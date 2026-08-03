@@ -7,6 +7,13 @@ into its subagent list at construction time so the `task` tool can dispatch to
 each installed expert for sync consult; the same registry is reused by the
 QuickJS `task()` global for panel mode.
 
+A skill declares itself an expert by carrying a sibling `AGENTS.md`, whose
+body is the actor definition and therefore the runtime prompt — see
+`skills_manager._parse_skill_md`. Those experts dispatch async and are built
+by `expert_container_async.py`, so what reaches THIS module is the legacy
+`type: expert` frontmatter population, plus every read-only surface
+(`list_dispatchable_experts`) that has to see both.
+
 The generic-container principle from #361 lives in THIS FUNCTION — one
 construction path for all experts, sourcing behaviour from the skill file
 rather than a per-expert YAML. There's no deployed graph per expert in v1;
@@ -40,14 +47,35 @@ _DEFAULT_EXPERT_TOOLS: tuple[str, ...] = ("think_tool", "skill_manager")
 _DEFAULT_EXPERT_SKILLS: tuple[str, ...] = ("/skills/",)
 
 
-def _body_of(skill_info: SkillInfo) -> str:
-    """Return the SKILL.md body (post-frontmatter content).
+def expert_prompt_body(skill_info: SkillInfo) -> str:
+    """Return the text that becomes *skill_info*'s runtime prompt.
 
-    Prefers the body cached on ``SkillInfo`` by ``_parse_skill_md``. Falls
-    back to reading SKILL.md fresh if the cached body is empty — that
-    handles skills constructed by hand (external callers) without a body
-    field populated. Returns an empty string if the file can't be read.
+    The single answer to "which file carries this expert's persona", for
+    every path that builds or validates an expert — sync spec factory, async
+    spec factory, and the async loader middleware. The two contracts source
+    it differently, and splitting that decision across call sites is how a
+    skill ends up registered off one file and prompted off another:
+
+    - ``expert_source == "agents_md"`` — the sibling AGENTS.md body (persona
+      + result envelope). SKILL.md stays pure knowledge and stays readable
+      in-turn off the ``/skills/`` mount, so it is deliberately NOT the
+      prompt here.
+    - legacy frontmatter experts — the SKILL.md body, which is where those
+      skills put their persona before the actor/knowledge split.
+
+    Prefers the text cached on ``SkillInfo`` by ``_parse_skill_md``. Falls
+    back to reading from disk when the cached field is empty — that handles
+    ``SkillInfo`` objects constructed by hand (external callers) without the
+    body populated. Returns an empty string if the file can't be read; the
+    callers treat that as "refuse to register this expert".
     """
+    if skill_info.expert_source == "agents_md":
+        if skill_info.agents_body:
+            return skill_info.agents_body
+        from ..tools.skills_manager import _read_agents_md
+
+        return _read_agents_md(skill_info.path) or ""
+
     if skill_info.body:
         return skill_info.body
     skill_md = skill_info.path / "SKILL.md"
@@ -66,12 +94,17 @@ def _body_of(skill_info: SkillInfo) -> str:
 
 
 def _compose_system_prompt(skill_info: SkillInfo, body: str) -> str:
-    """Compose the expert's system_prompt from its role + SKILL.md body.
+    """Compose the expert's system_prompt from its role + prompt body.
 
-    The `role` frontmatter (one-line role summary) is prepended as an
-    orientation line; the body carries the persona voice, rubrics, and
-    output-style instructions (all written in second person addressing the
-    expert itself, per the expert-skill authoring convention).
+    *body* is what :func:`expert_prompt_body` resolved — an AGENTS.md actor
+    definition, or a legacy expert's SKILL.md body. Either way it carries
+    the persona voice, rubrics, and output-style instructions, written in
+    second person addressing the expert itself.
+
+    The legacy `role` frontmatter (one-line role summary) is prepended as an
+    orientation line when set. AGENTS.md experts declare no `role` — their
+    persona section opens with the same orientation in prose — so for those
+    the body passes through untouched.
     """
     if skill_info.role:
         return f"You are {skill_info.role}.\n\n{body}".rstrip() + "\n"
@@ -100,7 +133,7 @@ def build_expert_subagent_spec(
         to append to the main agent's `subagents=[...]` list.
     """
     tool_registry = tool_registry or {}
-    body = _body_of(skill_info)
+    body = expert_prompt_body(skill_info)
     system_prompt = _compose_system_prompt(skill_info, body)
 
     resolved_tools: list[Any] = []
@@ -225,7 +258,7 @@ def list_dispatchable_experts(
     async_available = is_async_dispatch_available(cfg=cfg)
     dispatchable: list[SkillInfo] = []
     for info in list_expert_skills(include_system=include_system):
-        if not _body_of(info).strip():
+        if not expert_prompt_body(info).strip():
             continue
         if info.name in reserved:
             continue
@@ -264,7 +297,7 @@ def build_expert_subagent_specs(
     for info in list_expert_skills(include_system=include_system):
         if info.default_dispatch == "async":
             continue
-        if not _body_of(info).strip():
+        if not expert_prompt_body(info).strip():
             _logger.warning(
                 "Expert skill %r: SKILL.md body is empty; skipping registration.",
                 info.name,

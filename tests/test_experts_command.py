@@ -58,6 +58,11 @@ class _FakeSkillInfo:
     # ``list_dispatchable_experts``. Tests that specifically want to
     # exercise the empty-body reject path pass ``body=""``.
     body: str = "persona"
+    # Legacy-frontmatter expert by default: ``expert_prompt_body`` reads
+    # ``body`` for these. Set ``expert_source="agents_md"`` plus
+    # ``agents_body`` to fake an expert on the current contract.
+    expert_source: str = ""
+    agents_body: str = ""
 
 
 def _make_ctx(active_teams: list[str] | None = None) -> tuple[CommandContext, _FakeUI]:

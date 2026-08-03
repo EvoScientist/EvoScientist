@@ -1188,6 +1188,186 @@ Body.
         assert any("invalid frontmatter YAML" in r.message for r in caplog.records)
 
 
+def _write_actor_skill(
+    parent: Path,
+    name: str,
+    *,
+    agents_body: str = "## Persona\n\nYou are the test expert.\n\n## Envelope\n\n{}\n",
+    skill_frontmatter: str = "",
+    skill_body: str = "# Knowledge\n\nThe portable workflow.\n",
+) -> Path:
+    """Write a skill declaring itself an expert via a sibling AGENTS.md."""
+    skill_dir = parent / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: A skill that can also act\n"
+        f"{skill_frontmatter}---\n\n{skill_body}"
+    )
+    (skill_dir / "AGENTS.md").write_text(agents_body)
+    return skill_dir
+
+
+class TestAgentsMdExpertContract:
+    """AGENTS.md presence is the expert declaration; its body is the prompt."""
+
+    def test_presence_classifies_as_expert(self, tmp_path):
+        skill_dir = _write_actor_skill(tmp_path, "actor-skill")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "expert"
+        assert result.expert_source == "agents_md"
+        assert result.agents_body.startswith("## Persona")
+        # SKILL.md stays pure knowledge and is still cached for load_skill.
+        assert "The portable workflow." in result.body
+
+    def test_presence_declares_async_dispatch(self, tmp_path):
+        """AGENTS.md carries no dispatch field — presence declares async.
+
+        Every downstream registry keys off ``default_dispatch``, so resolving
+        it here is what routes an AGENTS.md expert to ``start_async_task``
+        without any of those call sites learning about the new contract.
+        """
+        skill_dir = _write_actor_skill(tmp_path, "actor-skill")
+        assert _parse_skill_md(skill_dir / "SKILL.md").default_dispatch == "async"
+
+    def test_no_actor_frontmatter_needed(self, tmp_path):
+        """The decoration fields the contract removed stay empty, not invented."""
+        skill_dir = _write_actor_skill(tmp_path, "actor-skill")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.role == ""
+        assert result.byline == ""
+        assert result.capability_tags == []
+        assert result.avatar_hint == ""
+
+    def test_metadata_type_alone_does_not_classify(self, tmp_path):
+        """``metadata.type: [skill, expert]`` is index-facing only.
+
+        It is a projection of the AGENTS.md declaration for consumers that
+        can't stat the directory. Reading it in the runtime would create a
+        second classifier free to drift from the file that actually holds the
+        persona — a skill would register as an expert with nothing to say.
+        """
+        skill_dir = tmp_path / "index-only"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: index-only
+description: Declares expert to the index but ships no actor definition
+metadata:
+  type: [skill, expert]
+  tags: [core]
+---
+
+# Knowledge
+"""
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "utility"
+        assert result.expert_source == ""
+        # The tags path still reads metadata — only `type` is ignored there.
+        assert result.tags == ["core"]
+
+    def test_frontmatter_stripped_from_actor_definition(self, tmp_path):
+        """AGENTS.md carries no frontmatter, but YAML must never reach the prompt."""
+        skill_dir = _write_actor_skill(
+            tmp_path,
+            "fm-actor",
+            agents_body="---\nname: ignored\n---\n\n## Persona\n\nBody only.\n",
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.agents_body == "## Persona\n\nBody only.\n"
+
+    def test_empty_actor_definition_stays_classified(self, tmp_path):
+        """An empty AGENTS.md is still a declaration — a broken expert.
+
+        Downgrading it to a utility skill would hide the authoring bug; the
+        registration paths refuse it by name instead.
+        """
+        skill_dir = _write_actor_skill(tmp_path, "blank-actor", agents_body="   \n")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "expert"
+        assert result.expert_source == "agents_md"
+        assert result.agents_body.strip() == ""
+
+    def test_unreadable_skill_md_keeps_expert_declaration(self, tmp_path):
+        """SKILL.md and AGENTS.md are separate files with separate failures."""
+        skill_dir = tmp_path / "half-broken"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_bytes(b"---\nname: bad\n---\n\xff\xfe")
+        (skill_dir / "AGENTS.md").write_text("## Persona\n\nStill valid.\n")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.description == "(unreadable)"
+        assert result.type == "expert"
+        assert result.expert_source == "agents_md"
+        assert result.agents_body == "## Persona\n\nStill valid.\n"
+
+    def test_agents_md_overrides_legacy_frontmatter(self, tmp_path, caplog):
+        """A skill mid-migration resolves to one contract, not a blend."""
+        import logging
+
+        skill_dir = _write_actor_skill(
+            tmp_path,
+            "migrating",
+            skill_frontmatter=(
+                "type: expert\nrole: legacy role\nbyline: Legacy\n"
+                "default_dispatch: sync\n"
+            ),
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.expert_source == "agents_md"
+        assert result.default_dispatch == "async"  # not the frontmatter's `sync`
+        assert any(
+            "is ignored and should be removed" in r.message and "migrating" in r.message
+            for r in caplog.records
+        )
+
+    def test_legacy_frontmatter_expert_warns_once(self, tmp_path, caplog):
+        """The deprecated path keeps working, and says so — once per skill.
+
+        ``_parse_skill_md`` runs on every ``list_skills`` call (agent
+        construction, /expert completion, GET /api/teams), so a per-parse
+        warning would bury real diagnostics under repeats.
+        """
+        import logging
+
+        skill_dir = tmp_path / "legacy-expert"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: legacy-expert
+description: Declares itself the old way
+type: expert
+role: legacy role
+---
+
+# Persona body
+"""
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            first = _parse_skill_md(skill_dir / "SKILL.md")
+            _parse_skill_md(skill_dir / "SKILL.md")
+        assert first.type == "expert"
+        assert first.expert_source == "frontmatter"
+        assert first.role == "legacy role"
+        deprecations = [r for r in caplog.records if "deprecated" in r.message.lower()]
+        assert len(deprecations) == 1
+
+    def test_utility_skill_has_no_expert_source(self, tmp_path):
+        skill_dir = tmp_path / "plain"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: plain\ndescription: Plain skill\n---\n\n# Body\n"
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "utility"
+        assert result.expert_source == ""
+        assert result.agents_body == ""
+
+
 class TestListExpertSkills:
     """`list_expert_skills()` filters `list_skills()` to `type == 'expert'`."""
 

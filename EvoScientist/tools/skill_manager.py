@@ -206,8 +206,10 @@ def skill_manager(
         ]
         if info.tags:
             lines.append(f"Tags: {', '.join(info.tags)}")
-        # Expert-skill surface (agent-teams v1): only shown when the
-        # skill declared `type: expert` in its SKILL.md frontmatter.
+        # Expert surface: shown when the skill can also act as an expert —
+        # declared by a sibling AGENTS.md, or by legacy `type: expert`
+        # frontmatter. The decoration lines below exist only on the legacy
+        # path, so an AGENTS.md expert renders type + dispatch and stops.
         if info.type == "expert":
             lines.append("Type: expert")
             if info.role:

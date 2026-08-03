@@ -117,6 +117,34 @@ class TestBuildExpertAsyncSubagentSpecs:
             specs = build_expert_async_subagent_specs(cfg=cfg)
         assert [s["name"] for s in specs] == ["literature-review"]
 
+    def test_agents_md_expert_registered_and_gated_on_its_own_file(self):
+        """AGENTS.md experts reach async dispatch, and their gate is AGENTS.md.
+
+        ``_parse_skill_md`` resolves presence to ``default_dispatch: async``,
+        so no filter here changes — but the empty-persona gate has to follow
+        the contract: a healthy SKILL.md must not vouch for a skill whose
+        actor definition is blank.
+        """
+        cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+        healthy = _skill("paper-review", "async")
+        healthy.expert_source = "agents_md"
+        healthy.agents_body = "## Persona\n\nYou are an adversarial reviewer.\n"
+        blank_actor = _skill("blank-actor", "async")
+        blank_actor.expert_source = "agents_md"
+        blank_actor.agents_body = "   \n"  # SKILL.md body is fine; actor isn't
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=[healthy, blank_actor],
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
+            ),
+        ):
+            specs = build_expert_async_subagent_specs(cfg=cfg)
+        assert [s["name"] for s in specs] == ["paper-review"]
+
     def test_reserved_name_collision_skipped(self, caplog):
         """A skill named after a yaml async sub-agent (or ``general-purpose``)
         must skip async-dispatch registration with a warning, not raise. Without

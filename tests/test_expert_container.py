@@ -7,10 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from EvoScientist.subagents.expert_container import (
-    _body_of,
     _compose_system_prompt,
     build_expert_subagent_spec,
     build_expert_subagent_specs,
+    expert_prompt_body,
     is_async_dispatch_available,
     list_dispatchable_experts,
 )
@@ -70,15 +70,15 @@ class _FakeTool:
 
 
 # =============================================================================
-# _body_of
+# expert_prompt_body
 # =============================================================================
 
 
-class TestBodyOf:
+class TestExpertPromptBody:
     def test_extracts_body_after_frontmatter(self, tmp_path):
         skill_dir = _write_expert_skill_file(tmp_path, "expert-a")
         info = _skill_info(skill_dir)
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body.startswith("You are a test expert.")
         assert "Do the thing." in body
         assert "---" not in body
@@ -88,7 +88,7 @@ class TestBodyOf:
         # A SkillInfo pointing at a nonexistent SKILL.md — factory should
         # gracefully degrade with a warning rather than raise.
         info = _skill_info(tmp_path / "nonexistent")
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body == ""
         # Warning surfaced — SEV so the malformed skill isn't invisible.
         assert any("could not read SKILL.md" in r.message for r in caplog.records)
@@ -101,7 +101,7 @@ class TestBodyOf:
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_bytes(b"\xff\xfe garbage")
         info = _skill_info(skill_dir, name="bad-utf8")
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body == ""
         assert any("could not read SKILL.md" in r.message for r in caplog.records)
 
@@ -111,13 +111,13 @@ class TestBodyOf:
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("# Body Only\n\nContent here.\n")
         info = _skill_info(skill_dir, name="no-fm")
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert "# Body Only" in body
         assert "Content here." in body
 
     def test_prefers_cached_body_over_disk_read(self, tmp_path):
         """When ``SkillInfo.body`` is populated (the ``_parse_skill_md`` path),
-        ``_body_of`` uses it directly without touching disk. Guards against
+        ``expert_prompt_body`` uses it directly without touching disk. Guards against
         the double-read regression flagged by pre-PR review."""
         info = SkillInfo(
             name="cached",
@@ -127,8 +127,68 @@ class TestBodyOf:
             type="expert",
             body="Cached body content from SkillInfo.",
         )
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body == "Cached body content from SkillInfo."
+
+    def test_agents_md_expert_reads_actor_definition_not_skill_md(self, tmp_path):
+        """An AGENTS.md expert is prompted from its actor definition.
+
+        SKILL.md stays pure knowledge under the current contract — it is
+        reachable in-turn via ``load_skill`` — so leaking it into the system
+        prompt would both bloat the prompt and hand the expert a document
+        written for a different reader.
+        """
+        info = SkillInfo(
+            name="paper-review",
+            description="d",
+            path=tmp_path / "paper-review",
+            source="builtin",
+            type="expert",
+            expert_source="agents_md",
+            body="# Knowledge\n\nThe 5-aspect checklist.\n",
+            agents_body="## Persona\n\nYou are an adversarial reviewer.\n",
+        )
+        body = expert_prompt_body(info)
+        assert body == "## Persona\n\nYou are an adversarial reviewer.\n"
+        assert "5-aspect checklist" not in body
+
+    def test_agents_md_expert_falls_back_to_disk(self, tmp_path):
+        """A hand-built SkillInfo without ``agents_body`` still resolves.
+
+        Mirrors the SKILL.md fallback below it — external callers construct
+        SkillInfo objects without going through ``_parse_skill_md``.
+        """
+        skill_dir = tmp_path / "on-disk"
+        skill_dir.mkdir()
+        (skill_dir / "AGENTS.md").write_text("## Persona\n\nFrom disk.\n")
+        info = SkillInfo(
+            name="on-disk",
+            description="d",
+            path=skill_dir,
+            source="workspace",
+            type="expert",
+            expert_source="agents_md",
+            body="SKILL.md body that must not be used.",
+        )
+        assert expert_prompt_body(info) == "## Persona\n\nFrom disk.\n"
+
+    def test_agents_md_expert_returns_empty_when_file_missing(self, tmp_path):
+        """Declared expert, no resolvable actor definition -> empty.
+
+        Empty is the signal every registration path checks; falling back to
+        the SKILL.md body here would register a knowledge document as a
+        persona instead of refusing.
+        """
+        info = SkillInfo(
+            name="gone",
+            description="d",
+            path=tmp_path / "gone",
+            source="workspace",
+            type="expert",
+            expert_source="agents_md",
+            body="SKILL.md body that must not be used.",
+        )
+        assert expert_prompt_body(info) == ""
 
 
 # =============================================================================
@@ -314,6 +374,41 @@ role: blank
             "SKILL.md body is empty" in r.message and "expert-blank" in r.message
             for r in caplog.records
         )
+
+    def test_agents_md_expert_excluded_from_sync_registry(self, tmp_path):
+        """AGENTS.md experts dispatch async, so the sync registry skips them.
+
+        Presence is the declaration and async is the dispatch it declares, so
+        an AGENTS.md skill resolves to ``default_dispatch: async`` and is
+        built by ``build_expert_async_subagent_specs``. Registering it here
+        too would produce two competing tool schemas for one subagent name.
+        """
+        _write_expert_skill_file(tmp_path, "legacy-expert")
+        actor = tmp_path / "new-expert"
+        actor.mkdir()
+        (actor / "SKILL.md").write_text(
+            """---
+name: new-expert
+description: Knowledge only
+---
+
+# Knowledge
+
+The workflow.
+"""
+        )
+        (actor / "AGENTS.md").write_text("## Persona\n\nYou are the new expert.\n")
+
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
+            patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
+        ):
+            specs = build_expert_subagent_specs(tool_registry={})
+
+        assert [s["name"] for s in specs] == ["legacy-expert"]
 
     def test_returns_empty_when_no_expert_skills(self, tmp_path):
         # A utility skill only — no experts.
