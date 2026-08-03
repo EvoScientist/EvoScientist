@@ -17,6 +17,12 @@ It covers cases that deepagents' ``PatchToolCallsMiddleware`` does not:
 2. Mid-run coverage -- repair runs at the model boundary on every request
    (including malformed / ``invalid_tool_calls``), not only at agent start, so
    interruptions that happen partway through a run are healed too.
+3. Blank ``tool_call_id`` normalization -- some streaming providers (notably
+   Kimi and Zhipu on streamed tool calls) occasionally emit tool calls whose
+   id is an empty string, whitespace, or ``None``. Strict providers reject the
+   next turn with ``invalid tool_call_id`` (HTTP 400, code 3). Each blank id
+   is replaced with a fresh unique id, preserving the AIMessage↔ToolMessage
+   pairing by positional FIFO matching.
 
 Because the middleware only rewrites the request and cannot mutate thread
 state, the repaired synthetic results are recomputed on every model call. To
@@ -27,6 +33,7 @@ tool-call id via a ``warned`` set owned by the middleware instance.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 
 from langchain.agents.middleware.types import (
@@ -38,6 +45,98 @@ from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
 _INTERRUPTED_RESULT = "Tool execution was interrupted before completion."
+_REPAIR_ID_PREFIX = "_repair_"
+
+
+def _is_blank_tool_call_id(value: object) -> bool:
+    """True for ids strict providers reject (None / empty / whitespace-only).
+
+    Non-string values (ints, lists, etc.) are left for the main loop's existing
+    strict-type filtering to handle -- only None and blank/whitespace strings
+    count as "blank" here.
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _normalize_blank_tool_call_ids(
+    messages: Sequence[AnyMessage],
+    warned: set[str] | None = None,
+) -> list[AnyMessage]:
+    """Replace blank tool_call_ids with fresh unique ids.
+
+    Pairs each blank-id call on an ``AIMessage`` with the next blank-id
+    ``ToolMessage`` in arrival order (FIFO) so existing exchanges stay paired.
+    Orphan blank ``ToolMessage``\\ s (no preceding blank call to claim) keep
+    their blank id -- the main repair loop drops them as orphans.
+
+    The raw ``additional_kwargs["tool_calls"]`` form is dropped on any message
+    whose parsed ``tool_calls`` had a blank id, so langchain-openai's
+    serializer falls back to the now-valid parsed form instead of preferring
+    the raw form (which still carries the blank id and would be subset-filtered
+    by the main loop, losing the freshly-normalized entries).
+
+    Newly-assigned ids for unmatched blank calls are recorded in *warned* when
+    provided so the main loop doesn't log them again as a separate repair --
+    the fresh ids are non-deterministic across calls, so without this pre-add
+    every model call on a thread with a blank id would re-log the repair.
+    """
+    pending_slots: list[str] = []
+    normalized: list[AnyMessage] = []
+    saw_blank = False
+
+    for message in messages:
+        if isinstance(message, AIMessage):
+            new_tool_calls: list[dict[str, object]] = []
+            any_changed = False
+            for call in message.tool_calls:
+                if _is_blank_tool_call_id(call.get("id")):
+                    new_id = f"{_REPAIR_ID_PREFIX}{uuid.uuid4().hex}"
+                    pending_slots.append(new_id)
+                    new_tool_calls.append({**call, "id": new_id})
+                    any_changed = True
+                    saw_blank = True
+                else:
+                    new_tool_calls.append(dict(call))
+
+            new_invalid: list[dict[str, object]] = []
+            for call in getattr(message, "invalid_tool_calls", None) or []:
+                if _is_blank_tool_call_id(call.get("id")):
+                    new_id = f"{_REPAIR_ID_PREFIX}{uuid.uuid4().hex}"
+                    new_invalid.append({**call, "id": new_id})
+                    saw_blank = True
+                else:
+                    new_invalid.append(dict(call))
+
+            if any_changed:
+                update: dict[str, object] = {"tool_calls": new_tool_calls}
+                if new_invalid:
+                    update["invalid_tool_calls"] = new_invalid
+                additional_kwargs = message.additional_kwargs
+                if isinstance(additional_kwargs, dict) and isinstance(
+                    additional_kwargs.get("tool_calls"), list
+                ):
+                    new_additional = dict(additional_kwargs)
+                    new_additional.pop("tool_calls", None)
+                    update["additional_kwargs"] = new_additional
+                message = message.model_copy(update=update)
+        elif isinstance(message, ToolMessage):
+            if _is_blank_tool_call_id(message.tool_call_id) and pending_slots:
+                new_id = pending_slots.pop(0)
+                message = message.model_copy(update={"tool_call_id": new_id})
+                saw_blank = True
+        normalized.append(message)
+
+    if saw_blank and warned is not None:
+        for slot in pending_slots:
+            warned.add(slot)
+
+    if saw_blank:
+        logger.debug(
+            "Normalized blank tool_call_id(s) in message history; "
+            "%d unmatched blank call(s) will be synthesized or dropped",
+            len(pending_slots),
+        )
+    return normalized
 
 
 def repair_tool_history(
@@ -51,6 +150,8 @@ def repair_tool_history(
     warning to once per unique interrupted/malformed call even though the
     middleware re-runs on every model call.
     """
+    messages = _normalize_blank_tool_call_ids(messages, warned=warned)
+
     repaired: list[AnyMessage] = []
     pending: dict[str, str | None] = {}
     synthesized: list[str] = []

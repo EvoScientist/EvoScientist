@@ -352,3 +352,196 @@ def test_middleware_warns_once_per_thread(caplog):
         middleware.wrap_model_call(request, handler)
 
     assert len(caplog.records) == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #345: blank tool_call_id from streaming providers
+# (Kimi, Zhipu, etc.) was passed through to the next model call, where strict
+# providers rejected it as `invalid tool_call_id` (HTTP 400, code 3).
+# ---------------------------------------------------------------------------
+
+
+def _blank_tool_call():
+    return {"id": "", "name": "execute", "args": {"cmd": "ls"}}
+
+
+def test_normalizes_blank_tool_call_id_in_paired_exchange():
+    """AIMessage(blank id) + ToolMessage(blank id) → both get the same fresh id."""
+    messages = [
+        HumanMessage("run task"),
+        AIMessage(content="thinking", tool_calls=[_blank_tool_call()]),
+        ToolMessage(content="result", tool_call_id="", name="execute"),
+        HumanMessage("continue"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    ai_msg = next(m for m in repaired if isinstance(m, AIMessage))
+    tool_msgs = [m for m in repaired if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 1, "paired ToolMessage must be preserved"
+
+    new_id = ai_msg.tool_calls[0]["id"]
+    assert isinstance(new_id, str)
+    assert new_id
+    assert new_id != ""
+    assert tool_msgs[0].tool_call_id == new_id, (
+        "ToolMessage must adopt the same fresh id as its AIMessage call"
+    )
+    assert tool_msgs[0].content == "result"
+
+
+def test_normalizes_none_tool_call_id_and_synthesizes_missing_result():
+    """AIMessage(None id) with no matching ToolMessage gets a fresh id plus a
+    synthesized interrupted-result ToolMessage."""
+    messages = [
+        HumanMessage("run task"),
+        AIMessage(
+            content="thinking",
+            tool_calls=[{"id": None, "name": "execute", "args": {}}],
+        ),
+        HumanMessage("continue"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert [type(message) for message in repaired] == [
+        HumanMessage,
+        AIMessage,
+        ToolMessage,
+        HumanMessage,
+    ]
+    ai_msg = repaired[1]
+    tool_msg = repaired[2]
+    new_id = ai_msg.tool_calls[0]["id"]
+    assert isinstance(new_id, str)
+    assert new_id
+    assert tool_msg.tool_call_id == new_id
+    assert tool_msg.status == "error"
+
+
+def test_normalizes_multiple_blank_ids_positionally():
+    """Multiple blank-id calls in one AIMessage pair FIFO with subsequent
+    blank-id ToolMessages."""
+    messages = [
+        HumanMessage("run"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "", "name": "first", "args": {}},
+                {"id": "   ", "name": "second", "args": {}},
+            ],
+        ),
+        ToolMessage(content="result-1", tool_call_id="", name="first"),
+        ToolMessage(content="result-2", tool_call_id="   ", name="second"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    ai_msg = next(m for m in repaired if isinstance(m, AIMessage))
+    tool_msgs = [m for m in repaired if isinstance(m, ToolMessage)]
+    assert len(tool_msgs) == 2
+
+    first_id = ai_msg.tool_calls[0]["id"]
+    second_id = ai_msg.tool_calls[1]["id"]
+    assert first_id
+    assert second_id
+    assert first_id != second_id
+    assert tool_msgs[0].tool_call_id == first_id
+    assert tool_msgs[1].tool_call_id == second_id
+    assert [m.content for m in tool_msgs] == ["result-1", "result-2"]
+
+
+def test_drops_orphan_blank_tool_message():
+    """A blank-id ToolMessage with no preceding blank-id AIMessage call is
+    still dropped (existing orphan behavior preserved)."""
+    messages = [
+        HumanMessage("old request"),
+        ToolMessage("late result", tool_call_id=""),
+        HumanMessage("continue"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert [type(message) for message in repaired] == [HumanMessage, HumanMessage]
+    assert not any(isinstance(m, ToolMessage) for m in repaired)
+
+
+def test_blank_id_repair_yields_provider_serializable_payload():
+    """End-to-end: the repaired history, when serialized by langchain-openai,
+    must not put any blank tool_call_id on the wire."""
+    from langchain_openai.chat_models.base import _convert_message_to_dict
+
+    messages = [
+        HumanMessage(content="run task"),
+        AIMessage(
+            content="thinking",
+            tool_calls=[{"id": "", "name": "read_file", "args": {"path": "x"}}],
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "x"}',
+                        },
+                    }
+                ]
+            },
+        ),
+        ToolMessage(content="result", tool_call_id="", name="read_file"),
+        HumanMessage(content="continue"),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    wire_ids: list[str] = []
+    for message in repaired:
+        payload = _convert_message_to_dict(message)
+        if payload.get("role") == "assistant":
+            for call in payload.get("tool_calls", []):
+                wire_ids.append(call.get("id"))
+        elif payload.get("role") == "tool":
+            wire_ids.append(payload.get("tool_call_id"))
+
+    blanks = [cid for cid in wire_ids if not isinstance(cid, str) or not cid.strip()]
+    assert not blanks, f"blank tool_call_id reached the wire: {blanks!r}"
+    # pairing preserved: each assistant id has a matching tool result
+    assistant_ids = [
+        call.get("id")
+        for m in repaired
+        if isinstance(m, AIMessage)
+        for call in m.tool_calls
+    ]
+    tool_ids = [m.tool_call_id for m in repaired if isinstance(m, ToolMessage)]
+    assert sorted(assistant_ids) == sorted(tool_ids)
+
+
+def test_blank_id_repair_does_not_spam_warnings(caplog):
+    """Across repeated repair calls (as on every model call within one run),
+    blank-id normalization must not re-emit the synthesized/dropped warning.
+
+    The fresh ids assigned by the pre-pass are non-deterministic across calls,
+    so they are pre-added to ``warned`` to keep the warning silent -- otherwise
+    every model call on a thread with a blank id would re-log the repair.
+    """
+    messages = [
+        HumanMessage("run"),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "", "name": "execute", "args": {}}],
+        ),
+        HumanMessage("continue"),
+    ]
+    warned: set[str] = set()
+
+    with caplog.at_level("WARNING"):
+        repair_tool_history(messages, warned=warned)
+        first_warnings = len(caplog.records)
+        repair_tool_history(messages, warned=warned)
+        second_warnings = len(caplog.records)
+
+    assert first_warnings == 0, (
+        "blank-id repair is silent (normalized before the warning path)"
+    )
+    assert second_warnings == 0
