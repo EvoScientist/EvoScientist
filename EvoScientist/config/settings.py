@@ -213,11 +213,28 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
+    # Network interface the langgraph dev subprocess binds to. Stays on loopback
+    # by default because this server IS the agent API: no authentication, and
+    # the deployed agent can run shell commands. Set "0.0.0.0" to reach it from
+    # another machine (LAN / remote browser) — trusted networks only. Callers
+    # that *connect* (health probes, async sub-agent self-dispatch) map a
+    # wildcard bind back to loopback via manager._probe_host, so widening this
+    # never redirects internal traffic off-box.
+    langgraph_dev_host: str = "127.0.0.1"
+
     # Port for the WebUI front-end (Next.js server from @evoscientist/webui),
     # used only when ui_backend == "webui". 4716 is 6174 reversed — a memorable
     # pairing with the langgraph dev port that it connects to. The backend keeps
     # its own port (langgraph_dev_port); this is just the browser server.
     webui_port: int = 4716
+
+    # Network interface the WebUI front-end binds to. Unlike the backend above,
+    # this defaults to "0.0.0.0" so the browser UI is reachable from another
+    # machine out of the box — it serves the app shell only and holds no
+    # credentials (see deploy/webui.py:_scrubbed_env). Note the UI talks to the
+    # backend from the BROWSER, not server-side, so remote use also needs
+    # langgraph_dev_host widened. Set "127.0.0.1" to keep it local-only.
+    webui_host: str = "0.0.0.0"
 
     # --- Scheduled tasks (cron) ---
     # Master switch for scheduled tasks (/schedule, NL tools, scheduler context). Defaults
@@ -488,6 +505,19 @@ class EvoScientistConfig:
             self.auto_approve = True
 
         _normalize_str_enum_fields(self)
+
+        # Bind hosts reach socket.bind() / the langgraph CLI verbatim, where a
+        # stray-whitespace or empty value surfaces as an opaque gaierror at
+        # startup. Normalize to the field's own default instead — the two
+        # defaults differ deliberately (loopback backend, exposed front-end),
+        # so this cannot be a single shared fallback.
+        for _host_field, _host_default in (
+            ("langgraph_dev_host", "127.0.0.1"),
+            ("webui_host", "0.0.0.0"),
+        ):
+            _host = getattr(self, _host_field, _host_default)
+            _host = _host.strip() if isinstance(_host, str) else ""
+            setattr(self, _host_field, _host or _host_default)
 
         synthesis_time = _normalize_hhmm(self.memory_skill_synthesis_time)
         if synthesis_time is None:
@@ -802,7 +832,9 @@ _ENV_MAPPINGS = {
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "langgraph_dev_host": "EVOSCIENTIST_LANGGRAPH_DEV_HOST",
     "webui_port": "EVOSCIENTIST_WEBUI_PORT",
+    "webui_host": "EVOSCIENTIST_WEBUI_HOST",
     "enable_scheduler": "EVOSCIENTIST_ENABLE_SCHEDULER",
     "scheduler_default_timezone": "EVOSCIENTIST_SCHEDULER_DEFAULT_TIMEZONE",
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",

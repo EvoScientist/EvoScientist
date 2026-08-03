@@ -454,6 +454,15 @@ EvoSci config set webui_port 4800    # change the front-end port (must differ fr
 
 Requires **Node.js 24 LTS** (for `npx`); the first launch downloads `@evoscientist/webui` and needs network. Note: the WebUI does not show your CLI/TUI chat history, and `-p` / `--resume` fall back to the classic CLI.
 
+**Opening it from another machine.** The front-end listens on `0.0.0.0` by default, so `http://<this-machine-ip>:4716` works over the LAN out of the box. The backend does *not* — it's an unauthenticated API whose agent can run shell commands, so it stays on loopback until you say otherwise. Since the UI connects to the backend **from the browser**, remote use needs both:
+
+```bash
+EvoSci config set langgraph_dev_host 0.0.0.0   # ⚠ no auth — trusted networks only
+EvoSci config set webui_host 127.0.0.1         # or go the other way: front-end local-only
+```
+
+Then point the UI's deployment URL at `http://<this-machine-ip>:6174`. `EvoSci deploy` takes the same interface as a flag: `EvoSci deploy --host 0.0.0.0`. Widening the backend prints a red `⚠ PUBLIC BIND` banner at startup — prefer `EvoSci deploy --tunnel` or an SSH tunnel if the network isn't trusted.
+
 </details>
 
 <details>
