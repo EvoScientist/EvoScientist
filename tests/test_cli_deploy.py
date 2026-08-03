@@ -371,6 +371,39 @@ def test_deploy_host_is_stripped(monkeypatch, tmp_path):
     assert captured["host_passed"] == "0.0.0.0"
 
 
+def test_deploy_config_host_is_stripped(monkeypatch, tmp_path):
+    """Stripping must not depend on the value arriving via --host.
+    ``EvoScientistConfig.__post_init__`` normalizes these fields, but deploy()
+    reads through ``getattr`` and is handed duck-typed config objects that
+    never run it — an unstripped value would reach socket.bind()."""
+    config = _make_config(
+        default_workdir=str(tmp_path), langgraph_dev_host="  192.168.1.5  "
+    )
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_whitespace_config_host_collapses_to_default(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="   ")
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "0.0.0.0"
+
+
+def test_deploy_padded_loopback_config_host_suppresses_warning(monkeypatch, tmp_path):
+    """Consequence of the unstripped path: `_is_loopback_host` would not match
+    " 127.0.0.1 ", so a padded loopback config would print a false PUBLIC BIND
+    warning while binding a value socket.bind() rejects outright."""
+    config = _make_config(
+        default_workdir=str(tmp_path), langgraph_dev_host=" 127.0.0.1 "
+    )
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "127.0.0.1"
+    assert not any("PUBLIC BIND" in line for line in captured["printed"])
+
+
 @pytest.mark.parametrize("exposed_host", ["0.0.0.0", "192.168.1.5", "::"])
 def test_deploy_warns_on_public_bind(monkeypatch, tmp_path, exposed_host):
     config = _make_config(default_workdir=str(tmp_path))

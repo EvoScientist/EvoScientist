@@ -124,12 +124,17 @@ def deploy(
         )
         raise typer.Exit(1)
 
-    # Same explicit-None resolution for the bind interface. Strip first so a
-    # quoted-with-whitespace shell arg (--host " 0.0.0.0 ") doesn't reach
-    # socket.bind() and fail with an opaque gaierror; an all-whitespace value
-    # collapses to the loopback default rather than erroring.
+    # Same explicit-None resolution for the bind interface. Both branches strip
+    # (matching run_webui): whitespace reaching socket.bind() surfaces as an
+    # opaque gaierror, and an all-whitespace value collapses to the default
+    # rather than erroring. The config branch needs it too even though
+    # ``EvoScientistConfig.__post_init__`` normalizes these fields — this
+    # function reads via ``getattr`` and is routinely handed duck-typed config
+    # objects, which never run that normalization.
     effective_host = (
-        str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
+        str(
+            getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST
+        ).strip()
         if host is None
         else host.strip()
     ) or _DEFAULT_HOST
