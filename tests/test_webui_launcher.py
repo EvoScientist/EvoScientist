@@ -147,7 +147,7 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
     # _stop_webui shells out to taskkill on Windows — neutralize it.
     monkeypatch.setattr(webui_mod, "_stop_webui", lambda _proc: None)
     monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: fn)
-    monkeypatch.setattr(signal, "signal", lambda _sig, _handler: (lambda *a: None))
+    monkeypatch.setattr(signal, "signal", lambda _sig, _handler: lambda *a: None)
     monkeypatch.setattr(threading, "Event", _ImmediateEvent)
 
     webui_mod.run_webui(config, workspace_dir="/tmp/ws")

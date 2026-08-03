@@ -47,7 +47,9 @@ class TestProbeHost:
     def test_wildcards_map_to_loopback(self, wildcard):
         assert manager._probe_host(wildcard) == "127.0.0.1"
 
-    @pytest.mark.parametrize("host", ["127.0.0.1", "192.168.1.5", "::1", "example.test"])
+    @pytest.mark.parametrize(
+        "host", ["127.0.0.1", "192.168.1.5", "::1", "example.test"]
+    )
     def test_specific_hosts_pass_through(self, host):
         assert manager._probe_host(host) == host
 

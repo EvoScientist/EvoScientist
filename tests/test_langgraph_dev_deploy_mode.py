@@ -260,9 +260,7 @@ def test_env_host_replaces_inherited(monkeypatch, tmp_path, runtime_paths):
     monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_HOST", "10.0.0.9")
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(_PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=tmp_path, port=16178, host="0.0.0.0"
-        )
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178, host="0.0.0.0")
 
     assert captured["env"].get("EVOSCIENTIST_LANGGRAPH_DEV_HOST") == "0.0.0.0"
 

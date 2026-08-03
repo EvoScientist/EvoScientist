@@ -529,7 +529,11 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     # fails soft (async falls back to in-process), and warning about a bind
     # that never happened would be worse than saying nothing.
     bind_host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
-    if bind_host and not _is_loopback_host(bind_host) and is_async_subagents_available():
+    if (
+        bind_host
+        and not _is_loopback_host(bind_host)
+        and is_async_subagents_available()
+    ):
         console.print(
             "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
             f"[bold red]Agent server listening on {bind_host} — no auth, and "
