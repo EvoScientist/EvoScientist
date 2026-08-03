@@ -828,8 +828,18 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
         except Exception:
             return web.Response(status=400)
 
-        # ── Decrypt if encrypt_key is configured ──
-        if self.config.encrypt_key and "encrypt" in body:
+        # When encryption is configured the inbound POST MUST carry an
+        # ``encrypt`` field. A plaintext body used to skip decryption and
+        # reach the agent directly, defeating the encryption setup (issue
+        # #392). Treat a missing ``encrypt`` field on an
+        # encryption-configured channel as an authentication failure.
+        if self.config.encrypt_key:
+            if not isinstance(body, dict) or "encrypt" not in body:
+                logger.warning(
+                    "Feishu event rejected: encrypt_key is configured but the "
+                    "body has no 'encrypt' field (possible signature bypass)"
+                )
+                return web.Response(status=403)
             try:
                 body = self._decrypt_event(body["encrypt"])
             except Exception:

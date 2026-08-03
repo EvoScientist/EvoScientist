@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import time
 import xml.etree.ElementTree as ET
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -440,6 +441,126 @@ class TestMessageProcessing:
             }
         )
         assert channel._queue.empty()
+
+
+# ── Webhook signature bypass regression (issue #392) ──────────────
+
+
+class _FakeWeChatRequest:
+    """Minimal stand-in for aiohttp.web.Request for _handle_message tests."""
+
+    def __init__(self, text_body: str, query: dict | None = None):
+        self._text = text_body
+        self.query = query or {}
+
+    async def text(self) -> str:
+        return self._text
+
+
+class TestWebhookSignatureBypass:
+    """Regression tests for issue #392: when encryption is configured, an
+    unsigned POST must NOT reach the agent — verify before branching, not
+    inside the branch the request controls."""
+
+    PLAINTEXT_FORGED_XML = (
+        "<xml><MsgType><![CDATA[text]]></MsgType>"
+        "<Content><![CDATA[forged]]></Content>"
+        "<FromUserName><![CDATA[attacker]]></FromUserName></xml>"
+    )
+
+    def _make_channel_with_crypto(self) -> WeChatChannel:
+        """Channel whose `_crypto` is set, mimicking what start() does when
+        encoding_aes_key + token are configured. We set _crypto directly to
+        avoid the network roundtrip in start()."""
+        config = WeComConfig(
+            corp_id="corp",
+            agent_id="1",
+            secret="s",
+            token="t",
+            encoding_aes_key="a" * 43,
+        )
+        channel = WeChatChannel(config, backend="wecom")
+        channel._crypto = MagicMock()
+        channel._crypto.verify_signature.return_value = (
+            False  # default: signature won't match
+        )
+        channel._safe_process_message = AsyncMock()  # type: ignore[assignment]
+        return channel
+
+    def _make_channel_without_crypto(self) -> WeChatChannel:
+        config = WeComConfig(corp_id="corp", agent_id="1", secret="s")
+        channel = WeChatChannel(config, backend="wecom")
+        # _crypto stays None (plaintext mode)
+        channel._safe_process_message = AsyncMock()  # type: ignore[assignment]
+        return channel
+
+    async def test_plaintext_rejected_when_crypto_configured(self):
+        """An unsigned POST on an encryption-configured channel must 403."""
+        channel = self._make_channel_with_crypto()
+        resp = await channel._handle_message(
+            _FakeWeChatRequest(self.PLAINTEXT_FORGED_XML)
+        )
+        assert resp.status == 403
+        channel._safe_process_message.assert_not_called()
+
+    async def test_missing_encrypt_rejected_even_with_crypto_present(self):
+        """Even if the body has other XML, no <Encrypt> + crypto set → 403."""
+        channel = self._make_channel_with_crypto()
+        body = "<xml><MsgType><![CDATA[text]]></MsgType></xml>"
+        resp = await channel._handle_message(_FakeWeChatRequest(body))
+        assert resp.status == 403
+        channel._safe_process_message.assert_not_called()
+
+    async def test_invalid_signature_rejected(self):
+        """Encrypted body with wrong signature → 403 (no behavior change)."""
+        channel = self._make_channel_with_crypto()
+        body = "<xml><Encrypt><![CDATA[encrypted-blob]]></Encrypt></xml>"
+        # crypto.verify_signature returns False by default in _make_channel_with_crypto
+        resp = await channel._handle_message(
+            _FakeWeChatRequest(
+                body,
+                query={
+                    "msg_signature": "wrong",
+                    "timestamp": "1",
+                    "nonce": "n",
+                },
+            )
+        )
+        assert resp.status == 403
+        channel._safe_process_message.assert_not_called()
+
+    async def test_valid_signature_decrypts_and_processes(self):
+        """Encrypted body with valid signature → 200, agent reached."""
+        channel = self._make_channel_with_crypto()
+        channel._crypto.verify_signature.return_value = True
+        channel._crypto.decrypt.return_value = (
+            "<xml><MsgType><![CDATA[text]]></MsgType>"
+            "<Content><![CDATA[legit]]></Content>"
+            "<FromUserName><![CDATA[user1]]></FromUserName></xml>",
+            "user1",
+        )
+        body = "<xml><Encrypt><![CDATA[ok]]></Encrypt></xml>"
+        resp = await channel._handle_message(
+            _FakeWeChatRequest(
+                body,
+                query={
+                    "msg_signature": "right",
+                    "timestamp": "1",
+                    "nonce": "n",
+                },
+            )
+        )
+        assert resp.status == 200
+        channel._safe_process_message.assert_called_once()
+
+    async def test_plaintext_accepted_when_crypto_not_configured(self):
+        """No-regression: plaintext mode (no crypto) keeps working."""
+        channel = self._make_channel_without_crypto()
+        resp = await channel._handle_message(
+            _FakeWeChatRequest(self.PLAINTEXT_FORGED_XML)
+        )
+        assert resp.status == 200
+        channel._safe_process_message.assert_called_once()
 
 
 # ── Registration test ─────────────────────────────────────────────
