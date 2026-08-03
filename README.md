@@ -457,7 +457,11 @@ Requires **Node.js 24 LTS** (for `npx`); the first launch downloads `@evoscienti
 **Opening it from another machine.** Both servers listen on `0.0.0.0` by default, so `http://<this-machine-ip>:4716` works over the LAN out of the box. Since the UI connects to the backend **from the browser**, point the UI's deployment URL at `http://<this-machine-ip>:6174` rather than leaving it on localhost.
 
 > [!WARNING]
-> The backend is an **unauthenticated API whose agent can run shell commands**. Anyone who can reach port 6174 controls it. EvoSci prints a red `⚠ PUBLIC BIND` banner at every startup while it's exposed. On an untrusted network, take it back to loopback and reach it over SSH (`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`) instead:
+> The backend is an **unauthenticated API whose agent can run shell commands**. Anyone who can reach port 6174 controls it. EvoSci prints a red `⚠ PUBLIC BIND` banner at every startup while it's exposed.
+>
+> **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so port 6174 is on the network in every mode. Only the front-end port (4716) is WebUI-only.
+>
+> On an untrusted network, take it back to loopback and reach it over SSH (`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`) instead:
 
 ```bash
 EvoSci --host 127.0.0.1                        # this session only, both servers

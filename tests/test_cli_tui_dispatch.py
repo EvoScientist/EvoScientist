@@ -126,6 +126,62 @@ def test_no_host_flag_leaves_config_defaults(monkeypatch):
     assert calls["webui_config"].webui_host == "0.0.0.0"
 
 
+def _run_ensure_backend(monkeypatch, config, *, server_up=True):
+    """Drive ``_ensure_async_subagent_server`` and capture console output."""
+    import EvoScientist.cli.commands as cmds
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
+        lambda config, *, workspace_dir: None,
+    )
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+        lambda: server_up,
+    )
+    monkeypatch.setattr(
+        cmds, "_reconcile_autoskill_schedule", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        cmds.console, "print", lambda *a, **k: printed.append(str(a[0]) if a else "")
+    )
+    monkeypatch.setattr(
+        cmds.console,
+        "status",
+        lambda *a, **k: __import__("contextlib").nullcontext(),
+    )
+    cmds._ensure_async_subagent_server(config, workspace_dir="/tmp/workspace")
+    return printed
+
+
+@pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5", "::"])
+def test_cli_mode_warns_on_public_backend_bind(monkeypatch, exposed):
+    """The langgraph dev backend is shared across UI modes, so a plain
+    `EvoSci` session must warn too — otherwise the default 0.0.0.0 bind puts
+    an unauthenticated shell-capable API on the network with no signal."""
+    config = SimpleNamespace(langgraph_dev_host=exposed)
+    printed = _run_ensure_backend(monkeypatch, config)
+
+    assert any("PUBLIC BIND" in line for line in printed)
+
+
+@pytest.mark.parametrize("loopback", ["127.0.0.1", "::1", "localhost"])
+def test_cli_mode_silent_on_loopback_backend_bind(monkeypatch, loopback):
+    config = SimpleNamespace(langgraph_dev_host=loopback)
+    printed = _run_ensure_backend(monkeypatch, config)
+
+    assert not any("PUBLIC BIND" in line for line in printed)
+
+
+def test_no_warning_when_backend_failed_to_start(monkeypatch):
+    """ensure_langgraph_dev fails soft (async degrades to in-process). Warning
+    about a bind that never happened is worse than saying nothing."""
+    config = SimpleNamespace(langgraph_dev_host="0.0.0.0")
+    printed = _run_ensure_backend(monkeypatch, config, server_up=False)
+
+    assert not any("PUBLIC BIND" in line for line in printed)
+
+
 def test_background_agent_server_starts_even_when_async_subagents_disabled(
     monkeypatch,
 ):
