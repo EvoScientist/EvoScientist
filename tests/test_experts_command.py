@@ -60,7 +60,7 @@ class _FakeSkillInfo:
     # Legacy-frontmatter expert by default: ``expert_prompt_body`` reads
     # ``body`` for these. Set ``expert_source="agents_md"`` plus
     # ``agents_body`` to fake an expert on the current contract.
-    expert_source: str = ""
+    expert_source: str = "frontmatter"
     agents_body: str = ""
 
 

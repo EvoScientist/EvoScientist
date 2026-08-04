@@ -1,24 +1,23 @@
-"""Expert-subagent-spec factory for the v1 agent-teams feature.
+"""Expert-subagent-spec factory for the agent-teams feature.
 
 Turns an installed **expert skill** (a `SkillInfo` with `type == "expert"`) into
 a deepagents subagent spec dict compatible with `subagents=[...]` on
 `create_deep_agent`. The main agent's `_build_base_kwargs` folds these specs
 into its subagent list at construction time so the `task` tool can dispatch to
-each installed expert for sync consult; the same registry is reused by the
-QuickJS `task()` global for panel mode.
+each installed expert in-turn; the same registry is reused by the QuickJS
+`task()` global for in-eval fan-out.
 
-A skill declares itself an expert by carrying a sibling `AGENTS.md`, whose
-body is the actor definition and therefore the runtime prompt — see
-`skills_manager._parse_skill_md`. Those experts dispatch async and are built
-by `expert_container_async.py`, so what reaches THIS module is the legacy
-`type: expert` frontmatter population, plus every read-only surface
-(`list_dispatchable_experts`) that has to see both.
+A skill declares itself an expert by carrying a sibling `AGENTS.md`, whose body
+is the actor definition and therefore the runtime prompt — see
+`skills_manager._parse_skill_md`. THIS module builds the in-turn (`task()`) spec
+for such experts and for legacy `type: expert` frontmatter experts alike;
+`expert_container_async.py` independently builds the background
+(`start_async_task`) spec for the same experts, so every expert is reachable
+both ways and the orchestrator picks per task.
 
 The generic-container principle from #361 lives in THIS FUNCTION — one
 construction path for all experts, sourcing behaviour from the skill file
-rather than a per-expert YAML. There's no deployed graph per expert in v1;
-that's async-thread territory (v2) and blocked on the deepagents
-`AsyncSubAgent` config-passthrough gap.
+rather than a per-expert YAML.
 """
 
 from __future__ import annotations

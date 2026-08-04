@@ -501,6 +501,17 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
                 )
             type_ = "expert"
             expert_source = "agents_md"
+            # AGENTS.md is authoritative on every axis: the actor definition is
+            # that file, so legacy decoration from SKILL.md frontmatter must not
+            # leak onto SkillInfo. ``role`` would otherwise be prepended to the
+            # AGENTS.md prompt (``_compose_system_prompt`` / the async head), and
+            # a mismatched frontmatter ``name`` would desync the registry
+            # identity from the skill directory.
+            name = parent.name
+            role = ""
+            byline = ""
+            capability_tags = []
+            avatar_hint = ""
         elif type_ == "expert":
             _warn_once(
                 f"{parent}:legacy",

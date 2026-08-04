@@ -1269,6 +1269,7 @@ metadata:
             "migrating",
             skill_frontmatter=(
                 "type: expert\nrole: legacy role\nbyline: Legacy\n"
+                "capability_tags: [legacy]\navatar_hint: legacy-avatar\n"
                 "default_dispatch: sync\n"
             ),
         )
@@ -1277,10 +1278,32 @@ metadata:
         ):
             result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.expert_source == "agents_md"
+        # AGENTS.md wins on every axis: the legacy decoration fields must be
+        # cleared, not merely warned about — otherwise `role` is prepended to
+        # the AGENTS.md prompt and the gallery chips leak stale frontmatter.
+        assert result.role == ""
+        assert result.byline == ""
+        assert result.capability_tags == []
+        assert result.avatar_hint == ""
         assert any(
             "is ignored and should be removed" in r.message and "migrating" in r.message
             for r in caplog.records
         )
+
+    def test_agents_md_expert_name_is_directory_name(self, tmp_path):
+        """Registry identity for an AGENTS.md expert is the directory name.
+
+        A frontmatter ``name:`` that disagrees with the directory would desync
+        the dispatch registry key from the skill the orchestrator names.
+        """
+        skill_dir = tmp_path / "real-dir"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: mismatched-name\ndescription: d\n---\n\n# Knowledge\n"
+        )
+        (skill_dir / "AGENTS.md").write_text("## Persona\n\nBody.\n")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.name == "real-dir"
 
     def test_legacy_frontmatter_expert_warns_once(self, tmp_path, caplog):
         """The deprecated path keeps working, and says so — once per skill.

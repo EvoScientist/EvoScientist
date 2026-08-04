@@ -168,6 +168,7 @@ def test_middleware_appends_multi_expert_cue(mock_get_config, mock_dispatchable)
     assert "`literature-review`" in text
     assert "The user has invited the following experts" in text
     assert "task(" not in text
+    assert "start_async_task" not in text
     assert "base system" in text
 
 

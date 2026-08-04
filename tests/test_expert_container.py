@@ -412,6 +412,38 @@ The workflow.
         assert "You are the new expert." in by_name["new-expert"]["system_prompt"]
         assert "The workflow." not in by_name["new-expert"]["system_prompt"]
 
+    def test_legacy_async_dispatch_still_in_sync_registry(self, tmp_path):
+        """A legacy ``default_dispatch: async`` skill still gets an in-turn spec.
+
+        ``default_dispatch`` is no longer read: every expert is reachable both
+        ways and the orchestrator picks per task, so an async-declared legacy
+        skill must not be dropped from the sync registry. This is the
+        behavioural counterpart to the parser's not-read contract.
+        """
+        actor = tmp_path / "async-legacy"
+        actor.mkdir()
+        (actor / "SKILL.md").write_text(
+            """---
+name: async-legacy
+description: Legacy expert that declared async dispatch
+type: expert
+role: legacy async expert
+default_dispatch: async
+---
+
+You are the legacy async expert.
+"""
+        )
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
+            patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
+        ):
+            specs = build_expert_subagent_specs(tool_registry={})
+        assert "async-legacy" in {s["name"] for s in specs}
+
     def test_returns_empty_when_no_expert_skills(self, tmp_path):
         # A utility skill only — no experts.
         util = tmp_path / "util-only"
