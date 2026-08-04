@@ -746,21 +746,29 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
     # ── Send retry abstraction ──────────────────────────────────────
 
-    _non_retryable_patterns: tuple[str, ...] = ()
+    _non_retryable_patterns: tuple[str, ...] = (
+        "unauthorized",
+        "forbidden",
+        "permission denied",
+        "invalid token",
+        "invalid api key",
+        "authentication failed",
+    )
     _rate_limit_patterns: tuple[str, ...] = ("429", "ratelimit")
     _rate_limit_delay: float = 1.0
 
     def _extract_retry_after(self, exc: Exception) -> float | None:
         """Extract retry-wait seconds from an exception.
 
-        Returns ``None`` to signal that the error is **not retryable**.
+        Returns a retry delay in seconds, or ``None`` when the error is
+        explicitly non-retryable.
 
         Pipeline:
         1. SDK-provided ``retry_after`` attribute (Telegram / Slack SDKs).
         2. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
         3. Non-retryable pattern match → ``None``.
         4. Rate-limit pattern match → ``_rate_limit_delay``.
-        5. Default ``None`` for non-retryable errors.
+        5. Default ``1.0`` s for generic transient errors.
 
         Channels can customize behavior declaratively via class attributes
         ``_non_retryable_patterns``, ``_rate_limit_patterns``, and
@@ -790,8 +798,8 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         ):
             return self._rate_limit_delay
 
-        # 5. Default: not retryable
-        return None
+        # 5. Default: transient error, retry with the standard delay
+        return 1.0
 
     def _parse_retry_after_header(self, exc: Exception) -> float | None:
         """Try to extract a ``Retry-After`` value from an HTTP response."""

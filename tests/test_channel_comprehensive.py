@@ -1221,11 +1221,21 @@ class TestChannelReconnect:
 
 
 class TestExtractRetryAfter:
-    def test_never_returns_none(self):
-        """[B-01] Base _extract_retry_after returns None for non-retryable errors."""
+    def test_generic_errors_use_default_retry_delay(self):
+        """Generic transient errors should use the base retry delay."""
         ch = StubChannel()
         result = ch._extract_retry_after(ValueError("bad"))
+        assert result == 1.0
+
+    def test_explicit_auth_errors_do_not_retry(self):
+        ch = StubChannel()
+        result = ch._extract_retry_after(Exception("HTTP 401 Unauthorized"))
         assert result is None
+
+    def test_5xx_style_errors_still_retry(self):
+        ch = StubChannel()
+        result = ch._extract_retry_after(Exception("HTTP 500 Internal Server Error"))
+        assert result == 1.0
 
     def test_extracts_retry_after_attribute(self):
         ch = StubChannel()
