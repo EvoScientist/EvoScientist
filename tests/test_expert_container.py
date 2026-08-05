@@ -14,6 +14,7 @@ from EvoScientist.subagents.expert_container import (
     dispatchable_experts_token,
     expert_prompt_body,
     list_dispatchable_experts,
+    rollback_dispatchable_memo,
 )
 from EvoScientist.tools.skills_manager import SkillInfo
 
@@ -647,14 +648,19 @@ class TestListDispatchableExpertsSurvivesAsyncOutage:
 # =============================================================================
 
 
-def _expert(name: str, body: str = "persona body\n") -> SkillInfo:
+def _expert(
+    name: str,
+    body: str = "persona body\n",
+    description: str | None = None,
+    role: str | None = None,
+) -> SkillInfo:
     return SkillInfo(
         name=name,
-        description=f"{name} description",
+        description=f"{name} description" if description is None else description,
         path=Path("/tmp/nope") / name,
         source="builtin",
         type="expert",
-        role=f"{name} role",
+        role=f"{name} role" if role is None else role,
         body=body,
     )
 
@@ -757,6 +763,31 @@ class TestDispatchableExpertsToken:
         """
         before = self._token_for([_expert("alpha", body="original persona\n")])
         after = self._token_for([_expert("alpha", body="rewritten persona\n")])
+        assert before != after
+
+    def test_changes_when_a_description_is_edited(self):
+        """``description`` is baked into BOTH dispatch tools' schemas.
+
+        deepagents builds the ``task`` tool description from the folded
+        specs, and ``expert_async_subagent`` builds ``start_async_task``'s
+        the same way. An edited ``description:`` that didn't move the token
+        would leave the orchestrator choosing between experts on stale
+        blurbs, on both reaches, until something else forced a rebuild.
+        """
+        before = self._token_for([_expert("alpha", description="reviews physics")])
+        after = self._token_for([_expert("alpha", description="reviews chemistry")])
+        assert before != after
+
+    def test_changes_when_a_role_is_edited(self):
+        """``role`` is prepended to the frozen ``system_prompt``.
+
+        ``_compose_system_prompt`` turns it into the "You are …" line, so
+        hashing the raw actor body alone would miss it. Only legacy
+        frontmatter experts set ``role`` — the AGENTS.md contract forces it
+        empty — but those still ship in this tree.
+        """
+        before = self._token_for([_expert("alpha", role="a physics reviewer")])
+        after = self._token_for([_expert("alpha", role="a chemistry reviewer")])
         assert before != after
 
     def test_ignores_filesystem_ordering(self):
@@ -866,3 +897,44 @@ class TestDispatchableExpertsTokenSeesMidRunEdits:
             return_value=[_expert("alpha", body="rewritten persona\n")],
         ):
             assert dispatchable_experts_token() != before
+
+
+class TestRollbackDispatchableMemo:
+    """The token restamps the memo before anyone knows the rebuild worked.
+
+    When it didn't, the cue and the ``/expert`` popup would go on naming an
+    expert the still-seated agent cannot route to — the same
+    advertise-versus-provide gap this module exists to close, moved onto the
+    failure branch.
+    """
+
+    def test_rollback_restores_the_pre_probe_list(self):
+        _reset_dispatchable_experts_cache()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ):
+            # The set the seated agent was built from.
+            list_dispatchable_experts()
+
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha"), _expert("beta")],
+        ):
+            # A staleness probe: walks, restamps, decides a rebuild is due.
+            dispatchable_experts_token()
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha", "beta"]
+
+            # The rebuild failed, so the new expert is not reachable.
+            rollback_dispatchable_memo()
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
+
+    def test_rollback_is_safe_before_any_walk(self):
+        """Nothing has been displaced yet; rolling back must not crash."""
+        _reset_dispatchable_experts_cache()
+        rollback_dispatchable_memo()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ):
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]

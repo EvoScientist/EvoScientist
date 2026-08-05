@@ -199,16 +199,19 @@ def _reserved_subagent_names() -> frozenset[str]:
     return _reserved_subagent_names_cache
 
 
-# Epoch-keyed memo for ``list_dispatchable_experts``. Keyed on
-# ``(skills_epoch(), include_system)``, so an entry survives until a skill
-# is installed or uninstalled.
+# Memo for ``list_dispatchable_experts``, keyed on
+# ``(skills_epoch(), include_system)``. The epoch invalidates it on
+# install/uninstall; ``dispatchable_experts_token`` overwrites it outright on
+# every call, regardless of epoch, which is what lets an edit that never
+# touched the install path reach the readers below.
 #
-# The memo exists for one reader: the active-expert cue calls
-# ``list_dispatchable_experts`` on EVERY model call, including inside
-# ``awrap_model_call``. Uncached, that is a full ``iterdir`` + SKILL.md
-# parse of the skills tree on the async model-call path.
+# Two readers, both of which would otherwise walk the skills tree:
+# the active-expert cue (``middleware/active_team.py``) on EVERY model call,
+# including inside ``awrap_model_call``, and the ``/expert`` popup
+# (``commands/implementation/experts.py``) per keystroke. Uncached, the first
+# of those is a full ``iterdir`` + SKILL.md parse on the async model-call path.
 #
-# It is deliberately NOT the source for ``dispatchable_experts_token`` —
+# The memo is deliberately NOT the source for ``dispatchable_experts_token``:
 # the epoch only moves on install/uninstall, and an expert can also be
 # authored or edited straight onto the writable workspace skills tier
 # (``MergedSkillsBackend`` routes the agent's own ``write``/``edit`` there).
@@ -217,18 +220,48 @@ def _reserved_subagent_names() -> frozenset[str]:
 _dispatchable_cache_key: tuple[int, bool] | None = None
 _dispatchable_cache_value: list[SkillInfo] | None = None
 
+# The memo entry displaced by the most recent ``_read_dispatchable_fresh``.
+# Exists so a caller that walked the tree in order to DECIDE on a rebuild can
+# undo the restamp when that rebuild fails — see ``rollback_dispatchable_memo``.
+_dispatchable_memo_prev: tuple[tuple[int, bool] | None, list[SkillInfo] | None] = (
+    None,
+    None,
+)
+
 
 def _reset_dispatchable_experts_cache() -> None:
-    """Test hook: drop the epoch-keyed dispatchable-experts memo.
+    """Test hook: drop the dispatchable-experts memo and its rollback slot.
 
-    Production code never needs this — the epoch key invalidates itself.
-    Tests that patch ``list_expert_skills`` mutate the skill set without
-    touching the epoch, so they must reset explicitly (see the autouse
-    fixture in ``tests/conftest.py``).
+    Production code never needs this — the epoch key invalidates itself and
+    the token overwrites it. Tests that patch ``list_expert_skills`` mutate
+    the skill set without touching the epoch, so they must reset explicitly
+    (see the autouse fixture in ``tests/conftest.py``).
     """
     global _dispatchable_cache_key, _dispatchable_cache_value
+    global _dispatchable_memo_prev
     _dispatchable_cache_key = None
     _dispatchable_cache_value = None
+    _dispatchable_memo_prev = (None, None)
+
+
+def rollback_dispatchable_memo() -> None:
+    """Undo the most recent memo restamp.
+
+    ``dispatchable_experts_token`` restamps the memo at the moment a caller
+    decides *whether* to rebuild, which is necessarily before it knows the
+    rebuild succeeded. When it did not, the readers above would otherwise
+    advertise an expert the still-seated agent cannot dispatch to — the exact
+    advertise-versus-provide divergence this module exists to close, just on
+    the failure branch.
+
+    Callers on a rebuild-failure path call this to restore the set the seated
+    agent was actually built from. Idempotent in the sense that rolling back
+    twice restores the same entry; the displaced value is not itself stacked,
+    so only one level of undo is available. That is enough: every caller
+    walks, decides, and rebuilds without yielding in between.
+    """
+    global _dispatchable_cache_key, _dispatchable_cache_value
+    _dispatchable_cache_key, _dispatchable_cache_value = _dispatchable_memo_prev
 
 
 def _read_dispatchable_fresh(include_system: bool) -> list[SkillInfo]:
@@ -242,8 +275,13 @@ def _read_dispatchable_fresh(include_system: bool) -> list[SkillInfo]:
     mid-walk then leaves the memo stamped with the superseded epoch, so
     the next reader misses and re-walks — rather than a half-updated view
     being served under the new key.
+
+    The displaced entry is kept in ``_dispatchable_memo_prev`` so a caller
+    that walked in order to decide on a rebuild can undo this restamp if the
+    rebuild fails; see ``rollback_dispatchable_memo``.
     """
     global _dispatchable_cache_key, _dispatchable_cache_value
+    global _dispatchable_memo_prev
 
     from ..tools.skills_manager import list_expert_skills, skills_epoch
 
@@ -259,8 +297,12 @@ def _read_dispatchable_fresh(include_system: bool) -> list[SkillInfo]:
             continue
         dispatchable.append(info)
 
-    _dispatchable_cache_key = (epoch, include_system)
+    _dispatchable_memo_prev = (_dispatchable_cache_key, _dispatchable_cache_value)
+    # Value before key. A reader interleaving between these two writes then
+    # either misses (old key, cheap re-walk) or matches the old key and gets
+    # the fresher list — never the new key paired with the stale value.
     _dispatchable_cache_value = dispatchable
+    _dispatchable_cache_key = (epoch, include_system)
     return dispatchable
 
 
@@ -284,9 +326,12 @@ def list_dispatchable_experts(
     returned list is a fresh copy so a caller sorting or filtering it in
     place can't corrupt the next reader's view.
 
-    The memo is also restamped by ``dispatchable_experts_token``, which
-    runs at every turn boundary, so a mid-run edit reaches this reader on
-    the next turn even though it never advanced the epoch.
+    The memo is also restamped by ``dispatchable_experts_token`` — once per
+    turn boundary in the CLI/TUI, once per HTTP request in the WebUI — so a
+    mid-run edit reaches this reader without ever advancing the epoch. When
+    the rebuild that restamp was taken for fails, the caller rolls it back
+    (``rollback_dispatchable_memo``), so this never reports an expert the
+    seated agent cannot dispatch to.
 
     ``cfg`` is accepted and ignored; kept so callers that thread config
     through don't have to special-case this one. Read-only filter —
@@ -310,11 +355,23 @@ def dispatchable_experts_token(*, include_system: bool = True) -> str:
     can reach, or what any of them is prompted with? Callers hold the
     previous value and rebuild when it differs.
 
-    Covers name and actor definition, because both are baked into the
-    frozen in-turn spec at ``create_deep_agent`` time
-    (``build_expert_subagent_spec`` bakes ``system_prompt``). Hashing the
-    body — not just the name set — is what makes a reinstall that only
-    edits an expert's AGENTS.md refresh the stale sync spec.
+    Covers exactly the ``SkillInfo`` surface that gets frozen at
+    ``create_deep_agent`` time, which is three fields:
+
+    - ``name`` — the key in deepagents' ``subagent_graphs`` dict.
+    - ``description`` — baked into BOTH dispatch tools' schemas: deepagents
+      builds the ``task`` description from it, and
+      ``middleware/expert_async_subagent.py`` builds ``start_async_task``'s
+      the same way. An edited ``description:`` therefore leaves the model
+      reading a stale blurb on both reaches until a rebuild.
+    - the composed system prompt — ``_compose_system_prompt`` over the actor
+      body, which folds in ``role``. Composing rather than hashing the raw
+      body is what catches a ``role:`` edit on a legacy frontmatter expert.
+
+    Nothing else on ``SkillInfo`` reaches a frozen construct: ``byline``,
+    ``capability_tags``, ``avatar_hint``, ``tags`` and ``source`` are
+    WebUI/filter-only, and the async persona is re-resolved per model call by
+    ``expert_container_async.ExpertSkillLoaderMiddleware`` rather than baked.
 
     Deliberately narrower than ``skills_epoch()``: installing a utility
     skill advances the epoch but leaves this token unchanged, so it costs
@@ -330,9 +387,15 @@ def dispatchable_experts_token(*, include_system: bool = True) -> str:
     Without the walk, "write me an expert" would produce one the
     orchestrator could not dispatch to until ``/new``.
 
-    Costs one skills-tree walk per call. Callers are turn boundaries and
-    the WebUI graph factory — never ``awrap_model_call``, whose cue reads
-    the memo this restamps.
+    Costs one skills-tree walk per call, measured at ~16 ms warm for 11
+    installed skills and scaling roughly linearly with that count. Callers
+    are turn boundaries (CLI/TUI) and the WebUI graph factory, which pays it
+    per HTTP request including read-only state polls — never
+    ``awrap_model_call``, whose cue reads the memo this restamps.
+
+    Restamping the memo is a side effect, not incidental: it is what keeps
+    the cue reporting the same set the rebuild decision was made on. A
+    caller whose rebuild then fails must call ``rollback_dispatchable_memo``.
     """
     experts = _read_dispatchable_fresh(include_system)
 
@@ -341,7 +404,11 @@ def dispatchable_experts_token(*, include_system: bool = True) -> str:
     for info in sorted(experts, key=lambda s: s.name):
         digest.update(info.name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(expert_prompt_body(info).encode("utf-8"))
+        digest.update((info.description or "").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(
+            _compose_system_prompt(info, expert_prompt_body(info)).encode("utf-8")
+        )
         digest.update(b"\0")
     return digest.hexdigest()
 

@@ -97,8 +97,12 @@ _EvoScientist_agent = None
 # built. Compared on every access so a mid-session change to the expert set
 # — an install, or an expert written straight onto the workspace skills
 # tier — rebuilds the agent instead of leaving it frozen at construction
-# time. Written only inside ``_get_default_agent``'s build block, so it
-# cannot drift from the agent it describes.
+# time. Written only by ``_get_default_agent``, and it means two different
+# things by outcome: on success, the registry the seated agent was built
+# from; on failure, the registry a build was already attempted and failed
+# at. The second reading is deliberate — it is what stops a broken expert
+# from being retried once per HTTP request — so after a failed rebuild this
+# describes the attempt, not the older agent still seated.
 _EvoScientist_agent_expert_token: str | None = None
 
 
@@ -1086,11 +1090,28 @@ def _get_default_agent():
     equivalent of the ``_replace_chat_model`` null-out, and the mechanism
     ``langgraph_dev.main_graph``'s graph factory relies on to serve a
     current agent per request.
+
+    **A failed rebuild keeps the previous agent.** Since the graph factory
+    calls this per request, raising would take a working deployment to a
+    permanent 500 — and the trigger is now agent-authored content, so a
+    half-written expert would be enough to do it. The degraded state is "the
+    new expert isn't reachable yet", never a dead deployment. A build with no
+    previous agent to fall back on (first access, or after
+    ``_replace_chat_model``) still raises.
     """
     global _EvoScientist_agent, _EvoScientist_agent_expert_token
-    from .subagents.expert_container import dispatchable_experts_token
+    from .subagents.expert_container import (
+        dispatchable_experts_token,
+        rollback_dispatchable_memo,
+    )
 
     expert_token = dispatchable_experts_token()
+    # Captured BEFORE the null-out below, which is what makes the failure
+    # path safe against ``_replace_chat_model``. That function nulls this
+    # global itself, so on a model switch ``previous`` is already None and a
+    # failed build re-raises rather than re-seating an agent still bound to
+    # the superseded chat model. Only the registry-change path can re-seat.
+    previous = _EvoScientist_agent
     if (
         _EvoScientist_agent is not None
         and _EvoScientist_agent_expert_token != expert_token
@@ -1104,27 +1125,56 @@ def _get_default_agent():
     if _EvoScientist_agent is None:
         from deepagents import create_deep_agent
 
-        cfg = _ensure_config()
-        be = _get_default_backend()
-        mw = _get_default_middleware()
+        try:
+            cfg = _ensure_config()
+            be = _get_default_backend()
+            mw = _get_default_middleware()
 
-        if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
-            kwargs = _build_base_kwargs(
-                be,
-                mw,
-                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
-            )
-        else:
-            kwargs = load_mcp_and_build_kwargs(
-                be,
-                mw,
-                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
-            )
+            if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
+                kwargs = _build_base_kwargs(
+                    be,
+                    mw,
+                    workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
+                )
+            else:
+                kwargs = load_mcp_and_build_kwargs(
+                    be,
+                    mw,
+                    workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
+                )
 
-        _EvoScientist_agent = create_deep_agent(
-            **kwargs,
-            interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
-        ).with_config({"recursion_limit": cfg.recursion_limit})
+            agent = create_deep_agent(
+                **kwargs,
+                interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
+            ).with_config({"recursion_limit": cfg.recursion_limit})
+        except Exception:
+            if previous is None:
+                raise
+            # A rebuild triggered by a registry change failed. The expert set
+            # is now agent-authored content, so a half-written expert must not
+            # take a working deployment down: the WebUI graph factory calls
+            # this per request, including for read-only state reads, so
+            # re-raising would 500 every one of them.
+            logging.getLogger(__name__).warning(
+                "Agent rebuild failed; continuing with the previously built "
+                "agent. The new experts will not be reachable until the "
+                "registry changes again.",
+                exc_info=True,
+            )
+            # Stamp the token we failed on, not the old one, so the failing
+            # build is not retried until the inputs move again — the same
+            # property ``BackgroundAgentLoader._reload`` gets for free from
+            # ``start``, and it matters more here because the retry would
+            # otherwise be paid per HTTP request.
+            _EvoScientist_agent = previous
+            _EvoScientist_agent_expert_token = expert_token
+            # The token read above already restamped the cue's memo with the
+            # set this build was going to provide. It didn't, so put back the
+            # set ``previous`` was actually built from.
+            rollback_dispatchable_memo()
+            return previous
+
+        _EvoScientist_agent = agent
         _EvoScientist_agent_expert_token = expert_token
     return _EvoScientist_agent
 

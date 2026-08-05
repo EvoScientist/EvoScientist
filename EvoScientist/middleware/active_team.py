@@ -105,11 +105,16 @@ def _dispatchable_names() -> set[str]:
     is restamped by ``expert_container.dispatchable_experts_token``, the
     same read that decides whether to rebuild the agent (callers in
     ``cli/_agent_loader.py`` / ``EvoScientist.py``). One skills-tree walk
-    per turn boundary feeds both, so by the time a turn reaches the model
-    the running agent was built from the very expert set this list
-    reports. An expert installed — or written straight onto the workspace
-    skills tier — mid-turn is named from the next turn on, the same turn
-    it becomes dispatchable.
+    feeds both, so by the time a turn reaches the model the running agent
+    was built from the very expert set this list reports. An expert
+    installed — or written straight onto the workspace skills tier —
+    mid-turn is named from the next turn on, the same turn it becomes
+    dispatchable.
+
+    That holds on the failure branch too: a rebuild can fail after the
+    restamp, and the callers roll the memo back
+    (``expert_container.rollback_dispatchable_memo``) when it does, so this
+    never names an expert the still-seated agent cannot reach.
 
     On import failure returns an empty set — the middleware then emits no
     cue, matching the outside-runnable-context no-op path.
