@@ -558,12 +558,12 @@ def test_register_owner_preserves_unknown_ownership(
     CLI as sole owner would later read as 'all owners dead' and authorize a
     reclaim while unknown pre-feature sessions may still use the server."""
     sidecar = tmp_path / "ws.json"
-    sidecar.write_text(json.dumps({"workspace": str(tmp_path / "A"), "pid": 99999}))
+    original = {"workspace": str(tmp_path / "A"), "pid": 99999}
+    sidecar.write_text(json.dumps(original))
     monkeypatch.setattr(
         manager,
         "RUNTIME",
         dataclasses.replace(runtime_paths, workspace_sidecar=sidecar),
     )
     manager._sidecar_register_owner()
-    data = json.loads(sidecar.read_text())
-    assert "owner_pids" not in data
+    assert json.loads(sidecar.read_text()) == original
