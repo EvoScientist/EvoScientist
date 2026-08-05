@@ -781,3 +781,88 @@ class TestDispatchableExpertsToken:
         with_blank = self._token_for([_expert("alpha"), _expert("blank", body="  \n")])
         without = self._token_for([_expert("alpha")])
         assert with_blank == without
+
+
+class TestDispatchableExpertsTokenSeesMidRunEdits:
+    """The token must not be gated on ``skills_epoch()``.
+
+    The workspace skills tier is writable by the agent itself —
+    ``backends.MergedSkillsBackend`` routes ``write``/``edit`` there — so a
+    user can ask the agent to author or rewrite an expert mid-session. That
+    path never calls ``install_skill``, so the epoch never moves and the
+    epoch-keyed memo never expires. These tests pin the walk that makes
+    such changes visible; none of them bumps the epoch or resets the memo
+    between the two states.
+    """
+
+    def test_an_edited_actor_definition_moves_the_token(self):
+        _reset_dispatchable_experts_cache()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha", body="original persona\n")],
+        ):
+            before = dispatchable_experts_token()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha", body="rewritten persona\n")],
+        ):
+            after = dispatchable_experts_token()
+        assert before != after
+
+    def test_an_expert_authored_without_an_install_moves_the_token(self):
+        """An expert the agent was asked to write must be dispatchable."""
+        _reset_dispatchable_experts_cache()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ):
+            before = dispatchable_experts_token()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha"), _expert("authored-in-session")],
+        ):
+            after = dispatchable_experts_token()
+        assert before != after
+
+    def test_the_walk_restamps_the_memo_the_cue_reads(self):
+        """Otherwise the cue would under-report what ``task()`` can reach.
+
+        ``_dispatchable_names`` reads the epoch-keyed memo on every model
+        call. At an unchanged epoch it would keep serving the pre-edit list
+        while the rebuilt agent could already dispatch to the new expert.
+        The token's walk restamps the memo so one tree read serves both.
+        """
+        _reset_dispatchable_experts_cache()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ):
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha"), _expert("authored-in-session")],
+        ) as listing:
+            dispatchable_experts_token()
+            assert [s.name for s in list_dispatchable_experts()] == [
+                "alpha",
+                "authored-in-session",
+            ]
+            # One walk, not two: the cue reuses what the token just read.
+            assert listing.call_count == 1
+
+    def test_a_stale_memo_never_shadows_the_token(self):
+        """The memo is a hot-path optimisation, never the token's source."""
+        _reset_dispatchable_experts_cache()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ):
+            # Seed the memo at this epoch, so a memo-reading token would be
+            # pinned to the pre-edit view for the rest of the epoch.
+            list_dispatchable_experts()
+            before = dispatchable_experts_token()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha", body="rewritten persona\n")],
+        ):
+            assert dispatchable_experts_token() != before

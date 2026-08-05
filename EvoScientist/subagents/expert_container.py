@@ -199,18 +199,23 @@ def _reserved_subagent_names() -> frozenset[str]:
     return _reserved_subagent_names_cache
 
 
-# Epoch-keyed memo for ``list_dispatchable_experts`` and the token derived
-# from it. Keyed on ``(skills_epoch(), include_system)``: an entry stays
-# valid until a skill is installed or uninstalled, which is the only way
-# the dispatchable set can change through a supported path.
+# Epoch-keyed memo for ``list_dispatchable_experts``. Keyed on
+# ``(skills_epoch(), include_system)``, so an entry survives until a skill
+# is installed or uninstalled.
 #
-# The cache exists because the active-expert cue reads this list on EVERY
-# model call, including inside ``awrap_model_call``. Uncached, that is a
-# full ``iterdir`` + SKILL.md parse of the skills tree on the async
-# model-call path.
+# The memo exists for one reader: the active-expert cue calls
+# ``list_dispatchable_experts`` on EVERY model call, including inside
+# ``awrap_model_call``. Uncached, that is a full ``iterdir`` + SKILL.md
+# parse of the skills tree on the async model-call path.
+#
+# It is deliberately NOT the source for ``dispatchable_experts_token`` —
+# the epoch only moves on install/uninstall, and an expert can also be
+# authored or edited straight onto the writable workspace skills tier
+# (``MergedSkillsBackend`` routes the agent's own ``write``/``edit`` there).
+# The token walks the tree itself so those edits are seen; see
+# ``_read_dispatchable_fresh``.
 _dispatchable_cache_key: tuple[int, bool] | None = None
 _dispatchable_cache_value: list[SkillInfo] | None = None
-_dispatchable_cache_token: str | None = None
 
 
 def _reset_dispatchable_experts_cache() -> None:
@@ -222,10 +227,41 @@ def _reset_dispatchable_experts_cache() -> None:
     fixture in ``tests/conftest.py``).
     """
     global _dispatchable_cache_key, _dispatchable_cache_value
-    global _dispatchable_cache_token
     _dispatchable_cache_key = None
     _dispatchable_cache_value = None
-    _dispatchable_cache_token = None
+
+
+def _read_dispatchable_fresh(include_system: bool) -> list[SkillInfo]:
+    """Walk the skills tree, apply the dispatchability filters, restamp the memo.
+
+    The single place the memo is written, so "which epoch is this list
+    from" is decided once rather than at each caller. Returns the live
+    list; callers that hand it out copy it first.
+
+    The epoch is read *before* the walk on purpose. An install landing
+    mid-walk then leaves the memo stamped with the superseded epoch, so
+    the next reader misses and re-walks — rather than a half-updated view
+    being served under the new key.
+    """
+    global _dispatchable_cache_key, _dispatchable_cache_value
+
+    from ..tools.skills_manager import list_expert_skills, skills_epoch
+
+    epoch = skills_epoch()
+    reserved = _reserved_subagent_names()
+    dispatchable: list[SkillInfo] = []
+    for info in list_expert_skills(include_system=include_system):
+        # Nothing to prompt the expert with.
+        if not expert_prompt_body(info).strip():
+            continue
+        # Would shadow a yaml sub-agent or ``general-purpose`` at fold time.
+        if info.name in reserved:
+            continue
+        dispatchable.append(info)
+
+    _dispatchable_cache_key = (epoch, include_system)
+    _dispatchable_cache_value = dispatchable
+    return dispatchable
 
 
 def list_dispatchable_experts(
@@ -248,35 +284,22 @@ def list_dispatchable_experts(
     returned list is a fresh copy so a caller sorting or filtering it in
     place can't corrupt the next reader's view.
 
+    The memo is also restamped by ``dispatchable_experts_token``, which
+    runs at every turn boundary, so a mid-run edit reaches this reader on
+    the next turn even though it never advanced the epoch.
+
     ``cfg`` is accepted and ignored; kept so callers that thread config
     through don't have to special-case this one. Read-only filter —
     construction-time warnings for empty-body / colliding experts are
     emitted by ``build_expert_subagent_specs`` and
     ``_fold_expert_subagents`` respectively, so nothing is logged here.
     """
-    global _dispatchable_cache_key, _dispatchable_cache_value
-    global _dispatchable_cache_token
-
-    from ..tools.skills_manager import list_expert_skills, skills_epoch
+    from ..tools.skills_manager import skills_epoch
 
     key = (skills_epoch(), include_system)
     if key == _dispatchable_cache_key and _dispatchable_cache_value is not None:
         return list(_dispatchable_cache_value)
-
-    reserved = _reserved_subagent_names()
-    dispatchable: list[SkillInfo] = []
-    for info in list_expert_skills(include_system=include_system):
-        if not expert_prompt_body(info).strip():
-            continue
-        if info.name in reserved:
-            continue
-        dispatchable.append(info)
-
-    _dispatchable_cache_key = key
-    _dispatchable_cache_value = dispatchable
-    # Recomputed lazily by ``dispatchable_experts_token`` under the new key.
-    _dispatchable_cache_token = None
-    return list(dispatchable)
+    return list(_read_dispatchable_fresh(include_system))
 
 
 def dispatchable_experts_token(*, include_system: bool = True) -> str:
@@ -298,15 +321,20 @@ def dispatchable_experts_token(*, include_system: bool = True) -> str:
     a skills-tree walk rather than a full agent rebuild. Utility skills
     are already live through the ``/skills/`` mount and need no rebuild.
 
-    Memoised on the same epoch key as ``list_dispatchable_experts``, whose
-    cached ``SkillInfo`` bodies it reads — so a steady-state call does no
-    disk I/O.
-    """
-    global _dispatchable_cache_token
+    Deliberately *wider* than the epoch in the other direction: this walks
+    the skills tree rather than reading the epoch-keyed memo, so it also
+    sees an expert authored or edited straight onto the workspace skills
+    tier. That tier is writable precisely so the agent can author there
+    (``backends.MergedSkillsBackend`` routes ``write``/``edit`` to it), and
+    such a change never calls ``install_skill``, so the epoch never moves.
+    Without the walk, "write me an expert" would produce one the
+    orchestrator could not dispatch to until ``/new``.
 
-    experts = list_dispatchable_experts(include_system=include_system)
-    if _dispatchable_cache_token is not None:
-        return _dispatchable_cache_token
+    Costs one skills-tree walk per call. Callers are turn boundaries and
+    the WebUI graph factory — never ``awrap_model_call``, whose cue reads
+    the memo this restamps.
+    """
+    experts = _read_dispatchable_fresh(include_system)
 
     digest = hashlib.sha256()
     # Sorted so filesystem iteration order can't produce a spurious change.
@@ -315,8 +343,7 @@ def dispatchable_experts_token(*, include_system: bool = True) -> str:
         digest.update(b"\0")
         digest.update(expert_prompt_body(info).encode("utf-8"))
         digest.update(b"\0")
-    _dispatchable_cache_token = digest.hexdigest()
-    return _dispatchable_cache_token
+    return digest.hexdigest()
 
 
 def build_expert_subagent_specs(

@@ -96,18 +96,20 @@ def _dispatchable_names() -> set[str]:
     honest: naming an expert the model cannot reach is worse than saying
     nothing.
 
-    That list is memoised on ``skills_epoch()``, so this is a dict lookup
-    on the steady-state model-call path rather than a skills-tree walk —
-    it runs inside ``awrap_model_call``, where synchronous filesystem and
-    YAML work would block the event loop.
+    That list is memoised, so this is a dict lookup on the steady-state
+    model-call path rather than a skills-tree walk — it runs inside
+    ``awrap_model_call``, where synchronous filesystem and YAML work would
+    block the event loop.
 
-    The same epoch drives the agent rebuild (see
-    ``expert_container.dispatchable_experts_token`` and its callers in
-    ``cli/_agent_loader.py`` / ``EvoScientist.py``), which is what makes
-    the cue honest rather than merely current: by the time a turn reaches
-    the model, the running agent was built from the same expert set this
-    list reports. An expert installed mid-turn is named from the next turn
-    on — the turn where it also becomes dispatchable.
+    What makes the cue honest rather than merely current is that the memo
+    is restamped by ``expert_container.dispatchable_experts_token``, the
+    same read that decides whether to rebuild the agent (callers in
+    ``cli/_agent_loader.py`` / ``EvoScientist.py``). One skills-tree walk
+    per turn boundary feeds both, so by the time a turn reaches the model
+    the running agent was built from the very expert set this list
+    reports. An expert installed — or written straight onto the workspace
+    skills tier — mid-turn is named from the next turn on, the same turn
+    it becomes dispatchable.
 
     On import failure returns an empty set — the middleware then emits no
     cue, matching the outside-runnable-context no-op path.
