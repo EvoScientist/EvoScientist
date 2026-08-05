@@ -102,22 +102,29 @@ def test_read_active_teams_returns_empty_outside_runnable_context(mock_get_confi
 
 
 @patch("langgraph.config.get_config")
-def test_middleware_no_op_when_active_teams_absent(mock_get_config):
+def test_middleware_injects_concept_when_no_experts_invited(mock_get_config):
+    """The ## Experts concept is injected every turn, even with no invites.
+
+    Gating the whole block on invitation would make the expert mechanism
+    vanish when nothing is invited — the trap the design avoids.
+    """
     mock_get_config.return_value = {"configurable": {}}
     middleware = ActiveTeamMiddleware()
-    request = _request()
-    modified = middleware.modify_request(request)
-    # No override applied: original request returned as-is.
-    assert modified is request
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "## Experts" in text
+    assert "The user has invited" not in text  # no invite block without invitees
+    assert "base system" in text
 
 
 @patch("langgraph.config.get_config")
-def test_middleware_no_op_when_active_teams_empty_list(mock_get_config):
+def test_middleware_injects_concept_when_active_teams_empty_list(mock_get_config):
     mock_get_config.return_value = {"configurable": {"active_teams": []}}
     middleware = ActiveTeamMiddleware()
-    request = _request()
-    modified = middleware.modify_request(request)
-    assert modified is request
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "## Experts" in text
+    assert "The user has invited" not in text
 
 
 def _mock_expert(name: str) -> MagicMock:
@@ -133,7 +140,9 @@ def _mock_expert(name: str) -> MagicMock:
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_appends_single_expert_cue(mock_get_config, mock_dispatchable):
+def test_middleware_appends_invite_for_single_expert(
+    mock_get_config, mock_dispatchable
+):
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm"]},
     }
@@ -141,18 +150,18 @@ def test_middleware_appends_single_expert_cue(mock_get_config, mock_dispatchable
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
-    assert "<active_expert>" in text
+    assert "## Experts" in text  # concept always present
+    assert "The user has invited" in text  # plus the invite block
     assert "`idea-brainstorm`" in text
-    # The cue names the expert and stops; choosing a tool is the
-    # orchestrator's job, and the tool shapes live in DELEGATION_STRATEGY.
-    assert "task(" not in text
-    assert "start_async_task" not in text
     assert "base system" in text  # original preserved
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_appends_multi_expert_cue(mock_get_config, mock_dispatchable):
+def test_middleware_appends_invite_for_multiple_experts(
+    mock_get_config, mock_dispatchable
+):
+    """One <active_expert> tag names one or many invited experts."""
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm", "literature-review"]},
     }
@@ -163,34 +172,35 @@ def test_middleware_appends_multi_expert_cue(mock_get_config, mock_dispatchable)
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
-    assert "<active_experts>" in text
+    assert "## Experts" in text
+    assert "The user has invited" in text
+    # One tag for any number of names — no separate plural tag.
+    assert "<active_experts>" not in text
     assert "`idea-brainstorm`" in text
     assert "`literature-review`" in text
-    assert "The user has invited the following experts" in text
-    assert "task(" not in text
-    assert "start_async_task" not in text
     assert "base system" in text
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_omits_cue_for_undispatchable_names(
+def test_middleware_omits_invite_for_undispatchable_names(
     mock_get_config, mock_dispatchable
 ):
-    """Names not in ``list_dispatchable_experts`` are dropped from the cue.
+    """Names not in ``list_dispatchable_experts`` are dropped from the invite.
 
-    Covers uninstalled experts, empty actor definitions, and name
-    collisions — anything the model would find missing at dispatch time.
+    Covers uninstalled experts, empty actor definitions, and name collisions
+    — anything the model would find missing at dispatch time. The concept
+    still shows; only the invite block is suppressed.
     """
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["nonexistent-expert"]},
     }
     mock_dispatchable.return_value = []  # nothing dispatchable
-    request = _request()
     middleware = ActiveTeamMiddleware()
-    modified = middleware.modify_request(request)
-    # No cue appended — modify_request returns the original request untouched.
-    assert modified is request
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "## Experts" in text
+    assert "The user has invited" not in text
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
@@ -219,11 +229,14 @@ def test_middleware_drops_invited_expert_that_is_not_dispatchable(
 
 
 @patch("langgraph.config.get_config", side_effect=RuntimeError("outside context"))
-def test_middleware_no_op_outside_runnable_context(mock_get_config):
+def test_middleware_injects_concept_outside_runnable_context(mock_get_config):
+    """Outside a runnable context there are no invites, but the concept still
+    injects — ``_read_active_teams`` degrades to an empty list, not a raise."""
     middleware = ActiveTeamMiddleware()
-    request = _request()
-    modified = middleware.modify_request(request)
-    assert modified is request
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "## Experts" in text
+    assert "The user has invited" not in text
 
 
 # ---- composition tests: _get_default_middleware ----------------------------

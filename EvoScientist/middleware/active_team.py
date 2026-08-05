@@ -1,39 +1,28 @@
-"""ActiveTeamMiddleware for EvoScientist agent-teams v1.
+"""ActiveTeamMiddleware: the expert prompt for the main agent.
 
-Reads ``configurable.active_teams: list[str]`` on every model call and
-appends a system-prompt cue biasing the main agent to consult the
-user-invited expert(s).
+Injects the ``## Experts`` concept into the system message on every
+main-agent turn, so the expert mechanism is always visible — mirroring how
+the skill system's guidance is always present. When the user has invited
+experts (``configurable.active_teams``), an ``<active_expert>`` block naming
+the reachable ones is appended on top.
 
-The cue names the expert and stops there. It deliberately does not
-prescribe a tool: every expert is reachable both in-turn (``task``) and in
-the background (``start_async_task``), and choosing between them is the
-orchestrator's job per task. The tool shapes, the output-path convention
-and the result-envelope handling live once in ``DELEGATION_STRATEGY``
-rather than being restated per active expert.
+An expert is a fractal of a skill, so this block is ordered (via the
+middleware stack in ``_get_default_middleware``) to land right after
+``## Skills System``. Gating the whole block on invitation is the trap this
+design avoids: the expert mechanism must not disappear when nothing is
+invited, and the invited-expert list must not read as a standalone "always
+dispatch an expert" directive.
 
 Backend-stateless team binding: WebUI sends ``active_teams`` on every
 ``stream.submit()`` for as long as the invited expert is active; this
-middleware reads it fresh per turn via ``langgraph.config.get_config()``.
-Matches the plan's decision to reach for the ``configurable`` primitive
-rather than a server-side thread-state store (CLAUDE.md #5).
+middleware reads it fresh per turn via ``langgraph.config.get_config()`` —
+the ``configurable`` primitive, not a server-side thread-state store
+(CLAUDE.md #5). The wire key stays ``active_teams`` (plural, legacy from the
+earlier "teams" framing); the semantic content is a list of expert names.
 
-Naming note: the WIRE FORMAT is ``configurable.active_teams`` (plural,
-legacy from the earlier "teams" framing that survived the pivot per the
-WebUI section of the design note). Under the current expert-skill
-mechanism the semantic content is a list of expert names, but the
-wire key stays ``active_teams`` for WebUI compatibility. Internal
-system-prompt tags use ``<active_expert>`` / ``<active_experts>``
-because that matches what the LLM sees as the semantic target.
-
-No-op when:
-- ``configurable.active_teams`` is absent, empty, non-list, or contains
-  no non-empty string entries.
-- The middleware is invoked outside a runnable context (``get_config``
-  raises).
-
-Not included in the async-subagent middleware stack: an expert running
-as its own graph would otherwise inject a "prefer expert X" cue into
-its own system prompt, where the persona is already baked in. See
+Not included in the async-subagent middleware stack: an expert running as
+its own graph would otherwise inject the expert prompt into its own system
+message, where its persona is already baked in. See
 ``EvoScientist.py::_get_default_middleware``.
 """
 
@@ -47,21 +36,30 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 
-_TEMPLATE_SINGLE = (
-    "<active_expert>\n"
-    "The user has invited the expert `{expert}` to this thread. Prefer it "
-    "for requests within its scope. It stays available for the whole "
-    "session until the user dismisses it.\n"
-    "</active_expert>"
-)
+# The expert concept — injected on every main-agent turn so the mechanism is
+# always visible, mirroring how ``## Skills System`` is always present. Moved
+# here from ``DELEGATION_STRATEGY`` (an expert is a fractal of a skill, so its
+# guidance belongs next to the skill system's). The invited-expert list is
+# appended below only when the user has invited experts this session.
+EXPERTS_CONCEPT = """## Experts
+An expert is an installed skill that also ships an actor definition — a persona and a result-envelope contract. Every installed expert is reachable both ways, and the choice is yours per task, not fixed per expert:
 
-_TEMPLATE_MULTI = (
-    "<active_experts>\n"
-    "The user has invited the following experts to this thread: {experts}. "
-    "Consult the right one for the current request; do not consult an expert "
-    "if the request is clearly outside its scope. They stay available for "
-    "the whole session until the user dismisses them.\n"
-    "</active_experts>"
+- `task({subagent_type: '<expert>', description: ...})` — runs in-turn and returns into the current turn. Use when the answer is short and the user is waiting on it.
+- `start_async_task(subagent_type: '<expert>', description: ...)` — runs in the background, returns a task ID immediately. Use when the work is long-running or its deliverable is a file. **Name a concrete output path in the description** (e.g. "write to `./artifacts/<expert>/<slug>.md`") — the expert honours the path you give it. On `status: 'success'`, `check_async_task` returns a `result` envelope with `output_path`, a one-paragraph `summary`, and an expert-defined `metadata` block; render `summary` and `metadata` to the user directly rather than re-reading the artifact to build a synopsis.
+
+Prefer the background form when unsure — expert work is usually multi-step, and it keeps the conversation responsive.
+
+You need not dispatch at all. An expert's `SKILL.md` is ordinary knowledge on the `/skills/` mount: read it and do the work yourself when the task is small, or when the full conversation context matters more than a fresh sub-agent would. If an `<active_expert>` block appears below, the user invited that expert specifically — prefer it for requests in its scope."""
+
+# Appended to ``EXPERTS_CONCEPT`` only when the user has invited reachable
+# experts. One ``<active_expert>`` tag handles one or many names.
+_INVITE_TEMPLATE = (
+    "\n\n<active_expert>\n"
+    "The user has invited {experts} to this thread. Prefer the right one for "
+    "requests within its scope; do not consult an expert if the request is "
+    "clearly outside its scope. They stay available for the whole session "
+    "until the user dismisses them.\n"
+    "</active_expert>"
 )
 
 
@@ -120,36 +118,32 @@ class ActiveTeamMiddleware(AgentMiddleware):
 
     name = "active_team"
 
-    def _cue_for(self, experts: list[str]) -> str:
-        """Render the cue over the dispatchable subset of ``experts``.
+    def _invite_block(self, experts: list[str]) -> str:
+        """Render the ``<active_expert>`` block over the dispatchable subset.
 
         Invited experts that aren't currently dispatchable (uninstalled,
-        empty actor definition, name collision) are dropped from the cue —
-        naming an expert the model cannot reach is worse than saying
-        nothing. Returns the empty string when nothing survives the
-        filter; caller skips the system-prompt append in that case.
+        empty actor definition, name collision) are dropped — naming an
+        expert the model cannot reach is worse than saying nothing. Returns
+        the empty string when nothing survives the filter.
         """
         reachable = _dispatchable_names()
         experts = [e for e in experts if e in reachable]
         if not experts:
             return ""
-        if len(experts) == 1:
-            return _TEMPLATE_SINGLE.format(expert=experts[0])
-        return _TEMPLATE_MULTI.format(
-            experts=", ".join(f"`{e}`" for e in experts),
-        )
+        names = ", ".join(f"`{e}`" for e in experts)
+        return _INVITE_TEMPLATE.format(experts=names)
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
-        """Append the active-expert cue to the request's system message."""
-        experts = _read_active_teams()
-        if not experts:
-            return request
-        cue = self._cue_for(experts)
-        if not cue:
-            return request
+        """Append the expert concept (always) plus the invited-expert block
+        (when the user has invited reachable experts) to the system message.
+        """
+        block = EXPERTS_CONCEPT
+        invited = _read_active_teams()
+        if invited:
+            block += self._invite_block(invited)
         from .utils import append_to_system_message
 
-        new_system = append_to_system_message(request.system_message, cue)
+        new_system = append_to_system_message(request.system_message, block)
         return request.override(system_message=new_system)
 
     def wrap_model_call(
