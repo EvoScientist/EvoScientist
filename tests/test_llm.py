@@ -99,7 +99,7 @@ class TestModelsRegistry:
         assert ("qwen3.5-27b", "qwen/qwen3.5-27b") in atlas_models
         assert get_models_for_provider("atlas") == []
         novita_models = get_models_for_provider("novita")
-        assert ("deepseek-v3.2", "deepseek/deepseek-v3.2") in novita_models
+        assert ("kimi-k3", "moonshotai/kimi-k3") in novita_models
 
 
 # =============================================================================
@@ -457,10 +457,10 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("NOVITA_API_KEY", "novita-key-123")
 
-        get_chat_model("deepseek-v3.2", provider="novita")
+        get_chat_model("kimi-k3", provider="novita")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "deepseek/deepseek-v3.2"
+        assert call_kwargs["model"] == "moonshotai/kimi-k3"
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://api.novita.ai/openai/v1"
         assert call_kwargs["api_key"] == "novita-key-123"

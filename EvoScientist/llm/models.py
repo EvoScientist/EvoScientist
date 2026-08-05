@@ -249,12 +249,10 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
     ("grok-4.3", "xai/grok-4.3", "requesty"),
     ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
-    # Novita (aggregator — OpenAI-compatible, DeepSeek/Qwen/GLM, etc.)
-    ("deepseek-v3.2", "deepseek/deepseek-v3.2", "novita"),
-    ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "novita"),
-    ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "novita"),
-    ("qwen3.5-27b", "qwen/qwen3.5-27b", "novita"),
+    # Novita (aggregator — OpenAI-compatible, Kimi/GLM/DeepSeek, etc.)
+    ("kimi-k3", "moonshotai/kimi-k3", "novita"),
     ("glm-5.2", "zai-org/glm-5.2", "novita"),
+    ("deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731", "novita"),
     # OpenRouter
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
