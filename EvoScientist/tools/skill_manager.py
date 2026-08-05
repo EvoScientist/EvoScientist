@@ -40,8 +40,8 @@ def skill_manager(
 
     action="info" (requires name):
       Get details (description, source, path, tags) about a specific skill by name.
-      Expert skills also surface their role, byline, capability tags, and default
-      dispatch mode. Searches both user and system skills.
+      Expert skills also surface their role, byline, and capability tags.
+      Searches both user and system skills.
 
     action="uninstall" (requires name):
       Remove a user-installed skill by name. System skills cannot be uninstalled.
@@ -206,8 +206,10 @@ def skill_manager(
         ]
         if info.tags:
             lines.append(f"Tags: {', '.join(info.tags)}")
-        # Expert-skill surface (agent-teams v1): only shown when the
-        # skill declared `type: expert` in its SKILL.md frontmatter.
+        # Expert surface: shown when the skill can also act as an expert —
+        # declared by a sibling AGENTS.md, or by legacy `type: expert`
+        # frontmatter. The decoration lines below exist only on the legacy
+        # path, so an AGENTS.md expert renders the type line and stops.
         if info.type == "expert":
             lines.append("Type: expert")
             if info.role:
@@ -218,8 +220,6 @@ def skill_manager(
                 lines.append(f"Capability tags: {', '.join(info.capability_tags)}")
             if info.avatar_hint:
                 lines.append(f"Avatar hint: {info.avatar_hint}")
-            if info.default_dispatch:
-                lines.append(f"Default dispatch: {info.default_dispatch}")
         return "\n".join(lines)
 
     else:

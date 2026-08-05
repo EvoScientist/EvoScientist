@@ -78,14 +78,22 @@ async def get_models(_request: Request) -> JSONResponse:
 async def get_teams(_request: Request) -> JSONResponse:
     """Return installed expert skills as ``{teams: [...]}`` for the WebUI gallery.
 
-    A "team" in the WebUI vocabulary is an installed expert skill —
-    ``SKILL.md`` with ``type: expert`` frontmatter. The response is a
-    curated, gallery-safe projection: name + description, plus optional
-    ``byline`` / ``capability_tags`` / ``avatar_hint`` when the skill
-    populates them.
+    A "team" in the WebUI vocabulary is an installed expert skill — a skill
+    directory carrying a sibling ``AGENTS.md`` (or, on the deprecated path,
+    ``type: expert`` SKILL.md frontmatter). The response is a curated,
+    gallery-safe projection: name + description, plus optional ``byline`` /
+    ``capability_tags`` / ``avatar_hint`` when the skill populates them.
+
+    Cards for experts on the current contract carry name + description only:
+    the decoration fields were actor metadata in SKILL.md frontmatter, which
+    that contract removes rather than relocates (``AGENTS.md`` has no
+    frontmatter to hold them). The omit-when-unpopulated projection below is
+    what makes those cards degrade rather than break; restoring richer cards
+    means sourcing decoration from index metadata, not re-adding frontmatter
+    fields.
 
     Backend implementation details (SKILL.md body / system prompt, role
-    line, default_dispatch, tool list, source tier, filesystem path,
+    line, tool list, source tier, filesystem path,
     tags) are intentionally NOT projected. The gallery only needs
     identity + descriptor fields to render the card; anything richer
     belongs in a dedicated info endpoint.

@@ -962,7 +962,6 @@ def _write_expert_skill(
     byline: str = "Test persona",
     capability_tags: list[str] | None = None,
     avatar_hint: str = "star",
-    default_dispatch: str = "sync",
     include_description: bool = True,
 ) -> Path:
     """Write an expert SKILL.md under parent/<name>/ and return the skill dir."""
@@ -978,7 +977,6 @@ role: {role}
 byline: {byline}
 capability_tags: {tags_str}
 avatar_hint: {avatar_hint}
-default_dispatch: {default_dispatch}
 ---
 
 # {name}
@@ -1000,7 +998,6 @@ class TestParseSkillMdExpertFields:
         assert result.byline == ""
         assert result.capability_tags == []
         assert result.avatar_hint == ""
-        assert result.default_dispatch == ""
 
     def test_expert_fields_extracted(self, tmp_path):
         skill_dir = _write_expert_skill(
@@ -1010,7 +1007,6 @@ class TestParseSkillMdExpertFields:
             byline="A Byline",
             capability_tags=["tag-1", "tag-2"],
             avatar_hint="atom",
-            default_dispatch="panel",
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
@@ -1018,7 +1014,6 @@ class TestParseSkillMdExpertFields:
         assert result.byline == "A Byline"
         assert result.capability_tags == ["tag-1", "tag-2"]
         assert result.avatar_hint == "atom"
-        assert result.default_dispatch == "panel"
 
     def test_body_populated_from_skill_md(self, tmp_path):
         """`SkillInfo.body` carries the post-frontmatter content so the expert
@@ -1063,14 +1058,20 @@ role: This should be ignored
             for r in caplog.records
         )
 
-    def test_valid_async_default_dispatch(self, tmp_path):
-        """``default_dispatch: async`` is a recognized value (agent-teams v2 dispatch mode)."""
+    def test_default_dispatch_frontmatter_is_not_read(self, tmp_path):
+        """A skill cannot pin its own dispatch shape.
+
+        ``default_dispatch`` used to partition experts into two disjoint
+        registries, which is how an installed expert could end up reachable
+        by nothing. Nothing consumes the field now — the orchestrator picks
+        a reach per task — so it must not reappear on ``SkillInfo``.
+        """
         skill_dir = tmp_path / "async-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
             """---
 name: async-skill
-description: uses async dispatch
+description: declares a dispatch shape the runtime ignores
 type: expert
 role: Some role
 default_dispatch: async
@@ -1080,39 +1081,8 @@ default_dispatch: async
 """
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.default_dispatch == "async"
-
-    def test_invalid_default_dispatch_falls_back_to_empty(self, tmp_path, caplog):
-        skill_dir = tmp_path / "bad-dispatch"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            """---
-name: bad-dispatch
-description: Has a bad default_dispatch
-type: expert
-role: Some role
-default_dispatch: asynchronous
----
-
-# Body
-"""
-        )
-        import logging
-
-        with caplog.at_level(
-            logging.WARNING, logger="EvoScientist.tools.skills_manager"
-        ):
-            result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
-        assert result.default_dispatch == ""  # rejected, not passed through
-        # A typo like ``asynchronous`` is silently indistinguishable from
-        # unset without the warning; the log line must name the offending
-        # value so authors can see why their expert didn't register async.
-        assert any(
-            "unrecognized default_dispatch" in rec.message
-            and "asynchronous" in rec.message
-            for rec in caplog.records
-        )
+        assert not hasattr(result, "default_dispatch")
 
     def test_capability_tags_accepts_comma_string(self, tmp_path):
         """capability_tags falls back to comma-separated string parsing (like `tags`)."""
@@ -1188,6 +1158,198 @@ Body.
         assert any("invalid frontmatter YAML" in r.message for r in caplog.records)
 
 
+def _write_actor_skill(
+    parent: Path,
+    name: str,
+    *,
+    agents_body: str = "## Persona\n\nYou are the test expert.\n\n## Envelope\n\n{}\n",
+    skill_frontmatter: str = "",
+    skill_body: str = "# Knowledge\n\nThe portable workflow.\n",
+) -> Path:
+    """Write a skill declaring itself an expert via a sibling AGENTS.md."""
+    skill_dir = parent / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: A skill that can also act\n"
+        f"{skill_frontmatter}---\n\n{skill_body}"
+    )
+    (skill_dir / "AGENTS.md").write_text(agents_body)
+    return skill_dir
+
+
+class TestAgentsMdExpertContract:
+    """AGENTS.md presence is the expert declaration; its body is the prompt."""
+
+    def test_presence_classifies_as_expert(self, tmp_path):
+        skill_dir = _write_actor_skill(tmp_path, "actor-skill")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "expert"
+        assert result.expert_source == "agents_md"
+        assert result.agents_body.startswith("## Persona")
+        # SKILL.md stays pure knowledge and is still cached for in-turn use.
+        assert "The portable workflow." in result.body
+
+    def test_no_actor_frontmatter_needed(self, tmp_path):
+        """The decoration fields the contract removed stay empty, not invented."""
+        skill_dir = _write_actor_skill(tmp_path, "actor-skill")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.role == ""
+        assert result.byline == ""
+        assert result.capability_tags == []
+        assert result.avatar_hint == ""
+
+    def test_metadata_type_alone_does_not_classify(self, tmp_path):
+        """``metadata.type: [skill, expert]`` is index-facing only.
+
+        It is a projection of the AGENTS.md declaration for consumers that
+        can't stat the directory. Reading it in the runtime would create a
+        second classifier free to drift from the file that actually holds the
+        persona — a skill would register as an expert with nothing to say.
+        """
+        skill_dir = tmp_path / "index-only"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: index-only
+description: Declares expert to the index but ships no actor definition
+metadata:
+  type: [skill, expert]
+  tags: [core]
+---
+
+# Knowledge
+"""
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "utility"
+        assert result.expert_source == ""
+        # The tags path still reads metadata — only `type` is ignored there.
+        assert result.tags == ["core"]
+
+    def test_frontmatter_stripped_from_actor_definition(self, tmp_path):
+        """AGENTS.md carries no frontmatter, but YAML must never reach the prompt."""
+        skill_dir = _write_actor_skill(
+            tmp_path,
+            "fm-actor",
+            agents_body="---\nname: ignored\n---\n\n## Persona\n\nBody only.\n",
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.agents_body == "## Persona\n\nBody only.\n"
+
+    def test_empty_actor_definition_stays_classified(self, tmp_path):
+        """An empty AGENTS.md is still a declaration — a broken expert.
+
+        Downgrading it to a utility skill would hide the authoring bug; the
+        registration paths refuse it by name instead.
+        """
+        skill_dir = _write_actor_skill(tmp_path, "blank-actor", agents_body="   \n")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "expert"
+        assert result.expert_source == "agents_md"
+        assert result.agents_body.strip() == ""
+
+    def test_unreadable_skill_md_keeps_expert_declaration(self, tmp_path):
+        """SKILL.md and AGENTS.md are separate files with separate failures."""
+        skill_dir = tmp_path / "half-broken"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_bytes(b"---\nname: bad\n---\n\xff\xfe")
+        (skill_dir / "AGENTS.md").write_text("## Persona\n\nStill valid.\n")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.description == "(unreadable)"
+        assert result.type == "expert"
+        assert result.expert_source == "agents_md"
+        assert result.agents_body == "## Persona\n\nStill valid.\n"
+
+    def test_agents_md_overrides_legacy_frontmatter(self, tmp_path, caplog):
+        """A skill mid-migration resolves to one contract, not a blend."""
+        import logging
+
+        skill_dir = _write_actor_skill(
+            tmp_path,
+            "migrating",
+            skill_frontmatter=(
+                "type: expert\nrole: legacy role\nbyline: Legacy\n"
+                "capability_tags: [legacy]\navatar_hint: legacy-avatar\n"
+                "default_dispatch: sync\n"
+            ),
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.expert_source == "agents_md"
+        # AGENTS.md wins on every axis: the legacy decoration fields must be
+        # cleared, not merely warned about — otherwise `role` is prepended to
+        # the AGENTS.md prompt and the gallery chips leak stale frontmatter.
+        assert result.role == ""
+        assert result.byline == ""
+        assert result.capability_tags == []
+        assert result.avatar_hint == ""
+        assert any(
+            "is ignored and should be removed" in r.message and "migrating" in r.message
+            for r in caplog.records
+        )
+
+    def test_agents_md_expert_name_is_directory_name(self, tmp_path):
+        """Registry identity for an AGENTS.md expert is the directory name.
+
+        A frontmatter ``name:`` that disagrees with the directory would desync
+        the dispatch registry key from the skill the orchestrator names.
+        """
+        skill_dir = tmp_path / "real-dir"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: mismatched-name\ndescription: d\n---\n\n# Knowledge\n"
+        )
+        (skill_dir / "AGENTS.md").write_text("## Persona\n\nBody.\n")
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.name == "real-dir"
+
+    def test_legacy_frontmatter_expert_warns_once(self, tmp_path, caplog):
+        """The deprecated path keeps working, and says so — once per skill.
+
+        ``_parse_skill_md`` runs on every ``list_skills`` call (agent
+        construction, /expert completion, GET /api/teams), so a per-parse
+        warning would bury real diagnostics under repeats.
+        """
+        import logging
+
+        skill_dir = tmp_path / "legacy-expert"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: legacy-expert
+description: Declares itself the old way
+type: expert
+role: legacy role
+---
+
+# Persona body
+"""
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            first = _parse_skill_md(skill_dir / "SKILL.md")
+            _parse_skill_md(skill_dir / "SKILL.md")
+        assert first.type == "expert"
+        assert first.expert_source == "frontmatter"
+        assert first.role == "legacy role"
+        deprecations = [r for r in caplog.records if "deprecated" in r.message.lower()]
+        assert len(deprecations) == 1
+
+    def test_utility_skill_has_no_expert_source(self, tmp_path):
+        skill_dir = tmp_path / "plain"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: plain\ndescription: Plain skill\n---\n\n# Body\n"
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.type == "utility"
+        assert result.expert_source == ""
+        assert result.agents_body == ""
+
+
 class TestListExpertSkills:
     """`list_expert_skills()` filters `list_skills()` to `type == 'expert'`."""
 
@@ -1258,7 +1420,6 @@ class TestSkillManagerToolExpertSurface:
                 byline="Ideation persona",
                 capability_tags=["Iteration", "ELO"],
                 avatar_hint="lightbulb",
-                default_dispatch="sync",
             ),
             SkillInfo(
                 name="util-b",
@@ -1361,7 +1522,8 @@ class TestSkillManagerToolExpertSurface:
         assert "Byline: Ideation persona" in out
         assert "Capability tags: Iteration, ELO" in out
         assert "Avatar hint: lightbulb" in out
-        assert "Default dispatch: sync" in out
+        # No dispatch line: an expert does not pin its own reach.
+        assert "Default dispatch" not in out
 
     def test_info_omits_expert_block_for_utility_skills(self):
         from EvoScientist.tools.skill_manager import skill_manager
@@ -1688,250 +1850,3 @@ class TestSkillsChangedCallback:
         result = install_skill("/nonexistent/path", str(temp_skills_dir))
         assert result["success"] is False
         assert good == [True]
-
-
-class TestSkillManagerInfo:
-    """Tests for the skill_manager() tool's action='info' output.
-
-    Guards the sandbox-visible ``Path: /skills/<name>`` shape and the absence
-    of any host filesystem path in the agent-visible response. Agents burn
-    turns on ``cd <host-path> && …`` chains whenever the host path leaks.
-    """
-
-    def _make_skill(self, parent, name, description="A skill"):
-        skill_dir = parent / name
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: {description}\n---\n"
-        )
-        return skill_dir
-
-    def test_info_reports_virtual_mount_path(self, tmp_path):
-        """``Path:`` is the sandbox-visible ``/skills/<name>``, not the host path."""
-        from EvoScientist.tools.skill_manager import skill_manager
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-        global_dir = tmp_path / "global-empty"
-        global_dir.mkdir()
-        self._make_skill(tmp_path, "info-skill")
-        install_skill(str(tmp_path / "info-skill"), str(workspace_dir))
-
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            result = skill_manager.invoke({"action": "info", "name": "info-skill"})
-
-        assert "Path: /skills/info-skill" in result
-
-    def test_info_omits_host_path(self, tmp_path):
-        """No host filesystem path leaks into the response.
-
-        Stronger than a label-only check: catches any future refactor that
-        keeps the path visible under a different label (``Local:``,
-        ``Installed at:``, embedded in ``Source: …``).
-        """
-        from EvoScientist.tools.skill_manager import skill_manager
-        from EvoScientist.tools.skills_manager import get_skill_info
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-        global_dir = tmp_path / "global-empty"
-        global_dir.mkdir()
-        self._make_skill(tmp_path, "host-leak-guard")
-        install_skill(str(tmp_path / "host-leak-guard"), str(workspace_dir))
-
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            info = get_skill_info("host-leak-guard")
-            result = skill_manager.invoke({"action": "info", "name": "host-leak-guard"})
-
-        assert str(info.path) not in result
-
-
-class TestSkillManagerInstall:
-    """Tests for the skill_manager() tool's action='install' output shape.
-
-    Covers both single-install and batch-install returns:
-    - Single: ``{"success": True, "name": ..., "path": ..., "description": ...}``.
-    - Batch: ``{"success": ..., "batch": True, "installed": [...], "failed": [...]}``
-      with no top-level ``name``, ``path``, ``description``, or ``error``.
-    """
-
-    def _make_skill(self, parent, name, description="A skill"):
-        skill_dir = parent / name
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: {description}\n---\n"
-        )
-        return skill_dir
-
-    def test_install_single_reports_virtual_mount_path(self, tmp_path):
-        """Single install: ``Path: /skills/<name>``, no host path."""
-        from EvoScientist.tools.skill_manager import skill_manager
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-        global_dir = tmp_path / "global-empty"
-        global_dir.mkdir()
-        self._make_skill(tmp_path, "solo-skill")
-
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            result = skill_manager.invoke(
-                {"action": "install", "source": str(tmp_path / "solo-skill")}
-            )
-
-        assert "Successfully installed skill: solo-skill" in result
-        assert "Path: /skills/solo-skill" in result
-
-    def test_install_single_omits_host_path(self, tmp_path):
-        """Single install: no host filesystem path leaks into the response.
-
-        ``install_skill(source)`` defaults to ``global_install=True``, so the
-        skill lands under ``GLOBAL_SKILLS_DIR`` rather than ``USER_SKILLS_DIR``.
-        Checking against a narrower directory (e.g. workspace_dir) would pass
-        even without the scrub - the check has to cover every path the tool
-        might resolve to. ``tmp_path`` covers both patched dirs and the source
-        path used by ``install_skill``.
-        """
-        from EvoScientist.tools.skill_manager import skill_manager
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-        global_dir = tmp_path / "global-empty"
-        global_dir.mkdir()
-        self._make_skill(tmp_path, "leak-guard-install")
-
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            result = skill_manager.invoke(
-                {"action": "install", "source": str(tmp_path / "leak-guard-install")}
-            )
-
-        assert str(tmp_path) not in result
-
-    def test_install_batch_lists_each_skill_with_virtual_path(self, tmp_path):
-        """Batch install: one block per installed skill, each with ``Path: /skills/<name>``."""
-        from EvoScientist.tools.skill_manager import skill_manager
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-        global_dir = tmp_path / "global-empty"
-        global_dir.mkdir()
-        pack = tmp_path / "pack"
-        pack.mkdir()
-        self._make_skill(pack, "alpha", description="first")
-        self._make_skill(pack, "beta", description="second")
-
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            result = skill_manager.invoke({"action": "install", "source": str(pack)})
-
-        assert "Successfully installed skill: alpha" in result
-        assert "Successfully installed skill: beta" in result
-        assert "Path: /skills/alpha" in result
-        assert "Path: /skills/beta" in result
-        # Same leak guard as ``test_install_single_omits_host_path``: batch
-        # returns must not surface any host path either. Cover every dir the
-        # install might resolve to.
-        assert str(tmp_path) not in result
-
-    def test_install_batch_all_fail_returns_error_list(self, tmp_path):
-        """Batch install where every skill fails must not KeyError on the
-        missing top-level ``error`` field.
-
-        Pre-fix behavior: ``result['error']`` crashed because
-        ``_batch_install_local`` returns ``{"success": False, "batch": True,
-        "installed": [], "failed": [{"name": ..., "error": ...}]}`` with no
-        top-level ``error`` key. This test pins the guard.
-        """
-        from EvoScientist.tools.skill_manager import skill_manager
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-        global_dir = tmp_path / "global-empty"
-        global_dir.mkdir()
-
-        batch_result = {
-            "success": False,
-            "batch": True,
-            "installed": [],
-            "failed": [
-                {"name": "broken-a", "error": "corrupt frontmatter"},
-                {"name": "broken-b", "error": "missing SKILL.md"},
-            ],
-        }
-
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch(
-                "EvoScientist.tools.skills_manager.install_skill",
-                return_value=batch_result,
-            ),
-        ):
-            result = skill_manager.invoke(
-                {"action": "install", "source": "some/source"}
-            )
-
-        # No KeyError, and every failure surfaced.
-        assert "broken-a" in result
-        assert "corrupt frontmatter" in result
-        assert "broken-b" in result
-        assert "missing SKILL.md" in result
-
-    def test_install_batch_partial_fail_surfaces_both(self, tmp_path):
-        """Batch install with partial failure lists successes AND failures.
-
-        Pre-fix behavior: partial failures were silently dropped; only the
-        success blocks reached the agent.
-        """
-        from EvoScientist.tools.skill_manager import skill_manager
-
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
-        global_dir = tmp_path / "global-empty"
-        global_dir.mkdir()
-
-        partial_result = {
-            "success": True,
-            "batch": True,
-            "installed": [
-                {
-                    "name": "worked",
-                    "path": str(workspace_dir / "worked"),
-                    "description": "installed cleanly",
-                },
-            ],
-            "failed": [
-                {"name": "broken", "error": "corrupt frontmatter"},
-            ],
-        }
-
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch(
-                "EvoScientist.tools.skills_manager.install_skill",
-                return_value=partial_result,
-            ),
-        ):
-            result = skill_manager.invoke(
-                {"action": "install", "source": "some/source"}
-            )
-
-        assert "Successfully installed skill: worked" in result
-
-        assert "Path: /skills/worked" in result
-        assert "broken" in result
-        assert "corrupt frontmatter" in result

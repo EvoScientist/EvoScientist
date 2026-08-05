@@ -7,11 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from EvoScientist.subagents.expert_container import (
-    _body_of,
     _compose_system_prompt,
     build_expert_subagent_spec,
     build_expert_subagent_specs,
-    is_async_dispatch_available,
+    expert_prompt_body,
     list_dispatchable_experts,
 )
 from EvoScientist.tools.skills_manager import SkillInfo
@@ -70,15 +69,15 @@ class _FakeTool:
 
 
 # =============================================================================
-# _body_of
+# expert_prompt_body
 # =============================================================================
 
 
-class TestBodyOf:
+class TestExpertPromptBody:
     def test_extracts_body_after_frontmatter(self, tmp_path):
         skill_dir = _write_expert_skill_file(tmp_path, "expert-a")
         info = _skill_info(skill_dir)
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body.startswith("You are a test expert.")
         assert "Do the thing." in body
         assert "---" not in body
@@ -88,7 +87,7 @@ class TestBodyOf:
         # A SkillInfo pointing at a nonexistent SKILL.md — factory should
         # gracefully degrade with a warning rather than raise.
         info = _skill_info(tmp_path / "nonexistent")
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body == ""
         # Warning surfaced — SEV so the malformed skill isn't invisible.
         assert any("could not read SKILL.md" in r.message for r in caplog.records)
@@ -101,7 +100,7 @@ class TestBodyOf:
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_bytes(b"\xff\xfe garbage")
         info = _skill_info(skill_dir, name="bad-utf8")
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body == ""
         assert any("could not read SKILL.md" in r.message for r in caplog.records)
 
@@ -111,13 +110,13 @@ class TestBodyOf:
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("# Body Only\n\nContent here.\n")
         info = _skill_info(skill_dir, name="no-fm")
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert "# Body Only" in body
         assert "Content here." in body
 
     def test_prefers_cached_body_over_disk_read(self, tmp_path):
         """When ``SkillInfo.body`` is populated (the ``_parse_skill_md`` path),
-        ``_body_of`` uses it directly without touching disk. Guards against
+        ``expert_prompt_body`` uses it directly without touching disk. Guards against
         the double-read regression flagged by pre-PR review."""
         info = SkillInfo(
             name="cached",
@@ -127,8 +126,68 @@ class TestBodyOf:
             type="expert",
             body="Cached body content from SkillInfo.",
         )
-        body = _body_of(info)
+        body = expert_prompt_body(info)
         assert body == "Cached body content from SkillInfo."
+
+    def test_agents_md_expert_reads_actor_definition_not_skill_md(self, tmp_path):
+        """An AGENTS.md expert is prompted from its actor definition.
+
+        SKILL.md stays pure knowledge under the current contract — it is
+        reachable in-turn via ``load_skill`` — so leaking it into the system
+        prompt would both bloat the prompt and hand the expert a document
+        written for a different reader.
+        """
+        info = SkillInfo(
+            name="paper-review",
+            description="d",
+            path=tmp_path / "paper-review",
+            source="builtin",
+            type="expert",
+            expert_source="agents_md",
+            body="# Knowledge\n\nThe 5-aspect checklist.\n",
+            agents_body="## Persona\n\nYou are an adversarial reviewer.\n",
+        )
+        body = expert_prompt_body(info)
+        assert body == "## Persona\n\nYou are an adversarial reviewer.\n"
+        assert "5-aspect checklist" not in body
+
+    def test_agents_md_expert_falls_back_to_disk(self, tmp_path):
+        """A hand-built SkillInfo without ``agents_body`` still resolves.
+
+        Mirrors the SKILL.md fallback below it — external callers construct
+        SkillInfo objects without going through ``_parse_skill_md``.
+        """
+        skill_dir = tmp_path / "on-disk"
+        skill_dir.mkdir()
+        (skill_dir / "AGENTS.md").write_text("## Persona\n\nFrom disk.\n")
+        info = SkillInfo(
+            name="on-disk",
+            description="d",
+            path=skill_dir,
+            source="workspace",
+            type="expert",
+            expert_source="agents_md",
+            body="SKILL.md body that must not be used.",
+        )
+        assert expert_prompt_body(info) == "## Persona\n\nFrom disk.\n"
+
+    def test_agents_md_expert_returns_empty_when_file_missing(self, tmp_path):
+        """Declared expert, no resolvable actor definition -> empty.
+
+        Empty is the signal every registration path checks; falling back to
+        the SKILL.md body here would register a knowledge document as a
+        persona instead of refusing.
+        """
+        info = SkillInfo(
+            name="gone",
+            description="d",
+            path=tmp_path / "gone",
+            source="workspace",
+            type="expert",
+            expert_source="agents_md",
+            body="SKILL.md body that must not be used.",
+        )
+        assert expert_prompt_body(info) == ""
 
 
 # =============================================================================
@@ -315,6 +374,76 @@ role: blank
             for r in caplog.records
         )
 
+    def test_agents_md_expert_included_in_sync_registry(self, tmp_path):
+        """Both contracts land in the in-turn registry, and its prompt is AGENTS.md.
+
+        Every expert gets both reaches, so an AGENTS.md skill appears here
+        as well as in the async specs. Sharing the name across the two is
+        safe: they land on different tools with separate schemas.
+        """
+        _write_expert_skill_file(tmp_path, "legacy-expert")
+        actor = tmp_path / "new-expert"
+        actor.mkdir()
+        (actor / "SKILL.md").write_text(
+            """---
+name: new-expert
+description: Knowledge only
+---
+
+# Knowledge
+
+The workflow.
+"""
+        )
+        (actor / "AGENTS.md").write_text("## Persona\n\nYou are the new expert.\n")
+
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
+            patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
+        ):
+            specs = build_expert_subagent_specs(tool_registry={})
+
+        by_name = {s["name"]: s for s in specs}
+        assert set(by_name) == {"legacy-expert", "new-expert"}
+        # Prompted from the actor definition, not the knowledge file.
+        assert "You are the new expert." in by_name["new-expert"]["system_prompt"]
+        assert "The workflow." not in by_name["new-expert"]["system_prompt"]
+
+    def test_legacy_async_dispatch_still_in_sync_registry(self, tmp_path):
+        """A legacy ``default_dispatch: async`` skill still gets an in-turn spec.
+
+        ``default_dispatch`` is no longer read: every expert is reachable both
+        ways and the orchestrator picks per task, so an async-declared legacy
+        skill must not be dropped from the sync registry. This is the
+        behavioural counterpart to the parser's not-read contract.
+        """
+        actor = tmp_path / "async-legacy"
+        actor.mkdir()
+        (actor / "SKILL.md").write_text(
+            """---
+name: async-legacy
+description: Legacy expert that declared async dispatch
+type: expert
+role: legacy async expert
+default_dispatch: async
+---
+
+You are the legacy async expert.
+"""
+        )
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        with (
+            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
+            patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
+        ):
+            specs = build_expert_subagent_specs(tool_registry={})
+        assert "async-legacy" in {s["name"] for s in specs}
+
     def test_returns_empty_when_no_expert_skills(self, tmp_path):
         # A utility skill only — no experts.
         util = tmp_path / "util-only"
@@ -447,41 +576,21 @@ class TestFoldExpertSubagents:
 
 
 # =============================================================================
-# is_async_dispatch_available / list_dispatchable_experts honest surface
+# list_dispatchable_experts honest surface
 # =============================================================================
 
 
-class TestIsAsyncDispatchAvailable:
-    """The gate ``list_dispatchable_experts`` and ``ActiveTeamMiddleware``
-    both consult to decide whether async-declared experts can be surfaced."""
+class TestListDispatchableExpertsSurvivesAsyncOutage:
+    """``list_dispatchable_experts`` never drops an expert for async reasons.
 
-    def test_false_when_flag_disabled(self):
-        cfg = SimpleNamespace(enable_async_subagents=False)
-        assert is_async_dispatch_available(cfg=cfg) is False
+    Under the old per-skill classification an async-declared expert vanished
+    from every surface whenever ``enable_async_subagents`` was off or
+    langgraph dev was unreachable — installed, listed in the gallery, and
+    reachable by nothing. Every expert now keeps its in-turn reach, so an
+    async outage degrades the reach rather than removing the expert.
+    """
 
-    def test_false_when_dev_unreachable(self):
-        cfg = SimpleNamespace(enable_async_subagents=True)
-        with patch(
-            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
-            return_value=False,
-        ):
-            assert is_async_dispatch_available(cfg=cfg) is False
-
-    def test_true_when_both_gates_pass(self):
-        cfg = SimpleNamespace(enable_async_subagents=True)
-        with patch(
-            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
-            return_value=True,
-        ):
-            assert is_async_dispatch_available(cfg=cfg) is True
-
-
-class TestListDispatchableExpertsAsyncFilter:
-    """``list_dispatchable_experts`` drops async-declared experts when async
-    dispatch isn't registered — sync-declared experts pass through, mirroring
-    honest advertising per the reviewer's ask on PR #391."""
-
-    def _skill(self, name: str, dispatch: str) -> SkillInfo:
+    def _skill(self, name: str) -> SkillInfo:
         return SkillInfo(
             name=name,
             description=f"{name} description",
@@ -489,23 +598,22 @@ class TestListDispatchableExpertsAsyncFilter:
             source="builtin",
             type="expert",
             role=f"{name} role",
-            default_dispatch=dispatch,
             body="persona body\n",
         )
 
-    def test_async_expert_dropped_when_flag_disabled(self):
+    def test_experts_survive_async_flag_disabled(self):
         cfg = SimpleNamespace(enable_async_subagents=False)
-        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
+        skills = [self._skill("idea-brainstorm"), self._skill("lit")]
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=skills,
         ):
             result = list_dispatchable_experts(cfg=cfg)
-        assert [s.name for s in result] == ["idea-brainstorm"]
+        assert {s.name for s in result} == {"idea-brainstorm", "lit"}
 
-    def test_async_expert_dropped_when_dev_unreachable(self):
+    def test_experts_survive_dev_unreachable(self):
         cfg = SimpleNamespace(enable_async_subagents=True)
-        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
+        skills = [self._skill("idea-brainstorm"), self._skill("lit")]
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -517,20 +625,16 @@ class TestListDispatchableExpertsAsyncFilter:
             ),
         ):
             result = list_dispatchable_experts(cfg=cfg)
-        assert [s.name for s in result] == ["idea-brainstorm"]
+        assert {s.name for s in result} == {"idea-brainstorm", "lit"}
 
-    def test_async_expert_included_when_registered(self):
+    def test_empty_actor_definition_still_dropped(self):
+        """The filters that remain are about broken experts, not reach."""
         cfg = SimpleNamespace(enable_async_subagents=True)
-        skills = [self._skill("idea-brainstorm", "sync"), self._skill("lit", "async")]
-        with (
-            patch(
-                "EvoScientist.tools.skills_manager.list_expert_skills",
-                return_value=skills,
-            ),
-            patch(
-                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
-                return_value=True,
-            ),
+        blank = self._skill("blank")
+        blank.body = "   \n"
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[self._skill("idea-brainstorm"), blank],
         ):
             result = list_dispatchable_experts(cfg=cfg)
-        assert {s.name for s in result} == {"idea-brainstorm", "lit"}
+        assert [s.name for s in result] == ["idea-brainstorm"]

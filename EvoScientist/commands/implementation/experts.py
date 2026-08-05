@@ -104,14 +104,12 @@ class ExpertsCommand(Command):
         table = Table(title=f"Expert Skills ({len(experts)})", show_header=True)
         table.add_column("Name", style="cyan")
         table.add_column("Role", style="dim")
-        table.add_column("Dispatch", style="dim")
         table.add_column("Active", style="green")
         for skill in experts:
             marker = "*" if skill.name in active else ""
             table.add_row(
                 skill.name,
                 skill.role or skill.description,
-                skill.default_dispatch or "sync",
                 marker,
             )
         ctx.ui.mount_renderable(table)
@@ -203,30 +201,19 @@ class ExpertCommand(Command):
 
         dispatchable = {s.name for s in _dispatchable_experts()}
         if target not in dispatchable:
-            from ...subagents.expert_container import is_async_dispatch_available
             from ...tools.skills_manager import list_expert_skills
 
-            installed = {s.name: s for s in list_expert_skills(include_system=True)}
-            match = installed.get(target)
-            if match is None:
+            installed = {s.name for s in list_expert_skills(include_system=True)}
+            if target not in installed:
                 ctx.ui.append_system(
                     f"No expert skill named '{target}'. `/experts` lists "
                     "installed ones.",
                     style="red",
                 )
-            elif (
-                match.default_dispatch == "async" and not is_async_dispatch_available()
-            ):
-                ctx.ui.append_system(
-                    f"Expert '{target}' declares async dispatch but async "
-                    "dispatch is unavailable (enable_async_subagents is off "
-                    "or langgraph dev is not reachable).",
-                    style="red",
-                )
             else:
                 ctx.ui.append_system(
-                    f"Expert '{target}' can't be dispatched (empty SKILL.md body "
-                    "or name collision with a built-in sub-agent).",
+                    f"Expert '{target}' can't be dispatched (empty actor "
+                    "definition or name collision with a built-in sub-agent).",
                     style="red",
                 )
             return

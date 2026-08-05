@@ -3,11 +3,11 @@
 Covers:
 - ``_route_async_specs_through_evo_middleware`` splits AsyncSubAgent specs
   out of the ``subs`` list and folds them into the base middleware.
-- ``build_expert_async_subagent_specs`` filters by
-  ``default_dispatch == "async"`` and respects the async-enable flag +
-  langgraph dev reachability.
-- ``build_expert_subagent_specs`` (sync fold-in) excludes async experts so
-  a single skill never surfaces twice in the main agent's tool schema.
+- ``build_expert_async_subagent_specs`` gives every installed expert a
+  background reach, gated only on the async-enable flag + langgraph dev
+  reachability.
+- ``build_expert_subagent_specs`` (in-turn fold-in) covers the same
+  experts, so each name holds both reaches without colliding.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from EvoScientist.subagents.expert_container_async import (
 from EvoScientist.tools.skills_manager import SkillInfo
 
 
-def _skill(name: str, dispatch: str) -> SkillInfo:
+def _skill(name: str) -> SkillInfo:
     return SkillInfo(
         name=name,
         description=f"{name} description",
@@ -31,7 +31,6 @@ def _skill(name: str, dispatch: str) -> SkillInfo:
         source="builtin",
         type="expert",
         role=f"{name} role",
-        default_dispatch=dispatch,
         body="body\n",
     )
 
@@ -46,7 +45,7 @@ class TestBuildExpertAsyncSubagentSpecs:
         cfg = SimpleNamespace(enable_async_subagents=False)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
-            return_value=[_skill("literature-review", "async")],
+            return_value=[_skill("literature-review")],
         ):
             specs = build_expert_async_subagent_specs(cfg=cfg)
         assert specs == []
@@ -56,7 +55,7 @@ class TestBuildExpertAsyncSubagentSpecs:
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",
-                return_value=[_skill("literature-review", "async")],
+                return_value=[_skill("literature-review")],
             ),
             patch(
                 "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
@@ -66,13 +65,13 @@ class TestBuildExpertAsyncSubagentSpecs:
             specs = build_expert_async_subagent_specs(cfg=cfg)
         assert specs == []
 
-    def test_filters_by_default_dispatch(self):
-        """Only ``default_dispatch: async`` skills become AsyncSubAgent specs."""
+    def test_every_expert_gets_a_background_reach(self):
+        """No classification: every installed expert becomes an AsyncSubAgent spec."""
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         skills = [
-            _skill("idea-brainstorm", "sync"),
-            _skill("literature-review", "async"),
-            _skill("panel-expert", "panel"),
+            _skill("idea-brainstorm"),
+            _skill("literature-review"),
+            _skill("panel-expert"),
         ]
         with (
             patch(
@@ -85,11 +84,15 @@ class TestBuildExpertAsyncSubagentSpecs:
             ),
         ):
             specs = build_expert_async_subagent_specs(cfg=cfg)
-        assert len(specs) == 1
-        assert specs[0]["name"] == "literature-review"
-        assert specs[0]["graph_id"] == "expert-container-async"
-        assert specs[0]["is_expert"] is True
-        assert "http://localhost:6174" in specs[0]["url"]
+        assert {s["name"] for s in specs} == {
+            "idea-brainstorm",
+            "literature-review",
+            "panel-expert",
+        }
+        for spec in specs:
+            assert spec["graph_id"] == "expert-container-async"
+            assert spec["is_expert"] is True
+            assert "http://localhost:6174" in spec["url"]
 
     def test_empty_body_experts_skipped(self):
         """Empty-body async experts are filtered out at spec-build time so
@@ -98,8 +101,8 @@ class TestBuildExpertAsyncSubagentSpecs:
         ``expert_container.py::build_expert_subagent_specs``."""
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         skills = [
-            _skill("literature-review", "async"),  # normal body from _skill()
-            _skill("empty-persona", "async"),
+            _skill("literature-review"),  # normal body from _skill()
+            _skill("empty-persona"),
         ]
         # Second skill has no body — dataclass field default is ``""``, but
         # helper sets it to "body\n" — override to empty.
@@ -117,6 +120,32 @@ class TestBuildExpertAsyncSubagentSpecs:
             specs = build_expert_async_subagent_specs(cfg=cfg)
         assert [s["name"] for s in specs] == ["literature-review"]
 
+    def test_agents_md_expert_registered_and_gated_on_its_own_file(self):
+        """AGENTS.md experts reach async dispatch, and their gate is AGENTS.md.
+
+        The empty-persona gate has to follow the skill's contract: a healthy
+        SKILL.md must not vouch for a skill whose actor definition is blank.
+        """
+        cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+        healthy = _skill("paper-review")
+        healthy.expert_source = "agents_md"
+        healthy.agents_body = "## Persona\n\nYou are an adversarial reviewer.\n"
+        blank_actor = _skill("blank-actor")
+        blank_actor.expert_source = "agents_md"
+        blank_actor.agents_body = "   \n"  # SKILL.md body is fine; actor isn't
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=[healthy, blank_actor],
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
+            ),
+        ):
+            specs = build_expert_async_subagent_specs(cfg=cfg)
+        assert [s["name"] for s in specs] == ["paper-review"]
+
     def test_reserved_name_collision_skipped(self, caplog):
         """A skill named after a yaml async sub-agent (or ``general-purpose``)
         must skip async-dispatch registration with a warning, not raise. Without
@@ -127,8 +156,8 @@ class TestBuildExpertAsyncSubagentSpecs:
 
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         skills = [
-            _skill("writing-agent", "async"),  # collides with yaml async agent
-            _skill("literature-review", "async"),
+            _skill("writing-agent"),  # collides with yaml async agent
+            _skill("literature-review"),
         ]
         with (
             patch(
@@ -165,8 +194,8 @@ class TestBuildExpertAsyncSubagentSpecs:
 
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         skills = [
-            _skill("literature-review", "async"),
-            _skill("literature-review", "async"),  # duplicate name
+            _skill("literature-review"),
+            _skill("literature-review"),  # duplicate name
         ]
         with (
             patch(
@@ -196,35 +225,35 @@ class TestBuildExpertAsyncSubagentSpecs:
 
 
 # =============================================================================
-# build_expert_subagent_specs (sync side) — must exclude async experts
+# build_expert_subagent_specs (in-turn side) — same experts, second reach
 # =============================================================================
 
 
-class TestBuildExpertSubagentSpecsExcludesAsync:
-    """The sync fold-in must not emit specs for ``default_dispatch: async`` skills.
+class TestBuildExpertSubagentSpecsCoversEveryExpert:
+    """The in-turn fold-in emits a spec for every expert, async ones included.
 
-    A skill in both lists would produce two competing tool schemas — one
-    under ``task(subagent_type='<name>')`` and one under
-    ``start_async_task(subagent_type='<name>')`` — from the main agent's
-    perspective. Ambiguous. The partition is: async goes async, everything
-    else goes sync.
+    Sharing a name across the two registries is intentional. They land on
+    different tools with separate schemas (``task`` vs
+    ``start_async_task``), and deepagents' duplicate-name check is scoped to
+    the async list alone, so one expert holding both reaches never collides.
     """
 
-    def test_async_expert_skipped_by_sync_fold_in(self):
+    def test_every_expert_gets_an_in_turn_reach(self):
         skills = [
-            _skill("idea-brainstorm", "sync"),
-            _skill("literature-review", "async"),
-            _skill("panel-expert", "panel"),
+            _skill("idea-brainstorm"),
+            _skill("literature-review"),
+            _skill("panel-expert"),
         ]
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=skills,
         ):
             specs = build_expert_subagent_specs(tool_registry={})
-        names = [s["name"] for s in specs]
-        assert "idea-brainstorm" in names
-        assert "panel-expert" in names
-        assert "literature-review" not in names
+        assert {s["name"] for s in specs} == {
+            "idea-brainstorm",
+            "literature-review",
+            "panel-expert",
+        }
 
 
 # =============================================================================
@@ -307,7 +336,7 @@ class TestRouteAsyncSpecs:
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",
-                return_value=[_skill("literature-review", "async")],
+                return_value=[_skill("literature-review")],
             ),
             patch(
                 "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
@@ -370,7 +399,7 @@ class TestRouteAsyncSpecs:
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",
-                return_value=[_skill("literature-review", "async")],
+                return_value=[_skill("literature-review")],
             ),
             patch(
                 "EvoScientist.langgraph_dev.manager.is_async_subagents_available",

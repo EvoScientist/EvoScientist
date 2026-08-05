@@ -411,9 +411,10 @@ def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
     """Append expert-skill sub-agent specs to ``subs``, guarding names.
 
     Each installed expert skill becomes an in-process sub-agent entry so
-    the main agent's ``task`` tool (and the QuickJS ``task()`` global for
-    panel mode) can dispatch to it by name. Async-graph deploy of experts
-    is v2 territory — they live purely in the sync in-process registry.
+    the main agent's ``task`` tool (and the QuickJS ``task()`` global) can
+    dispatch to it in-turn by name. The same experts independently get a
+    background reach via ``build_expert_async_subagent_specs``; the two
+    reaches land on separate tool schemas, so sharing the name is safe.
 
     Skips (with a warning) any expert whose ``name`` collides with a
     subagent already in ``subs`` or with ``general-purpose``. The reserved
@@ -563,7 +564,7 @@ def _route_async_specs_through_evo_middleware(
     specs from ``subs`` here and hand them to our middleware.
 
     Also folds in ``AsyncSubAgent`` specs for installed
-    ``default_dispatch: async`` expert skills — all pointing at the shared
+    installed expert skills — all pointing at the shared
     ``expert-container-async`` graph, marked ``is_expert=True`` so the
     middleware requires a payload with ``skill_name``.
 
@@ -962,13 +963,6 @@ def _get_default_middleware(
         ErrorNormalizationMiddleware(),
         ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
-        # Team-binding cue for the main agent only. Reads
-        # `configurable.active_teams: list[str]` and appends a cue biasing
-        # the main agent to consult the invited expert(s). Skipped for
-        # async subagents (a running expert graph shouldn't inject a
-        # "prefer expert X" hint into its own system prompt — the persona
-        # is already baked in). See agent-teams-design.md.
-        *([] if for_async_subagent else [create_active_team_middleware()]),
         create_context_editing_middleware(model),
         ModelFallbackMiddleware(events=events),
         ContextOverflowMapperMiddleware(),
@@ -1008,6 +1002,15 @@ def _get_default_middleware(
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())
+
+    # Expert prompt for the main agent — injects the ## Experts concept every
+    # turn (plus the invited-expert list when experts are invited). Inserted
+    # AFTER AskUser so it sits ahead of AskUser in the stack and runs first,
+    # landing its block right after ## Skills System (experts mirror skills).
+    # Main agent only: a running expert graph must not inject the expert prompt
+    # into its own baked-in persona.
+    if not for_async_subagent:
+        mw.insert(0, create_active_team_middleware())
 
     # Background-process tools (run_in_background / check_process / stop_process /
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and

@@ -133,6 +133,52 @@ class TestComposePrompt:
         assert composed.startswith("ERROR:")
         assert "empty SKILL.md body" in composed
 
+    def test_agents_md_expert_prompted_from_actor_definition(self):
+        """AGENTS.md experts are prompted from AGENTS.md, not SKILL.md.
+
+        Both files exist for these skills, so composing from ``.body`` would
+        silently work — and hand the expert a knowledge document written for
+        a different reader in place of its persona.
+        """
+        mw = ExpertSkillLoaderMiddleware()
+        info = _skill_info(
+            name="paper-review",
+            role="",
+            body="# Knowledge\n\nThe 5-aspect checklist.\n",
+        )
+        info.expert_source = "agents_md"
+        info.agents_body = "## Persona\n\nYou are an adversarial reviewer.\n"
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[info],
+        ):
+            composed = mw._compose_prompt({"skill_name": "paper-review"})
+        assert "You are an adversarial reviewer." in composed
+        assert "5-aspect checklist" not in composed
+
+    def test_empty_actor_definition_names_agents_md_in_error(self):
+        """The error cue names the file the author has to fix.
+
+        An AGENTS.md expert with a healthy SKILL.md would otherwise be told
+        its SKILL.md body is empty, sending the author to the wrong file.
+        """
+        mw = ExpertSkillLoaderMiddleware()
+        info = _skill_info(
+            name="paper-review",
+            role="",
+            body="# Knowledge\n\nPlenty of content here.\n",
+        )
+        info.expert_source = "agents_md"
+        info.agents_body = "  \n"
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[info],
+        ):
+            composed = mw._compose_prompt({"skill_name": "paper-review"})
+        assert composed.startswith("ERROR:")
+        assert "empty AGENTS.md body" in composed
+        assert "paper-review" in composed
+
     def test_runtime_context_tail_surfaces_skill_name(self):
         """The tail block re-asserts ``skill_name`` on every model call so the
         expert knows its own persona name after summarization. Since

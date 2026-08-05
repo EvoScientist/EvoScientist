@@ -341,9 +341,9 @@ Launch multiple sub-agents only when experiments are independent:
 ## Dispatch Mechanisms
 Three ways to reach a sub-agent — pick based on what you need:
 
-- **Sequential `task`** — the default. Emit one `task({subagent_type: ..., description: ...})` tool call, wait for the result, integrate, continue. Use for a single-shot consult, including an **expert consult** when the user has invited an expert to the thread (see any `<active_expert>` cue in the system prompt).
+- **Sequential `task`** — the default. Emit one `task({subagent_type: ..., description: ...})` tool call, wait for the result, integrate, continue. Use for a single-shot consult.
 
-- **In-eval `task()` fan-out via `code_interpreter`** — write a short JS script that dispatches N `task()` calls concurrently and synthesises results in the same eval. Use for independent parallel work: **expert panels** (dispatch to multiple invited experts and synthesise), ELO-style tournaments, N-way method / dataset comparisons where results are independent. Prefer `Promise.allSettled` over `Promise.all` so one failed dispatch does not fail the whole eval — inspect each entry's `status` and retry only the failed subset.
+- **In-eval `task()` fan-out via `code_interpreter`** — write a short JS script that dispatches N `task()` calls concurrently and synthesises results in the same eval. Use for independent parallel work: expert panels, ELO-style tournaments, N-way method / dataset comparisons where results are independent. Prefer `Promise.allSettled` over `Promise.all` so one failed dispatch does not fail the whole eval — inspect each entry's `status` and retry only the failed subset.
 
 - **`start_async_task`** — spawn a long-running background job that returns a task ID immediately; poll with `check_async_task` or continue when the async notification arrives. Use for work that will take minutes to hours (long training runs, exhaustive experiments, whole pipelines). The user can keep working in the main conversation while it runs.
 

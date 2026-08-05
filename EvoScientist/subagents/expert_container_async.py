@@ -1,9 +1,11 @@
 """Async container graph for expert-skill dispatch.
 
 One generic graph that reads ``skill_name`` from initial state and loads
-that expert skill's ``SKILL.md`` body as the sub-agent's system prompt at
-invocation time. Registered once in ``langgraph.json``; parameterised per
-run via the payload the main agent's ``start_async_task`` passes through
+that expert skill's actor definition as the sub-agent's system prompt at
+invocation time — its ``AGENTS.md`` body under the current skill contract,
+or its ``SKILL.md`` body for legacy ``type: expert`` skills. Registered once
+in ``langgraph.json``; parameterised per run via the payload the main
+agent's ``start_async_task`` passes through
 :class:`EvoScientist.middleware.expert_async_subagent.EvoAsyncSubAgentMiddleware`.
 
 Why one shared graph rather than one graph per expert: the per-expert
@@ -65,7 +67,7 @@ class ExpertContainerState(DeepAgentState):
     ``subagent_type`` so the loader middleware knows which persona to
     load. ``output_path`` is NOT in state; the main agent embeds the
     desired artifact path in the task description (natural language) and
-    the expert's SKILL.md contract instructs the LLM to pin it in
+    the expert's actor definition instructs the LLM to pin it in
     ``write_todos`` on turn 1 — surviving summarization via langgraph's
     todo composition.
     """
@@ -74,13 +76,15 @@ class ExpertContainerState(DeepAgentState):
 
 
 class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
-    """Load the expert skill's SKILL.md body as system prompt on every model call.
+    """Load the expert's actor definition as system prompt on every model call.
 
     Reads ``state.skill_name``, resolves the corresponding installed expert
     skill via ``list_expert_skills()``, composes the system message from
-    ``role`` + SKILL.md body (mirrors the sync path in
-    ``EvoScientist.subagents.expert_container._compose_system_prompt``),
-    and overrides ``request.system_message`` before the handler runs.
+    ``role`` + the skill's prompt body (AGENTS.md under the current contract,
+    SKILL.md for legacy frontmatter experts — resolved by
+    ``expert_container.expert_prompt_body``, mirroring the sync path in
+    ``expert_container._compose_system_prompt``), and overrides
+    ``request.system_message`` before the handler runs.
 
     The container graph's static ``system_prompt`` at construction time is a
     minimal fallback; this middleware is the load-bearing component. If the
@@ -134,9 +138,21 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         # persona-less system prompt — a worse failure mode than the expert
         # being absent. Prefer a well-formed error envelope over silent
         # nonsense.
-        if not (match.body or "").strip():
+        #
+        # Which file is checked follows the skill's contract:
+        # ``expert_prompt_body`` reads AGENTS.md for experts declared that
+        # way and SKILL.md for legacy frontmatter experts. Checking ``.body``
+        # directly would clear a paper-review-shaped skill on the strength of
+        # its knowledge file while its actor definition is empty.
+        from .expert_container import expert_prompt_body
+
+        body = expert_prompt_body(match)
+        if not body.strip():
+            source_file = (
+                "AGENTS.md" if match.expert_source == "agents_md" else "SKILL.md"
+            )
             return (
-                f"ERROR: Expert skill '{skill_name}' has an empty SKILL.md "
+                f"ERROR: Expert skill '{skill_name}' has an empty {source_file} "
                 "body — the persona / pipeline the sub-agent needs is missing. "
                 "This is a skill-authoring bug; the sub-agent cannot proceed. "
                 "Return an error envelope with status='error' naming the "
@@ -144,7 +160,6 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
             )
 
         # Compose: role prepend (if present) + body + runtime-context tail.
-        body = match.body or ""
         head = f"You are {match.role}.\n\n" if match.role else ""
         runtime_block = (
             "\n---\n\n"
@@ -203,7 +218,12 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
 
 
 def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
-    """Build ``AsyncSubAgent``-shaped specs for every ``default_dispatch: async`` expert.
+    """Build ``AsyncSubAgent``-shaped specs for every installed expert skill.
+
+    Every expert gets a background reach here, and
+    ``build_expert_subagent_specs`` independently gives every expert an
+    in-turn reach. Nothing classifies a skill into one or the other — the
+    orchestrator chooses per task.
 
     Each spec is a dict pointing at the shared ``expert-container-async`` graph
     with ``is_expert=True``. The main agent's
@@ -229,7 +249,7 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
         return []
 
     from ..tools.skills_manager import list_expert_skills
-    from .expert_container import _reserved_subagent_names
+    from .expert_container import _reserved_subagent_names, expert_prompt_body
 
     port = int(getattr(cfg, "langgraph_dev_port", 6174))
     # Mirror the sync fold-in's name guard in ``_fold_expert_subagents``:
@@ -244,18 +264,17 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
     taken = set(_reserved_subagent_names())
     specs: list[dict[str, Any]] = []
     for skill in list_expert_skills(include_system=True):
-        if skill.default_dispatch != "async":
-            continue
         # Same empty-body skip the sync fold-in enforces in
         # ``expert_container.py::build_expert_subagent_specs``. Advertising
         # a body-less expert in ``start_async_task``'s tool schema, then
         # rejecting it at loader time, wastes a launch round-trip; filter
         # upstream so ``start_async_task`` never sees the broken skill.
-        if not (skill.body or "").strip():
+        if not expert_prompt_body(skill).strip():
             _logger.warning(
-                "Expert skill %r: SKILL.md body is empty; skipping "
+                "Expert skill %r: %s body is empty; skipping "
                 "async-dispatch registration.",
                 skill.name,
+                "AGENTS.md" if skill.expert_source == "agents_md" else "SKILL.md",
             )
             continue
         if skill.name in taken:
@@ -284,7 +303,7 @@ def build_expert_container_async_graph() -> Any:
     Called once at langgraph dev startup. The returned graph accepts
     ``{messages, skill_name}`` as initial state; the
     :class:`ExpertSkillLoaderMiddleware` resolves ``skill_name`` on every
-    model call and injects the matching SKILL.md body as system prompt.
+    model call and injects that expert's actor definition as system prompt.
 
     Tool set is intentionally minimal (``think_tool`` only) — matches the
     sync ``expert_container`` factory. Once the per-skill ``allowed-tools``

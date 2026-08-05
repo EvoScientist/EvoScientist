@@ -102,165 +102,105 @@ def test_read_active_teams_returns_empty_outside_runnable_context(mock_get_confi
 
 
 @patch("langgraph.config.get_config")
-def test_middleware_no_op_when_active_teams_absent(mock_get_config):
+def test_middleware_injects_concept_when_no_experts_invited(mock_get_config):
+    """The ## Experts concept is injected every turn, even with no invites.
+
+    Gating the whole block on invitation would make the expert mechanism
+    vanish when nothing is invited — the trap the design avoids.
+    """
     mock_get_config.return_value = {"configurable": {}}
     middleware = ActiveTeamMiddleware()
-    request = _request()
-    modified = middleware.modify_request(request)
-    # No override applied: original request returned as-is.
-    assert modified is request
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "## Experts" in text
+    assert "The user has invited" not in text  # no invite block without invitees
+    assert "base system" in text
 
 
 @patch("langgraph.config.get_config")
-def test_middleware_no_op_when_active_teams_empty_list(mock_get_config):
+def test_middleware_injects_concept_when_active_teams_empty_list(mock_get_config):
     mock_get_config.return_value = {"configurable": {"active_teams": []}}
     middleware = ActiveTeamMiddleware()
-    request = _request()
-    modified = middleware.modify_request(request)
-    assert modified is request
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "## Experts" in text
+    assert "The user has invited" not in text
 
 
-def _mock_expert(name: str, dispatch: str) -> MagicMock:
-    """Build a MagicMock ``SkillInfo`` with the given dispatch shape.
+def _mock_expert(name: str) -> MagicMock:
+    """Build a MagicMock ``SkillInfo`` for a dispatchable expert.
 
     ``name`` on ``MagicMock`` must be set via attribute assignment; passing
     ``name=`` to the constructor names the mock instance itself.
     """
-    info = MagicMock(default_dispatch=dispatch)
+    info = MagicMock()
     info.name = name
     return info
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_appends_single_expert_cue(mock_get_config, mock_dispatchable):
+def test_middleware_appends_invite_for_single_expert(
+    mock_get_config, mock_dispatchable
+):
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm"]},
     }
-    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm", "sync")]
+    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm")]
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
-    assert "<active_expert>" in text
+    assert "## Experts" in text  # concept always present
+    assert "The user has invited" in text  # plus the invite block
     assert "`idea-brainstorm`" in text
-    assert "Consult it via `task(" in text
     assert "base system" in text  # original preserved
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_appends_multi_expert_cue(mock_get_config, mock_dispatchable):
+def test_middleware_appends_invite_for_multiple_experts(
+    mock_get_config, mock_dispatchable
+):
+    """One <active_expert> tag names one or many invited experts."""
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm", "literature-review"]},
     }
     mock_dispatchable.return_value = [
-        _mock_expert("idea-brainstorm", "sync"),
-        _mock_expert("literature-review", "sync"),
+        _mock_expert("idea-brainstorm"),
+        _mock_expert("literature-review"),
     ]
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
-    assert "<active_experts>" in text
+    assert "## Experts" in text
+    assert "The user has invited" in text
+    # One tag for any number of names — no separate plural tag.
+    assert "<active_experts>" not in text
     assert "`idea-brainstorm`" in text
     assert "`literature-review`" in text
-    # Multi-cue: header names both experts, then per-expert dispatch lines follow.
-    assert "The user has invited the following experts" in text
-    assert "Per-expert dispatch" in text
     assert "base system" in text
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
-def test_middleware_omits_cue_for_undispatchable_names(
+def test_middleware_omits_invite_for_undispatchable_names(
     mock_get_config, mock_dispatchable
 ):
-    """Names not in ``list_dispatchable_experts`` are dropped from the cue.
+    """Names not in ``list_dispatchable_experts`` are dropped from the invite.
 
-    Covers uninstalled experts, empty-body experts, name collisions, and
-    async-declared experts when async dispatch is unavailable — anything
-    the model would find missing at dispatch time.
+    Covers uninstalled experts, empty actor definitions, and name collisions
+    — anything the model would find missing at dispatch time. The concept
+    still shows; only the invite block is suppressed.
     """
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["nonexistent-expert"]},
     }
     mock_dispatchable.return_value = []  # nothing dispatchable
-    request = _request()
-    middleware = ActiveTeamMiddleware()
-    modified = middleware.modify_request(request)
-    # No cue appended — modify_request returns the original request untouched.
-    assert modified is request
-
-
-@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
-@patch("langgraph.config.get_config")
-def test_middleware_uses_start_async_task_cue_for_async_dispatch(
-    mock_get_config, mock_dispatchable
-):
-    """An expert declared ``default_dispatch: async`` gets the async cue.
-
-    Only reaches the cue when async dispatch is actually registered — the
-    honest-surface filter in ``list_dispatchable_experts`` drops
-    async-declared experts otherwise.
-    """
-    mock_get_config.return_value = {
-        "configurable": {"active_teams": ["literature-review"]},
-    }
-    mock_dispatchable.return_value = [_mock_expert("literature-review", "async")]
-
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
-    assert "<active_expert>" in text
-    assert "start_async_task(" in text
-    assert "subagent_type: 'literature-review'" in text
-    # Post-X-4: no payload dict. The cue instructs the main agent to embed
-    # the desired output path directly in the description string.
-    assert "payload" not in text
-    assert "output path" in text.lower() or "output_path" in text
-    assert "check_async_task" in text
-    # Sync cue must NOT be advertised for async experts.
-    assert "Consult it via `task(" not in text
-
-
-@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
-@patch("langgraph.config.get_config")
-def test_middleware_uses_task_cue_for_sync_dispatch(mock_get_config, mock_dispatchable):
-    """Sync-dispatched experts get the ``task()`` cue."""
-    mock_get_config.return_value = {
-        "configurable": {"active_teams": ["idea-brainstorm"]},
-    }
-    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm", "sync")]
-
-    middleware = ActiveTeamMiddleware()
-    modified = middleware.modify_request(_request())
-    text = _system_text(modified)
-    assert "Consult it via `task(" in text
-    assert "runs synchronously" in text
-    # No async-specific fragments for a sync expert.
-    assert "start_async_task(" not in text
-    assert "output_path" not in text
-
-
-@patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
-@patch("langgraph.config.get_config")
-def test_middleware_multi_mixed_dispatch(mock_get_config, mock_dispatchable):
-    """When both sync and async experts are active, each gets its own cue."""
-    mock_get_config.return_value = {
-        "configurable": {"active_teams": ["idea-brainstorm", "literature-review"]},
-    }
-    mock_dispatchable.return_value = [
-        _mock_expert("idea-brainstorm", "sync"),
-        _mock_expert("literature-review", "async"),
-    ]
-
-    middleware = ActiveTeamMiddleware()
-    modified = middleware.modify_request(_request())
-    text = _system_text(modified)
-    # Both cue shapes appear once each in the per-expert block.
-    assert text.count("`task(") == 1
-    assert text.count("start_async_task(") == 1
-    assert "`idea-brainstorm`:" in text
-    assert "`literature-review`:" in text
+    assert "## Experts" in text
+    assert "The user has invited" not in text
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
@@ -268,18 +208,16 @@ def test_middleware_multi_mixed_dispatch(mock_get_config, mock_dispatchable):
 def test_middleware_drops_invited_expert_that_is_not_dispatchable(
     mock_get_config, mock_dispatchable
 ):
-    """An async-declared expert stays invited across a config change, but
-    when async dispatch turns unavailable it drops out of
-    ``list_dispatchable_experts``. The cue must not mention it — otherwise
-    the model is told to reach for a tool that either doesn't exist or
-    doesn't list the expert."""
+    """An invited expert that stops being dispatchable — uninstalled, or its
+    actor definition emptied — must drop out of the cue. Naming an expert
+    the model cannot reach is worse than saying nothing."""
     mock_get_config.return_value = {
         "configurable": {
             "active_teams": ["idea-brainstorm", "literature-review"],
         },
     }
     # literature-review invited but not dispatchable this turn.
-    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm", "sync")]
+    mock_dispatchable.return_value = [_mock_expert("idea-brainstorm")]
 
     middleware = ActiveTeamMiddleware()
     modified = middleware.modify_request(_request())
@@ -288,15 +226,17 @@ def test_middleware_drops_invited_expert_that_is_not_dispatchable(
     assert "<active_expert>" in text
     assert "`idea-brainstorm`" in text
     assert "literature-review" not in text
-    assert "start_async_task(" not in text
 
 
 @patch("langgraph.config.get_config", side_effect=RuntimeError("outside context"))
-def test_middleware_no_op_outside_runnable_context(mock_get_config):
+def test_middleware_injects_concept_outside_runnable_context(mock_get_config):
+    """Outside a runnable context there are no invites, but the concept still
+    injects — ``_read_active_teams`` degrades to an empty list, not a raise."""
     middleware = ActiveTeamMiddleware()
-    request = _request()
-    modified = middleware.modify_request(request)
-    assert modified is request
+    modified = middleware.modify_request(_request())
+    text = _system_text(modified)
+    assert "## Experts" in text
+    assert "The user has invited" not in text
 
 
 # ---- composition tests: _get_default_middleware ----------------------------
