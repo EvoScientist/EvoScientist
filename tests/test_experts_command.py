@@ -172,6 +172,10 @@ class TestExpertToggle:
             return_value=[_FakeSkillInfo(name="idea-brainstorm")],
         ):
             await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
+        # Anchor the negative assertion to a successful invite — otherwise it
+        # also passes when the invite fails outright and prints "unknown
+        # expert", which mentions no ``/new`` either.
+        assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
         assert not any("/new" in text for text, _ in ui.lines)
 
     async def test_toggle_dismisses_when_already_invited(self):

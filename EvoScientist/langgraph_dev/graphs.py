@@ -17,9 +17,10 @@ To add a new async sub-agent:
 
          "<name>": "EvoScientist.langgraph_dev.graphs:<snake_name>"
 
-The deployed main agent (``EvoScientist_agent``) lives in ``main_graph.py``
-because it follows a different mechanism (re-exporting a lazily-constructed
-attribute), not the yaml-driven factory.
+The deployed main agent lives in ``main_graph.py`` because it follows a
+different mechanism — a zero-arg graph factory (``make_EvoScientist_agent``)
+that langgraph-api invokes per request, so the agent can be rebuilt when the
+expert registry changes — not the yaml-driven factory below.
 """
 
 from EvoScientist.memory.agents import (

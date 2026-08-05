@@ -205,12 +205,23 @@ def make_EvoScientist_agent() -> CompiledStateGraph:
 
     Steady-state cost is one skills-tree walk per request — what
     ``dispatchable_experts_token`` charges to answer "did the expert set
-    change?". The walk cannot be replaced by a cheaper counter: an expert
-    can be authored or edited straight onto the writable workspace skills
-    tier without ever calling ``install_skill``, and that is a first-class
-    flow (the agent itself writes there when asked for a new expert), not a
-    corner case. Before this factory existed the equivalent walk ran on
-    every *model call*, so this remains a large net reduction.
+    change?". Measured at ~16 ms warm for 11 installed skills, scaling
+    roughly linearly with that count. The walk cannot be replaced by a
+    cheaper counter: an expert can be authored or edited straight onto the
+    writable workspace skills tier without ever calling ``install_skill``,
+    and that is a first-class flow (the agent itself writes there when asked
+    for a new expert), not a corner case. Before this factory existed the
+    equivalent walk ran on every *model call*, so this remains a large net
+    reduction.
+
+    Note which requests pay it, because it is wider than run creation:
+    ``get_graph`` is also entered for read-only ``GET /threads/{id}/state``
+    and history, so idle polling now costs a walk where it previously cost
+    nothing. Cutting that down needs a content fingerprint cheap enough to
+    check per request (mtime + size over each skill's SKILL.md / AGENTS.md)
+    so the parse only runs when something moved — deliberately not attempted
+    here, since same-second edits and coarse timestamp granularity make it a
+    change that needs its own measurement.
 
     A rebuild runs synchronously on the event loop, so the first request
     after the expert set changes pays for it. That is the price of the
@@ -289,7 +300,19 @@ def _apply_filter_to_all_registered_graphs() -> None:
         module_path, attr = path.rsplit(":", 1)
         try:
             module = import_module(module_path)
-        except ImportError:
+        except Exception:
+            # Broader than ImportError on purpose: these modules build their
+            # graphs at import (``graphs.py`` constructs every yaml sub-agent
+            # at module scope), so a missing API key or a malformed subagent
+            # surfaces here as a ValidationError, not an import error. Only
+            # ImportError was caught, which made the "best-effort" promise
+            # above false for the failure that actually happens.
+            _logger.debug(
+                "Could not import %r to apply the snapshot filter; leaving it "
+                "unfiltered.",
+                module_path,
+                exc_info=True,
+            )
             continue
         graph = getattr(module, attr, None)
         if isinstance(graph, CompiledStateGraph) and not isinstance(
@@ -306,7 +329,20 @@ _apply_filter_to_all_registered_graphs()
 # event loop and off the first request — the same startup profile this module
 # had before it became a factory. Every later call is a cache hit unless the
 # expert registry moved.
-make_EvoScientist_agent()
+#
+# Guarded because this is a warm-up, not the build of record. Letting it
+# propagate would turn any transient construction failure into a
+# ``GraphLoadError`` that stops the dev server outright, when the factory
+# would simply retry on the first request. It also keeps importing this
+# module — to check the ``langgraph.json`` contract, say — from requiring a
+# working model configuration.
+try:
+    make_EvoScientist_agent()
+except Exception:
+    _logger.exception(
+        "Eager main-agent build at import failed; deferring to the first "
+        "request through make_EvoScientist_agent()."
+    )
 
 
 __all__ = ["make_EvoScientist_agent"]
