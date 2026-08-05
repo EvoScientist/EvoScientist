@@ -510,9 +510,30 @@ def cmd_interactive(
     # the next turn: the loader rebuilds the agent in place (same thread,
     # same checkpointer) when the expert registry changes, so ``task`` /
     # ``start_async_task`` can reach the new expert without ``/new``.
+    def _on_agent_rebuild_failed(exc: BaseException) -> None:
+        """Report a failed in-place rebuild; the session keeps running.
+
+        ``_reload`` swallows the exception and re-seats the previous agent,
+        so without this the user gets no signal at all that the expert they
+        just installed didn't land.
+        """
+        from ..subagents.expert_container import rollback_dispatchable_memo
+
+        # The staleness probe already restamped the cue's memo with the set
+        # this rebuild was going to provide. Put back the set the still-seated
+        # agent was built from, so neither the expert prompt nor ``/expert``
+        # offers something ``task`` can't route.
+        rollback_dispatchable_memo()
+        console.print(
+            f"[yellow]Couldn't pick up the new experts yet:[/yellow] "
+            f"{escape(str(exc))}[yellow]. Continuing with the current agent."
+            f"[/yellow]"
+        )
+
     agent_loader = BackgroundAgentLoader(
         _load_agent,
         on_progress=_on_mcp_progress,
+        on_rebuild_failed=_on_agent_rebuild_failed,
         build_token=dispatchable_experts_token,
     )
 

@@ -86,6 +86,11 @@ class BackgroundAgentLoader(Generic[AgentT]):
     threads inside it if needed.  ``on_success`` / ``on_failure`` fire
     on the event loop when the task completes.
 
+    ``on_failure`` means the session has no agent.  A failed *in-place*
+    rebuild is a different event — the previous agent keeps serving — and
+    reports through ``on_rebuild_failed`` instead, so a UI can say "couldn't
+    pick that up yet" rather than "the load died".
+
     ``build_token`` makes the seated agent self-invalidating: see
     :meth:`await_ready`.
     """
@@ -97,16 +102,24 @@ class BackgroundAgentLoader(Generic[AgentT]):
         on_progress: ProgressCallback | None = None,
         on_success: SuccessCallback | None = None,
         on_failure: FailureCallback | None = None,
+        on_rebuild_failed: FailureCallback | None = None,
         build_token: Callable[[], Any] | None = None,
     ) -> None:
         self._loader_fn = loader_fn
         self._on_progress = on_progress
         self._on_success = on_success
         self._on_failure = on_failure
+        self._on_rebuild_failed = on_rebuild_failed
         self._build_token = build_token
         self.agent: AgentT | None = None
         self._task: asyncio.Task[AgentT] | None = None
         self._load_id: int = 0
+        # True only while ``_reload`` is driving ``start`` + ``await_ready``.
+        # ``_on_done`` fires the fatal ``on_failure`` before ``_reload``'s
+        # ``except`` gets a chance to re-seat the previous agent, so without
+        # this flag every in-place rebuild failure is reported as a dead
+        # session.
+        self._reloading: bool = False
         # Kwargs of the most recent ``start``, replayed verbatim by the
         # stale-token reload in ``await_ready``. Everything session-scoped
         # (checkpointer, event sink, workspace, config object) lives in
@@ -188,15 +201,25 @@ class BackgroundAgentLoader(Generic[AgentT]):
         """Evaluate ``build_token``, treating any failure as "unknown".
 
         A token that can't be computed must not strand the session in a
-        rebuild loop, so it degrades to ``None`` — which compares equal to
-        the ``None`` used when no ``build_token`` was supplied.
+        rebuild loop, so it degrades to ``None``. That is not a no-op once a
+        real token has been read: ``None`` compares unequal to the hash
+        already in ``_agent_token``, so the first raise forces one rebuild,
+        after which ``start`` re-stamps ``None`` and it settles.
+
+        Logged at warning because this is the single failure that silently
+        turns mid-session expert pickup off entirely — at debug level nobody
+        would ever learn why installs stopped taking effect.
         """
         if self._build_token is None:
             return None
         try:
             return self._build_token()
         except Exception:
-            _logger.debug("build_token callback raised", exc_info=True)
+            _logger.warning(
+                "build_token callback raised; agent staleness checks are "
+                "disabled until it succeeds again.",
+                exc_info=True,
+            )
             return None
 
     async def await_ready(self) -> AgentT:
@@ -218,12 +241,13 @@ class BackgroundAgentLoader(Generic[AgentT]):
 
         A failed rebuild keeps the previous agent seated — a broken
         install must degrade to "the new thing isn't there yet", never to
-        a dead session.
+        a dead session — and reports through ``on_rebuild_failed`` rather
+        than the fatal ``on_failure``.
         """
         if self.agent is not None:
             token = self._read_build_token()
             if token != self._agent_token and self._last_kwargs is not None:
-                return await self._reload(token)
+                return await self._reload()
             return self.agent
         if self._task is None:
             raise RuntimeError(
@@ -234,19 +258,24 @@ class BackgroundAgentLoader(Generic[AgentT]):
             raise RuntimeError("BackgroundAgentLoader completed without an agent")
         return self.agent
 
-    async def _reload(self, token: Any) -> AgentT:
+    async def _reload(self) -> AgentT:
         """Rebuild the seated agent in place, falling back to the old one."""
         assert self._last_kwargs is not None
         previous = self.agent
-        _logger.info(
-            "Agent inputs changed (build token %r -> %r); rebuilding in place.",
-            self._agent_token,
-            token,
-        )
-        self.start(**self._last_kwargs)
+        stale_token = self._agent_token
+        self._reloading = True
         try:
+            # ``start`` re-reads the token itself, so it is not passed in —
+            # doing so would cost a second full skills-tree walk per rebuild
+            # for a value only ever used in this log line.
+            self.start(**self._last_kwargs)
+            _logger.info(
+                "Agent inputs changed (build token %r -> %r); rebuilding in place.",
+                stale_token,
+                self._agent_token,
+            )
             return await self.await_ready()
-        except Exception:
+        except Exception as exc:
             # Re-seat the old agent so the session keeps working. Its
             # token stays the failed one, so the rebuild is not retried
             # until the inputs change again — which is also the next
@@ -258,7 +287,11 @@ class BackgroundAgentLoader(Generic[AgentT]):
             )
             self.agent = previous
             self._task = None
+            if self._on_rebuild_failed is not None:
+                self._on_rebuild_failed(exc)
             return previous  # type: ignore[return-value]
+        finally:
+            self._reloading = False
 
     def _on_done(self, task: asyncio.Task[AgentT], load_id: int) -> None:
         if load_id != self._load_id:
@@ -271,7 +304,11 @@ class BackgroundAgentLoader(Generic[AgentT]):
             # Keep ``_task`` set so a later ``await_ready`` re-raises the
             # real exception instead of the "before start()" sentinel.
             self.agent = None
-            if self._on_failure is not None:
+            # During a reload the session is not dead — ``_reload``'s except
+            # branch is about to re-seat the previous agent and report via
+            # ``on_rebuild_failed``. Firing the fatal callback here would tell
+            # the user the load died a moment before the next turn runs fine.
+            if self._on_failure is not None and not self._reloading:
                 self._on_failure(exc)
             return
         if self._on_success is not None:

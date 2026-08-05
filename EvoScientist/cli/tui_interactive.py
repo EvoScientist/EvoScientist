@@ -646,6 +646,7 @@ def run_textual_interactive(
                 on_progress=self._on_mcp_progress,
                 on_success=self._on_agent_load_success,
                 on_failure=self._on_agent_load_failure,
+                on_rebuild_failed=self._on_agent_rebuild_failed,
                 build_token=dispatchable_experts_token,
             )
             self._mcp_loader_widget: Any = None
@@ -731,6 +732,27 @@ def run_textual_interactive(
         def _on_agent_load_failure(self, exc: BaseException) -> None:
             self._append_system(f"Agent failed to load: {exc}", style="red")
             self._finish_loader_widget()
+
+        def _on_agent_rebuild_failed(self, exc: BaseException) -> None:
+            """Report a failed in-place rebuild without claiming the session died.
+
+            The previous agent is still seated and the next turn runs
+            normally, so this is yellow rather than red and says what was
+            actually lost. No loader widget to finish — ``_reload`` drives
+            ``start`` directly and never mounts one.
+            """
+            from ..subagents.expert_container import rollback_dispatchable_memo
+
+            # The staleness probe already restamped the cue's memo with the
+            # set this rebuild was going to provide. Put back the set the
+            # still-seated agent was built from, so the expert prompt and the
+            # ``/expert`` popup don't offer something ``task`` can't route.
+            rollback_dispatchable_memo()
+            self._append_system(
+                f"Couldn't pick up the new experts yet: {exc}. "
+                "Continuing with the current agent.",
+                style="yellow",
+            )
 
         def _start_background_agent_load(self, workspace: str | None) -> None:
             self._progress_tracker.prime()

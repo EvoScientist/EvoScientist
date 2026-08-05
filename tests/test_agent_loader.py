@@ -481,3 +481,75 @@ class TestBackgroundAgentLoaderBuildToken:
         assert await loader.await_ready() == "AGENT1"
         assert await loader.await_ready() == "AGENT1"
         assert len(calls) == 1
+
+    async def test_a_token_that_starts_raising_settles_after_one_rebuild(self):
+        """The interesting transition: a token that worked, then breaks.
+
+        The always-raising case above passes trivially — ``start`` stamps
+        ``None`` too, so both sides of the comparison are ``None``. Here the
+        seated agent carries a real hash, so the first ``None`` reads as a
+        change and forces one rebuild; after that ``start`` has re-stamped
+        ``None`` and it must settle rather than rebuild every turn.
+        """
+        calls: list[dict] = []
+        reads = {"n": 0}
+
+        def _breaks_after_first():
+            reads["n"] += 1
+            if reads["n"] == 1:
+                return "t0"
+            raise RuntimeError("registry unreadable")
+
+        loader = BackgroundAgentLoader(
+            self._counting_loader(calls), build_token=_breaks_after_first
+        )
+
+        loader.start()
+        assert await loader.await_ready() == "AGENT1"
+        assert await loader.await_ready() == "AGENT2"  # one rebuild, not a loop
+        assert await loader.await_ready() == "AGENT2"
+        assert await loader.await_ready() == "AGENT2"
+        assert len(calls) == 2
+
+    async def test_failed_rebuild_reports_as_a_refresh_not_a_dead_session(self):
+        """``_reload`` reuses ``start``, so ``_on_done`` fires before the
+        previous agent is re-seated. Without the guard the user is told the
+        load died a moment before the next turn runs normally.
+        """
+        token = {"value": "t0"}
+        fatal: list[BaseException] = []
+        refresh: list[BaseException] = []
+        loader = BackgroundAgentLoader(
+            _make_loader_fn("GOOD"),
+            on_failure=fatal.append,
+            on_rebuild_failed=refresh.append,
+            build_token=lambda: token["value"],
+        )
+
+        loader.start()
+        await loader.await_ready()
+
+        loader._loader_fn = _make_loader_fn(fail_with=RuntimeError("bad skill"))
+        token["value"] = "t1"
+        assert await loader.await_ready() == "GOOD"
+
+        assert fatal == []
+        assert [str(e) for e in refresh] == ["bad skill"]
+
+    async def test_failed_initial_load_still_reports_as_fatal(self):
+        """The guard must not swallow the case where there is no agent."""
+        fatal: list[BaseException] = []
+        refresh: list[BaseException] = []
+        loader = BackgroundAgentLoader(
+            _make_loader_fn(fail_with=RuntimeError("no agent")),
+            on_failure=fatal.append,
+            on_rebuild_failed=refresh.append,
+            build_token=lambda: "t0",
+        )
+
+        loader.start()
+        with pytest.raises(RuntimeError, match="no agent"):
+            await loader.await_ready()
+
+        assert [str(e) for e in fatal] == ["no agent"]
+        assert refresh == []
