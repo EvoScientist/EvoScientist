@@ -47,6 +47,7 @@ class TestModelsRegistry:
         assert "moonshot" in providers
         assert "kimi-coding" in providers
         assert "atlascloud" in providers
+        assert "novita" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -70,6 +71,7 @@ class TestModelsRegistry:
             "moonshot",
             "kimi-coding",
             "atlascloud",
+            "novita",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
@@ -96,6 +98,8 @@ class TestModelsRegistry:
         atlas_models = get_models_for_provider("atlascloud")
         assert ("qwen3.5-27b", "qwen/qwen3.5-27b") in atlas_models
         assert get_models_for_provider("atlas") == []
+        novita_models = get_models_for_provider("novita")
+        assert ("deepseek-v3.2", "deepseek/deepseek-v3.2") in novita_models
 
 
 # =============================================================================
@@ -446,6 +450,29 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://router.requesty.ai/v1"
         assert call_kwargs["api_key"] == "rq-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_novita_routes_through_openai(self, mock_init, monkeypatch):
+        """Novita provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("NOVITA_API_KEY", "novita-key-123")
+
+        get_chat_model("deepseek-v3.2", provider="novita")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "deepseek/deepseek-v3.2"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.novita.ai/openai/v1"
+        assert call_kwargs["api_key"] == "novita-key-123"
+
+    def test_novita_host_maps_to_provider(self):
+        """Provider error envelopes should identify Novita by host."""
+        from EvoScientist.llm.errors import _lookup_host_or_compat
+
+        assert (
+            _lookup_host_or_compat("https://api.novita.ai/openai/v1", "openai")
+            == "novita"
+        )
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_requesty_anthropic_prompt_cache_enabled_by_default(

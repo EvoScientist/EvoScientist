@@ -187,6 +187,7 @@ _HOST_TO_PROVIDER: dict[str, str] = {
     "api.minimaxi.com": "minimax",
     "api.kimi.com": "kimi",  # kimi-coding shares this host
     "openrouter.ai": "openrouter",
+    "api.novita.ai": "novita",
 }
 
 

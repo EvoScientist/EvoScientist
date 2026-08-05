@@ -3,9 +3,9 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and custom
-OpenAI/Anthropic-compatible endpoints) and convenient short names for common
-models.
+Novita, ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and
+custom OpenAI/Anthropic-compatible endpoints) and convenient short names for
+common models.
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ _ATLASCLOUD_BASE_URL = "https://api.atlascloud.ai/v1"
 _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
 _REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
+_NOVITA_BASE_URL = "https://api.novita.ai/openai/v1"
 
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
 # installed versions are advertised automatically.
@@ -117,6 +118,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
     "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
+    "novita": (_NOVITA_BASE_URL, "NOVITA_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
@@ -247,6 +249,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
     ("grok-4.3", "xai/grok-4.3", "requesty"),
     ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
+    # Novita (aggregator — OpenAI-compatible, DeepSeek/Qwen/GLM, etc.)
+    ("deepseek-v3.2", "deepseek/deepseek-v3.2", "novita"),
+    ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "novita"),
+    ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "novita"),
+    ("qwen3.5-27b", "qwen/qwen3.5-27b", "novita"),
+    ("glm-5.2", "zai-org/glm-5.2", "novita"),
     # OpenRouter
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
