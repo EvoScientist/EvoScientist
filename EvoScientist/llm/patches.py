@@ -11,8 +11,6 @@ Patches:
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
-    - _patch_openai_tool_call_names: remove malformed function tool calls
-      before sending conversation history to strict OpenAI-compatible APIs
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
@@ -765,62 +763,6 @@ def _patch_openai_capture_reasoning_content() -> None:
 
 
 _patch_openai_capture_reasoning_content()
-
-
-# ---------------------------------------------------------------------------
-# Patch (module-level): langchain-openai serializes invalid_tool_calls and raw
-# additional_kwargs tool calls even when function.name is absent. Strict
-# OpenAI-compatible providers reject the next request instead of accepting the
-# malformed history. Drop only malformed function calls; preserve other tool
-# call types and valid calls in the same assistant message.
-# ---------------------------------------------------------------------------
-_openai_tool_call_names_patched = False
-
-
-def _patch_openai_tool_call_names() -> None:
-    global _openai_tool_call_names_patched
-    if _openai_tool_call_names_patched:
-        return
-    try:
-        import langchain_openai.chat_models.base as _base
-
-        _orig_convert_message_to_dict = _base._convert_message_to_dict
-
-        def _patched_convert_message_to_dict(
-            message: Any, *args: Any, **kwargs: Any
-        ) -> dict[str, Any]:
-            result = _orig_convert_message_to_dict(message, *args, **kwargs)
-            tool_calls = result.get("tool_calls")
-            if not isinstance(tool_calls, list):
-                return result
-
-            valid_calls = [
-                call
-                for call in tool_calls
-                if not (
-                    isinstance(call, dict)
-                    and call.get("type") == "function"
-                    and (
-                        not isinstance(call.get("function"), dict)
-                        or not call["function"].get("name")
-                    )
-                )
-            ]
-            if valid_calls:
-                result["tool_calls"] = valid_calls
-            else:
-                result.pop("tool_calls", None)
-                if result.get("content") is None:
-                    result["content"] = ""
-            return result
-
-        _base._convert_message_to_dict = _patched_convert_message_to_dict
-        _openai_tool_call_names_patched = True
-    except Exception:
-        pass
-
-
-_patch_openai_tool_call_names()
 
 
 # ---------------------------------------------------------------------------

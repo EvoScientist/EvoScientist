@@ -171,3 +171,63 @@ def test_middleware_warns_once_per_thread(caplog):
         middleware.wrap_model_call(request, handler)
 
     assert len(caplog.records) == 1
+
+
+def test_drops_nameless_parsed_tool_call():
+    messages = [
+        HumanMessage("run tools"),
+        AIMessage(
+            content="answer",
+            invalid_tool_calls=[
+                {"id": "nameless", "name": None, "args": "{", "error": "invalid"},
+                _invalid_tool_call("named"),
+            ],
+        ),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert [call["id"] for call in repaired[1].invalid_tool_calls] == ["named"]
+    assert repaired[1].content == "answer"
+    assert [message.tool_call_id for message in repaired[2:]] == ["named"]
+
+
+def test_drops_nameless_raw_tool_call_from_additional_kwargs():
+    messages = [
+        HumanMessage("run tools"),
+        AIMessage(
+            content="",
+            additional_kwargs={
+                "tool_calls": [
+                    {
+                        "id": "raw-nameless",
+                        "type": "function",
+                        "function": {"arguments": "{}"},
+                    },
+                    {
+                        "id": "raw-named",
+                        "type": "function",
+                        "function": {"name": "search", "arguments": "{}"},
+                    },
+                ]
+            },
+        ),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert [call["id"] for call in repaired[1].additional_kwargs["tool_calls"]] == [
+        "raw-named"
+    ]
+
+
+def test_keeps_non_function_tool_calls_without_name():
+    raw = {"id": "custom", "type": "custom", "custom": {"input": "x"}}
+    messages = [
+        HumanMessage("run tools"),
+        AIMessage(content="", additional_kwargs={"tool_calls": [raw]}),
+    ]
+
+    repaired = repair_tool_history(messages)
+
+    assert repaired[1].additional_kwargs["tool_calls"] == [raw]

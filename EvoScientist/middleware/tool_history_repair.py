@@ -16,6 +16,10 @@ It covers cases that deepagents' ``PatchToolCallsMiddleware`` does not:
 2. Mid-run coverage -- repair runs at the model boundary on every request
    (including malformed / ``invalid_tool_calls``), not only at agent start, so
    interruptions that happen partway through a run are healed too.
+3. Nameless function call dropping -- a tool call whose ``function.name`` is
+   missing cannot be serialized into a valid request, so it is removed from the
+   assistant message entirely (along with any raw ``additional_kwargs``
+   counterpart) before the history is closed off.
 
 Because the middleware only rewrites the request and cannot mutate thread
 state, the repaired synthetic results are recomputed on every model call. To
@@ -39,6 +43,57 @@ logger = logging.getLogger(__name__)
 _INTERRUPTED_RESULT = "Tool execution was interrupted before completion."
 
 
+def _drop_nameless_calls(message: AIMessage) -> tuple[AIMessage, list[str]]:
+    """Return the message without function tool calls that have no name.
+
+    A call with no ``name`` cannot be serialized into a valid
+    ``function.name``, so strict providers reject the whole request. Only
+    nameless function calls are removed; valid calls in the same message and
+    non-function call types are preserved.
+    """
+    raw_calls = message.additional_kwargs.get("tool_calls")
+    nameless_raw = [
+        call
+        for call in raw_calls or []
+        if isinstance(call, dict)
+        and call.get("type") == "function"
+        and (
+            not isinstance(call.get("function"), dict)
+            or not call["function"].get("name")
+        )
+    ]
+    nameless_parsed = [
+        call
+        for call in list(message.tool_calls)
+        + list(getattr(message, "invalid_tool_calls", []) or [])
+        if not call.get("name")
+    ]
+    if not nameless_raw and not nameless_parsed:
+        return message, []
+
+    dropped_ids = [
+        call.get("id") or ""
+        for call in nameless_parsed + nameless_raw  # type: ignore[union-attr]
+    ]
+    update: dict[str, object] = {
+        "tool_calls": [call for call in message.tool_calls if call.get("name")],
+        "invalid_tool_calls": [
+            call
+            for call in getattr(message, "invalid_tool_calls", []) or []
+            if call.get("name")
+        ],
+    }
+    if raw_calls is not None:
+        additional_kwargs = dict(message.additional_kwargs)
+        remaining = [call for call in raw_calls if call not in nameless_raw]
+        if remaining:
+            additional_kwargs["tool_calls"] = remaining
+        else:
+            additional_kwargs.pop("tool_calls", None)
+        update["additional_kwargs"] = additional_kwargs
+    return message.model_copy(update=update), [tid for tid in dropped_ids if tid]
+
+
 def repair_tool_history(
     messages: Sequence[AnyMessage],
     warned: set[str] | None = None,
@@ -54,6 +109,7 @@ def repair_tool_history(
     pending: dict[str, str | None] = {}
     synthesized: list[str] = []
     dropped: list[str] = []
+    unnamed: list[str] = []
 
     def close_pending() -> None:
         for tool_call_id, tool_name in pending.items():
@@ -80,6 +136,9 @@ def repair_tool_history(
 
         if pending:
             close_pending()
+        if isinstance(message, AIMessage):
+            message, nameless_ids = _drop_nameless_calls(message)
+            unnamed.extend(nameless_ids)
         repaired.append(message)
         if isinstance(message, AIMessage):
             all_calls = list(message.tool_calls) + list(
@@ -95,14 +154,17 @@ def repair_tool_history(
     if warned is not None:
         synthesized = [tid for tid in synthesized if tid not in warned]
         dropped = [tid for tid in dropped if tid not in warned]
+        unnamed = [tid for tid in unnamed if tid not in warned]
         warned.update(synthesized)
         warned.update(dropped)
+        warned.update(unnamed)
 
-    if synthesized or dropped:
+    if synthesized or dropped or unnamed:
         logger.warning(
-            "Repaired interrupted tool history: synthesized=%s dropped=%s",
+            "Repaired interrupted tool history: synthesized=%s dropped=%s unnamed=%s",
             synthesized,
             dropped,
+            unnamed,
         )
     return repaired
 
