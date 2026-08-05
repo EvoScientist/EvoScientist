@@ -10,6 +10,8 @@ PEP 562): importing the shared :mod:`.types` protocols must not cascade into
 ``sessions``/langgraph/langgraph_sdk, which every CLI invocation would pay.
 """
 
+from typing import TYPE_CHECKING
+
 import lazy_loader as _lazy
 
 from .types import (
@@ -23,6 +25,21 @@ from .types import (
     ThreadResolution,
     ThreadStore,
 )
+
+if TYPE_CHECKING:
+    # Static counterparts of the lazy attach below — type checkers don't
+    # infer names served through __getattr__.
+    from . import background_runs
+    from .local import LocalGraphGateway, LocalThreadStore
+    from .runtime import (
+        RuntimeGatewayBackend,
+        RuntimeGateways,
+        create_runtime_gateways,
+    )
+    from .server import (
+        LangGraphServerGateway,
+        LangGraphServerThreadStore,
+    )
 
 __getattr__, _attach_dir, _ = _lazy.attach(
     __name__,

@@ -549,3 +549,21 @@ def test_sidecar_live_owners_malformed_entries_mean_unknown(owners):
         )
         is None
     )
+
+
+def test_register_owner_preserves_unknown_ownership(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """Pre-feature sidecar (no owner record) must stay untouched: stamping this
+    CLI as sole owner would later read as 'all owners dead' and authorize a
+    reclaim while unknown pre-feature sessions may still use the server."""
+    sidecar = tmp_path / "ws.json"
+    sidecar.write_text(json.dumps({"workspace": str(tmp_path / "A"), "pid": 99999}))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=sidecar),
+    )
+    manager._sidecar_register_owner()
+    data = json.loads(sidecar.read_text())
+    assert "owner_pids" not in data

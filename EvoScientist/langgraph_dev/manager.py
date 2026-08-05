@@ -250,7 +250,13 @@ def _sidecar_register_owner() -> None:
     sidecar = _read_workspace_sidecar()
     if sidecar is None:
         return
-    live = _sidecar_live_owners(sidecar) or []
+    live = _sidecar_live_owners(sidecar)
+    if live is None:
+        # Pre-feature sidecar: owners are unknown. Recording only this CLI
+        # would let a later session mistake the server for an unowned
+        # leftover once we exit. Leave the record untouched so the
+        # conservative refusal stays in place.
+        return
     if os.getpid() not in live:
         live.append(os.getpid())
     try:

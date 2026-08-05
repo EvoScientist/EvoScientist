@@ -235,6 +235,9 @@ class TestThreadFunctions(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_threads_creates_meta_index(self):
         """Thread listing must run off the expression index, not a blob scan."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("DROP INDEX IF EXISTS idx_evoscientist_thread_meta")
+            await conn.commit()
         await list_threads(limit=10)
         async with aiosqlite.connect(self._db_path) as conn:
             async with conn.execute(
