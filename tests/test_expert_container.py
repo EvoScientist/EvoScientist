@@ -929,6 +929,33 @@ class TestRollbackDispatchableMemo:
             rollback_dispatchable_memo()
             assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
 
+    def test_restamp_false_leaves_the_memo_untouched(self):
+        """Detection must not advertise ahead of the rebuild.
+
+        The background refresher reads the token to decide whether to rebuild,
+        and the rebuild takes seconds. Restamping at detection time would have
+        the active-expert cue naming the new expert for that whole window,
+        while ``task()`` still cannot route to it.
+        """
+        _reset_dispatchable_experts_cache()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ):
+            list_dispatchable_experts()  # the set the seated agent was built from
+            alpha_only = dispatchable_experts_token(restamp=False)
+
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha"), _expert("beta")],
+        ):
+            with_beta = dispatchable_experts_token(restamp=False)
+            # The cue still reports only what the seated agent can reach...
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
+
+        # ...while the token is still a real change signal.
+        assert with_beta != alpha_only
+
     def test_rollback_is_safe_before_any_walk(self):
         """Nothing has been displaced yet; rolling back must not crash."""
         _reset_dispatchable_experts_cache()

@@ -264,7 +264,9 @@ def rollback_dispatchable_memo() -> None:
     _dispatchable_cache_key, _dispatchable_cache_value = _dispatchable_memo_prev
 
 
-def _read_dispatchable_fresh(include_system: bool) -> list[SkillInfo]:
+def _read_dispatchable_fresh(
+    include_system: bool, *, restamp: bool = True
+) -> list[SkillInfo]:
     """Walk the skills tree, apply the dispatchability filters, restamp the memo.
 
     The single place the memo is written, so "which epoch is this list
@@ -279,6 +281,11 @@ def _read_dispatchable_fresh(include_system: bool) -> list[SkillInfo]:
     The displaced entry is kept in ``_dispatchable_memo_prev`` so a caller
     that walked in order to decide on a rebuild can undo this restamp if the
     rebuild fails; see ``rollback_dispatchable_memo``.
+
+    ``restamp=False`` walks without touching the memo at all. For a caller
+    that only wants to *detect* a change and will rebuild separately, that
+    is the difference between the cue naming a new expert immediately and
+    naming it once the agent can actually reach it.
     """
     global _dispatchable_cache_key, _dispatchable_cache_value
     global _dispatchable_memo_prev
@@ -296,6 +303,9 @@ def _read_dispatchable_fresh(include_system: bool) -> list[SkillInfo]:
         if info.name in reserved:
             continue
         dispatchable.append(info)
+
+    if not restamp:
+        return dispatchable
 
     _dispatchable_memo_prev = (_dispatchable_cache_key, _dispatchable_cache_value)
     # Value before key. A reader interleaving between these two writes then
@@ -347,7 +357,9 @@ def list_dispatchable_experts(
     return list(_read_dispatchable_fresh(include_system))
 
 
-def dispatchable_experts_token(*, include_system: bool = True) -> str:
+def dispatchable_experts_token(
+    *, include_system: bool = True, restamp: bool = True
+) -> str:
     """Fingerprint of the expert registry an agent would be built from.
 
     Answers one question for every cache of a *constructed* agent: would
@@ -387,17 +399,26 @@ def dispatchable_experts_token(*, include_system: bool = True) -> str:
     Without the walk, "write me an expert" would produce one the
     orchestrator could not dispatch to until ``/new``.
 
-    Costs one skills-tree walk per call, measured at ~16 ms warm for 11
-    installed skills and scaling roughly linearly with that count. Callers
-    are turn boundaries (CLI/TUI) and the WebUI graph factory, which pays it
-    per HTTP request including read-only state polls — never
-    ``awrap_model_call``, whose cue reads the memo this restamps.
+    Costs one skills-tree walk per call, measured at ~18 ms warm for 5
+    dispatchable experts and scaling roughly linearly with the installed
+    skill count. Callers are turn boundaries (CLI/TUI) and the WebUI's
+    background refresher — never ``awrap_model_call``, whose cue reads the
+    memo this restamps, and never the WebUI request path.
+
+    Blocking by nature (``iterdir`` plus SKILL.md / AGENTS.md parsing), so
+    every caller must keep it off an event loop. langgraph-dev installs a
+    blockbuster guard that turns a filesystem call on the loop into a raised
+    ``BlockingError``, not merely a slow request.
 
     Restamping the memo is a side effect, not incidental: it is what keeps
-    the cue reporting the same set the rebuild decision was made on. A
+    the cue reporting the same set the rebuild decision was made on, and a
     caller whose rebuild then fails must call ``rollback_dispatchable_memo``.
+    Pass ``restamp=False`` when only *detecting* a change: the rebuild that
+    follows is what makes the new expert reachable and can take seconds,
+    during which a restamped memo would have the cue naming an expert
+    ``task()`` cannot route to. The rebuild path restamps on its own.
     """
-    experts = _read_dispatchable_fresh(include_system)
+    experts = _read_dispatchable_fresh(include_system, restamp=restamp)
 
     digest = hashlib.sha256()
     # Sorted so filesystem iteration order can't produce a spurious change.

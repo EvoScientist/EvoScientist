@@ -35,6 +35,11 @@ from langgraph.types import PregelTask, StateSnapshot
 
 _logger = logging.getLogger(__name__)
 
+# The graph ``make_EvoScientist_agent`` hands langgraph-api. Written only by
+# ``refresh_main_graph`` — from the import-time warm-up and from the background
+# refresher — so the request path never has to decide whether it is current.
+_current_graph: CompiledStateGraph | None = None
+
 _PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
 
 # Sanity check on the LangGraph internals ``_strip_private`` scrubs. If any
@@ -197,43 +202,53 @@ class _EvoFilteredGraph(CompiledStateGraph):
 def make_EvoScientist_agent() -> CompiledStateGraph:
     """Graph factory for the ``EvoScientist`` entry in ``langgraph.json``.
 
-    Called by langgraph-api on every request that touches the graph
-    (``get_graph`` → ``invoke_factory``), and it must not do its own
-    caching: ``_get_default_agent`` already returns the same compiled
-    object until the expert registry changes, at which point it rebuilds.
-    Adding a second cache here would only be able to go stale.
+    Returns the graph most recently published by ``refresh_main_graph`` and
+    does nothing else. No token read, no filesystem access, no thread hop —
+    which is the whole point.
 
-    Steady-state cost is one skills-tree walk per request — what
-    ``dispatchable_experts_token`` charges to answer "did the expert set
-    change?". Measured at ~16 ms warm for 11 installed skills, scaling
-    roughly linearly with that count. The walk cannot be replaced by a
-    cheaper counter: an expert can be authored or edited straight onto the
-    writable workspace skills tier without ever calling ``install_skill``,
-    and that is a first-class flow (the agent itself writes there when asked
-    for a new expert), not a corner case. Before this factory existed the
-    equivalent walk ran on every *model call*, so this remains a large net
-    reduction.
+    langgraph-api calls this on **every** request that touches the graph
+    (``get_graph`` → ``invoke_factory``), and that is wider than run
+    creation: read-only ``GET /threads/{id}/state`` and history enter it
+    too. Any real work here is therefore paid per idle poll. Worse, it runs
+    on the event loop, where langgraph-dev's blockbuster guard turns a
+    filesystem call into a raised ``BlockingError`` rather than a slow
+    request — so a staleness check here does not merely cost time, it fails.
 
-    Note which requests pay it, because it is wider than run creation:
-    ``get_graph`` is also entered for read-only ``GET /threads/{id}/state``
-    and history, so idle polling now costs a walk where it previously cost
-    nothing. Cutting that down needs a content fingerprint cheap enough to
-    check per request (mtime + size over each skill's SKILL.md / AGENTS.md)
-    so the parse only runs when something moved — deliberately not attempted
-    here, since same-second edits and coarse timestamp granularity make it a
-    change that needs its own measurement.
-
-    A rebuild runs synchronously on the event loop, so the first request
-    after the expert set changes pays for it. That is the price of the
-    guarantee this factory exists to provide — returning the stale graph
-    and rebuilding in the background would mean the very next turn still
-    can't reach the new expert. It is logged with its elapsed time so the
-    cost is visible rather than inferred.
+    Keeping the graph current is instead the job of
+    ``registry_refresh.expert_registry_refresher``, a background task that
+    rebuilds off-request and publishes the result here. See that module for
+    why the check is both pushed and polled.
 
     Zero-arg on purpose: ``langgraph_api._factory_utils._classify_factory``
     reads the signature, and any parameter would make it inject a config or
     a ``ServerRuntime`` we have no use for.
     """
+    if _current_graph is None:
+        # The import-time warm-up below is guarded, so this is reachable when
+        # that build failed. Raising keeps the blocking build off the loop;
+        # the refresher's startup pass retries and the next request succeeds.
+        raise RuntimeError(
+            "The EvoScientist graph is not built yet. The import-time build "
+            "failed; the background refresher will retry shortly."
+        )
+    return _current_graph
+
+
+def refresh_main_graph() -> CompiledStateGraph:
+    """Rebuild if the expert registry moved, publish, and return the graph.
+
+    Blocking by nature — ``_get_default_agent`` walks the skills tree and may
+    construct a whole agent. Callers are the import-time warm-up (which
+    langgraph-api already runs in an executor thread) and the background
+    refresher (which hands it to ``asyncio.to_thread``). Never call it from
+    the request path.
+
+    Publishing last means a failed rebuild leaves the previous graph serving:
+    ``_get_default_agent`` re-seats its own previous agent and returns it, so
+    the assignment below is a no-op rather than a downgrade.
+    """
+    global _current_graph
+
     started = time.perf_counter()
     from EvoScientist.EvoScientist import _get_default_agent
 
@@ -251,6 +266,7 @@ def make_EvoScientist_agent() -> CompiledStateGraph:
             "Built the main EvoScientist graph in %.0f ms.",
             elapsed_ms,
         )
+    _current_graph = agent
     return agent
 
 
@@ -323,26 +339,25 @@ def _apply_filter_to_all_registered_graphs() -> None:
 
 _apply_filter_to_all_registered_graphs()
 
-# Build the main agent eagerly, at import. langgraph-api imports this module
-# from a worker thread during startup (``_graph_from_spec`` runs under
-# ``run_in_executor``), so paying the ~1 s construction here keeps it off the
-# event loop and off the first request — the same startup profile this module
-# had before it became a factory. Every later call is a cache hit unless the
-# expert registry moved.
+# Build and publish the main agent eagerly, at import. langgraph-api imports
+# this module from a worker thread during startup (``_graph_from_spec`` runs
+# under ``run_in_executor``), so the construction is off the event loop here
+# and off the first request. Without it the first request would find
+# ``_current_graph`` unset and fail until the refresher's startup pass landed.
 #
 # Guarded because this is a warm-up, not the build of record. Letting it
 # propagate would turn any transient construction failure into a
-# ``GraphLoadError`` that stops the dev server outright, when the factory
-# would simply retry on the first request. It also keeps importing this
+# ``GraphLoadError`` that stops the dev server outright, when the background
+# refresher's startup pass would simply retry. It also keeps importing this
 # module — to check the ``langgraph.json`` contract, say — from requiring a
 # working model configuration.
 try:
-    make_EvoScientist_agent()
+    refresh_main_graph()
 except Exception:
     _logger.exception(
-        "Eager main-agent build at import failed; deferring to the first "
-        "request through make_EvoScientist_agent()."
+        "Eager main-agent build at import failed; the background refresher "
+        "will retry on startup."
     )
 
 
-__all__ = ["make_EvoScientist_agent"]
+__all__ = ["make_EvoScientist_agent", "refresh_main_graph"]

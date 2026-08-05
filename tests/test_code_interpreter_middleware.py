@@ -255,16 +255,16 @@ def test_agent_uses_filtered_graph_class():
     ``Pregel.copy(update=...)`` — the call langgraph-api makes in
     ``get_graph`` before yielding the graph to endpoint handlers.
 
-    The swap lives inside the factory rather than at module level because
-    the factory rebuilds the agent when the expert registry changes; a
+    The swap lives inside ``refresh_main_graph`` rather than at module level
+    because the graph is rebuilt whenever the expert registry changes; a
     one-shot swap at import would leave every rebuilt graph unfiltered.
     """
     from EvoScientist.langgraph_dev.main_graph import (
         _EvoFilteredGraph,
-        make_EvoScientist_agent,
+        refresh_main_graph,
     )
 
-    agent = make_EvoScientist_agent()
+    agent = refresh_main_graph()
     assert isinstance(agent, _EvoFilteredGraph)
     assert isinstance(agent.copy(update={}), _EvoFilteredGraph)
 
@@ -277,6 +277,11 @@ def test_main_graph_entry_is_a_zero_arg_factory():
 
     Zero-arg specifically: ``_classify_factory`` injects a config or a
     ``ServerRuntime`` for any declared parameter.
+
+    Synchronous specifically: ``invoke_factory`` calls it on the event loop,
+    so it must stay a plain function doing no blocking work. An ``async def``
+    would resolve (``as_asynccontextmanager`` awaits coroutines) but would put
+    the whole per-request path through a thread hop for no reason.
     """
     import inspect
     import json
@@ -294,34 +299,48 @@ def test_main_graph_entry_is_a_zero_arg_factory():
     factory = getattr(main_graph, attr)
 
     assert callable(factory)
+    assert not inspect.iscoroutinefunction(factory)
     assert list(inspect.signature(factory).parameters) == []
     # ``{}`` (not ``None``) is what ``is_factory`` keys on for the 0-arg case.
     assert _classify_factory(factory) == {}
 
 
-def test_factory_returns_the_cached_graph_until_experts_change():
-    """A factory is called on every request, so the steady state must be a
-    cache hit — and a changed expert registry must produce a new graph.
+def test_factory_does_no_work_per_request(monkeypatch):
+    """The factory runs on the event loop for every request that touches the
+    graph, including read-only state polls. Any filesystem access there is not
+    merely slow — langgraph-dev's blockbuster guard raises ``BlockingError`` on
+    it. So the factory must return the published graph and nothing else;
+    keeping it current is the background refresher's job.
     """
     from EvoScientist.langgraph_dev.main_graph import (
-        _EvoFilteredGraph,
         make_EvoScientist_agent,
+        refresh_main_graph,
     )
 
-    first = make_EvoScientist_agent()
+    first = refresh_main_graph()
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("the factory must not read the skills tree")
+
+    monkeypatch.setattr(
+        "EvoScientist.tools.skills_manager.list_expert_skills", _explode
+    )
+    monkeypatch.setattr("EvoScientist.tools.skills_manager.list_skills", _explode)
+
+    assert make_EvoScientist_agent() is first
     assert make_EvoScientist_agent() is first
 
-    import EvoScientist.EvoScientist as evo_mod
 
-    original_token = evo_mod._EvoScientist_agent_expert_token
-    try:
-        evo_mod._EvoScientist_agent_expert_token = "stale-token"
-        rebuilt = make_EvoScientist_agent()
-        assert rebuilt is not first
-        assert isinstance(rebuilt, _EvoFilteredGraph)
-    finally:
-        evo_mod._EvoScientist_agent_expert_token = original_token
-        evo_mod._EvoScientist_agent = first
+def test_factory_reports_clearly_when_nothing_is_published(monkeypatch):
+    """If the guarded import-time build failed, the factory must say so rather
+    than build inline — an inline build is exactly the blocking-on-the-loop
+    call this design exists to avoid. The refresher's startup pass retries.
+    """
+    from EvoScientist.langgraph_dev import main_graph
+
+    monkeypatch.setattr(main_graph, "_current_graph", None)
+    with pytest.raises(RuntimeError, match="not built yet"):
+        main_graph.make_EvoScientist_agent()
 
 
 def test_all_registered_graphs_use_filtered_graph_class():
@@ -345,7 +364,15 @@ def test_all_registered_graphs_use_filtered_graph_class():
 
     # Import triggers ``main_graph``'s swap loop.
     from EvoScientist.langgraph_dev import main_graph
-    from EvoScientist.langgraph_dev.main_graph import _EvoFilteredGraph
+    from EvoScientist.langgraph_dev.main_graph import (
+        _EvoFilteredGraph,
+        refresh_main_graph,
+    )
+
+    # The factory only ever returns what the refresher published, so publish
+    # once here — otherwise this asserts against an unbuilt module rather than
+    # against the graph that reaches the endpoints.
+    refresh_main_graph()
 
     config_path = Path(main_graph.__file__).parent / "langgraph.json"
     config = json.loads(config_path.read_text())

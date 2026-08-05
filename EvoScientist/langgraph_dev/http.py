@@ -23,6 +23,8 @@ memory.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -132,9 +134,29 @@ async def get_teams(_request: Request) -> JSONResponse:
     return JSONResponse({"teams": teams})
 
 
+@asynccontextmanager
+async def _lifespan(app: Starlette) -> AsyncIterator[None]:
+    """Custom-app lifespan, merged with langgraph-api's own.
+
+    ``langgraph_api.server`` combines this with its base lifespan, so it is the
+    supported place to own a background task for the deploy process. It must be
+    ``lifespan=`` and not ``on_startup`` — ``validate_router_lifespan_hooks``
+    refuses to merge a router that declares those.
+
+    Imported here rather than at module scope so importing this module (to
+    resolve the ``http`` entry in ``langgraph.json``) does not pull in the
+    agent-build machinery.
+    """
+    from .registry_refresh import expert_registry_refresher
+
+    async with expert_registry_refresher(app):
+        yield
+
+
 app = Starlette(
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),
-    ]
+    ],
+    lifespan=_lifespan,
 )
