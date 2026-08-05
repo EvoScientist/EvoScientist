@@ -94,10 +94,11 @@ _MCP_TOOLS_CACHE_VALUE: dict[str, list] | None = None
 # spawning subprocesses at import time.
 _EvoScientist_agent = None
 # ``dispatchable_experts_token()`` at the time ``_EvoScientist_agent`` was
-# built. Compared on every access so a mid-session ``skill_manager install
-# <expert>`` rebuilds the agent instead of leaving an expert set frozen at
-# construction time. Written only inside ``_get_default_agent``'s build
-# block, so it cannot drift from the agent it describes.
+# built. Compared on every access so a mid-session change to the expert set
+# — an install, or an expert written straight onto the workspace skills
+# tier — rebuilds the agent instead of leaving it frozen at construction
+# time. Written only inside ``_get_default_agent``'s build block, so it
+# cannot drift from the agent it describes.
 _EvoScientist_agent_expert_token: str | None = None
 
 
@@ -1077,8 +1078,9 @@ def _get_default_agent():
 
     **Rebuilds when the expert registry changes.** ``task`` and
     ``start_async_task`` resolve ``subagent_type`` against dicts frozen
-    inside ``create_deep_agent``, so an expert installed after this agent
-    was built is unreachable until it is rebuilt. Comparing
+    inside ``create_deep_agent``, so an expert that appears — or whose
+    actor definition changes — after this agent was built is unreachable,
+    or reachable with a stale persona, until it is rebuilt. Comparing
     ``dispatchable_experts_token()`` against the value the cached agent was
     built at makes that rebuild happen on next access — the pull-side
     equivalent of the ``_replace_chat_model`` null-out, and the mechanism

@@ -39,9 +39,12 @@ def _dispatchable_experts() -> list[SkillInfo]:
     the /expert popup and invite-accept path only ever surface names
     that will actually reach ``ActiveTeamMiddleware``'s cue.
 
-    ``list_dispatchable_experts`` memoises on ``skills_epoch()``, so the
-    popup stays responsive per keystroke and a freshly installed expert
-    appears without this module holding a second cache of its own.
+    ``list_dispatchable_experts`` is memoised, so the popup stays
+    responsive per keystroke without this module holding a second cache of
+    its own. The memo is restamped at every turn boundary by
+    ``dispatchable_experts_token``, so an expert that appeared mid-session
+    is offered here from the next turn on — whether it arrived by install
+    or was written straight onto the workspace skills tier.
     """
     try:
         from ...subagents.expert_container import list_dispatchable_experts

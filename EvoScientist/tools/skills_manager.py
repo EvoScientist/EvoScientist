@@ -60,10 +60,14 @@ _logger = logging.getLogger(__name__)
 #
 # The invariant lives here instead, in two shapes over one publish point:
 #
-# - ``skills_epoch()`` — pull. What every in-tree consumer uses: the
-#   dispatchable-expert memo, the agent build token, and through it the
-#   TUI/CLI in-place agent rebuild and the deployed graph factory. A
-#   consumer with no natural place to subscribe from just compares it.
+# - ``skills_epoch()`` — pull. Compared by the dispatchable-expert memo,
+#   whose job is keeping a skills-tree walk off the model-call path. It
+#   counts install/uninstall calls, which makes it the right key for that
+#   memo and the wrong one for deciding whether a *built agent* is stale:
+#   an expert can also be authored or edited straight onto the writable
+#   workspace skills tier, which never reaches this publish point. That
+#   decision belongs to ``expert_container.dispatchable_experts_token``,
+#   which walks the tree rather than reading a counter.
 # - ``register_skills_changed_callback`` — push, for a consumer that must
 #   act at mutation time rather than at next read. No in-tree subscriber
 #   currently needs that; the hook is kept because it is the documented
@@ -77,11 +81,10 @@ _logger = logging.getLogger(__name__)
 _skills_changed_callbacks: list[Callable[[], None]] = []
 
 # Monotonic counter advanced by every ``_notify_skills_changed`` call. The
-# pull-side counterpart to the callback list above: consumers that cache
-# derived skill data but have no natural place to subscribe from (module
-# globals rebuilt lazily, per-request graph factories) compare this value
-# against the one their cache was built at instead of registering a
-# callback. Same invariant, same single publish point — a caller that
+# pull-side counterpart to the callback list above: a consumer that caches
+# derived skill data but has no natural place to subscribe from compares
+# this value against the one its cache was built at instead of registering
+# a callback. Same invariant, same single publish point — a caller that
 # forgets to notify breaks both mechanisms identically, so there is only
 # one thing to get right.
 _skills_epoch = 0
@@ -91,9 +94,12 @@ def skills_epoch() -> int:
     """Return the current skills-mutation counter.
 
     Advances on every ``install_skill`` / ``uninstall_skill`` call. Callers
-    treat it as an opaque cache key: equal value means no skill was
-    installed or uninstalled since, so anything derived from the skill set
-    is still valid.
+    treat it as an opaque cache key, and an equal value means exactly what
+    it says — no skill was installed or uninstalled since — which is not
+    the same as "the skill set is unchanged". Edits written straight to the
+    writable workspace skills tier bypass both entry points and leave this
+    counter still. A cache that must survive those needs a content read,
+    not this counter; see ``expert_container.dispatchable_experts_token``.
     """
     return _skills_epoch
 

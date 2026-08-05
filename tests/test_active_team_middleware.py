@@ -297,9 +297,10 @@ def test_cue_does_not_walk_the_skills_tree_per_model_call(mock_get_config):
 
     ``modify_request`` runs inside ``awrap_model_call``; a ``list_skills``
     ``iterdir`` + SKILL.md parse there is synchronous I/O on the event
-    loop. The memo makes repeat turns a dict lookup — and, because the
-    same epoch drives the agent rebuild, it reports the expert set the
-    running agent was actually built from.
+    loop. The memo makes repeat turns a dict lookup — and, because
+    ``dispatchable_experts_token`` restamps that memo with the same walk
+    that decides whether to rebuild, it reports the expert set the running
+    agent was actually built from.
     """
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm"]},
@@ -328,9 +329,13 @@ def test_cue_does_not_walk_the_skills_tree_per_model_call(mock_get_config):
 
 @patch("langgraph.config.get_config")
 def test_cue_picks_up_a_newly_installed_expert(mock_get_config):
-    """An install advances ``skills_epoch``, which drops the memo — the same
-    signal that rebuilds the agent, so the cue and the reachable set move
-    together.
+    """An install advances ``skills_epoch``, which drops the memo the cue
+    reads.
+
+    This pins the install path specifically. The agent rebuild is driven
+    by ``dispatchable_experts_token``, not by the epoch, which is what
+    also covers experts that appear without an install — see
+    ``TestDispatchableExpertsTokenSeesMidRunEdits``.
     """
     from EvoScientist.tools import skills_manager
 

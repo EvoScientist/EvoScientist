@@ -198,18 +198,26 @@ def make_EvoScientist_agent() -> CompiledStateGraph:
     """Graph factory for the ``EvoScientist`` entry in ``langgraph.json``.
 
     Called by langgraph-api on every request that touches the graph
-    (``get_graph`` → ``invoke_factory``), so it must be cheap in the steady
-    state and it must not do its own caching: ``_get_default_agent`` already
-    returns the same compiled object until the expert registry changes, at
-    which point it rebuilds. Adding a second cache here would only be able
-    to go stale.
+    (``get_graph`` → ``invoke_factory``), and it must not do its own
+    caching: ``_get_default_agent`` already returns the same compiled
+    object until the expert registry changes, at which point it rebuilds.
+    Adding a second cache here would only be able to go stale.
 
-    The rebuild runs synchronously on the event loop, so the one request
-    following a ``skill_manager install <expert>`` pays for it. That is the
-    price of the guarantee this factory exists to provide — returning the
-    stale graph and rebuilding in the background would mean the very next
-    turn still can't reach the new expert. It is logged with its elapsed
-    time so the cost is visible rather than inferred.
+    Steady-state cost is one skills-tree walk per request — what
+    ``dispatchable_experts_token`` charges to answer "did the expert set
+    change?". The walk cannot be replaced by a cheaper counter: an expert
+    can be authored or edited straight onto the writable workspace skills
+    tier without ever calling ``install_skill``, and that is a first-class
+    flow (the agent itself writes there when asked for a new expert), not a
+    corner case. Before this factory existed the equivalent walk ran on
+    every *model call*, so this remains a large net reduction.
+
+    A rebuild runs synchronously on the event loop, so the first request
+    after the expert set changes pays for it. That is the price of the
+    guarantee this factory exists to provide — returning the stale graph
+    and rebuilding in the background would mean the very next turn still
+    can't reach the new expert. It is logged with its elapsed time so the
+    cost is visible rather than inferred.
 
     Zero-arg on purpose: ``langgraph_api._factory_utils._classify_factory``
     reads the signature, and any parameter would make it inject a config or

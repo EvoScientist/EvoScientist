@@ -180,10 +180,11 @@ def _reset_dispatchable_experts_cache():
     install / uninstall. Tests instead patch ``list_expert_skills`` or
     write skill directories straight to a tmpdir, neither of which moves
     the epoch — so without this the second test to run sees the first
-    test's fakes. Autouse rather than opt-in because the memo is read
-    transitively (the ``/expert`` popup, the active-expert cue, the agent
-    build token), so an opt-in fixture would have to be remembered by
-    tests that never mention the cache.
+    test's fakes. Autouse rather than opt-in because the memo is reached
+    transitively: the ``/expert`` popup and the active-expert cue read it,
+    and ``dispatchable_experts_token`` restamps it on every agent build.
+    An opt-in fixture would have to be remembered by tests that never
+    mention the cache.
     """
     from EvoScientist.subagents import expert_container
 
