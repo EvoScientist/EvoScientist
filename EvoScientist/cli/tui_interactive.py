@@ -646,6 +646,7 @@ def run_textual_interactive(
                 on_progress=self._on_mcp_progress,
                 on_success=self._on_agent_load_success,
                 on_failure=self._on_agent_load_failure,
+                on_rebuild_started=self._on_agent_rebuild_started,
                 on_rebuild_failed=self._on_agent_rebuild_failed,
                 build_token=dispatchable_experts_token,
             )
@@ -732,6 +733,18 @@ def run_textual_interactive(
         def _on_agent_load_failure(self, exc: BaseException) -> None:
             self._append_system(f"Agent failed to load: {exc}", style="red")
             self._finish_loader_widget()
+
+        def _on_agent_rebuild_started(self) -> None:
+            """Explain the pause before an in-place rebuild.
+
+            The rebuild is awaited before the turn runs and takes seconds, with
+            no loader widget (``_reload`` drives ``start`` directly and never
+            mounts one). Without this the UI is silent for the whole wait.
+            """
+            self._append_system(
+                "Picking up new experts; this takes a few seconds.",
+                style="dim",
+            )
 
         def _on_agent_rebuild_failed(self, exc: BaseException) -> None:
             """Report a failed in-place rebuild without claiming the session died.

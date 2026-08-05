@@ -530,9 +530,14 @@ def cmd_interactive(
             f"[/yellow]"
         )
 
+    def _on_agent_rebuild_started() -> None:
+        """Explain the pause before an in-place rebuild (it takes seconds)."""
+        console.print("[dim]Picking up new experts; this takes a few seconds.[/dim]")
+
     agent_loader = BackgroundAgentLoader(
         _load_agent,
         on_progress=_on_mcp_progress,
+        on_rebuild_started=_on_agent_rebuild_started,
         on_rebuild_failed=_on_agent_rebuild_failed,
         build_token=dispatchable_experts_token,
     )

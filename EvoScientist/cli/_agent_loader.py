@@ -102,6 +102,7 @@ class BackgroundAgentLoader(Generic[AgentT]):
         on_progress: ProgressCallback | None = None,
         on_success: SuccessCallback | None = None,
         on_failure: FailureCallback | None = None,
+        on_rebuild_started: Callable[[], None] | None = None,
         on_rebuild_failed: FailureCallback | None = None,
         build_token: Callable[[], Any] | None = None,
     ) -> None:
@@ -109,6 +110,7 @@ class BackgroundAgentLoader(Generic[AgentT]):
         self._on_progress = on_progress
         self._on_success = on_success
         self._on_failure = on_failure
+        self._on_rebuild_started = on_rebuild_started
         self._on_rebuild_failed = on_rebuild_failed
         self._build_token = build_token
         self.agent: AgentT | None = None
@@ -263,6 +265,11 @@ class BackgroundAgentLoader(Generic[AgentT]):
         assert self._last_kwargs is not None
         previous = self.agent
         stale_token = self._agent_token
+        # Announced before the await, not after: the rebuild blocks the turn
+        # for seconds and the UI is otherwise silent for all of it, which
+        # reads as a hang rather than as work.
+        if self._on_rebuild_started is not None:
+            self._on_rebuild_started()
         self._reloading = True
         try:
             # ``start`` re-reads the token itself, so it is not passed in —
