@@ -14,7 +14,7 @@ import lazy_loader as _lazy
 
 __getattr__, __dir__, __all__ = _lazy.attach(
     __name__,
-    submodules=["context_window", "models", "patches"],
+    submodules=["context_window", "models", "patches", "registry"],
     submod_attrs={
         "context_window": [
             "DEFAULT_CONTEXT_WINDOW_FALLBACK",
@@ -22,9 +22,12 @@ __getattr__, __dir__, __all__ = _lazy.attach(
             "resolve_context_window",
         ],
         "models": [
+            "get_chat_model",
+        ],
+        # Registry data resolves without the langchain/provider-SDK stack.
+        "registry": [
             "DEFAULT_MODEL",
             "MODELS",
-            "get_chat_model",
             "get_model_info",
             "get_models_for_provider",
             "list_models",

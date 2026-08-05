@@ -6,15 +6,15 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
-from langgraph.types import Command
-
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
+    from langgraph.types import Command
 
     from ..middleware.events import SessionEvents
 
 GraphEvent: TypeAlias = dict[str, Any]
-GraphRunInput: TypeAlias = str | Command
+# String alias keeps this module langgraph-free at import time (~950 modules).
+GraphRunInput: TypeAlias = "str | Command"
 GraphStateValues: TypeAlias = dict[str, Any]
 DEFAULT_GRAPH_ID = "EvoScientist"
 

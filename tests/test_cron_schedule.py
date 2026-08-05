@@ -204,6 +204,7 @@ requirements = [
     assert manager._read_workspace_sidecar() == {
         "workspace": str(workspace),
         "pid": 12345,
+        "owner_pids": [os.getpid()],
     }
 
     runtime.pid_file.write_text(str(os.getpid()), encoding="utf-8")

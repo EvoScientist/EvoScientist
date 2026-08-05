@@ -21,8 +21,6 @@ from ..gateway import (
     GraphGateway,
     GraphTarget,
     RunRequest,
-    RuntimeGateways,
-    create_runtime_gateways,
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
@@ -67,6 +65,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from ..config import EvoScientistConfig
+    from ..gateway import RuntimeGateways
 
 
 _ASYNC_RUNTIME_META_KEY = "evoscientist.async_runtime"
@@ -913,7 +912,7 @@ class ServeRuntimeState:
     thread_id: str
     workspace_dir: str | None
     config: "EvoScientistConfig | None"
-    runtime_gateways: RuntimeGateways
+    runtime_gateways: "RuntimeGateways"
     async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
 
@@ -1512,6 +1511,8 @@ def serve(
         )
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
+
+    from ..gateway import create_runtime_gateways
 
     runtime_gateways = create_runtime_gateways()
     tid = async_runtime.run_sync(
@@ -2357,6 +2358,7 @@ def _main_callback(
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
 
+        from ..gateway import create_runtime_gateways
         from ..sessions import get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import _wait_for_memory_workers_before_exit, cmd_run

@@ -544,6 +544,42 @@ async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
         return await cur.fetchone() is not None
 
 
+async def _ensure_thread_meta_index(conn: aiosqlite.Connection) -> None:
+    """Create the expression index behind thread listing, if missing.
+
+    ``list_threads`` filters + groups on ``json_extract(metadata, ...)``;
+    without an index SQLite scans every checkpoint row, dragging each row's
+    multi-KB checkpoint blob through the page cache (~1.3s on a 700MB DB vs
+    ~0.1s indexed). Not a true covering index — SQLite still fetches
+    ``metadata`` for the selected expressions — but the index-ordered search
+    avoids the full-table blob scan, which is where the time went. One-time
+    build on an existing DB is sub-second (measured ~0.2s on 700MB), well
+    inside concurrent writers' 5s busy timeout. Best-effort: a locked DB
+    just means this listing runs unindexed.
+    """
+    try:
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_evoscientist_thread_meta
+            ON checkpoints (
+                json_extract(metadata, '$.agent_name'),
+                thread_id,
+                json_extract(metadata, '$.updated_at'),
+                json_extract(metadata, '$.graph_id'),
+                json_extract(metadata, '$.workspace_dir'),
+                json_extract(metadata, '$.model')
+            )
+            """
+        )
+        await conn.commit()
+    except aiosqlite.Error:
+        _logger.debug("Could not ensure thread meta index", exc_info=True)
+        try:
+            await conn.rollback()
+        except aiosqlite.Error:
+            pass
+
+
 def _reduce_messages_delta(
     state: list[AnyMessage] | None, writes: list[Any]
 ) -> list[AnyMessage]:
@@ -889,6 +925,7 @@ async def list_threads(
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return []
+        await _ensure_thread_meta_index(conn)
 
         query = f"""
             SELECT thread_id,

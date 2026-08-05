@@ -244,6 +244,12 @@ class EvoScientistConfig:
     # slowdown.
     langgraph_dev_jobs_per_worker: int = 10
 
+    # Keep the auto-started langgraph dev subprocess running after the CLI
+    # exits. The next `EvoSci` start in the same workspace reuses it instantly
+    # instead of paying the cold boot (~15s); a start in a DIFFERENT workspace
+    # reclaims and restarts it automatically once no other CLI is using it.
+    langgraph_dev_keepalive: bool = False
+
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
     # ``agent.invoke()`` — i.e., this is per-turn, NOT per-conversation. For
@@ -810,6 +816,7 @@ _ENV_MAPPINGS = {
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
+    "langgraph_dev_keepalive": "EVOSCIENTIST_LANGGRAPH_DEV_KEEPALIVE",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
     "memory_profile_enabled": "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
     "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",

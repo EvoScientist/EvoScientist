@@ -177,8 +177,15 @@ class WorkspaceMismatchError(RuntimeError):
     """
 
 
-def _write_workspace_sidecar(workspace_dir: Path, pid: int) -> None:
+def _write_workspace_sidecar(
+    workspace_dir: Path, pid: int, owner_pids: list[int] | None = None
+) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
+
+    ``owner_pids`` lists the CLI processes currently relying on this server
+    (defaults to the calling process). It lets a later CLI in a different
+    workspace distinguish a keepalive leftover (all owners exited → safe to
+    reclaim) from a server another live session depends on.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -195,13 +202,62 @@ def _write_workspace_sidecar(workspace_dir: Path, pid: int) -> None:
         RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
         tmp.write_text(
-            json.dumps({"workspace": str(workspace_dir), "pid": pid}), encoding="utf-8"
+            json.dumps(
+                {
+                    "workspace": str(workspace_dir),
+                    "pid": pid,
+                    "owner_pids": (
+                        owner_pids if owner_pids is not None else [os.getpid()]
+                    ),
+                }
+            ),
+            encoding="utf-8",
         )
         os.replace(tmp, RUNTIME.workspace_sidecar)
     except OSError as exc:
         logger.warning(
             "Failed to write workspace sidecar %s: %s", RUNTIME.workspace_sidecar, exc
         )
+
+
+def _sidecar_live_owners(sidecar: dict) -> list[int] | None:
+    """Return the still-alive owner CLI pids recorded in the sidecar.
+
+    ``None`` means the sidecar predates owner tracking — callers must stay
+    conservative (treat the server as possibly in use). PID recycling can only
+    make a dead owner look alive, which fails toward the safe side (refuse).
+    """
+    owners = sidecar.get("owner_pids")
+    if not isinstance(owners, list):
+        return None
+    # Any malformed entry (bool, string, null, ≤0) means the record can't be
+    # trusted — return "unknown" rather than letting corruption authorize a
+    # reclaim by looking like "all owners dead".
+    if not all(
+        isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 for pid in owners
+    ):
+        return None
+    return [pid for pid in owners if psutil.pid_exists(pid)]
+
+
+def _sidecar_register_owner() -> None:
+    """Add this process to the sidecar's owner list, pruning dead owners.
+
+    Called on the cross-process reuse path so a keepalive server adopted by a
+    new CLI is not mistaken for an unowned leftover by a third session.
+    Callers hold the ensure file lock, so read-modify-write here is safe.
+    """
+    sidecar = _read_workspace_sidecar()
+    if sidecar is None:
+        return
+    live = _sidecar_live_owners(sidecar) or []
+    if os.getpid() not in live:
+        live.append(os.getpid())
+    try:
+        recorded_pid = int(sidecar.get("pid") or 0)
+    except (TypeError, ValueError):
+        recorded_pid = 0
+    _write_workspace_sidecar(Path(sidecar["workspace"]), recorded_pid, owner_pids=live)
 
 
 def _read_workspace_sidecar() -> dict | None:
@@ -513,6 +569,67 @@ def _kill_owned_stale_process(port: int) -> bool:
 
     try:
         proc.kill()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    try:
+        RUNTIME.pid_file.unlink()
+    except OSError:
+        pass
+    _unlink_workspace_sidecar()
+    return True
+
+
+def _kill_owned_leftover_server(port: int, expected_pid: int | None = None) -> bool:
+    """Kill the healthy-but-orphaned langgraph dev recorded in our PID file.
+
+    Used by the keepalive reclaim path (workspace changed, every owner CLI
+    has exited). Unlike ``_kill_owned_stale_process`` this must not depend on
+    mapping the port to a PID: system-wide ``psutil.net_connections`` needs
+    root on macOS, so that check can never pass there. Ownership identity =
+    our PID file, agreement with the sidecar's recorded server pid
+    (``expected_pid``, when available), and a live process whose cmdline
+    contains both ``langgraph`` and the configured port (anti PID-recycling;
+    ``start_langgraph_dev`` always passes ``--port``). Kills the whole
+    process tree — langgraph dev spawns worker children — and removes the
+    PID file + sidecar so the caller can start fresh.
+    """
+    if not RUNTIME.pid_file.exists():
+        return False
+    try:
+        owned_pid = int(RUNTIME.pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if expected_pid is not None and owned_pid != expected_pid:
+        # PID file and sidecar disagree — mixed process generations (e.g. an
+        # unlocked deploy start overwrote one of them). Refuse: we can no
+        # longer prove which server the workspace check applied to.
+        return False
+    try:
+        proc = psutil.Process(owned_pid)
+        cmdline = proc.cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    if not any("langgraph" in arg for arg in cmdline):
+        return False
+    if str(port) not in cmdline:
+        return False
+
+    try:
+        for child in proc.children(recursive=True):
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except psutil.TimeoutExpired:
+            for child in proc.children(recursive=True):
+                try:
+                    child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            proc.kill()
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
     try:
@@ -1010,6 +1127,7 @@ def _ensure_langgraph_dev_locked(
         _wait_for_port_release(port)
         _ASYNC_SUBAGENTS_AVAILABLE = False  # cleared until restart succeeds
 
+    reclaimed_leftover = False
     if is_langgraph_dev_running(port=port):
         # If WE own the running process AND it's still alive, workspace was
         # already verified above via _PROCESS_WORKSPACE comparison. Otherwise
@@ -1026,19 +1144,47 @@ def _ensure_langgraph_dev_locked(
             if sidecar is not None:
                 recorded = Path(sidecar["workspace"]).resolve()
                 if recorded != ws_path.resolve():
-                    raise WorkspaceMismatchError(
-                        f"An EvoSci langgraph dev is already running on "
-                        f"{_base_url(port)} for workspace {recorded}, but the "
-                        f"current process requested workspace {ws_path}. "
-                        f"Stop the other EvoSci session (deploy / TUI / serve) "
-                        f"or rerun with --workdir {recorded}."
+                    # Keepalive leftover: every CLI recorded as an owner has
+                    # exited, and the PID-file + cmdline check confirms the
+                    # server is ours — reclaim it for the new workspace. A
+                    # live owner, a pre-feature sidecar (owners unknown), or
+                    # a failed ownership check keeps the hard refusal.
+                    sidecar_pid = sidecar.get("pid")
+                    if _sidecar_live_owners(
+                        sidecar
+                    ) == [] and _kill_owned_leftover_server(
+                        port,
+                        expected_pid=(
+                            sidecar_pid
+                            if isinstance(sidecar_pid, int)
+                            and not isinstance(sidecar_pid, bool)
+                            else None
+                        ),
+                    ):
+                        logger.info(
+                            "Reclaiming leftover langgraph dev (workspace %s -> "
+                            "%s): all owner CLIs have exited.",
+                            recorded,
+                            ws_path,
+                        )
+                        _wait_for_port_release(port)
+                        reclaimed_leftover = True
+                    else:
+                        raise WorkspaceMismatchError(
+                            f"An EvoSci langgraph dev is already running on "
+                            f"{_base_url(port)} for workspace {recorded}, but the "
+                            f"current process requested workspace {ws_path}. "
+                            f"Stop the other EvoSci session (deploy / TUI / serve) "
+                            f"or rerun with --workdir {recorded}."
+                        )
+                else:
+                    _sidecar_register_owner()
+                    logger.info(
+                        "Reusing externally-managed langgraph dev on %s; sidecar "
+                        "confirms matching workspace %s.",
+                        _base_url(port),
+                        recorded,
                     )
-                logger.info(
-                    "Reusing externally-managed langgraph dev on %s; sidecar "
-                    "confirms matching workspace %s.",
-                    _base_url(port),
-                    recorded,
-                )
             else:
                 # Pre-feature langgraph dev — no sidecar to verify against.
                 # Fall back to the original log-warning behavior so users
@@ -1053,8 +1199,9 @@ def _ensure_langgraph_dev_locked(
                 )
         else:
             logger.info("langgraph dev already running on %s, reusing", _base_url(port))
-        _ASYNC_SUBAGENTS_AVAILABLE = True
-        return None
+        if not reclaimed_leftover:
+            _ASYNC_SUBAGENTS_AVAILABLE = True
+            return None
 
     try:
         proc = start_langgraph_dev(
@@ -1078,5 +1225,10 @@ def _ensure_langgraph_dev_locked(
         return None
 
     _ASYNC_SUBAGENTS_AVAILABLE = True
-    atexit.register(stop_langgraph_dev, proc)
+    if getattr(config, "langgraph_dev_keepalive", False):
+        # Keepalive: leave the server (plus PID file + sidecar) behind on CLI
+        # exit so the next start in this workspace reuses it instantly.
+        logger.info("langgraph_dev_keepalive enabled — server will outlive this CLI.")
+    else:
+        atexit.register(stop_langgraph_dev, proc)
     return proc

@@ -62,6 +62,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         RUNTIME,
         _is_port_occupied,
         _read_workspace_sidecar,
+        _sidecar_register_owner,
         is_langgraph_dev_running,
         start_langgraph_dev,
         stop_langgraph_dev,
@@ -150,6 +151,9 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                     f"[/dim]"
                 )
                 raise typer.Exit(1)
+            # Register as a live owner so a different-workspace CLI's keepalive
+            # reclaim never kills the server out from under this WebUI session.
+            _sidecar_register_owner()
             console.print(
                 f"[green]✓[/green] Reusing langgraph dev already serving "
                 f"port {backend_port}"
