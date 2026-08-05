@@ -29,56 +29,26 @@ from ..manager import manager
 if TYPE_CHECKING:
     from ...tools.skills_manager import SkillInfo
 
-_dispatchable_experts_cache: list[SkillInfo] | None = None
-
-
-def invalidate_experts_cache() -> None:
-    """Reset the /expert dispatchable-experts cache.
-
-    Called after ``install_skill`` / ``uninstall_skill`` mutations so a
-    freshly installed expert shows up in the /expert popup on the next
-    keystroke.
-    """
-    global _dispatchable_experts_cache
-    _dispatchable_experts_cache = None
-
-
-def _subscribe_cache_invalidation() -> None:
-    """Register with ``skills_manager`` so every install/uninstall path
-    (slash commands, agent ``skill_manager`` @tool, onboarding) busts
-    the /expert popup — no caller has to remember.
-    """
-    try:
-        from ...tools.skills_manager import register_skills_changed_callback
-
-        register_skills_changed_callback(invalidate_experts_cache)
-    except Exception:
-        # ``skills_manager`` not importable in some early-init contexts;
-        # cache staleness is a UX inconvenience, not a correctness bug.
-        pass
-
-
-_subscribe_cache_invalidation()
-
 
 def _dispatchable_experts() -> list[SkillInfo]:
-    """Cached list of experts that /expert can safely invite.
+    """Experts that /expert can safely invite.
 
     Filters ``list_expert_skills`` down to those that pass the same
     empty-body + name-collision guards ``build_expert_subagent_specs``
     and ``_fold_expert_subagents`` apply at agent-construction time, so
     the /expert popup and invite-accept path only ever surface names
     that will actually reach ``ActiveTeamMiddleware``'s cue.
-    """
-    global _dispatchable_experts_cache
-    if _dispatchable_experts_cache is None:
-        try:
-            from ...subagents.expert_container import list_dispatchable_experts
 
-            _dispatchable_experts_cache = list_dispatchable_experts(include_system=True)
-        except Exception:
-            return []
-    return _dispatchable_experts_cache
+    ``list_dispatchable_experts`` memoises on ``skills_epoch()``, so the
+    popup stays responsive per keystroke and a freshly installed expert
+    appears without this module holding a second cache of its own.
+    """
+    try:
+        from ...subagents.expert_container import list_dispatchable_experts
+
+        return list_dispatchable_experts(include_system=True)
+    except Exception:
+        return []
 
 
 class ExpertsCommand(Command):
@@ -224,12 +194,6 @@ class ExpertCommand(Command):
         else:
             runtime.active_teams = [*runtime.active_teams, target]
             ctx.ui.append_system(f"Invited expert: {target}", style="green")
-            # Case (c): expert was installed after agent construction, so it
-            # will not reach ``task()`` until the graph is rebuilt. Cheap
-            # always-print hint mirrors the /install-skill success message.
-            ctx.ui.append_system(
-                "If just installed, run /new to activate it.", style="dim"
-            )
         if runtime.active_teams:
             ctx.ui.append_system(
                 f"Active: {', '.join(runtime.active_teams)}", style="dim"

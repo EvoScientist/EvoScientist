@@ -169,3 +169,26 @@ def _isolate_dotenv(monkeypatch):
         "EvoScientist.config.settings.find_dotenv",
         lambda *args, **kwargs: _NONEXISTENT_DOTENV,
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_dispatchable_experts_cache():
+    """Drop the epoch-keyed dispatchable-experts memo around every test.
+
+    ``expert_container.list_dispatchable_experts`` invalidates on
+    ``skills_manager.skills_epoch()``, which only advances on a real
+    install / uninstall. Tests instead patch ``list_expert_skills`` or
+    write skill directories straight to a tmpdir, neither of which moves
+    the epoch — so without this the second test to run sees the first
+    test's fakes. Autouse rather than opt-in because the memo is read
+    transitively (the ``/expert`` popup, the active-expert cue, the agent
+    build token), so an opt-in fixture would have to be remembered by
+    tests that never mention the cache.
+    """
+    from EvoScientist.subagents import expert_container
+
+    expert_container._reset_dispatchable_experts_cache()
+    try:
+        yield
+    finally:
+        expert_container._reset_dispatchable_experts_cache()

@@ -35,6 +35,7 @@ from ..gateway import (
 from ..paths import DATA_DIR
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
+from ..subagents.expert_container import dispatchable_experts_token
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
     DANGEROUS_BANNER_LABEL,
@@ -635,11 +636,17 @@ def run_textual_interactive(
         ) -> None:
             super().__init__()
             self._progress_tracker = MCPProgressTracker()
+            # ``build_token`` makes an expert installed mid-session
+            # dispatchable on the next turn: the loader rebuilds the agent
+            # in place (same thread, same checkpointer) when the expert
+            # registry changes, so ``task`` / ``start_async_task`` can
+            # reach the new expert without ``/new``.
             self._agent_loader = BackgroundAgentLoader(
                 load_agent,
                 on_progress=self._on_mcp_progress,
                 on_success=self._on_agent_load_success,
                 on_failure=self._on_agent_load_failure,
+                build_token=dispatchable_experts_token,
             )
             self._mcp_loader_widget: Any = None
             self._conversation_tid = thread_id_value

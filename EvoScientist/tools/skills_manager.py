@@ -53,16 +53,49 @@ _logger = logging.getLogger(__name__)
 #
 # ``install_skill`` and ``uninstall_skill`` are called from six places today:
 # three slash commands, two paths in the agent's ``skill_manager`` @tool, and
-# the onboarding step. Consumers that cache skill data (currently the
-# /expert completion popup) need to invalidate on every mutation, and wiring
-# that at each caller site was the "vibes and hope" pattern reviewers rightly
-# called out on PR #371 — the next caller silently reintroduces staleness.
+# the onboarding step. Consumers that cache skill data need to invalidate on
+# every mutation, and wiring that at each caller site was the "vibes and hope"
+# pattern reviewers rightly called out on PR #371 — the next caller silently
+# reintroduces staleness.
 #
-# The invariant lives here instead: any subscriber registered via
-# ``register_skills_changed_callback`` is fired after every install / uninstall
-# call, so no caller has to remember.
+# The invariant lives here instead, in two shapes over one publish point:
+#
+# - ``skills_epoch()`` — pull. What every in-tree consumer uses: the
+#   dispatchable-expert memo, the agent build token, and through it the
+#   TUI/CLI in-place agent rebuild and the deployed graph factory. A
+#   consumer with no natural place to subscribe from just compares it.
+# - ``register_skills_changed_callback`` — push, for a consumer that must
+#   act at mutation time rather than at next read. No in-tree subscriber
+#   currently needs that; the hook is kept because it is the documented
+#   extension point and removing it would leave the next such consumer
+#   re-deriving it at a caller site, which is the pattern this block exists
+#   to prevent.
+#
+# Both are driven by ``_notify_skills_changed`` below, so a caller that
+# forgets to publish breaks them identically — one thing to get right.
 
 _skills_changed_callbacks: list[Callable[[], None]] = []
+
+# Monotonic counter advanced by every ``_notify_skills_changed`` call. The
+# pull-side counterpart to the callback list above: consumers that cache
+# derived skill data but have no natural place to subscribe from (module
+# globals rebuilt lazily, per-request graph factories) compare this value
+# against the one their cache was built at instead of registering a
+# callback. Same invariant, same single publish point — a caller that
+# forgets to notify breaks both mechanisms identically, so there is only
+# one thing to get right.
+_skills_epoch = 0
+
+
+def skills_epoch() -> int:
+    """Return the current skills-mutation counter.
+
+    Advances on every ``install_skill`` / ``uninstall_skill`` call. Callers
+    treat it as an opaque cache key: equal value means no skill was
+    installed or uninstalled since, so anything derived from the skill set
+    is still valid.
+    """
+    return _skills_epoch
 
 
 def register_skills_changed_callback(callback: Callable[[], None]) -> None:
@@ -85,11 +118,16 @@ def _reset_skills_changed_callbacks() -> None:
 
 
 def _notify_skills_changed() -> None:
-    """Fire every registered callback.
+    """Advance ``skills_epoch`` and fire every registered callback.
+
+    The epoch is bumped first so a callback that reads it during the
+    notification already sees the post-mutation value.
 
     Exceptions are logged but swallowed so a misbehaving subscriber can't
     break the install/uninstall return path.
     """
+    global _skills_epoch
+    _skills_epoch += 1
     for cb in _skills_changed_callbacks:
         try:
             cb()

@@ -22,6 +22,7 @@ rather than a per-expert YAML.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -198,6 +199,35 @@ def _reserved_subagent_names() -> frozenset[str]:
     return _reserved_subagent_names_cache
 
 
+# Epoch-keyed memo for ``list_dispatchable_experts`` and the token derived
+# from it. Keyed on ``(skills_epoch(), include_system)``: an entry stays
+# valid until a skill is installed or uninstalled, which is the only way
+# the dispatchable set can change through a supported path.
+#
+# The cache exists because the active-expert cue reads this list on EVERY
+# model call, including inside ``awrap_model_call``. Uncached, that is a
+# full ``iterdir`` + SKILL.md parse of the skills tree on the async
+# model-call path.
+_dispatchable_cache_key: tuple[int, bool] | None = None
+_dispatchable_cache_value: list[SkillInfo] | None = None
+_dispatchable_cache_token: str | None = None
+
+
+def _reset_dispatchable_experts_cache() -> None:
+    """Test hook: drop the epoch-keyed dispatchable-experts memo.
+
+    Production code never needs this — the epoch key invalidates itself.
+    Tests that patch ``list_expert_skills`` mutate the skill set without
+    touching the epoch, so they must reset explicitly (see the autouse
+    fixture in ``tests/conftest.py``).
+    """
+    global _dispatchable_cache_key, _dispatchable_cache_value
+    global _dispatchable_cache_token
+    _dispatchable_cache_key = None
+    _dispatchable_cache_value = None
+    _dispatchable_cache_token = None
+
+
 def list_dispatchable_experts(
     *, include_system: bool = True, cfg: Any | None = None
 ) -> list[SkillInfo]:
@@ -214,13 +244,24 @@ def list_dispatchable_experts(
     failure mode that made installed experts vanish whenever langgraph
     dev was unhealthy.
 
+    Memoised on ``skills_epoch()`` — see ``_dispatchable_cache_key``. The
+    returned list is a fresh copy so a caller sorting or filtering it in
+    place can't corrupt the next reader's view.
+
     ``cfg`` is accepted and ignored; kept so callers that thread config
     through don't have to special-case this one. Read-only filter —
     construction-time warnings for empty-body / colliding experts are
     emitted by ``build_expert_subagent_specs`` and
     ``_fold_expert_subagents`` respectively, so nothing is logged here.
     """
-    from ..tools.skills_manager import list_expert_skills
+    global _dispatchable_cache_key, _dispatchable_cache_value
+    global _dispatchable_cache_token
+
+    from ..tools.skills_manager import list_expert_skills, skills_epoch
+
+    key = (skills_epoch(), include_system)
+    if key == _dispatchable_cache_key and _dispatchable_cache_value is not None:
+        return list(_dispatchable_cache_value)
 
     reserved = _reserved_subagent_names()
     dispatchable: list[SkillInfo] = []
@@ -230,7 +271,52 @@ def list_dispatchable_experts(
         if info.name in reserved:
             continue
         dispatchable.append(info)
-    return dispatchable
+
+    _dispatchable_cache_key = key
+    _dispatchable_cache_value = dispatchable
+    # Recomputed lazily by ``dispatchable_experts_token`` under the new key.
+    _dispatchable_cache_token = None
+    return list(dispatchable)
+
+
+def dispatchable_experts_token(*, include_system: bool = True) -> str:
+    """Fingerprint of the expert registry an agent would be built from.
+
+    Answers one question for every cache of a *constructed* agent: would
+    rebuilding right now change which experts ``task`` / ``start_async_task``
+    can reach, or what any of them is prompted with? Callers hold the
+    previous value and rebuild when it differs.
+
+    Covers name and actor definition, because both are baked into the
+    frozen in-turn spec at ``create_deep_agent`` time
+    (``build_expert_subagent_spec`` bakes ``system_prompt``). Hashing the
+    body — not just the name set — is what makes a reinstall that only
+    edits an expert's AGENTS.md refresh the stale sync spec.
+
+    Deliberately narrower than ``skills_epoch()``: installing a utility
+    skill advances the epoch but leaves this token unchanged, so it costs
+    a skills-tree walk rather than a full agent rebuild. Utility skills
+    are already live through the ``/skills/`` mount and need no rebuild.
+
+    Memoised on the same epoch key as ``list_dispatchable_experts``, whose
+    cached ``SkillInfo`` bodies it reads — so a steady-state call does no
+    disk I/O.
+    """
+    global _dispatchable_cache_token
+
+    experts = list_dispatchable_experts(include_system=include_system)
+    if _dispatchable_cache_token is not None:
+        return _dispatchable_cache_token
+
+    digest = hashlib.sha256()
+    # Sorted so filesystem iteration order can't produce a spurious change.
+    for info in sorted(experts, key=lambda s: s.name):
+        digest.update(info.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(expert_prompt_body(info).encode("utf-8"))
+        digest.update(b"\0")
+    _dispatchable_cache_token = digest.hexdigest()
+    return _dispatchable_cache_token
 
 
 def build_expert_subagent_specs(

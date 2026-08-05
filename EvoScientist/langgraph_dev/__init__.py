@@ -5,7 +5,8 @@ Holds everything needed to run the EvoScientist agent ecosystem on a local
 
 - ``manager`` — subprocess lifecycle (auto-start, port management, cleanup).
 - ``langgraph.json`` — graph manifest consumed by ``langgraph dev --config``.
-- ``main_graph`` — re-export of the lazy-loaded ``EvoScientist_agent``.
+- ``main_graph`` — graph factory for the lazy-loaded ``EvoScientist_agent``,
+  rebuilt when the installed expert set changes.
 - ``graphs`` — module-level bindings for every yaml-flagged async sub-agent
   (``async: true`` in ``EvoScientist/subagents/<name>.yaml``).
 

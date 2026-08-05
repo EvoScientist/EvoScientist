@@ -285,3 +285,83 @@ def test_default_middleware_excludes_active_team_for_async_subagent(
 
 def test_factory_returns_middleware_instance():
     assert isinstance(create_active_team_middleware(), ActiveTeamMiddleware)
+
+
+# ---- registry reads on the model-call path --------------------------------
+
+
+@patch("langgraph.config.get_config")
+def test_cue_does_not_walk_the_skills_tree_per_model_call(mock_get_config):
+    """The cue renders from the epoch-keyed registry memo, not a fresh
+    filesystem read.
+
+    ``modify_request`` runs inside ``awrap_model_call``; a ``list_skills``
+    ``iterdir`` + SKILL.md parse there is synchronous I/O on the event
+    loop. The memo makes repeat turns a dict lookup — and, because the
+    same epoch drives the agent rebuild, it reports the expert set the
+    running agent was actually built from.
+    """
+    mock_get_config.return_value = {
+        "configurable": {"active_teams": ["idea-brainstorm"]},
+    }
+    expert = SimpleNamespace(
+        name="idea-brainstorm",
+        description="d",
+        path=None,
+        source="builtin",
+        type="expert",
+        role="",
+        body="persona\n",
+        expert_source="",
+        agents_body="",
+    )
+    middleware = ActiveTeamMiddleware()
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        return_value=[expert],
+    ) as listing:
+        for _ in range(3):
+            text = _system_text(middleware.modify_request(_request()))
+            assert "`idea-brainstorm`" in text
+    assert listing.call_count == 1
+
+
+@patch("langgraph.config.get_config")
+def test_cue_picks_up_a_newly_installed_expert(mock_get_config):
+    """An install advances ``skills_epoch``, which drops the memo — the same
+    signal that rebuilds the agent, so the cue and the reachable set move
+    together.
+    """
+    from EvoScientist.tools import skills_manager
+
+    mock_get_config.return_value = {
+        "configurable": {"active_teams": ["fresh-expert"]},
+    }
+
+    def _expert(name):
+        return SimpleNamespace(
+            name=name,
+            description="d",
+            path=None,
+            source="builtin",
+            type="expert",
+            role="",
+            body="persona\n",
+            expert_source="",
+            agents_body="",
+        )
+
+    middleware = ActiveTeamMiddleware()
+    with patch("EvoScientist.tools.skills_manager.list_expert_skills", return_value=[]):
+        text = _system_text(middleware.modify_request(_request()))
+    # The concept still injects; only the invite block waits on the install.
+    assert "## Experts" in text
+    assert "The user has invited" not in text
+
+    skills_manager._notify_skills_changed()
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        return_value=[_expert("fresh-expert")],
+    ):
+        text = _system_text(middleware.modify_request(_request()))
+    assert "`fresh-expert`" in text

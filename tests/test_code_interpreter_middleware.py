@@ -250,18 +250,78 @@ def test_agent_uses_filtered_graph_class():
     that makes ``_strip_private`` reach the langgraph-api endpoints.
     ``_strip_private`` and ``_EvoFilteredGraph`` in isolation don't prove the
     swap ran; every other test in this file passes even if someone drops the
-    swap line. This asserts the compiled agent is actually the filtered
-    subclass at module-load time, and that the subclass survives
+    swap line. This asserts the graph the factory hands langgraph-api is
+    actually the filtered subclass, and that the subclass survives
     ``Pregel.copy(update=...)`` — the call langgraph-api makes in
     ``get_graph`` before yielding the graph to endpoint handlers.
+
+    The swap lives inside the factory rather than at module level because
+    the factory rebuilds the agent when the expert registry changes; a
+    one-shot swap at import would leave every rebuilt graph unfiltered.
     """
     from EvoScientist.langgraph_dev.main_graph import (
-        EvoScientist_agent,
         _EvoFilteredGraph,
+        make_EvoScientist_agent,
     )
 
-    assert isinstance(EvoScientist_agent, _EvoFilteredGraph)
-    assert isinstance(EvoScientist_agent.copy(update={}), _EvoFilteredGraph)
+    agent = make_EvoScientist_agent()
+    assert isinstance(agent, _EvoFilteredGraph)
+    assert isinstance(agent.copy(update={}), _EvoFilteredGraph)
+
+
+def test_main_graph_entry_is_a_zero_arg_factory():
+    """``langgraph.json``'s ``EvoScientist`` entry must resolve to a callable
+    langgraph-api classifies as a factory, otherwise the graph is collected
+    into ``GRAPHS`` once at startup and an expert installed mid-session stays
+    unreachable in the WebUI until the dev subprocess restarts.
+
+    Zero-arg specifically: ``_classify_factory`` injects a config or a
+    ``ServerRuntime`` for any declared parameter.
+    """
+    import inspect
+    import json
+    from pathlib import Path
+
+    from langgraph_api._factory_utils import _classify_factory
+
+    from EvoScientist.langgraph_dev import main_graph
+
+    config = json.loads(
+        (Path(main_graph.__file__).parent / "langgraph.json").read_text()
+    )
+    module_path, attr = config["graphs"]["EvoScientist"].rsplit(":", 1)
+    assert module_path == main_graph.__name__
+    factory = getattr(main_graph, attr)
+
+    assert callable(factory)
+    assert list(inspect.signature(factory).parameters) == []
+    # ``{}`` (not ``None``) is what ``is_factory`` keys on for the 0-arg case.
+    assert _classify_factory(factory) == {}
+
+
+def test_factory_returns_the_cached_graph_until_experts_change():
+    """A factory is called on every request, so the steady state must be a
+    cache hit — and a changed expert registry must produce a new graph.
+    """
+    from EvoScientist.langgraph_dev.main_graph import (
+        _EvoFilteredGraph,
+        make_EvoScientist_agent,
+    )
+
+    first = make_EvoScientist_agent()
+    assert make_EvoScientist_agent() is first
+
+    import EvoScientist.EvoScientist as evo_mod
+
+    original_token = evo_mod._EvoScientist_agent_expert_token
+    try:
+        evo_mod._EvoScientist_agent_expert_token = "stale-token"
+        rebuilt = make_EvoScientist_agent()
+        assert rebuilt is not first
+        assert isinstance(rebuilt, _EvoFilteredGraph)
+    finally:
+        evo_mod._EvoScientist_agent_expert_token = original_token
+        evo_mod._EvoScientist_agent = first
 
 
 def test_all_registered_graphs_use_filtered_graph_class():
@@ -292,6 +352,11 @@ def test_all_registered_graphs_use_filtered_graph_class():
     for name, path in config["graphs"].items():
         module_path, attr = path.rsplit(":", 1)
         graph = getattr(import_module(module_path), attr)
+        # Factory entries (the main agent) are resolved the same way
+        # langgraph-api resolves them — by calling them — so the assertion
+        # covers the graph that actually reaches the endpoints.
+        if callable(graph):
+            graph = graph()
         assert isinstance(graph, _EvoFilteredGraph), (
             f"graph {name!r} ({path}) did not receive the class swap"
         )

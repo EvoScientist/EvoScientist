@@ -91,14 +91,23 @@ def _read_active_teams() -> list[str]:
 def _dispatchable_names() -> set[str]:
     """Return the names of experts the orchestrator can currently reach.
 
-    Fresh filesystem read every call so a ``skill_manager install <expert>``
-    is visible on the next turn without an agent rebuild. Cheap at current
-    scale (a handful of skills, cached bodies).
-
     Sourced from ``list_dispatchable_experts``, which drops empty-body
     experts and names colliding with reserved sub-agents. Keeps the cue
     honest: naming an expert the model cannot reach is worse than saying
     nothing.
+
+    That list is memoised on ``skills_epoch()``, so this is a dict lookup
+    on the steady-state model-call path rather than a skills-tree walk —
+    it runs inside ``awrap_model_call``, where synchronous filesystem and
+    YAML work would block the event loop.
+
+    The same epoch drives the agent rebuild (see
+    ``expert_container.dispatchable_experts_token`` and its callers in
+    ``cli/_agent_loader.py`` / ``EvoScientist.py``), which is what makes
+    the cue honest rather than merely current: by the time a turn reaches
+    the model, the running agent was built from the same expert set this
+    list reports. An expert installed mid-turn is named from the next turn
+    on — the turn where it also becomes dispatchable.
 
     On import failure returns an empty set — the middleware then emits no
     cue, matching the outside-runnable-context no-op path.

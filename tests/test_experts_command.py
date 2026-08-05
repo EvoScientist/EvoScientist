@@ -6,25 +6,16 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import patch
 
-import pytest
-
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.commands.implementation.experts import (
     ExpertCommand,
     ExpertsCommand,
-    invalidate_experts_cache,
 )
 
-
-@pytest.fixture(autouse=True)
-def _bust_experts_cache_between_tests():
-    """The dispatchable-experts cache in ``experts.py`` is module-level; without
-    resetting it, a test that patches ``list_expert_skills`` sees the previous
-    test's fakes.
-    """
-    invalidate_experts_cache()
-    yield
-    invalidate_experts_cache()
+# The dispatchable-experts memo these commands read through is reset around
+# every test by the autouse ``_reset_dispatchable_experts_cache`` fixture in
+# ``tests/conftest.py`` — without it, a test that patches
+# ``list_expert_skills`` would see the previous test's fakes.
 
 
 class _FakeUI:
@@ -169,6 +160,19 @@ class TestExpertToggle:
             await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
         assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
         assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
+
+    async def test_invite_does_not_tell_the_user_to_run_new(self):
+        """The agent rebuilds itself when the expert registry changes, so
+        an invite must not send the user through ``/new`` — which would
+        activate the expert at the cost of the conversation.
+        """
+        ctx, ui = _make_ctx()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_FakeSkillInfo(name="idea-brainstorm")],
+        ):
+            await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
+        assert not any("/new" in text for text, _ in ui.lines)
 
     async def test_toggle_dismisses_when_already_invited(self):
         ctx, ui = _make_ctx(active_teams=["idea-brainstorm"])

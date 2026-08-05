@@ -1,12 +1,21 @@
 """Deployed graph entry for the main EvoScientist agent.
 
-The main ``EvoScientist_agent`` is exposed via ``__getattr__`` lazy loading
-in ``EvoScientist/EvoScientist.py`` so it doesn't construct on plain
-``import EvoScientist``. ``langgraph dev`` 's symbol resolver inspects
-module attributes directly and doesn't trigger ``__getattr__``, so we
-re-export here to make it visible.
+Registered in ``langgraph.json`` as ``make_EvoScientist_agent`` — a
+zero-arg **graph factory**, not a compiled graph. langgraph-api collects a
+compiled graph into its ``GRAPHS`` registry once at startup and never
+re-reads the source module, but it calls a factory on every request
+(``langgraph_api.graph.get_graph`` → ``invoke_factory``). Since the deploy
+subprocess is launched ``--no-reload``, the factory is the only way an
+expert installed mid-session becomes dispatchable there without restarting
+the server: see ``EvoScientist.EvoScientist._get_default_agent``, which
+rebuilds itself when the expert registry changes and which the factory
+simply forwards to.
 
-Before re-export we upgrade the compiled graph's class in place to
+The agent itself is exposed via ``__getattr__`` lazy loading in
+``EvoScientist/EvoScientist.py`` so it doesn't construct on plain ``import
+EvoScientist``; the factory triggers that load.
+
+Before handing the graph over we upgrade its class in place to
 ``_EvoFilteredGraph``, which strips ``PrivateStateAttr``-marked fields
 (currently just ``_quickjs_snapshot_payload``) from ``get_state`` /
 ``get_state_history`` responses. Upstream ``langchain_quickjs`` annotates
@@ -18,10 +27,13 @@ closes the gap without touching the middleware's write path, preserving
 cross-turn REPL persistence as ``langchain-ai/deepagents#3064`` shipped it.
 """
 
+import logging
+import time
+
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import PregelTask, StateSnapshot
 
-from EvoScientist.EvoScientist import EvoScientist_agent as _agent
+_logger = logging.getLogger(__name__)
 
 _PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
 
@@ -182,12 +194,45 @@ class _EvoFilteredGraph(CompiledStateGraph):
             yield _strip_private(snap)
 
 
-# In-place ``__class__`` swap: the subclass adds only methods (no new
-# instance attributes) so the memory layout is identical and the swap is
-# safe. Constructing a fresh ``_EvoFilteredGraph`` via ``.copy()`` would
-# require reproducing the deep-agent build pipeline; the swap avoids that.
-_agent.__class__ = _EvoFilteredGraph
-EvoScientist_agent = _agent
+def make_EvoScientist_agent() -> CompiledStateGraph:
+    """Graph factory for the ``EvoScientist`` entry in ``langgraph.json``.
+
+    Called by langgraph-api on every request that touches the graph
+    (``get_graph`` → ``invoke_factory``), so it must be cheap in the steady
+    state and it must not do its own caching: ``_get_default_agent`` already
+    returns the same compiled object until the expert registry changes, at
+    which point it rebuilds. Adding a second cache here would only be able
+    to go stale.
+
+    The rebuild runs synchronously on the event loop, so the one request
+    following a ``skill_manager install <expert>`` pays for it. That is the
+    price of the guarantee this factory exists to provide — returning the
+    stale graph and rebuilding in the background would mean the very next
+    turn still can't reach the new expert. It is logged with its elapsed
+    time so the cost is visible rather than inferred.
+
+    Zero-arg on purpose: ``langgraph_api._factory_utils._classify_factory``
+    reads the signature, and any parameter would make it inject a config or
+    a ``ServerRuntime`` we have no use for.
+    """
+    started = time.perf_counter()
+    from EvoScientist.EvoScientist import _get_default_agent
+
+    agent = _get_default_agent()
+    # In-place ``__class__`` swap: the subclass adds only methods (no new
+    # instance attributes) so the memory layout is identical and the swap
+    # is safe. Constructing a fresh ``_EvoFilteredGraph`` via ``.copy()``
+    # would require reproducing the deep-agent build pipeline; the swap
+    # avoids that. Idempotent, so re-running it on the cached graph costs
+    # one ``isinstance`` check.
+    if not isinstance(agent, _EvoFilteredGraph):
+        agent.__class__ = _EvoFilteredGraph
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _logger.info(
+            "Built the main EvoScientist graph in %.0f ms.",
+            elapsed_ms,
+        )
+    return agent
 
 
 def _apply_filter_to_all_registered_graphs() -> None:
@@ -202,13 +247,16 @@ def _apply_filter_to_all_registered_graphs() -> None:
 
     Async subagents get their own ``thread_id`` and their ``/threads/{id}/state``
     endpoint is served by their own compiled graph. Without swapping the
-    class on those graphs, the filter we applied to ``EvoScientist_agent``
-    doesn't reach that endpoint and any real code_interpreter touch inside
-    a subagent leaks the anchor snapshot verbatim.
+    class on those graphs, the filter ``make_EvoScientist_agent`` applies to
+    the main agent doesn't reach that endpoint and any real code_interpreter
+    touch inside a subagent leaks the anchor snapshot verbatim.
 
     Reads the graph registry straight from ``langgraph.json`` so a new
     subagent added to the config picks up the swap automatically — no
-    hardcoded list to keep in sync.
+    hardcoded list to keep in sync. The main agent's own entry resolves to
+    a factory rather than a compiled graph, so the ``isinstance`` guard
+    below skips it; ``make_EvoScientist_agent`` swaps it instead, on every
+    graph it returns.
 
     Idempotent (skips graphs already swapped) and safe on graphs that don't
     use the middleware — ``_strip_private`` returns snapshots unchanged when
@@ -244,5 +292,13 @@ def _apply_filter_to_all_registered_graphs() -> None:
 
 _apply_filter_to_all_registered_graphs()
 
+# Build the main agent eagerly, at import. langgraph-api imports this module
+# from a worker thread during startup (``_graph_from_spec`` runs under
+# ``run_in_executor``), so paying the ~1 s construction here keeps it off the
+# event loop and off the first request — the same startup profile this module
+# had before it became a factory. Every later call is a cache hit unless the
+# expert registry moved.
+make_EvoScientist_agent()
 
-__all__ = ["EvoScientist_agent"]
+
+__all__ = ["make_EvoScientist_agent"]

@@ -45,6 +45,7 @@ from ..gateway import (
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
+from ..subagents.expert_container import dispatchable_experts_token
 from . import async_notifier
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
@@ -505,9 +506,14 @@ def cmd_interactive(
                 f"[red]failed:[/red] {escape(detail)}"
             )
 
+    # ``build_token`` makes an expert installed mid-session dispatchable on
+    # the next turn: the loader rebuilds the agent in place (same thread,
+    # same checkpointer) when the expert registry changes, so ``task`` /
+    # ``start_async_task`` can reach the new expert without ``/new``.
     agent_loader = BackgroundAgentLoader(
         _load_agent,
         on_progress=_on_mcp_progress,
+        build_token=dispatchable_experts_token,
     )
 
     # One frontend event sink for the whole session — injected into the agent's

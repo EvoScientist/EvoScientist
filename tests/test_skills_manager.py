@@ -24,6 +24,7 @@ from EvoScientist.tools.skills_manager import (
     list_skills_by_tag,
     register_skills_changed_callback,
     resolve_remote_head,
+    skills_epoch,
     uninstall_skill,
 )
 
@@ -1850,3 +1851,51 @@ class TestSkillsChangedCallback:
         result = install_skill("/nonexistent/path", str(temp_skills_dir))
         assert result["success"] is False
         assert good == [True]
+
+
+class TestSkillsEpoch:
+    """``skills_epoch`` is the pull-side half of the skills-changed contract.
+
+    Consumers that can't subscribe (lazily-rebuilt module globals, the
+    per-request langgraph graph factory) compare it instead, so it has to
+    advance on exactly the paths the callbacks fire on.
+    """
+
+    def test_epoch_advances_on_install(self, sample_skill_dir, temp_skills_dir):
+        before = skills_epoch()
+        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        assert skills_epoch() > before
+
+    def test_epoch_advances_on_failed_install(self, temp_skills_dir):
+        """Same as the callbacks: notification is in a ``finally``.
+
+        An install that fails part-way can still have written files, so a
+        failure return is not evidence that nothing changed.
+        """
+        before = skills_epoch()
+        result = install_skill("/nonexistent/path", str(temp_skills_dir))
+        assert result["success"] is False
+        assert skills_epoch() > before
+
+    def test_epoch_advances_on_uninstall(self):
+        before = skills_epoch()
+        uninstall_skill("nonexistent-skill")
+        assert skills_epoch() > before
+
+    def test_epoch_is_stable_without_mutations(self):
+        assert skills_epoch() == skills_epoch()
+
+    def test_callbacks_observe_the_new_epoch(
+        self, isolated_skills_changed_callbacks, temp_skills_dir
+    ):
+        """The bump lands before subscribers run.
+
+        A subscriber that caches against the epoch would otherwise stamp
+        its refreshed value with the pre-mutation counter and go stale
+        immediately.
+        """
+        before = skills_epoch()
+        seen: list[int] = []
+        register_skills_changed_callback(lambda: seen.append(skills_epoch()))
+        install_skill("/nonexistent/path", str(temp_skills_dir))
+        assert seen == [before + 1]

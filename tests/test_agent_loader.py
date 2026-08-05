@@ -335,3 +335,149 @@ class TestBackgroundAgentLoaderIsPending:
         wait_loader.release.set()
         await loader.await_ready()
         assert not loader.is_pending
+
+
+class TestBackgroundAgentLoaderBuildToken:
+    """``build_token`` is what makes a mid-session ``skill_manager install
+    <expert>`` reach ``task()`` on the next turn: every pre-turn agent
+    access in both UIs goes through ``await_ready``, so the staleness check
+    lives there instead of in each turn loop.
+    """
+
+    def _counting_loader(self, calls: list[dict]):
+        def _loader(*, on_mcp_progress=None, **kwargs):
+            calls.append(kwargs)
+            return f"AGENT{len(calls)}"
+
+        return _loader
+
+    async def test_no_rebuild_while_the_token_is_unchanged(self):
+        calls: list[dict] = []
+        loader = BackgroundAgentLoader(
+            self._counting_loader(calls), build_token=lambda: "t0"
+        )
+
+        loader.start(workspace_dir="/ws")
+        assert await loader.await_ready() == "AGENT1"
+        assert await loader.await_ready() == "AGENT1"
+        assert len(calls) == 1
+
+    async def test_rebuild_replays_the_original_kwargs(self):
+        """The rebuild must reuse the session's checkpointer, workspace and
+        event sink — that is what keeps the conversation intact, unlike
+        ``/new``, which rotates the thread.
+        """
+        calls: list[dict] = []
+        token = {"value": "t0"}
+        loader = BackgroundAgentLoader(
+            self._counting_loader(calls), build_token=lambda: token["value"]
+        )
+
+        loader.start(workspace_dir="/ws", checkpointer="CK", events="SINK")
+        assert await loader.await_ready() == "AGENT1"
+
+        token["value"] = "t1"
+        assert await loader.await_ready() == "AGENT2"
+        assert calls == [
+            {"workspace_dir": "/ws", "checkpointer": "CK", "events": "SINK"},
+            {"workspace_dir": "/ws", "checkpointer": "CK", "events": "SINK"},
+        ]
+
+    async def test_rebuild_happens_once_per_token_change(self):
+        calls: list[dict] = []
+        token = {"value": "t0"}
+        loader = BackgroundAgentLoader(
+            self._counting_loader(calls), build_token=lambda: token["value"]
+        )
+
+        loader.start()
+        await loader.await_ready()
+        token["value"] = "t1"
+        await loader.await_ready()
+        await loader.await_ready()
+        assert len(calls) == 2
+
+    async def test_failed_rebuild_keeps_serving_the_previous_agent(self, caplog):
+        """A broken install must degrade to "the new expert isn't there yet",
+        never to a dead session.
+        """
+        token = {"value": "t0"}
+        loader = BackgroundAgentLoader(
+            _make_loader_fn("GOOD"), build_token=lambda: token["value"]
+        )
+
+        loader.start()
+        assert await loader.await_ready() == "GOOD"
+
+        loader._loader_fn = _make_loader_fn(fail_with=RuntimeError("bad skill"))
+        token["value"] = "t1"
+        assert await loader.await_ready() == "GOOD"
+        assert loader.agent == "GOOD"
+        assert any("Agent rebuild failed" in r.message for r in caplog.records)
+
+    async def test_failed_rebuild_is_not_retried_until_inputs_change_again(self):
+        """Otherwise every turn pays for a rebuild that is known to fail."""
+        token = {"value": "t0"}
+        loader = BackgroundAgentLoader(
+            _make_loader_fn("GOOD"), build_token=lambda: token["value"]
+        )
+        loader.start()
+        await loader.await_ready()
+
+        attempts: list[int] = []
+
+        def _failing(*, on_mcp_progress=None, **kwargs):
+            attempts.append(1)
+            raise RuntimeError("bad skill")
+
+        loader._loader_fn = _failing
+        token["value"] = "t1"
+        await loader.await_ready()
+        await loader.await_ready()
+        assert len(attempts) == 1
+
+        loader._loader_fn = _make_loader_fn("RECOVERED")
+        token["value"] = "t2"
+        assert await loader.await_ready() == "RECOVERED"
+
+    async def test_adopt_restamps_the_token(self):
+        """``/model`` builds its replacement agent from current inputs, so
+        the next ``await_ready`` must not rebuild it again.
+        """
+        calls: list[dict] = []
+        token = {"value": "t0"}
+        loader = BackgroundAgentLoader(
+            self._counting_loader(calls), build_token=lambda: token["value"]
+        )
+
+        loader.start()
+        await loader.await_ready()
+        token["value"] = "t1"
+        loader.adopt("FROM_MODEL")
+
+        assert await loader.await_ready() == "FROM_MODEL"
+        assert len(calls) == 1
+
+    async def test_no_build_token_never_rebuilds(self):
+        """Loaders constructed without the hook keep the old behaviour."""
+        calls: list[dict] = []
+        loader = BackgroundAgentLoader(self._counting_loader(calls))
+
+        loader.start()
+        await loader.await_ready()
+        await loader.await_ready()
+        assert len(calls) == 1
+
+    async def test_a_raising_token_does_not_strand_the_session(self):
+        """An unreadable token degrades to "unknown", not to a rebuild loop."""
+        calls: list[dict] = []
+
+        def _boom():
+            raise RuntimeError("registry unreadable")
+
+        loader = BackgroundAgentLoader(self._counting_loader(calls), build_token=_boom)
+
+        loader.start()
+        assert await loader.await_ready() == "AGENT1"
+        assert await loader.await_ready() == "AGENT1"
+        assert len(calls) == 1

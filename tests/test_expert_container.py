@@ -8,8 +8,10 @@ from unittest.mock import patch
 
 from EvoScientist.subagents.expert_container import (
     _compose_system_prompt,
+    _reset_dispatchable_experts_cache,
     build_expert_subagent_spec,
     build_expert_subagent_specs,
+    dispatchable_experts_token,
     expert_prompt_body,
     list_dispatchable_experts,
 )
@@ -638,3 +640,144 @@ class TestListDispatchableExpertsSurvivesAsyncOutage:
         ):
             result = list_dispatchable_experts(cfg=cfg)
         assert [s.name for s in result] == ["idea-brainstorm"]
+
+
+# =============================================================================
+# epoch-keyed cache + registry token
+# =============================================================================
+
+
+def _expert(name: str, body: str = "persona body\n") -> SkillInfo:
+    return SkillInfo(
+        name=name,
+        description=f"{name} description",
+        path=Path("/tmp/nope") / name,
+        source="builtin",
+        type="expert",
+        role=f"{name} role",
+        body=body,
+    )
+
+
+class TestDispatchableExpertsCache:
+    """``list_dispatchable_experts`` runs on the async model-call path via
+    the active-expert cue, so it is memoised on ``skills_epoch()`` rather
+    than walking the skills tree per call.
+    """
+
+    def test_second_call_at_same_epoch_does_not_re_read(self):
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ) as listing:
+            first = list_dispatchable_experts()
+            second = list_dispatchable_experts()
+        assert [s.name for s in first] == ["alpha"]
+        assert [s.name for s in second] == ["alpha"]
+        assert listing.call_count == 1
+
+    def test_epoch_bump_re_reads(self):
+        from EvoScientist.tools import skills_manager
+
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha")],
+        ):
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
+        skills_manager._notify_skills_changed()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha"), _expert("beta")],
+        ):
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha", "beta"]
+
+    def test_include_system_is_part_of_the_key(self):
+        """Two callers asking different questions must not share an answer."""
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            side_effect=lambda include_system=True: (
+                [_expert("alpha"), _expert("beta")]
+                if include_system
+                else [_expert("alpha")]
+            ),
+        ):
+            with_system = list_dispatchable_experts(include_system=True)
+            without_system = list_dispatchable_experts(include_system=False)
+        assert [s.name for s in with_system] == ["alpha", "beta"]
+        assert [s.name for s in without_system] == ["alpha"]
+
+    def test_returned_list_is_a_copy(self):
+        """A caller sorting or popping the result can't corrupt the memo."""
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha"), _expert("beta")],
+        ):
+            first = list_dispatchable_experts()
+            first.clear()
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha", "beta"]
+
+
+class TestDispatchableExpertsToken:
+    """The token decides whether a *constructed* agent is stale.
+
+    It must move when — and only when — rebuilding would change which
+    experts ``task`` / ``start_async_task`` reach, or what they are
+    prompted with.
+    """
+
+    def _token_for(self, skills: list[SkillInfo]) -> str:
+        _reset_dispatchable_experts_cache()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=skills,
+        ):
+            return dispatchable_experts_token()
+
+    def test_stable_for_an_unchanged_registry(self):
+        skills = [_expert("alpha"), _expert("beta")]
+        assert self._token_for(skills) == self._token_for(skills)
+
+    def test_changes_when_an_expert_is_added(self):
+        before = self._token_for([_expert("alpha")])
+        after = self._token_for([_expert("alpha"), _expert("beta")])
+        assert before != after
+
+    def test_changes_when_an_expert_is_removed(self):
+        before = self._token_for([_expert("alpha"), _expert("beta")])
+        after = self._token_for([_expert("alpha")])
+        assert before != after
+
+    def test_changes_when_an_actor_definition_is_edited(self):
+        """The in-turn spec bakes the prompt at ``create_deep_agent`` time.
+
+        Without hashing the body, a reinstall that only rewrites an
+        expert's AGENTS.md would leave ``task()`` serving the old persona
+        while the background reach — which resolves the skill at
+        model-call time — served the new one.
+        """
+        before = self._token_for([_expert("alpha", body="original persona\n")])
+        after = self._token_for([_expert("alpha", body="rewritten persona\n")])
+        assert before != after
+
+    def test_ignores_filesystem_ordering(self):
+        alpha, beta = _expert("alpha"), _expert("beta")
+        assert self._token_for([alpha, beta]) == self._token_for([beta, alpha])
+
+    def test_unchanged_by_a_non_expert_skill_install(self):
+        """A utility skill bumps the epoch but must not force a rebuild.
+
+        Utility skills are already live through the ``/skills/`` mount, so
+        charging an agent rebuild for one would be pure cost.
+        """
+        from EvoScientist.tools import skills_manager
+
+        experts = [_expert("alpha")]
+        before = self._token_for(experts)
+        skills_manager._notify_skills_changed()
+        assert self._token_for(experts) == before
+
+    def test_ignores_experts_that_are_not_dispatchable(self):
+        """The token describes the registry, not the skills directory."""
+        with_blank = self._token_for([_expert("alpha"), _expert("blank", body="  \n")])
+        without = self._token_for([_expert("alpha")])
+        assert with_blank == without

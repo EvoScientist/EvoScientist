@@ -85,6 +85,9 @@ class BackgroundAgentLoader(Generic[AgentT]):
     ``on_progress`` fires on the **worker thread**; UI callers hop
     threads inside it if needed.  ``on_success`` / ``on_failure`` fire
     on the event loop when the task completes.
+
+    ``build_token`` makes the seated agent self-invalidating: see
+    :meth:`await_ready`.
     """
 
     def __init__(
@@ -94,14 +97,23 @@ class BackgroundAgentLoader(Generic[AgentT]):
         on_progress: ProgressCallback | None = None,
         on_success: SuccessCallback | None = None,
         on_failure: FailureCallback | None = None,
+        build_token: Callable[[], Any] | None = None,
     ) -> None:
         self._loader_fn = loader_fn
         self._on_progress = on_progress
         self._on_success = on_success
         self._on_failure = on_failure
+        self._build_token = build_token
         self.agent: AgentT | None = None
         self._task: asyncio.Task[AgentT] | None = None
         self._load_id: int = 0
+        # Kwargs of the most recent ``start``, replayed verbatim by the
+        # stale-token reload in ``await_ready``. Everything session-scoped
+        # (checkpointer, event sink, workspace, config object) lives in
+        # here, so replaying them rebuilds the agent without disturbing
+        # the conversation — unlike ``/new``, which rotates the thread.
+        self._last_kwargs: dict[str, Any] | None = None
+        self._agent_token: Any = None
 
     @property
     def task(self) -> asyncio.Task[AgentT] | None:
@@ -127,6 +139,11 @@ class BackgroundAgentLoader(Generic[AgentT]):
         self._load_id += 1
         load_id = self._load_id
         self.agent = None
+        self._last_kwargs = dict(loader_kwargs)
+        # Stamped BEFORE the build, not after: a mutation landing mid-build
+        # may or may not be captured by it, so the pessimistic stamp costs
+        # at most one extra rebuild and never leaves a stale agent seated.
+        self._agent_token = self._read_build_token()
 
         def _gated_progress(event: str, server: str, detail: str) -> None:
             if load_id != self._load_id:
@@ -162,6 +179,25 @@ class BackgroundAgentLoader(Generic[AgentT]):
         self._load_id += 1
         self._task = None
         self.agent = agent
+        # The caller built this agent just now, so it already reflects the
+        # current inputs; without re-stamping, the next ``await_ready``
+        # would rebuild it for a token change it already contains.
+        self._agent_token = self._read_build_token()
+
+    def _read_build_token(self) -> Any:
+        """Evaluate ``build_token``, treating any failure as "unknown".
+
+        A token that can't be computed must not strand the session in a
+        rebuild loop, so it degrades to ``None`` — which compares equal to
+        the ``None`` used when no ``build_token`` was supplied.
+        """
+        if self._build_token is None:
+            return None
+        try:
+            return self._build_token()
+        except Exception:
+            _logger.debug("build_token callback raised", exc_info=True)
+            return None
 
     async def await_ready(self) -> AgentT:
         """Return the loaded agent; re-raises on load failure.
@@ -170,8 +206,24 @@ class BackgroundAgentLoader(Generic[AgentT]):
         ``on_success`` / ``on_failure``) are handled exclusively by
         :meth:`_on_done`, which fires before this ``await`` resumes
         (asyncio guarantees done-callbacks run in registration order).
+
+        When a ``build_token`` was supplied and its value has moved since
+        the seated agent was built, the agent is transparently rebuilt
+        here from the stored ``start`` kwargs.  Every pre-turn agent
+        access in both UIs funnels through this method, which is why the
+        check lives here rather than in each turn loop: an agent input
+        that changes mid-session (a ``skill_manager install`` firing from
+        inside a tool call) takes effect on the next turn without the
+        user running ``/new`` and losing the conversation.
+
+        A failed rebuild keeps the previous agent seated — a broken
+        install must degrade to "the new thing isn't there yet", never to
+        a dead session.
         """
         if self.agent is not None:
+            token = self._read_build_token()
+            if token != self._agent_token and self._last_kwargs is not None:
+                return await self._reload(token)
             return self.agent
         if self._task is None:
             raise RuntimeError(
@@ -181,6 +233,32 @@ class BackgroundAgentLoader(Generic[AgentT]):
         if self.agent is None:
             raise RuntimeError("BackgroundAgentLoader completed without an agent")
         return self.agent
+
+    async def _reload(self, token: Any) -> AgentT:
+        """Rebuild the seated agent in place, falling back to the old one."""
+        assert self._last_kwargs is not None
+        previous = self.agent
+        _logger.info(
+            "Agent inputs changed (build token %r -> %r); rebuilding in place.",
+            self._agent_token,
+            token,
+        )
+        self.start(**self._last_kwargs)
+        try:
+            return await self.await_ready()
+        except Exception:
+            # Re-seat the old agent so the session keeps working. Its
+            # token stays the failed one, so the rebuild is not retried
+            # until the inputs change again — which is also the next
+            # chance for the underlying problem to have been fixed.
+            _logger.warning(
+                "Agent rebuild failed; continuing with the previously loaded "
+                "agent. New inputs will not be visible until the next rebuild.",
+                exc_info=True,
+            )
+            self.agent = previous
+            self._task = None
+            return previous  # type: ignore[return-value]
 
     def _on_done(self, task: asyncio.Task[AgentT], load_id: int) -> None:
         if load_id != self._load_id:

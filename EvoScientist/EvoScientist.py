@@ -93,6 +93,12 @@ _MCP_TOOLS_CACHE_VALUE: dict[str, list] | None = None
 # Lazily constructed on first access so MCP tools are included without
 # spawning subprocesses at import time.
 _EvoScientist_agent = None
+# ``dispatchable_experts_token()`` at the time ``_EvoScientist_agent`` was
+# built. Compared on every access so a mid-session ``skill_manager install
+# <expert>`` rebuilds the agent instead of leaving an expert set frozen at
+# construction time. Written only inside ``_get_default_agent``'s build
+# block, so it cannot drift from the agent it describes.
+_EvoScientist_agent_expert_token: str | None = None
 
 
 # =============================================================================
@@ -1068,8 +1074,31 @@ def _get_default_agent():
     Plain ``from EvoScientist import EvoScientist_agent`` (env var unset)
     loads MCP. Async sub-agents stay disabled in that case because there is
     no langgraph dev server to self-loop into.
+
+    **Rebuilds when the expert registry changes.** ``task`` and
+    ``start_async_task`` resolve ``subagent_type`` against dicts frozen
+    inside ``create_deep_agent``, so an expert installed after this agent
+    was built is unreachable until it is rebuilt. Comparing
+    ``dispatchable_experts_token()`` against the value the cached agent was
+    built at makes that rebuild happen on next access — the pull-side
+    equivalent of the ``_replace_chat_model`` null-out, and the mechanism
+    ``langgraph_dev.main_graph``'s graph factory relies on to serve a
+    current agent per request.
     """
-    global _EvoScientist_agent
+    global _EvoScientist_agent, _EvoScientist_agent_expert_token
+    from .subagents.expert_container import dispatchable_experts_token
+
+    expert_token = dispatchable_experts_token()
+    if (
+        _EvoScientist_agent is not None
+        and _EvoScientist_agent_expert_token != expert_token
+    ):
+        logging.getLogger(__name__).info(
+            "Expert registry changed; rebuilding the default agent so newly "
+            "installed experts are dispatchable."
+        )
+        _EvoScientist_agent = None
+
     if _EvoScientist_agent is None:
         from deepagents import create_deep_agent
 
@@ -1094,6 +1123,7 @@ def _get_default_agent():
             **kwargs,
             interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
         ).with_config({"recursion_limit": cfg.recursion_limit})
+        _EvoScientist_agent_expert_token = expert_token
     return _EvoScientist_agent
 
 

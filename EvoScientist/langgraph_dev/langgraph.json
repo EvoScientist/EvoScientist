@@ -1,7 +1,7 @@
 {
     "dependencies": ["."],
     "graphs": {
-        "EvoScientist": "EvoScientist.langgraph_dev.main_graph:EvoScientist_agent",
+        "EvoScientist": "EvoScientist.langgraph_dev.main_graph:make_EvoScientist_agent",
         "writing-agent": "EvoScientist.langgraph_dev.graphs:writing_agent",
         "data-analysis-agent": "EvoScientist.langgraph_dev.graphs:data_analysis_agent",
         "scheduler": "EvoScientist.langgraph_dev.graphs:scheduler",
