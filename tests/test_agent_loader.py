@@ -440,23 +440,60 @@ class TestBackgroundAgentLoaderBuildToken:
         token["value"] = "t2"
         assert await loader.await_ready() == "RECOVERED"
 
-    async def test_adopt_restamps_the_token(self):
+    async def test_adopt_restamps_the_token_and_publishes(self):
         """``/model`` builds its replacement agent from current inputs, so
-        the next ``await_ready`` must not rebuild it again.
+        the next ``await_ready`` must not rebuild it again — and anything
+        derived from those inputs has to describe the adopted agent, not
+        the one it displaced.
         """
         calls: list[dict] = []
+        published: list[int] = []
         token = {"value": "t0"}
         loader = BackgroundAgentLoader(
-            self._counting_loader(calls), build_token=lambda: token["value"]
+            self._counting_loader(calls),
+            build_token=lambda: token["value"],
+            publish_build=lambda: published.append(1),
         )
 
         loader.start()
         await loader.await_ready()
+        assert len(published) == 1  # the initial load
         token["value"] = "t1"
         loader.adopt("FROM_MODEL")
 
         assert await loader.await_ready() == "FROM_MODEL"
         assert len(calls) == 1
+        assert len(published) == 2
+
+    async def test_a_failed_build_publishes_nothing(self):
+        """The whole point of publishing from the success branch."""
+        published: list[int] = []
+
+        def _fail(**_kwargs):
+            raise RuntimeError("build boom")
+
+        loader = BackgroundAgentLoader(_fail, publish_build=lambda: published.append(1))
+
+        loader.start()
+        with pytest.raises(RuntimeError):
+            await loader.await_ready()
+        assert published == []
+
+    async def test_a_raising_publish_does_not_break_the_load(self):
+        """The agent is already built and serving; a stale side-cache is the
+        lesser failure."""
+        calls: list[dict] = []
+
+        def _boom() -> None:
+            raise RuntimeError("publish boom")
+
+        loader = BackgroundAgentLoader(
+            self._counting_loader(calls), publish_build=_boom
+        )
+
+        loader.start()
+        await loader.await_ready()
+        assert loader.agent is not None
 
     async def test_no_build_token_never_rebuilds(self):
         """Loaders constructed without the hook keep the old behaviour."""

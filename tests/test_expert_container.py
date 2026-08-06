@@ -14,7 +14,7 @@ from EvoScientist.subagents.expert_container import (
     dispatchable_experts_token,
     expert_prompt_body,
     list_dispatchable_experts,
-    rollback_dispatchable_memo,
+    publish_dispatchable_experts,
 )
 from EvoScientist.tools.skills_manager import SkillInfo
 
@@ -855,13 +855,13 @@ class TestDispatchableExpertsTokenSeesMidRunEdits:
             after = dispatchable_experts_token()
         assert before != after
 
-    def test_the_walk_restamps_the_memo_the_cue_reads(self):
-        """Otherwise the cue would under-report what ``task()`` can reach.
+    def test_the_cue_follows_the_rebuild_rather_than_the_edit(self):
+        """Otherwise the cue would mis-report what ``task()`` can reach.
 
         ``_dispatchable_names`` reads the epoch-keyed memo on every model
-        call. At an unchanged epoch it would keep serving the pre-edit list
-        while the rebuilt agent could already dispatch to the new expert.
-        The token's walk restamps the memo so one tree read serves both.
+        call, and an in-session edit never moves the epoch. So the memo has
+        to be written by something — and it matters that the something is
+        the finished rebuild, not the walk that decided to start one.
         """
         _reset_dispatchable_experts_cache()
         with patch(
@@ -872,14 +872,17 @@ class TestDispatchableExpertsTokenSeesMidRunEdits:
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_expert("alpha"), _expert("authored-in-session")],
-        ) as listing:
+        ):
+            # Detection: the agent is still the one built from ``alpha``.
             dispatchable_experts_token()
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
+
+            # The rebuild finished, so now the cue may name the new expert.
+            publish_dispatchable_experts()
             assert [s.name for s in list_dispatchable_experts()] == [
                 "alpha",
                 "authored-in-session",
             ]
-            # One walk, not two: the cue reuses what the token just read.
-            assert listing.call_count == 1
 
     def test_a_stale_memo_never_shadows_the_token(self):
         """The memo is a hot-path optimisation, never the token's source."""
@@ -899,69 +902,50 @@ class TestDispatchableExpertsTokenSeesMidRunEdits:
             assert dispatchable_experts_token() != before
 
 
-class TestRollbackDispatchableMemo:
-    """The token restamps the memo before anyone knows the rebuild worked.
+class TestOnlyASuccessfulBuildStampsTheMemo:
+    """Detection must not advertise ahead of the rebuild it triggers.
 
-    When it didn't, the cue and the ``/expert`` popup would go on naming an
-    expert the still-seated agent cannot route to — the same
-    advertise-versus-provide gap this module exists to close, moved onto the
-    failure branch.
+    Deciding whether to rebuild and announcing the result are separate
+    events with seconds between them, and the rebuild can fail in between.
+    Only the second one may write the memo the cue and the ``/expert``
+    popup read.
     """
 
-    def test_rollback_restores_the_pre_probe_list(self):
-        _reset_dispatchable_experts_cache()
-        with patch(
-            "EvoScientist.tools.skills_manager.list_expert_skills",
-            return_value=[_expert("alpha")],
-        ):
-            # The set the seated agent was built from.
-            list_dispatchable_experts()
-
-        with patch(
-            "EvoScientist.tools.skills_manager.list_expert_skills",
-            return_value=[_expert("alpha"), _expert("beta")],
-        ):
-            # A staleness probe: walks, restamps, decides a rebuild is due.
-            dispatchable_experts_token()
-            assert [s.name for s in list_dispatchable_experts()] == ["alpha", "beta"]
-
-            # The rebuild failed, so the new expert is not reachable.
-            rollback_dispatchable_memo()
-            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
-
-    def test_restamp_false_leaves_the_memo_untouched(self):
-        """Detection must not advertise ahead of the rebuild.
-
-        The background refresher reads the token to decide whether to rebuild,
-        and the rebuild takes seconds. Restamping at detection time would have
-        the active-expert cue naming the new expert for that whole window,
-        while ``task()`` still cannot route to it.
-        """
+    def test_the_token_never_stamps_the_memo(self):
         _reset_dispatchable_experts_cache()
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_expert("alpha")],
         ):
             list_dispatchable_experts()  # the set the seated agent was built from
-            alpha_only = dispatchable_experts_token(restamp=False)
+            alpha_only = dispatchable_experts_token()
 
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_expert("alpha"), _expert("beta")],
         ):
-            with_beta = dispatchable_experts_token(restamp=False)
-            # The cue still reports only what the seated agent can reach...
+            # Reading it repeatedly must stay side-effect-free: the CLI walks
+            # twice per rebuild turn (``await_ready`` then ``start``).
+            with_beta = dispatchable_experts_token()
+            assert dispatchable_experts_token() == with_beta
+            # The cue still reports only what the seated agent can reach.
             assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
 
         # ...while the token is still a real change signal.
         assert with_beta != alpha_only
 
-    def test_rollback_is_safe_before_any_walk(self):
-        """Nothing has been displaced yet; rolling back must not crash."""
+    def test_publish_stamps_the_memo_without_advancing_the_epoch(self):
+        """What a finished rebuild calls, and the only thing that writes."""
         _reset_dispatchable_experts_cache()
-        rollback_dispatchable_memo()
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_expert("alpha")],
         ):
-            assert [s.name for s in list_dispatchable_experts()] == ["alpha"]
+            list_dispatchable_experts()
+
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_expert("alpha"), _expert("beta")],
+        ):
+            publish_dispatchable_experts()
+            assert [s.name for s in list_dispatchable_experts()] == ["alpha", "beta"]

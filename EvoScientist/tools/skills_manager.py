@@ -69,11 +69,10 @@ _logger = logging.getLogger(__name__)
 #   decision belongs to ``expert_container.dispatchable_experts_token``,
 #   which walks the tree rather than reading a counter.
 # - ``register_skills_changed_callback`` — push, for a consumer that must
-#   act at mutation time rather than at next read. No in-tree subscriber
-#   currently needs that; the hook is kept because it is the documented
-#   extension point and removing it would leave the next such consumer
-#   re-deriving it at a caller site, which is the pattern this block exists
-#   to prevent.
+#   act at mutation time rather than at next read. ``langgraph_dev/
+#   registry_refresh.py`` subscribes: it wakes its poll loop immediately on
+#   install/uninstall instead of waiting out the interval. It still polls,
+#   because the silent paths above never reach this publish point.
 #
 # Both are driven by ``_notify_skills_changed`` below, so a caller that
 # forgets to publish breaks them identically — one thing to get right.

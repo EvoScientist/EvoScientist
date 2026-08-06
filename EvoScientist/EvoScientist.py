@@ -1093,16 +1093,19 @@ def _get_default_agent():
 
     **A failed rebuild keeps the previous agent.** Since the graph factory
     calls this per request, raising would take a working deployment to a
-    permanent 500 — and the trigger is now agent-authored content, so a
-    half-written expert would be enough to do it. The degraded state is "the
-    new expert isn't reachable yet", never a dead deployment. A build with no
-    previous agent to fall back on (first access, or after
-    ``_replace_chat_model``) still raises.
+    permanent 500. The expert content itself cannot cause that — every
+    malformed expert is skipped with a warning rather than raising — but the
+    stages a rebuild re-runs around it can: the backends are reconstructed
+    against live paths and the chat model is re-resolved, so a full disk, a
+    revoked credential or an unreachable provider all surface here. The
+    degraded state is "the new expert isn't reachable yet", never a dead
+    deployment. A build with no previous agent to fall back on (first
+    access, or after ``_replace_chat_model``) still raises.
     """
     global _EvoScientist_agent, _EvoScientist_agent_expert_token
     from .subagents.expert_container import (
         dispatchable_experts_token,
-        rollback_dispatchable_memo,
+        publish_dispatchable_experts,
     )
 
     expert_token = dispatchable_experts_token()
@@ -1150,11 +1153,12 @@ def _get_default_agent():
         except Exception:
             if previous is None:
                 raise
-            # A rebuild triggered by a registry change failed. The expert set
-            # is now agent-authored content, so a half-written expert must not
-            # take a working deployment down: the WebUI graph factory calls
-            # this per request, including for read-only state reads, so
-            # re-raising would 500 every one of them.
+            # A rebuild triggered by a registry change failed — on the backend
+            # or chat-model construction it re-runs, since expert content
+            # itself is skip-on-error. Either way it must not take a working
+            # deployment down: the WebUI graph factory calls this per request,
+            # including for read-only state reads, so re-raising would 500
+            # every one of them.
             logging.getLogger(__name__).warning(
                 "Agent rebuild failed; continuing with the previously built "
                 "agent. The new experts will not be reachable until the "
@@ -1168,14 +1172,16 @@ def _get_default_agent():
             # otherwise be paid per HTTP request.
             _EvoScientist_agent = previous
             _EvoScientist_agent_expert_token = expert_token
-            # The token read above already restamped the cue's memo with the
-            # set this build was going to provide. It didn't, so put back the
-            # set ``previous`` was actually built from.
-            rollback_dispatchable_memo()
+            # Nothing to undo: the token read above is side-effect-free and
+            # the cue's memo is only ever stamped below, past this branch.
             return previous
 
         _EvoScientist_agent = agent
         _EvoScientist_agent_expert_token = expert_token
+        # Reached only by a build that produced an agent, which is what makes
+        # the active-expert cue and the ``/expert`` popup describe something
+        # ``task()`` can actually route to.
+        publish_dispatchable_experts()
     return _EvoScientist_agent
 
 

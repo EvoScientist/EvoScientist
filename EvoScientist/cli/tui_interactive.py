@@ -35,7 +35,10 @@ from ..gateway import (
 from ..paths import DATA_DIR
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
-from ..subagents.expert_container import dispatchable_experts_token
+from ..subagents.expert_container import (
+    dispatchable_experts_token,
+    publish_dispatchable_experts,
+)
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
     DANGEROUS_BANNER_LABEL,
@@ -649,6 +652,7 @@ def run_textual_interactive(
                 on_rebuild_started=self._on_agent_rebuild_started,
                 on_rebuild_failed=self._on_agent_rebuild_failed,
                 build_token=dispatchable_experts_token,
+                publish_build=publish_dispatchable_experts,
             )
             self._mcp_loader_widget: Any = None
             self._conversation_tid = thread_id_value
@@ -753,14 +757,11 @@ def run_textual_interactive(
             normally, so this is yellow rather than red and says what was
             actually lost. No loader widget to finish — ``_reload`` drives
             ``start`` directly and never mounts one.
-            """
-            from ..subagents.expert_container import rollback_dispatchable_memo
 
-            # The staleness probe already restamped the cue's memo with the
-            # set this rebuild was going to provide. Put back the set the
-            # still-seated agent was built from, so the expert prompt and the
-            # ``/expert`` popup don't offer something ``task`` can't route.
-            rollback_dispatchable_memo()
+            Nothing to undo here: the cue's memo and the ``/expert`` popup
+            are stamped from the build's success branch, which this rebuild
+            never reached, so both still describe the seated agent.
+            """
             self._append_system(
                 f"Couldn't pick up the new experts yet: {exc}. "
                 "Continuing with the current agent.",

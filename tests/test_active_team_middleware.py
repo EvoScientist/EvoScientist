@@ -298,9 +298,9 @@ def test_cue_does_not_walk_the_skills_tree_per_model_call(mock_get_config):
     ``modify_request`` runs inside ``awrap_model_call``; a ``list_skills``
     ``iterdir`` + SKILL.md parse there is synchronous I/O on the event
     loop. The memo makes repeat turns a dict lookup — and, because
-    ``dispatchable_experts_token`` restamps that memo with the same walk
-    that decides whether to rebuild, it reports the expert set the running
-    agent was actually built from.
+    ``publish_dispatchable_experts`` stamps it from the success branch of
+    every agent build, it reports the expert set the running agent was
+    actually built from.
     """
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm"]},

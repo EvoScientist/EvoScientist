@@ -92,7 +92,10 @@ class BackgroundAgentLoader(Generic[AgentT]):
     pick that up yet" rather than "the load died".
 
     ``build_token`` makes the seated agent self-invalidating: see
-    :meth:`await_ready`.
+    :meth:`await_ready`.  ``publish_build`` is its success-branch twin —
+    fired only once a build has produced an agent, so whatever it publishes
+    describes something that actually exists.  Both are injected rather than
+    imported so this module keeps knowing nothing about experts or skills.
     """
 
     def __init__(
@@ -105,6 +108,7 @@ class BackgroundAgentLoader(Generic[AgentT]):
         on_rebuild_started: Callable[[], None] | None = None,
         on_rebuild_failed: FailureCallback | None = None,
         build_token: Callable[[], Any] | None = None,
+        publish_build: Callable[[], None] | None = None,
     ) -> None:
         self._loader_fn = loader_fn
         self._on_progress = on_progress
@@ -113,6 +117,7 @@ class BackgroundAgentLoader(Generic[AgentT]):
         self._on_rebuild_started = on_rebuild_started
         self._on_rebuild_failed = on_rebuild_failed
         self._build_token = build_token
+        self._publish_build = publish_build
         self.agent: AgentT | None = None
         self._task: asyncio.Task[AgentT] | None = None
         self._load_id: int = 0
@@ -198,6 +203,27 @@ class BackgroundAgentLoader(Generic[AgentT]):
         # current inputs; without re-stamping, the next ``await_ready``
         # would rebuild it for a token change it already contains.
         self._agent_token = self._read_build_token()
+        self._publish_built_agent()
+
+    def _publish_built_agent(self) -> None:
+        """Announce a build that produced an agent.
+
+        Every call site is downstream of a successful construction, which is
+        the whole design: nothing publishes speculatively, so no caller has a
+        failure branch to undo. Swallows and logs rather than propagating —
+        the agent is already built and serving, and a failed publish costs a
+        stale side-cache, not a session.
+        """
+        if self._publish_build is None:
+            return
+        try:
+            self._publish_build()
+        except Exception:
+            _logger.warning(
+                "publish_build callback raised; caches derived from the agent's "
+                "inputs may report a stale set until the next build.",
+                exc_info=True,
+            )
 
     def _read_build_token(self) -> Any:
         """Evaluate ``build_token``, treating any failure as "unknown".
@@ -241,10 +267,12 @@ class BackgroundAgentLoader(Generic[AgentT]):
         inside a tool call) takes effect on the next turn without the
         user running ``/new`` and losing the conversation.
 
-        A failed rebuild keeps the previous agent seated — a broken
-        install must degrade to "the new thing isn't there yet", never to
-        a dead session — and reports through ``on_rebuild_failed`` rather
-        than the fatal ``on_failure``.
+        A failed rebuild keeps the previous agent seated — a rebuild that
+        raises must degrade to "the new thing isn't there yet", never to a
+        dead session — and reports through ``on_rebuild_failed`` rather than
+        the fatal ``on_failure``.  It also leaves ``publish_build`` unfired,
+        so anything derived from the agent's inputs still describes the
+        agent that is actually serving.
         """
         if self.agent is not None:
             token = self._read_build_token()
@@ -272,9 +300,11 @@ class BackgroundAgentLoader(Generic[AgentT]):
             self._on_rebuild_started()
         self._reloading = True
         try:
-            # ``start`` re-reads the token itself, so it is not passed in —
-            # doing so would cost a second full skills-tree walk per rebuild
-            # for a value only ever used in this log line.
+            # ``start`` re-reads the token rather than taking the one
+            # ``await_ready`` just read, so a rebuild turn walks the tree
+            # twice. Both reads are side-effect-free, so the cost is ~18 ms
+            # against a multi-second rebuild and nothing observable depends
+            # on which of the two won.
             self.start(**self._last_kwargs)
             _logger.info(
                 "Agent inputs changed (build token %r -> %r); rebuilding in place.",
@@ -318,5 +348,8 @@ class BackgroundAgentLoader(Generic[AgentT]):
             if self._on_failure is not None and not self._reloading:
                 self._on_failure(exc)
             return
+        # Before ``on_success`` so a UI callback that reads the published set
+        # while rendering sees the agent it is announcing, not the one before.
+        self._publish_built_agent()
         if self._on_success is not None:
             self._on_success(self.agent)

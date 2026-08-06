@@ -71,10 +71,11 @@ async def _refresh_once(last_token: str | None) -> str | None:
     """
     from ..subagents.expert_container import dispatchable_experts_token
 
-    # ``restamp=False``: this is detection only. Restamping here would let the
-    # active-expert cue name the new expert for the whole rebuild, before
-    # ``task()`` can route to it. The rebuild restamps once it succeeds.
-    token = await asyncio.to_thread(dispatchable_experts_token, restamp=False)
+    # Detection only, and the token cannot stamp the cue's memo even if a
+    # caller wanted it to. ``refresh_main_graph`` -> ``_get_default_agent``
+    # stamps on its success branch, so the cue starts naming the new expert
+    # at the moment ``task()`` can route to it — not for the seconds before.
+    token = await asyncio.to_thread(dispatchable_experts_token)
     if token == last_token:
         return last_token
 
@@ -96,8 +97,9 @@ async def _refresh_loop(wake: asyncio.Event) -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Never let one bad pass end the watch — a half-written expert
-            # would otherwise disable refresh for the rest of the process.
+            # Never let one bad pass end the watch — a transient failure in
+            # the surrounding build (backends against live paths, the chat
+            # model) would otherwise disable refresh for the whole process.
             # ``_get_default_agent`` keeps the previous agent seated, so the
             # deployment stays usable; we simply try again next tick.
             _logger.warning(

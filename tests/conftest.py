@@ -182,7 +182,7 @@ def _reset_dispatchable_experts_cache():
     the epoch — so without this the second test to run sees the first
     test's fakes. Autouse rather than opt-in because the memo is reached
     transitively: the ``/expert`` popup and the active-expert cue read it,
-    and ``dispatchable_experts_token`` restamps it on every agent build.
+    and ``publish_dispatchable_experts`` stamps it after every agent build.
     An opt-in fixture would have to be remembered by tests that never
     mention the cache.
     """

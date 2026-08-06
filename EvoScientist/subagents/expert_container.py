@@ -201,9 +201,9 @@ def _reserved_subagent_names() -> frozenset[str]:
 
 # Memo for ``list_dispatchable_experts``, keyed on
 # ``(skills_epoch(), include_system)``. The epoch invalidates it on
-# install/uninstall; ``dispatchable_experts_token`` overwrites it outright on
-# every call, regardless of epoch, which is what lets an edit that never
-# touched the install path reach the readers below.
+# install/uninstall; ``publish_dispatchable_experts`` overwrites it outright,
+# regardless of epoch, which is what lets an edit that never touched the
+# install path reach the readers below.
 #
 # Two readers, both of which would otherwise walk the skills tree:
 # the active-expert cue (``middleware/active_team.py``) on EVERY model call,
@@ -220,48 +220,36 @@ def _reserved_subagent_names() -> frozenset[str]:
 _dispatchable_cache_key: tuple[int, bool] | None = None
 _dispatchable_cache_value: list[SkillInfo] | None = None
 
-# The memo entry displaced by the most recent ``_read_dispatchable_fresh``.
-# Exists so a caller that walked the tree in order to DECIDE on a rebuild can
-# undo the restamp when that rebuild fails — see ``rollback_dispatchable_memo``.
-_dispatchable_memo_prev: tuple[tuple[int, bool] | None, list[SkillInfo] | None] = (
-    None,
-    None,
-)
-
 
 def _reset_dispatchable_experts_cache() -> None:
-    """Test hook: drop the dispatchable-experts memo and its rollback slot.
+    """Test hook: drop the dispatchable-experts memo.
 
     Production code never needs this — the epoch key invalidates itself and
-    the token overwrites it. Tests that patch ``list_expert_skills`` mutate
-    the skill set without touching the epoch, so they must reset explicitly
-    (see the autouse fixture in ``tests/conftest.py``).
+    a successful build overwrites it. Tests that patch ``list_expert_skills``
+    mutate the skill set without touching the epoch, so they must reset
+    explicitly (see the autouse fixture in ``tests/conftest.py``).
     """
     global _dispatchable_cache_key, _dispatchable_cache_value
-    global _dispatchable_memo_prev
     _dispatchable_cache_key = None
     _dispatchable_cache_value = None
-    _dispatchable_memo_prev = (None, None)
 
 
-def rollback_dispatchable_memo() -> None:
-    """Undo the most recent memo restamp.
+def publish_dispatchable_experts(*, include_system: bool = True) -> None:
+    """Stamp the memo with the expert set a just-built agent can dispatch to.
 
-    ``dispatchable_experts_token`` restamps the memo at the moment a caller
-    decides *whether* to rebuild, which is necessarily before it knows the
-    rebuild succeeded. When it did not, the readers above would otherwise
-    advertise an expert the still-seated agent cannot dispatch to — the exact
-    advertise-versus-provide divergence this module exists to close, just on
-    the failure branch.
+    Called from the success branch of every agent build — the CLI/TUI loader
+    (``cli/_agent_loader.py``), and ``EvoScientist._get_default_agent`` for the
+    deployed graph. Nowhere else writes the memo on behalf of a build, so a
+    build that raises leaves the readers reporting the set the still-seated
+    agent was actually constructed from. There is no failure branch to get
+    right because a failed build simply never reaches this call.
 
-    Callers on a rebuild-failure path call this to restore the set the seated
-    agent was actually built from. Idempotent in the sense that rolling back
-    twice restores the same entry; the displaced value is not itself stacked,
-    so only one level of undo is available. That is enough: every caller
-    walks, decides, and rebuilds without yielding in between.
+    Costs one skills-tree walk (~18 ms for a dozen skills) against a rebuild
+    measured at 15-25 s, so it is not worth threading the decision walk's list
+    through the build to avoid it — and re-walking here is the more honest
+    read anyway, since the build did its own walk.
     """
-    global _dispatchable_cache_key, _dispatchable_cache_value
-    _dispatchable_cache_key, _dispatchable_cache_value = _dispatchable_memo_prev
+    _read_dispatchable_fresh(include_system, restamp=True)
 
 
 def _read_dispatchable_fresh(
@@ -278,17 +266,13 @@ def _read_dispatchable_fresh(
     the next reader misses and re-walks — rather than a half-updated view
     being served under the new key.
 
-    The displaced entry is kept in ``_dispatchable_memo_prev`` so a caller
-    that walked in order to decide on a rebuild can undo this restamp if the
-    rebuild fails; see ``rollback_dispatchable_memo``.
-
-    ``restamp=False`` walks without touching the memo at all. For a caller
-    that only wants to *detect* a change and will rebuild separately, that
-    is the difference between the cue naming a new expert immediately and
-    naming it once the agent can actually reach it.
+    ``restamp=False`` walks without touching the memo at all, which is how
+    ``dispatchable_experts_token`` reads: a caller deciding *whether* to
+    rebuild must not advertise the result before the rebuild has happened.
+    Only ``publish_dispatchable_experts`` and this function's own memo-miss
+    path pass ``restamp=True``.
     """
     global _dispatchable_cache_key, _dispatchable_cache_value
-    global _dispatchable_memo_prev
 
     from ..tools.skills_manager import list_expert_skills, skills_epoch
 
@@ -307,7 +291,6 @@ def _read_dispatchable_fresh(
     if not restamp:
         return dispatchable
 
-    _dispatchable_memo_prev = (_dispatchable_cache_key, _dispatchable_cache_value)
     # Value before key. A reader interleaving between these two writes then
     # either misses (old key, cheap re-walk) or matches the old key and gets
     # the fresher list — never the new key paired with the stale value.
@@ -336,12 +319,18 @@ def list_dispatchable_experts(
     returned list is a fresh copy so a caller sorting or filtering it in
     place can't corrupt the next reader's view.
 
-    The memo is also restamped by ``dispatchable_experts_token`` — once per
-    turn boundary in the CLI/TUI, once per HTTP request in the WebUI — so a
-    mid-run edit reaches this reader without ever advancing the epoch. When
-    the rebuild that restamp was taken for fails, the caller rolls it back
-    (``rollback_dispatchable_memo``), so this never reports an expert the
-    seated agent cannot dispatch to.
+    The memo is also stamped by ``publish_dispatchable_experts`` on the
+    success branch of every agent build, so a mid-run edit reaches this
+    reader without ever advancing the epoch. A build that fails stamps
+    nothing, which is what keeps this from reporting an expert the seated
+    agent cannot dispatch to.
+
+    That guarantee is a turn-boundary one, not an absolute one. The key
+    above is the epoch, so an ``install_skill`` landing mid-turn invalidates
+    the memo and the next read here walks fresh — naming the new expert
+    before the rebuild that makes it dispatchable. The window closes at the
+    next build; edits written straight to the workspace skills tier never
+    move the epoch and so never open it at all.
 
     ``cfg`` is accepted and ignored; kept so callers that thread config
     through don't have to special-case this one. Read-only filter —
@@ -357,9 +346,7 @@ def list_dispatchable_experts(
     return list(_read_dispatchable_fresh(include_system))
 
 
-def dispatchable_experts_token(
-    *, include_system: bool = True, restamp: bool = True
-) -> str:
+def dispatchable_experts_token(*, include_system: bool = True) -> str:
     """Fingerprint of the expert registry an agent would be built from.
 
     Answers one question for every cache of a *constructed* agent: would
@@ -403,22 +390,21 @@ def dispatchable_experts_token(
     dispatchable experts and scaling roughly linearly with the installed
     skill count. Callers are turn boundaries (CLI/TUI) and the WebUI's
     background refresher — never ``awrap_model_call``, whose cue reads the
-    memo this restamps, and never the WebUI request path.
+    memo, and never the WebUI request path.
 
     Blocking by nature (``iterdir`` plus SKILL.md / AGENTS.md parsing), so
     every caller must keep it off an event loop. langgraph-dev installs a
     blockbuster guard that turns a filesystem call on the loop into a raised
     ``BlockingError``, not merely a slow request.
 
-    Restamping the memo is a side effect, not incidental: it is what keeps
-    the cue reporting the same set the rebuild decision was made on, and a
-    caller whose rebuild then fails must call ``rollback_dispatchable_memo``.
-    Pass ``restamp=False`` when only *detecting* a change: the rebuild that
-    follows is what makes the new expert reachable and can take seconds,
-    during which a restamped memo would have the cue naming an expert
-    ``task()`` cannot route to. The rebuild path restamps on its own.
+    Reads without writing, and takes no argument that would let a caller
+    change that. This is a *detection* read: the rebuild it triggers is what
+    makes the new expert reachable and takes seconds, so stamping the memo
+    here would have the cue naming an expert ``task()`` cannot route to for
+    that whole window — and for good, if the rebuild then failed. Stamping
+    belongs to ``publish_dispatchable_experts`` on the success branch.
     """
-    experts = _read_dispatchable_fresh(include_system, restamp=restamp)
+    experts = _read_dispatchable_fresh(include_system, restamp=False)
 
     digest = hashlib.sha256()
     # Sorted so filesystem iteration order can't produce a spurious change.

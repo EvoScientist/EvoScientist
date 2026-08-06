@@ -9,10 +9,28 @@ deployment down.
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 import EvoScientist.EvoScientist as agent_module
 from EvoScientist.subagents import expert_container
+from EvoScientist.tools.skills_manager import SkillInfo
+
+_SKILLS = "EvoScientist.tools.skills_manager.list_expert_skills"
+
+
+def _expert(name: str) -> SkillInfo:
+    return SkillInfo(
+        name=name,
+        description=f"{name} description",
+        path=Path("/tmp/nope") / name,
+        source="builtin",
+        type="expert",
+        role=f"{name} role",
+        body="persona body\n",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -48,14 +66,17 @@ def build(monkeypatch):
     configuration before the interesting failure — these tests stay runnable
     without credentials, unlike the factory tests that construct a real agent.
 
-    Failing at the kwargs step is also where a malformed expert actually bites:
-    ``_fold_expert_subagents`` runs inside ``_build_base_kwargs``.
+    The failure is injected rather than provoked with a malformed expert,
+    because expert content cannot fail a build: empty bodies, colliding names
+    and unresolved tools are each skipped with a warning. What can fail is the
+    surrounding construction a rebuild re-runs — backends against live paths,
+    and the chat model — which is what this stands in for.
     """
     calls: list[int] = []
 
     def _fail(*_args, **_kwargs):
         calls.append(1)
-        raise RuntimeError("bad expert spec")
+        raise RuntimeError("backend construction failed")
 
     monkeypatch.setattr(agent_module, "_ensure_config", lambda: _StubConfig())
     monkeypatch.setattr(agent_module, "_get_default_backend", lambda: object())
@@ -104,35 +125,25 @@ class TestFailedRebuildKeepsTheSeatedAgent:
 
         assert len(build) == 1
 
-    def test_a_failed_rebuild_rolls_the_cue_back(self, build, monkeypatch):
-        """The staleness probe restamps the memo before the build is tried.
+    def test_a_failed_rebuild_leaves_the_cue_on_the_seated_set(self, build):
+        """The expert prompt and the ``/expert`` popup must not offer an
+        expert ``task()`` cannot route to.
 
-        If the build then fails, the expert prompt and the ``/expert`` popup
-        must not go on offering an expert ``task()`` cannot route.
+        Drives the real ``dispatchable_experts_token`` and the real memo,
+        patching only the skills listing underneath them — a stand-in for
+        either would let a scheme that writes the memo before the build and
+        undoes it afterwards pass while failing in production.
         """
-        monkeypatch.setattr(
-            expert_container, "_reset_dispatchable_experts_cache", lambda: None
-        )
-        expert_container._dispatchable_cache_key = (0, True)
-        expert_container._dispatchable_cache_value = ["seated-set"]
-        expert_container._dispatchable_memo_prev = ((0, True), ["seated-set"])
+        seated = object()
+        with patch(_SKILLS, return_value=[_expert("alpha")]):
+            # The set the seated agent was built from.
+            expert_container.list_dispatchable_experts()
+            _seat(seated, expert_container.dispatchable_experts_token())
 
-        def _token_that_restamps(**_kwargs):
-            expert_container._dispatchable_memo_prev = (
-                expert_container._dispatchable_cache_key,
-                expert_container._dispatchable_cache_value,
-            )
-            expert_container._dispatchable_cache_value = ["seated-set", "not-built"]
-            return "new"
-
-        monkeypatch.setattr(
-            expert_container, "dispatchable_experts_token", _token_that_restamps
-        )
-        _seat(object(), "old")
-
-        agent_module._get_default_agent()
-
-        assert expert_container._dispatchable_cache_value == ["seated-set"]
+        with patch(_SKILLS, return_value=[_expert("alpha"), _expert("beta")]):
+            assert agent_module._get_default_agent() is seated
+            names = [s.name for s in expert_container.list_dispatchable_experts()]
+            assert names == ["alpha"]
 
     def test_a_failed_first_build_still_raises(self, build, monkeypatch):
         """With no previous agent there is nothing to degrade to.
@@ -146,7 +157,7 @@ class TestFailedRebuildKeepsTheSeatedAgent:
         )
         agent_module._EvoScientist_agent = None
 
-        with pytest.raises(RuntimeError, match="bad expert spec"):
+        with pytest.raises(RuntimeError, match="backend construction failed"):
             agent_module._get_default_agent()
 
     def test_a_failed_rebuild_warns(self, build, monkeypatch, caplog):

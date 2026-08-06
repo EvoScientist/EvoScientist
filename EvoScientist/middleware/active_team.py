@@ -102,19 +102,23 @@ def _dispatchable_names() -> set[str]:
     block the event loop.
 
     What makes the cue honest rather than merely current is that the memo
-    is restamped by ``expert_container.dispatchable_experts_token``, the
-    same read that decides whether to rebuild the agent (callers in
-    ``cli/_agent_loader.py`` / ``EvoScientist.py``). One skills-tree walk
-    feeds both, so by the time a turn reaches the model the running agent
-    was built from the very expert set this list reports. An expert
-    installed — or written straight onto the workspace skills tier —
+    is stamped by ``expert_container.publish_dispatchable_experts``, called
+    from the success branch of every agent build (``cli/_agent_loader.py``
+    and ``EvoScientist._get_default_agent``). So by the time a turn reaches
+    the model, the running agent was built from the very expert set this
+    list reports. An expert written straight onto the workspace skills tier
     mid-turn is named from the next turn on, the same turn it becomes
     dispatchable.
 
-    That holds on the failure branch too: a rebuild can fail after the
-    restamp, and the callers roll the memo back
-    (``expert_container.rollback_dispatchable_memo``) when it does, so this
-    never names an expert the still-seated agent cannot reach.
+    The failure branch needs no special handling: a rebuild that raises
+    never reaches the stamp, so this keeps reporting the set the seated
+    agent was built from rather than the one that failed to arrive.
+
+    One boundary: the memo's key is ``skills_epoch()``, which
+    ``install_skill`` advances. That invalidates the memo, so between an
+    install and the next build this reads through to a fresh walk and can
+    name the new expert a turn early. Tier writes never move the epoch, so
+    the agent-authors-an-expert path — the one this exists for — is exact.
 
     On import failure returns an empty set — the middleware then emits no
     cue, matching the outside-runnable-context no-op path.

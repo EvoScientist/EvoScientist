@@ -10,10 +10,30 @@ end the watch.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from EvoScientist.langgraph_dev import registry_refresh
+from EvoScientist.subagents.expert_container import (
+    dispatchable_experts_token as _REAL_TOKEN,
+)
+from EvoScientist.tools.skills_manager import SkillInfo
+
+_SKILLS = "EvoScientist.tools.skills_manager.list_expert_skills"
+
+
+def _expert(name: str) -> SkillInfo:
+    return SkillInfo(
+        name=name,
+        description=f"{name} description",
+        path=Path("/tmp/nope") / name,
+        source="builtin",
+        type="expert",
+        role=f"{name} role",
+        body="persona body\n",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -42,17 +62,17 @@ class _Registry:
     def __init__(self, token: str = "t0") -> None:
         self.token = token
         self.rebuilds = 0
-        self.restamp_calls: list[bool] = []
+        self.token_reads = 0
         self.fail_next = False
 
-    def read_token(self, *, include_system: bool = True, restamp: bool = True) -> str:
-        self.restamp_calls.append(restamp)
+    def read_token(self, *, include_system: bool = True) -> str:
+        self.token_reads += 1
         return self.token
 
     def rebuild(self):
         self.rebuilds += 1
         if self.fail_next:
-            raise RuntimeError("half-written expert")
+            raise RuntimeError("backend construction failed")
         return object()
 
 
@@ -100,17 +120,29 @@ class TestRefreshLoop:
             await _settle(lambda: registry.rebuilds >= 2)
         assert registry.rebuilds == 2
 
-    async def test_detection_never_restamps_the_cue_memo(self, registry):
-        """Restamping at detection time would have the active-expert cue name
+    async def test_detection_never_stamps_the_cue_memo(self, registry, monkeypatch):
+        """Stamping at detection time would have the active-expert cue name
         the new expert for the whole rebuild, before ``task()`` can route to it.
+
+        Restores the real token over the fixture's stand-in and asserts
+        against the real memo, so this still holds if the refresher starts
+        reading it some other way. The stubbed rebuild publishes nothing, so
+        anything in the memo afterwards came from detection.
         """
-        async with registry_refresh.expert_registry_refresher():
-            await _settle(lambda: registry.rebuilds >= 1)
-        assert registry.restamp_calls
-        assert not any(registry.restamp_calls)
+        from EvoScientist.subagents import expert_container
+
+        monkeypatch.setattr(
+            expert_container,
+            "dispatchable_experts_token",
+            _REAL_TOKEN,
+        )
+        with patch(_SKILLS, return_value=[_expert("alpha")]):
+            async with registry_refresh.expert_registry_refresher():
+                await _settle(lambda: registry.rebuilds >= 1)
+        assert expert_container._dispatchable_cache_value is None
 
     async def test_a_failed_rebuild_does_not_end_the_watch(self, registry, caplog):
-        """A half-written expert must not disable refresh for the process."""
+        """One bad build must not disable refresh for the rest of the process."""
         registry.fail_next = True
         async with registry_refresh.expert_registry_refresher():
             await _settle(lambda: registry.rebuilds >= 1)

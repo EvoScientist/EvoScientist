@@ -45,7 +45,10 @@ from ..gateway import (
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
-from ..subagents.expert_container import dispatchable_experts_token
+from ..subagents.expert_container import (
+    dispatchable_experts_token,
+    publish_dispatchable_experts,
+)
 from . import async_notifier
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
 from ._constants import (
@@ -515,15 +518,10 @@ def cmd_interactive(
 
         ``_reload`` swallows the exception and re-seats the previous agent,
         so without this the user gets no signal at all that the expert they
-        just installed didn't land.
+        just installed didn't land. Nothing to undo here — the cue's memo is
+        stamped from the build's success branch, which this rebuild never
+        reached.
         """
-        from ..subagents.expert_container import rollback_dispatchable_memo
-
-        # The staleness probe already restamped the cue's memo with the set
-        # this rebuild was going to provide. Put back the set the still-seated
-        # agent was built from, so neither the expert prompt nor ``/expert``
-        # offers something ``task`` can't route.
-        rollback_dispatchable_memo()
         console.print(
             f"[yellow]Couldn't pick up the new experts yet:[/yellow] "
             f"{escape(str(exc))}[yellow]. Continuing with the current agent."
@@ -540,6 +538,7 @@ def cmd_interactive(
         on_rebuild_started=_on_agent_rebuild_started,
         on_rebuild_failed=_on_agent_rebuild_failed,
         build_token=dispatchable_experts_token,
+        publish_build=publish_dispatchable_experts,
     )
 
     # One frontend event sink for the whole session — injected into the agent's

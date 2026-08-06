@@ -41,10 +41,11 @@ def _dispatchable_experts() -> list[SkillInfo]:
 
     ``list_dispatchable_experts`` is memoised, so the popup stays
     responsive per keystroke without this module holding a second cache of
-    its own. The memo is restamped at every turn boundary by
-    ``dispatchable_experts_token``, so an expert that appeared mid-session
-    is offered here from the next turn on — whether it arrived by install
-    or was written straight onto the workspace skills tier.
+    its own. The memo is stamped by ``publish_dispatchable_experts`` once a
+    rebuild has produced an agent, so an expert that appeared mid-session is
+    offered here from the next turn on — whether it arrived by install or
+    was written straight onto the workspace skills tier — and a rebuild that
+    failed leaves the popup offering only what ``task`` can still reach.
     """
     try:
         from ...subagents.expert_container import list_dispatchable_experts
