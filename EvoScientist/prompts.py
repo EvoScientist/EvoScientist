@@ -234,6 +234,8 @@ WRITING_GUIDELINES = """# Writing Guidelines
 - Use bullets for configs, stage lists, and key results; use short paragraphs for reasoning.
 - Avoid first-person singular ("I ..."). Prefer neutral phrasing ("This experiment...") or "we" style.
 - Professional, objective tone. Be precise, technical, and concise.
+- When linking to a file in the active workspace, use a Markdown link target relative to the workspace root with POSIX `/` separators, for example `[report](reports/final_report.md)`.
+- Never use host absolute paths, `file://` URLs, or `sandbox:` URLs for workspace files.
 """
 
 # =============================================================================

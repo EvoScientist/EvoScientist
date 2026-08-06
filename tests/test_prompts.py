@@ -146,6 +146,15 @@ class TestWritingGuidelines:
             or "I ..." in WRITING_GUIDELINES
         )
 
+    def test_requires_workspace_relative_artifact_links(self):
+        result = get_system_prompt()
+        assert "relative to the workspace root" in result
+        assert "POSIX `/` separators" in result
+        assert "host absolute paths" in result
+        assert "`file://`" in result
+        assert "`sandbox:`" in result
+        assert "[report](reports/final_report.md)" in result
+
 
 class TestShellGuidelines:
     def test_constant_not_empty(self):
