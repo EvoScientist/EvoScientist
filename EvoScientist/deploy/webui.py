@@ -61,14 +61,12 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     from ..langgraph_dev.manager import (
         _DEFAULT_HOST,
         _DEFAULT_PORT,
-        _FILE_LOCK_TIMEOUT,
         RUNTIME,
         _base_url,
         _format_hostport,
         _is_loopback_host,
         _is_port_occupied,
         _read_workspace_sidecar,
-        _sidecar_register_owner,
         is_langgraph_dev_running,
         start_langgraph_dev,
         stop_langgraph_dev,
@@ -150,51 +148,22 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             # — mirror the sidecar guard in ensure_langgraph_dev so WebUI started
             # from workspace B never silently binds to a server pinned to
             # workspace A. No sidecar (older subprocess) → reuse, as before.
-            from filelock import FileLock
-            from filelock import Timeout as FileLockTimeout
-
-            def _refuse_if_foreign_workspace() -> None:
-                sidecar = _read_workspace_sidecar()
-                if (
-                    sidecar is not None
-                    and Path(sidecar["workspace"]).resolve() != Path(ws).resolve()
-                ):
-                    console.print(
-                        f"[red]Port {backend_port} is already serving a langgraph "
-                        f"dev for a different workspace "
-                        f"({_shorten(sidecar['workspace'])}).[/red]"
-                    )
-                    console.print(
-                        f"[dim]Stop that EvoSci session, or launch from that "
-                        f"workspace ([bold]--workdir {sidecar['workspace']}[/bold])."
-                        f"[/dim]"
-                    )
-                    raise typer.Exit(1)
-
-            try:
-                # Validate + register as ONE atomic step under the cross-process
-                # lock: registration guards this session against keepalive
-                # reclaim, and a concurrent CLI could otherwise replace the
-                # server between the workspace check and the owner write.
-                with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
-                    _refuse_if_foreign_workspace()
-                    _sidecar_register_owner()
-            except FileLockTimeout:
-                # No unlocked fallback: without the lock any sidecar snapshot
-                # can be a mid-mutation read, and skipping registration would
-                # leave this session exposed to keepalive reclaim. A held lock
-                # after 120s means another EvoSci process is stuck mid
-                # lifecycle change — refuse rather than guess.
+            sidecar = _read_workspace_sidecar()
+            if (
+                sidecar is not None
+                and Path(sidecar["workspace"]).resolve() != Path(ws).resolve()
+            ):
                 console.print(
-                    f"[red]Another EvoSci process is holding the langgraph dev "
-                    f"lock ({RUNTIME.lock_file}); cannot safely verify the "
-                    f"server on port {backend_port}.[/red]"
+                    f"[red]Port {backend_port} is already serving a langgraph "
+                    f"dev for a different workspace "
+                    f"({_shorten(sidecar['workspace'])}).[/red]"
                 )
                 console.print(
-                    "[dim]Wait for the other session to finish (or stop it), "
-                    "then re-run [bold]EvoSci[/bold].[/dim]"
+                    f"[dim]Stop that EvoSci session, or launch from that "
+                    f"workspace ([bold]--workdir {sidecar['workspace']}[/bold])."
+                    f"[/dim]"
                 )
-                raise typer.Exit(1) from None
+                raise typer.Exit(1)
             console.print(
                 f"[green]✓[/green] Reusing langgraph dev already serving "
                 f"port {backend_port}"

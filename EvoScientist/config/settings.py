@@ -263,8 +263,9 @@ class EvoScientistConfig:
 
     # Keep the auto-started langgraph dev subprocess running after the CLI
     # exits. The next `EvoSci` start in the same workspace reuses it instantly
-    # instead of paying the cold boot (~15s); a start in a DIFFERENT workspace
-    # reclaims and restarts it automatically once no other CLI is using it.
+    # instead of paying the cold boot (~15s). Starting in a DIFFERENT workspace
+    # raises WorkspaceMismatchError with the leftover server's pid — stop it
+    # manually (the server is pinned to one workspace per process).
     langgraph_dev_keepalive: bool = False
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
