@@ -105,6 +105,25 @@ def _is_deepseek_endpoint(base_url: str | None) -> bool:
         return False
 
 
+def _normalize_volcengine_coding_model(model_id: str, base_url: str | None) -> str:
+    """Use model aliases accepted by Volcengine's Coding Plan endpoint."""
+    if not base_url:
+        return model_id
+    try:
+        parsed = urlparse(base_url)
+    except ValueError:
+        return model_id
+    if (
+        parsed.hostname == "ark.cn-beijing.volces.com"
+        and parsed.path.rstrip("/") == "/api/coding/v3"
+    ):
+        return {
+            "glm-5.2": "glm-5-2",
+            "kimi-k2.5": "kimi-k2-5",
+        }.get(model_id, model_id)
+    return model_id
+
+
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
 _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
@@ -641,6 +660,8 @@ def get_chat_model(
             base_url = base_url_default
         if base_url:
             kwargs["base_url"] = base_url
+        if provider == "custom-openai":
+            model_id = _normalize_volcengine_coding_model(model_id, base_url)
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key

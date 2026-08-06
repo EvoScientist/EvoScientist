@@ -32,6 +32,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Zhipu GLM-5.2 — 1M context, an exception to the ``glm-5`` family (203K).
     # Matches OpenRouter ``z-ai/glm-5.2`` via split('/')[-1].
     "glm-5.2": 1_000_000,
+    # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2.
+    "glm-5-2": 1_000_000,
     # Tencent Hunyuan HY3 — 262K context (OpenRouter ``tencent/hy3``).
     "hy3": 262_000,
 }
