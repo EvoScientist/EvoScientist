@@ -7,8 +7,8 @@ from collections.abc import Mapping
 DEFAULT_LANGGRAPH_DEV_PORT = 6174
 # Mirrors ``config.langgraph_dev_host`` / ``manager._DEFAULT_HOST``. The value
 # only matters as a stand-in for the *bind* host — ``_format_hostport`` runs it
-# through ``_probe_host``, so both this and "127.0.0.1" yield the same client URL.
-DEFAULT_LANGGRAPH_DEV_HOST = "0.0.0.0"
+# through ``_probe_host``, so both this and "0.0.0.0" yield the same client URL.
+DEFAULT_LANGGRAPH_DEV_HOST = "127.0.0.1"
 LANGGRAPH_DEV_AUTH_HEADERS = {"x-auth-scheme": "langsmith"}
 
 

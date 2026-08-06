@@ -2158,11 +2158,12 @@ def _main_callback(
     host: str | None = typer.Option(
         None,
         "--host",
-        help="Interface to bind servers to (default: 0.0.0.0). Sets "
-        "langgraph_dev_host, which applies in EVERY UI mode — the background "
-        "langgraph dev backend is shared by tui/cli/webui/serve — and "
-        "webui_host, which only matters in WebUI mode. Pass 127.0.0.1 to keep "
-        "the backend off the network.",
+        help="Interface to bind servers to (defaults: langgraph_dev_host "
+        "127.0.0.1, webui_host 0.0.0.0). Sets langgraph_dev_host, which "
+        "applies in EVERY UI mode — the background langgraph dev backend is "
+        "shared by tui/cli/webui/serve — and webui_host, which only matters in "
+        "WebUI mode. Pass 0.0.0.0 to reach both from another machine (the "
+        "backend has no auth).",
     ),
     output_format: str | None = typer.Option(
         None,

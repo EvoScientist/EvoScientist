@@ -23,7 +23,7 @@ def _make_config(
     *,
     default_workdir: str = "",
     langgraph_dev_port: int = 6174,
-    langgraph_dev_host: str = "0.0.0.0",
+    langgraph_dev_host: str = "127.0.0.1",
     webui_port: int = 4716,
     webui_host: str = "0.0.0.0",
 ):
@@ -214,24 +214,19 @@ def test_backend_host_reaches_start_langgraph_dev(monkeypatch):
     assert captured["backend_host"] == "0.0.0.0"
 
 
-def test_backend_defaults_to_all_interfaces(monkeypatch):
+def test_backend_defaults_to_loopback(monkeypatch):
+    """The backend is an unauthenticated API whose agent can run shell, so it
+    stays off the network unless ``langgraph_dev_host`` opts in."""
     config = _make_config()
-    captured = _run_webui_once(monkeypatch, config)
-
-    assert captured["backend_host"] == "0.0.0.0"
-
-
-def test_backend_loopback_opt_out(monkeypatch):
-    config = _make_config(langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
     assert captured["backend_host"] == "127.0.0.1"
 
 
 def test_public_bind_warning_when_backend_exposed(monkeypatch):
-    """Fires on the shipped default, by design: the backend is an
-    unauthenticated API whose agent can run shell, so users should be told
-    every time it is reachable off-box — not only when they opt in."""
+    """Users who widen the backend get told every time it is reachable
+    off-box — an unauthenticated, shell-capable API deserves a standing
+    reminder, not a one-time opt-in prompt."""
     config = _make_config(langgraph_dev_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 

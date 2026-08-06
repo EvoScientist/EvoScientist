@@ -116,12 +116,12 @@ _LOCK = threading.RLock()
 # corresponding url= field on AsyncSubAgent specs.
 _DEFAULT_PORT = 6174
 
-# Default bind interface — all interfaces, matching
-# ``config.langgraph_dev_host`` so there is a single story about where this
-# server listens. SECURITY: the langgraph dev server is the unauthenticated
-# agent API; ``config.langgraph_dev_host = "127.0.0.1"`` takes it back to
-# loopback, and every launcher warns while it is exposed.
-_DEFAULT_HOST = "0.0.0.0"
+# Default bind interface — loopback, matching ``config.langgraph_dev_host`` so
+# there is a single story about where this server listens. SECURITY: the
+# langgraph dev server is the unauthenticated agent API; widening it with
+# ``config.langgraph_dev_host = "0.0.0.0"`` puts it on the network, and every
+# launcher warns while it is exposed.
+_DEFAULT_HOST = "127.0.0.1"
 
 # Wildcard bind addresses: the server listens on every interface, but you
 # cannot meaningfully *connect* to them (0.0.0.0 is routed to loopback on

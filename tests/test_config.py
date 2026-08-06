@@ -154,33 +154,41 @@ class TestEvoScientistConfig:
         assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
 
-    def test_bind_hosts_default_to_all_interfaces(self):
-        """Both servers bind every interface out of the box so the WebUI and
-        SDK clients work from another machine without extra setup.
+    def test_bind_host_defaults_differ_per_server(self):
+        """The front-end binds every interface out of the box; the backend does
+        not.
 
         The backend is an unauthenticated API whose agent can run shell
-        commands, so this is a deliberate project decision, not an oversight —
-        the launchers print a red PUBLIC BIND banner while it is exposed, and
-        ``langgraph_dev_host = 127.0.0.1`` takes it back to loopback.
+        commands, so it stays on loopback until asked — ``langgraph_dev_host =
+        0.0.0.0`` opts in, and the launchers then print a red PUBLIC BIND
+        banner while it is exposed. The WebUI front-end serves the app shell
+        only and holds no credentials, so it defaults to the wildcard.
         """
         config = EvoScientistConfig()
 
-        assert config.langgraph_dev_host == "0.0.0.0"
+        assert config.langgraph_dev_host == "127.0.0.1"
         assert config.webui_host == "0.0.0.0"
 
-    @pytest.mark.parametrize("field", ["langgraph_dev_host", "webui_host"])
+    @pytest.mark.parametrize(
+        ("field", "default"),
+        [("langgraph_dev_host", "127.0.0.1"), ("webui_host", "0.0.0.0")],
+    )
     @pytest.mark.parametrize("blank", ["", "   ", "\t"])
-    def test_blank_bind_host_falls_back_to_default(self, field, blank):
+    def test_blank_bind_host_falls_back_to_default(self, field, blank, default):
         """A blank host would reach socket.bind() verbatim and surface as an
-        opaque gaierror; it degrades to the default instead."""
+        opaque gaierror; it degrades to the field's own default instead."""
         config = EvoScientistConfig(**{field: blank})
-        assert getattr(config, field) == "0.0.0.0"
+        assert getattr(config, field) == default
 
-    @pytest.mark.parametrize("field", ["langgraph_dev_host", "webui_host"])
-    def test_bind_host_loopback_opt_out_is_preserved(self, field):
-        """The escape hatch must survive normalization untouched."""
-        config = EvoScientistConfig(**{field: "127.0.0.1"})
-        assert getattr(config, field) == "127.0.0.1"
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("langgraph_dev_host", "0.0.0.0"), ("webui_host", "127.0.0.1")],
+    )
+    def test_bind_host_opt_out_is_preserved(self, field, value):
+        """Each field's escape hatch — widen the backend, narrow the front-end —
+        must survive normalization untouched."""
+        config = EvoScientistConfig(**{field: value})
+        assert getattr(config, field) == value
 
     @pytest.mark.parametrize("field", ["langgraph_dev_host", "webui_host"])
     def test_bind_host_is_stripped(self, field):

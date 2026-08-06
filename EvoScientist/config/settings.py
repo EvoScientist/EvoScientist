@@ -213,19 +213,17 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
-    # Network interface the langgraph dev subprocess binds to. Defaults to all
-    # interfaces so the WebUI (which talks to this server FROM THE BROWSER) and
-    # external SDK clients work from another machine without extra setup.
-    #
-    # SECURITY: this server is the agent API — no authentication, and the
-    # deployed agent can run shell commands. On an untrusted network set
-    # "127.0.0.1" to take it back to loopback; every launcher prints a red
-    # PUBLIC BIND banner while it is exposed.
+    # Network interface the langgraph dev subprocess binds to. Loopback by
+    # default: this server is the agent API — no authentication, and the
+    # deployed agent can run shell commands — so it stays off the network until
+    # asked. Set "0.0.0.0" to reach it from another machine (the WebUI talks to
+    # it FROM THE BROWSER, and external SDK clients need it too); every launcher
+    # then prints a red PUBLIC BIND banner while it is exposed.
     #
     # Callers that *connect* (health probes, async sub-agent self-dispatch) map
-    # a wildcard bind back to loopback via manager._probe_host, so this never
-    # redirects internal traffic off-box.
-    langgraph_dev_host: str = "0.0.0.0"
+    # a wildcard bind back to loopback via manager._probe_host, so widening this
+    # never redirects internal traffic off-box.
+    langgraph_dev_host: str = "127.0.0.1"
 
     # Port for the WebUI front-end (Next.js server from @evoscientist/webui),
     # used only when ui_backend == "webui". 4716 is 6174 reversed — a memorable
@@ -512,7 +510,7 @@ class EvoScientistConfig:
         # stray-whitespace or empty value surfaces as an opaque gaierror at
         # startup. Normalize to the field's own default instead.
         for _host_field, _host_default in (
-            ("langgraph_dev_host", "0.0.0.0"),
+            ("langgraph_dev_host", "127.0.0.1"),
             ("webui_host", "0.0.0.0"),
         ):
             _host = getattr(self, _host_field, _host_default)

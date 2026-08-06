@@ -219,27 +219,26 @@ def test_workspace_dir_env_var_set_regardless_of_mode(
 # =============================================================================
 
 
-def test_host_defaults_to_all_interfaces_in_argv(monkeypatch, tmp_path, runtime_paths):
-    """``--host`` must always be emitted: the langgraph CLI's own default is
-    127.0.0.1, so omitting the flag would silently ignore our wider default."""
+def test_host_defaults_to_loopback_in_argv(monkeypatch, tmp_path, runtime_paths):
+    """``--host`` must always be emitted rather than left to the langgraph
+    CLI's own default, so the bind stays pinned to _DEFAULT_HOST even if that
+    default moves."""
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
 
     args = captured["args"]
-    assert args[args.index("--host") + 1] == "0.0.0.0"
+    assert args[args.index("--host") + 1] == "127.0.0.1"
 
 
-def test_explicit_loopback_host_reaches_argv(monkeypatch, tmp_path, runtime_paths):
-    """The security escape hatch has to survive all the way into argv."""
+def test_explicit_wildcard_host_reaches_argv(monkeypatch, tmp_path, runtime_paths):
+    """The opt-in to a public bind has to survive all the way into argv."""
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
     with pytest.raises(_PopenAbort):
-        manager.start_langgraph_dev(
-            workspace_dir=tmp_path, port=16178, host="127.0.0.1"
-        )
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178, host="0.0.0.0")
 
     args = captured["args"]
-    assert args[args.index("--host") + 1] == "127.0.0.1"
+    assert args[args.index("--host") + 1] == "0.0.0.0"
 
 
 def test_env_carries_explicit_bind_host(monkeypatch, tmp_path, runtime_paths):

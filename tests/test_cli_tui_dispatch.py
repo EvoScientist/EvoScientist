@@ -93,12 +93,12 @@ def test_host_flag_drives_both_servers(monkeypatch):
     """One flag, both halves. In WebUI mode the front-end and backend are two
     halves of one surface, so `--host` has to move them together — widening
     only one leaves the UI loading but unable to reach the agent."""
-    calls, result = _invoke_main(monkeypatch, ["--host", "127.0.0.1"])
+    calls, result = _invoke_main(monkeypatch, ["--host", "0.0.0.0"])
 
     assert result.exit_code == 0
     cfg = calls["webui_config"]
-    assert cfg.webui_host == "127.0.0.1"
-    assert cfg.langgraph_dev_host == "127.0.0.1"
+    assert cfg.webui_host == "0.0.0.0"
+    assert cfg.langgraph_dev_host == "0.0.0.0"
 
 
 def test_host_flag_is_stripped(monkeypatch):
@@ -115,7 +115,7 @@ def test_blank_host_flag_leaves_config_defaults(monkeypatch):
 
     assert result.exit_code == 0
     assert "langgraph_dev_host" not in calls["overrides"]
-    assert calls["webui_config"].langgraph_dev_host == "0.0.0.0"
+    assert calls["webui_config"].langgraph_dev_host == "127.0.0.1"
 
 
 def test_no_host_flag_leaves_config_defaults(monkeypatch):
@@ -155,8 +155,9 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5", "::"])
 def test_cli_mode_warns_on_public_backend_bind(monkeypatch, exposed):
     """The langgraph dev backend is shared across UI modes, so a plain
-    `EvoSci` session must warn too — otherwise the default 0.0.0.0 bind puts
-    an unauthenticated shell-capable API on the network with no signal."""
+    `EvoSci` session must warn too — otherwise `--host 0.0.0.0` (or a config
+    file with it) puts an unauthenticated shell-capable API on the network in
+    every mode with no signal."""
     config = SimpleNamespace(langgraph_dev_host=exposed)
     printed = _run_ensure_backend(monkeypatch, config)
 
