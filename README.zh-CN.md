@@ -460,15 +460,15 @@ EvoSci config set webui_port 4800    # 修改前端端口（须与 langgraph dev
 
 需要 **Node.js 24 LTS**（提供 `npx`）；首次启动会下载 `@evoscientist/webui`，需要联网。注意：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
 
-**从其他机器访问。** 前端默认监听 `0.0.0.0`，因此开箱即可通过 `http://<本机IP>:4716` 从局域网打开。后端默认仍留在回环地址（`127.0.0.1`），而 UI 是**从浏览器**直连后端的，所以还需把后端一并放开，并把 UI 里的部署地址填成 `http://<本机IP>:6174`，而不是保留 localhost：
+**从其他机器访问。** 两个服务默认都绑定回环地址（`127.0.0.1`），WebUI 开箱即为仅本机可用。要在局域网使用，需把两者一并放开——UI 是**从浏览器**直连后端的，因此还要把 UI 里的部署地址填成 `http://<本机IP>:6174`，而不是保留 localhost：
 
 ```bash
 EvoSci --host 0.0.0.0                          # 仅本次会话，两个服务一起
-EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，仅后端
-EvoSci config set webui_host 127.0.0.1         # 持久化，仅前端
+EvoSci config set webui_host 0.0.0.0           # 持久化，前端（4716 端口）
+EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端口）
 ```
 
-`EvoSci deploy` 也支持同名参数：`EvoSci deploy --host 0.0.0.0`。
+`EvoSci deploy` 与 `EvoSci serve` 也支持同名参数：`EvoSci deploy --host 0.0.0.0`。
 
 > [!WARNING]
 > 后端是**无鉴权、且 agent 能执行 shell 的 API**。任何能访问 6174 端口的人都能完全控制它，因此只应在可信网络里放开；暴露期间 EvoSci 每次启动都会打印红色 `⚠ PUBLIC BIND` 横幅。

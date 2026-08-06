@@ -42,7 +42,7 @@ from ..stream.console import console
 # Front-end npm package + spec. ``@latest`` → always the newest published UI.
 _WEBUI_PACKAGE = "@evoscientist/webui@latest"
 _DEFAULT_WEBUI_PORT = 4716
-_DEFAULT_WEBUI_HOST = "0.0.0.0"
+_DEFAULT_WEBUI_HOST = "127.0.0.1"
 
 
 def run_webui(config: Any, workspace_dir: str | None = None) -> None:
@@ -89,9 +89,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     # webui_port = the local Next.js server the browser actually opens.
     backend_port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     webui_port = int(getattr(config, "webui_port", _DEFAULT_WEBUI_PORT))
-    # ...and their bind interfaces. The defaults deliberately differ: the
-    # front-end is exposed (it serves the app shell and holds no credentials),
-    # the backend is not (unauthenticated API, agent can run shell).
+    # ...and their bind interfaces, both loopback by default (a wildcard
+    # front-end bind breaks the UI's same-origin checks — see config.webui_host).
     backend_host = (
         str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
     ).strip() or _DEFAULT_HOST
@@ -213,10 +212,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     # lets the UI's config prefill point at our backend automatically. Secrets
     # are scrubbed — the browser UI never needs LLM provider API keys.
     #
-    # HOSTNAME is the front-end's bind knob: the package ships no --host flag,
-    # and its bin launcher passes `HOSTNAME: process.env.HOSTNAME || "127.0.0.1"`
-    # through to the Next standalone server. Setting it here is therefore the
-    # only supported way to widen the front-end's interface.
+    # HOSTNAME is the front-end's only bind knob: the package has no --host
+    # flag; its launcher forwards `HOSTNAME || "127.0.0.1"` to the Next server.
     webui_env = _scrubbed_env(
         {
             "EVOSCIENTIST_LANGGRAPH_DEV_PORT": str(backend_port),
@@ -224,10 +221,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             "HOSTNAME": webui_host,
         }
     )
-    # The UI connects to the backend from the BROWSER, not server-side, so a
-    # remote visitor needs a backend address that resolves on *their* machine.
-    # Spell that out when the front-end is exposed but the backend isn't —
-    # otherwise the page loads and every request silently fails.
+    # The UI reaches the backend from the BROWSER; when only the front-end is
+    # exposed, remote pages load but every request fails — say so.
     remote_backend_hint = ""
     if not _is_loopback_host(webui_host) and _is_loopback_host(backend_host):
         remote_backend_hint = (

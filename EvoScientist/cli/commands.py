@@ -522,12 +522,9 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    # This backend is shared by every UI mode, not just `deploy` / WebUI — so
-    # the exposure warning belongs here too, or a plain `EvoSci` session would
-    # put an unauthenticated, shell-capable API on the network with no signal
-    # at all. Gated on the server actually being up: ensure_langgraph_dev
-    # fails soft (async falls back to in-process), and warning about a bind
-    # that never happened would be worse than saying nothing.
+    # The backend is shared by every UI mode, so the exposure warning lives
+    # here, not just in deploy/WebUI. Gated on the server being up: warning
+    # about a bind that never happened would be worse than saying nothing.
     bind_host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
     if (
         bind_host
@@ -1437,6 +1434,13 @@ def serve(
     workdir: str | None = typer.Option(
         None, "--workdir", help="Override workspace directory"
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Interface to bind the langgraph dev backend to (default: "
+        "langgraph_dev_host = 127.0.0.1). Pass 0.0.0.0 to reach it from "
+        "another machine — the backend has no auth.",
+    ),
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -1471,6 +1475,9 @@ def serve(
     from ..config import apply_config_to_env, get_effective_config
 
     cli_overrides = {}
+    # serve starts no front-end, so only the backend bind applies here.
+    if host is not None and host.strip():
+        cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:
         cli_overrides["auto_approve"] = True
     if auto_mode:
@@ -2158,12 +2165,11 @@ def _main_callback(
     host: str | None = typer.Option(
         None,
         "--host",
-        help="Interface to bind servers to (defaults: langgraph_dev_host "
-        "127.0.0.1, webui_host 0.0.0.0). Sets langgraph_dev_host, which "
-        "applies in EVERY UI mode — the background langgraph dev backend is "
-        "shared by tui/cli/webui/serve — and webui_host, which only matters in "
-        "WebUI mode. Pass 0.0.0.0 to reach both from another machine (the "
-        "backend has no auth).",
+        help="Interface to bind servers to (default: 127.0.0.1 for both). "
+        "Sets langgraph_dev_host — the backend shared by every UI mode — and "
+        "webui_host (WebUI mode only). Applies to the default entry; the "
+        "serve and deploy subcommands take their own --host. Pass 0.0.0.0 to "
+        "reach both from another machine (the backend has no auth).",
     ),
     output_format: str | None = typer.Option(
         None,
@@ -2226,10 +2232,8 @@ def _main_callback(
     if ui:
         cli_overrides["ui_backend"] = ui
     if host is not None and host.strip():
-        # One flag drives both servers. Note this is NOT WebUI-specific: the
-        # langgraph dev backend is auto-started for tui/cli/serve too (see
-        # _ensure_async_subagent_server), so --host narrows or widens the
-        # agent API in every mode. Only webui_host is WebUI-only.
+        # One flag drives both servers; the backend applies in EVERY UI mode
+        # (auto-started for tui/cli/serve too), webui_host only in WebUI mode.
         cli_overrides["webui_host"] = host.strip()
         cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:

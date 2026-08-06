@@ -214,15 +214,10 @@ class EvoScientistConfig:
     langgraph_dev_port: int = 6174
 
     # Network interface the langgraph dev subprocess binds to. Loopback by
-    # default: this server is the agent API — no authentication, and the
-    # deployed agent can run shell commands — so it stays off the network until
-    # asked. Set "0.0.0.0" to reach it from another machine (the WebUI talks to
-    # it FROM THE BROWSER, and external SDK clients need it too); every launcher
-    # then prints a red PUBLIC BIND banner while it is exposed.
-    #
-    # Callers that *connect* (health probes, async sub-agent self-dispatch) map
-    # a wildcard bind back to loopback via manager._probe_host, so widening this
-    # never redirects internal traffic off-box.
+    # default — this is the unauthenticated agent API (the agent can run
+    # shell), so "0.0.0.0" is opt-in and every launcher prints a PUBLIC BIND
+    # banner while exposed. Internal callers *connect* via manager._probe_host,
+    # so widening never redirects their traffic off-box.
     langgraph_dev_host: str = "127.0.0.1"
 
     # Port for the WebUI front-end (Next.js server from @evoscientist/webui),
@@ -231,10 +226,11 @@ class EvoScientistConfig:
     # its own port (langgraph_dev_port); this is just the browser server.
     webui_port: int = 4716
 
-    # Network interface the WebUI front-end binds to. Also all interfaces by
-    # default; it serves the app shell only and holds no credentials (see
-    # deploy/webui.py:_scrubbed_env). Set "127.0.0.1" to keep it local-only.
-    webui_host: str = "0.0.0.0"
+    # Network interface the WebUI front-end binds to. Loopback by default: the
+    # Next server derives its own origin from this value, and the UI's
+    # same-origin checks 403 every write when the page's address doesn't match
+    # it — a wildcard breaks the auto-opened localhost page ("0.0.0.0" = LAN).
+    webui_host: str = "127.0.0.1"
 
     # --- Scheduled tasks (cron) ---
     # Master switch for scheduled tasks (/schedule, NL tools, scheduler context). Defaults
@@ -511,7 +507,7 @@ class EvoScientistConfig:
         # startup. Normalize to the field's own default instead.
         for _host_field, _host_default in (
             ("langgraph_dev_host", "127.0.0.1"),
-            ("webui_host", "0.0.0.0"),
+            ("webui_host", "127.0.0.1"),
         ):
             _host = getattr(self, _host_field, _host_default)
             _host = _host.strip() if isinstance(_host, str) else ""

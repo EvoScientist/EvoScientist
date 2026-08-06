@@ -116,11 +116,9 @@ _LOCK = threading.RLock()
 # corresponding url= field on AsyncSubAgent specs.
 _DEFAULT_PORT = 6174
 
-# Default bind interface — loopback, matching ``config.langgraph_dev_host`` so
-# there is a single story about where this server listens. SECURITY: the
-# langgraph dev server is the unauthenticated agent API; widening it with
-# ``config.langgraph_dev_host = "0.0.0.0"`` puts it on the network, and every
-# launcher warns while it is exposed.
+# Default bind interface — loopback, matching ``config.langgraph_dev_host``.
+# SECURITY: this is the unauthenticated agent API; launchers print a PUBLIC
+# BIND banner while it is exposed.
 _DEFAULT_HOST = "127.0.0.1"
 
 # Wildcard bind addresses: the server listens on every interface, but you
@@ -132,12 +130,8 @@ _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
 def _probe_host(host: str = _DEFAULT_HOST) -> str:
     """Map a bind address to one a client can actually connect to.
 
-    The distinction that makes host support tractable: only ``bind()`` needs
-    the configured interface. Every consumer in this module that *connects* —
-    health probes, occupancy checks, async sub-agent self-dispatch — wants a
-    reachable address. Binding ``0.0.0.0`` includes loopback, so ``127.0.0.1``
-    stays correct there; a specific IP is returned as-is because loopback
-    would not reach a server bound only to that interface.
+    A wildcard bind includes loopback, so clients use ``127.0.0.1``; a
+    specific interface is returned as-is — loopback would not reach it.
     """
     return "127.0.0.1" if host in _WILDCARD_HOSTS else host
 
@@ -145,9 +139,8 @@ def _probe_host(host: str = _DEFAULT_HOST) -> str:
 def _is_loopback_host(host: str) -> bool:
     """Return True if binding ``host`` keeps the server unreachable off-box.
 
-    Drives the "public bind" security warning in the deploy / WebUI launchers,
-    so it must be conservative: anything not provably loopback (a wildcard, a
-    LAN address, an unresolvable name) counts as exposed and gets the banner.
+    Drives the PUBLIC BIND warning, so it is conservative: anything not
+    provably loopback counts as exposed.
     """
     return host.strip().lower() in {"127.0.0.1", "::1", "localhost"}
 
@@ -425,11 +418,9 @@ def _can_bind_port(port: int, host: str = _DEFAULT_HOST) -> bool:
     actually attempts the bind that langgraph dev would attempt, then
     closes immediately.
 
-    Binds the *literal* ``host`` — not ``_probe_host(host)`` — precisely
-    because this must replicate the server's own bind. Probing loopback
-    while the server will claim ``0.0.0.0`` gives false confidence: another
-    process holding a single non-loopback interface would let our probe
-    succeed and the real bind fail.
+    Binds the *literal* ``host`` — not ``_probe_host(host)`` — because this
+    must replicate the server's own bind: a loopback probe can succeed while
+    the real wildcard bind still fails on another interface's conflict.
     """
     import socket as _socket
 
@@ -613,9 +604,9 @@ def start_langgraph_dev(
             (``CustomSandboxBackend`` derives its workspace root from cwd via
             ``paths.WORKSPACE_ROOT``). Defaults to ``Path.cwd()``.
         port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
-        host: Network interface to bind. Defaults to all interfaces. SECURITY:
-            this exposes an unauthenticated API whose agent can run shell
-            commands — pass ``127.0.0.1`` on untrusted networks.
+        host: Network interface to bind. Defaults to loopback. SECURITY:
+            widening this exposes an unauthenticated API whose agent can run
+            shell commands — only pass ``0.0.0.0`` on trusted networks.
         file_persistence: When True (default), langgraph dev writes its full
             ``.langgraph_api/`` cache so async-task / Store / scheduler state
             survives subprocess restarts. Set False to suppress periodic

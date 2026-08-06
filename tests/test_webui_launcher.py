@@ -25,7 +25,7 @@ def _make_config(
     langgraph_dev_port: int = 6174,
     langgraph_dev_host: str = "127.0.0.1",
     webui_port: int = 4716,
-    webui_host: str = "0.0.0.0",
+    webui_host: str = "127.0.0.1",
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -169,8 +169,11 @@ def test_hostname_env_carries_webui_host(monkeypatch):
     )
 
 
-def test_hostname_env_honors_loopback_opt_out(monkeypatch):
-    config = _make_config(webui_host="127.0.0.1")
+def test_hostname_env_defaults_to_loopback(monkeypatch):
+    """Loopback is not just the safe default — the UI's same-origin checks
+    derive the expected origin from this value, and a wildcard rejects every
+    write from the auto-opened http://localhost page."""
+    config = _make_config()
     captured = _run_webui_once(monkeypatch, config)
 
     assert captured["npx_env"].get("HOSTNAME") == "127.0.0.1"
@@ -195,11 +198,11 @@ def test_no_host_flag_passed_to_npx(monkeypatch):
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_webui_host_falls_back_to_wildcard(monkeypatch, blank):
+def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
     config = _make_config(webui_host=blank)
     captured = _run_webui_once(monkeypatch, config)
 
-    assert captured["npx_env"].get("HOSTNAME") == "0.0.0.0"
+    assert captured["npx_env"].get("HOSTNAME") == "127.0.0.1"
 
 
 # =============================================================================
