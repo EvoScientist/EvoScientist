@@ -313,7 +313,7 @@ def test_ensure_reclaims_leftover_when_all_owners_dead(
         "_kill_owned_leftover_server",
         lambda port, expected_pid=None: killed.append(port) or True,
     )
-    monkeypatch.setattr(manager, "_wait_for_port_release", lambda port: True)
+    monkeypatch.setattr(manager, "_wait_for_port_release", lambda port, host=None: True)
     started = []
     fake_proc = object()
     monkeypatch.setattr(

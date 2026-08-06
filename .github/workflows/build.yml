@@ -11,7 +11,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      # Full tag required — setup-uv dropped major/minor tags in v8.0.0, so
+      # `@v9` does not resolve. See the note in lint.yml.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.11"
           cache-dependency-glob: "**/pyproject.toml"
