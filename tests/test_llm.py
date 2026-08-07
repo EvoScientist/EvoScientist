@@ -1148,8 +1148,7 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["model"] == api_model
         assert (
-            call_kwargs["base_url"]
-            == "https://ark.cn-beijing.volces.com/api/coding/v3"
+            call_kwargs["base_url"] == "https://ark.cn-beijing.volces.com/api/coding/v3"
         )
         assert call_kwargs["api_key"] == "ve-code-key-123"
 
