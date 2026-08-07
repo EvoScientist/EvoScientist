@@ -475,6 +475,9 @@ def validate_zhipu_key(api_key: str) -> tuple[bool, str]:
 def validate_volcengine_key(api_key: str) -> tuple[bool, str]:
     """Validate a Volcengine API key by making a test request.
 
+    Uses the general endpoint for validation; volcengine and volcengine-code
+    share the same API key and only differ in their runtime base URL.
+
     Returns:
         Tuple of (is_valid, message).
     """
