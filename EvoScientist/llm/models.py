@@ -279,6 +279,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
     ("grok-4.5", "x-ai/grok-4.5", "openrouter"),
     ("hy3", "tencent/hy3", "openrouter"),
+    ("qwen3.8-max", "qwen/qwen3.8-max", "openrouter"),
     ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),
     ("qwen3.7-plus", "qwen/qwen3.7-plus", "openrouter"),
     ("qwen3.6-flash", "qwen/qwen3.6-flash", "openrouter"),
@@ -312,6 +313,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("doubao-1.5-pro", "doubao-1.5-pro-256k", "volcengine"),
     ("doubao-1.5-thinking-pro", "doubao-1.5-thinking-pro", "volcengine"),
     # DashScope Coding Plan (阿里云代码计划 — subscription sk-sp-* endpoint)
+    ("qwen3.8-max", "qwen3.8-max", "dashscope-code"),
     ("qwen3.7-max", "qwen3.7-max", "dashscope-code"),
     ("qwen3.7-plus", "qwen3.7-plus", "dashscope-code"),
     ("qwen3.6-max", "qwen3.6-max-preview", "dashscope-code"),
@@ -322,6 +324,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3-max", "qwen3-max", "dashscope-code"),
     ("qwen3.5-plus", "qwen3.5-plus", "dashscope-code"),
     # DashScope (阿里云 — Qwen models, default for simple lookups)
+    ("qwen3.8-max", "qwen3.8-max", "dashscope"),
     ("qwen3.7-max", "qwen3.7-max", "dashscope"),
     ("qwen3.7-plus", "qwen3.7-plus", "dashscope"),
     ("qwen3.6-max", "qwen3.6-max-preview", "dashscope"),

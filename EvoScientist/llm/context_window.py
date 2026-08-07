@@ -17,6 +17,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.6 open-source variants — exceptions to the ``qwen3.6`` family.
     "qwen3.6-27b": 262_000,
     "qwen3.6-35b-a3b": 262_000,
+    # Qwen 3.8 flagship — Max (1M).
+    "qwen3.8-max": 1_000_000,
     # Qwen 3.7 closed-source tiers — Max flagship and Plus (1M).
     "qwen3.7-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
