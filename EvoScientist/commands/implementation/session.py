@@ -228,7 +228,7 @@ class NewCommand(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         # ``/new`` means fresh state — release any invited experts. Uniform
-        # with the ``ChannelRuntime.clear`` path on channel shutdown; avoids
+        # with the explicit ``/expert clear`` path; avoids
         # the "why is idea-brainstorm still active in my new thread?"
         # surprise. Users who want to reuse an invite in the next thread can
         # re-invite explicitly. Cleared only after the new session actually
