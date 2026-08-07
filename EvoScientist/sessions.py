@@ -550,9 +550,12 @@ async def _ensure_thread_meta_index(conn: aiosqlite.Connection, db_path: str) ->
     ``list_threads`` filters + groups on ``json_extract(metadata, ...)``;
     without an index SQLite scans every checkpoint row, dragging each row's
     multi-KB checkpoint blob through the page cache (~1.3s on a 700MB DB vs
-    ~0.1s indexed). Not a true covering index — SQLite still fetches
-    ``metadata`` for the selected expressions — but the index-ordered search
-    avoids the full-table blob scan, which is where the time went.
+    ~0.1s indexed). The four columns are exactly the per-row expressions:
+    agent_name + graph_id feed the WHERE and updated_at feeds the MAX, so
+    none of them may fall back to a per-row metadata fetch; workspace_dir /
+    model are only materialized for the surviving groups (~dozens), so they
+    stay out of the index (measured: same speed as a 6-column variant at
+    60% of its size, and two fewer json_extract per checkpoint write).
 
     The existence probe is a cheap catalog read on the caller's connection
     (it can still wait on an exclusive schema lock, bounded by that
@@ -576,9 +579,7 @@ async def _ensure_thread_meta_index(conn: aiosqlite.Connection, db_path: str) ->
                     json_extract(metadata, '$.agent_name'),
                     thread_id,
                     json_extract(metadata, '$.updated_at'),
-                    json_extract(metadata, '$.graph_id'),
-                    json_extract(metadata, '$.workspace_dir'),
-                    json_extract(metadata, '$.model')
+                    json_extract(metadata, '$.graph_id')
                 )
                 """
             )

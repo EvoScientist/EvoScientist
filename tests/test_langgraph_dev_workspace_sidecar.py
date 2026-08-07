@@ -295,3 +295,206 @@ def test_keepalive_skips_atexit_registration(tmp_path, monkeypatch, runtime_path
     assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A") is fake_proc
     assert registered
     assert registered[0][0] is manager.stop_langgraph_dev
+
+
+# ---------------------------------------------------------------------------
+# Config fingerprint + drift detection + explicit server stop
+# ---------------------------------------------------------------------------
+
+
+def _dead_pid() -> int:
+    """Spawn-and-reap a process so its pid is reliably dead."""
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def test_sidecar_records_config_fingerprint_when_passed(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path / "ws", pid=1, config_fingerprint="abc123"
+    )
+    assert json.loads((tmp_path / "ws.json").read_text())["config_fingerprint"] == (
+        "abc123"
+    )
+
+
+def test_server_config_fingerprint_tracks_relevant_fields():
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    assert base == manager._server_config_fingerprint(cfg), "must be deterministic"
+    cfg.model = "some-other-model"
+    assert manager._server_config_fingerprint(cfg) != base
+
+
+def _reuse_setup(tmp_path, monkeypatch, runtime_paths, fingerprint):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path / "A", pid=99999, config_fingerprint=fingerprint
+    )
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    return cfg
+
+
+def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
+    tmp_path, monkeypatch, runtime_paths
+):
+    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "stale-fingerprint")
+    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+
+
+def test_reuse_clears_drift_flag_on_matching_fingerprint(
+    tmp_path, monkeypatch, runtime_paths
+):
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    fp = manager._server_config_fingerprint(cfg)
+    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
+    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
+
+
+def test_stop_recorded_server_none_when_no_pid_file(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    assert manager.stop_recorded_server() is None
+
+
+def test_stop_recorded_server_cleans_stale_files_for_dead_pid(
+    tmp_path, monkeypatch, runtime_paths
+):
+    pid_file = tmp_path / "pid.txt"
+    sidecar = tmp_path / "ws.json"
+    pid_file.write_text(str(_dead_pid()))
+    sidecar.write_text(json.dumps({"workspace": "/a", "pid": 1}))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
+        ),
+    )
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    assert manager.stop_recorded_server() is None
+    assert not pid_file.exists()
+    assert not sidecar.exists()
+
+
+def test_stop_recorded_server_refuses_foreign_process(
+    tmp_path, monkeypatch, runtime_paths
+):
+    import subprocess
+    import sys
+
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        pid_file = tmp_path / "pid.txt"
+        pid_file.write_text(str(victim.pid))
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(runtime_paths, pid_file=pid_file),
+        )
+        monkeypatch.setattr(manager, "_PROCESS", None)
+        assert manager.stop_recorded_server() is None
+        assert victim.poll() is None, "foreign process must not be killed"
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_stop_recorded_server_kills_owned_langgraph_process(
+    tmp_path, monkeypatch, runtime_paths
+):
+    import subprocess
+    import sys
+
+    victim = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph"]
+    )
+    try:
+        pid_file = tmp_path / "pid.txt"
+        sidecar = tmp_path / "ws.json"
+        pid_file.write_text(str(victim.pid))
+        sidecar.write_text(json.dumps({"workspace": "/a", "pid": victim.pid}))
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(
+                runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
+            ),
+        )
+        monkeypatch.setattr(manager, "_PROCESS", None)
+        assert manager.stop_recorded_server() == victim.pid
+        assert victim.poll() is not None, "owned langgraph process must be stopped"
+        assert not pid_file.exists()
+        assert not sidecar.exists()
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+        victim.wait()
+
+
+def test_stop_recorded_server_cleans_corrupt_pid_file(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A corrupt PID file is cleaned up, matching the docstring's promise."""
+    pid_file = tmp_path / "pid.txt"
+    pid_file.write_text("not-a-pid")
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, pid_file=pid_file),
+    )
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    assert manager.stop_recorded_server() is None
+    assert not pid_file.exists()
+
+
+def test_server_config_fingerprint_tracks_dangerous_mode():
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.dangerous_mode = True
+    assert manager._server_config_fingerprint(cfg) != base
+
+
+def test_pid_serves_port_matrix():
+    import subprocess
+    import sys
+
+    assert manager._pid_serves_port(None, 6174) is False
+    assert manager._pid_serves_port(True, 6174) is False
+    assert manager._pid_serves_port(-1, 6174) is False
+
+    victim = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph", "6174"]
+    )
+    try:
+        assert manager._pid_serves_port(victim.pid, 6174) is True
+        assert manager._pid_serves_port(victim.pid, 9999) is False, (
+            "must not attribute a server bound to a different port"
+        )
+    finally:
+        victim.kill()
+        victim.wait()
+    assert manager._pid_serves_port(victim.pid, 6174) is False, "dead pid"

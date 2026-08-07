@@ -67,6 +67,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         _is_loopback_host,
         _is_port_occupied,
         _read_workspace_sidecar,
+        _server_config_fingerprint,
         is_langgraph_dev_running,
         start_langgraph_dev,
         stop_langgraph_dev,
@@ -192,6 +193,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                     file_persistence=file_persistence,
                     jobs_per_worker=jobs_per_worker,
                     deploy_mode=True,
+                    config_fingerprint=_server_config_fingerprint(config),
                 )
             atexit.register(stop_langgraph_dev, started_proc)
         except Exception as exc:

@@ -26,7 +26,10 @@ from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_contex
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..runtime import AsyncRuntime
 from ..stream.console import console
-from . import async_notifier
+from . import (
+    async_notifier,
+    server_cmd,  # noqa: F401 — registers `EvoSci server` commands
+)
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
@@ -520,6 +523,16 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+    from ..langgraph_dev import manager as _lg_manager
+
+    if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+        console.print(
+            "[yellow]⚠ Config changed since the background agent server was "
+            "launched — async sub-agents still use the old settings. Apply "
+            "them with [bold]EvoSci server stop[/bold], then restart "
+            "EvoSci.[/yellow]"
+        )
 
     # This backend is shared by every UI mode, not just `deploy` / WebUI — so
     # the exposure warning belongs here too, or a plain `EvoSci` session would
