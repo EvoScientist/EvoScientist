@@ -503,7 +503,13 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     state would route async sub-agent calls to a process pinned to /A
     while the main agent runs in /B.
     """
-    from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
+    from ..langgraph_dev.manager import (
+        _DEFAULT_HOST,
+        WorkspaceMismatchError,
+        _is_loopback_host,
+        ensure_langgraph_dev,
+        is_async_subagents_available,
+    )
 
     try:
         with console.status(
@@ -515,6 +521,25 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+    # This backend is shared by every UI mode, not just `deploy` / WebUI — so
+    # the exposure warning belongs here too, or a plain `EvoSci` session would
+    # put an unauthenticated, shell-capable API on the network with no signal
+    # at all. Gated on the server actually being up: ensure_langgraph_dev
+    # fails soft (async falls back to in-process), and warning about a bind
+    # that never happened would be worse than saying nothing.
+    bind_host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
+    if (
+        bind_host
+        and not _is_loopback_host(bind_host)
+        and is_async_subagents_available()
+    ):
+        console.print(
+            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+            f"[bold red]Agent server listening on {bind_host} — no auth, and "
+            f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
+            f"networks.[/bold red]"
+        )
 
 
 def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
@@ -2130,6 +2155,16 @@ def _main_callback(
         "--ui",
         help="UI backend: tui (default), cli, or webui.",
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Interface to bind servers to (defaults: langgraph_dev_host "
+        "127.0.0.1, webui_host 0.0.0.0). Sets langgraph_dev_host, which "
+        "applies in EVERY UI mode — the background langgraph dev backend is "
+        "shared by tui/cli/webui/serve — and webui_host, which only matters in "
+        "WebUI mode. Pass 0.0.0.0 to reach both from another machine (the "
+        "backend has no auth).",
+    ),
     output_format: str | None = typer.Option(
         None,
         "--output-format",
@@ -2190,6 +2225,13 @@ def _main_callback(
         cli_overrides["show_thinking"] = False
     if ui:
         cli_overrides["ui_backend"] = ui
+    if host is not None and host.strip():
+        # One flag drives both servers. Note this is NOT WebUI-specific: the
+        # langgraph dev backend is auto-started for tui/cli/serve too (see
+        # _ensure_async_subagent_server), so --host narrows or widens the
+        # agent API in every mode. Only webui_host is WebUI-only.
+        cli_overrides["webui_host"] = host.strip()
+        cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:
         cli_overrides["auto_approve"] = True
     if effective_auto_mode:

@@ -34,6 +34,103 @@ def reset_module_state():
 
 
 # =============================================================================
+# Bind host vs. probe host
+# =============================================================================
+
+
+class TestProbeHost:
+    """``_probe_host`` is the seam that makes host support safe: only bind()
+    uses the configured interface, every client falls back to something
+    actually reachable."""
+
+    @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", ""])
+    def test_wildcards_map_to_loopback(self, wildcard):
+        assert manager._probe_host(wildcard) == "127.0.0.1"
+
+    @pytest.mark.parametrize(
+        "host", ["127.0.0.1", "192.168.1.5", "::1", "example.test"]
+    )
+    def test_specific_hosts_pass_through(self, host):
+        assert manager._probe_host(host) == host
+
+    def test_defaults_to_loopback(self):
+        assert manager._probe_host() == "127.0.0.1"
+
+
+class TestIsLoopbackHost:
+    """Drives the public-bind warning, so it must be conservative: only
+    provable loopback suppresses the banner."""
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "  LOCALHOST  "])
+    def test_loopback_recognized(self, host):
+        assert manager._is_loopback_host(host) is True
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.5", "example.test"])
+    def test_exposed_hosts_rejected(self, host):
+        assert manager._is_loopback_host(host) is False
+
+
+class TestBaseUrl:
+    def test_default_is_loopback(self):
+        assert manager._base_url(6174) == "http://127.0.0.1:6174"
+
+    def test_wildcard_renders_as_loopback(self):
+        assert manager._base_url(6174, "0.0.0.0") == "http://127.0.0.1:6174"
+
+    def test_specific_host_preserved(self):
+        assert manager._base_url(6174, "192.168.1.5") == "http://192.168.1.5:6174"
+
+    def test_ipv6_literal_is_bracketed(self):
+        """Unbracketed ``::1:6174`` is not a parseable authority (RFC 3986)."""
+        assert manager._base_url(6174, "::1") == "http://[::1]:6174"
+
+
+class TestCanBindPort:
+    def test_binds_literal_host_not_probe_host(self, monkeypatch):
+        """``_can_bind_port`` must replicate the server's own bind. Probing
+        loopback while the server claims 0.0.0.0 would give false confidence
+        when another process holds a single non-loopback interface."""
+        import socket as _socket
+
+        bound: list[tuple] = []
+
+        class _FakeSocket:
+            def __init__(self, family, type_):
+                self.family = family
+
+            def bind(self, addr):
+                bound.append((self.family, addr))
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _FakeSocket)
+
+        assert manager._can_bind_port(6174, "0.0.0.0") is True
+        assert bound == [(_socket.AF_INET, ("0.0.0.0", 6174))]
+
+    def test_ipv6_host_uses_ipv6_family(self, monkeypatch):
+        import socket as _socket
+
+        bound: list[tuple] = []
+
+        class _FakeSocket:
+            def __init__(self, family, type_):
+                self.family = family
+
+            def bind(self, addr):
+                bound.append((self.family, addr))
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _FakeSocket)
+
+        assert manager._can_bind_port(6174, "::1") is True
+        assert bound == [(_socket.AF_INET6, ("::1", 6174))]
+
+
+# =============================================================================
 # langgraph CLI resolution
 # =============================================================================
 
@@ -124,14 +221,42 @@ class TestIsLanggraphDevRunning:
     def test_returns_true_on_200(self, mock_get):
         mock_get.return_value = MagicMock(status_code=200)
         assert manager.is_langgraph_dev_running(port=6174) is True
-        # Verify it probed /ok at the configured port.
+        # Verify it probed /ok at the configured port. 127.0.0.1 rather than
+        # "localhost" on purpose: the latter can resolve to ::1 first, which
+        # never reaches a server bound to an IPv4 interface.
         called_url = mock_get.call_args[0][0]
-        assert called_url == "http://localhost:6174/ok"
+        assert called_url == "http://127.0.0.1:6174/ok"
 
     @patch("EvoScientist.langgraph_dev.manager.httpx.get")
     def test_returns_false_on_non_200(self, mock_get):
         mock_get.return_value = MagicMock(status_code=503)
         assert manager.is_langgraph_dev_running(port=6174) is False
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_wildcard_bind_probed_over_loopback(self, mock_get):
+        """A server bound to 0.0.0.0 also listens on loopback, and you cannot
+        meaningfully connect to 0.0.0.0 itself — probe 127.0.0.1."""
+        mock_get.return_value = MagicMock(status_code=200)
+        assert manager.is_langgraph_dev_running(port=6174, host="0.0.0.0") is True
+        assert mock_get.call_args[0][0] == "http://127.0.0.1:6174/ok"
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_specific_host_probed_verbatim(self, mock_get):
+        """Loopback would not reach a server pinned to one interface."""
+        mock_get.return_value = MagicMock(status_code=200)
+        assert manager.is_langgraph_dev_running(port=6174, host="192.168.1.5") is True
+        assert mock_get.call_args[0][0] == "http://192.168.1.5:6174/ok"
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_explicit_base_url_still_wins(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        assert (
+            manager.is_langgraph_dev_running(
+                base_url="http://example.test:1234", port=6174, host="0.0.0.0"
+            )
+            is True
+        )
+        assert mock_get.call_args[0][0] == "http://example.test:1234/ok"
 
 
 # =============================================================================
@@ -524,7 +649,7 @@ class TestStartLanggraphDevRotatesLog:
         # sockets.  Patch ``_can_bind_port`` so the bind-poll loop in
         # ``_wait_for_port_bindable`` passes immediately regardless of
         # whether port 6174 is in use on the dev machine.
-        monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
+        monkeypatch.setattr(manager, "_can_bind_port", lambda port, *_a, **_kw: True)
         # Make ``_packaged_langgraph_config`` point at a real file so
         # ``start_langgraph_dev`` doesn't bail at the existence check
         # before reaching the rotation call.
@@ -577,7 +702,7 @@ def start_langgraph_dev_capture(tmp_path, monkeypatch):
             log_file=log,
         ),
     )
-    monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
+    monkeypatch.setattr(manager, "_can_bind_port", lambda port, *_a, **_kw: True)
     fake_config = tmp_path / "langgraph.json"
     fake_config.write_text("{}")
     monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/fake/langgraph")

@@ -434,6 +434,59 @@ class TestValidateAtlasCloudKey:
 # =============================================================================
 
 
+class TestStepPortsRenderConfiguredHost:
+    """The wizard's confirmation lines used to hard-code ``127.0.0.1`` /
+    ``localhost``, which lies once a bind host is pinned to a real interface.
+    They now render whatever the configured host resolves to."""
+
+    def _capture(self, step, config, answer=""):
+        printed: list[str] = []
+        with (
+            patch("EvoScientist.config.onboard.steps.questionary") as mock_q,
+            patch("EvoScientist.config.onboard.steps.console") as mock_console,
+            patch(
+                "EvoScientist.langgraph_dev.manager._is_port_occupied",
+                lambda *_a, **_kw: False,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_langgraph_dev_running",
+                lambda *_a, **_kw: False,
+            ),
+        ):
+            mock_q.text.return_value.ask.return_value = answer
+            mock_console.print.side_effect = lambda *a, **k: printed.append(str(a[0]))
+            step(config)
+        return "\n".join(printed)
+
+    def test_langgraph_dev_step_shows_pinned_interface(self):
+        from EvoScientist.config.onboard.steps import _step_langgraph_dev_port
+
+        config = EvoScientistConfig(
+            langgraph_dev_port=6174, langgraph_dev_host="192.168.1.5"
+        )
+        assert "http://192.168.1.5:6174" in self._capture(
+            _step_langgraph_dev_port, config
+        )
+
+    def test_langgraph_dev_step_shows_loopback_for_wildcard(self):
+        """A wildcard bind is reported as loopback — that is the address this
+        machine's own browser opens."""
+        from EvoScientist.config.onboard.steps import _step_langgraph_dev_port
+
+        config = EvoScientistConfig(
+            langgraph_dev_port=6174, langgraph_dev_host="0.0.0.0"
+        )
+        assert "http://127.0.0.1:6174" in self._capture(
+            _step_langgraph_dev_port, config
+        )
+
+    def test_webui_step_shows_pinned_interface(self):
+        from EvoScientist.config.onboard.steps import _step_webui_port
+
+        config = EvoScientistConfig(webui_port=4716, webui_host="192.168.1.5")
+        assert "http://192.168.1.5:4716" in self._capture(_step_webui_port, config)
+
+
 class TestStepProvider:
     def test_returns_selected_provider(self):
         """Test that _step_provider returns selected provider."""

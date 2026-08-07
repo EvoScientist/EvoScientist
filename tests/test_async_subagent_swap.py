@@ -150,12 +150,12 @@ def test_swaps_async_flagged_subs():
     # Async subs are AsyncSubAgent specs (TypedDict) pointing at the right URL.
     writing = by_name["writing-agent"]
     assert writing["graph_id"] == "writing-agent"
-    assert writing["url"] == "http://localhost:6174"
+    assert writing["url"] == "http://127.0.0.1:6174"
     assert writing["description"] == "write report"
 
     data = by_name["data-analysis-agent"]
     assert data["graph_id"] == "data-analysis-agent"
-    assert data["url"] == "http://localhost:6174"
+    assert data["url"] == "http://127.0.0.1:6174"
 
 
 def test_swap_uses_configured_port():
@@ -170,7 +170,48 @@ def test_swap_uses_configured_port():
         ),
     ):
         out = _maybe_swap_async_subagents(subs)
-    assert out[0]["url"] == "http://localhost:9999"
+    assert out[0]["url"] == "http://127.0.0.1:9999"
+
+
+def test_swap_uses_configured_host():
+    """A backend pinned to one interface can't be self-dispatched over
+    loopback, so the URL must track cfg.langgraph_dev_host too."""
+    cfg = SimpleNamespace(
+        enable_async_subagents=True,
+        langgraph_dev_port=6174,
+        langgraph_dev_host="192.168.1.5",
+    )
+    subs = [_sub("writing-agent", async_flag=True)]
+    with (
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+        patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ),
+    ):
+        out = _maybe_swap_async_subagents(subs)
+    assert out[0]["url"] == "http://192.168.1.5:6174"
+
+
+def test_swap_maps_wildcard_host_to_loopback():
+    """A 0.0.0.0 bind includes loopback, and connecting *to* 0.0.0.0 is
+    rejected outright on Windows — the client URL must collapse to
+    127.0.0.1 rather than echo the bind address back."""
+    cfg = SimpleNamespace(
+        enable_async_subagents=True,
+        langgraph_dev_port=6174,
+        langgraph_dev_host="0.0.0.0",
+    )
+    subs = [_sub("writing-agent", async_flag=True)]
+    with (
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+        patch(
+            "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+            return_value=True,
+        ),
+    ):
+        out = _maybe_swap_async_subagents(subs)
+    assert out[0]["url"] == "http://127.0.0.1:6174"
 
 
 # =============================================================================

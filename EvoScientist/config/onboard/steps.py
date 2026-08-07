@@ -156,8 +156,14 @@ def _step_langgraph_dev_port(config: EvoScientistConfig) -> int:
             f"EvoSci config set langgraph_dev_port <other-port>[/yellow]"
         )
     else:
+        # Render the address the configured bind actually produces rather than
+        # a hard-coded loopback URL — the two diverge once langgraph_dev_host
+        # is pinned to a specific interface.
+        from ...langgraph_dev.manager import _base_url
+
+        host = getattr(config, "langgraph_dev_host", "")
         console.print(
-            f"  [green]✓ EvoScientist will run on http://127.0.0.1:{port}[/green]"
+            f"  [green]✓ EvoScientist will run on {_base_url(port, host)}[/green]"
         )
     return port
 
@@ -220,7 +226,15 @@ def _step_webui_port(config: EvoScientistConfig) -> int:
         raise KeyboardInterrupt()
 
     port = int(raw) if raw else current_port
-    console.print(f"  [green]✓ WebUI will open at http://localhost:{port}[/green]")
+    # Same reasoning as the langgraph-dev step: render the configured bind, not
+    # a hard-coded localhost. A wildcard bind still shows loopback here — that
+    # is the address this machine's own browser opens.
+    from ...langgraph_dev.manager import _format_hostport
+
+    host = getattr(config, "webui_host", "")
+    console.print(
+        f"  [green]✓ WebUI will open at http://{_format_hostport(host, port)}[/green]"
+    )
     console.print(
         "  [yellow]⚠️  Note: the WebUI won't show your CLI/TUI chat history "
         "yet.[/yellow]"

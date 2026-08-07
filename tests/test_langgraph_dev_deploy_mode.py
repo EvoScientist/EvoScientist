@@ -34,13 +34,16 @@ def _patch_start_prereqs(monkeypatch, tmp_path: Path, runtime_paths) -> dict:
     fake_config.write_text("{}")
     monkeypatch.setattr(manager, "_packaged_langgraph_config", lambda: fake_config)
 
-    # No conflicts, no stale process — straight to spawn.
+    # No conflicts, no stale process — straight to spawn. The ``**_kw`` tails
+    # absorb the ``host`` argument these probes now take.
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_: False)
-    monkeypatch.setattr(manager, "_is_port_occupied", lambda _port: False)
-    monkeypatch.setattr(manager, "_wait_for_port_bindable", lambda _port: True)
+    monkeypatch.setattr(manager, "_is_port_occupied", lambda _port, *_a, **_kw: False)
+    monkeypatch.setattr(
+        manager, "_wait_for_port_bindable", lambda _port, *_a, **_kw: True
+    )
     monkeypatch.setattr(manager, "_kill_owned_stale_process", lambda _port: False)
     monkeypatch.setattr(
-        manager, "_wait_for_port_release", lambda _port, timeout=10.0: True
+        manager, "_wait_for_port_release", lambda _port, *_a, **_kw: True
     )
 
     # Redirect the log file — pid_dir already rooted under tmp via the fixture.
@@ -209,6 +212,56 @@ def test_workspace_dir_env_var_set_regardless_of_mode(
                 deploy_mode=deploy_mode,
             )
         assert captured["env"].get("EVOSCIENTIST_WORKSPACE_DIR") == str(tmp_path)
+
+
+# =============================================================================
+# Bind host — argv flag + env propagation
+# =============================================================================
+
+
+def test_host_defaults_to_loopback_in_argv(monkeypatch, tmp_path, runtime_paths):
+    """``--host`` must always be emitted rather than left to the langgraph
+    CLI's own default, so the bind stays pinned to _DEFAULT_HOST even if that
+    default moves."""
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+
+    args = captured["args"]
+    assert args[args.index("--host") + 1] == "127.0.0.1"
+
+
+def test_explicit_wildcard_host_reaches_argv(monkeypatch, tmp_path, runtime_paths):
+    """The opt-in to a public bind has to survive all the way into argv."""
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178, host="0.0.0.0")
+
+    args = captured["args"]
+    assert args[args.index("--host") + 1] == "0.0.0.0"
+
+
+def test_env_carries_explicit_bind_host(monkeypatch, tmp_path, runtime_paths):
+    """The subprocess resolves its self-dispatch URL from config, so the
+    caller-resolved host must be injected — mirrors the port propagation."""
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(
+            workspace_dir=tmp_path, port=16178, host="192.168.1.5"
+        )
+
+    assert captured["env"].get("EVOSCIENTIST_LANGGRAPH_DEV_HOST") == "192.168.1.5"
+
+
+def test_env_host_replaces_inherited(monkeypatch, tmp_path, runtime_paths):
+    """A stray export in the user's shell must not override the host this
+    caller resolved — otherwise the bind and the dispatch URL desync."""
+    monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_HOST", "10.0.0.9")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178, host="0.0.0.0")
+
+    assert captured["env"].get("EVOSCIENTIST_LANGGRAPH_DEV_HOST") == "0.0.0.0"
 
 
 # =============================================================================
