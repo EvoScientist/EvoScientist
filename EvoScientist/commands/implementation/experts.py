@@ -199,12 +199,17 @@ class ExpertCommand(Command):
             )
             return
 
-        dispatchable = {s.name for s in _dispatchable_experts()}
-        if target not in dispatchable:
+        # Completion matches case-insensitively; honour the same here by
+        # resolving a case-variant to the on-disk name before membership.
+        by_lower = {s.name.lower(): s.name for s in _dispatchable_experts()}
+        canonical = by_lower.get(target.lower())
+        if canonical is None:
             from ...tools.skills_manager import list_expert_skills
 
-            installed = {s.name for s in list_expert_skills(include_system=True)}
-            if target not in installed:
+            installed = {
+                s.name.lower() for s in list_expert_skills(include_system=True)
+            }
+            if target.lower() not in installed:
                 ctx.ui.append_system(
                     f"No expert skill named '{target}'. `/experts` lists "
                     "installed ones.",
@@ -218,12 +223,12 @@ class ExpertCommand(Command):
                 )
             return
 
-        if target in runtime.active_teams:
-            runtime.active_teams = [n for n in runtime.active_teams if n != target]
-            ctx.ui.append_system(f"Dismissed expert: {target}", style="dim")
+        if canonical in runtime.active_teams:
+            runtime.active_teams = [n for n in runtime.active_teams if n != canonical]
+            ctx.ui.append_system(f"Dismissed expert: {canonical}", style="dim")
         else:
-            runtime.active_teams = [*runtime.active_teams, target]
-            ctx.ui.append_system(f"Invited expert: {target}", style="green")
+            runtime.active_teams = [*runtime.active_teams, canonical]
+            ctx.ui.append_system(f"Invited expert: {canonical}", style="green")
             # Case (c): expert was installed after agent construction, so it
             # will not reach ``task()`` until the graph is rebuilt. Cheap
             # always-print hint mirrors the /install-skill success message.

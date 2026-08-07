@@ -170,6 +170,17 @@ class TestExpertToggle:
         assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
         assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
 
+    async def test_invite_matches_name_case_insensitively(self):
+        """Execute honours the same case-insensitive match as completion."""
+        ctx, ui = _make_ctx()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_FakeSkillInfo(name="idea-brainstorm")],
+        ):
+            await ExpertCommand().execute(ctx, args=["Idea-Brainstorm"])
+        assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
+        assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
+
     async def test_toggle_dismisses_when_already_invited(self):
         ctx, ui = _make_ctx(active_teams=["idea-brainstorm"])
         with patch(

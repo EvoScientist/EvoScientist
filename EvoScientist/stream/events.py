@@ -293,12 +293,14 @@ class _V3EventProcessor:
                     description=description if isinstance(description, str) else "",
                 ).data
             ]
+        raw_duration = payload.get("duration_ms")
+        duration_ms = raw_duration if isinstance(raw_duration, int) else 0
         if phase == "complete":
             return [
                 self.emitter.panel_dispatch_complete(
                     eval_id=eval_id_str,
                     dispatch_id=dispatch_id,
-                    duration_ms=payload.get("duration_ms", 0),
+                    duration_ms=duration_ms,
                 ).data
             ]
         if phase == "error":
@@ -307,7 +309,7 @@ class _V3EventProcessor:
                 self.emitter.panel_dispatch_error(
                     eval_id=eval_id_str,
                     dispatch_id=dispatch_id,
-                    duration_ms=payload.get("duration_ms", 0),
+                    duration_ms=duration_ms,
                     error=error if isinstance(error, str) else "",
                 ).data
             ]

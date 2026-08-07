@@ -101,6 +101,22 @@ class TestParseSkillMd:
         assert result.name == "no-frontmatter-skill"
         assert result.description == "(no description)"
 
+    def test_parse_with_empty_description_value(self, tmp_path):
+        """A present-but-empty ``description:`` parses to YAML None; guard it."""
+        skill_dir = tmp_path / "empty-desc-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: empty-desc-skill
+description:
+---
+
+# Body
+"""
+        )
+        result = _parse_skill_md(skill_dir / "SKILL.md")
+        assert result.description == "(no description)"
+
     def test_parse_with_partial_frontmatter(self, tmp_path):
         skill_dir = tmp_path / "partial-skill"
         skill_dir.mkdir()

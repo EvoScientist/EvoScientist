@@ -586,7 +586,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         # collision guard. Coerce to the parent dir name in both cases.
         return _info(
             frontmatter.get("name") or parent.name,
-            frontmatter.get("description", "(no description)"),
+            frontmatter.get("description") or "(no description)",
             tags,
             type_=type_,
             role=str(role),

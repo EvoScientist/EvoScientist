@@ -1321,6 +1321,25 @@ class TestPanelDispatchEvents:
         assert completes[0]["id"] == "ptc_task_abc12345"
         assert completes[0]["duration_ms"] == 1234
 
+    async def test_complete_event_with_null_duration_normalizes_to_zero(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "duration_ms": None,
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        completes = [e for e in events if e.get("type") == "panel_dispatch_complete"]
+        assert len(completes) == 1
+        assert completes[0]["duration_ms"] == 0
+
     async def test_error_event_becomes_panel_dispatch_error(self):
         agent = FakeV3Agent(
             [

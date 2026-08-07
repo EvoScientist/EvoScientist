@@ -17,11 +17,12 @@ story.
 
 State schema
 ------------
-Extends ``DeepAgentState`` with ``skill_name`` and ``output_path`` as
-optional keys. Both arrive via the ``payload`` the main agent passes; the
-middleware validates presence and halts with a clear error message when
-either is missing (rather than falling back to an ambient default that
-would silently produce the wrong survey).
+Extends ``DeepAgentState`` with ``skill_name`` as an optional key,
+injected by construction when the spec is built. The middleware validates
+its presence and halts with a clear error message when missing (rather
+than falling back to an ambient default that would silently produce the
+wrong survey). Run-specific values such as the output path travel in the
+task description, not in state.
 """
 
 from __future__ import annotations

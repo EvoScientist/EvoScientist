@@ -85,3 +85,24 @@ class TestNewCommand:
         ctx = CommandContext(agent=None, thread_id="tid", ui=ui, channel_runtime=None)
         await NewCommand().execute(ctx, [])
         ui.append_system.assert_not_called()
+
+    async def test_failed_session_start_keeps_invitations(self):
+        """A raising start_new_session leaves the current session's invites."""
+        import pytest
+
+        from EvoScientist.commands.base import ChannelRuntime, CommandContext
+        from EvoScientist.commands.implementation.session import NewCommand
+
+        ui = MagicMock()
+        ui.start_new_session = AsyncMock(side_effect=RuntimeError("gateway down"))
+        runtime = ChannelRuntime()
+        runtime.active_teams = ["idea-brainstorm"]
+        ctx = CommandContext(
+            agent=None,
+            thread_id="tid",
+            ui=ui,
+            channel_runtime=runtime,
+        )
+        with pytest.raises(RuntimeError):
+            await NewCommand().execute(ctx, [])
+        assert runtime.active_teams == ["idea-brainstorm"]
