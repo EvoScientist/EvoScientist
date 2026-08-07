@@ -279,6 +279,10 @@ def _step_provider(
             value="volcengine",
         ),
         Choice(
+            title="Volcengine Coding Plan (火山引擎代码计划 — coding models)",
+            value="volcengine-code",
+        ),
+        Choice(
             title="DashScope (阿里云 — Qwen models)",
             value="dashscope",
         ),

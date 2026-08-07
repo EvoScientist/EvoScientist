@@ -202,3 +202,8 @@ def test_lookup_is_case_insensitive():
     # GLM-5 capitalized variant
     glm = SimpleNamespace(model_name="Pro/zai-org/GLM-5", profile=None)
     assert get_context_window(glm) == 203_000
+
+
+def test_volcengine_glm_5_2_alias_keeps_exact_context_window():
+    model = SimpleNamespace(model_name="glm-5-2", profile=None)
+    assert get_context_window(model) == 1_000_000

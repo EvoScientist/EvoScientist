@@ -165,6 +165,7 @@ class LocalGraphGateway:
             metadata=request.metadata,
             media=request.media,
             events=self.events,
+            configurable_extra=request.configurable_extra,
         )
         try:
             async for event in inner:
