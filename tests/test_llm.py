@@ -41,6 +41,7 @@ class TestModelsRegistry:
         assert "zhipu" in providers
         assert "zhipu-code" in providers
         assert "volcengine" in providers
+        assert "volcengine-code" in providers
         assert "dashscope" in providers
         assert "dashscope-code" in providers
         assert "deepseek" in providers
@@ -62,6 +63,7 @@ class TestModelsRegistry:
             "zhipu",
             "zhipu-code",
             "volcengine",
+            "volcengine-code",
             "dashscope",
             "dashscope-code",
             "custom-openai",
@@ -1075,38 +1077,6 @@ class TestThirdPartyRouting:
         assert call_kwargs["base_url"] == "https://my-llm.example.com/v1"
         assert call_kwargs["api_key"] == "custom-key-789"
 
-    @pytest.mark.parametrize(
-        ("configured_model", "api_model"),
-        [("glm-5.2", "glm-5-2"), ("kimi-k2.5", "kimi-k2-5")],
-    )
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_custom_volcengine_coding_uses_compatible_model_alias(
-        self, mock_init, configured_model, api_model, monkeypatch
-    ):
-        """Volcengine Coding Plan rejects dotted compatibility model IDs."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv(
-            "CUSTOM_OPENAI_BASE_URL",
-            "https://ark.cn-beijing.volces.com/api/coding/v3",
-        )
-        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "custom-key-789")
-
-        get_chat_model(configured_model, provider="custom-openai")
-
-        assert mock_init.call_args[1]["model"] == api_model
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_custom_non_volcengine_endpoint_preserves_dotted_model(
-        self, mock_init, monkeypatch
-    ):
-        """The provider-specific aliases must not leak to other endpoints."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://example.com/v1")
-
-        get_chat_model("glm-5.2", provider="custom-openai")
-
-        assert mock_init.call_args[1]["model"] == "glm-5.2"
-
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_base_url_override(self, mock_init, monkeypatch):
         """Anthropic provider should support base_url override (e.g. ccproxy)."""
@@ -1159,6 +1129,29 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://ark.cn-beijing.volces.com/api/v3"
         assert call_kwargs["api_key"] == "ve-key-123"
+
+    @pytest.mark.parametrize(
+        ("configured_model", "api_model"),
+        [("glm-5.2", "glm-5-2"), ("kimi-k2.5", "kimi-k2-5")],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_volcengine_code_routes_through_openai(
+        self, mock_init, configured_model, api_model, monkeypatch
+    ):
+        """Volcengine Coding Plan uses its endpoint, IDs, and vendor API key."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("VOLCENGINE_API_KEY", "ve-code-key-123")
+
+        get_chat_model(configured_model, provider="volcengine-code")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["model"] == api_model
+        assert (
+            call_kwargs["base_url"]
+            == "https://ark.cn-beijing.volces.com/api/coding/v3"
+        )
+        assert call_kwargs["api_key"] == "ve-code-key-123"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_dashscope_routes_through_openai(self, mock_init, monkeypatch):

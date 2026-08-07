@@ -43,6 +43,7 @@ _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 _ZHIPU_CODE_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+_VOLCENGINE_CODE_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding/v3"
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _DASHSCOPE_CODE_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1"
 
@@ -105,25 +106,6 @@ def _is_deepseek_endpoint(base_url: str | None) -> bool:
         return False
 
 
-def _normalize_volcengine_coding_model(model_id: str, base_url: str | None) -> str:
-    """Use model aliases accepted by Volcengine's Coding Plan endpoint."""
-    if not base_url:
-        return model_id
-    try:
-        parsed = urlparse(base_url)
-    except ValueError:
-        return model_id
-    if (
-        parsed.hostname == "ark.cn-beijing.volces.com"
-        and parsed.path.rstrip("/") == "/api/coding/v3"
-    ):
-        return {
-            "glm-5.2": "glm-5-2",
-            "kimi-k2.5": "kimi-k2-5",
-        }.get(model_id, model_id)
-    return model_id
-
-
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
 _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
@@ -133,6 +115,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "zhipu": (_ZHIPU_BASE_URL, "ZHIPU_API_KEY"),
     "zhipu-code": (_ZHIPU_CODE_BASE_URL, "ZHIPU_API_KEY"),
     "volcengine": (_VOLCENGINE_BASE_URL, "VOLCENGINE_API_KEY"),
+    "volcengine-code": (_VOLCENGINE_CODE_BASE_URL, "VOLCENGINE_API_KEY"),
     "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
     "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
@@ -302,6 +285,10 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
+    # Volcengine Coding Plan (火山引擎代码计划 — coding-only endpoint)
+    # Listed before Zhipu so simple GLM lookups keep their existing default.
+    ("glm-5.2", "glm-5-2", "volcengine-code"),
+    ("kimi-k2.5", "kimi-k2-5", "volcengine-code"),
     # Zhipu CodePlan (智谱代码计划 — coding-only endpoint)
     ("glm-5.2", "glm-5.2", "zhipu-code"),
     ("glm-5.1", "glm-5.1", "zhipu-code"),
@@ -660,8 +647,6 @@ def get_chat_model(
             base_url = base_url_default
         if base_url:
             kwargs["base_url"] = base_url
-        if provider == "custom-openai":
-            model_id = _normalize_volcengine_coding_model(model_id, base_url)
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
