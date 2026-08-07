@@ -17,6 +17,7 @@ def server_status() -> None:
     from ..langgraph_dev.manager import (
         _DEFAULT_HOST,
         _DEFAULT_PORT,
+        _pid_serves_port,
         _read_workspace_sidecar,
         is_langgraph_dev_running,
     )
@@ -36,7 +37,14 @@ def server_status() -> None:
     console.print(f"[bold]langgraph dev[/bold] on port {port}: {state}")
     if sidecar is not None:
         console.print(f"  workspace: {sidecar.get('workspace')}")
-        console.print(f"  pid:       {sidecar.get('pid')}")
+        pid = sidecar.get("pid")
+        if _pid_serves_port(pid, port):
+            console.print(f"  pid:       {pid}")
+        else:
+            console.print(
+                f"  pid:       {pid} [yellow](stale record — this pid does "
+                f"not serve port {port})[/yellow]"
+            )
     elif running:
         console.print(
             "  [yellow]no sidecar — externally managed or pre-keepalive server[/yellow]"
