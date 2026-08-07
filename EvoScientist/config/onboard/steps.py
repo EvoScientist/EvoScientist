@@ -323,6 +323,10 @@ def _step_provider(
             value="requesty",
         ),
         Choice(
+            title="OrcaRouter (aggregator — OpenAI, Anthropic, Gemini, etc.)",
+            value="orcarouter",
+        ),
+        Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
         ),

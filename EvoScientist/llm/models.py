@@ -51,6 +51,7 @@ _ATLASCLOUD_BASE_URL = "https://api.atlascloud.ai/v1"
 _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
 _REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
+_ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1"
 
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
 # installed versions are advertised automatically.
@@ -119,6 +120,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "dashscope": (_DASHSCOPE_BASE_URL, "DASHSCOPE_API_KEY"),
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
     "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
+    "orcarouter": (_ORCAROUTER_BASE_URL, "ORCAROUTER_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
@@ -249,6 +251,36 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
     ("grok-4.3", "xai/grok-4.3", "requesty"),
     ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
+    # OrcaRouter (aggregator — OpenAI-compatible gateway, provider/model IDs).
+    # Listed before OpenRouter so that for model names shared with OpenRouter
+    # or a native provider, OrcaRouter does not override them (the dict below is
+    # last-entry-wins); OrcaRouter is selected explicitly via get_models_for_provider.
+    ("claude-fable-5", "anthropic/claude-fable-5", "orcarouter"),
+    ("claude-opus-5", "anthropic/claude-opus-5", "orcarouter"),
+    ("claude-opus-4.8", "anthropic/claude-opus-4.8", "orcarouter"),
+    ("claude-sonnet-5", "anthropic/claude-sonnet-5", "orcarouter"),
+    ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "orcarouter"),
+    ("claude-haiku-4.5", "anthropic/claude-haiku-4.5", "orcarouter"),
+    ("gpt-5.6-sol", "openai/gpt-5.6-sol", "orcarouter"),
+    ("gpt-5.6-terra", "openai/gpt-5.6-terra", "orcarouter"),
+    ("gpt-5.6-luna", "openai/gpt-5.6-luna", "orcarouter"),
+    ("gpt-5.5-pro", "openai/gpt-5.5-pro", "orcarouter"),
+    ("gpt-5.5", "openai/gpt-5.5", "orcarouter"),
+    ("gpt-5.4", "openai/gpt-5.4", "orcarouter"),
+    ("gpt-5.4-mini", "openai/gpt-5.4-mini", "orcarouter"),
+    ("gemini-3.6-flash", "google/gemini-3.6-flash", "orcarouter"),
+    ("gemini-3.5-flash", "google/gemini-3.5-flash", "orcarouter"),
+    ("gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "orcarouter"),
+    ("gemini-3.1-pro", "google/gemini-3.1-pro-preview", "orcarouter"),
+    ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "orcarouter"),
+    ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "orcarouter"),
+    ("kimi-k3", "kimi/kimi-k3", "orcarouter"),
+    ("kimi-k2.6", "kimi/kimi-k2.6", "orcarouter"),
+    ("glm-5.2", "z-ai/glm-5.2", "orcarouter"),
+    ("grok-4.3", "grok/grok-4.3", "orcarouter"),
+    ("grok-4.5", "grok/grok-4.5", "orcarouter"),
+    ("qwen3.7-max", "qwen/qwen3.7-max", "orcarouter"),
+    ("qwen3.7-plus", "qwen/qwen3.7-plus", "orcarouter"),
     # OpenRouter
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
@@ -661,6 +693,15 @@ def get_chat_model(
         # Moonshot's K3 guide forbids the K2.x `thinking` parameter for it.
         if provider == "moonshot" and not model_id.startswith("kimi-k3"):
             kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
+        # OrcaRouter: app attribution (HTTP-Referer / X-Title) so usage is
+        # credited to the project on the gateway side.
+        if provider == "orcarouter":
+            kwargs.setdefault("default_headers", {}).update(
+                {
+                    "HTTP-Referer": "https://github.com/EvoScientist/EvoScientist",
+                    "X-Title": "EvoScientist",
+                }
+            )
         provider = "openai"
 
     # OpenRouter → native ChatOpenRouter via init_chat_model.
