@@ -470,10 +470,11 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端�
 
 `EvoSci deploy` 与 `EvoSci serve` 也支持同名参数：`EvoSci deploy --host 0.0.0.0`。
 
-> [!WARNING]
+> 🚨 **警告**
+>
 > 后端是**无鉴权、且 agent 能执行 shell 的 API**。任何能访问 6174 端口的人都能完全控制它，因此只应在可信网络里放开；暴露期间 EvoSci 每次启动都会打印红色 `⚠ PUBLIC BIND` 横幅。
 >
-> **这不是 WebUI 独有的问题。** `tui`、`cli`、`serve`、`deploy` 都会自动启动同一个 langgraph dev 后端，因此 `--host` 会让 6174 端口在所有模式下都暴露到网络上；只有前端端口 4716 是 WebUI 专属的。
+> **这不是 WebUI 独有的问题。** `tui`、`cli`、`serve`、`deploy` 都会自动启动同一个 langgraph dev 后端，因此 `--host` 会让 6174 端口在所有模式下都暴露到网络上。前端端口 4716 虽然只在 WebUI 模式下存在，但同样不是无害的：它的 API 可以读写、上传工作区文件并安装 skill，因此同样会打印横幅、同样只应在可信网络放开。
 >
 > 网络不可信时，请让后端留在回环地址，改用 SSH 隧道访问：`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <主机>`。
 

@@ -124,17 +124,16 @@ def deploy(
         )
         raise typer.Exit(1)
 
-    # Same explicit-None resolution as run_webui, stripping both branches:
-    # whitespace reaching socket.bind() surfaces as an opaque gaierror. The
-    # config branch strips too — this function is routinely handed duck-typed
-    # configs that never ran ``__post_init__`` normalization.
+    # A blank ``--host`` means "not passed" (matching serve), so it can never
+    # discard the configured bind. Both branches strip: whitespace reaching
+    # socket.bind() surfaces as an opaque gaierror, and duck-typed configs
+    # handed to this function never ran ``__post_init__`` normalization.
+    cli_host = host.strip() if host is not None else ""
     effective_host = (
-        str(
-            getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST
-        ).strip()
-        if host is None
-        else host.strip()
-    ) or _DEFAULT_HOST
+        cli_host
+        or str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
+        or _DEFAULT_HOST
+    )
 
     # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
     # holding the port. If an existing EvoSci langgraph dev is already up,

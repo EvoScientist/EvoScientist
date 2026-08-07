@@ -89,8 +89,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     # webui_port = the local Next.js server the browser actually opens.
     backend_port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     webui_port = int(getattr(config, "webui_port", _DEFAULT_WEBUI_PORT))
-    # ...and their bind interfaces, both loopback by default (a wildcard
-    # front-end bind breaks the UI's same-origin checks — see config.webui_host).
+    # ...and their bind interfaces, both loopback by default — the front-end
+    # carries workspace/skill APIs of its own (see config.webui_host).
     backend_host = (
         str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
     ).strip() or _DEFAULT_HOST
@@ -254,6 +254,13 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
             f"[bold red]Backend listening on {backend_host} — no auth, and the "
             f"agent can run shell. Trusted networks only.[/bold red]"
+        )
+    if not _is_loopback_host(webui_host):
+        console.print(
+            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+            f"[bold red]WebUI listening on {webui_host} — its API reads, writes "
+            f"and uploads workspace files and installs skills, with no auth. "
+            f"Trusted networks only.[/bold red]"
         )
 
     popen_kwargs: dict[str, Any] = {"env": webui_env}

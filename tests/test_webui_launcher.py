@@ -170,9 +170,8 @@ def test_hostname_env_carries_webui_host(monkeypatch):
 
 
 def test_hostname_env_defaults_to_loopback(monkeypatch):
-    """Loopback is not just the safe default — the UI's same-origin checks
-    derive the expected origin from this value, and a wildcard rejects every
-    write from the auto-opened http://localhost page."""
+    """The front-end serves the workspace file/upload and skill-install
+    endpoints, so it stays off the network until ``webui_host`` opts in."""
     config = _make_config()
     captured = _run_webui_once(monkeypatch, config)
 
@@ -245,13 +244,15 @@ def test_no_public_bind_warning_when_backend_on_loopback(monkeypatch):
     assert not any("PUBLIC BIND" in line for line in captured["printed"])
 
 
-def test_webui_host_alone_does_not_trigger_warning(monkeypatch):
-    """Only the backend earns a banner. The front-end serves the app shell and
-    holds no credentials, so warning on it would double the noise."""
+def test_public_bind_warning_when_frontend_exposed(monkeypatch):
+    """The front-end earns its own banner: it is not a passive app shell — its
+    API reads, writes and uploads workspace files and installs skills."""
     config = _make_config(webui_host="0.0.0.0", langgraph_dev_host="127.0.0.1")
     captured = _run_webui_once(monkeypatch, config)
 
-    assert not any("PUBLIC BIND" in line for line in captured["printed"])
+    banner = "\n".join(captured["printed"])
+    assert "WebUI listening on 0.0.0.0" in banner
+    assert "Backend listening" not in banner
 
 
 def test_remote_backend_hint_when_frontend_exposed_but_backend_is_not(monkeypatch):

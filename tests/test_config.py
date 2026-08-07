@@ -158,10 +158,8 @@ class TestEvoScientistConfig:
         """Both servers stay off the network until asked.
 
         The backend is an unauthenticated API whose agent can run shell
-        commands. The front-end must match: the standalone Next server derives
-        its own origin from the bind host, and the UI's same-origin checks 403
-        every write when the page's address doesn't match it, so a wildcard
-        default breaks upload/save from the auto-opened localhost page.
+        commands; the front-end serves the workspace file/upload and
+        skill-install endpoints. Neither is a safe default to publish, so
         ``--host 0.0.0.0`` / ``config set`` opts in to LAN exposure.
         """
         config = EvoScientistConfig()

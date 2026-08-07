@@ -346,10 +346,21 @@ def test_deploy_host_falls_back_when_config_lacks_field(monkeypatch, tmp_path):
     assert captured["host_passed"] == "127.0.0.1"
 
 
-def test_deploy_host_whitespace_collapses_to_default(monkeypatch, tmp_path):
-    """``--host "  "`` would reach socket.bind() as an empty string and raise
-    an opaque gaierror; it must degrade to the default instead."""
-    config = _make_config(default_workdir=str(tmp_path))
+def test_deploy_blank_host_keeps_config_value(monkeypatch, tmp_path):
+    """``--host "  "`` means "not passed" (as in serve), so it must not discard
+    the configured bind."""
+    config = _make_config(
+        default_workdir=str(tmp_path), langgraph_dev_host="192.168.1.5"
+    )
+    captured = _run_deploy_once(monkeypatch, config, host="   ")
+
+    assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_blank_host_and_blank_config_use_default(monkeypatch, tmp_path):
+    """Whitespace on both sides would reach socket.bind() as an empty string
+    and raise an opaque gaierror; it degrades to the default instead."""
+    config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="  ")
     captured = _run_deploy_once(monkeypatch, config, host="   ")
 
     assert captured["host_passed"] == "127.0.0.1"

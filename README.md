@@ -464,10 +464,11 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 
 `EvoSci deploy` and `EvoSci serve` take the same flag: `EvoSci deploy --host 0.0.0.0`.
 
-> [!WARNING]
+> 🚨 **WARNING**
+>
 > The backend is an **unauthenticated API whose agent can run shell commands**. Anyone who can reach port 6174 controls it, so only widen it on a trusted network — EvoSci prints a red `⚠ PUBLIC BIND` banner at every startup while it's exposed.
 >
-> **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so `--host` puts port 6174 on the network in every mode. Only the front-end port (4716) is WebUI-only.
+> **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so `--host` puts port 6174 on the network in every mode. The front-end port (4716) is WebUI-only but not harmless either: its API reads, writes and uploads workspace files and installs skills, so it gets the same banner and the same trusted-network rule.
 >
 > On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
 

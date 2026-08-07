@@ -226,10 +226,10 @@ class EvoScientistConfig:
     # its own port (langgraph_dev_port); this is just the browser server.
     webui_port: int = 4716
 
-    # Network interface the WebUI front-end binds to. Loopback by default: the
-    # Next server derives its own origin from this value, and the UI's
-    # same-origin checks 403 every write when the page's address doesn't match
-    # it — a wildcard breaks the auto-opened localhost page ("0.0.0.0" = LAN).
+    # Network interface the WebUI front-end binds to. Loopback by default,
+    # matching langgraph_dev_host: this server is not a passive app shell —
+    # its API reads, writes and uploads workspace files and installs skills,
+    # all unauthenticated. Set "0.0.0.0" (with langgraph_dev_host) for LAN.
     webui_host: str = "127.0.0.1"
 
     # --- Scheduled tasks (cron) ---
