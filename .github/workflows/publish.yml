@@ -1,0 +1,60 @@
+name: Publish to PyPI
+
+# Publishes EvoScientist to PyPI via OpenID Connect (trusted publishing) — no
+# API token or password involved. Fires when a GitHub Release is published
+# (i.e. after `gh release create vX.Y.Z`), builds the sdist + wheel, guards
+# that the package version matches the release tag, then uploads with a
+# short-lived OIDC token.
+#
+# One-time PyPI setup (Manage project -> Publishing -> Add a new publisher):
+#   Owner:            EvoScientist
+#   Repository:       EvoScientist
+#   Workflow name:    publish.yml
+#   Environment name: pypi
+on:
+  release:
+    types: [published]
+  # Manual re-run escape hatch (run it from the release tag, not main).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/EvoScientist/
+    permissions:
+      id-token: write  # required to mint the OIDC token PyPI verifies
+    steps:
+      - uses: actions/checkout@v5
+      # Full tag required — setup-uv dropped major/minor tags in v8.0.0, so
+      # `@v9` does not resolve. See the note in lint.yml.
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.11"
+          cache-dependency-glob: "**/pyproject.toml"
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Guard — package version must match the release tag
+        if: github.event_name == 'release'
+        run: |
+          VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "(.*)"/\1/')
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "pyproject version: $VERSION | release tag: $TAG"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::pyproject version ($VERSION) does not match release tag ($TAG); refusing to publish."
+            exit 1
+          fi
+
+      - name: Twine metadata check
+        run: uvx twine check dist/*
+
+      - name: Publish to PyPI (trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1

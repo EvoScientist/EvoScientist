@@ -3,7 +3,10 @@ name: Docker
 on:
   push:
     branches: ["main"]
-    tags: ["v*"]
+  # Version images build when a GitHub Release is published — the same event
+  # that triggers the PyPI upload (publish.yml), so the two channels stay in sync.
+  release:
+    types: [published]
   pull_request:
     paths:
       - "Dockerfile"
