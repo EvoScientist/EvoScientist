@@ -9,6 +9,7 @@ import questionary
 from rich.panel import Panel
 from rich.text import Text
 
+from ...runtime import AsyncRuntime
 from ..settings import (
     EvoScientistConfig,
     get_config_path,
@@ -117,10 +118,13 @@ _PROVIDER_KEY_ATTR = {
     "google-genai": "google_api_key",
     "siliconflow": "siliconflow_api_key",
     "openrouter": "openrouter_api_key",
+    "atlascloud": "atlascloud_api_key",
+    "requesty": "requesty_api_key",
     "deepseek": "deepseek_api_key",
     "zhipu": "zhipu_api_key",
     "zhipu-code": "zhipu_api_key",
     "volcengine": "volcengine_api_key",
+    "volcengine-code": "volcengine_api_key",
     "dashscope": "dashscope_api_key",
     "dashscope-code": "dashscope_api_key",
     "moonshot": "moonshot_api_key",
@@ -475,6 +479,7 @@ def run_onboard(
     skip_validation: bool = False,
     prompter=None,
     only_sections: set[str] | frozenset[str] | None = None,
+    runtime: AsyncRuntime | None = None,
 ) -> bool:
     """Run the interactive onboarding wizard.
 
@@ -487,6 +492,9 @@ def run_onboard(
         only_sections: If given, restrict the wizard to exactly these section
             ids — the Keep/Modify/Reset prompt is skipped. Used by ``EvoSci
             configure <section>`` to re-run a single phase.
+        runtime: Optional application-scoped async runtime used by channel
+            login and credential probes. Direct callers may omit it; the
+            channel step then owns a runtime for the duration of that step.
 
     Returns:
         True if configuration was saved, False if cancelled.
@@ -883,7 +891,7 @@ def run_onboard(
                 _step_tinytex()
 
             if "channels" in sections_to_run:
-                for key, value in _step_channels(config).items():
+                for key, value in _step_channels(config, runtime=runtime).items():
                     setattr(config, key, value)
                 _autosave(config)
 

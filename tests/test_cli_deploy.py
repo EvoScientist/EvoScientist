@@ -3,6 +3,7 @@
 Verifies the orchestration:
 - workspace resolution (CLI > config > cwd)
 - port resolution (CLI > config > default)
+- host resolution (CLI > config > default) + the public-bind warning
 - port collision pre-flight
 - ccproxy lifecycle (only if OAuth configured)
 - ``start_langgraph_dev(deploy_mode=True)`` invocation
@@ -24,6 +25,7 @@ def _make_config(
     *,
     default_workdir: str = "",
     langgraph_dev_port: int = 6174,
+    langgraph_dev_host: str = "127.0.0.1",
     anthropic_auth_mode: str = "api_key",
     openai_auth_mode: str = "api_key",
     log_level: str = "warning",
@@ -34,6 +36,7 @@ def _make_config(
     return SimpleNamespace(
         default_workdir=default_workdir,
         langgraph_dev_port=langgraph_dev_port,
+        langgraph_dev_host=langgraph_dev_host,
         anthropic_auth_mode=anthropic_auth_mode,
         openai_auth_mode=openai_auth_mode,
         log_level=log_level,
@@ -70,6 +73,7 @@ def _run_deploy_once(
     *,
     workdir: str | None = None,
     port: int | None = None,
+    host: str | None = None,
     debug: bool = False,
     cwd: str | None = None,
     port_occupied: bool = False,
@@ -89,6 +93,8 @@ def _run_deploy_once(
         "deploy_mode_passed": None,
         "workspace_passed": None,
         "port_passed": None,
+        "host_passed": None,
+        "printed": [],
         "atexit_callbacks": [],
     }
 
@@ -101,7 +107,7 @@ def _run_deploy_once(
     monkeypatch.setattr(config_mod, "get_effective_config", _fake_get_effective_config)
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
 
-    monkeypatch.setattr(deploy_server, "console", _SilentConsole())
+    monkeypatch.setattr(deploy_server, "console", _SilentConsole(captured["printed"]))
 
     # Workspace setup mocks
     from EvoScientist import paths as paths_mod
@@ -112,7 +118,7 @@ def _run_deploy_once(
     # langgraph_dev.manager mocks
     from EvoScientist.langgraph_dev import manager as lgm
 
-    monkeypatch.setattr(lgm, "_is_port_occupied", lambda _p: port_occupied)
+    monkeypatch.setattr(lgm, "_is_port_occupied", lambda _p, *_a, **_kw: port_occupied)
     monkeypatch.setattr(
         lgm,
         "is_langgraph_dev_running",
@@ -123,6 +129,7 @@ def _run_deploy_once(
         workspace_dir=None,
         *,
         port=None,
+        host=None,
         file_persistence=True,
         jobs_per_worker=10,
         deploy_mode=False,
@@ -131,6 +138,7 @@ def _run_deploy_once(
         captured["langgraph_dev_started"] = True
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
         captured["port_passed"] = port
+        captured["host_passed"] = host
         captured["deploy_mode_passed"] = deploy_mode
         captured["jobs_per_worker_passed"] = jobs_per_worker
         captured["file_persistence_passed"] = file_persistence
@@ -204,17 +212,27 @@ def _run_deploy_once(
     if cwd is not None:
         monkeypatch.setattr(os, "getcwd", lambda: cwd)
 
-    deploy_server.deploy(workdir=workdir, port=port, debug=debug, tunnel=tunnel)
+    deploy_server.deploy(
+        workdir=workdir, port=port, host=host, debug=debug, tunnel=tunnel
+    )
     return captured
 
 
 class _SilentConsole:
     """Stand-in for the Rich console — swallows all output so test runs
     don't spew ANSI to the captured pytest output (but doesn't break the
-    code paths that call ``console.print`` / ``console.status``)."""
+    code paths that call ``console.print`` / ``console.status``).
+
+    Optionally records what was printed so tests can assert on banners
+    (e.g. the public-bind warning) without letting them reach the terminal.
+    """
+
+    def __init__(self, sink: list | None = None):
+        self._sink = sink
 
     def print(self, *args, **kwargs):
-        pass
+        if self._sink is not None:
+            self._sink.append(" ".join(str(a) for a in args))
 
     def status(self, *args, **kwargs):
         class _Ctx:
@@ -300,6 +318,121 @@ def test_deploy_port_defaults_to_config(monkeypatch, tmp_path):
     captured = _run_deploy_once(monkeypatch, config)
 
     assert captured["port_passed"] == 6543
+
+
+def test_deploy_host_cli_arg_beats_config(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="127.0.0.1")
+    captured = _run_deploy_once(monkeypatch, config, host="192.168.1.5")
+
+    assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_host_defaults_to_config(monkeypatch, tmp_path):
+    config = _make_config(
+        default_workdir=str(tmp_path), langgraph_dev_host="192.168.1.5"
+    )
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_host_falls_back_when_config_lacks_field(monkeypatch, tmp_path):
+    """A config object missing the field entirely still resolves to the
+    module default rather than passing None down to socket.bind()."""
+    config = _make_config(default_workdir=str(tmp_path))
+    del config.langgraph_dev_host
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "127.0.0.1"
+
+
+def test_deploy_blank_host_keeps_config_value(monkeypatch, tmp_path):
+    """``--host "  "`` means "not passed" (as in serve), so it must not discard
+    the configured bind."""
+    config = _make_config(
+        default_workdir=str(tmp_path), langgraph_dev_host="192.168.1.5"
+    )
+    captured = _run_deploy_once(monkeypatch, config, host="   ")
+
+    assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_blank_host_and_blank_config_use_default(monkeypatch, tmp_path):
+    """Whitespace on both sides would reach socket.bind() as an empty string
+    and raise an opaque gaierror; it degrades to the default instead."""
+    config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="  ")
+    captured = _run_deploy_once(monkeypatch, config, host="   ")
+
+    assert captured["host_passed"] == "127.0.0.1"
+
+
+def test_deploy_host_public_opt_in(monkeypatch, tmp_path):
+    """``--host 0.0.0.0`` must actually widen the bind even though the config
+    default keeps the unauthenticated backend on loopback."""
+    config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="127.0.0.1")
+    captured = _run_deploy_once(monkeypatch, config, host="0.0.0.0")
+
+    assert captured["host_passed"] == "0.0.0.0"
+
+
+def test_deploy_host_is_stripped(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, host="  0.0.0.0  ")
+
+    assert captured["host_passed"] == "0.0.0.0"
+
+
+def test_deploy_config_host_is_stripped(monkeypatch, tmp_path):
+    """Stripping must not depend on the value arriving via --host.
+    ``EvoScientistConfig.__post_init__`` normalizes these fields, but deploy()
+    reads through ``getattr`` and is handed duck-typed config objects that
+    never run it — an unstripped value would reach socket.bind()."""
+    config = _make_config(
+        default_workdir=str(tmp_path), langgraph_dev_host="  192.168.1.5  "
+    )
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_whitespace_config_host_collapses_to_default(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path), langgraph_dev_host="   ")
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "127.0.0.1"
+
+
+def test_deploy_padded_loopback_config_host_suppresses_warning(monkeypatch, tmp_path):
+    """Consequence of the unstripped path: `_is_loopback_host` would not match
+    " 127.0.0.1 ", so a padded loopback config would print a false PUBLIC BIND
+    warning while binding a value socket.bind() rejects outright."""
+    config = _make_config(
+        default_workdir=str(tmp_path), langgraph_dev_host=" 127.0.0.1 "
+    )
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["host_passed"] == "127.0.0.1"
+    assert not any("PUBLIC BIND" in line for line in captured["printed"])
+
+
+@pytest.mark.parametrize("exposed_host", ["0.0.0.0", "192.168.1.5", "::"])
+def test_deploy_warns_on_public_bind(monkeypatch, tmp_path, exposed_host):
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, host=exposed_host)
+
+    assert any("PUBLIC BIND" in line for line in captured["printed"]), (
+        f"binding {exposed_host} reaches other machines and MUST warn"
+    )
+
+
+@pytest.mark.parametrize("loopback_host", ["127.0.0.1", "::1", "localhost"])
+def test_deploy_no_warning_on_loopback_bind(monkeypatch, tmp_path, loopback_host):
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, host=loopback_host)
+
+    assert not any("PUBLIC BIND" in line for line in captured["printed"]), (
+        f"{loopback_host} is unreachable off-box — warning would be noise"
+    )
 
 
 @pytest.mark.parametrize("bad_port", [0, -1, 70000])

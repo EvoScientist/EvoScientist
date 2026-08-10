@@ -154,6 +154,7 @@ class TestApprovalPolicy:
         p = I.ApprovalPolicy()
         cfg = MagicMock()
         cfg.auto_approve = True
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             reqs = [{"name": "execute", "args": {"command": "rm -rf /"}}]
             assert p.auto_decision("tg:c1", reqs) == [{"type": "approve"}]
@@ -163,6 +164,7 @@ class TestApprovalPolicy:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = ""
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             reqs = [{"name": "execute", "args": {"command": "rm -rf /"}}]
             assert p.auto_decision("tg:c1", reqs) is None
@@ -179,6 +181,7 @@ class TestConfigAutoApprove:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = ""
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
                 I.config_auto_approve(
@@ -191,6 +194,7 @@ class TestConfigAutoApprove:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = "ls,python"
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
                 I.config_auto_approve(
@@ -203,6 +207,7 @@ class TestConfigAutoApprove:
         cfg = MagicMock()
         cfg.auto_approve = False
         cfg.shell_allow_list = "ls,cat"
+        cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
                 I.config_auto_approve(
@@ -251,6 +256,15 @@ class TestApprovalPromptFormat:
     def test_no_command_falls_back_to_name(self):
         got = I.format_approval_prompt([{"name": "ask_user", "args": {}}])
         assert "ask_user" in got
+
+    def test_delete_shows_file_path(self):
+        # deepagents 0.7.0's `delete` tool uses `file_path`, not `command`/
+        # `path` — the prompt must still show the target, not just the name.
+        got = I.format_approval_prompt(
+            [{"name": "delete", "args": {"file_path": "/results/run-3"}}]
+        )
+        assert "delete" in got
+        assert "/results/run-3" in got
 
     def test_metadata_no_buttons(self):
         assert I.approval_prompt_metadata({"k": "v"}, with_buttons=False) == {"k": "v"}

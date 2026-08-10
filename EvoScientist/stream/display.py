@@ -6,13 +6,15 @@ Also provides the shared console and formatter globals.
 """
 
 import asyncio
+import concurrent.futures
 import inspect
 import logging
 import os
 import re
 import threading
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
 from rich.live import Live  # type: ignore[import-untyped]
@@ -21,8 +23,10 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
+from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
+from ..runtime import AsyncRuntime, RuntimeHandle
 from .console import console
 from .diff_format import build_edit_diff
 from .formatter import ToolResultFormatter
@@ -49,6 +53,24 @@ if TYPE_CHECKING:
 
 # Media file extensions that should trigger on_file_write callback
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+_T = TypeVar("_T")
+_QuestionRunner = Callable[[Any], Any]
+
+
+class _StreamPromptCancelled(Exception):
+    """Internal control flow for an owned terminal prompt cancellation."""
+
+
+def _update_final_live_frame(
+    live: Any,
+    final_display: Any,
+    stream_handle: RuntimeHandle[Any] | None,
+) -> None:
+    """Render the final frame unless this owned stream was cancelled."""
+    if stream_handle is not None and stream_handle.cancelled():
+        return
+    live.update(final_display)
+    live.refresh()
 
 
 def _graph_target_for_local_agent(
@@ -119,10 +141,18 @@ formatter = ToolResultFormatter()
 # per-message scope so `/stop` only affects that message's run; scope-less
 # callers retain the legacy process-wide default event.
 _DEFAULT_STREAM_CANCEL_SCOPE = "__default__"
-_stream_cancel_lock = threading.Lock()
+# Serve signal handlers may request cancellation while the main thread is in a
+# scoped cancellation lookup.  Re-entrancy prevents the Python signal callback
+# from deadlocking if it interrupts one of these short registry sections.
+_stream_cancel_lock = threading.RLock()
 _stream_cancel_events: dict[str, threading.Event] = {
     _DEFAULT_STREAM_CANCEL_SCOPE: threading.Event()
 }
+# The flag remains useful for cancellation requested before a stream starts and
+# at synchronous HITL boundaries.  Active Rich streams additionally register
+# their owned-runtime handle so a request can interrupt a blocked ``__anext__``
+# immediately instead of waiting for the model to emit another event.
+_stream_cancel_handles: dict[str, set[RuntimeHandle[Any]]] = {}
 # Backward-compat alias used by older tests and direct imports.
 _stream_cancel_event = _stream_cancel_events[_DEFAULT_STREAM_CANCEL_SCOPE]
 
@@ -146,11 +176,81 @@ def _get_stream_cancel_event(
 
 
 def request_stream_cancel(cancel_scope: str | None = None) -> bool:
-    """Signal a specific in-flight stream to terminate."""
-    event = _get_stream_cancel_event(cancel_scope, create=True)
-    already_requested = event.is_set()
-    event.set()
+    """Signal a stream and directly cancel any active owned coroutine."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        event = _stream_cancel_events.get(scope_key)
+        if event is None:
+            event = threading.Event()
+            _stream_cancel_events[scope_key] = event
+        already_requested = event.is_set()
+        event.set()
+        handles = tuple(_stream_cancel_handles.get(scope_key, ()))
+
+    # Future.cancel() is thread-safe.  Do it outside the registry lock because
+    # cancellation callbacks may settle quickly and unregister the handle.
+    for handle in handles:
+        handle.cancel()
+    # Sync tools may remain active in an executor after their awaiting graph
+    # task is cancelled, so stop their owned subprocesses explicitly.
+    from ..backends import cancel_active_shell_processes
+
+    cancel_active_shell_processes(event)
     return not already_requested
+
+
+def _register_stream_cancel_handle(
+    cancel_scope: str | None,
+    handle: RuntimeHandle[Any],
+) -> None:
+    """Register an active owned task, honoring a pre-start stop request."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        handles = _stream_cancel_handles.setdefault(scope_key, set())
+        handles.add(handle)
+        event = _stream_cancel_events.get(scope_key)
+        cancel_now = event is not None and event.is_set()
+    if cancel_now:
+        handle.cancel()
+
+
+def _unregister_stream_cancel_handle(
+    cancel_scope: str | None,
+    handle: RuntimeHandle[Any],
+) -> None:
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        handles = _stream_cancel_handles.get(scope_key)
+        if handles is None:
+            return
+        handles.discard(handle)
+        if not handles:
+            _stream_cancel_handles.pop(scope_key, None)
+
+
+def _run_owned_questionary_prompt(
+    question: Any,
+    *,
+    runtime: AsyncRuntime,
+    cancel_scope: str | None,
+) -> Any:
+    """Run a terminal prompt as owned async work so stop can cancel it."""
+    prompt_handle: RuntimeHandle[Any] | None = None
+
+    def _register(handle: RuntimeHandle[Any]) -> None:
+        nonlocal prompt_handle
+        prompt_handle = handle
+        _register_stream_cancel_handle(cancel_scope, handle)
+
+    try:
+        return runtime.run_sync(question.ask_async, on_submitted=_register)
+    except concurrent.futures.CancelledError as exc:
+        if is_stream_cancel_requested(cancel_scope):
+            raise _StreamPromptCancelled from exc
+        raise
+    finally:
+        if prompt_handle is not None:
+            _unregister_stream_cancel_handle(cancel_scope, prompt_handle)
 
 
 def is_stream_cancel_requested(cancel_scope: str | None = None) -> bool:
@@ -163,6 +263,40 @@ def clear_stream_cancel(cancel_scope: str | None = None) -> None:
     event = _get_stream_cancel_event(cancel_scope)
     if event is not None:
         event.clear()
+
+
+@contextmanager
+def bind_stream_cancel(cancel_scope: str | None = None) -> Iterator[None]:
+    """Bind a stream's stop event for cancellation-aware blocking tools."""
+    event = _get_stream_cancel_event(cancel_scope, create=True)
+    assert event is not None
+    with bind_cancel_event(event):
+        yield
+
+
+async def iter_with_stream_cancel(
+    events: AsyncIterator[_T],
+    cancel_scope: str | None = None,
+) -> AsyncIterator[_T]:
+    """Iterate graph events with the matching blocking-tool cancel context."""
+    iterator = aiter(events)
+    try:
+        while True:
+            try:
+                # ContextVar tokens cannot safely straddle ``yield``: async
+                # generator finalization may run in a different task/context.
+                # The cancellation binding is only needed while requesting the
+                # next graph event, which includes any nested tool execution.
+                with bind_stream_cancel(cancel_scope):
+                    event = await anext(iterator)
+            except StopAsyncIteration:
+                return
+            yield event
+    finally:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            with bind_stream_cancel(cancel_scope):
+                await aclose()
 
 
 def discard_stream_cancel(cancel_scope: str | None = None) -> None:
@@ -1017,15 +1151,11 @@ _MAX_HITL_ITERATIONS = 50
 _session_auto_approve = False
 
 
-def _matches_shell_allow_list(command: str, allow_list: list[str]) -> bool:
-    """Check if a shell command matches any prefix in the allow list."""
-    cmd = command.strip()
-    return any(cmd.startswith(prefix) for prefix in allow_list)
-
-
 def _resolve_hitl_approval(
     interrupt_data: dict,
     prompt_fn: Callable[[list], list[dict] | None] | None = None,
+    *,
+    question_runner: _QuestionRunner | None = None,
 ) -> list[dict] | None:
     """Resolve HITL approval for an interrupt.
 
@@ -1040,52 +1170,77 @@ def _resolve_hitl_approval(
     """
     global _session_auto_approve
 
+    from ..backends import ActionDecision, resolve_action_decision
+    from ..config.settings import (
+        HITL_ALWAYS_PROMPT_TOOLS,
+        HITL_SHELL_TOOLS,
+        load_config,
+    )
+
     action_requests = interrupt_data.get("action_requests", [])
     if not action_requests:
         return [{"type": "approve"}]
 
-    # Session-level auto-approve (user chose "Approve all" earlier)
+    # Session "approve all" is an explicit human opt-in → blanket-approve
+    # everything (dangerous set included), unlike unattended auto_approve below.
     if _session_auto_approve:
         return [{"type": "approve"} for _ in action_requests]
 
-    # Config-level auto-approve
-    from ..config.settings import HITL_SHELL_TOOLS, load_config
-
     cfg = load_config()
-    if cfg.auto_approve:
-        return [{"type": "approve"} for _ in action_requests]
-
-    # Per-tool auto-approval: only execute needs manual approval
-    shell_allow_list = (
+    auto_approve = cfg.auto_approve
+    allow_list = (
         [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
         if cfg.shell_allow_list
         else []
     )
 
+    decisions: list[dict] = []
     needs_prompt = False
     for req in action_requests:
+        if not isinstance(req, dict):
+            # Malformed request on an approval gate — never silently approve;
+            # surface it for a human decision (or fail loud in the prompt path).
+            needs_prompt = True
+            break
         name = req.get("name", "")
         args = req.get("args", {})
 
-        if name not in HITL_SHELL_TOOLS:
-            continue  # Only shell-running tools need manual approval
-
-        command = args.get("command", "") if isinstance(args, dict) else ""
-        if not _matches_shell_allow_list(command, shell_allow_list):
+        if name in HITL_ALWAYS_PROMPT_TOOLS:
             needs_prompt = True
             break
 
-    if not needs_prompt:
-        return [{"type": "approve"} for _ in action_requests]
+        if name not in HITL_SHELL_TOOLS:
+            decisions.append({"type": "approve"})
+            continue
 
-    # Use custom prompt function if provided (e.g. channel-based approval)
-    if prompt_fn is not None:
-        return prompt_fn(action_requests)
+        command = args.get("command", "") if isinstance(args, dict) else ""
+        verdict = resolve_action_decision(
+            command,
+            auto_approve=auto_approve,
+            dangerous_mode=cfg.dangerous_mode,
+            allow_list=allow_list,
+        )
+        if verdict.decision is ActionDecision.APPROVE:
+            decisions.append({"type": "approve"})
+        elif verdict.decision is ActionDecision.REJECT:
+            decisions.append({"type": "reject", "message": verdict.reason})
+        else:
+            needs_prompt = True
+            break
 
-    return _prompt_hitl_approval(action_requests)
+    if needs_prompt:
+        if prompt_fn is not None:
+            return prompt_fn(action_requests)
+        return _prompt_hitl_approval(action_requests, question_runner=question_runner)
+
+    return decisions
 
 
-def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
+def _prompt_hitl_approval(
+    action_requests: list,
+    *,
+    question_runner: _QuestionRunner | None = None,
+) -> list[dict] | None:
     """Display approval prompt and get user decision.
 
     Returns list of decisions if approved, None if rejected.
@@ -1130,11 +1285,14 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     auto_label = "Approve all (session)"
 
     try:
-        selected = questionary.select(
+        question = questionary.select(
             "Approval required",
             choices=[approve_label, reject_label, auto_label],
             style=_PICKER_STYLE,
-        ).ask()
+        )
+        selected = (
+            question_runner(question) if question_runner is not None else question.ask()
+        )
     except (EOFError, KeyboardInterrupt):
         console.print("[dim]  Rejected.[/dim]")
         return None
@@ -1152,37 +1310,11 @@ def _prompt_hitl_approval(action_requests: list) -> list[dict] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Async-to-sync bridge
-# ---------------------------------------------------------------------------
-
-
-def _create_event_loop() -> asyncio.AbstractEventLoop:
-    """Create and set the event loop for asyncio.
-
-    Returns:
-        The created event loop.
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop
-
-
-def _get_event_loop() -> asyncio.AbstractEventLoop:
-    """Get the event loop for asyncio.
-
-    If no event loop is set, a new one is created.
-
-    Returns:
-        The current event loop.
-    """
-    loop = asyncio.get_event_loop()
-    if loop.is_closed():
-        loop = _create_event_loop()
-    return loop
-
-
-def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
+def _resolve_ask_user_prompt(
+    ask_user_data: dict,
+    *,
+    question_runner: _QuestionRunner | None = None,
+) -> dict:
     """Interactive console Q&A for ask_user events.
 
     Presents multiple-choice questions with arrow-key navigation via
@@ -1235,11 +1367,16 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
                 other_label = "Other (type your answer)"
                 choice_labels.append(other_label)
 
-                selected = questionary.select(
+                question = questionary.select(
                     prompt_text,
                     choices=choice_labels,
                     style=_PICKER_STYLE,
-                ).ask()
+                )
+                selected = (
+                    question_runner(question)
+                    if question_runner is not None
+                    else question.ask()
+                )
 
                 if selected is None:  # Ctrl+C
                     raise KeyboardInterrupt
@@ -1250,22 +1387,32 @@ def _resolve_ask_user_prompt(ask_user_data: dict) -> dict:
                     continue
 
                 if selected == other_label:
-                    selected = questionary.text(
+                    question = questionary.text(
                         "Your answer:",
                         validate=_make_validator(required),
                         style=_PICKER_STYLE,
-                    ).ask()
+                    )
+                    selected = (
+                        question_runner(question)
+                        if question_runner is not None
+                        else question.ask()
+                    )
                     if selected is None:
                         raise KeyboardInterrupt
 
                 answers.append(selected)
 
             else:
-                answer = questionary.text(
+                question = questionary.text(
                     prompt_text,
                     validate=_make_validator(required),
                     style=_PICKER_STYLE,
-                ).ask()
+                )
+                answer = (
+                    question_runner(question)
+                    if question_runner is not None
+                    else question.ask()
+                )
 
                 if answer is None:  # Ctrl+C
                     raise KeyboardInterrupt
@@ -1293,11 +1440,13 @@ def _run_streaming(
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict[str, object] | None = None,
+    configurable_extra: dict[str, Any] | None = None,
     hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
     cancel_scope: str | None = None,
     *,
     gateway: GraphGateway,
+    runtime: AsyncRuntime | None = None,
     _state: StreamState | None = None,
     _hitl_depth: int = 0,
     _media_sent: set[str] | None = None,
@@ -1329,6 +1478,32 @@ def _run_streaming(
     Returns:
         The final response text.
     """
+    if runtime is None:
+        with AsyncRuntime(thread_name="evosci-stream-runtime") as owned_runtime:
+            return _run_streaming(
+                agent=agent,
+                message=message,
+                thread_id=thread_id,
+                show_thinking=show_thinking,
+                interactive=interactive,
+                on_thinking=on_thinking,
+                on_todo=on_todo,
+                on_file_write=on_file_write,
+                on_stream_event=on_stream_event,
+                status_footer_builder=status_footer_builder,
+                metadata=metadata,
+                configurable_extra=configurable_extra,
+                hitl_prompt_fn=hitl_prompt_fn,
+                ask_user_prompt_fn=ask_user_prompt_fn,
+                cancel_scope=cancel_scope,
+                gateway=gateway,
+                runtime=owned_runtime,
+                _state=_state,
+                _hitl_depth=_hitl_depth,
+                _media_sent=_media_sent,
+                _sent_thinking_text=_sent_thinking_text,
+            )
+
     # Scope-less callers keep the legacy single-event semantics. Scoped
     # callers use unique per-request scopes, so pre-start `/stop` must
     # remain armed until this run consumes it.
@@ -1348,108 +1523,115 @@ def _run_streaming(
 
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
-        async for event in gateway.stream_events(
+        event_stream = gateway.stream_events(
             RunRequest(
                 message=message,
                 thread_id=thread_id,
                 metadata=metadata,
+                configurable_extra=configurable_extra,
                 target=_graph_target_for_local_agent(agent, metadata),
             )
-        ):
-            if is_stream_cancel_requested(cancel_scope):
-                _stopped_response()
-                return
-            event_type = state.handle_event(event)
+        )
+        try:
+            async for event in event_stream:
+                if is_stream_cancel_requested(cancel_scope):
+                    _stopped_response()
+                    return
+                event_type = state.handle_event(event)
 
-            # Relay thinking to channel when transitioning away from
-            # thinking phase.  Uses content comparison so that replayed
-            # thinking after resume is skipped, but genuinely new
-            # thinking is still delivered.
-            if (
-                on_thinking
-                and event_type != "thinking"
-                and state.thinking_text
-                and len(state.thinking_text) >= _MIN_THINKING_LEN
-            ):
-                current = state.thinking_text.rstrip()
-                if current != _sent_thinking_text:
-                    on_thinking(current)
-                    _sent_thinking_text = current
+                # Relay thinking to channel when transitioning away from
+                # thinking phase.  Uses content comparison so that replayed
+                # thinking after resume is skipped, but genuinely new
+                # thinking is still delivered.
+                if (
+                    on_thinking
+                    and event_type != "thinking"
+                    and state.thinking_text
+                    and len(state.thinking_text) >= _MIN_THINKING_LEN
+                ):
+                    current = state.thinking_text.rstrip()
+                    if current != _sent_thinking_text:
+                        on_thinking(current)
+                        _sent_thinking_text = current
 
-            # Send todo list to channel on first write_todos tool_call
-            if (
-                on_todo
-                and not _todo_sent
-                and event_type == "tool_call"
-                and event.get("name") == "write_todos"
-                and state.todo_items
-            ):
-                on_todo(state.todo_items)
-                _todo_sent = True
+                # Send todo list to channel on first write_todos tool_call
+                if (
+                    on_todo
+                    and not _todo_sent
+                    and event_type == "tool_call"
+                    and event.get("name") == "write_todos"
+                    and state.todo_items
+                ):
+                    on_todo(state.todo_items)
+                    _todo_sent = True
 
-            # Send media file to channel when write_file succeeds
-            if (
-                on_file_write
-                and event_type == "tool_result"
-                and event.get("name") == "write_file"
-                and event.get("success")
-            ):
-                wf_path = ""
-                for tc in reversed(state.tool_calls):
-                    if tc.get("name") == "write_file":
-                        p = tc.get("args", {}).get("path", "")
-                        if p and p not in _media_sent:
-                            wf_path = p
-                            break
-                if wf_path:
-                    ext = os.path.splitext(wf_path)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        real_path = str(resolve_virtual_path(wf_path))
-                        if os.path.isfile(real_path):
-                            _media_sent.add(wf_path)
-                            on_file_write(real_path)
+                # Send media file to channel when write_file succeeds
+                if (
+                    on_file_write
+                    and event_type == "tool_result"
+                    and event.get("name") == "write_file"
+                    and event.get("success")
+                ):
+                    wf_path = ""
+                    for tc in reversed(state.tool_calls):
+                        if tc.get("name") == "write_file":
+                            p = tc.get("args", {}).get("path", "")
+                            if p and p not in _media_sent:
+                                wf_path = p
+                                break
+                    if wf_path:
+                        ext = os.path.splitext(wf_path)[1].lower()
+                        if ext in _MEDIA_EXTENSIONS:
+                            real_path = str(resolve_virtual_path(wf_path))
+                            if os.path.isfile(real_path):
+                                _media_sent.add(wf_path)
+                                on_file_write(real_path)
 
-            # Send media file to channel when read_file returns an image
-            if (
-                on_file_write
-                and event_type == "tool_result"
-                and event.get("name") == "read_file"
-                and event.get("success")
-            ):
-                rf_path = ""
-                for tc in reversed(state.tool_calls):
-                    if tc.get("name") == "read_file":
-                        p = tc.get("args", {}).get("file_path", "") or tc.get(
-                            "args", {}
-                        ).get("path", "")
-                        if p and p not in _media_sent:
-                            rf_path = p
-                            break
-                if rf_path:
-                    ext = os.path.splitext(rf_path)[1].lower()
-                    if ext in _MEDIA_EXTENSIONS:
-                        real_path = rf_path
-                        if not os.path.isfile(real_path):
-                            real_path = str(resolve_virtual_path(rf_path))
-                        if os.path.isfile(real_path):
-                            _media_sent.add(rf_path)
-                            on_file_write(real_path)
+                # Send media file to channel when read_file returns an image
+                if (
+                    on_file_write
+                    and event_type == "tool_result"
+                    and event.get("name") == "read_file"
+                    and event.get("success")
+                ):
+                    rf_path = ""
+                    for tc in reversed(state.tool_calls):
+                        if tc.get("name") == "read_file":
+                            p = tc.get("args", {}).get("file_path", "") or tc.get(
+                                "args", {}
+                            ).get("path", "")
+                            if p and p not in _media_sent:
+                                rf_path = p
+                                break
+                    if rf_path:
+                        ext = os.path.splitext(rf_path)[1].lower()
+                        if ext in _MEDIA_EXTENSIONS:
+                            real_path = rf_path
+                            if not os.path.isfile(real_path):
+                                real_path = str(resolve_virtual_path(rf_path))
+                            if os.path.isfile(real_path):
+                                _media_sent.add(rf_path)
+                                on_file_write(real_path)
 
-            if on_stream_event is not None:
-                callback_result = on_stream_event(event_type, state)
-                if inspect.isawaitable(callback_result):
-                    await callback_result
+                if on_stream_event is not None:
+                    callback_result = on_stream_event(event_type, state)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
 
-            live.update(
-                create_streaming_display(
-                    **state.get_display_args(),
-                    show_thinking=show_thinking,
-                    response_markdown=state.get_response_markdown(),
-                    status_footer=(
-                        status_footer_builder() if status_footer_builder else None
-                    ),
+                live.update(
+                    create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=(
+                            status_footer_builder() if status_footer_builder else None
+                        ),
+                    )
                 )
-            )
+        finally:
+            aclose = getattr(event_stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
     try:
         if is_stream_cancel_requested(cancel_scope):
@@ -1469,32 +1651,6 @@ def _run_streaming(
                     ),
                 )
             )
-            # Determine how to run the async streaming coroutine.
-            # - In TUI mode (Textual), there's already a running event loop;
-            #   nest_asyncio is needed to allow run_until_complete inside it.
-            # - In serve/CLI mode, the main thread has no running loop;
-            #   use a fresh event loop directly (no nest_asyncio needed or wanted,
-            #   since nest_asyncio.apply() patches globally and breaks the bus
-            #   thread's event loop Task-context detection).
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-
-            if running_loop is not None:
-                # Already inside a running loop (TUI) — must use nest_asyncio.
-                # NOTE: nest_asyncio.apply() is global and irreversible within
-                # the process; avoid mixing TUI and serve modes in one process.
-                import nest_asyncio  # type: ignore[import-untyped]
-
-                nest_asyncio.apply()
-                loop = running_loop
-            else:
-                # No running loop (serve/CLI) — create a fresh one
-                try:
-                    loop = _get_event_loop()
-                except RuntimeError:
-                    loop = _create_event_loop()
 
             async def _run_with_refresh() -> None:
                 async def _periodic_refresh() -> None:
@@ -1507,7 +1663,8 @@ def _run_streaming(
 
                 refresh_task = asyncio.ensure_future(_periodic_refresh())
                 try:
-                    await _consume()
+                    with bind_stream_cancel(cancel_scope):
+                        await _consume()
                 finally:
                     refresh_task.cancel()
                     try:
@@ -1552,10 +1709,24 @@ def _run_streaming(
                                 interactive, status_footer_builder
                             ),
                         )
-                    live.update(final_display)
-                    live.refresh()
+                    _update_final_live_frame(live, final_display, stream_handle)
 
-            loop.run_until_complete(_run_with_refresh())
+            stream_handle: RuntimeHandle[None] | None = None
+
+            def _register(handle: RuntimeHandle[None]) -> None:
+                nonlocal stream_handle
+                stream_handle = handle
+                _register_stream_cancel_handle(cancel_scope, handle)
+
+            try:
+                runtime.run_sync(_run_with_refresh, on_submitted=_register)
+            except concurrent.futures.CancelledError:
+                if not is_stream_cancel_requested(cancel_scope):
+                    raise
+                _stopped_response()
+            finally:
+                if stream_handle is not None:
+                    _unregister_stream_cancel_handle(cancel_scope, stream_handle)
 
         # Flush any remaining thinking that wasn't sent during streaming.
         if on_thinking and state.thinking_text:
@@ -1571,7 +1742,17 @@ def _run_streaming(
             if ask_user_prompt_fn is not None:
                 result = ask_user_prompt_fn(state.pending_ask_user)
             else:
-                result = _resolve_ask_user_prompt(state.pending_ask_user)
+                try:
+                    result = _resolve_ask_user_prompt(
+                        state.pending_ask_user,
+                        question_runner=lambda question: _run_owned_questionary_prompt(
+                            question,
+                            runtime=runtime,
+                            cancel_scope=cancel_scope,
+                        ),
+                    )
+                except _StreamPromptCancelled:
+                    return _stopped_response()
             from langgraph.types import Command  # type: ignore[import-untyped]
 
             state.pending_ask_user = None
@@ -1590,10 +1771,12 @@ def _run_streaming(
                 on_stream_event=on_stream_event,
                 status_footer_builder=status_footer_builder,
                 metadata=metadata,
+                configurable_extra=configurable_extra,
                 hitl_prompt_fn=hitl_prompt_fn,
                 ask_user_prompt_fn=ask_user_prompt_fn,
                 cancel_scope=cancel_scope,
                 gateway=gateway,
+                runtime=runtime,
                 _state=state,
                 _hitl_depth=_hitl_depth + 1,
                 _media_sent=_media_sent,
@@ -1604,22 +1787,35 @@ def _run_streaming(
         if state.pending_interrupt is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
             if is_stream_cancel_requested(cancel_scope):
                 return _stopped_response()
-            decisions = _resolve_hitl_approval(
-                state.pending_interrupt,
-                prompt_fn=hitl_prompt_fn,
-            )
+            try:
+                decisions = _resolve_hitl_approval(
+                    state.pending_interrupt,
+                    prompt_fn=hitl_prompt_fn,
+                    question_runner=(
+                        None
+                        if hitl_prompt_fn is not None
+                        else lambda question: _run_owned_questionary_prompt(
+                            question,
+                            runtime=runtime,
+                            cancel_scope=cancel_scope,
+                        )
+                    ),
+                )
+            except _StreamPromptCancelled:
+                return _stopped_response()
             if is_stream_cancel_requested(cancel_scope):
                 return _stopped_response()
             if decisions is not None:
-                from langgraph.types import Command  # type: ignore[import-untyped]
+                from ..backends import build_hitl_resume
 
+                interrupt_id = state.pending_interrupt.get("interrupt_id")
                 state.pending_interrupt = None
                 state.thinking_text = ""  # reset accumulation for fresh round
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
                 return _run_streaming(
                     agent=agent,
-                    message=Command(resume={"decisions": decisions}),
+                    message=build_hitl_resume(interrupt_id, decisions),
                     thread_id=thread_id,
                     show_thinking=show_thinking,
                     interactive=interactive,
@@ -1629,10 +1825,12 @@ def _run_streaming(
                     on_stream_event=on_stream_event,
                     status_footer_builder=status_footer_builder,
                     metadata=metadata,
+                    configurable_extra=configurable_extra,
                     hitl_prompt_fn=hitl_prompt_fn,
                     ask_user_prompt_fn=ask_user_prompt_fn,
                     cancel_scope=cancel_scope,
                     gateway=gateway,
+                    runtime=runtime,
                     _state=state,
                     _hitl_depth=_hitl_depth + 1,
                     _media_sent=_media_sent,

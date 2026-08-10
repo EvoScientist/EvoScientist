@@ -117,3 +117,50 @@ class TestResumeCommand:
         assert ctx.workspace_dir == "/keep"
         # Callback still fires with the metadata value (empty string)
         ui.handle_session_resume.assert_awaited_once_with("tid", "")
+
+
+class TestResumeClearsInvitedExperts:
+    """Invitations are session-scoped: switching threads dismisses them."""
+
+    def _runtime(self, invited):
+        from EvoScientist.commands.base import ChannelRuntime
+
+        runtime = ChannelRuntime()
+        runtime.active_teams = list(invited)
+        return runtime
+
+    async def test_switching_thread_dismisses_and_announces(self):
+        from EvoScientist.commands.implementation.session import ResumeCommand
+
+        ctx, ui = _ctx(
+            thread_id="current",
+            thread_store=FakeThreadStore(resolved_thread_id="other-tid"),
+        )
+        ctx.channel_runtime = self._runtime(["idea-brainstorm"])
+        await ResumeCommand().execute(ctx, ["other-tid"])
+        assert ctx.channel_runtime.active_teams == []
+        msgs = [c.args[0] for c in ui.append_system.call_args_list]
+        assert any(
+            "Dismissed experts on session switch: idea-brainstorm" in m for m in msgs
+        )
+
+    async def test_resuming_current_thread_keeps_invitations(self):
+        from EvoScientist.commands.implementation.session import ResumeCommand
+
+        ctx, ui = _ctx(
+            thread_id="current",
+            thread_store=FakeThreadStore(resolved_thread_id="current"),
+        )
+        ctx.channel_runtime = self._runtime(["idea-brainstorm"])
+        await ResumeCommand().execute(ctx, ["current"])
+        assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
+        msgs = [c.args[0] for c in ui.append_system.call_args_list]
+        assert not any("Dismissed experts" in m for m in msgs)
+
+    async def test_failed_resolution_keeps_invitations(self):
+        from EvoScientist.commands.implementation.session import ResumeCommand
+
+        ctx, _ui = _ctx(thread_store=FakeThreadStore())
+        ctx.channel_runtime = self._runtime(["idea-brainstorm"])
+        await ResumeCommand().execute(ctx, ["nope"])
+        assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]

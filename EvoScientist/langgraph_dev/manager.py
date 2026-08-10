@@ -116,9 +116,43 @@ _LOCK = threading.RLock()
 # corresponding url= field on AsyncSubAgent specs.
 _DEFAULT_PORT = 6174
 
+# Default bind interface — loopback, matching ``config.langgraph_dev_host``.
+# SECURITY: this is the unauthenticated agent API; launchers print a PUBLIC
+# BIND banner while it is exposed.
+_DEFAULT_HOST = "127.0.0.1"
 
-def _base_url(port: int = _DEFAULT_PORT) -> str:
-    return f"http://localhost:{port}"
+# Wildcard bind addresses: the server listens on every interface, but you
+# cannot meaningfully *connect* to them (0.0.0.0 is routed to loopback on
+# Linux and outright rejected on Windows), so clients target loopback instead.
+_WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
+
+
+def _probe_host(host: str = _DEFAULT_HOST) -> str:
+    """Map a bind address to one a client can actually connect to.
+
+    A wildcard bind includes loopback, so clients use ``127.0.0.1``; a
+    specific interface is returned as-is — loopback would not reach it.
+    """
+    return "127.0.0.1" if host in _WILDCARD_HOSTS else host
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True if binding ``host`` keeps the server unreachable off-box.
+
+    Drives the PUBLIC BIND warning, so it is conservative: anything not
+    provably loopback counts as exposed.
+    """
+    return host.strip().lower() in {"127.0.0.1", "::1", "localhost"}
+
+
+def _format_hostport(host: str, port: int) -> str:
+    """Render ``host:port`` for a URL, bracketing IPv6 literals per RFC 3986."""
+    probe = _probe_host(host)
+    return f"[{probe}]:{port}" if ":" in probe else f"{probe}:{port}"
+
+
+def _base_url(port: int = _DEFAULT_PORT, host: str = _DEFAULT_HOST) -> str:
+    return f"http://{_format_hostport(host, port)}"
 
 
 # Default rollover threshold for ``RUNTIME.log_file`` — once the log
@@ -331,32 +365,37 @@ def is_langgraph_dev_running(
     base_url: str | None = None,
     *,
     port: int = _DEFAULT_PORT,
+    host: str = _DEFAULT_HOST,
 ) -> bool:
     """Check whether a langgraph dev API is already serving at ``base_url``.
 
-    ``base_url`` overrides ``port`` when given.
+    ``base_url`` overrides ``port``/``host`` when given.
     """
-    url = base_url or _base_url(port)
+    url = base_url or _base_url(port, host)
     try:
         return httpx.get(f"{url}/ok", timeout=1.0).status_code == 200
     except (httpx.TransportError, OSError):
         return False
 
 
-def _is_port_occupied(port: int) -> bool:
-    """Return True if anything is listening on ``port`` (TCP, IPv4)."""
+def _is_port_occupied(port: int, host: str = _DEFAULT_HOST) -> bool:
+    """Return True if anything is listening on ``host:port`` (TCP)."""
     import socket as _socket
 
-    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    probe = _probe_host(host)
+    family = _socket.AF_INET6 if ":" in probe else _socket.AF_INET
+    s = _socket.socket(family, _socket.SOCK_STREAM)
     try:
         s.settimeout(0.5)
         # connect_ex returns 0 on success (something accepted), nonzero otherwise
-        return s.connect_ex(("127.0.0.1", port)) == 0
+        return s.connect_ex((probe, port)) == 0
     finally:
         s.close()
 
 
-def _wait_for_port_release(port: int, timeout: float = 10.0) -> bool:
+def _wait_for_port_release(
+    port: int, timeout: float = 10.0, host: str = _DEFAULT_HOST
+) -> bool:
     """Poll until ``port`` is released or ``timeout`` elapses.
 
     Used after ``stop_langgraph_dev`` / ``_kill_owned_stale_process`` to
@@ -364,13 +403,13 @@ def _wait_for_port_release(port: int, timeout: float = 10.0) -> bool:
     True if the port is free, False on timeout.
     """
     deadline = time.monotonic() + timeout
-    while _is_port_occupied(port) and time.monotonic() < deadline:
+    while _is_port_occupied(port, host) and time.monotonic() < deadline:
         time.sleep(0.5)
-    return not _is_port_occupied(port)
+    return not _is_port_occupied(port, host)
 
 
-def _can_bind_port(port: int) -> bool:
-    """Return True if a fresh ``bind()`` to ``port`` succeeds right now.
+def _can_bind_port(port: int, host: str = _DEFAULT_HOST) -> bool:
+    """Return True if a fresh ``bind()`` to ``host:port`` succeeds right now.
 
     More reliable than ``_is_port_occupied`` when the previous listener has
     just exited: ``connect_ex`` can already report "free" while ``bind()``
@@ -378,12 +417,17 @@ def _can_bind_port(port: int) -> bool:
     (TIME_WAIT for accepted connections, SO_REUSEADDR rules, etc.). This
     actually attempts the bind that langgraph dev would attempt, then
     closes immediately.
+
+    Binds the *literal* ``host`` — not ``_probe_host(host)`` — because this
+    must replicate the server's own bind: a loopback probe can succeed while
+    the real wildcard bind still fails on another interface's conflict.
     """
     import socket as _socket
 
-    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    family = _socket.AF_INET6 if ":" in host else _socket.AF_INET
+    s = _socket.socket(family, _socket.SOCK_STREAM)
     try:
-        s.bind(("127.0.0.1", port))
+        s.bind((host, port))
         return True
     except OSError:
         return False
@@ -394,7 +438,9 @@ def _can_bind_port(port: int) -> bool:
             pass
 
 
-def _wait_for_port_bindable(port: int, timeout: float = 60.0) -> bool:
+def _wait_for_port_bindable(
+    port: int, timeout: float = 60.0, host: str = _DEFAULT_HOST
+) -> bool:
     """Poll until a real ``bind()`` to ``port`` can succeed, or timeout.
 
     Use this immediately before ``subprocess.Popen("langgraph dev")`` —
@@ -408,7 +454,7 @@ def _wait_for_port_bindable(port: int, timeout: float = 60.0) -> bool:
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if _can_bind_port(port):
+        if _can_bind_port(port, host):
             return True
         time.sleep(0.5)
     return False
@@ -544,6 +590,7 @@ def start_langgraph_dev(
     workspace_dir: Path | None = None,
     *,
     port: int = _DEFAULT_PORT,
+    host: str = _DEFAULT_HOST,
     file_persistence: bool = True,
     jobs_per_worker: int = 10,
     deploy_mode: bool = False,
@@ -557,6 +604,9 @@ def start_langgraph_dev(
             (``CustomSandboxBackend`` derives its workspace root from cwd via
             ``paths.WORKSPACE_ROOT``). Defaults to ``Path.cwd()``.
         port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
+        host: Network interface to bind. Defaults to loopback. SECURITY:
+            widening this exposes an unauthenticated API whose agent can run
+            shell commands — only pass ``0.0.0.0`` on trusted networks.
         file_persistence: When True (default), langgraph dev writes its full
             ``.langgraph_api/`` cache so async-task / Store / scheduler state
             survives subprocess restarts. Set False to suppress periodic
@@ -609,7 +659,9 @@ def start_langgraph_dev(
     # only verifies PID-file ownership, so absence of a match conflates "stale
     # TIME_WAIT" with "foreign process". Falling through to the bind poll
     # disambiguates by behavior — TIME_WAIT clears, foreign listeners don't.
-    if not is_langgraph_dev_running(port=port) and _is_port_occupied(port):
+    if not is_langgraph_dev_running(port=port, host=host) and _is_port_occupied(
+        port, host
+    ):
         if _kill_owned_stale_process(port):
             logger.warning(
                 "Cleaned up stale langgraph dev (pid from %s) on port %d",
@@ -620,7 +672,7 @@ def start_langgraph_dev(
             # several seconds before fully releasing it. Poll until the port
             # is genuinely free so the upcoming bind() doesn't race a
             # half-released socket and crash with "Port already in use".
-            _wait_for_port_release(port)
+            _wait_for_port_release(port, host=host)
         else:
             # No owned stale PID — could be foreign or kernel-only TIME_WAIT
             # from a previous subprocess. Defer to the bind poll below.
@@ -638,9 +690,9 @@ def start_langgraph_dev(
     # "Port already in use" even though our pre-checks passed. By probing
     # the same operation langgraph dev will do, we either wait it out or
     # fail clearly with an actionable message. 60s covers macOS TIME_WAIT.
-    if not _wait_for_port_bindable(port):
+    if not _wait_for_port_bindable(port, host=host):
         raise RuntimeError(
-            f"Port {port} cannot be bound after waiting 60s (kernel TIME_WAIT "
+            f"{host}:{port} cannot be bound after waiting 60s (kernel TIME_WAIT "
             f"or another process holds it). Free the port with `lsof -ti:{port}`, "
             f"or change ports with: `EvoSci config set langgraph_dev_port <other-port>`"
         )
@@ -713,6 +765,25 @@ def start_langgraph_dev(
     sub_env.pop("EVOSCIENTIST_DEPLOY_MODE", None)
     sub_env["EVOSCIENTIST_DEPLOY_MODE"] = "full" if deploy_mode else "stripped"
 
+    # Propagate the effective bind port into the subprocess's config resolution
+    # via the standard ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` override (see
+    # ``EvoScientist/config/settings.py``). Without this, ``EvoSci deploy
+    # --port X`` binds to X but the deployed main agent still reads
+    # ``cfg.langgraph_dev_port`` from disk and dispatches self-loop async
+    # tasks (start_async_task → http://localhost:{cfg.port}) to whatever
+    # the config file says — which desyncs from the bind port whenever
+    # ``--port`` differs from the persisted ``langgraph_dev_port``, and
+    # every async subagent launch fails with "All connection attempts failed".
+    # ``get_effective_config`` treats ``EVOSCIENTIST_*`` shell values as
+    # authoritative over any workspace ``.env`` (see its docstring), so a
+    # ``.env`` in the subprocess cwd cannot shadow the caller-resolved port.
+    sub_env["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] = str(port)
+    # Same reasoning for the bind interface: the deployed agent resolves its
+    # self-dispatch URL from ``cfg.langgraph_dev_host``, so a host resolved by
+    # this caller (``EvoSci deploy --host X``) must reach the subprocess too,
+    # or async sub-agent launches would target whatever the config file says.
+    sub_env["EVOSCIENTIST_LANGGRAPH_DEV_HOST"] = host
+
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
         proc = subprocess.Popen(
@@ -721,6 +792,8 @@ def start_langgraph_dev(
                 "dev",
                 "--config",
                 str(config_file),
+                "--host",
+                host,
                 "--port",
                 str(port),
                 "--n-jobs-per-worker",
@@ -773,9 +846,9 @@ def start_langgraph_dev(
                 f"langgraph dev exited immediately with code {proc.returncode}.\n"
                 f"Log tail:\n{tail}"
             )
-        if is_langgraph_dev_running(port=port):
+        if is_langgraph_dev_running(port=port, host=host):
             logger.info(
-                "langgraph dev started on %s (pid=%d)", _base_url(port), proc.pid
+                "langgraph dev started on %s (pid=%d)", _base_url(port, host), proc.pid
             )
             return proc
         time.sleep(0.5)
@@ -961,6 +1034,7 @@ def _ensure_langgraph_dev_locked(
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     global _ASYNC_SUBAGENTS_AVAILABLE
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
+    host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
 
@@ -993,10 +1067,10 @@ def _ensure_langgraph_dev_locked(
         # and abort with a hard "non-langgraph process" error — turning a
         # clean owned restart into a permanent async-disable. Wait inline for
         # the kernel to release the port before continuing.
-        _wait_for_port_release(port)
+        _wait_for_port_release(port, host=host)
         _ASYNC_SUBAGENTS_AVAILABLE = False  # cleared until restart succeeds
 
-    if is_langgraph_dev_running(port=port):
+    if is_langgraph_dev_running(port=port, host=host):
         # If WE own the running process AND it's still alive, workspace was
         # already verified above via _PROCESS_WORKSPACE comparison. Otherwise
         # — we never owned it (EvoSci deploy in another terminal, or a
@@ -1014,7 +1088,7 @@ def _ensure_langgraph_dev_locked(
                 if recorded != ws_path.resolve():
                     raise WorkspaceMismatchError(
                         f"An EvoSci langgraph dev is already running on "
-                        f"{_base_url(port)} for workspace {recorded}, but the "
+                        f"{_base_url(port, host)} for workspace {recorded}, but the "
                         f"current process requested workspace {ws_path}. "
                         f"Stop the other EvoSci session (deploy / TUI / serve) "
                         f"or rerun with --workdir {recorded}."
@@ -1022,7 +1096,7 @@ def _ensure_langgraph_dev_locked(
                 logger.info(
                     "Reusing externally-managed langgraph dev on %s; sidecar "
                     "confirms matching workspace %s.",
-                    _base_url(port),
+                    _base_url(port, host),
                     recorded,
                 )
             else:
@@ -1034,11 +1108,13 @@ def _ensure_langgraph_dev_locked(
                     "workspace sidecar, cannot verify it matches the requested "
                     "%s. Async sub-agents may operate on a different workspace's "
                     "files.",
-                    _base_url(port),
+                    _base_url(port, host),
                     ws_path,
                 )
         else:
-            logger.info("langgraph dev already running on %s, reusing", _base_url(port))
+            logger.info(
+                "langgraph dev already running on %s, reusing", _base_url(port, host)
+            )
         _ASYNC_SUBAGENTS_AVAILABLE = True
         return None
 
@@ -1046,6 +1122,7 @@ def _ensure_langgraph_dev_locked(
         proc = start_langgraph_dev(
             workspace_dir=ws_path,
             port=port,
+            host=host,
             file_persistence=file_persistence,
             jobs_per_worker=jobs_per_worker,
         )

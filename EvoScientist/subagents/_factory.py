@@ -18,6 +18,10 @@ from __future__ import annotations
 import os
 from typing import Any
 
+# Async research agents (no approval path) keep the backend guard forced on;
+# internal graphs (scheduler, evomemory, autoskills) run unguarded.
+_GUARDED_ASYNC_SUBAGENTS = frozenset({"writing-agent", "data-analysis-agent"})
+
 
 def build_async_subagent_graph(name: str) -> Any:
     """Build a deployable graph for the ``name`` sub-agent defined in yaml.
@@ -113,13 +117,14 @@ def build_async_subagent_graph(name: str) -> Any:
         _ensure_auxiliary_chat_model() if name == "scheduler" else _ensure_chat_model()
     )
 
+    guarded = name in _GUARDED_ASYNC_SUBAGENTS
     return create_deep_agent(
         name=name,
         model=model,
         system_prompt=spec.get("system_prompt", ""),
         tools=spec.get("tools", []) + agent_mcp_tools,
         skills=spec.get("skills"),
-        backend=_get_default_backend(),
+        backend=_get_default_backend(guard_dangerous=guarded, refuse_delete=guarded),
         middleware=middleware,
         subagents=subagents,
     ).with_config({"recursion_limit": cfg.recursion_limit})

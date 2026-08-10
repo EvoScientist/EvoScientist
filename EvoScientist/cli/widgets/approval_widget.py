@@ -101,6 +101,15 @@ class ApprovalWidget(Widget):
         self._selected = 0
         self._option_widgets: list[Static] = []
 
+    @staticmethod
+    def _extract_command(args: dict) -> str:
+        """Pull the display-worthy target out of a tool's args dict.
+
+        Checks `command`/`path` first, then deepagents 0.7.0's `delete`
+        tool key `file_path` — without it, `delete` shows no target.
+        """
+        return args.get("command", args.get("path", args.get("file_path", "")))
+
     def compose(self) -> ComposeResult:
         self._option_widgets = []
         count = len(self._action_requests)
@@ -115,10 +124,7 @@ class ApprovalWidget(Widget):
         for req in self._action_requests:
             name = req.get("name", "")
             args = req.get("args", {})
-            if isinstance(args, dict):
-                command = args.get("command", args.get("path", ""))
-            else:
-                command = ""
+            command = self._extract_command(args) if isinstance(args, dict) else ""
             if command:
                 cmd_str = str(command)
                 if len(cmd_str) > _COMMAND_TRUNCATE_LENGTH:

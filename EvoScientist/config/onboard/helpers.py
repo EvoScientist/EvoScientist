@@ -15,6 +15,7 @@ from ..settings import EvoScientistConfig
 from .style import QMARK, WIZARD_STYLE, console
 from .validators import (
     validate_anthropic_key,
+    validate_atlascloud_key,
     validate_dashscope_code_key,
     validate_dashscope_key,
     validate_deepseek_key,
@@ -25,6 +26,7 @@ from .validators import (
     validate_nvidia_key,
     validate_openai_key,
     validate_openrouter_key,
+    validate_requesty_key,
     validate_siliconflow_key,
     validate_volcengine_key,
     validate_zhipu_key,
@@ -70,6 +72,16 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             config.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", ""),
             validate_openrouter_key,
         ),
+        "atlascloud": (
+            "Atlas Cloud",
+            config.atlascloud_api_key or os.environ.get("ATLASCLOUD_API_KEY", ""),
+            validate_atlascloud_key,
+        ),
+        "requesty": (
+            "Requesty",
+            config.requesty_api_key or os.environ.get("REQUESTY_API_KEY", ""),
+            validate_requesty_key,
+        ),
         "deepseek": (
             "DeepSeek",
             config.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
@@ -87,6 +99,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
         ),
         "volcengine": (
             "Volcengine",
+            config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
+            validate_volcengine_key,
+        ),
+        "volcengine-code": (
+            "Volcengine Coding Plan",
             config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
             validate_volcengine_key,
         ),

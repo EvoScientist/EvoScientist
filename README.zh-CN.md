@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,11 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 8 月 7 日]** **[v0.2.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.6)** — Agent teams：可将已安装的专家技能邀请进会话（`/expert <name>`），支持轮内咨询、并行面板与后台任务；langgraph dev 后端与 WebUI 绑定地址可配置（默认仅回环）；新增火山引擎代码计划 provider（`glm-5.2`、`kimi-k2.5`）；Qwen3.8-Max 可在 DashScope 与 OpenRouter 选用（1M 上下文）；deepagents 0.7.5，不支持的媒体改为占位符、不再触发 provider 400；修复 Kimi/Zhipu 会话的空白 tool-call ID 问题。
+- **[2026 年 8 月 1 日]** **[v0.2.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.5)** — 主 agent 与同步/异步子 agent 统一 human-in-the-loop 审批；升级 deepagents 0.7.0，内置 prompt 更精简，新增递归 `delete` 工具、与 `execute` 同级审批；新增 Requesty 与 Atlas Cloud 两个 LLM provider；修复无名工具调用、同步子 agent 的中断工具历史，以及 deploy 模式端口传播。
+- **[2026 年 7 月 26 日]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 可在 Anthropic 与 OpenRouter 中选用（含 fast），Google 与 OpenRouter 另新增 Gemini 3.6 Flash 与 3.5 Flash Lite；Kimi K3 打通 Anthropic 协议通道（Kimi For Coding、自定义端点），结构化输出、历史回放、多轮 thinking 均可用；修复中断的工具调用历史、技能安装路径泄漏，以及 OpenRouter SSE 流式回归（固定到 0.11 以下）。
+- **[2026 年 7 月 18 日]** **[v0.2.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.3)** — Kimi K3 可在 Moonshot 与 OpenRouter 中选用（1M 上下文）；清理孤儿运行后，异步子代理不再卡在 pending 状态；Telegram 斜杠命令；provider 修复（DeepSeek 原生 SDK、ChatGPT OAuth 下的 GPT-5.x、OpenAI `reasoning_effort`）；tool-selector 流式输出更安静，checkpoint 体积更小。
+- **[2026 年 7 月 11 日]** **[v0.2.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.2)** — onboarding 与 `/model` 新增可选模型：OpenAI 与 OpenRouter 的 GPT-5.6（sol、terra、luna），以及 OpenRouter 上的 Grok 4.5 与腾讯混元 HY3；收紧配置文件权限，并重做了辅助模型的 onboarding OAuth 流程。
 - **[2026 年 7 月 5 日]** **[v0.2.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.1)** — AutoSkills：EvoMemory 从自身的观察记录聚类中起草可复用技能，供你用 `/autoskills` 审核；新增面向无头 / SDK 客户端的 `--output-format stream-json`；更丰富的斜杠命令补全；修复 Windows UTF-8 配置读取；TUI 欢迎横幅修复；langchain-openrouter 升级到 0.2.5。
 - **[2026 年 6 月 26 日]** **[v0.2.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.0)** — 定时任务：用 `/schedule` 或自然语言设置 cron 风格的重复运行，无人值守并对 shell 访问做门控；记忆自连成图：将观察记录连成知识图谱（互补 / 矛盾 / 取代）；新增只读 `GET /api/models` 端点，供 WebUI 模型选择器使用。
 - **[2026 年 6 月 23 日]** **[v0.1.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.9)** — 新安装热修复：deepagents 0.6.11 / langchain-quickjs 0.3 将 `task` 保留为 REPL 全局后,首次对话即崩溃（`The subagent `task` tool cannot be exposed via `ptc``）。从 code-interpreter 的 PTC 白名单移除 `task`（`task()` 仍作为 REPL 全局可用,异步分发工具继续保留在 PTC 中），并将 deepagents pin 升级到 `~=0.6.11`。
@@ -455,6 +460,24 @@ EvoSci config set webui_port 4800    # 修改前端端口（须与 langgraph dev
 ```
 
 需要 **Node.js 24 LTS**（提供 `npx`）；首次启动会下载 `@evoscientist/webui`，需要联网。注意：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
+
+**从其他机器访问。** 两个服务默认都绑定回环地址（`127.0.0.1`），WebUI 开箱即为仅本机可用。要在局域网使用，需把两者一并放开——UI 是**从浏览器**直连后端的，因此还要把 UI 里的部署地址填成 `http://<本机IP>:6174`，而不是保留 localhost：
+
+```bash
+EvoSci --host 0.0.0.0                          # 仅本次会话，两个服务一起
+EvoSci config set webui_host 0.0.0.0           # 持久化，前端（4716 端口）
+EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端口）
+```
+
+`EvoSci deploy` 与 `EvoSci serve` 也支持同名参数：`EvoSci deploy --host 0.0.0.0`。
+
+> 🚨 **警告**
+>
+> 后端是**无鉴权、且 agent 能执行 shell 的 API**。任何能访问 6174 端口的人都能完全控制它，因此只应在可信网络里放开；暴露期间 EvoSci 每次启动都会打印红色 `⚠ PUBLIC BIND` 横幅。
+>
+> **这不是 WebUI 独有的问题。** `tui`、`cli`、`serve`、`deploy` 都会自动启动同一个 langgraph dev 后端，因此 `--host` 会让 6174 端口在所有模式下都暴露到网络上。前端端口 4716 虽然只在 WebUI 模式下存在，但同样不是无害的：它的 API 可以读写、上传工作区文件并安装 skill，因此同样会打印横幅、同样只应在可信网络放开。
+>
+> 网络不可信时，请让后端留在回环地址，改用 SSH 隧道访问：`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <主机>`。
 
 </details>
 
@@ -752,9 +775,9 @@ Jan Piotrowski, Wiktor Cupiał, Jakub Kaliski, Jakub Filipiuk, Xinhao Yi, Shuyu 
   <img src="https://contrib.rocks/image?repo=EvoScientist/EvoScientist" />
 </a>
 
-<!-- ### 📈 Star 趋势
+### 📈 Star 趋势
 
-[![Star History Chart](https://api.star-history.com/svg?repos=EvoScientist/EvoScientist&type=date&legend=bottom-right)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=bottom-right) -->
+[![Star History Chart](https://api.star-history.com/chart?repos=EvoScientist/EvoScientist&type=date&legend=top-left&sealed_token=-XivKBib6Pb_YTJjMxBwUghZaRWxGqr5HYBKsa5jyiCgVMWfHmmkLyCYbT0uUvJJdUQsza9mRnlk1-QVQzm-s0UExQ_8DIBSrWKIrPQz5WzNlRURsUoHSA)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=top-left)
 
 <p align="right"><a href="#top">🔝回到顶部</a></p>
 

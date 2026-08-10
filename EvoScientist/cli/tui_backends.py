@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..gateway import GraphGateway
 from ..stream.display import _run_streaming
+
+if TYPE_CHECKING:
+    from ..runtime import AsyncRuntime
 
 
 class StreamingTUIBackend(Protocol):
@@ -29,10 +32,12 @@ class StreamingTUIBackend(Protocol):
         on_stream_event: Callable[[str, Any], Any] | None = None,
         status_footer_builder: Callable[[], Any] | None = None,
         metadata: dict | None = None,
+        configurable_extra: dict[str, Any] | None = None,
         hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
         ask_user_prompt_fn: Callable[[dict], dict] | None = None,
         cancel_scope: str | None = None,
         gateway: GraphGateway,
+        runtime: AsyncRuntime | None = None,
     ) -> str:
         """Run streaming and return final response text."""
 
@@ -57,10 +62,12 @@ class RichStreamingBackend:
         on_stream_event: Callable[[str, Any], Any] | None = None,
         status_footer_builder: Callable[[], Any] | None = None,
         metadata: dict | None = None,
+        configurable_extra: dict[str, Any] | None = None,
         hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
         ask_user_prompt_fn: Callable[[dict], dict] | None = None,
         cancel_scope: str | None = None,
         gateway: GraphGateway,
+        runtime: AsyncRuntime | None = None,
     ) -> str:
         return _run_streaming(
             agent=agent,
@@ -74,8 +81,10 @@ class RichStreamingBackend:
             on_stream_event=on_stream_event,
             status_footer_builder=status_footer_builder,
             metadata=metadata,
+            configurable_extra=configurable_extra,
             hitl_prompt_fn=hitl_prompt_fn,
             ask_user_prompt_fn=ask_user_prompt_fn,
             cancel_scope=cancel_scope,
             gateway=gateway,
+            runtime=runtime,
         )

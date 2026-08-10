@@ -1,6 +1,5 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
-import asyncio
 import logging
 import os
 import queue
@@ -12,11 +11,17 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
+import click
 import typer
 from rich.markup import escape
 from rich.table import Table
 
-from ..commands.base import ChannelRuntime, Command, CommandContext
+from ..commands.base import (
+    ChannelRuntime,
+    Command,
+    CommandContext,
+    active_teams_configurable_extra,
+)
 from ..gateway import (
     GraphGateway,
     GraphTarget,
@@ -26,6 +31,7 @@ from ..gateway import (
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
+from ..runtime import AsyncRuntime
 from ..stream.console import console
 from . import async_notifier
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
@@ -53,6 +59,7 @@ from .channel import (
     publish_to_channel_origin,
     remember_channel_origin,
 )
+from .channel_sends import PendingChannelSends
 from .mcp_ui import (
     _mcp_add_server_from_kwargs,
     _mcp_edit_server_fields,
@@ -66,6 +73,35 @@ if TYPE_CHECKING:
 
     from ..config import EvoScientistConfig
 
+
+_ASYNC_RUNTIME_META_KEY = "evoscientist.async_runtime"
+
+
+def _close_cli_async_runtime(runtime: AsyncRuntime) -> None:
+    """Close the owned runtime or surface a controlled CLI shutdown failure."""
+    try:
+        runtime.close()
+    except TimeoutError as exc:
+        click.echo(
+            f"Error: Async runtime shutdown did not complete: {exc}",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from None
+
+
+def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
+    """Return the application-scoped runtime owned by this CLI invocation."""
+    root = ctx.find_root()
+    runtime = root.meta.get(_ASYNC_RUNTIME_META_KEY)
+    if runtime is None:
+        runtime = AsyncRuntime()
+        root.meta[_ASYNC_RUNTIME_META_KEY] = runtime
+        root.call_on_close(lambda: _close_cli_async_runtime(runtime))
+    if not isinstance(runtime, AsyncRuntime):  # pragma: no cover - defensive
+        raise RuntimeError("CLI async runtime context is invalid")
+    return runtime
+
+
 # =============================================================================
 # Onboard command
 # =============================================================================
@@ -73,6 +109,7 @@ if TYPE_CHECKING:
 
 @app.command()
 def onboard(
+    ctx: typer.Context,
     skip_validation: bool = typer.Option(
         False, "--skip-validation", help="Skip API key validation during setup"
     ),
@@ -201,7 +238,11 @@ def onboard(
             strict=non_interactive,
         )
 
-    _run_onboard_cli(skip_validation=skip_validation, prompter=prompter)
+    _run_onboard_cli(
+        skip_validation=skip_validation,
+        prompter=prompter,
+        runtime=_get_cli_async_runtime(ctx),
+    )
 
 
 # =============================================================================
@@ -243,11 +284,21 @@ def _run_onboard_cli(**kwargs: Any) -> None:
         raise typer.Exit(code=1) from exc
 
 
-def _configure_section(section: str, skip_validation: bool = False) -> None:
+def _configure_section(
+    section: str,
+    skip_validation: bool = False,
+    *,
+    runtime: AsyncRuntime | None = None,
+) -> None:
     """Run a single onboarding section, reusing the wizard's step logic."""
+    kwargs: dict[str, Any] = {
+        "skip_validation": skip_validation,
+        "only_sections": {section},
+    }
+    if runtime is not None:
+        kwargs["runtime"] = runtime
     _run_onboard_cli(
-        skip_validation=skip_validation,
-        only_sections={section},
+        **kwargs,
     )
 
 
@@ -325,9 +376,9 @@ def configure_latex():
 
 
 @configure_app.command("channels")
-def configure_channels():
+def configure_channels(ctx: typer.Context):
     """Re-run channels selection and per-channel configuration."""
-    _configure_section("channels")
+    _configure_section("channels", runtime=_get_cli_async_runtime(ctx))
 
 
 # =============================================================================
@@ -336,24 +387,17 @@ def configure_channels():
 
 
 @channel_app.command("setup")
-def channel_setup():
+def channel_setup(ctx: typer.Context):
     """Interactive channel configuration wizard.
 
     Guides you through selecting and configuring messaging channels
     (Telegram, Discord, or iMessage).
     """
-    import asyncio
-
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
     from ..config import load_config, save_config
     from ..config.onboard.channels import _step_channels
 
     config = load_config()
-    updates = _step_channels(config)
+    updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
     if updates:
         for key, value in updates.items():
             setattr(config, key, value)
@@ -464,7 +508,13 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     state would route async sub-agent calls to a process pinned to /A
     while the main agent runs in /B.
     """
-    from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
+    from ..langgraph_dev.manager import (
+        _DEFAULT_HOST,
+        WorkspaceMismatchError,
+        _is_loopback_host,
+        ensure_langgraph_dev,
+        is_async_subagents_available,
+    )
 
     try:
         with console.status(
@@ -476,6 +526,22 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+    # The backend is shared by every UI mode, so the exposure warning lives
+    # here, not just in deploy/WebUI. Gated on the server being up: warning
+    # about a bind that never happened would be worse than saying nothing.
+    bind_host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
+    if (
+        bind_host
+        and not _is_loopback_host(bind_host)
+        and is_async_subagents_available()
+    ):
+        console.print(
+            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+            f"[bold red]Agent server listening on {bind_host} — no auth, and "
+            f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
+            f"networks.[/bold red]"
+        )
 
 
 def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
@@ -875,6 +941,7 @@ class ServeRuntimeState:
     workspace_dir: str | None
     config: "EvoScientistConfig | None"
     runtime_gateways: RuntimeGateways
+    async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
 
     def set_agent(
@@ -969,6 +1036,7 @@ async def _apply_serve_resume_state(
                 _load_agent,
                 workspace_dir=new_workspace,
                 config=effective_config,
+                runtime=runtime_state.async_runtime,
             )
             await _sync_background_agent_server_workspace(
                 effective_config,
@@ -1119,8 +1187,6 @@ def _serve_process_message(
     via the ``on_cmd_completed`` hook because the command mutates
     ``ctx.thread_id`` / ``ctx.workspace_dir`` directly.
     """
-    import asyncio
-
     from .channel import _bus_loop
     from .tui_runtime import run_streaming
 
@@ -1139,14 +1205,10 @@ def _serve_process_message(
 
     # -- channel callback helpers (same pattern as interactive.py) --
 
+    pending_channel_sends = PendingChannelSends(_bus_loop, _serve_logger)
+
     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
-        loop = _bus_loop
-        if not loop:
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
-        except Exception as e:
-            _serve_logger.debug(f"{label} send failed: {e}")
+        pending_channel_sends.submit(coro, label, timeout)
 
     def _send_thinking(thinking: str) -> None:
         ch = msg.channel_ref
@@ -1196,31 +1258,15 @@ def _serve_process_message(
     # commands like ``/evoskills`` actually execute in serve mode instead
     # of being fed to the LLM as a plain prompt.  ``await_agent_ready`` is
     # None because the agent is always loaded before the serve loop polls.
-    # Uses a dedicated event loop (not ``asyncio.run``) so SIGINT handling
-    # installed by ``serve()`` remains authoritative — ``asyncio.run``
-    # swaps ``signal.set_wakeup_fd`` and can leave it dangling on edge
-    # cases, which breaks Ctrl+C between messages.
-    # ``set_event_loop`` is needed because some downstream commands
-    # (e.g. ``/install-mcp``) call ``asyncio.get_event_loop()``, which
-    # raises ``RuntimeError`` on Python 3.12+ when the thread has no
-    # current loop set.  The prior loop (often ``None``) is restored in
-    # the ``finally`` below so subsequent messages start from a clean
-    # slate.  Loop creation lives inside the try so an exception between
-    # creation and ``set_event_loop`` still closes the loop.
+    # Slash commands run on the application-owned runtime. The main thread
+    # remains the signal owner while command coroutines share one stable loop.
     try:
-        _prev_loop: asyncio.AbstractEventLoop | None
-        try:
-            _prev_loop = asyncio.get_event_loop_policy().get_event_loop()
-        except RuntimeError:
-            _prev_loop = None
-        _slash_loop: asyncio.AbstractEventLoop | None = None
         _slash_handled = False
         _slash_error: Exception | None = None
         try:
-            _slash_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(_slash_loop)
-            _slash_handled = _slash_loop.run_until_complete(
-                dispatch_channel_slash_command(
+            async_runtime = runtime_state.async_runtime
+            _slash_handled = async_runtime.run_sync(
+                lambda: dispatch_channel_slash_command(
                     msg,
                     agent=runtime_state.agent,
                     thread_id=runtime_state.thread_id,
@@ -1245,15 +1291,12 @@ def _serve_process_message(
                     ),
                     channel_runtime=channel_runtime,
                     graph_gateway=runtime_gateways.graph_gateway,
+                    async_runtime=async_runtime,
                 )
             )
         except Exception as exc:
             _slash_error = exc
             _serve_logger.exception("Slash dispatch failed for %s", msg.channel_type)
-        finally:
-            if _slash_loop is not None:
-                _slash_loop.close()
-            asyncio.set_event_loop(_prev_loop)
 
         if _slash_error is not None:
             _set_channel_response(msg.msg_id, f"Command error: {_slash_error}")
@@ -1280,6 +1323,7 @@ def _serve_process_message(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                configurable_extra=active_teams_configurable_extra(channel_runtime),
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
@@ -1287,11 +1331,13 @@ def _serve_process_message(
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
                 gateway=runtime_gateways.graph_gateway,
+                runtime=runtime_state.async_runtime,
             )
         except Exception as e:
             response = f"Error: {e}"
             console.print(f"[red]Serve error: {e}[/red]")
 
+        pending_channel_sends.settle()
         _set_channel_response(msg.msg_id, response)
         console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
     finally:
@@ -1309,6 +1355,7 @@ def _serve_drain_notifications(
     model: str | None,
     workspace_dir: str,
     show_thinking: bool,
+    channel_runtime: ChannelRuntime | None = None,
 ) -> None:
     """Drain the async-task notification queue in headless serve mode.
 
@@ -1340,7 +1387,9 @@ def _serve_drain_notifications(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                configurable_extra=active_teams_configurable_extra(channel_runtime),
                 gateway=runtime_state.runtime_gateways.graph_gateway,
+                runtime=runtime_state.async_runtime,
             )
         except Exception as exc:
             _serve_logger.warning("Notification agent turn failed: %s", exc)
@@ -1378,24 +1427,27 @@ def _serve_drain_notifications(
             current_thread_id=runtime_state.thread_id,
         )
 
-    _notif_loop: _aio.AbstractEventLoop | None = None
     try:
-        _notif_loop = _aio.new_event_loop()
-        _notif_loop.run_until_complete(_consume())
+        runtime_state.async_runtime.run_sync(_consume)
     except Exception as exc:
         _serve_logger.warning("Notification drain failed: %s", exc)
-    finally:
-        if _notif_loop is not None:
-            _notif_loop.close()
 
 
 @app.command()
 def serve(
+    ctx: typer.Context,
     no_thinking: bool = typer.Option(
         False, "--no-thinking", help="Disable thinking relay to channels"
     ),
     workdir: str | None = typer.Option(
         None, "--workdir", help="Override workspace directory"
+    ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Interface to bind the langgraph dev backend to (default: "
+        "langgraph_dev_host = 127.0.0.1). Pass 0.0.0.0 to reach it from "
+        "another machine — the backend has no auth.",
     ),
     auto_approve: bool = typer.Option(
         False,
@@ -1431,6 +1483,9 @@ def serve(
     from ..config import apply_config_to_env, get_effective_config
 
     cli_overrides = {}
+    # serve starts no front-end, so only the backend bind applies here.
+    if host is not None and host.strip():
+        cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:
         cli_overrides["auto_approve"] = True
     if auto_mode:
@@ -1445,6 +1500,7 @@ def serve(
         cli_overrides["log_level"] = "DEBUG"
         cli_overrides["channel_debug_tracing"] = True
     config = get_effective_config(cli_overrides)
+    async_runtime = _get_cli_async_runtime(ctx)
     if debug:
         os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
         os.environ["EVOSCIENTIST_CHANNEL_DEBUG_TRACING"] = "true"
@@ -1495,11 +1551,13 @@ def serve(
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
     console.print("[dim]Loading agent...[/dim]")
-    agent = _load_agent(workspace_dir=ws, config=config)
+    agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
 
     runtime_gateways = create_runtime_gateways()
-    tid = asyncio.run(
-        runtime_gateways.graph_gateway.create_thread(GraphTarget(workspace_dir=ws))
+    tid = async_runtime.run_sync(
+        lambda: runtime_gateways.graph_gateway.create_thread(
+            GraphTarget(workspace_dir=ws)
+        )
     )
 
     # Mutable runtime shared with _serve_process_message so channel slash
@@ -1511,6 +1569,7 @@ def serve(
         workspace_dir=ws,
         config=config,
         runtime_gateways=runtime_gateways,
+        async_runtime=async_runtime,
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
@@ -1551,9 +1610,22 @@ def serve(
     import threading
 
     shutdown_event = threading.Event()
+    no_active_cancel_scope = object()
+    active_cancel_scope: str | object | None = no_active_cancel_scope
 
     def _handle_shutdown(signum: int, _frame: Any) -> None:
         shutdown_event.set()
+        # Cancelling the owned asyncio task is not enough when it is awaiting a
+        # blocking execute call: the executor thread and its isolated process
+        # group keep running until the matching stream event is set.  Request
+        # scope cancellation before KeyboardInterrupt unwinds message cleanup
+        # (which discards that scope).  SIGTERM also needs this to unblock the
+        # synchronous serve call so the poll loop can observe shutdown_event.
+        scope = active_cancel_scope
+        if scope is not no_active_cancel_scope:
+            from ..stream.display import request_stream_cancel
+
+            request_stream_cancel(cast(str | None, scope))
         # Fall back to Python's default SIGINT behavior (raises
         # KeyboardInterrupt) so blocking I/O inside ``run_streaming``
         # is still interrupted.  For SIGTERM there's no default that
@@ -1573,6 +1645,7 @@ def serve(
             if shutdown_event.is_set():
                 break
             if msg is not None:
+                active_cancel_scope = _channel_message_cancel_scope(msg)
                 try:
                     _serve_process_message(
                         msg,
@@ -1588,15 +1661,23 @@ def serve(
                 except KeyboardInterrupt:
                     shutdown_event.set()
                     break
+                finally:
+                    active_cancel_scope = no_active_cancel_scope
 
             # Poll notification queue when idle (no channel message was pending).
             if async_notifier.has_pending_notifications(runtime_state.thread_id):
-                _serve_drain_notifications(
-                    runtime_state=runtime_state,
-                    model=config.model,
-                    workspace_dir=ws,
-                    show_thinking=effective_channel_thinking,
-                )
+                # Notification turns use the default stream cancellation scope.
+                active_cancel_scope = None
+                try:
+                    _serve_drain_notifications(
+                        runtime_state=runtime_state,
+                        model=config.model,
+                        workspace_dir=ws,
+                        show_thinking=effective_channel_thinking,
+                        channel_runtime=channel_runtime,
+                    )
+                finally:
+                    active_cancel_scope = no_active_cancel_scope
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
@@ -1954,20 +2035,16 @@ def sessions_callback(ctx: typer.Context):
     so the bare command is informative rather than silent.
     """
     if ctx.invoked_subcommand is None:
-        sessions_stats()
+        sessions_stats(ctx)
 
 
 @sessions_app.command("stats")
-def sessions_stats():
+def sessions_stats(ctx: typer.Context):
     """Show DB size, thread count, total checkpoints, top heaviest threads."""
-    import asyncio
-
     from ..sessions import db_stats
 
-    try:
-        stats = asyncio.get_event_loop().run_until_complete(db_stats())
-    except RuntimeError:
-        stats = asyncio.new_event_loop().run_until_complete(db_stats())
+    runtime = _get_cli_async_runtime(ctx)
+    stats = runtime.run_sync(db_stats)
 
     table = Table(title="EvoScientist sessions DB", show_header=True)
     table.add_column("Metric", style="cyan")
@@ -2094,6 +2171,15 @@ def _main_callback(
         "--ui",
         help="UI backend: tui (default), cli, or webui.",
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Interface to bind servers to (default: 127.0.0.1 for both). "
+        "Sets langgraph_dev_host — the backend shared by every UI mode — and "
+        "webui_host (WebUI mode only). Applies to the default entry; the "
+        "serve and deploy subcommands take their own --host. Pass 0.0.0.0 to "
+        "reach both from another machine (the backend has no auth).",
+    ),
     output_format: str | None = typer.Option(
         None,
         "--output-format",
@@ -2107,6 +2193,8 @@ def _main_callback(
     # If a subcommand was invoked, don't run the default behavior
     if ctx.invoked_subcommand is not None:
         return
+
+    async_runtime = _get_cli_async_runtime(ctx)
 
     # Load and apply configuration
     from ..config import apply_config_to_env, get_effective_config
@@ -2152,6 +2240,11 @@ def _main_callback(
         cli_overrides["show_thinking"] = False
     if ui:
         cli_overrides["ui_backend"] = ui
+    if host is not None and host.strip():
+        # One flag drives both servers; the backend applies in EVERY UI mode
+        # (auto-started for tui/cli/serve too), webui_host only in WebUI mode.
+        cli_overrides["webui_host"] = host.strip()
+        cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:
         cli_overrides["auto_approve"] = True
     if effective_auto_mode:
@@ -2350,10 +2443,12 @@ def _main_callback(
                 else:
                     tid = await graph_gateway.create_thread()
                 console.print("[dim]Loading agent...[/dim]")
-                agent = _load_agent(
+                agent = await asyncio.to_thread(
+                    _load_agent,
                     workspace_dir=workspace_dir,
                     checkpointer=checkpointer,
                     config=config,
+                    runtime=async_runtime,
                 )
                 try:
                     if effective_output_format == "stream-json":
@@ -2382,16 +2477,31 @@ def _main_callback(
                             # matching the text path (cmd_run does this itself).
                             _wait_for_memory_workers_before_exit()
                     else:
-                        cmd_run(
-                            agent,
-                            prompt,
-                            thread_id=tid,
-                            show_thinking=show_thinking,
-                            workspace_dir=workspace_dir,
-                            model=config.model,
-                            ui_backend=config.ui_backend,
-                            runtime_gateways=runtime_gateways,
+                        stream_worker = asyncio.create_task(
+                            asyncio.to_thread(
+                                cmd_run,
+                                agent,
+                                prompt,
+                                thread_id=tid,
+                                show_thinking=show_thinking,
+                                workspace_dir=workspace_dir,
+                                model=config.model,
+                                ui_backend=config.ui_backend,
+                                runtime_gateways=runtime_gateways,
+                                async_runtime=async_runtime,
+                            )
                         )
+                        try:
+                            await asyncio.shield(stream_worker)
+                        except asyncio.CancelledError:
+                            from ..stream.display import request_stream_cancel
+                            from .tui_runtime import settle_cancelled_worker
+
+                            await settle_cancelled_worker(
+                                stream_worker,
+                                on_cancel=request_stream_cancel,
+                            )
+                            raise
                 finally:
                     # Model failures can bypass middleware ``after_agent``
                     # hooks. Close any remaining QuickJS workers while this
@@ -2407,10 +2517,7 @@ def _main_callback(
                     except Exception:
                         pass
 
-        import nest_asyncio
-
-        nest_asyncio.apply()
-        asyncio.get_event_loop().run_until_complete(_single_shot())
+        async_runtime.run_sync(_single_shot)
     else:
         from .interactive import cmd_interactive
 
@@ -2427,6 +2534,7 @@ def _main_callback(
             thread_id=thread_id,
             ui_backend=config.ui_backend,
             config=config,
+            async_runtime=async_runtime,
         )
 
 

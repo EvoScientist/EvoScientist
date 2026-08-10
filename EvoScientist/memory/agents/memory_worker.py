@@ -34,7 +34,7 @@ from ._factory import (
 logger = logging.getLogger(__name__)
 
 _MEMORY_WORKER_EXCLUDED_TOOLS = frozenset(
-    {"execute", "task", "write_file", "write_todos"}
+    {"delete", "execute", "task", "write_file", "write_todos"}
 )
 
 

@@ -597,7 +597,11 @@ class InboundConsumer:
                 if outcome.decisions is None:
                     return None  # reject / timeout / stop — end the turn
 
-                stream_input = Command(resume={"decisions": outcome.decisions})
+                from ..backends import build_hitl_resume
+
+                stream_input = build_hitl_resume(
+                    interrupt_data.get("interrupt_id"), outcome.decisions
+                )
                 # continue to next HITL round
 
         except TimeoutError:

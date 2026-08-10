@@ -4,8 +4,10 @@ import asyncio
 import logging
 import queue
 import random
+import signal
 import sys
-from collections.abc import Callable
+import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -62,6 +64,7 @@ from .channel import (
     _set_channel_response,
     dispatch_channel_slash_command,
 )
+from .channel_sends import PendingChannelSends
 from .file_mentions import complete_file_mention, resolve_file_mentions
 from .rich_command_ui import RichCLICommandUI
 from .status_bar import (
@@ -83,7 +86,12 @@ from .status_bar import (
     make_usage_status_snapshot,
 )
 from .tui_interactive import run_textual_interactive
-from .tui_runtime import resolve_ui_backend, run_streaming
+from .tui_runtime import (
+    StreamCancellationTimeout,
+    resolve_ui_backend,
+    run_streaming,
+    run_streaming_async,
+)
 
 _MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
 _MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
@@ -97,6 +105,8 @@ _background_tasks: set[asyncio.Task] = set()
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..runtime import AsyncRuntime
+
 
 @dataclass(frozen=True, slots=True)
 class _StartupSession:
@@ -105,6 +115,15 @@ class _StartupSession:
     thread_id: str
     workspace_dir: str | None
     resumed: bool
+
+
+async def _run_serialized_turn(
+    turn_lock: asyncio.Lock,
+    operation: Callable[[], Awaitable[Any]],
+) -> Any:
+    """Run one session turn without overlapping another frontend source."""
+    async with turn_lock:
+        return await operation()
 
 
 # =============================================================================
@@ -328,6 +347,47 @@ async def _resolve_startup_session(
 # =============================================================================
 
 
+async def _run_rich_cli_streaming_turn(**kwargs: Any) -> str:
+    """Run one Rich CLI turn with a fresh, turn-local SIGINT policy.
+
+    ``asyncio.run`` installs a SIGINT handler whose interrupt count lasts for
+    the lifetime of the runner.  The Rich CLI intentionally recovers after a
+    cancelled turn, so relying on that handler makes Ctrl+C on a later turn
+    look like the runner's second interrupt and raises ``KeyboardInterrupt``.
+
+    While a model turn is active, route the first Ctrl+C to a child task
+    instead.  Restoring the runner's handler after every turn keeps Ctrl+C at
+    the prompt unchanged and resets the force-quit boundary for the next turn.
+    A second Ctrl+C before the current turn settles remains a force quit.
+    """
+    stream_task = asyncio.create_task(
+        run_streaming_async(**kwargs, recover_on_cancel=True)
+    )
+
+    # Interactive CLI execution belongs on the main thread, but retaining the
+    # ordinary await makes this helper safe in embedded/test environments where
+    # Python does not permit installing process signal handlers.
+    if threading.current_thread() is not threading.main_thread():
+        return await stream_task
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    interrupted = False
+
+    def _cancel_turn(signum: int, frame: Any) -> None:
+        nonlocal interrupted
+        if interrupted or stream_task.done():
+            signal.default_int_handler(signum, frame)
+            return
+        interrupted = True
+        stream_task.cancel()
+
+    signal.signal(signal.SIGINT, _cancel_turn)
+    try:
+        return await stream_task
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+
+
 def cmd_interactive(
     show_thinking: bool = True,
     channel_send_thinking: bool = True,
@@ -340,6 +400,7 @@ def cmd_interactive(
     thread_id: str | None = None,
     ui_backend: str = "cli",
     config=None,
+    async_runtime: "AsyncRuntime | None" = None,
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -358,15 +419,15 @@ def cmd_interactive(
         thread_id: Optional thread ID to resume a previous session
         ui_backend: UI backend ('cli' or 'tui')
     """
-    import nest_asyncio
-
-    nest_asyncio.apply()
-
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
         from functools import partial
 
-        load_agent = partial(_load_agent, config=config)
+        load_agent = partial(
+            _load_agent,
+            config=config,
+            runtime=async_runtime,
+        )
         run_textual_interactive(
             show_thinking=show_thinking,
             channel_send_thinking=channel_send_thinking,
@@ -380,6 +441,7 @@ def cmd_interactive(
             load_agent=load_agent,
             create_session_workspace=_create_session_workspace,
             config=config,
+            async_runtime=async_runtime,
         )
         return
 
@@ -419,7 +481,7 @@ def cmd_interactive(
         width = console.size.width
         console.print(Text("\u2500" * width, style="dim"))
 
-    from ..commands.base import ChannelRuntime
+    from ..commands.base import ChannelRuntime, active_teams_configurable_extra
 
     channel_runtime = ChannelRuntime()
 
@@ -497,6 +559,7 @@ def cmd_interactive(
             checkpointer=checkpointer,
             config=config,
             events=event_sink,
+            runtime=async_runtime,
         )
 
     async def _await_agent_ready() -> "CompiledStateGraph":
@@ -868,6 +931,8 @@ def cmd_interactive(
 
             # ---- Channel queue processing (bus → main thread) ----
 
+            turn_lock = asyncio.Lock()
+
             async def _process_channel_message(msg: ChannelMessage) -> None:
                 """Process a single channel message with real-time streaming.
 
@@ -905,17 +970,12 @@ def cmd_interactive(
                     console.print(rx)
                     _print_separator()
 
+                    pending_channel_sends = PendingChannelSends(
+                        _ch_mod._bus_loop, _channel_logger
+                    )
+
                     def _send_to_channel(coro, label: str, timeout: int = 15) -> None:
-                        """Schedule an async channel send on the bus loop."""
-                        loop = _ch_mod._bus_loop
-                        if not loop:
-                            return
-                        try:
-                            asyncio.run_coroutine_threadsafe(coro, loop).result(
-                                timeout=timeout
-                            )
-                        except Exception as e:
-                            _channel_logger.debug(f"{label} send failed: {e}")
+                        pending_channel_sends.submit(coro, label, timeout)
 
                     def _send_thinking_to_channel(thinking: str) -> None:
                         ch = msg.channel_ref
@@ -1029,6 +1089,7 @@ def cmd_interactive(
                         on_cmd_completed=_on_channel_cmd_completed,
                         channel_runtime=channel_runtime,
                         graph_gateway=runtime_gateways.graph_gateway,
+                        async_runtime=async_runtime,
                     )
                     if _slash_handled:
                         # A channel-issued /new or /resume rotates the thread
@@ -1047,7 +1108,7 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             msg.content, reset_streaming_text=True
                         )
-                        response = run_streaming(
+                        response = await run_streaming_async(
                             ui_backend=state["ui_backend"],
                             agent=ready_agent,
                             message=msg.content,
@@ -1055,6 +1116,9 @@ def cmd_interactive(
                             show_thinking=show_thinking,
                             interactive=True,
                             metadata=meta,
+                            configurable_extra=active_teams_configurable_extra(
+                                channel_runtime
+                            ),
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
@@ -1064,11 +1128,13 @@ def cmd_interactive(
                             status_footer_builder=_stream_status_footer,
                             cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
                             gateway=runtime_gateways.graph_gateway,
+                            runtime=async_runtime,
                         )
                     except Exception as e:
                         response = f"Error: {e}"
                         console.print(f"[red]Channel error: {e}[/red]")
 
+                    await pending_channel_sends.settle_async()
                     _set_channel_response(msg.msg_id, response)
                     await _refresh_status_snapshot(reset_streaming_text=True)
 
@@ -1105,7 +1171,7 @@ def cmd_interactive(
                 meta = build_metadata(state["workspace_dir"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
                 ready_agent = await _await_agent_ready()
-                response = run_streaming(
+                response = await run_streaming_async(
                     ui_backend=state["ui_backend"],
                     agent=ready_agent,
                     message=text,
@@ -1118,9 +1184,11 @@ def cmd_interactive(
                     show_thinking=show_thinking,
                     interactive=True,
                     metadata=meta,
+                    configurable_extra=active_teams_configurable_extra(channel_runtime),
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
                     gateway=runtime_gateways.graph_gateway,
+                    runtime=async_runtime,
                 )
                 _notif_tid = target_thread_id or state["thread_id"]
                 if _ch_mod.publish_to_channel_origin(_notif_tid, response):
@@ -1176,7 +1244,10 @@ def cmd_interactive(
                     except queue.Empty:
                         msg = None
                     if msg is not None:
-                        await _process_channel_message(msg)
+                        await _run_serialized_turn(
+                            turn_lock,
+                            lambda _msg=msg: _process_channel_message(_msg),
+                        )
                         continue  # check queues again immediately
 
                     # Notification path (only when no channel message was pending).
@@ -1193,8 +1264,13 @@ def cmd_interactive(
                         try:
                             await async_notifier.consume_notifications(
                                 run_message=lambda text, notifs, _tid=current_tid: (
-                                    _inject_notification_message(
-                                        text, notifs, target_thread_id=_tid
+                                    _run_serialized_turn(
+                                        turn_lock,
+                                        lambda: _inject_notification_message(
+                                            text,
+                                            notifs,
+                                            target_thread_id=_tid,
+                                        ),
                                     )
                                 ),
                                 read_async_tasks_state=read_async_tasks_state,
@@ -1329,6 +1405,7 @@ def cmd_interactive(
                                 input_tokens_hint=state.get("status_last_input_tokens"),
                                 channel_runtime=channel_runtime,
                                 graph_gateway=runtime_gateways.graph_gateway,
+                                async_runtime=async_runtime,
                             )
                             await cmd_manager.execute(user_input, ctx)
 
@@ -1411,17 +1488,26 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
-                        run_streaming(
-                            ui_backend=state["ui_backend"],
-                            agent=ready_agent,
-                            message=message_to_send,
-                            thread_id=state["thread_id"],
-                            show_thinking=show_thinking,
-                            interactive=True,
-                            metadata=meta,
-                            on_stream_event=_handle_stream_status_event,
-                            status_footer_builder=_stream_status_footer,
-                            gateway=runtime_gateways.graph_gateway,
+                        await _run_serialized_turn(
+                            turn_lock,
+                            lambda _agent=ready_agent, _message=message_to_send, _thread_id=state["thread_id"], _meta=meta: (
+                                _run_rich_cli_streaming_turn(
+                                    ui_backend=state["ui_backend"],
+                                    agent=_agent,
+                                    message=_message,
+                                    thread_id=_thread_id,
+                                    show_thinking=show_thinking,
+                                    interactive=True,
+                                    metadata=_meta,
+                                    configurable_extra=active_teams_configurable_extra(
+                                        channel_runtime
+                                    ),
+                                    on_stream_event=_handle_stream_status_event,
+                                    status_footer_builder=_stream_status_footer,
+                                    gateway=runtime_gateways.graph_gateway,
+                                    runtime=async_runtime,
+                                )
+                            ),
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
@@ -1434,6 +1520,14 @@ def cmd_interactive(
                     except EOFError:
                         # Handle Ctrl+D
                         console.print()
+                        state["running"] = False
+                        break
+                    except StreamCancellationTimeout as e:
+                        console.print(f"[red]{escape(str(e))}[/red]")
+                        console.print(
+                            "[dim]Exiting because the active turn could not be "
+                            "stopped safely.[/dim]"
+                        )
                         state["running"] = False
                         break
                     except Exception as e:
@@ -1456,6 +1550,17 @@ def cmd_interactive(
                     await queue_task
                 except asyncio.CancelledError:
                     pass
+                try:
+                    from ..middleware.code_interpreter import (
+                        aclose_code_interpreters,
+                    )
+
+                    await aclose_code_interpreters()
+                except Exception:
+                    _channel_logger.debug(
+                        "code interpreter cleanup failed",
+                        exc_info=True,
+                    )
                 # Best-effort: guard so a DB lookup failure here can't
                 # shadow the original exception exiting _async_main_loop.
                 current_tid = state.get("thread_id")
@@ -1493,6 +1598,7 @@ def cmd_run(
     ui_backend: str = "cli",
     *,
     runtime_gateways: RuntimeGateways,
+    async_runtime: "AsyncRuntime | None" = None,
 ) -> None:
     """Single-shot execution with streaming display.
 
@@ -1526,6 +1632,7 @@ def cmd_run(
             interactive=False,
             metadata=meta,
             gateway=runtime_gateways.graph_gateway,
+            runtime=async_runtime,
         )
         _wait_for_memory_workers_before_exit()
     except Exception as e:

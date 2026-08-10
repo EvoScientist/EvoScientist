@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway
+    from ..runtime import AsyncRuntime
 
 
 @dataclass
@@ -65,18 +66,45 @@ class CommandUI(Protocol):
 
 @dataclass
 class ChannelRuntime:
-    """Mutable handle to the agent + thread bound to running channels."""
+    """Mutable handle to the agent + thread bound to running channels.
+
+    Also holds session-scoped bindings mutated by slash commands — the
+    ``active_teams`` list backs the ``/expert`` command, feeding into
+    ``RunRequest.configurable_extra`` at stream call time.
+    """
 
     agent: Any = None
     thread_id: str | None = None
+    active_teams: list[str] = field(default_factory=list)
 
     def bind(self, agent: Any, thread_id: str) -> None:
         self.agent = agent
         self.thread_id = thread_id
 
     def clear(self) -> None:
+        # ``active_teams`` is session-scoped and reset explicitly by ``/new``
+        # (session.py) and ``/expert clear`` — not tied to channel lifecycle.
+        # Clearing here on channel shutdown would silently dismiss the user's
+        # invited experts, which they never asked for.
         self.agent = None
         self.thread_id = None
+
+
+def active_teams_configurable_extra(
+    runtime: ChannelRuntime | None,
+) -> dict[str, Any] | None:
+    """Build ``RunRequest.configurable_extra`` from a channel runtime.
+
+    Returns ``{"active_teams": [...]}`` when the runtime has invited
+    experts, or ``None`` when there is no runtime or no active invites —
+    lets stream call sites forward the field unconditionally without
+    each duplicating the "read runtime slot, build dict, drop when
+    empty" three-liner.
+    """
+    if runtime is None:
+        return None
+    invited = list(runtime.active_teams)
+    return {"active_teams": invited} if invited else None
 
 
 @dataclass
@@ -91,6 +119,7 @@ class CommandContext:
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
     graph_gateway: GraphGateway | None = None
+    async_runtime: AsyncRuntime | None = None
     command_error: str | None = None
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.

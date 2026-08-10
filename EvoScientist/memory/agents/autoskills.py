@@ -21,7 +21,7 @@ from ._factory import (
     resolve_memory_agent_paths,
 )
 
-_AUTOSKILLS_EXCLUDED_TOOLS = frozenset({"task", "write_todos"})
+_AUTOSKILLS_EXCLUDED_TOOLS = frozenset({"delete", "task", "write_todos"})
 
 
 def _autoskills_system_prompt() -> str:

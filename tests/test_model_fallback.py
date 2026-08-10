@@ -16,8 +16,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 from EvoScientist.middleware.events import NoOpSink
 from EvoScientist.middleware.model_fallback import (
     _guard_and_fallback,
+    _guard_and_fallback_sync,
     _is_non_fallbackable,
     _try_fallbacks,
+    _try_fallbacks_sync,
     add_fallback,
     clear_fallbacks,
 )
@@ -408,6 +410,49 @@ class TestGuardAndFallback:
 
         assert result is AI_RESPONSE
         invoke.assert_awaited_once()
+
+
+class TestSynchronousFallback:
+    """The sync middleware path must not create or nest an event loop."""
+
+    def test_first_fallback_succeeds_without_async_bridge(self):
+        add_fallback("fb-model", "fb-provider")
+        req = _fake_request()
+        invoke = MagicMock(return_value=AI_RESPONSE)
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            result = _try_fallbacks_sync(req, invoke, Exception("503 boom"), _SINK)
+
+        assert result is AI_RESPONSE
+        invoke.assert_called_once()
+
+    def test_guard_rejects_non_fallbackable_error_before_handler(self):
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        invoke = MagicMock()
+
+        with pytest.raises(ContextOverflowError):
+            _guard_and_fallback_sync(
+                ContextOverflowError("overflow"), req, invoke, _SINK
+            )
+
+        invoke.assert_not_called()
+
+    def test_middleware_sync_entrypoint_uses_native_traversal(self):
+        from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
+
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        response = AI_RESPONSE
+        handler = MagicMock(side_effect=[Exception("503 primary"), response])
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            result = ModelFallbackMiddleware().wrap_model_call(req, handler)
+
+        assert result is response
+        assert handler.call_count == 2
 
 
 # ═════════════════════════════════════════════════════════════════

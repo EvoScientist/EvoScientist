@@ -100,45 +100,6 @@ class TestStreamStateInterrupt:
 
 
 # =============================================================================
-# _matches_shell_allow_list
-# =============================================================================
-
-
-class TestMatchesShellAllowList:
-    def test_matches_prefix(self):
-        from EvoScientist.stream.display import _matches_shell_allow_list
-
-        assert _matches_shell_allow_list("ls -la", ["ls", "cat"]) is True
-        assert _matches_shell_allow_list("cat file.txt", ["ls", "cat"]) is True
-
-    def test_no_match(self):
-        from EvoScientist.stream.display import _matches_shell_allow_list
-
-        assert _matches_shell_allow_list("rm -rf /", ["ls", "cat"]) is False
-
-    def test_empty_allow_list(self):
-        from EvoScientist.stream.display import _matches_shell_allow_list
-
-        assert _matches_shell_allow_list("ls", []) is False
-
-    def test_whitespace_handling(self):
-        from EvoScientist.stream.display import _matches_shell_allow_list
-
-        assert _matches_shell_allow_list("  ls -la", ["ls"]) is True
-
-    def test_exact_match(self):
-        from EvoScientist.stream.display import _matches_shell_allow_list
-
-        assert _matches_shell_allow_list("python", ["python"]) is True
-
-    def test_partial_word_match(self):
-        from EvoScientist.stream.display import _matches_shell_allow_list
-
-        # "ls" prefix matches "lsof" — this is by design (prefix matching)
-        assert _matches_shell_allow_list("lsof", ["ls"]) is True
-
-
-# =============================================================================
 # _resolve_hitl_approval
 # =============================================================================
 
@@ -177,6 +138,7 @@ class TestResolveHitlApproval:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = True
             mock_cfg.shell_allow_list = ""
+            mock_cfg.dangerous_mode = False
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
             ):
@@ -201,6 +163,7 @@ class TestResolveHitlApproval:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = ""
+            mock_cfg.dangerous_mode = False
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
             ):
@@ -225,6 +188,7 @@ class TestResolveHitlApproval:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = "ls,cat,python"
+            mock_cfg.dangerous_mode = False
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
             ):
@@ -249,6 +213,7 @@ class TestResolveHitlApproval:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = "ls,cat"
+            mock_cfg.dangerous_mode = False
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
             ):
@@ -279,6 +244,7 @@ class TestResolveHitlApproval:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = "ls,cat"
+            mock_cfg.dangerous_mode = False
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
             ):
@@ -312,6 +278,7 @@ class TestResolveHitlApproval:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = "python"
+            mock_cfg.dangerous_mode = False
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
             ):
@@ -326,6 +293,37 @@ class TestResolveHitlApproval:
                     }
                 )
             assert result == [{"type": "approve"}]
+        finally:
+            disp._session_auto_approve = original
+
+    def test_delete_only_request_prompts_not_auto_approved(self):
+        """delete is armed in HITL_INTERRUPT_ON but has no `command` arg, so the
+        shell_allow_list carve-out must never silently clear it (C1)."""
+        import EvoScientist.stream.display as disp
+        from EvoScientist.stream.display import _resolve_hitl_approval
+
+        original = disp._session_auto_approve
+        try:
+            disp._session_auto_approve = False
+            mock_cfg = MagicMock()
+            mock_cfg.auto_approve = False
+            mock_cfg.shell_allow_list = ""
+            with patch(
+                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+            ):
+                with patch(
+                    "EvoScientist.stream.display._prompt_hitl_approval"
+                ) as mock_prompt:
+                    mock_prompt.return_value = [{"type": "approve"}]
+                    result = _resolve_hitl_approval(
+                        {
+                            "action_requests": [
+                                {"name": "delete", "args": {"file_path": "/f.txt"}}
+                            ],
+                        }
+                    )
+            assert result == [{"type": "approve"}]
+            mock_prompt.assert_called_once()  # must be prompted, not auto-approved
         finally:
             disp._session_auto_approve = original
 
@@ -506,6 +504,7 @@ class TestConsumerHitlHelpers:
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = ""
+        mock_cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
             result = config_auto_approve(
                 [
@@ -521,6 +520,7 @@ class TestConsumerHitlHelpers:
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = ""
+        mock_cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
             result = config_auto_approve(
                 [
@@ -534,6 +534,7 @@ class TestConsumerHitlHelpers:
 
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = True
+        mock_cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
             result = config_auto_approve(
                 [
@@ -548,6 +549,7 @@ class TestConsumerHitlHelpers:
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = "ls,python"
+        mock_cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
             result = config_auto_approve(
                 [
@@ -555,6 +557,22 @@ class TestConsumerHitlHelpers:
                 ]
             )
         assert result is True
+
+    def test_should_auto_approve_delete_not_cleared(self):
+        """delete has no `command` arg, so shell_allow_list must never clear it
+        the way it clears execute (C1)."""
+        from EvoScientist.channels.interaction import config_auto_approve
+
+        mock_cfg = MagicMock()
+        mock_cfg.auto_approve = False
+        mock_cfg.shell_allow_list = "ls,python"
+        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+            result = config_auto_approve(
+                [
+                    {"name": "delete", "args": {"file_path": "/f.txt"}},
+                ]
+            )
+        assert result is False
 
 
 # =============================================================================
@@ -618,6 +636,7 @@ class TestResolveHitlApprovalWithPromptFn:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = ""
+            mock_cfg.dangerous_mode = False
             custom_decisions = [{"type": "approve"}]
             mock_fn = MagicMock(return_value=custom_decisions)
             with patch(
@@ -645,6 +664,7 @@ class TestResolveHitlApprovalWithPromptFn:
             disp._session_auto_approve = False
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = True
+            mock_cfg.dangerous_mode = False
             mock_fn = MagicMock()
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
@@ -672,6 +692,7 @@ class TestResolveHitlApprovalWithPromptFn:
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = ""
+            mock_cfg.dangerous_mode = False
             mock_fn = MagicMock()
             with patch(
                 "EvoScientist.config.settings.load_config", return_value=mock_cfg
@@ -684,3 +705,429 @@ class TestResolveHitlApprovalWithPromptFn:
             mock_fn.assert_not_called()
         finally:
             disp._session_auto_approve = original
+
+
+# =============================================================================
+# _build_hitl_interrupt_on
+# =============================================================================
+
+
+class TestInterruptOnWiring:
+    """interrupt_on must be passed natively and gated on auto_approve."""
+
+    def test_hitl_interrupt_on_helper_gates_on_auto_approve(self):
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        assert _build_hitl_interrupt_on(auto_approve=True) is None
+
+    def test_hitl_interrupt_on_helper_returns_shell_tools(self):
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        cfg = _build_hitl_interrupt_on(auto_approve=False)
+        assert cfg == {
+            "execute": True,
+            "run_in_background": True,
+            "schedule_task": True,
+            "delete": True,
+        }
+
+    def test_auto_mode_implies_auto_approve_so_nothing_is_armed(self):
+        """auto_mode must imply auto_approve from ANY source (not just the CLI
+        flag), so a config-file / direct-construction auto_mode run arms no
+        interrupt and never prompts."""
+        from EvoScientist.config.settings import EvoScientistConfig
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        cfg = EvoScientistConfig(auto_mode=True)
+        assert cfg.auto_approve is True
+        assert _build_hitl_interrupt_on(auto_approve=cfg.auto_approve) is None
+
+    def test_hitl_interrupt_on_reaches_create_deep_agent(self):
+        """The kwarg must actually reach ``create_deep_agent`` — not just the
+        pure helper — so a future edit that drops it or re-adds a bare
+        ``HumanInTheLoopMiddleware`` append gets caught."""
+        import EvoScientist.EvoScientist as es_mod
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        captured = []
+
+        def fake_create_deep_agent(**kwargs):
+            captured.append(kwargs.get("interrupt_on", "MISSING"))
+            agent = MagicMock()
+            agent.with_config.return_value = agent
+            return agent
+
+        for auto_approve in (False, True):
+            cfg = MagicMock()
+            cfg.auto_approve = auto_approve
+            cfg.dangerous_mode = False
+            cfg.sandbox_execute_timeout = 300
+            cfg.recursion_limit = 100
+
+            with patch(
+                "deepagents.create_deep_agent", side_effect=fake_create_deep_agent
+            ):
+                with patch.object(es_mod, "_apply_env_from_config"):
+                    with patch.object(
+                        es_mod, "_get_default_middleware", return_value=[]
+                    ):
+                        with patch.object(
+                            es_mod,
+                            "load_mcp_and_build_kwargs",
+                            return_value={"name": "x"},
+                        ):
+                            es_mod.create_cli_agent(
+                                workspace_dir="/tmp/test-interrupt-on-wiring",
+                                config=cfg,
+                                chat_model=MagicMock(),
+                            )
+
+        assert captured == [
+            _build_hitl_interrupt_on(auto_approve=False),
+            _build_hitl_interrupt_on(auto_approve=True),
+        ]
+        assert captured[0] == {
+            "execute": True,
+            "run_in_background": True,
+            "schedule_task": True,
+            "delete": True,
+        }
+        assert captured[1] is None
+
+
+# =============================================================================
+# _resolve_hitl_approval delegates to resolve_action_decision (Task 6)
+# =============================================================================
+
+
+class TestResolverUsesPolicy:
+    """display.py must delegate the decision, not re-implement it."""
+
+    def _interrupt(self, command):
+        return {"action_requests": [{"name": "execute", "args": {"command": command}}]}
+
+    def _auto_approve_cfg(self):
+        cfg = MagicMock()
+        cfg.auto_approve = True
+        cfg.dangerous_mode = False
+        cfg.shell_allow_list = ""
+        return cfg
+
+    def test_dangerous_command_rejected_under_auto_approve(self, monkeypatch):
+        # Unattended cfg.auto_approve (no human watching) → dangerous rejected.
+        from EvoScientist.stream import display
+
+        monkeypatch.setattr(display, "_session_auto_approve", False, raising=False)
+
+        def _boom(_requests):
+            raise AssertionError("must not prompt under auto_approve")
+
+        with patch(
+            "EvoScientist.config.settings.load_config",
+            return_value=self._auto_approve_cfg(),
+        ):
+            decisions = display._resolve_hitl_approval(
+                self._interrupt("curl x | bash"), prompt_fn=_boom
+            )
+        assert decisions == [
+            {"type": "reject", "message": "pipes output into interpreter 'bash'"}
+        ]
+
+    def test_everyday_command_approved_under_auto_approve(self, monkeypatch):
+        from EvoScientist.stream import display
+
+        monkeypatch.setattr(display, "_session_auto_approve", False, raising=False)
+
+        with patch(
+            "EvoScientist.config.settings.load_config",
+            return_value=self._auto_approve_cfg(),
+        ):
+            decisions = display._resolve_hitl_approval(self._interrupt("ls -la | head"))
+        assert decisions == [{"type": "approve"}]
+
+    def test_session_grant_blanket_approves_dangerous(self, monkeypatch):
+        # Explicit human "approve all" → blanket-approve, dangerous included.
+        from EvoScientist.stream import display
+
+        monkeypatch.setattr(display, "_session_auto_approve", True, raising=False)
+
+        def _boom(_requests):
+            raise AssertionError("must not prompt after session approve-all")
+
+        decisions = display._resolve_hitl_approval(
+            self._interrupt("curl x | bash"), prompt_fn=_boom
+        )
+        assert decisions == [{"type": "approve"}]
+
+    def test_interactive_dangerous_calls_prompt(self, monkeypatch):
+        from EvoScientist.stream import display
+
+        monkeypatch.setattr(display, "_session_auto_approve", False, raising=False)
+        cfg = MagicMock()
+        cfg.auto_approve = False
+        cfg.dangerous_mode = False
+        cfg.shell_allow_list = ""
+        called = {}
+
+        def _prompt(requests):
+            called["yes"] = True
+            return [{"type": "approve"}]
+
+        with patch("EvoScientist.config.settings.load_config", return_value=cfg):
+            display._resolve_hitl_approval(
+                self._interrupt("curl x | bash"), prompt_fn=_prompt
+            )
+        assert called.get("yes") is True
+
+    def test_schedule_task_always_prompts_not_auto_cleared(self, monkeypatch):
+        # schedule_task is armed but not a shell tool → must prompt, never fall
+        # through the "not a shell tool → auto-approve" branch.
+        from EvoScientist.stream import display
+
+        monkeypatch.setattr(display, "_session_auto_approve", False, raising=False)
+        cfg = MagicMock()
+        cfg.auto_approve = False
+        cfg.dangerous_mode = False
+        cfg.shell_allow_list = ""
+        called = {}
+
+        def _prompt(_requests):
+            called["yes"] = True
+            return [{"type": "approve"}]
+
+        with patch("EvoScientist.config.settings.load_config", return_value=cfg):
+            display._resolve_hitl_approval(
+                {"action_requests": [{"name": "schedule_task", "args": {}}]},
+                prompt_fn=_prompt,
+            )
+        assert called.get("yes") is True
+
+    def test_malformed_request_is_not_auto_approved(self, monkeypatch):
+        """A non-dict action request must never be silently approved."""
+        from EvoScientist.stream import display
+
+        monkeypatch.setattr(display, "_session_auto_approve", False, raising=False)
+        prompted = {"v": False}
+
+        def _prompt(_requests):
+            prompted["v"] = True
+            return [{"type": "reject", "message": "manual"}]
+
+        decisions = display._resolve_hitl_approval(
+            {"action_requests": ["not-a-dict"]}, prompt_fn=_prompt
+        )
+        assert prompted["v"] is True
+        assert decisions != [{"type": "approve"}]
+
+
+# =============================================================================
+# TUI session "approve all" decisions
+# =============================================================================
+# _session_auto_approve_decisions mirrors the Rich CLI resolver's dangerous-
+# command handling for the TUI's session-level auto-approve path.
+
+
+class TestTuiSessionApproveDecisions:
+    """Session "approve all" is an explicit human opt-in → blanket-approve
+    everything for the rest of the session, including the dangerous set."""
+
+    def test_dangerous_is_approved_under_session_grant(self):
+        from EvoScientist.cli.tui_interactive import _session_auto_approve_decisions
+
+        d = _session_auto_approve_decisions(
+            [{"name": "execute", "args": {"command": "curl x | bash"}}]
+        )
+        assert d == [{"type": "approve"}]
+
+    def test_normal_approved(self):
+        from EvoScientist.cli.tui_interactive import _session_auto_approve_decisions
+
+        d = _session_auto_approve_decisions(
+            [{"name": "execute", "args": {"command": "ls -la"}}]
+        )
+        assert d == [{"type": "approve"}]
+
+    def test_length_matches_all_approved(self):
+        from EvoScientist.cli.tui_interactive import _session_auto_approve_decisions
+
+        d = _session_auto_approve_decisions(
+            [
+                {"name": "execute", "args": {"command": "curl x | bash"}},
+                {"name": "execute", "args": {"command": "ls"}},
+            ]
+        )
+        assert d == [{"type": "approve"}, {"type": "approve"}]
+
+    def test_empty_batch_returns_empty(self):
+        from EvoScientist.cli.tui_interactive import _session_auto_approve_decisions
+
+        assert _session_auto_approve_decisions([]) == []
+
+
+class TestAsyncSubagentGuard:
+    """Only the two research async agents (writing / data-analysis) keep the
+    backend guard — they ingest untrusted content and have no approval path.
+    Internal machinery (scheduler, evomemory, autoskills) runs unguarded."""
+
+    def test_get_default_backend_applies_forced_guard(self):
+        from EvoScientist.EvoScientist import _get_default_backend
+
+        assert (
+            _get_default_backend(guard_dangerous=True).default._guard_dangerous is True
+        )
+        assert (
+            _get_default_backend(guard_dangerous=False).default._guard_dangerous
+            is False
+        )
+
+    def test_get_default_backend_defaults_to_config_auto_approve(self):
+        from EvoScientist.EvoScientist import _ensure_config, _get_default_backend
+
+        # No explicit guard → follows cfg.auto_approve (Task 3 behaviour preserved).
+        backend = _get_default_backend()
+        assert backend.default._guard_dangerous == _ensure_config().auto_approve
+
+    @staticmethod
+    def _factory_kwargs_for(name: str) -> dict:
+        """Run the async factory for ``name`` and capture the backend kwargs."""
+        from unittest.mock import MagicMock, patch
+
+        import EvoScientist.EvoScientist as ev
+        from EvoScientist.subagents import _factory
+
+        captured: dict = {}
+
+        def _spy_backend(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with (
+            patch.object(ev, "_get_default_backend", _spy_backend),
+            patch(
+                "EvoScientist.utils.load_subagents",
+                return_value=[{"name": name, "system_prompt": "x", "tools": []}],
+            ),
+            patch.object(ev, "_load_mcp_tools_cached", return_value={}),
+            patch.object(ev, "_get_default_middleware", return_value=[]),
+            patch.object(ev, "_ensure_general_purpose_subagent", lambda subs: None),
+            patch.object(ev, "_inject_subagent_middleware", lambda subs: None),
+            patch.object(ev, "_ensure_chat_model", return_value=MagicMock()),
+            patch.object(ev, "_ensure_auxiliary_chat_model", return_value=MagicMock()),
+            patch("deepagents.create_deep_agent", return_value=MagicMock()),
+        ):
+            _factory.build_async_subagent_graph(name)
+
+        return captured
+
+    def test_async_factory_guards_research_agents(self):
+        # Research async agents keep both the dangerous-command guard AND the
+        # delete refusal on (no interactive approval path → relay to orchestrator).
+        for name in ("writing-agent", "data-analysis-agent"):
+            kw = self._factory_kwargs_for(name)
+            assert kw.get("guard_dangerous") is True
+            assert kw.get("refuse_delete") is True
+
+    def test_async_factory_does_not_guard_internal_agents(self):
+        # Scheduler and any other internal async graph run unguarded in any mode.
+        kw = self._factory_kwargs_for("scheduler")
+        assert kw.get("guard_dangerous") is False
+        assert kw.get("refuse_delete") is False
+
+
+class TestOrchestratorRelayGuidance:
+    """The orchestrator needs the recovery path spelled out in its prompt."""
+
+    def test_delegation_prompt_explains_blocked_command_relay(self):
+        from EvoScientist.prompts import DELEGATION_STRATEGY
+
+        text = DELEGATION_STRATEGY.lower()
+        assert "update_async_task" in text
+        assert "blocked" in text
+
+
+class TestHitlResumeKeying:
+    """The HITL resume payload must be keyed by interrupt_id so parallel
+    sub-agent interrupts don't hit langgraph's multi-pending-interrupt crash."""
+
+    def test_build_hitl_resume_is_id_keyed(self):
+        from EvoScientist.backends import build_hitl_resume
+
+        cmd = build_hitl_resume("abc123", [{"type": "approve"}])
+        assert cmd.resume == {"abc123": {"decisions": [{"type": "approve"}]}}
+
+    def test_two_parallel_subagent_interrupts_drain_without_crash(self):
+        """Integration guard against the exact regression: 2 declarative
+        sub-agents each calling execute leave 2 pending interrupts; a flat
+        resume raises 'multiple pending interrupts'. Resuming one id at a time
+        (what build_hitl_resume produces) drains them cleanly."""
+        import uuid
+
+        from deepagents import create_deep_agent
+        from langchain_core.language_models.fake_chat_models import (
+            FakeMessagesListChatModel,
+        )
+        from langchain_core.messages import AIMessage, ToolCall
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from EvoScientist.backends import build_hitl_resume
+
+        class _SM(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        def _mk(s):
+            return _SM(responses=s)
+
+        top = AIMessage(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    name="task",
+                    args={"description": "A", "subagent_type": "agent-a"},
+                    id="t1",
+                ),
+                ToolCall(
+                    name="task",
+                    args={"description": "B", "subagent_type": "agent-b"},
+                    id="t2",
+                ),
+            ],
+        )
+        tf = AIMessage(content="done")
+        sub = AIMessage(
+            content="",
+            tool_calls=[ToolCall(name="execute", args={"command": "echo hi"}, id="e1")],
+        )
+        sf = AIMessage(content="sub done")
+        agent = create_deep_agent(
+            model=_mk([top] + [tf] * 6),
+            subagents=[
+                {
+                    "name": "agent-a",
+                    "description": "a",
+                    "system_prompt": "a",
+                    "model": _mk([sub, sf, sf]),
+                },
+                {
+                    "name": "agent-b",
+                    "description": "b",
+                    "system_prompt": "b",
+                    "model": _mk([sub, sf, sf]),
+                },
+            ],
+            interrupt_on={"execute": True},
+            checkpointer=InMemorySaver(),
+        )
+        cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        res = agent.invoke({"messages": [("user", "go")]}, config=cfg)
+        ints = res.get("__interrupt__", [])
+        assert len(ints) == 2  # the regression precondition
+
+        for _ in range(5):
+            ints = res.get("__interrupt__", [])
+            if not ints:
+                break
+            res = agent.invoke(
+                build_hitl_resume(ints[0].id, [{"type": "approve"}]), config=cfg
+            )
+        assert not res.get("__interrupt__", [])  # drained, no crash

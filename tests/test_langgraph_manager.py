@@ -34,6 +34,103 @@ def reset_module_state():
 
 
 # =============================================================================
+# Bind host vs. probe host
+# =============================================================================
+
+
+class TestProbeHost:
+    """``_probe_host`` is the seam that makes host support safe: only bind()
+    uses the configured interface, every client falls back to something
+    actually reachable."""
+
+    @pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", ""])
+    def test_wildcards_map_to_loopback(self, wildcard):
+        assert manager._probe_host(wildcard) == "127.0.0.1"
+
+    @pytest.mark.parametrize(
+        "host", ["127.0.0.1", "192.168.1.5", "::1", "example.test"]
+    )
+    def test_specific_hosts_pass_through(self, host):
+        assert manager._probe_host(host) == host
+
+    def test_defaults_to_loopback(self):
+        assert manager._probe_host() == "127.0.0.1"
+
+
+class TestIsLoopbackHost:
+    """Drives the public-bind warning, so it must be conservative: only
+    provable loopback suppresses the banner."""
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "  LOCALHOST  "])
+    def test_loopback_recognized(self, host):
+        assert manager._is_loopback_host(host) is True
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.5", "example.test"])
+    def test_exposed_hosts_rejected(self, host):
+        assert manager._is_loopback_host(host) is False
+
+
+class TestBaseUrl:
+    def test_default_is_loopback(self):
+        assert manager._base_url(6174) == "http://127.0.0.1:6174"
+
+    def test_wildcard_renders_as_loopback(self):
+        assert manager._base_url(6174, "0.0.0.0") == "http://127.0.0.1:6174"
+
+    def test_specific_host_preserved(self):
+        assert manager._base_url(6174, "192.168.1.5") == "http://192.168.1.5:6174"
+
+    def test_ipv6_literal_is_bracketed(self):
+        """Unbracketed ``::1:6174`` is not a parseable authority (RFC 3986)."""
+        assert manager._base_url(6174, "::1") == "http://[::1]:6174"
+
+
+class TestCanBindPort:
+    def test_binds_literal_host_not_probe_host(self, monkeypatch):
+        """``_can_bind_port`` must replicate the server's own bind. Probing
+        loopback while the server claims 0.0.0.0 would give false confidence
+        when another process holds a single non-loopback interface."""
+        import socket as _socket
+
+        bound: list[tuple] = []
+
+        class _FakeSocket:
+            def __init__(self, family, type_):
+                self.family = family
+
+            def bind(self, addr):
+                bound.append((self.family, addr))
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _FakeSocket)
+
+        assert manager._can_bind_port(6174, "0.0.0.0") is True
+        assert bound == [(_socket.AF_INET, ("0.0.0.0", 6174))]
+
+    def test_ipv6_host_uses_ipv6_family(self, monkeypatch):
+        import socket as _socket
+
+        bound: list[tuple] = []
+
+        class _FakeSocket:
+            def __init__(self, family, type_):
+                self.family = family
+
+            def bind(self, addr):
+                bound.append((self.family, addr))
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _FakeSocket)
+
+        assert manager._can_bind_port(6174, "::1") is True
+        assert bound == [(_socket.AF_INET6, ("::1", 6174))]
+
+
+# =============================================================================
 # langgraph CLI resolution
 # =============================================================================
 
@@ -124,14 +221,42 @@ class TestIsLanggraphDevRunning:
     def test_returns_true_on_200(self, mock_get):
         mock_get.return_value = MagicMock(status_code=200)
         assert manager.is_langgraph_dev_running(port=6174) is True
-        # Verify it probed /ok at the configured port.
+        # Verify it probed /ok at the configured port. 127.0.0.1 rather than
+        # "localhost" on purpose: the latter can resolve to ::1 first, which
+        # never reaches a server bound to an IPv4 interface.
         called_url = mock_get.call_args[0][0]
-        assert called_url == "http://localhost:6174/ok"
+        assert called_url == "http://127.0.0.1:6174/ok"
 
     @patch("EvoScientist.langgraph_dev.manager.httpx.get")
     def test_returns_false_on_non_200(self, mock_get):
         mock_get.return_value = MagicMock(status_code=503)
         assert manager.is_langgraph_dev_running(port=6174) is False
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_wildcard_bind_probed_over_loopback(self, mock_get):
+        """A server bound to 0.0.0.0 also listens on loopback, and you cannot
+        meaningfully connect to 0.0.0.0 itself — probe 127.0.0.1."""
+        mock_get.return_value = MagicMock(status_code=200)
+        assert manager.is_langgraph_dev_running(port=6174, host="0.0.0.0") is True
+        assert mock_get.call_args[0][0] == "http://127.0.0.1:6174/ok"
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_specific_host_probed_verbatim(self, mock_get):
+        """Loopback would not reach a server pinned to one interface."""
+        mock_get.return_value = MagicMock(status_code=200)
+        assert manager.is_langgraph_dev_running(port=6174, host="192.168.1.5") is True
+        assert mock_get.call_args[0][0] == "http://192.168.1.5:6174/ok"
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_explicit_base_url_still_wins(self, mock_get):
+        mock_get.return_value = MagicMock(status_code=200)
+        assert (
+            manager.is_langgraph_dev_running(
+                base_url="http://example.test:1234", port=6174, host="0.0.0.0"
+            )
+            is True
+        )
+        assert mock_get.call_args[0][0] == "http://example.test:1234/ok"
 
 
 # =============================================================================
@@ -524,7 +649,7 @@ class TestStartLanggraphDevRotatesLog:
         # sockets.  Patch ``_can_bind_port`` so the bind-poll loop in
         # ``_wait_for_port_bindable`` passes immediately regardless of
         # whether port 6174 is in use on the dev machine.
-        monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
+        monkeypatch.setattr(manager, "_can_bind_port", lambda port, *_a, **_kw: True)
         # Make ``_packaged_langgraph_config`` point at a real file so
         # ``start_langgraph_dev`` doesn't bail at the existence check
         # before reaching the rotation call.
@@ -557,6 +682,48 @@ class TestStartLanggraphDevRotatesLog:
         assert pid_dir.is_dir()
 
 
+@pytest.fixture
+def start_langgraph_dev_capture(tmp_path, monkeypatch):
+    """Prereq patches + capturing ``_fake_popen`` for ``start_langgraph_dev``
+    tests. Mocks everything up to (but not including) ``Popen``, redirecting
+    all runtime paths under ``tmp_path``, then installs a ``_fake_popen``
+    that records the argv, env, and ``_LOG_OFFSET_AT_START`` at the instant
+    ``Popen`` is invoked and raises ``FileNotFoundError`` to stop before the
+    real spawn. Callers may seed the log file (available as ``env.log``)
+    before invoking ``start_langgraph_dev``.
+    """
+    pid_dir = tmp_path / "pids"
+    log = tmp_path / "langgraph_dev.log"
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            manager.LanggraphRuntimePaths.for_directory(pid_dir),
+            log_file=log,
+        ),
+    )
+    monkeypatch.setattr(manager, "_can_bind_port", lambda port, *_a, **_kw: True)
+    fake_config = tmp_path / "langgraph.json"
+    fake_config.write_text("{}")
+    monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/fake/langgraph")
+    monkeypatch.setattr(manager, "_packaged_langgraph_config", lambda: fake_config)
+
+    captured: dict = {}
+
+    def _fake_popen(args, **kwargs):
+        # Read the offset global at the instant Popen is invoked — this is
+        # strictly after the capture line in start_langgraph_dev.
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        captured["offset"] = manager._LOG_OFFSET_AT_START
+        raise FileNotFoundError("stop before real spawn")
+
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
+    )
+    return SimpleNamespace(tmp_path=tmp_path, log=log, captured=captured)
+
+
 class TestStartLanggraphDevCapturesLogOffset:
     """``start_langgraph_dev`` must capture ``_LOG_OFFSET_AT_START`` at the
     right moment — after ``_rotate_log_if_needed`` + ``open('ab')`` but
@@ -566,73 +733,90 @@ class TestStartLanggraphDevCapturesLogOffset:
     a regression moving the capture line would actually be caught.
     """
 
-    def _patch_prereqs(self, tmp_path, monkeypatch, log):
-        """Mock everything up to (but not including) Popen, redirecting all
-        runtime paths under ``tmp_path``."""
-        pid_dir = tmp_path / "pids"
-        monkeypatch.setattr(
-            manager,
-            "RUNTIME",
-            dataclasses.replace(
-                manager.LanggraphRuntimePaths.for_directory(pid_dir),
-                log_file=log,
-            ),
-        )
-        monkeypatch.setattr(manager, "_can_bind_port", lambda port: True)
-        fake_config = tmp_path / "langgraph.json"
-        fake_config.write_text("{}")
-        monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/fake/langgraph")
-        monkeypatch.setattr(manager, "_packaged_langgraph_config", lambda: fake_config)
-
-    def test_offset_equals_existing_log_size(self, tmp_path, monkeypatch):
+    def test_offset_equals_existing_log_size(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
         """No rotation → offset is the pre-existing (appended-to) log size,
         so a stale URL above that offset is never re-read."""
-        log = tmp_path / "langgraph_dev.log"
-        log.write_bytes(b"x" * 512)
+        env = start_langgraph_dev_capture
+        env.log.write_bytes(b"x" * 512)
         # Keep the log well under the rotation threshold so it is NOT rotated.
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 10**9)
-        self._patch_prereqs(tmp_path, monkeypatch, log)
 
-        captured: dict = {}
-
-        def _fake_popen(args, **kwargs):
-            # Read the global at the instant Popen is invoked — this is
-            # strictly after the capture line in start_langgraph_dev.
-            captured["offset"] = manager._LOG_OFFSET_AT_START
-            raise FileNotFoundError("stop before real spawn")
-
-        monkeypatch.setattr(
-            "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
-        )
         try:
-            manager.start_langgraph_dev(workspace_dir=tmp_path)
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
         except FileNotFoundError:
             pass
-        assert captured["offset"] == 512
+        assert env.captured["offset"] == 512
 
-    def test_offset_zero_after_forced_rotation(self, tmp_path, monkeypatch):
+    def test_offset_zero_after_forced_rotation(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
         """Forced rotation moves the old log away; the fresh ``open('ab')``
         starts empty → offset 0 (scan the whole new file)."""
-        log = tmp_path / "langgraph_dev.log"
-        log.write_bytes(b"x" * 4096)
+        env = start_langgraph_dev_capture
+        env.log.write_bytes(b"x" * 4096)
         monkeypatch.setattr(manager, "_LOG_ROTATION_BYTES", 1024)
-        self._patch_prereqs(tmp_path, monkeypatch, log)
 
-        captured: dict = {}
-
-        def _fake_popen(args, **kwargs):
-            captured["offset"] = manager._LOG_OFFSET_AT_START
-            raise FileNotFoundError("stop before real spawn")
-
-        monkeypatch.setattr(
-            "EvoScientist.langgraph_dev.manager.subprocess.Popen", _fake_popen
-        )
         try:
-            manager.start_langgraph_dev(workspace_dir=tmp_path)
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
         except FileNotFoundError:
             pass
-        assert (tmp_path / "langgraph_dev.log.1").exists()  # rotation happened
-        assert captured["offset"] == 0
+        assert (env.tmp_path / "langgraph_dev.log.1").exists()  # rotation happened
+        assert env.captured["offset"] == 0
+
+
+class TestStartLanggraphDevPropagatesPort:
+    """``start_langgraph_dev`` must export the effective bind port into the
+    subprocess env as ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` so the deployed
+    main agent's ``cfg.langgraph_dev_port`` matches what langgraph dev
+    actually bound to. Without this, ``EvoSci deploy --port X`` binds to X
+    but the deployed agent reads the persisted ``langgraph_dev_port``
+    (whatever ``EvoSci config set langgraph_dev_port`` last wrote), and
+    every ``start_async_task`` fails with "All connection attempts failed"
+    because the self-loop URL points at an unbound port.
+    """
+
+    def test_env_carries_explicit_bind_port(self, start_langgraph_dev_capture):
+        """The ``env`` passed to Popen must set the env var to ``str(port)``
+        matching whatever the caller resolved, AND that value must match the
+        ``--port`` argv the subprocess is spawned with. Comparing both closes
+        the exact desync class this PR fixes — a future refactor that changed
+        how argv gets its port (or introduced a second port variable) would
+        slip past a pure env-only assertion."""
+        env = start_langgraph_dev_capture
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6617)
+        except FileNotFoundError:
+            pass
+        assert env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6617"
+        argv = env.captured["args"]
+        assert (
+            argv[argv.index("--port") + 1]
+            == env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"]
+        )
+
+    def test_env_value_replaces_inherited(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
+        """A stray parent-shell export of ``EVOSCIENTIST_LANGGRAPH_DEV_PORT``
+        must NOT shadow the caller-resolved bind port in the subprocess env.
+        Dict assignment on ``sub_env`` already guarantees this, but the
+        argv-vs-env cross-check pins the invariant against a future refactor
+        that decoupled the two."""
+        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "9999")
+        env = start_langgraph_dev_capture
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path, port=6606)
+        except FileNotFoundError:
+            pass
+        # Parent's 9999 replaced; caller's 6606 wins in both env and argv.
+        assert env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+        argv = env.captured["args"]
+        assert (
+            argv[argv.index("--port") + 1]
+            == env.captured["env"]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"]
+        )
 
 
 # =============================================================================
