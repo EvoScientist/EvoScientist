@@ -513,7 +513,6 @@ def _build_base_kwargs(
 
     subs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=tool_registry,
     )
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
@@ -588,7 +587,6 @@ def load_mcp_and_build_kwargs(
 
     subs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=registry,
     )
 
     _ensure_general_purpose_subagent(subs)

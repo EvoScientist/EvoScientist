@@ -22,7 +22,10 @@ def resolve_subagent_tools(
     subagent: dict[str, Any], tool_registry: dict[str, Any]
 ) -> dict[str, Any]:
     """Resolve deferred YAML tool names while preserving injected tool objects."""
-    tool_names = subagent.pop("_tool_names", [])
+    tool_names = subagent.pop("_tool_names", None)
+    if tool_names is None:
+        return subagent
+
     resolved = list(subagent.get("tools", []))
     for tool_name in tool_names:
         if tool_name in tool_registry:
@@ -131,7 +134,6 @@ def show_prompt(prompt_text: str, title: str = "Prompt", border_style: str = "bl
 def load_subagents(
     config_path: Path,
     *,
-    tool_registry: dict[str, Any],
     prompt_refs: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Load subagent definitions from a directory of YAML files and wire up tools.
@@ -238,8 +240,9 @@ def load_subagents(
         # Defer YAML-name resolution until the caller decides whether this
         # spec will run in-process. Async specs are replaced by remote graph
         # references and must not warn against the caller's unrelated registry.
-        subagent["_tool_names"] = list(spec.get("tools", []))
-        subagent["tools"] = []
+        if "tools" in spec:
+            subagent["_tool_names"] = list(spec["tools"])
+            subagent["tools"] = []
 
         # Internal field: carries the ``async:`` yaml flag through to
         # ``_maybe_swap_async_subagents`` so the swap doesn't need a second
@@ -275,7 +278,6 @@ def load_subagent(
     """Load and resolve a single sub-agent by name from YAML."""
     for agent in load_subagents(
         config_path,
-        tool_registry=tool_registry,
         prompt_refs=prompt_refs,
     ):
         if agent.get("name") == name:

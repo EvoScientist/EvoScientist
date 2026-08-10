@@ -64,7 +64,6 @@ def build_async_subagent_graph(name: str) -> Any:
     # all wired the same way as the in-process sync version.
     specs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=tool_registry,
     )
     spec = next((s for s in specs if s.get("name") == name), None)
     if spec is None:

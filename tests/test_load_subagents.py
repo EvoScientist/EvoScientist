@@ -33,7 +33,7 @@ def test_async_flag_accepts_real_bool(tmp_path):
           async: true
         """,
     )
-    subs = load_subagents(config_path, tool_registry={})
+    subs = load_subagents(config_path)
     assert len(subs) == 1
     assert subs[0]["name"] == "writing-agent"
     assert subs[0]["_async"] is True
@@ -51,7 +51,7 @@ def test_async_flag_defaults_to_false_when_omitted(tmp_path):
           tools: []
         """,
     )
-    subs = load_subagents(config_path, tool_registry={})
+    subs = load_subagents(config_path)
     assert subs[0]["_async"] is False
 
 
@@ -69,7 +69,7 @@ def test_tool_names_are_deferred_until_the_spec_is_selected(tmp_path, caplog):
         """,
     )
 
-    subs = load_subagents(config_path, tool_registry={"available": selected_tool})
+    subs = load_subagents(config_path)
 
     assert not caplog.records
     assert subs[0]["tools"] == []
@@ -77,6 +77,24 @@ def test_tool_names_are_deferred_until_the_spec_is_selected(tmp_path, caplog):
     resolve_subagent_tools(subs[0], {"available": selected_tool})
     assert subs[0]["tools"] == [selected_tool]
     assert "_tool_names" not in subs[0]
+
+
+def test_agent_without_tools_preserves_parent_tool_inheritance(tmp_path):
+    config_path = _write_yaml(
+        tmp_path,
+        "general.yaml",
+        """
+        general-purpose:
+          description: Handles general tasks
+          system_prompt: ""
+        """,
+    )
+
+    subagent = load_subagents(config_path)[0]
+    resolve_subagent_tools(subagent, {"available": object()})
+
+    assert "tools" not in subagent
+    assert "_tool_names" not in subagent
 
 
 def test_async_flag_rejects_quoted_string(tmp_path):
@@ -97,7 +115,7 @@ def test_async_flag_rejects_quoted_string(tmp_path):
         """,
     )
     with pytest.raises(ValueError, match=r"'async' must be a boolean"):
-        load_subagents(config_path, tool_registry={})
+        load_subagents(config_path)
 
 
 def test_async_flag_rejects_integer(tmp_path):
@@ -114,7 +132,7 @@ def test_async_flag_rejects_integer(tmp_path):
         """,
     )
     with pytest.raises(ValueError, match=r"'async' must be a boolean"):
-        load_subagents(config_path, tool_registry={})
+        load_subagents(config_path)
 
 
 def test_async_flag_error_includes_agent_name(tmp_path):
@@ -131,7 +149,7 @@ def test_async_flag_error_includes_agent_name(tmp_path):
         """,
     )
     with pytest.raises(ValueError, match=r"my-bad-agent"):
-        load_subagents(config_path, tool_registry={})
+        load_subagents(config_path)
 
 
 def test_non_dict_spec_raises(tmp_path):
@@ -149,7 +167,7 @@ def test_non_dict_spec_raises(tmp_path):
         """,
     )
     with pytest.raises(ValueError, match=r"must map to a spec dict"):
-        load_subagents(config_path, tool_registry={})
+        load_subagents(config_path)
 
 
 def test_non_dict_spec_error_includes_filename_and_name(tmp_path):
@@ -162,7 +180,7 @@ def test_non_dict_spec_error_includes_filename_and_name(tmp_path):
         """,
     )
     with pytest.raises(ValueError, match=r"weird\.yaml.*weird-agent"):
-        load_subagents(config_path, tool_registry={})
+        load_subagents(config_path)
 
 
 def test_missing_tool_on_sync_subagent_warns_at_resolution(tmp_path, caplog):
@@ -178,7 +196,7 @@ def test_missing_tool_on_sync_subagent_warns_at_resolution(tmp_path, caplog):
         """,
     )
     with caplog.at_level("DEBUG", logger="EvoScientist.utils"):
-        subs = load_subagents(config_path, tool_registry={})
+        subs = load_subagents(config_path)
     assert subs[0]["_async"] is False
     assert subs[0]["tools"] == []
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
@@ -203,7 +221,7 @@ def test_missing_tool_on_async_subagent_is_deferred_without_logging(tmp_path, ca
         """,
     )
     with caplog.at_level("DEBUG", logger="EvoScientist.utils"):
-        subs = load_subagents(config_path, tool_registry={})
+        subs = load_subagents(config_path)
     assert subs[0]["_async"] is True
     assert subs[0]["tools"] == []
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
@@ -229,7 +247,7 @@ def test_missing_async_tool_warns_at_terminal_resolution(
         """,
     )
     with caplog.at_level("DEBUG", logger="EvoScientist.utils"):
-        subs = load_subagents(config_path, tool_registry={})
+        subs = load_subagents(config_path)
         resolve_subagent_tools(subs[0], {})
     assert subs[0]["_async"] is True
     assert subs[0]["tools"] == []
