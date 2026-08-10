@@ -261,7 +261,9 @@ class EvoScientistConfig:
     # exits. The next `EvoSci` start in the same workspace reuses it instantly
     # instead of paying the cold boot (~15s). Starting in a DIFFERENT workspace
     # raises WorkspaceMismatchError with the leftover server's pid — stop it
-    # manually (the server is pinned to one workspace per process).
+    # manually (the server is pinned to one workspace per process). Known
+    # limitation: changing langgraph_dev_port/host while a keepalive server
+    # runs orphans its records — run `EvoSci server stop` before switching.
     langgraph_dev_keepalive: bool = False
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation

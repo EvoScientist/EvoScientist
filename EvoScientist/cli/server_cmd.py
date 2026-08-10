@@ -6,6 +6,8 @@ that outlives its CLI needs an equally explicit way to see and stop it.
 
 from __future__ import annotations
 
+import sys
+
 from ..stream.console import console
 from ._app import server_app
 
@@ -80,9 +82,15 @@ def server_stop() -> None:
             f"EvoSci has no ownership record for it, so it was not "
             f"touched.[/yellow]"
         )
+        if sys.platform == "win32":
+            manual = (
+                f'powershell "Get-NetTCPConnection -LocalPort {port} | '
+                f'Select-Object -ExpandProperty OwningProcess | Stop-Process"'
+            )
+        else:
+            manual = f"kill $(lsof -ti :{port})"
         console.print(
-            f"[dim]If it is yours, stop it manually: "
-            f"[bold]kill $(lsof -ti :{port})[/bold][/dim]"
+            f"[dim]If it is yours, stop it manually: [bold]{manual}[/bold][/dim]"
         )
     else:
         console.print(
