@@ -54,13 +54,38 @@ def server_status() -> None:
 @server_app.command("stop")
 def server_stop() -> None:
     """Stop the background langgraph dev server started by EvoSci."""
-    from ..langgraph_dev.manager import stop_recorded_server
+    from ..config import get_effective_config
+    from ..langgraph_dev.manager import (
+        _DEFAULT_HOST,
+        _DEFAULT_PORT,
+        is_langgraph_dev_running,
+        stop_recorded_server,
+    )
 
     pid = stop_recorded_server()
-    if pid is None:
+    if pid is not None:
+        console.print(f"[green]✓[/green] Stopped langgraph dev (pid {pid}).")
+        return
+    config = get_effective_config()
+    port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
+    host = (
+        str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
+    ).strip() or _DEFAULT_HOST
+    if is_langgraph_dev_running(port=port, host=host):
+        # A server without ownership records (crashed session, deleted state
+        # files) can't be verified as ours — refuse to guess, hand the user
+        # the manual path instead of a silent no-op.
+        console.print(
+            f"[yellow]⚠ A langgraph dev is still serving port {port}, but "
+            f"EvoSci has no ownership record for it, so it was not "
+            f"touched.[/yellow]"
+        )
+        console.print(
+            f"[dim]If it is yours, stop it manually: "
+            f"[bold]kill $(lsof -ti :{port})[/bold][/dim]"
+        )
+    else:
         console.print(
             "[dim]No EvoSci-owned langgraph dev server to stop "
             "(stale state, if any, was cleaned up).[/dim]"
         )
-    else:
-        console.print(f"[green]✓[/green] Stopped langgraph dev (pid {pid}).")

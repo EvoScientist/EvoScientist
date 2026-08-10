@@ -22,6 +22,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 
 import httpx
@@ -220,7 +221,10 @@ class WorkspaceMismatchError(RuntimeError):
 
 
 def _write_workspace_sidecar(
-    workspace_dir: Path, pid: int, config_fingerprint: str | None = None
+    workspace_dir: Path,
+    pid: int,
+    config_fingerprint: str | None = None,
+    deploy_mode: bool | None = None,
 ) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
 
@@ -244,6 +248,8 @@ def _write_workspace_sidecar(
         payload: dict = {"workspace": str(workspace_dir), "pid": pid}
         if config_fingerprint is not None:
             payload["config_fingerprint"] = config_fingerprint
+        if deploy_mode is not None:
+            payload["deploy_mode"] = deploy_mode
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, RUNTIME.workspace_sidecar)
     except OSError as exc:
@@ -583,46 +589,84 @@ def _kill_owned_stale_process(port: int) -> bool:
     return True
 
 
-def _server_config_fingerprint(config: EvoScientistConfig) -> str:
-    """Hash of the config subset the langgraph dev subprocess consumes at launch.
+# Config fields that provably never reach the langgraph dev subprocess:
+# the channel stack + STT run in the CLI process, display/workspace/frontend
+# knobs shape the CLI itself, and keepalive is a lifecycle flag. Everything
+# NOT listed here counts toward the drift fingerprint, so a newly added
+# config field defaults to "affects the server" — the failure mode is a
+# spurious restart hint, never silent staleness.
+# Packaged sub-agent specs — consumed at graph build; module constant so
+# tests can redirect it.
+_SUBAGENTS_DIR = Path(__file__).resolve().parent.parent / "subagents"
 
-    Graphs read these once at import time (see ``subagents/_factory.py``), so a
-    keepalive server keeps serving with them until restarted. Recorded in the
-    sidecar; reuse compares it to warn about drift.
+_FINGERPRINT_EXCLUDED_PREFIXES = (
+    "channel_",
+    "imessage_",
+    "telegram_",
+    "discord_",
+    "slack_",
+    "feishu_",
+    "wechat_",
+    "dingtalk_",
+    "email_",
+    "qq_",
+    "signal_",
+    "stt_",
+)
+_FINGERPRINT_EXCLUDED_FIELDS = frozenset(
+    {
+        "require_mention",
+        "text_chunk_limit",
+        "allowed_channels",
+        "dm_policy",
+        "shared_webhook_port",
+        "show_thinking",
+        "ui_backend",
+        "log_level",
+        "default_mode",
+        "default_workdir",
+        "webui_port",
+        "webui_host",
+        "langgraph_dev_keepalive",
+        "shell_allow_list",
+    }
+)
+
+
+def _server_config_fingerprint(config: EvoScientistConfig) -> str:
+    """Hash of everything the langgraph dev subprocess consumes at launch.
+
+    Deployed graphs read config once at import (``subagents/_factory.py``,
+    ``EvoScientist.py``), so a keepalive server keeps serving those values
+    until restarted. Iterates the full ``EvoScientistConfig`` field list
+    minus the explicit exclusion set above — a new config field counts
+    toward drift by default — and folds in ``mcp.yaml`` plus the packaged
+    ``subagents/*.yaml``, which are consumed at graph build too. Secrets
+    only feed a truncated one-way digest; nothing recoverable is stored.
+    getattr with defaults: deploy/WebUI (and their tests) routinely hand
+    this module duck-typed config objects missing dataclass fields.
     """
-    # getattr with defaults: deploy/WebUI (and their tests) routinely hand
-    # this module duck-typed config objects missing dataclass fields.
-    fields = tuple(
-        str(getattr(config, name, None))
-        for name in (
-            "provider",
-            "model",
-            "model_fallbacks",
-            "auxiliary_provider",
-            "auxiliary_model",
-            "memory_observation_writer",
-            "memory_profile_enabled",
-            "memory_observations_enabled",
-            "memory_workers_enabled",
-            "memory_skill_synthesis_enabled",
-            "langgraph_dev_jobs_per_worker",
-            "langgraph_dev_file_persistence",
-            "recursion_limit",
-            "sandbox_execute_timeout",
-            "dangerous_mode",
-            "code_interpreter_timeout",
-            "code_interpreter_max_result_chars",
-        )
-    )
-    digest = hashlib.sha256(repr(fields).encode("utf-8"))
-    # MCP servers/tool routing are consumed at graph build too, but live in a
-    # separate file — fold its content in so mcp.yaml edits also count as drift.
+    parts = []
+    for field in dataclass_fields(EvoScientistConfig):
+        name = field.name
+        if name in _FINGERPRINT_EXCLUDED_FIELDS or name.startswith(
+            _FINGERPRINT_EXCLUDED_PREFIXES
+        ):
+            continue
+        parts.append((name, str(getattr(config, name, None))))
+    digest = hashlib.sha256(repr(parts).encode("utf-8"))
     try:
         from EvoScientist.config.settings import get_config_dir
 
         mcp_yaml = get_config_dir() / "mcp.yaml"
         if mcp_yaml.exists():
             digest.update(mcp_yaml.read_bytes())
+    except OSError:
+        pass
+    try:
+        for yaml_path in sorted(_SUBAGENTS_DIR.glob("*.yaml")):
+            digest.update(yaml_path.name.encode("utf-8"))
+            digest.update(yaml_path.read_bytes())
     except OSError:
         pass
     return digest.hexdigest()[:16]
@@ -974,7 +1018,10 @@ def start_langgraph_dev(
             pass
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
     _write_workspace_sidecar(
-        workspace_dir=workspace_dir, pid=proc.pid, config_fingerprint=config_fingerprint
+        workspace_dir=workspace_dir,
+        pid=proc.pid,
+        config_fingerprint=config_fingerprint,
+        deploy_mode=deploy_mode,
     )
     global _PROCESS_WORKSPACE
     _PROCESS = proc
@@ -1248,18 +1295,16 @@ def _ensure_langgraph_dev_locked(
                 recorded = Path(sidecar["workspace"]).resolve()
                 if recorded != ws_path.resolve():
                     hint = ""
-                    pid_val = sidecar.get("pid")
-                    if (
-                        getattr(config, "langgraph_dev_keepalive", False)
-                        and isinstance(pid_val, int)
-                        and not isinstance(pid_val, bool)
-                    ):
+                    if getattr(config, "langgraph_dev_keepalive", False):
                         # Only under keepalive can the server be an ownerless
                         # leftover; without the flag the mismatch means a live
-                        # session, where a kill suggestion would be misleading.
+                        # session, where a stop suggestion would be misleading.
+                        # Point at `EvoSci server stop` (not a raw kill): it
+                        # verifies ownership and cleans the PID/sidecar files,
+                        # so no stale records are left behind.
                         hint = (
-                            f" If it is a leftover keepalive server, stop it"
-                            f" with: kill {pid_val}."
+                            " If it is a leftover keepalive server, stop it"
+                            " with: EvoSci server stop."
                         )
                     raise WorkspaceMismatchError(
                         f"An EvoSci langgraph dev is already running on "

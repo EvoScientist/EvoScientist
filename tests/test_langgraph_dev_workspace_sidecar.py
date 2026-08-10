@@ -142,16 +142,17 @@ def test_ensure_langgraph_dev_refuses_on_workspace_mismatch(
         manager.ensure_langgraph_dev(cfg, workspace_dir=ws_b)
     assert str(ws_a.resolve()) in str(exc.value)
     assert str(ws_b) in str(exc.value)
-    # Without keepalive a mismatch means a live session — no kill suggestion,
+    # Without keepalive a mismatch means a live session — no stop suggestion,
     # keeping the message identical to pre-keepalive behavior.
-    assert "kill" not in str(exc.value)
+    assert "EvoSci server stop" not in str(exc.value)
 
 
-def test_mismatch_error_names_leftover_pid_under_keepalive(
+def test_mismatch_error_suggests_server_stop_under_keepalive(
     tmp_path, monkeypatch, runtime_paths
 ):
-    """With keepalive on, the leftover may be ownerless — the error gives the
-    exact cleanup command since manual kill is the only remaining path."""
+    """With keepalive on, the leftover may be ownerless — the error points at
+    `EvoSci server stop`, which kills AND cleans the records (a raw kill
+    would leave stale files behind)."""
     ws_a = tmp_path / "A"
     ws_b = tmp_path / "B"
     monkeypatch.setattr(
@@ -170,7 +171,7 @@ def test_mismatch_error_names_leftover_pid_under_keepalive(
     cfg.langgraph_dev_keepalive = True
     with pytest.raises(manager.WorkspaceMismatchError) as exc:
         manager.ensure_langgraph_dev(cfg, workspace_dir=ws_b)
-    assert "kill 99999" in str(exc.value)
+    assert "EvoSci server stop" in str(exc.value)
 
 
 def test_ensure_langgraph_dev_refuses_on_mismatch_with_stale_process(
@@ -498,3 +499,71 @@ def test_pid_serves_port_matrix():
         victim.kill()
         victim.wait()
     assert manager._pid_serves_port(victim.pid, 6174) is False, "dead pid"
+
+
+def test_server_config_fingerprint_covers_new_fields_by_default():
+    """The fingerprint iterates the dataclass minus an exclusion set, so
+    server-affecting values din0s called out — reasoning effort, provider
+    keys/base URLs — count without per-field registration."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.reasoning_effort = "definitely-different"
+    after_effort = manager._server_config_fingerprint(cfg)
+    assert after_effort != base
+    cfg.anthropic_base_url = "https://proxy.example"
+    assert manager._server_config_fingerprint(cfg) != after_effort
+
+
+def test_server_config_fingerprint_ignores_cli_only_fields():
+    """Channel/UI-side fields never reach the server — no spurious drift."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.show_thinking = not cfg.show_thinking
+    cfg.telegram_bot_token = "tg-token"
+    cfg.langgraph_dev_keepalive = True
+    assert manager._server_config_fingerprint(cfg) == base
+
+
+def test_sidecar_records_deploy_mode(tmp_path, monkeypatch, runtime_paths):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path / "ws", pid=1, deploy_mode=False
+    )
+    assert json.loads((tmp_path / "ws.json").read_text())["deploy_mode"] is False
+
+
+def test_server_config_fingerprint_ignores_shell_allow_list():
+    """shell_allow_list is read only by CLI/channel approval resolvers —
+    it never reaches the subprocess, so it must not cause drift."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.shell_allow_list = "git status,ls"
+    assert manager._server_config_fingerprint(cfg) == base
+
+
+def test_server_config_fingerprint_tracks_mcp_yaml_content(tmp_path, monkeypatch):
+    from EvoScientist.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "get_config_dir", lambda: tmp_path)
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    (tmp_path / "mcp.yaml").write_text("server-a:\n  transport: stdio\n")
+    changed = manager._server_config_fingerprint(cfg)
+    assert changed != base
+    (tmp_path / "mcp.yaml").write_text("server-b:\n  transport: http\n")
+    assert manager._server_config_fingerprint(cfg) != changed
+
+
+def test_server_config_fingerprint_tracks_subagent_yaml_content(tmp_path, monkeypatch):
+    fake_dir = tmp_path / "subagents"
+    fake_dir.mkdir()
+    (fake_dir / "research.yaml").write_text("name: research\nprompt: v1\n")
+    monkeypatch.setattr(manager, "_SUBAGENTS_DIR", fake_dir)
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    (fake_dir / "research.yaml").write_text("name: research\nprompt: v2\n")
+    assert manager._server_config_fingerprint(cfg) != base

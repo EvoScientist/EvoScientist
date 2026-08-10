@@ -26,6 +26,7 @@ def _make_config(
     langgraph_dev_host: str = "127.0.0.1",
     webui_port: int = 4716,
     webui_host: str = "127.0.0.1",
+    langgraph_dev_keepalive: bool = False,
 ):
     return SimpleNamespace(
         default_workdir=default_workdir,
@@ -35,6 +36,7 @@ def _make_config(
         webui_host=webui_host,
         langgraph_dev_jobs_per_worker=10,
         langgraph_dev_file_persistence=True,
+        langgraph_dev_keepalive=langgraph_dev_keepalive,
     )
 
 
@@ -121,7 +123,12 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
         return SimpleNamespace(pid=99999)
 
     monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
-    monkeypatch.setattr(lgm, "stop_langgraph_dev", lambda *_a, **_kw: None)
+
+    def _fake_stop(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop)
+    captured["stop_fn"] = _fake_stop
 
     class _FakeProc:
         pid = 12345
@@ -146,7 +153,10 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
     # _stop_webui shells out to taskkill on Windows — neutralize it.
     monkeypatch.setattr(webui_mod, "_stop_webui", lambda _proc: None)
-    monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: fn)
+    captured["atexit_fns"] = []
+    monkeypatch.setattr(
+        atexit, "register", lambda fn, *a, **k: captured["atexit_fns"].append(fn) or fn
+    )
     monkeypatch.setattr(signal, "signal", lambda _sig, _handler: lambda *a: None)
     monkeypatch.setattr(threading, "Event", _ImmediateEvent)
 
@@ -273,3 +283,21 @@ def test_no_remote_hint_when_both_exposed(monkeypatch):
 
     banner = "\n".join(captured["printed"])
     assert "Remote visitors cannot reach" not in banner
+
+
+# =============================================================================
+# Backend keepalive
+# =============================================================================
+
+
+def test_backend_default_registers_stop_on_exit(monkeypatch):
+    """Without keepalive the WebUI-started backend dies with the session."""
+    captured = _run_webui_once(monkeypatch, _make_config())
+    assert captured["stop_fn"] in captured["atexit_fns"]
+
+
+def test_backend_keepalive_skips_stop_registration(monkeypatch):
+    """With keepalive the backend outlives the WebUI session, so the next
+    same-workspace launch reuses it instead of paying the cold boot."""
+    captured = _run_webui_once(monkeypatch, _make_config(langgraph_dev_keepalive=True))
+    assert captured["stop_fn"] not in captured["atexit_fns"]

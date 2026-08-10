@@ -419,6 +419,10 @@ class TestEnsureLanggraphDev:
         with (
             patch.object(manager, "is_langgraph_dev_running", return_value=False),
             patch.object(manager, "start_langgraph_dev", return_value=proc) as start,
+            # Intercept the real atexit hook: letting it register means the
+            # callback fires at interpreter exit AFTER patches are restored,
+            # deleting the REAL ~/.config/evoscientist pid/sidecar files.
+            patch.object(manager.atexit, "register") as atexit_register,
             patch.object(
                 manager,
                 "RUNTIME",
@@ -432,6 +436,7 @@ class TestEnsureLanggraphDev:
 
         assert result is proc
         start.assert_called_once()
+        atexit_register.assert_called_once_with(manager.stop_langgraph_dev, proc)
         assert manager.is_async_subagents_available() is True
 
     def test_skips_when_async_and_memory_workers_disabled(
