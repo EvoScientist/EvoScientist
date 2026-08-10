@@ -154,24 +154,22 @@ class TestEvoScientistConfig:
         assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
 
-    def test_bind_host_defaults_differ_per_server(self):
-        """The front-end binds every interface out of the box; the backend does
-        not.
+    def test_bind_hosts_default_to_loopback(self):
+        """Both servers stay off the network until asked.
 
         The backend is an unauthenticated API whose agent can run shell
-        commands, so it stays on loopback until asked — ``langgraph_dev_host =
-        0.0.0.0`` opts in, and the launchers then print a red PUBLIC BIND
-        banner while it is exposed. The WebUI front-end serves the app shell
-        only and holds no credentials, so it defaults to the wildcard.
+        commands; the front-end serves the workspace file/upload and
+        skill-install endpoints. Neither is a safe default to publish, so
+        ``--host 0.0.0.0`` / ``config set`` opts in to LAN exposure.
         """
         config = EvoScientistConfig()
 
         assert config.langgraph_dev_host == "127.0.0.1"
-        assert config.webui_host == "0.0.0.0"
+        assert config.webui_host == "127.0.0.1"
 
     @pytest.mark.parametrize(
         ("field", "default"),
-        [("langgraph_dev_host", "127.0.0.1"), ("webui_host", "0.0.0.0")],
+        [("langgraph_dev_host", "127.0.0.1"), ("webui_host", "127.0.0.1")],
     )
     @pytest.mark.parametrize("blank", ["", "   ", "\t"])
     def test_blank_bind_host_falls_back_to_default(self, field, blank, default):
@@ -182,11 +180,11 @@ class TestEvoScientistConfig:
 
     @pytest.mark.parametrize(
         ("field", "value"),
-        [("langgraph_dev_host", "0.0.0.0"), ("webui_host", "127.0.0.1")],
+        [("langgraph_dev_host", "0.0.0.0"), ("webui_host", "0.0.0.0")],
     )
     def test_bind_host_opt_out_is_preserved(self, field, value):
-        """Each field's escape hatch — widen the backend, narrow the front-end —
-        must survive normalization untouched."""
+        """The LAN escape hatch — widening either bind to the wildcard — must
+        survive normalization untouched."""
         config = EvoScientistConfig(**{field: value})
         assert getattr(config, field) == value
 
@@ -1026,7 +1024,7 @@ class TestDotenvIsolation:
         ("field", "env_var", "value"),
         [
             ("langgraph_dev_host", "EVOSCIENTIST_LANGGRAPH_DEV_HOST", "0.0.0.0"),
-            ("webui_host", "EVOSCIENTIST_WEBUI_HOST", "127.0.0.1"),
+            ("webui_host", "EVOSCIENTIST_WEBUI_HOST", "0.0.0.0"),
         ],
     )
     def test_bind_hosts_are_env_overridable(

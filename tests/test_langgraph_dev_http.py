@@ -1,6 +1,6 @@
-"""Smoke test for the /api/models route mounted via langgraph.json's
-``http`` field. We test the FastAPI app directly — no need to spin up
-langgraph dev.
+"""Smoke tests for the /api/models and /api/teams routes mounted via
+langgraph.json's ``http`` field. We test the Starlette app directly — no
+need to spin up langgraph dev.
 """
 
 from __future__ import annotations
@@ -161,3 +161,138 @@ def test_ollama_discovery_skipped_when_base_url_absent():
         {"name": n, "model_id": m, "provider": p}
         for n, m, p in list_models_by_provider()
     ]
+
+
+# ---- /api/teams -----------------------------------------------------------
+
+
+def _expert_info(
+    name: str,
+    *,
+    description: str = "",
+    byline: str = "",
+    capability_tags: list[str] | None = None,
+    avatar_hint: str = "",
+):
+    """Build a SkillInfo for an expert skill (agent-teams v1)."""
+    from pathlib import Path
+
+    from EvoScientist.tools.skills_manager import SkillInfo
+
+    return SkillInfo(
+        name=name,
+        description=description or f"{name} description",
+        path=Path(f"/skills/{name}"),
+        source="builtin",
+        type="expert",
+        byline=byline,
+        capability_tags=list(capability_tags or []),
+        avatar_hint=avatar_hint,
+    )
+
+
+def test_get_teams_returns_installed_expert_skills():
+    experts = [
+        _expert_info("expert-a", description="First expert"),
+        _expert_info("expert-b", description="Second expert"),
+    ]
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        return_value=experts,
+    ):
+        resp = client.get("/api/teams")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "teams" in body
+    names = [t["name"] for t in body["teams"]]
+    assert names == ["expert-a", "expert-b"]
+
+
+def test_get_teams_omits_backend_implementation_fields():
+    """Never leak SKILL.md body / role / dispatch / source / path / etc.
+    onto the gallery endpoint — those are backend-only."""
+    experts = [_expert_info("expert-a")]
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        return_value=experts,
+    ):
+        body = client.get("/api/teams").json()
+    entry = body["teams"][0]
+    forbidden = {
+        "system_prompt",
+        "role",
+        "default_dispatch",
+        "type",
+        "source",
+        "path",
+        "tools",
+        "skills",
+        "tags",
+        "_async",
+    }
+    assert not (set(entry.keys()) & forbidden), (
+        f"leaked backend fields: {set(entry.keys()) & forbidden}"
+    )
+
+
+def test_get_teams_projects_optional_gallery_metadata_when_present():
+    experts = [
+        _expert_info(
+            "idea-brainstorm",
+            description="Multi-round brainstorm",
+            byline="Research idea brainstormer",
+            capability_tags=["Iteration", "ELO ranking"],
+            avatar_hint="lightbulb",
+        ),
+    ]
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        return_value=experts,
+    ):
+        body = client.get("/api/teams").json()
+    entry = body["teams"][0]
+    assert entry["name"] == "idea-brainstorm"
+    assert entry["description"] == "Multi-round brainstorm"
+    assert entry["byline"] == "Research idea brainstormer"
+    assert entry["capability_tags"] == ["Iteration", "ELO ranking"]
+    assert entry["avatar_hint"] == "lightbulb"
+
+
+def test_get_teams_omits_optional_fields_when_absent():
+    """Gallery card should degrade gracefully when an expert declares
+    only the minimum (name, description, type: expert)."""
+    experts = [_expert_info("minimal-expert")]  # no byline / tags / avatar
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        return_value=experts,
+    ):
+        body = client.get("/api/teams").json()
+    entry = body["teams"][0]
+    assert set(entry.keys()) == {"name", "description"}
+
+
+def test_get_teams_returns_empty_list_when_no_experts_installed():
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        return_value=[],
+    ):
+        body = client.get("/api/teams").json()
+    assert body == {"teams": []}
+
+
+def test_get_teams_calls_loader_with_include_system_true():
+    """First-party experts ship as builtin skills; the endpoint must
+    include the builtin tier or the gallery will be empty on a fresh
+    workspace with no user-installed experts."""
+    calls = []
+
+    def spy(include_system=False):
+        calls.append(include_system)
+        return []
+
+    with patch(
+        "EvoScientist.tools.skills_manager.list_expert_skills",
+        new=spy,
+    ):
+        client.get("/api/teams")
+    assert calls == [True]

@@ -41,6 +41,13 @@ class RunRequest:
     metadata: dict[str, Any] | None = None
     media: list[str] | None = None
     target: GraphTarget | None = None
+    configurable_extra: dict[str, Any] | None = None
+    """Extra keys to merge into the LangGraph ``configurable`` dict alongside
+    ``thread_id`` — e.g. ``{"active_teams": [...]}`` from the TUI
+    ``/expert`` command. WebUI callers achieve the same effect via
+    ``langgraph_sdk``'s ``config.configurable`` on their own; this field is
+    the local-gateway equivalent so CLI / TUI / headless serve can bias
+    the run identically."""
 
 
 @dataclass(frozen=True, slots=True)

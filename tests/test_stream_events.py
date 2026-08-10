@@ -29,6 +29,7 @@ from tests.stream_v3_fakes import (
     SubscriptionSensitiveV3Agent,
     async_iter,
     collect_events,
+    custom_subagent_event,
     message_delta,
     message_finish,
     message_tool_call_block,
@@ -156,6 +157,26 @@ class TestV3ProtocolStreaming:
         assert kwargs["version"] == "v3"
         assert "stream_mode" not in kwargs
         assert "subgraphs" not in kwargs
+
+    async def test_configurable_extra_merged_into_config(self):
+        """``configurable_extra`` from RunRequest lands next to thread_id."""
+        agent = FakeV3Agent([message_delta("hi")])
+        await collect_events(
+            agent,
+            thread_id="t1",
+            configurable_extra={"active_teams": ["idea-brainstorm"]},
+        )
+        _, kwargs = agent.astream_events.call_args
+        configurable = kwargs["config"]["configurable"]
+        assert configurable["thread_id"] == "t1"
+        assert configurable["active_teams"] == ["idea-brainstorm"]
+
+    async def test_configurable_extra_none_leaves_thread_id_only(self):
+        """When no extras are passed, only ``thread_id`` sits under configurable."""
+        agent = FakeV3Agent([message_delta("hi")])
+        await collect_events(agent, thread_id="t1")
+        _, kwargs = agent.astream_events.call_args
+        assert kwargs["config"]["configurable"] == {"thread_id": "t1"}
 
     async def test_streamed_non_selector_json_is_replayed(self):
         """Normal JSON answers are not swallowed by selector JSON buffering."""
@@ -1249,6 +1270,176 @@ class TestUsageStatsExtraction:
         events = await collect_events(agent)
         usage_events = [e for e in events if e.get("type") == "usage_stats"]
         assert len(usage_events) == 0
+
+
+class TestPanelDispatchEvents:
+    """Custom-stream subagent lifecycle from in-eval task() fan-out."""
+
+    async def test_start_event_becomes_panel_dispatch_start(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "subagent_type": "idea-brainstorm",
+                        "label": "innovator voice",
+                        "description": "generate one bold candidate",
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        starts = [e for e in events if e.get("type") == "panel_dispatch_start"]
+        assert len(starts) == 1
+        start = starts[0]
+        assert start["id"] == "ptc_task_abc12345"
+        assert start["eval_id"] == "ci_eval_1"
+        assert start["subagent_type"] == "idea-brainstorm"
+        assert start["label"] == "innovator voice"
+        assert start["description"] == "generate one bold candidate"
+
+    async def test_complete_event_becomes_panel_dispatch_complete(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "duration_ms": 1234,
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        completes = [e for e in events if e.get("type") == "panel_dispatch_complete"]
+        assert len(completes) == 1
+        assert completes[0]["id"] == "ptc_task_abc12345"
+        assert completes[0]["duration_ms"] == 1234
+
+    async def test_complete_event_with_null_duration_normalizes_to_zero(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "duration_ms": None,
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        completes = [e for e in events if e.get("type") == "panel_dispatch_complete"]
+        assert len(completes) == 1
+        assert completes[0]["duration_ms"] == 0
+
+    async def test_error_event_becomes_panel_dispatch_error(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "error",
+                        "id": "ptc_task_abc12345",
+                        "eval_id": "ci_eval_1",
+                        "duration_ms": 42,
+                        "error": "boom",
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        errors = [e for e in events if e.get("type") == "panel_dispatch_error"]
+        assert len(errors) == 1
+        assert errors[0]["error"] == "boom"
+        assert errors[0]["duration_ms"] == 42
+
+    async def test_unknown_custom_type_ignored(self):
+        """Custom payloads whose ``type`` is not ``subagent`` don't emit events."""
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event({"type": "something-else", "value": 1}),
+            ]
+        )
+        events = await collect_events(agent)
+        assert not any(e.get("type", "").startswith("panel_dispatch") for e in events)
+
+    async def test_missing_id_dropped(self):
+        """A malformed subagent event without ``id`` is silently dropped."""
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "subagent_type": "x",
+                        "label": "y",
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        assert not any(e.get("type", "").startswith("panel_dispatch") for e in events)
+
+    async def test_grouped_fanout_shares_eval_id(self):
+        """Parallel dispatches from one eval share the same ``eval_id``."""
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "id": "d1",
+                        "eval_id": "e1",
+                        "subagent_type": "innovator",
+                        "label": "a",
+                        "description": "d",
+                    }
+                ),
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "id": "d2",
+                        "eval_id": "e1",
+                        "subagent_type": "pragmatist",
+                        "label": "b",
+                        "description": "d",
+                    }
+                ),
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "d1",
+                        "eval_id": "e1",
+                        "duration_ms": 100,
+                    }
+                ),
+                custom_subagent_event(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": "d2",
+                        "eval_id": "e1",
+                        "duration_ms": 200,
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        panel_events = [
+            e for e in events if e.get("type", "").startswith("panel_dispatch")
+        ]
+        assert len(panel_events) == 4
+        assert {e["eval_id"] for e in panel_events} == {"e1"}
 
 
 class TestSummarizationHelpers:

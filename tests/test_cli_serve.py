@@ -51,6 +51,7 @@ def _run_serve_once(
     config,
     *,
     workdir: str | None = None,
+    host: str | None = None,
     no_thinking: bool = False,
     debug: bool = False,
     cwd: str | None = None,
@@ -93,8 +94,14 @@ def _run_serve_once(
         def get(self, timeout=None):
             raise KeyboardInterrupt()
 
+    def _fake_ensure_async_server(cfg, *, workspace_dir):
+        captured["ensure_config"] = cfg
+
     monkeypatch.setattr(commands, "set_workspace_root", _fake_set_workspace_root)
     monkeypatch.setattr(commands, "ensure_dirs", _fake_ensure_dirs)
+    monkeypatch.setattr(
+        commands, "_ensure_async_subagent_server", _fake_ensure_async_server
+    )
     monkeypatch.setattr(commands, "_load_agent", _fake_load_agent)
     monkeypatch.setattr(
         commands, "_start_channels_bus_mode", _fake_start_channels_bus_mode
@@ -126,6 +133,7 @@ def _run_serve_once(
             object(),
             no_thinking=no_thinking,
             workdir=workdir,
+            host=host,
             debug=debug,
             auto_approve=auto_approve,
             auto_mode=auto_mode,
@@ -234,6 +242,40 @@ def test_serve_debug_sets_log_level_and_channel_trace(monkeypatch, tmp_path):
         "channel_debug_tracing": True,
     }
     assert configure_calls == [("DEBUG", "true")]
+
+
+def test_serve_host_flag_narrows_or_widens_backend_bind(monkeypatch, tmp_path):
+    """`EvoSci serve --host` must reach langgraph_dev_host — the flag was
+    silently dropped before, leaving the backend bind config-only."""
+    ws = str((tmp_path / "ws").resolve())
+    config = _make_config(default_workdir=ws)
+
+    _, captured = _run_serve_once(monkeypatch, config, workdir=ws, host="0.0.0.0")
+
+    assert captured["cli_overrides"] == {"langgraph_dev_host": "0.0.0.0"}
+    # The effective config carrying the override must be the one handed to the
+    # backend launcher — not just recorded in the overrides dict.
+    assert captured["ensure_config"].langgraph_dev_host == "0.0.0.0"
+
+
+def test_serve_host_flag_is_stripped(monkeypatch, tmp_path):
+    ws = str((tmp_path / "ws").resolve())
+    config = _make_config(default_workdir=ws)
+
+    _, captured = _run_serve_once(
+        monkeypatch, config, workdir=ws, host="  192.168.1.5  "
+    )
+
+    assert captured["cli_overrides"] == {"langgraph_dev_host": "192.168.1.5"}
+
+
+def test_serve_blank_host_flag_leaves_config_defaults(monkeypatch, tmp_path):
+    ws = str((tmp_path / "ws").resolve())
+    config = _make_config(default_workdir=ws)
+
+    _, captured = _run_serve_once(monkeypatch, config, workdir=ws, host="   ")
+
+    assert captured["cli_overrides"] == {}
 
 
 def test_serve_auto_approve_only_sets_auto_approve(monkeypatch, tmp_path):

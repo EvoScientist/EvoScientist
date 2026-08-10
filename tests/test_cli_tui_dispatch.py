@@ -123,7 +123,7 @@ def test_no_host_flag_leaves_config_defaults(monkeypatch):
 
     assert result.exit_code == 0
     assert "webui_host" not in calls["overrides"]
-    assert calls["webui_config"].webui_host == "0.0.0.0"
+    assert calls["webui_config"].webui_host == "127.0.0.1"
 
 
 def _run_ensure_backend(monkeypatch, config, *, server_up=True):
