@@ -69,6 +69,7 @@ def _has_answer_content(content: object) -> bool:
         return content is not None
 
     reasoning_types = {"thinking", "reasoning", "reasoning_content"}
+    text_types = {"text", "output_text"}
     for block in content:
         if isinstance(block, str):
             if block.strip():
@@ -76,7 +77,16 @@ def _has_answer_content(content: object) -> bool:
             continue
         if not isinstance(block, dict):
             return True
-        if str(block.get("type", "")).lower() in reasoning_types:
+        block_type = str(block.get("type", "")).lower()
+        if block_type in reasoning_types:
+            continue
+        if block_type in text_types:
+            text = block.get("text")
+            if isinstance(text, str):
+                if text.strip():
+                    return True
+            elif text:
+                return True
             continue
         # Any non-reasoning block is meaningful output (text, image, refusal,
         # server tool result, etc.), even when its provider-specific payload

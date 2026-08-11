@@ -468,6 +468,26 @@ class TestMiddleware:
         with pytest.raises(ProviderStreamError):
             self._run_awrap(ErrorNormalizationMiddleware(), req, handler)
 
+    def test_empty_structured_text_block_with_length_is_detected(self):
+        response = ModelResponse(
+            result=[
+                AIMessage(
+                    content=[{"type": "text", "text": "   "}],
+                    response_metadata={"finish_reason": "length"},
+                )
+            ]
+        )
+
+        def handler(_req):
+            return response
+
+        with pytest.raises(ProviderStreamError) as excinfo:
+            ErrorNormalizationMiddleware().wrap_model_call(
+                _request(_openai_model()), handler
+            )
+
+        assert isinstance(excinfo.value.__cause__, ModelOutputTruncatedError)
+
     @pytest.mark.parametrize(
         "message",
         [
