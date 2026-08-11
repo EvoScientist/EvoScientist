@@ -136,7 +136,7 @@ def load_subagents(
     *,
     prompt_refs: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Load subagent definitions from a directory of YAML files and wire up tools.
+    """Load subagent definitions from a directory of YAML files.
 
     NOTE: This is a custom utility. deepagents does not natively load subagents
     from files - they're normally defined inline in the create_deep_agent() call.

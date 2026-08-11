@@ -79,6 +79,21 @@ def test_tool_names_are_deferred_until_the_spec_is_selected(tmp_path, caplog):
     assert "_tool_names" not in subs[0]
 
 
+def test_resolve_subagent_tools_preserves_injected_tools():
+    injected = object()
+    selected_tool = object()
+    subagent = {
+        "name": "selected-agent",
+        "tools": [injected],
+        "_tool_names": ["available"],
+    }
+
+    resolve_subagent_tools(subagent, {"available": selected_tool})
+
+    assert subagent["tools"] == [injected, selected_tool]
+    assert "_tool_names" not in subagent
+
+
 def test_agent_without_tools_preserves_parent_tool_inheritance(tmp_path):
     config_path = _write_yaml(
         tmp_path,
