@@ -96,6 +96,40 @@ def _resolve_reasoning_effort(default: str) -> str:
     return os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
 
 
+def _apply_openai_compat_reasoning_config(
+    provider: str,
+    model_id: str,
+    kwargs: dict[str, Any],
+) -> None:
+    """Apply reasoning controls supported by OpenAI-compatible providers.
+
+    Routed providers deliberately skip the native-OpenAI branch in
+    :func:`_apply_auto_config`, because most compatible endpoints reject
+    OpenAI-only ``reasoning`` payloads.  A small subset does support the
+    standard ``reasoning_effort`` field, though:
+
+    * DashScope Qwen 3.8 Max supports ``low`` / ``medium`` / ``xhigh`` and
+      maps the OpenAI aliases (including ``none``).  Its server default is
+      extremely large, so use ``low`` unless the user selected another level.
+    * ``custom-openai`` is user-owned.  Forward an *explicit* setting only;
+      with no setting, preserve compatibility with endpoints that reject the
+      field (including many non-reasoning OpenAI-compatible APIs).
+
+    Explicit caller kwargs always win.
+    """
+    configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip()
+    short_model_id = model_id.rsplit("/", 1)[-1]
+
+    if provider in {"dashscope", "dashscope-code"} and short_model_id.startswith(
+        "qwen3.8-max"
+    ):
+        kwargs.setdefault("reasoning_effort", configured or "low")
+        return
+
+    if provider == "custom-openai" and configured:
+        kwargs.setdefault("reasoning_effort", configured)
+
+
 def _is_deepseek_endpoint(base_url: str | None) -> bool:
     """Return whether an OpenAI-compatible endpoint is DeepSeek's API."""
     if not base_url:
@@ -396,6 +430,7 @@ def get_chat_model(
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
+        _apply_openai_compat_reasoning_config(provider, model_id, kwargs)
         # SiliconFlow: disable thinking — LangChain drops reasoning_content
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":

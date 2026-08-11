@@ -1078,6 +1078,34 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "custom-key-789"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_openai_forwards_explicit_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        """User-owned compatible endpoints receive an explicit effort only."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://opencode.example/v1")
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "custom-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("reasoning-model", provider="custom-openai")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "low"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_openai_omits_unconfigured_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        """Unknown compatible endpoints stay compatible by default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://plain.example/v1")
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "custom-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("plain-model", provider="custom-openai")
+
+        assert "reasoning_effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_base_url_override(self, mock_init, monkeypatch):
         """Anthropic provider should support base_url override (e.g. ccproxy)."""
         mock_init.return_value = "mock_model"
@@ -1167,6 +1195,33 @@ class TestThirdPartyRouting:
             == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         assert call_kwargs["api_key"] == "ds-key-456"
+        assert "reasoning_effort" not in call_kwargs
+
+    @pytest.mark.parametrize("provider", ["dashscope", "dashscope-code"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_defaults_to_low_reasoning(
+        self, mock_init, provider, monkeypatch
+    ):
+        """Qwen 3.8 must not inherit DashScope's enormous xhigh default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("qwen3.8-max", provider=provider)
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "low"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_respects_configured_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "medium")
+
+        get_chat_model("qwen3.8-max", provider="dashscope")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "medium"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_dashscope_code_routes_through_openai(self, mock_init, monkeypatch):
