@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 from collections.abc import Callable
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,108 @@ def _patch_mcp_windows_command_resolver() -> None:
 
 
 _patch_mcp_windows_command_resolver()
+
+
+# =============================================================================
+# Windows MCP SDK patch — give stdio subprocesses a real stderr file descriptor
+# =============================================================================
+#
+# ``mcp.client.stdio.stdio_client`` forwards the parent process's ``stderr``
+# (``errlog``, defaulting to ``sys.stderr``) to the MCP server subprocess via
+# ``anyio.open_process`` → ``subprocess.Popen(stderr=...)``. ``Popen`` resolves
+# that to an OS handle by calling ``errlog.fileno()``.
+#
+# Under the Textual TUI (and any non-console host), ``sys.stderr`` is
+# redirected to ``textual.app._PrintCapture``, whose ``fileno()`` returns
+# ``-1``. ``subprocess.Popen`` dutifully converts fd ``-1`` into an invalid
+# Windows handle and the child inherits a broken stderr pipe — every stdio
+# MCP server then fails to spawn with ``OSError: [Errno 9] Bad file
+# descriptor``. HTTP/SSE servers are unaffected (no subprocess), which is why
+# only the stdio server (e.g. arxiv) shows up as failed in the loader. See
+# issue #418; the same class of bug is tracked upstream as
+# modelcontextprotocol/python-sdk#1103.
+#
+# We can't pass ``errlog`` through ``langchain-mcp-adapters`` (it calls
+# ``stdio_client(server_params)`` with no ``errlog``), and the SDK's default
+# is bound once at import time — which may itself already capture a
+# redirected ``sys.stderr``. So we wrap ``stdio_client`` to swap in a safe
+# ``errlog`` at call time whenever the configured one has no usable fileno.
+# The substitute is ``sys.__stderr__`` (the real console handle) when
+# available, otherwise a discarded ``os.devnull`` handle.
+
+
+def _stdio_errlog_is_usable(errlog: object) -> bool:
+    """Return ``True`` if *errlog* can back a subprocess ``stderr`` pipe.
+
+    A usable errlog exposes a ``fileno()`` that resolves to a non-negative OS
+    file descriptor. Textual's ``_PrintCapture`` and similar redirected
+    streams return ``-1`` (or raise), so they are rejected here.
+    """
+    fileno = getattr(errlog, "fileno", None)
+    if not callable(fileno):
+        return False
+    try:
+        fd = fileno()
+    except Exception:
+        return False
+    return isinstance(fd, int) and fd >= 0
+
+
+def _safe_stdio_errlog() -> Any:
+    """Return a ``stderr``-suitable stream with a real OS file descriptor.
+
+    Prefers ``sys.__stderr__`` (the original console handle, so the server's
+    diagnostic output still lands where the user expects); falls back to an
+    ``os.devnull`` handle when even ``__stderr__`` is unavailable (e.g. in a
+    GUI/pythonw host with no console).
+    """
+    dunder = getattr(sys, "__stderr__", None)
+    if dunder is not None and _stdio_errlog_is_usable(dunder):
+        return dunder
+    # Last resort: discard the server's stderr so the spawn still succeeds.
+    return open(os.devnull, "w", encoding="utf-8", errors="replace")
+
+
+def _patch_mcp_stdio_errlog_safe() -> None:
+    """Wrap the SDK's ``stdio_client`` to guarantee a usable ``errlog``.
+
+    Idempotent. A no-op when the MCP SDK is absent (optional dependency).
+    When the caller already supplied a usable ``errlog`` it is forwarded
+    unchanged; only the unsafe default (redirected ``sys.stderr``) is
+    replaced. This keeps the patch transparent for embedders that pass their
+    own ``errlog`` explicitly.
+    """
+    try:
+        import mcp.client.stdio as _stdio_mod
+    except ImportError:
+        return  # MCP SDK not installed — nothing to patch.
+
+    original = getattr(_stdio_mod, "stdio_client", None)
+    if original is None:
+        # The SDK renamed/removed stdio_client — nothing to wrap. Log so a
+        # future SDK refactor doesn't silently drop this guard.
+        logger.warning(
+            "MCP SDK layout changed: mcp.client.stdio.stdio_client is missing; "
+            "the Windows stdio errlog safety patch was NOT applied. MCP stdio "
+            "tool loading may fail with [Errno 9] under a redirected stderr."
+        )
+        return
+
+    if getattr(original, "_evosci_errlog_safe", False):
+        return  # Already patched.
+
+    @wraps(original)
+    def _stdio_client_safe(server: Any, errlog: Any = ..., *args: Any, **kwargs: Any):
+        if errlog is ... or not _stdio_errlog_is_usable(errlog):
+            errlog = _safe_stdio_errlog()
+        return original(server, errlog, *args, **kwargs)
+
+    _stdio_client_safe._evosci_errlog_safe = True  # type: ignore[attr-defined]
+    _stdio_mod.stdio_client = _stdio_client_safe
+    logger.debug("Applied MCP stdio errlog safety patch")
+
+
+_patch_mcp_stdio_errlog_safe()
 
 
 # =============================================================================

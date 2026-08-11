@@ -279,6 +279,157 @@ class TestBuildConnections:
         assert set(conns.keys()) == {"a", "b"}
 
 
+# ---- stdio errlog safety patch (issue #418) ----
+
+
+class _FakeTextualStderr:
+    """Stand-in for ``textual.app._PrintCapture``.
+
+    Mirrors the TUI's redirected stderr: a file-like object whose ``fileno()``
+    returns ``-1`` (no real OS handle), which makes ``subprocess.Popen`` fail
+    with ``OSError: [Errno 9] Bad file descriptor`` when it is passed as
+    ``stderr``.
+    """
+
+    def write(self, data):
+        return len(data)
+
+    def flush(self):  # pragma: no cover - trivial
+        pass
+
+    def fileno(self):  # pragma: no cover - exercised via the helper
+        return -1
+
+    def isatty(self):
+        return True
+
+
+class TestStdioErrlogSafetyPatch:
+    """The stdio errlog guard (issue #418) keeps stdio MCP subprocesses alive
+    when the parent's ``sys.stderr`` is a redirected stream with no fileno."""
+
+    def test_bad_fileno_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        assert _stdio_errlog_is_usable(_FakeTextualStderr()) is False
+
+    def test_negative_fileno_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        class _Neg:
+            def fileno(self):
+                return -1
+
+        assert _stdio_errlog_is_usable(_Neg()) is False
+
+    def test_fileno_raising_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        class _Raises:
+            def fileno(self):
+                raise OSError("no fileno")
+
+        assert _stdio_errlog_is_usable(_Raises()) is False
+
+    def test_missing_fileno_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        assert _stdio_errlog_is_usable(object()) is False
+
+    def test_real_stderr_accepted(self):
+        import sys
+
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        # sys.__stderr__ is the original console handle; usable unless the
+        # process is a GUI host (pythonw). Skip there since there's nothing
+        # usable to assert.
+        if getattr(sys, "__stderr__", None) is None:
+            pytest.skip("no console stderr in this host")
+        assert _stdio_errlog_is_usable(sys.__stderr__) is True
+
+    def test_safe_errlog_returns_usable_stream(self):
+        import sys
+
+        from EvoScientist.mcp.client import _safe_stdio_errlog, _stdio_errlog_is_usable
+
+        stream = _safe_stdio_errlog()
+        try:
+            assert _stdio_errlog_is_usable(stream) is True
+        finally:
+            # ``_safe_stdio_errlog`` may open an os.devnull handle when
+            # ``sys.__stderr__`` is unavailable; close it so the test does
+            # not leak a file descriptor.
+            close = getattr(stream, "close", None)
+            if callable(close) and stream is not sys.__stderr__:
+                close()
+
+    def test_patch_wraps_stdio_client(self):
+        """Importing the MCP client wraps ``mcp.client.stdio.stdio_client``."""
+        import mcp.client.stdio as stdio_mod
+
+        # Importing EvoScientist.mcp.client applies the patch at module load.
+        import EvoScientist.mcp.client  # noqa: F401
+
+        assert getattr(stdio_mod.stdio_client, "_evosci_errlog_safe", False) is True
+
+    def test_wrapped_stdio_client_swaps_bad_errlog(self, monkeypatch):
+        """The wrapped ``stdio_client`` substitutes a usable errlog when the
+        caller's default has no fileno (the issue #418 condition)."""
+        from EvoScientist.mcp import client as mcp_client
+
+        captured = {}
+        sentinel_server = object()
+
+        def fake_original(server, errlog, *args, **kwargs):
+            captured["server"] = server
+            captured["errlog"] = errlog
+            return "called"
+
+        # Re-wrap around a fake ``stdio_client`` so we can inspect the errlog
+        # that the wrapper forwards.
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        # Re-run the patch logic against the fake.
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            # Called with no errlog → wrapper must inject a usable one.
+            result = stdio_mod.stdio_client(sentinel_server)
+            assert result == "called"
+            assert captured["server"] is sentinel_server
+            assert mcp_client._stdio_errlog_is_usable(captured["errlog"])
+        finally:
+            # The patch stamps the fake; reset by re-patching against a fresh
+            # fake so other tests are unaffected.
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+    def test_wrapped_stdio_client_keeps_good_errlog(self, monkeypatch):
+        """An explicitly-passed usable errlog is forwarded unchanged."""
+        import sys
+
+        from EvoScientist.mcp import client as mcp_client
+
+        if getattr(sys, "__stderr__", None) is None:
+            pytest.skip("no console stderr in this host")
+
+        captured = {}
+
+        def fake_original(server, errlog, *args, **kwargs):
+            captured["errlog"] = errlog
+            return "ok"
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            stdio_mod.stdio_client(object(), errlog=sys.__stderr__)
+            assert captured["errlog"] is sys.__stderr__
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+
 # ---- _filter_tools ----
 
 
