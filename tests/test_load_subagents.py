@@ -246,9 +246,7 @@ def test_missing_tool_on_async_subagent_is_deferred_without_logging(tmp_path, ca
     assert subs[0]["_tool_names"] == ["nonexistent_tool"]
 
 
-def test_missing_async_tool_warns_at_terminal_resolution(
-    tmp_path, caplog
-):
+def test_missing_async_tool_warns_at_terminal_resolution(tmp_path, caplog):
     """The selected async graph warns against its terminal registry."""
     config_path = _write_yaml(
         tmp_path,
