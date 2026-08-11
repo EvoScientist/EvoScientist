@@ -342,33 +342,27 @@ class TestStdioErrlogSafetyPatch:
     def test_closed_fd_rejected(self):
         """A closed stream may still report its former positive fd; the helper
         must reject it via os.fstat so subprocess.Popen doesn't fail later."""
-        import os
-
         from EvoScientist.mcp.client import _stdio_errlog_is_usable
 
         r, w = os.pipe()
         try:
+            # Capture the descriptor number, then close both ends. The stub
+            # below still reports ``r`` (now closed) from fileno(), exercising
+            # the os.fstat branch rather than the ValueError path.
+            stale_fd = r
+            os.close(r)
             os.close(w)
+
+            class _StaleFd:
+                """Reports a positive fd number that is no longer open."""
+
+                def fileno(self):
+                    return stale_fd
+
+            assert _stdio_errlog_is_usable(_StaleFd()) is False
         finally:
+            # fds already closed above; guard against partial failure.
             pass
-        # Wrap the read end so it has a fileno(), then close it. Its fileno()
-        # still returns the (now stale) fd.
-        read_end = os.fdopen(r, "r")
-        read_end.close()
-
-        class _StaleFd:
-            def fileno(self, _fd=read_end):
-                # Python keeps the fd number after close on the wrapper.
-                # Simulate a stream that still knows its old fd.
-                _read_end = _fd
-                # The underlying buffer is closed; emulate the reported value.
-                return getattr(_read_end, "fileno", lambda: -1)()
-
-        # A truly closed TextIOWrapper raises on fileno() after close, which
-        # the raising test already covers. To exercise the "stale positive fd"
-        # path directly, probe os.fstat on a closed fd.
-        closed_fd = read_end  # closed above
-        assert _stdio_errlog_is_usable(closed_fd) is False
 
     def test_real_stderr_accepted(self):
 
@@ -529,18 +523,21 @@ class TestStdioErrlogSafetyPatch:
             monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
 
     def test_adapter_binds_patched_stdio_client(self):
-        """``langchain-mcp-adapters`` resolves ``stdio_client`` from
-        ``mcp.client.stdio`` at call time, so the module-level patch applies to
-        the adapter path used in production (the import-order concern raised in
-        review). Verifies the binding rather than spawning a real server, which
-        keeps the test deterministic and free of handshake deadlocks."""
+        """``langchain-mcp-adapters`` binds ``stdio_client`` via a ``from``
+        import at its module load, so it could capture the unwrapped function
+        if imported before the patch. The patch re-binds the adapter's
+        reference too, so either import order reaches the wrapped function.
+
+        Verifies the binding rather than spawning a real server, which keeps
+        the test deterministic and free of handshake deadlocks.
+        """
         import mcp.client.stdio as stdio_mod
         from langchain_mcp_adapters import sessions as adapter_sessions
 
         import EvoScientist.mcp.client  # noqa: F401 — applies the patch
 
-        # The adapter imports the name into its module namespace, so it must
-        # resolve to the same patched object the SDK module exposes.
+        # Both the SDK module and the adapter must resolve to the same wrapped
+        # object, regardless of which was imported first.
         assert adapter_sessions.stdio_client is stdio_mod.stdio_client
         assert getattr(adapter_sessions.stdio_client, "_evosci_errlog_safe", False)
 

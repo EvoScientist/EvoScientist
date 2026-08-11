@@ -176,6 +176,12 @@ def _patch_mcp_stdio_errlog_safe() -> None:
     unchanged; only the unsafe default (redirected ``sys.stderr``) is
     replaced. This keeps the patch transparent for embedders that pass their
     own ``errlog`` explicitly.
+
+    The wrapper is installed on both ``mcp.client.stdio.stdio_client`` and
+    ``langchain_mcp_adapters.sessions.stdio_client``: the adapter binds the
+    name via a ``from … import`` at its module load, so updating only the
+    SDK module would leave an already-imported adapter pointing at the
+    unwrapped function.
     """
     try:
         import mcp.client.stdio as _stdio_mod
@@ -201,23 +207,27 @@ def _patch_mcp_stdio_errlog_safe() -> None:
         # When the caller didn't supply a usable errlog we allocate a fallback
         # stream (sys.__stderr__ or os.devnull). The SDK never closes a
         # caller-provided errlog, so a devnull fallback would leak its fd on
-        # every MCP reload. We own the fallback and close it once the stdio
-        # session exits. Caller-provided usable streams are passed through and
-        # left untouched.
-        owns_errlog = errlog is ... or not _stdio_errlog_is_usable(errlog)
-        if owns_errlog:
-            errlog = _safe_stdio_errlog()
+        # every MCP reload. We allocate the fallback inside the async context
+        # manager below so it is closed on exit — and, if the CM is discarded
+        # before being entered, Python finalises the async generator and runs
+        # the same ``finally``. ``errlog`` is forwarded by keyword so a future
+        # SDK that inserts a positional parameter before it can't mis-bind it.
+        needs_fallback = errlog is ... or not _stdio_errlog_is_usable(errlog)
+        caller_errlog = errlog
 
-        cm = original(server, errlog, *args, **kwargs)
-
-        # sys.__stderr__ is process-owned and must never be closed here.
         @asynccontextmanager
-        async def _close_owned_errlog(cm=cm, errlog=errlog, owns=owns_errlog):
+        async def _close_owned_errlog():
+            owns_errlog = needs_fallback
+            errlog = _safe_stdio_errlog() if owns_errlog else caller_errlog
+            # Forward by keyword: robust against future SDK signature changes
+            # that insert a positional parameter before ``errlog``.
+            cm = original(server, *args, errlog=errlog, **kwargs)
             try:
                 async with cm as streams:
                     yield streams
             finally:
-                if owns and errlog is not getattr(sys, "__stderr__", None):
+                # sys.__stderr__ is process-owned and must never be closed here.
+                if owns_errlog and errlog is not getattr(sys, "__stderr__", None):
                     close = getattr(errlog, "close", None)
                     if callable(close):
                         try:
@@ -231,6 +241,18 @@ def _patch_mcp_stdio_errlog_safe() -> None:
 
     _stdio_client_safe._evosci_errlog_safe = True  # type: ignore[attr-defined]
     _stdio_mod.stdio_client = _stdio_client_safe
+
+    # langchain-mcp-adapters binds stdio_client via a ``from`` import at its
+    # module load, so a pre-imported adapter keeps the unwrapped reference.
+    # Re-bind it too (best-effort; ignore if the layout differs).
+    try:
+        import langchain_mcp_adapters.sessions as _adapter_sessions
+
+        if getattr(_adapter_sessions, "stdio_client", None) is original:
+            _adapter_sessions.stdio_client = _stdio_client_safe
+    except ImportError:
+        pass  # Adapter not installed — nothing extra to rebind.
+
     logger.debug("Applied MCP stdio errlog safety patch")
 
 
