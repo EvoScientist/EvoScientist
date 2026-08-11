@@ -211,25 +211,62 @@ def _is_ccproxy_codex() -> bool:
 _SKIP_CONTENT_TYPES = frozenset({"thinking", "reasoning", "reasoning_content"})
 
 # Media block types preserved when flattening (positive allowlist;
-# thinking/reasoning still dropped).  Images + files (PDF/documents): both
-# serialize on OpenAI-compatible APIs and capable models read them.  `video` is
-# deliberately EXCLUDED (langchain-openai raises ValueError on it); `audio` is
-# omitted (almost no model support).  is_data_content_block is unreliable
-# (False for OpenAI image_url / Anthropic image-source).  Kept as separate
-# image/file sets so the no-media fallback can gate per modality.
+# thinking/reasoning still dropped). Images and files are enabled by default.
+# Video remains opt-in because not every adapter accepts video content blocks.
+# Kept as separate sets so the no-media fallback can gate per modality.
 _IMAGE_CONTENT_TYPES = frozenset({"image", "image_url", "input_image"})
 _FILE_CONTENT_TYPES = frozenset({"file", "input_file", "document"})
+_VIDEO_CONTENT_TYPES = frozenset({"video"})
 _MEDIA_CONTENT_TYPES = _IMAGE_CONTENT_TYPES | _FILE_CONTENT_TYPES
+_ALL_MEDIA_CONTENT_TYPES = _MEDIA_CONTENT_TYPES | _VIDEO_CONTENT_TYPES
 
 
-def _flatten_message_content(content: Any) -> str | list[Any] | Any:
+def _format_minimax_video_block(block: dict[str, Any]) -> dict[str, Any]:
+    """Convert a standard LangChain video block to MiniMax's API format."""
+    if "source" in block:
+        return block
+
+    source: dict[str, Any] | None = None
+    if url := block.get("url"):
+        source = {"type": "url", "url": url}
+    elif block.get("base64") or block.get("source_type") == "base64":
+        media_type = block.get("mime_type")
+        if not media_type:
+            raise ValueError("mime_type is required for base64 video input")
+        source = {
+            "type": "base64",
+            "media_type": media_type,
+            "data": block.get("base64") or block.get("data", ""),
+        }
+    elif file_id := block.get("file_id"):
+        source = {"type": "url", "url": f"mm_file://{file_id}"}
+    elif block.get("source_type") == "id" and (file_id := block.get("id")):
+        source = {"type": "url", "url": f"mm_file://{file_id}"}
+
+    if source is None:
+        return block
+
+    detail = block.get("detail")
+    if detail is None and isinstance(block.get("extras"), dict):
+        detail = block["extras"].get("detail")
+    if detail is not None:
+        source["detail"] = detail
+
+    formatted = {"type": "video", "source": source}
+    if "cache_control" in block:
+        formatted["cache_control"] = block["cache_control"]
+    return formatted
+
+
+def _flatten_message_content(
+    content: Any, *, preserve_video: bool = False
+) -> str | list[Any] | Any:
     """Convert list-of-blocks content to a string, preserving media blocks.
 
-    Thinking/reasoning blocks are dropped.  When a media block (image or file)
-    is present, returns a list in the ORIGINAL order — consecutive text is
-    joined into a single text block, media blocks kept as-is — so captions stay
-    next to the attachment they describe.  Otherwise returns a plain string.
-    Non-list input is returned unchanged.
+    Thinking/reasoning blocks are dropped. When an enabled media block is
+    present, returns a list in the original order so captions stay next to the
+    attachment they describe. Otherwise returns a plain string. Non-list input
+    is returned unchanged.
 
     Args:
         content: Message content — a string, a list of content blocks, or
@@ -243,6 +280,9 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
         return content
     if not isinstance(content, list):
         return content
+    media_content_types = (
+        _ALL_MEDIA_CONTENT_TYPES if preserve_video else _MEDIA_CONTENT_TYPES
+    )
     parts: list[str] = []
     ordered_blocks: list[Any] = []
     saw_media = False
@@ -255,11 +295,15 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
     for block in content:
         if isinstance(block, dict):
             btype = block.get("type")
-            if btype in _MEDIA_CONTENT_TYPES:
+            if btype in media_content_types:
                 # Keep media as-is (never mutate; upstream copy.copy is shallow)
                 # and preserve its position relative to surrounding text.
                 _flush_text()
-                ordered_blocks.append(block)
+                ordered_blocks.append(
+                    _format_minimax_video_block(block)
+                    if preserve_video and btype in _VIDEO_CONTENT_TYPES
+                    else block
+                )
                 saw_media = True
                 continue
             if btype in _SKIP_CONTENT_TYPES:
@@ -276,7 +320,9 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
 
 
 def _sanitize_messages(
-    messages: list[BaseMessage], hoist_tool_media: bool = True
+    messages: list[BaseMessage],
+    hoist_tool_media: bool = True,
+    preserve_video: bool = False,
 ) -> list[BaseMessage]:
     """Flatten list content for OpenAI-compatible APIs, preserving media.
 
@@ -307,7 +353,10 @@ def _sanitize_messages(
         if not isinstance(msg.content, list):
             out.append(msg)
             continue
-        flat = _flatten_message_content(msg.content)
+        flat = _flatten_message_content(
+            msg.content,
+            preserve_video=preserve_video,
+        )
         if hoist_tool_media and is_tool and isinstance(flat, list):
             text_blocks = [
                 b for b in flat if isinstance(b, dict) and b.get("type") == "text"
@@ -343,19 +392,25 @@ _UNSUPPORTED_MEDIA_PLACEHOLDER = (
 # type is remembered (not all media).  Generic markers map to all media.
 _IMAGE_ERROR_MARKERS = ("image_url", "image input", "support image")
 _FILE_ERROR_MARKERS = ("file input", "pdf input", "document input")
+_VIDEO_ERROR_MARKERS = ("video input", "support video", "type video")
 # `expected \`text\`` keeps the backticks — the bare "expected text" phrase is
 # too broad (matches non-media schema errors like "... expected text").
 _GENERIC_MEDIA_MARKERS = ("multimodal", "expected `text`")
 
 
-def _media_types_in(messages: list[BaseMessage]) -> set[str]:
+def _media_types_in(
+    messages: list[BaseMessage], preserve_video: bool = False
+) -> set[str]:
     """Set of preserved-media block types present across the messages."""
+    media_content_types = (
+        _ALL_MEDIA_CONTENT_TYPES if preserve_video else _MEDIA_CONTENT_TYPES
+    )
     found: set[str] = set()
     for msg in messages:
         content = getattr(msg, "content", None)
         if isinstance(content, list):
             for b in content:
-                if isinstance(b, dict) and b.get("type") in _MEDIA_CONTENT_TYPES:
+                if isinstance(b, dict) and b.get("type") in media_content_types:
                     found.add(b["type"])
     return found
 
@@ -372,8 +427,10 @@ def _media_error_types(exc: Exception) -> set[str]:
         types |= _IMAGE_CONTENT_TYPES
     if any(m in text for m in _FILE_ERROR_MARKERS):
         types |= _FILE_CONTENT_TYPES
+    if any(m in text for m in _VIDEO_ERROR_MARKERS):
+        types |= _VIDEO_CONTENT_TYPES
     if any(m in text for m in _GENERIC_MEDIA_MARKERS):
-        types |= _MEDIA_CONTENT_TYPES
+        types |= _ALL_MEDIA_CONTENT_TYPES
     return types
 
 
@@ -429,20 +486,28 @@ class _OpenAICompatContent:
         self,
         profile: Mapping[str, object] | None,
         hoist_tool_media: bool,
+        preserve_video: bool = False,
     ) -> None:
         self.hoist_tool_media = hoist_tool_media
+        self.preserve_video = preserve_video
         self.blocked: set[str] = set()
         if profile is not None:
             if profile.get("image_inputs") is False:
                 self.blocked |= _IMAGE_CONTENT_TYPES
             if profile.get("pdf_inputs") is False:
                 self.blocked |= _FILE_CONTENT_TYPES
+            if preserve_video and profile.get("video_inputs") is False:
+                self.blocked |= _VIDEO_CONTENT_TYPES
 
     def _prepare(self, messages: list[BaseMessage]) -> list[BaseMessage]:
         prepared = (
             _strip_media_types(messages, self.blocked) if self.blocked else messages
         )
-        return _sanitize_messages(prepared, self.hoist_tool_media)
+        return _sanitize_messages(
+            prepared,
+            self.hoist_tool_media,
+            self.preserve_video,
+        )
 
     def _stripped(
         self,
@@ -452,6 +517,7 @@ class _OpenAICompatContent:
         return _sanitize_messages(
             _strip_media_types(messages, self.blocked | suspects),
             self.hoist_tool_media,
+            self.preserve_video,
         )
 
     def invoke(
@@ -461,7 +527,7 @@ class _OpenAICompatContent:
         *args,
         **kwargs,
     ) -> Any:
-        suspects = _media_types_in(messages) - self.blocked
+        suspects = _media_types_in(messages, self.preserve_video) - self.blocked
         prepared = self._prepare(messages)
         if not suspects:
             return call(prepared, *args, **kwargs)
@@ -485,7 +551,7 @@ class _OpenAICompatContent:
         *args,
         **kwargs,
     ) -> Any:
-        suspects = _media_types_in(messages) - self.blocked
+        suspects = _media_types_in(messages, self.preserve_video) - self.blocked
         prepared = self._prepare(messages)
         if not suspects:
             return await call(prepared, *args, **kwargs)
@@ -510,7 +576,7 @@ class _OpenAICompatContent:
         *args,
         **kwargs,
     ) -> Iterator[Any]:
-        suspects = _media_types_in(messages) - self.blocked
+        suspects = _media_types_in(messages, self.preserve_video) - self.blocked
         prepared = self._prepare(messages)
         if not suspects:
             yield from call(prepared, *args, **kwargs)
@@ -547,7 +613,7 @@ class _OpenAICompatContent:
         *args,
         **kwargs,
     ) -> AsyncIterator[Any]:
-        suspects = _media_types_in(messages) - self.blocked
+        suspects = _media_types_in(messages, self.preserve_video) - self.blocked
         prepared = self._prepare(messages)
         if not suspects:
             async for chunk in call(prepared, *args, **kwargs):
@@ -581,7 +647,11 @@ class _OpenAICompatContent:
             raise media_exc from None
 
 
-def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> None:
+def _patch_openai_compat_content(
+    model: Any,
+    hoist_tool_media: bool = True,
+    preserve_video: bool = False,
+) -> None:
     """Normalize content for OpenAI-compatible models lacking a native adapter."""
     import functools
 
@@ -589,6 +659,7 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
     compat = _OpenAICompatContent(
         profile if isinstance(profile, Mapping) else None,
         hoist_tool_media,
+        preserve_video,
     )
 
     orig_generate = getattr(model, "_generate", None)

@@ -52,6 +52,9 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 
+# MiniMax models that accept native video content blocks.
+_VIDEO_INPUT_MODELS: frozenset[tuple[str, str]] = frozenset({("minimax", "MiniMax-M3")})
+
 # Moonshot rejects a forced tool choice while thinking is enabled, and kimi-k3
 # cannot disable thinking — structured output must use json_schema there.
 # Moonshot-specific: do NOT widen to other mandatory-reasoning models.

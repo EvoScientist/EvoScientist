@@ -1310,6 +1310,22 @@ class TestMiniMaxProvider:
         minimax_models = get_models_for_provider("minimax")
         assert len(minimax_models) > 0
 
+    @patch("EvoScientist.llm.models._patch_openai_compat_content")
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_m3_enables_video_preservation(
+        self, mock_init, mock_content_patch, monkeypatch
+    ):
+        """MiniMax M3 should preserve video blocks for the Anthropic adapter."""
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        get_chat_model("MiniMax-M3", provider="minimax")
+
+        mock_content_patch.assert_called_once_with(
+            mock_init.return_value,
+            hoist_tool_media=False,
+            preserve_video=True,
+        )
+
 
 # =============================================================================
 # Test _flatten_message_content
@@ -1396,25 +1412,49 @@ class TestFlattenMessageContent:
         f = {"type": "file", "base64": "FFF", "mime_type": "application/pdf"}
         assert _flatten_message_content([f]) == [f]
 
-    def test_unsupported_media_dropped(self):
-        # video/audio are NOT in the allowlist -> dropped, not crashing
-        # (langchain-openai raises ValueError on `video`).
+    def test_video_dropped_by_default(self):
         from EvoScientist.llm.patches import _flatten_message_content
 
-        for block in (
-            {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
-            {"type": "audio", "base64": "ZZZ", "mime_type": "audio/wav"},
-        ):
-            assert _flatten_message_content([block]) == ""
+        block = {"type": "video", "base64": "VVV", "mime_type": "video/mp4"}
+        assert _flatten_message_content([block]) == ""
 
-    def test_non_image_media_dropped_keeps_text(self):
+    @pytest.mark.parametrize(
+        ("block", "source"),
+        [
+            (
+                {"type": "video", "url": "https://example.com/clip.mp4"},
+                {"type": "url", "url": "https://example.com/clip.mp4"},
+            ),
+            (
+                {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
+                {"type": "base64", "media_type": "video/mp4", "data": "VVV"},
+            ),
+            (
+                {"type": "video", "file_id": "file-123"},
+                {"type": "url", "url": "mm_file://file-123"},
+            ),
+        ],
+    )
+    def test_video_preserved_when_enabled(self, block, source):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        assert _flatten_message_content([block], preserve_video=True) == [
+            {"type": "video", "source": source}
+        ]
+
+    def test_unsupported_audio_dropped(self):
+        from EvoScientist.llm.patches import _flatten_message_content
+
+        block = {"type": "audio", "base64": "ZZZ", "mime_type": "audio/wav"}
+        assert _flatten_message_content([block], preserve_video=True) == ""
+
+    def test_video_dropped_by_default_keeps_text(self):
         from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "text", "text": "hi"},
             {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
         ]
-        # Video dropped, text kept -> plain string (no media list).
         assert _flatten_message_content(content) == "hi"
 
     def test_consolidates_text_and_image(self):
@@ -1582,6 +1622,40 @@ class TestPatchOpenAICompatContent:
 
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
+
+    def test_generate_preserves_video_when_enabled(self):
+        from langchain_anthropic.chat_models import _format_messages
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(
+            model,
+            hoist_tool_media=False,
+            preserve_video=True,
+        )
+
+        video = {"type": "video", "url": "https://example.com/clip.mp4"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, video])
+        model._generate([msg])
+
+        called_msgs = orig.call_args[0][0]
+        expected_content = [
+            {"type": "text", "text": "see"},
+            {
+                "type": "video",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/clip.mp4",
+                },
+            },
+        ]
+        assert called_msgs[0].content == expected_content
+
+        _, formatted_messages = _format_messages(called_msgs)
+        assert formatted_messages[0]["content"] == expected_content
 
     async def test_agenerate_preserves_media(self):
         from langchain_core.messages import HumanMessage

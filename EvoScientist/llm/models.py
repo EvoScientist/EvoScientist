@@ -42,6 +42,7 @@ from .registry import (
     _OPENAI_ROUTED_PROVIDERS,
     _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS,  # noqa: F401 — re-exported
     _THINKING_CAPABLE_PROVIDERS,
+    _VIDEO_INPUT_MODELS,
     DEFAULT_MODEL,
     MODELS,
     _is_mandatory_thinking_kimi,
@@ -567,7 +568,12 @@ def get_chat_model(
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
         _hoist = _original_provider not in _ANTHROPIC_ROUTED_PROVIDERS
-        _patch_openai_compat_content(chat_model, hoist_tool_media=_hoist)
+        _preserve_video = (_original_provider, model_id) in _VIDEO_INPUT_MODELS
+        _patch_openai_compat_content(
+            chat_model,
+            hoist_tool_media=_hoist,
+            preserve_video=_preserve_video,
+        )
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)
