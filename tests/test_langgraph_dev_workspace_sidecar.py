@@ -142,6 +142,36 @@ def test_ensure_langgraph_dev_refuses_on_workspace_mismatch(
         manager.ensure_langgraph_dev(cfg, workspace_dir=ws_b)
     assert str(ws_a.resolve()) in str(exc.value)
     assert str(ws_b) in str(exc.value)
+    # Without keepalive a mismatch means a live session — no stop suggestion,
+    # keeping the message identical to pre-keepalive behavior.
+    assert "EvoSci server stop" not in str(exc.value)
+
+
+def test_mismatch_error_suggests_server_stop_under_keepalive(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """With keepalive on, the leftover may be ownerless — the error points at
+    `EvoSci server stop`, which kills AND cleans the records (a raw kill
+    would leave stale files behind)."""
+    ws_a = tmp_path / "A"
+    ws_b = tmp_path / "B"
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(workspace_dir=ws_a, pid=99999)
+
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
+
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    cfg.langgraph_dev_keepalive = True
+    with pytest.raises(manager.WorkspaceMismatchError) as exc:
+        manager.ensure_langgraph_dev(cfg, workspace_dir=ws_b)
+    assert "EvoSci server stop" in str(exc.value)
 
 
 def test_ensure_langgraph_dev_refuses_on_mismatch_with_stale_process(
@@ -236,3 +266,304 @@ def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths
     monkeypatch.setattr(manager, "_PROCESS", None)
     manager.stop_langgraph_dev()
     assert not sidecar.exists()
+
+
+def test_keepalive_skips_atexit_registration(tmp_path, monkeypatch, runtime_paths):
+    """keepalive=True leaves the server running on exit; False registers stop."""
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
+    fake_proc = object()
+    monkeypatch.setattr(manager, "start_langgraph_dev", lambda **kw: fake_proc)
+    registered = []
+    monkeypatch.setattr(
+        manager.atexit, "register", lambda *a, **kw: registered.append(a)
+    )
+
+    cfg = manager.EvoScientistConfig()
+    assert cfg.langgraph_dev_keepalive is False, "keepalive must default to off"
+    cfg.enable_async_subagents = True
+    cfg.langgraph_dev_keepalive = True
+    assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A") is fake_proc
+    assert registered == []
+
+    cfg.langgraph_dev_keepalive = False
+    assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A") is fake_proc
+    assert registered
+    assert registered[0][0] is manager.stop_langgraph_dev
+
+
+# ---------------------------------------------------------------------------
+# Config fingerprint + drift detection + explicit server stop
+# ---------------------------------------------------------------------------
+
+
+def _dead_pid() -> int:
+    """Spawn-and-reap a process so its pid is reliably dead."""
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def test_sidecar_records_config_fingerprint_when_passed(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path / "ws", pid=1, config_fingerprint="abc123"
+    )
+    assert json.loads((tmp_path / "ws.json").read_text())["config_fingerprint"] == (
+        "abc123"
+    )
+
+
+def test_server_config_fingerprint_tracks_relevant_fields():
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    assert base == manager._server_config_fingerprint(cfg), "must be deterministic"
+    cfg.model = "some-other-model"
+    assert manager._server_config_fingerprint(cfg) != base
+
+
+def _reuse_setup(tmp_path, monkeypatch, runtime_paths, fingerprint):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path / "A", pid=99999, config_fingerprint=fingerprint
+    )
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: True)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    return cfg
+
+
+def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
+    tmp_path, monkeypatch, runtime_paths
+):
+    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "stale-fingerprint")
+    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+
+
+def test_reuse_clears_drift_flag_on_matching_fingerprint(
+    tmp_path, monkeypatch, runtime_paths
+):
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    fp = manager._server_config_fingerprint(cfg)
+    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
+    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
+
+
+def test_stop_recorded_server_none_when_no_pid_file(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    assert manager.stop_recorded_server() is None
+
+
+def test_stop_recorded_server_cleans_stale_files_for_dead_pid(
+    tmp_path, monkeypatch, runtime_paths
+):
+    pid_file = tmp_path / "pid.txt"
+    sidecar = tmp_path / "ws.json"
+    pid_file.write_text(str(_dead_pid()))
+    sidecar.write_text(json.dumps({"workspace": "/a", "pid": 1}))
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
+        ),
+    )
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    assert manager.stop_recorded_server() is None
+    assert not pid_file.exists()
+    assert not sidecar.exists()
+
+
+def test_stop_recorded_server_refuses_foreign_process(
+    tmp_path, monkeypatch, runtime_paths
+):
+    import subprocess
+    import sys
+
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        pid_file = tmp_path / "pid.txt"
+        pid_file.write_text(str(victim.pid))
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(runtime_paths, pid_file=pid_file),
+        )
+        monkeypatch.setattr(manager, "_PROCESS", None)
+        assert manager.stop_recorded_server() is None
+        assert victim.poll() is None, "foreign process must not be killed"
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_stop_recorded_server_kills_owned_langgraph_process(
+    tmp_path, monkeypatch, runtime_paths
+):
+    import subprocess
+    import sys
+
+    victim = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph"]
+    )
+    try:
+        pid_file = tmp_path / "pid.txt"
+        sidecar = tmp_path / "ws.json"
+        pid_file.write_text(str(victim.pid))
+        sidecar.write_text(json.dumps({"workspace": "/a", "pid": victim.pid}))
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(
+                runtime_paths, pid_file=pid_file, workspace_sidecar=sidecar
+            ),
+        )
+        monkeypatch.setattr(manager, "_PROCESS", None)
+        assert manager.stop_recorded_server() == victim.pid
+        assert victim.poll() is not None, "owned langgraph process must be stopped"
+        assert not pid_file.exists()
+        assert not sidecar.exists()
+    finally:
+        if victim.poll() is None:
+            victim.kill()
+        victim.wait()
+
+
+def test_stop_recorded_server_cleans_corrupt_pid_file(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A corrupt PID file is cleaned up, matching the docstring's promise."""
+    pid_file = tmp_path / "pid.txt"
+    pid_file.write_text("not-a-pid")
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, pid_file=pid_file),
+    )
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    assert manager.stop_recorded_server() is None
+    assert not pid_file.exists()
+
+
+def test_server_config_fingerprint_tracks_dangerous_mode():
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.dangerous_mode = True
+    assert manager._server_config_fingerprint(cfg) != base
+
+
+def test_pid_serves_port_matrix():
+    import subprocess
+    import sys
+
+    assert manager._pid_serves_port(None, 6174) is False
+    assert manager._pid_serves_port(True, 6174) is False
+    assert manager._pid_serves_port(-1, 6174) is False
+
+    victim = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph", "6174"]
+    )
+    try:
+        assert manager._pid_serves_port(victim.pid, 6174) is True
+        assert manager._pid_serves_port(victim.pid, 9999) is False, (
+            "must not attribute a server bound to a different port"
+        )
+    finally:
+        victim.kill()
+        victim.wait()
+    assert manager._pid_serves_port(victim.pid, 6174) is False, "dead pid"
+
+
+def test_server_config_fingerprint_covers_new_fields_by_default():
+    """The fingerprint iterates the dataclass minus an exclusion set, so
+    server-affecting values din0s called out — reasoning effort, provider
+    keys/base URLs — count without per-field registration."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.reasoning_effort = "definitely-different"
+    after_effort = manager._server_config_fingerprint(cfg)
+    assert after_effort != base
+    cfg.anthropic_base_url = "https://proxy.example"
+    assert manager._server_config_fingerprint(cfg) != after_effort
+
+
+def test_server_config_fingerprint_ignores_cli_only_fields():
+    """Channel/UI-side fields never reach the server — no spurious drift."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.show_thinking = not cfg.show_thinking
+    cfg.telegram_bot_token = "tg-token"
+    cfg.langgraph_dev_keepalive = True
+    assert manager._server_config_fingerprint(cfg) == base
+
+
+def test_sidecar_records_deploy_mode(tmp_path, monkeypatch, runtime_paths):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path / "ws", pid=1, deploy_mode=False
+    )
+    assert json.loads((tmp_path / "ws.json").read_text())["deploy_mode"] is False
+
+
+def test_server_config_fingerprint_ignores_shell_allow_list():
+    """shell_allow_list is read only by CLI/channel approval resolvers —
+    it never reaches the subprocess, so it must not cause drift."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.shell_allow_list = "git status,ls"
+    assert manager._server_config_fingerprint(cfg) == base
+
+
+def test_server_config_fingerprint_tracks_mcp_yaml_content(tmp_path, monkeypatch):
+    from EvoScientist.config import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "get_config_dir", lambda: tmp_path)
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    (tmp_path / "mcp.yaml").write_text("server-a:\n  transport: stdio\n")
+    changed = manager._server_config_fingerprint(cfg)
+    assert changed != base
+    (tmp_path / "mcp.yaml").write_text("server-b:\n  transport: http\n")
+    assert manager._server_config_fingerprint(cfg) != changed
+
+
+def test_server_config_fingerprint_tracks_subagent_yaml_content(tmp_path, monkeypatch):
+    fake_dir = tmp_path / "subagents"
+    fake_dir.mkdir()
+    (fake_dir / "research.yaml").write_text("name: research\nprompt: v1\n")
+    monkeypatch.setattr(manager, "_SUBAGENTS_DIR", fake_dir)
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    (fake_dir / "research.yaml").write_text("name: research\nprompt: v2\n")
+    assert manager._server_config_fingerprint(cfg) != base

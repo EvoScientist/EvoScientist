@@ -26,14 +26,15 @@ from ..gateway import (
     GraphGateway,
     GraphTarget,
     RunRequest,
-    RuntimeGateways,
-    create_runtime_gateways,
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..runtime import AsyncRuntime
 from ..stream.console import console
-from . import async_notifier
+from . import (
+    async_notifier,
+    server_cmd,  # noqa: F401 — registers `EvoSci server` commands
+)
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from ..config import EvoScientistConfig
+    from ..gateway import RuntimeGateways
 
 
 _ASYNC_RUNTIME_META_KEY = "evoscientist.async_runtime"
@@ -527,6 +529,16 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
+    from ..langgraph_dev import manager as _lg_manager
+
+    if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+        console.print(
+            "[yellow]⚠ Config changed since the background agent server was "
+            "launched — async sub-agents still use the old settings. Apply "
+            "them with [bold]EvoSci server stop[/bold], then restart "
+            "EvoSci.[/yellow]"
+        )
+
     # The backend is shared by every UI mode, so the exposure warning lives
     # here, not just in deploy/WebUI. Gated on the server being up: warning
     # about a bind that never happened would be worse than saying nothing.
@@ -940,7 +952,7 @@ class ServeRuntimeState:
     thread_id: str
     workspace_dir: str | None
     config: "EvoScientistConfig | None"
-    runtime_gateways: RuntimeGateways
+    runtime_gateways: "RuntimeGateways"
     async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
 
@@ -1552,6 +1564,8 @@ def serve(
         )
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
+
+    from ..gateway import create_runtime_gateways
 
     runtime_gateways = create_runtime_gateways()
     tid = async_runtime.run_sync(
@@ -2412,6 +2426,7 @@ def _main_callback(
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
 
+        from ..gateway import create_runtime_gateways
         from ..sessions import get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import _wait_for_memory_workers_before_exit, cmd_run

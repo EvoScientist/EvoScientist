@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC
 from unittest.mock import patch
 
+import aiosqlite
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -231,6 +232,19 @@ class TestThreadFunctions(unittest.IsolatedAsyncioTestCase):
     async def test_list_threads_with_message_count(self):
         threads = await list_threads(limit=10, include_message_count=True)
         assert "message_count" in threads[0]
+
+    async def test_list_threads_creates_meta_index(self):
+        """Thread listing must run off the expression index, not a blob scan."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("DROP INDEX IF EXISTS idx_evoscientist_thread_meta")
+            await conn.commit()
+        await list_threads(limit=10)
+        async with aiosqlite.connect(self._db_path) as conn:
+            async with conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_evoscientist_thread_meta",),
+            ) as cur:
+                assert await cur.fetchone() is not None
 
     async def test_thread_exists_true(self):
         assert await thread_exists("abc12345")

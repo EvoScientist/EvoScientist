@@ -12,6 +12,7 @@ Mirrors the lifecycle pattern used by ``ccproxy_manager.py``.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 
 import httpx
@@ -108,6 +110,13 @@ def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
 # ``stop_langgraph_dev`` from inside its own critical section during a
 # workspace-driven restart, and both mutate the same module-level state.
 _LOCK = threading.RLock()
+
+
+# Set by ``ensure_langgraph_dev`` when it reuses a keepalive server whose
+# recorded launch-time config fingerprint differs from the current effective
+# config. The CLI reads it after startup to surface a "restart to apply"
+# hint — the server itself is never restarted automatically.
+CONFIG_DRIFT_SINCE_LAUNCH = False
 
 
 # Default port (Kaprekar's constant — see config/settings.py for the rationale).
@@ -211,8 +220,16 @@ class WorkspaceMismatchError(RuntimeError):
     """
 
 
-def _write_workspace_sidecar(workspace_dir: Path, pid: int) -> None:
+def _write_workspace_sidecar(
+    workspace_dir: Path,
+    pid: int,
+    config_fingerprint: str | None = None,
+    deploy_mode: bool | None = None,
+) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
+
+    ``config_fingerprint`` (optional) captures the launch-time config subset
+    the server consumed; keepalive reuse compares it to detect drift.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -228,9 +245,12 @@ def _write_workspace_sidecar(workspace_dir: Path, pid: int) -> None:
     try:
         RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps({"workspace": str(workspace_dir), "pid": pid}), encoding="utf-8"
-        )
+        payload: dict = {"workspace": str(workspace_dir), "pid": pid}
+        if config_fingerprint is not None:
+            payload["config_fingerprint"] = config_fingerprint
+        if deploy_mode is not None:
+            payload["deploy_mode"] = deploy_mode
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, RUNTIME.workspace_sidecar)
     except OSError as exc:
         logger.warning(
@@ -569,6 +589,186 @@ def _kill_owned_stale_process(port: int) -> bool:
     return True
 
 
+# Config fields that provably never reach the langgraph dev subprocess:
+# the channel stack + STT run in the CLI process, display/workspace/frontend
+# knobs shape the CLI itself, and keepalive is a lifecycle flag. Everything
+# NOT listed here counts toward the drift fingerprint, so a newly added
+# config field defaults to "affects the server" — the failure mode is a
+# spurious restart hint, never silent staleness.
+# Packaged sub-agent specs — consumed at graph build; module constant so
+# tests can redirect it.
+_SUBAGENTS_DIR = Path(__file__).resolve().parent.parent / "subagents"
+
+_FINGERPRINT_EXCLUDED_PREFIXES = (
+    "channel_",
+    "imessage_",
+    "telegram_",
+    "discord_",
+    "slack_",
+    "feishu_",
+    "wechat_",
+    "dingtalk_",
+    "email_",
+    "qq_",
+    "signal_",
+    "stt_",
+)
+_FINGERPRINT_EXCLUDED_FIELDS = frozenset(
+    {
+        "require_mention",
+        "text_chunk_limit",
+        "allowed_channels",
+        "dm_policy",
+        "shared_webhook_port",
+        "show_thinking",
+        "ui_backend",
+        "log_level",
+        "default_mode",
+        "default_workdir",
+        "webui_port",
+        "webui_host",
+        "langgraph_dev_keepalive",
+        "shell_allow_list",
+    }
+)
+
+
+def _server_config_fingerprint(config: EvoScientistConfig) -> str:
+    """Hash of everything the langgraph dev subprocess consumes at launch.
+
+    Deployed graphs read config once at import (``subagents/_factory.py``,
+    ``EvoScientist.py``), so a keepalive server keeps serving those values
+    until restarted. Iterates the full ``EvoScientistConfig`` field list
+    minus the explicit exclusion set above — a new config field counts
+    toward drift by default — and folds in ``mcp.yaml`` plus the packaged
+    ``subagents/*.yaml``, which are consumed at graph build too. Secrets
+    only feed a truncated one-way digest; nothing recoverable is stored.
+    getattr with defaults: deploy/WebUI (and their tests) routinely hand
+    this module duck-typed config objects missing dataclass fields.
+    """
+    parts = []
+    for field in dataclass_fields(EvoScientistConfig):
+        name = field.name
+        if name in _FINGERPRINT_EXCLUDED_FIELDS or name.startswith(
+            _FINGERPRINT_EXCLUDED_PREFIXES
+        ):
+            continue
+        parts.append((name, str(getattr(config, name, None))))
+    digest = hashlib.sha256(repr(parts).encode("utf-8"))
+    try:
+        from EvoScientist.config.settings import get_config_dir
+
+        mcp_yaml = get_config_dir() / "mcp.yaml"
+        if mcp_yaml.exists():
+            digest.update(mcp_yaml.read_bytes())
+    except OSError:
+        pass
+    try:
+        for yaml_path in sorted(_SUBAGENTS_DIR.glob("*.yaml")):
+            digest.update(yaml_path.name.encode("utf-8"))
+            digest.update(yaml_path.read_bytes())
+    except OSError:
+        pass
+    return digest.hexdigest()[:16]
+
+
+def stop_recorded_server() -> int | None:
+    """Explicitly stop the langgraph dev recorded in our PID file.
+
+    Backs the user-facing ``EvoSci server stop`` command — the deliberate
+    counterpart to ``langgraph_dev_keepalive``: an opt-in server that
+    outlives its CLI needs a first-class way to stop it. Ownership = our
+    PID file + a live process whose cmdline still contains ``langgraph``
+    (same loose anti-PID-recycling match as ``_kill_owned_stale_process``,
+    with PID-file ownership as the primary guard). Holds the cross-process
+    file lock so a concurrent start can't have its fresh PID/sidecar records
+    wiped by this stop's cleanup. Kills the whole process tree, then removes
+    the PID file + sidecar. Returns the stopped pid, or ``None`` when nothing
+    was stopped (stale/corrupt files, if any, are still cleaned up).
+    """
+    try:
+        with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
+            return _stop_recorded_server_locked()
+    except FileLockTimeout:
+        logger.warning(
+            "Timed out waiting for the langgraph dev lock — another EvoSci "
+            "process is mid lifecycle change; not stopping anything."
+        )
+        return None
+
+
+def _stop_recorded_server_locked() -> int | None:
+    with _LOCK:
+        if _PROCESS is not None and _PROCESS.poll() is None:
+            pid = _PROCESS.pid
+            stop_langgraph_dev()
+            return pid
+    if not RUNTIME.pid_file.exists():
+        return None
+    try:
+        owned_pid = int(RUNTIME.pid_file.read_text(encoding="utf-8").strip())
+    except ValueError:
+        stop_langgraph_dev()  # corrupt PID file — clean it up as promised
+        return None
+    except OSError:
+        return None
+    try:
+        proc = psutil.Process(owned_pid)
+        cmdline = proc.cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        stop_langgraph_dev()  # dead/inaccessible — clean the stale files
+        return None
+    if not any("langgraph" in arg for arg in cmdline):
+        stop_langgraph_dev()  # pid recycled by a foreign process — files only
+        return None
+    try:
+        children = proc.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except psutil.TimeoutExpired:
+            for child in children:
+                try:
+                    child.kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            proc.kill()
+        # The parent exiting promptly doesn't prove its workers did — sweep
+        # the pre-kill snapshot for survivors.
+        for child in children:
+            try:
+                if child.is_running():
+                    child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    stop_langgraph_dev()
+    return owned_pid
+
+
+def _pid_serves_port(pid: object, port: int) -> bool:
+    """Best-effort check that ``pid`` is a langgraph dev serving ``port``.
+
+    Used to attribute an occupied port to the sidecar's recorded server
+    before printing its details — avoids blaming a stale record. Relies on
+    ``--port`` always being in ``start_langgraph_dev``'s argv, not on
+    port→PID mapping (root-only on macOS via psutil).
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        cmdline = psutil.Process(pid).cmdline()
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return False
+    return any("langgraph" in arg for arg in cmdline) and str(port) in cmdline
+
+
 def _packaged_langgraph_config() -> Path:
     """Return path to the package-shipped ``langgraph.json``.
 
@@ -595,6 +795,7 @@ def start_langgraph_dev(
     jobs_per_worker: int = 10,
     deploy_mode: bool = False,
     tunnel: bool = False,
+    config_fingerprint: str | None = None,
 ) -> subprocess.Popen:
     """Start langgraph dev as a background subprocess.
 
@@ -816,7 +1017,12 @@ def start_langgraph_dev(
         except Exception:
             pass
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
-    _write_workspace_sidecar(workspace_dir=workspace_dir, pid=proc.pid)
+    _write_workspace_sidecar(
+        workspace_dir=workspace_dir,
+        pid=proc.pid,
+        config_fingerprint=config_fingerprint,
+        deploy_mode=deploy_mode,
+    )
     global _PROCESS_WORKSPACE
     _PROCESS = proc
     _PROCESS_WORKSPACE = workspace_dir
@@ -993,7 +1199,8 @@ def ensure_langgraph_dev(
     still chat with sync sub-agents; only async sub-agent calls and EvoMemory
     background workers will fail.
     """
-    global _ASYNC_SUBAGENTS_AVAILABLE
+    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
+    CONFIG_DRIFT_SINCE_LAUNCH = False
 
     if not needs_langgraph_dev(config):
         _ASYNC_SUBAGENTS_AVAILABLE = False
@@ -1032,7 +1239,8 @@ def _ensure_langgraph_dev_locked(
     workspace_dir: Path | str | None,
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
-    global _ASYNC_SUBAGENTS_AVAILABLE
+    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
+    config_fp = _server_config_fingerprint(config)
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
@@ -1086,12 +1294,33 @@ def _ensure_langgraph_dev_locked(
             if sidecar is not None:
                 recorded = Path(sidecar["workspace"]).resolve()
                 if recorded != ws_path.resolve():
+                    hint = ""
+                    if getattr(config, "langgraph_dev_keepalive", False):
+                        # Only under keepalive can the server be an ownerless
+                        # leftover; without the flag the mismatch means a live
+                        # session, where a stop suggestion would be misleading.
+                        # Point at `EvoSci server stop` (not a raw kill): it
+                        # verifies ownership and cleans the PID/sidecar files,
+                        # so no stale records are left behind.
+                        hint = (
+                            " If it is a leftover keepalive server, stop it"
+                            " with: EvoSci server stop."
+                        )
                     raise WorkspaceMismatchError(
                         f"An EvoSci langgraph dev is already running on "
                         f"{_base_url(port, host)} for workspace {recorded}, but the "
                         f"current process requested workspace {ws_path}. "
                         f"Stop the other EvoSci session (deploy / TUI / serve) "
-                        f"or rerun with --workdir {recorded}."
+                        f"or rerun with --workdir {recorded}." + hint
+                    )
+                recorded_fp = sidecar.get("config_fingerprint")
+                if isinstance(recorded_fp, str) and recorded_fp != config_fp:
+                    CONFIG_DRIFT_SINCE_LAUNCH = True
+                    logger.warning(
+                        "Config changed since the running langgraph dev was "
+                        "launched — async sub-agents still use the old "
+                        "settings until the server is restarted "
+                        "(EvoSci server stop)."
                     )
                 logger.info(
                     "Reusing externally-managed langgraph dev on %s; sidecar "
@@ -1125,6 +1354,7 @@ def _ensure_langgraph_dev_locked(
             host=host,
             file_persistence=file_persistence,
             jobs_per_worker=jobs_per_worker,
+            config_fingerprint=config_fp,
         )
     except (FileNotFoundError, RuntimeError) as exc:
         # Startup failed — keep async subagents disabled so the main agent
@@ -1141,5 +1371,10 @@ def _ensure_langgraph_dev_locked(
         return None
 
     _ASYNC_SUBAGENTS_AVAILABLE = True
-    atexit.register(stop_langgraph_dev, proc)
+    if getattr(config, "langgraph_dev_keepalive", False):
+        # Keepalive: leave the server (plus PID file + sidecar) behind on CLI
+        # exit so the next start in this workspace reuses it instantly.
+        logger.info("langgraph_dev_keepalive enabled — server will outlive this CLI.")
+    else:
+        atexit.register(stop_langgraph_dev, proc)
     return proc

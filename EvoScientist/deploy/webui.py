@@ -67,6 +67,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         _is_loopback_host,
         _is_port_occupied,
         _read_workspace_sidecar,
+        _server_config_fingerprint,
         is_langgraph_dev_running,
         start_langgraph_dev,
         stop_langgraph_dev,
@@ -163,6 +164,31 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                     f"[/dim]"
                 )
                 raise typer.Exit(1)
+            if sidecar is not None and sidecar.get("deploy_mode") is False:
+                # A stripped (CLI-started) server has no MCP and no async
+                # sub-agents — silently reusing it would degrade the WebUI
+                # with no visible cause. Refuse; never auto-kill.
+                console.print(
+                    f"[red]Port {backend_port} is serving a stripped "
+                    f"(CLI-mode) langgraph dev — the WebUI needs the full "
+                    f"deploy-mode server (MCP + async sub-agents).[/red]"
+                )
+                console.print(
+                    "[dim]Stop it with [bold]EvoSci server stop[/bold], then "
+                    "re-run [bold]EvoSci[/bold].[/dim]"
+                )
+                raise typer.Exit(1)
+            if sidecar is not None:
+                recorded_fp = sidecar.get("config_fingerprint")
+                if isinstance(
+                    recorded_fp, str
+                ) and recorded_fp != _server_config_fingerprint(config):
+                    console.print(
+                        "[yellow]⚠ Config changed since this server was "
+                        "launched — it still serves the old settings. Apply "
+                        "them with [bold]EvoSci server stop[/bold], then "
+                        "re-run EvoSci.[/yellow]"
+                    )
             console.print(
                 f"[green]✓[/green] Reusing langgraph dev already serving "
                 f"port {backend_port}"
@@ -191,8 +217,18 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                     file_persistence=file_persistence,
                     jobs_per_worker=jobs_per_worker,
                     deploy_mode=True,
+                    config_fingerprint=_server_config_fingerprint(config),
                 )
-            atexit.register(stop_langgraph_dev, started_proc)
+            if getattr(config, "langgraph_dev_keepalive", False):
+                # Keepalive: the deploy-mode backend outlives this session so
+                # the next same-workspace launch reuses it instantly. The npx
+                # front-end below still stops on exit as usual.
+                console.print(
+                    "[dim]keepalive: backend server stays up after exit — "
+                    "stop it with [bold]EvoSci server stop[/bold].[/dim]"
+                )
+            else:
+                atexit.register(stop_langgraph_dev, started_proc)
         except Exception as exc:
             console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
             raise typer.Exit(1) from exc
