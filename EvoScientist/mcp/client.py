@@ -219,10 +219,12 @@ def _patch_mcp_stdio_errlog_safe() -> None:
         async def _close_owned_errlog():
             owns_errlog = needs_fallback
             errlog = _safe_stdio_errlog() if owns_errlog else caller_errlog
-            # Forward by keyword: robust against future SDK signature changes
-            # that insert a positional parameter before ``errlog``.
-            cm = original(server, *args, errlog=errlog, **kwargs)
             try:
+                # Construct inside the try so a failure here still reaches the
+                # finally and closes the wrapper-owned fallback stream.
+                # Forward by keyword: robust against future SDK signature changes
+                # that insert a positional parameter before ``errlog``.
+                cm = original(server, *args, errlog=errlog, **kwargs)
                 async with cm as streams:
                     yield streams
             finally:

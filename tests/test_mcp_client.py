@@ -522,6 +522,53 @@ class TestStdioErrlogSafetyPatch:
         finally:
             monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
 
+    def test_fallback_closed_when_construction_fails(self, monkeypatch):
+        """If the SDK's ``stdio_client`` raises during construction, the
+        wrapper-owned fallback stream is still closed — no fd leak on the
+        construction-failure path."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        # Force the devnull fallback by making sys.__stderr__ unusable.
+        monkeypatch.setattr("sys.__stderr__", None, raising=False)
+
+        opened = {}
+        real_open = open
+
+        def tracking_open(path, *args, **kwargs):
+            f = real_open(path, *args, **kwargs)
+            if str(path) == os.devnull:
+                opened["stream"] = f
+            return f
+
+        monkeypatch.setattr("builtins.open", tracking_open)
+
+        @asynccontextmanager
+        async def fake_original(server, *args, **kwargs):
+            # Construction itself fails (e.g. bad command / SDK error).
+            raise RuntimeError("construction failed")
+            yield  # pragma: no cover - unreachable
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            cm = stdio_mod.stdio_client(object())
+
+            async def _run():
+                with pytest.raises(RuntimeError, match="construction failed"):
+                    async with cm:
+                        pass
+
+            asyncio.run(_run())
+            # The fallback stream must be closed despite the construction error.
+            assert "stream" in opened, "fallback devnull was opened"
+            assert opened["stream"].closed is True
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
     def test_adapter_binds_patched_stdio_client(self):
         """``langchain-mcp-adapters`` binds ``stdio_client`` via a ``from``
         import at its module load, so it could capture the unwrapped function
