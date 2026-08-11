@@ -14,6 +14,7 @@ import re
 import shutil
 import sys
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -130,9 +131,11 @@ _patch_mcp_windows_command_resolver()
 def _stdio_errlog_is_usable(errlog: object) -> bool:
     """Return ``True`` if *errlog* can back a subprocess ``stderr`` pipe.
 
-    A usable errlog exposes a ``fileno()`` that resolves to a non-negative OS
-    file descriptor. Textual's ``_PrintCapture`` and similar redirected
-    streams return ``-1`` (or raise), so they are rejected here.
+    A usable errlog exposes a ``fileno()`` that resolves to a live OS file
+    descriptor. Textual's ``_PrintCapture`` and similar redirected streams
+    return ``-1`` (or raise), so they are rejected here. A closed stream may
+    still report its former (positive) fd, so we additionally ``os.fstat``
+    the descriptor to confirm it is still open.
     """
     fileno = getattr(errlog, "fileno", None)
     if not callable(fileno):
@@ -141,7 +144,13 @@ def _stdio_errlog_is_usable(errlog: object) -> bool:
         fd = fileno()
     except Exception:
         return False
-    return isinstance(fd, int) and fd >= 0
+    if not isinstance(fd, int) or fd < 0:
+        return False
+    try:
+        os.fstat(fd)
+    except (OSError, OverflowError):
+        return False
+    return True
 
 
 def _safe_stdio_errlog() -> Any:
@@ -189,9 +198,36 @@ def _patch_mcp_stdio_errlog_safe() -> None:
 
     @wraps(original)
     def _stdio_client_safe(server: Any, errlog: Any = ..., *args: Any, **kwargs: Any):
-        if errlog is ... or not _stdio_errlog_is_usable(errlog):
+        # When the caller didn't supply a usable errlog we allocate a fallback
+        # stream (sys.__stderr__ or os.devnull). The SDK never closes a
+        # caller-provided errlog, so a devnull fallback would leak its fd on
+        # every MCP reload. We own the fallback and close it once the stdio
+        # session exits. Caller-provided usable streams are passed through and
+        # left untouched.
+        owns_errlog = errlog is ... or not _stdio_errlog_is_usable(errlog)
+        if owns_errlog:
             errlog = _safe_stdio_errlog()
-        return original(server, errlog, *args, **kwargs)
+
+        cm = original(server, errlog, *args, **kwargs)
+
+        # sys.__stderr__ is process-owned and must never be closed here.
+        @asynccontextmanager
+        async def _close_owned_errlog(cm=cm, errlog=errlog, owns=owns_errlog):
+            try:
+                async with cm as streams:
+                    yield streams
+            finally:
+                if owns and errlog is not getattr(sys, "__stderr__", None):
+                    close = getattr(errlog, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            logger.debug(
+                                "Failed to close fallback stdio errlog", exc_info=True
+                            )
+
+        return _close_owned_errlog()
 
     _stdio_client_safe._evosci_errlog_safe = True  # type: ignore[attr-defined]
     _stdio_mod.stdio_client = _stdio_client_safe
