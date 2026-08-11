@@ -153,19 +153,27 @@ def _stdio_errlog_is_usable(errlog: object) -> bool:
     return True
 
 
-def _safe_stdio_errlog() -> Any:
-    """Return a ``stderr``-suitable stream with a real OS file descriptor.
+def _safe_stdio_errlog() -> tuple[Any, bool]:
+    """Return a ``(stream, opened_by_us)`` pair for a usable stderr.
 
     Prefers ``sys.__stderr__`` (the original console handle, so the server's
-    diagnostic output still lands where the user expects); falls back to an
-    ``os.devnull`` handle when even ``__stderr__`` is unavailable (e.g. in a
-    GUI/pythonw host with no console).
+    diagnostic output still lands where the user expects — note
+    ``sys.__stderr__`` is the process's original handle and stays usable even
+    while the Textual TUI controls the screen, since Textual only redirects
+    ``sys.stderr``). Falls back to an ``os.devnull`` handle when even
+    ``__stderr__`` is unavailable (e.g. in a GUI/pythonw host with no console).
+
+    The second element is ``True`` when *we* allocated the stream (the
+    ``os.devnull`` case) and therefore own its lifecycle; it is ``False`` for
+    ``sys.__stderr__``, which is process-owned and must never be closed here.
+    Callers use that flag to decide whether to close the stream after the
+    stdio session exits.
     """
     dunder = getattr(sys, "__stderr__", None)
     if dunder is not None and _stdio_errlog_is_usable(dunder):
-        return dunder
+        return dunder, False
     # Last resort: discard the server's stderr so the spawn still succeeds.
-    return open(os.devnull, "w", encoding="utf-8", errors="replace")
+    return open(os.devnull, "w", encoding="utf-8", errors="replace"), True
 
 
 def _patch_mcp_stdio_errlog_safe() -> None:
@@ -212,24 +220,27 @@ def _patch_mcp_stdio_errlog_safe() -> None:
         # before being entered, Python finalises the async generator and runs
         # the same ``finally``. ``errlog`` is forwarded by keyword so a future
         # SDK that inserts a positional parameter before it can't mis-bind it.
-        needs_fallback = errlog is ... or not _stdio_errlog_is_usable(errlog)
         caller_errlog = errlog
+        needs_fallback = errlog is ... or not _stdio_errlog_is_usable(errlog)
 
         @asynccontextmanager
         async def _close_owned_errlog():
-            owns_errlog = needs_fallback
-            errlog = _safe_stdio_errlog() if owns_errlog else caller_errlog
+            if needs_fallback:
+                # ``opened_by_us`` is True only for the os.devnull case;
+                # sys.__stderr__ is process-owned and must not be closed.
+                errlog, opened_by_us = _safe_stdio_errlog()
+            else:
+                errlog, opened_by_us = caller_errlog, False
             try:
                 # Construct inside the try so a failure here still reaches the
-                # finally and closes the wrapper-owned fallback stream.
+                # finally and closes a wrapper-owned fallback stream.
                 # Forward by keyword: robust against future SDK signature changes
                 # that insert a positional parameter before ``errlog``.
                 cm = original(server, *args, errlog=errlog, **kwargs)
                 async with cm as streams:
                     yield streams
             finally:
-                # sys.__stderr__ is process-owned and must never be closed here.
-                if owns_errlog and errlog is not getattr(sys, "__stderr__", None):
+                if opened_by_us:
                     close = getattr(errlog, "close", None)
                     if callable(close):
                         try:

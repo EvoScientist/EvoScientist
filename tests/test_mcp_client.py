@@ -345,24 +345,20 @@ class TestStdioErrlogSafetyPatch:
         from EvoScientist.mcp.client import _stdio_errlog_is_usable
 
         r, w = os.pipe()
-        try:
-            # Capture the descriptor number, then close both ends. The stub
-            # below still reports ``r`` (now closed) from fileno(), exercising
-            # the os.fstat branch rather than the ValueError path.
-            stale_fd = r
-            os.close(r)
-            os.close(w)
+        # Capture the descriptor number, then close both ends. The stub
+        # below still reports ``r`` (now closed) from fileno(), exercising
+        # the os.fstat branch rather than the ValueError path.
+        stale_fd = r
+        os.close(r)
+        os.close(w)
 
-            class _StaleFd:
-                """Reports a positive fd number that is no longer open."""
+        class _StaleFd:
+            """Reports a positive fd number that is no longer open."""
 
-                def fileno(self):
-                    return stale_fd
+            def fileno(self):
+                return stale_fd
 
-            assert _stdio_errlog_is_usable(_StaleFd()) is False
-        finally:
-            # fds already closed above; guard against partial failure.
-            pass
+        assert _stdio_errlog_is_usable(_StaleFd()) is False
 
     def test_real_stderr_accepted(self):
 
@@ -379,16 +375,14 @@ class TestStdioErrlogSafetyPatch:
 
         from EvoScientist.mcp.client import _safe_stdio_errlog, _stdio_errlog_is_usable
 
-        stream = _safe_stdio_errlog()
+        stream, opened_by_us = _safe_stdio_errlog()
         try:
             assert _stdio_errlog_is_usable(stream) is True
+            # sys.__stderr__ path is not owned; devnull path is.
+            assert opened_by_us is (stream is not sys.__stderr__)
         finally:
-            # ``_safe_stdio_errlog`` may open an os.devnull handle when
-            # ``sys.__stderr__`` is unavailable; close it so the test does
-            # not leak a file descriptor.
-            close = getattr(stream, "close", None)
-            if callable(close) and stream is not sys.__stderr__:
-                close()
+            if opened_by_us:
+                stream.close()
 
     def test_patch_wraps_stdio_client(self):
         """Importing the MCP client wraps ``mcp.client.stdio.stdio_client``."""
@@ -474,6 +468,43 @@ class TestStdioErrlogSafetyPatch:
             assert captured["errlog"] is sys.__stderr__
             # Caller-owned errlog must remain usable (not closed by wrapper).
             assert mcp_client._stdio_errlog_is_usable(sys.__stderr__) is True
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+    def test_wrapped_stdio_client_swaps_explicit_bad_errlog(self, monkeypatch):
+        """Cover the ``not _stdio_errlog_is_usable(errlog)`` branch: when the
+        caller explicitly passes an errlog whose fileno is unusable (e.g. a
+        redirected stream like Textual's _PrintCapture), the wrapper substitutes
+        a usable fallback rather than forwarding the broken stream."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        captured = {}
+
+        @asynccontextmanager
+        async def fake_original(server, *args, **kwargs):
+            captured["errlog"] = kwargs["errlog"]
+            yield ("read", "write")
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            # Explicitly pass the unusable redirected stream (NOT relying on
+            # the `errlog is ...` default sentinel).
+            bad_errlog = _FakeTextualStderr()
+
+            async def _run():
+                async with stdio_mod.stdio_client(object(), errlog=bad_errlog):
+                    pass
+
+            asyncio.run(_run())
+            # The wrapper must have swapped in a usable fallback, not forwarded
+            # the broken _FakeTextualStderr.
+            assert captured["errlog"] is not bad_errlog
+            assert mcp_client._stdio_errlog_is_usable(captured["errlog"]) is True
         finally:
             monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
 
