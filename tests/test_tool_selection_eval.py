@@ -107,7 +107,15 @@ def test_replay_ignores_unknown_events_and_deduplicates_tool_names():
         ([{"type": "tool_selection"}], "index 0 is missing 'tools'"),
         (
             [{"type": "tool_selection", "tools": "search"}],
-            "index 0 tools must be an iterable",
+            "index 0 tools must be a list",
+        ),
+        (
+            [{"type": "tool_selection", "tools": ("search",)}],
+            "index 0 tools must be a list",
+        ),
+        (
+            [{"type": "tool_selection", "tools": {"search": True}}],
+            "index 0 tools must be a list",
         ),
         (
             [{"type": "tool_selection", "tools": ["search", 7]}],

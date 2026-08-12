@@ -24,6 +24,13 @@ def _tool_names(value: object, *, context: str) -> frozenset[str]:
     return frozenset(names)
 
 
+def _event_tool_names(value: object, *, event_index: int) -> frozenset[str]:
+    context = f"tool_selection event at index {event_index} tools"
+    if not isinstance(value, list):
+        raise ValueError(f"{context} must be a list of tool-name strings")
+    return _tool_names(value, context=context)
+
+
 def _ratio(numerator: int, denominator: int, *, empty: float) -> float:
     return numerator / denominator if denominator else empty
 
@@ -183,10 +190,7 @@ def replay_tool_selections(
         selections.append(
             (
                 event_index,
-                _tool_names(
-                    event["tools"],
-                    context=f"tool_selection event at index {event_index} tools",
-                ),
+                _event_tool_names(event["tools"], event_index=event_index),
             )
         )
 
