@@ -90,11 +90,11 @@ def _score(
     false_positives = selected - expected
     false_negatives = expected - selected
 
-    # Selecting nothing has no false positives, while expecting nothing has no
-    # false negatives. This makes an empty/empty case a perfect exact match and
-    # still penalizes a non-empty selection for an empty expectation.
-    precision = _ratio(len(true_positives), len(selected), empty=1.0)
-    recall = _ratio(len(true_positives), len(expected), empty=1.0)
+    # Only empty/empty is a perfect abstention. If exactly one side is empty,
+    # the undefined metric is zero so macro aggregates do not reward a miss.
+    both_empty = not selected and not expected
+    precision = _ratio(len(true_positives), len(selected), empty=float(both_empty))
+    recall = _ratio(len(true_positives), len(expected), empty=float(both_empty))
     f1 = _ratio(2 * precision * recall, precision + recall, empty=0.0)
 
     return ToolSelectionScore(
@@ -119,10 +119,17 @@ def _report(scores: tuple[ToolSelectionScore, ...]) -> ToolSelectionReport:
     true_positives = sum(len(score.true_positives) for score in scores)
     false_positives = sum(len(score.false_positives) for score in scores)
     false_negatives = sum(len(score.false_negatives) for score in scores)
+    all_empty = not true_positives and not false_positives and not false_negatives
     micro_precision = _ratio(
-        true_positives, true_positives + false_positives, empty=1.0
+        true_positives,
+        true_positives + false_positives,
+        empty=float(all_empty),
     )
-    micro_recall = _ratio(true_positives, true_positives + false_negatives, empty=1.0)
+    micro_recall = _ratio(
+        true_positives,
+        true_positives + false_negatives,
+        empty=float(all_empty),
+    )
     micro_f1 = _ratio(
         2 * micro_precision * micro_recall,
         micro_precision + micro_recall,

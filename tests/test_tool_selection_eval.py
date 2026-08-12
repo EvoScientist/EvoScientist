@@ -65,17 +65,25 @@ def test_empty_expectations_follow_explicit_zero_denominator_policy():
         [
             {"type": "tool_selection", "tools": []},
             {"type": "tool_selection", "tools": ["unexpected"]},
+            {"type": "tool_selection", "tools": []},
         ],
-        [_expectation("empty"), _expectation("false-positive")],
+        [
+            _expectation("empty"),
+            _expectation("false-positive"),
+            _expectation("false-negative", "missing"),
+        ],
     )
 
-    empty, false_positive = report.scores
+    empty, false_positive, false_negative = report.scores
     assert empty.exact_match
     assert empty.precision == empty.recall == empty.f1 == 1.0
     assert not false_positive.exact_match
     assert false_positive.precision == 0.0
-    assert false_positive.recall == 1.0
+    assert false_positive.recall == 0.0
     assert false_positive.f1 == 0.0
+    assert false_negative.precision == 0.0
+    assert false_negative.recall == 0.0
+    assert false_negative.f1 == 0.0
 
 
 def test_replay_ignores_unknown_events_and_deduplicates_tool_names():
