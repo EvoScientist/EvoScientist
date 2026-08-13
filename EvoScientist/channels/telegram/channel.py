@@ -34,7 +34,11 @@ class TelegramChannel(Channel):
     capabilities = TELEGRAM_CAPS
     _typing_interval: float = 4.0
     _ready_attrs = ("_app",)
-    _non_retryable_patterns = ("parse", "can't parse")
+    _non_retryable_patterns = (
+        *Channel._non_retryable_patterns,
+        "parse",
+        "can't parse",
+    )
     _mention_pattern = r"(?i)@{bot_id}\s*"
 
     def __init__(self, config: TelegramConfig):

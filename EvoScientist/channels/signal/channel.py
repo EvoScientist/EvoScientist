@@ -32,7 +32,11 @@ class SignalChannel(Channel):
     name = "signal"
 
     capabilities = SIGNAL_CAPS
-    _non_retryable_patterns = ("unregistered", "auth")
+    _non_retryable_patterns = (
+        *Channel._non_retryable_patterns,
+        "unregistered",
+        "auth",
+    )
 
     def __init__(self, config: SignalConfig):
         super().__init__(config)
