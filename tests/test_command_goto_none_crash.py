@@ -2,7 +2,7 @@
 
 Root cause
 ----------
-When the WebUI sends a ``command`` parameter (e.g. ``{"resume": {...}}``) in
+When a client sends a ``command`` parameter (e.g. ``{"resume": {...}}``) in
 the run request body **without** a ``goto`` field, ``langgraph_api.command.map_cmd``
 produces ``Command(goto=None, resume=...)``.  LangGraph 1.2.9's
 ``_control_branch`` (``langgraph/graph/state.py:1754``) then tries to iterate
@@ -14,16 +14,17 @@ over ``None``::
     for go in goto_targets:        # ← TypeError: 'NoneType' object is not iterable
 
 The crash happens at the ``__start__`` pseudo-node — before any model call,
-before any middleware — so the thread's persisted checkpoint is **not**
-corrupted, but the thread status is set to ``"error"`` with empty ``values``
-and the WebUI renders a blank session.
+before any middleware.  The thread status is set to ``"error"`` and the
+checkpoint ``values`` are reset to defaults (``messages: []``, ``files: {}``,
+``async_tasks: {}``), corrupting the previous conversation state.  Every UI
+(WebUI, TUI, CLI) renders a blank session.
 
 These tests assert the **desired** behaviour: ``Command(goto=None)`` should be
 handled gracefully (treated as "no goto targets"), not crash.  They **fail**
 while the bug is live in langgraph 1.2.9 and **pass** once the fix is applied
 (either upstream in ``_control_branch`` or locally in ``map_cmd``).
 
-See ``notes/glm-5.2/emptied-session/root-cause.md`` for the full analysis.
+Matches upstream issue langchain-ai/langgraph#5656.
 """
 
 from __future__ import annotations
@@ -126,7 +127,7 @@ class TestCommandGotoNoneAsInput:
 
     def test_resume_command_does_not_crash(self, minimal_graph, thread_config):
         """``Command(goto=None, resume=...)`` — the exact shape ``map_cmd``
-        produces for a WebUI resume request — should not raise."""
+        produces for a resume request — should not raise."""
         cmd = Command(goto=None, resume={"answer": "yes"})
         # Should complete without TypeError
         asyncio.run(minimal_graph.ainvoke(cmd, config=thread_config))

@@ -1251,7 +1251,7 @@ def _patch_langgraph_goto_none_crash() -> None:
     all code paths (a Command(goto=None) could in principle be created
     by code other than map_cmd).
 
-    See ``notes/glm-5.2/emptied-session/`` for the full root-cause analysis.
+    Matches upstream issue langchain-ai/langgraph#5656.
     """
     # ── 1. map_cmd — prevent goto=None from being created ────────────────
     try:
