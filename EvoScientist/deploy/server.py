@@ -79,6 +79,9 @@ def deploy(
         _base_url,
         _is_loopback_host,
         _is_port_occupied,
+        _pid_serves_port,
+        _read_workspace_sidecar,
+        _server_config_fingerprint,
         is_langgraph_dev_running,
         read_tunnel_url,
         start_langgraph_dev,
@@ -145,10 +148,25 @@ def deploy(
                 f"[red]Port {effective_port} is already serving a langgraph dev "
                 f"instance.[/red]"
             )
-            console.print(
-                "[dim]Stop the existing EvoSci/serve session first, or use "
-                "[bold]--port[/bold] to deploy on a different port.[/dim]"
-            )
+            sidecar = _read_workspace_sidecar()
+            if sidecar is not None and _pid_serves_port(
+                sidecar.get("pid"), effective_port
+            ):
+                # Surface what we know about the occupant — with keepalive it
+                # may be an ownerless leftover rather than a live session.
+                # Only when the recorded pid verifiably serves THIS port, so a
+                # stale or other-port record is never blamed.
+                console.print(
+                    f"[dim]It serves workspace {sidecar.get('workspace')} "
+                    f"(pid {sidecar.get('pid')}). Stop it with "
+                    f"[bold]EvoSci server stop[/bold], or use "
+                    f"[bold]--port[/bold] to deploy on a different port.[/dim]"
+                )
+            else:
+                console.print(
+                    "[dim]Stop the existing EvoSci/serve session first, or use "
+                    "[bold]--port[/bold] to deploy on a different port.[/dim]"
+                )
         else:
             console.print(
                 f"[red]Port {effective_port} is occupied by another process.[/red]"
@@ -231,6 +249,7 @@ def deploy(
                 jobs_per_worker=jobs_per_worker,
                 deploy_mode=True,
                 tunnel=tunnel,
+                config_fingerprint=_server_config_fingerprint(config),
             )
         atexit.register(stop_langgraph_dev, proc)
     except Exception as exc:

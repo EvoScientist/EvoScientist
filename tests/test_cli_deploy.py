@@ -134,6 +134,7 @@ def _run_deploy_once(
         jobs_per_worker=10,
         deploy_mode=False,
         tunnel=False,
+        config_fingerprint=None,
     ):
         captured["langgraph_dev_started"] = True
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
