@@ -3032,12 +3032,14 @@ def test_observation_cache_invalidates_on_file_addition(tmp_path, monkeypatch):
 
 @pytest.mark.usefixtures("_clear_observation_cache")
 def test_observation_cache_invalidates_on_file_deletion(tmp_path, monkeypatch):
-    """Deleting a file must invalidate the cache."""
+    """Deleting a file must invalidate the cache and re-parse remaining files."""
     from EvoScientist.memory.observations import store
 
     memories = tmp_path / "memories"
-    obs_path = memories / "observations" / "global" / "O-1.md"
-    _write_observation(obs_path, "O-1")
+    obs_a = memories / "observations" / "global" / "O-1.md"
+    obs_b = memories / "observations" / "global" / "O-2.md"
+    _write_observation(obs_a, "O-1")
+    _write_observation(obs_b, "O-2")
 
     parse_calls: list[int] = []
     real_parse = store._parse_observation_search_document
@@ -3049,16 +3051,17 @@ def test_observation_cache_invalidates_on_file_deletion(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
 
     docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs1) == 1
-    assert len(parse_calls) == 1
+    assert len(docs1) == 2
+    assert len(parse_calls) == 2
 
-    obs_path.unlink()
+    obs_a.unlink()
 
     docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs2) == 0
-    assert len(parse_calls) == 1, (
-        "deleted file removes a path from the signature; the cache miss "
-        "re-parses remaining files (0 in this case)"
+    assert len(docs2) == 1
+    assert docs2[0].observation_id == "O-2"
+    assert len(parse_calls) == 3, (
+        "deleted file changes the signature; the cache miss must re-parse "
+        "the remaining file (2 from first call + 1 from second)"
     )
 
 

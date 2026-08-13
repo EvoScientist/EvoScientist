@@ -438,7 +438,7 @@ def list_observation_documents(
         return [
             document for document in documents if document.memory_type == memory_type
         ]
-    return documents
+    return list(documents)
 
 
 def search_observation_files(
