@@ -367,6 +367,34 @@ def _resolve_document_links(
     ]
 
 
+# Process-scoped mtime cache for ``list_observation_documents``. Keyed on
+# (root, project_id, scope); validated by a frozenset of (path, mtime) pairs
+# over ALL observation files under root (not just the scoped subset) so that
+# cross-scope link resolution stays correct. ``stat()`` is ~50 ms for ~228
+# files vs ~557 ms to re-read + re-parse them, so the validation pays for
+# itself even on the first call after a change. Thread-safe under the GIL:
+# a double-miss (two threads both parse) is wasteful but not incorrect.
+_observation_cache: dict[
+    tuple[Path, str, MemoryScope | None],
+    tuple[frozenset[tuple[str, float]], list[ObservationSearchDocument]],
+] = {}
+
+
+def _observation_file_signature(root: Path) -> frozenset[tuple[str, float]]:
+    """Return ``(path_str, mtime)`` pairs for all observation files under ``root``.
+
+    Covers every scope so that a cross-scope link-resolution target changing
+    invalidates the cache, not just the scoped files the caller asked for.
+    """
+    sig: set[tuple[str, float]] = set()
+    for path in _all_observation_files(root):
+        try:
+            sig.add((str(path), path.stat().st_mtime))
+        except OSError:
+            continue
+    return frozenset(sig)
+
+
 def list_observation_documents(
     *,
     memory_dir: str | Path,
@@ -374,21 +402,38 @@ def list_observation_documents(
     scope: MemoryScope | None = None,
     memory_type: MemoryType | None = None,
 ) -> list[ObservationSearchDocument]:
-    """Read candidate observations for the current filters."""
-    root = Path(memory_dir).expanduser()
-    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
-    for path in _observation_files(
-        memory_dir=root,
-        project_id=project_id,
-        scope=scope,
-    ):
-        parsed_document = _parse_observation_search_document(root=root, path=path)
-        if parsed_document is not None:
-            parsed.append(parsed_document)
+    """Read candidate observations for the current filters.
 
-    # Resolve links before filtering by memory_type so a procedural hit can still
-    # surface a linked semantic observation, and vice versa.
-    documents = _resolve_document_links(parsed, root=root)
+    Results are cached per ``(root, project_id, scope)`` and invalidated by
+    mtime changes on any observation file under the root. The cache stores
+    documents after link resolution and before ``memory_type`` filtering, so
+    calls with different filters share the same entry.
+    """
+    root = Path(memory_dir).expanduser()
+    cache_key = (root, project_id, scope)
+    signature = _observation_file_signature(root)
+
+    cached = _observation_cache.get(cache_key)
+    if cached is not None and cached[0] == signature:
+        documents = cached[1]
+    else:
+        parsed: list[
+            tuple[ObservationSearchDocument, list[RelatedObservationEntry]]
+        ] = []
+        for path in _observation_files(
+            memory_dir=root,
+            project_id=project_id,
+            scope=scope,
+        ):
+            parsed_document = _parse_observation_search_document(root=root, path=path)
+            if parsed_document is not None:
+                parsed.append(parsed_document)
+
+        # Resolve links before filtering by memory_type so a procedural hit can
+        # still surface a linked semantic observation, and vice versa.
+        documents = _resolve_document_links(parsed, root=root)
+        _observation_cache[cache_key] = (signature, documents)
+
     if memory_type is not None:
         return [
             document for document in documents if document.memory_type == memory_type
