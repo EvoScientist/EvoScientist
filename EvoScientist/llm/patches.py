@@ -14,6 +14,8 @@ Patches:
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
+    - _patch_langgraph_goto_none_crash: handle Command(goto=None)
+      defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
 
 Utilities:
     - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
@@ -1235,3 +1237,89 @@ def _patch_deepagents_model_passthrough() -> None:
     ds_mod._build_start_tool = _patched_build_start
     ds_mod._build_update_tool = _patched_build_update
     _model_passthrough_patched = True
+
+
+# ---------------------------------------------------------------------------
+# Patch: LangGraph 1.2.9 _control_branch crashes with TypeError when
+# Command.goto is None (e.g. from a resume command). We patch both the
+# generator (map_cmd) and the consumer (_control_branch).
+# ---------------------------------------------------------------------------
+def _patch_langgraph_goto_none_crash() -> None:
+    """Handle Command(goto=None) defensively in langgraph and langgraph-api.
+
+    Either patch alone prevents the production crash; both together cover
+    all code paths (a Command(goto=None) could in principle be created
+    by code other than map_cmd).
+
+    See ``notes/glm-5.2/emptied-session/`` for the full root-cause analysis.
+    """
+    # ── 1. map_cmd — prevent goto=None from being created ────────────────
+    try:
+        import langgraph_api.command as _cmd_mod
+        from langgraph.types import Command as _Command
+
+        _orig_map_cmd = getattr(_cmd_mod, "map_cmd", None)
+        if _orig_map_cmd and not hasattr(_orig_map_cmd, "_evosci_goto_none_fix"):
+
+            def _patched_map_cmd(cmd: Any) -> _Command:
+                result = _orig_map_cmd(cmd)
+                if result.goto is None:
+                    return _Command(
+                        update=result.update,
+                        goto=[],
+                        resume=result.resume,
+                    )
+                return result
+
+            _patched_map_cmd._evosci_goto_none_fix = True  # type: ignore[attr-defined]
+            _cmd_mod.map_cmd = _patched_map_cmd
+    except ImportError:
+        pass
+
+    # ── 2. _control_branch — handle goto=None defensively ────────────────
+    try:
+        import langgraph.graph.state as _state_mod
+        from langgraph.types import Command as _Command
+        from langgraph.types import Send as _Send
+
+        _orig_ctrl = getattr(_state_mod, "_control_branch", None)
+        if _orig_ctrl and not hasattr(_orig_ctrl, "_evosci_goto_none_fix"):
+            _TASKS = getattr(_state_mod, "TASKS", "__tasks__")
+            _BRANCH_TO = getattr(_state_mod, "_CHANNEL_BRANCH_TO", "branch:{}")
+
+            def _patched_ctrl(value: Any) -> Sequence[tuple[str, Any]]:
+                if isinstance(value, _Send):
+                    return ((str(_TASKS), value),)
+                commands: list[_Command] = []
+                if isinstance(value, _Command):
+                    commands.append(value)
+                elif isinstance(value, (list, tuple)):
+                    for cmd in value:
+                        if isinstance(cmd, _Command):
+                            commands.append(cmd)
+                rtn: list[tuple[str, Any]] = []
+                for command in commands:
+                    if command.graph == _Command.PARENT:
+                        raise _state_mod.ParentCommand(command)
+
+                    # THE FIX: use `or []` instead of bare `command.goto`
+                    goto_targets = (
+                        [command.goto]
+                        if isinstance(command.goto, (_Send, str))
+                        else (command.goto or [])
+                    )
+
+                    for go in goto_targets:
+                        if isinstance(go, _Send):
+                            rtn.append((str(_TASKS), go))
+                        elif isinstance(go, str) and go != "END":
+                            rtn.append((_BRANCH_TO.format(go), None))
+                return rtn
+
+            _patched_ctrl._evosci_goto_none_fix = True  # type: ignore[attr-defined]
+            _state_mod._control_branch = _patched_ctrl
+    except (ImportError, AttributeError):
+        pass
+
+
+_patch_langgraph_goto_none_crash()
