@@ -415,7 +415,7 @@ def list_observation_documents(
 
     cached = _observation_cache.get(cache_key)
     if cached is not None and cached[0] == signature:
-        documents = cached[1]
+        documents = cached[1].copy()
     else:
         parsed: list[
             tuple[ObservationSearchDocument, list[RelatedObservationEntry]]
@@ -432,13 +432,13 @@ def list_observation_documents(
         # Resolve links before filtering by memory_type so a procedural hit can
         # still surface a linked semantic observation, and vice versa.
         documents = _resolve_document_links(parsed, root=root)
-        _observation_cache[cache_key] = (signature, documents)
+        _observation_cache[cache_key] = (signature, documents.copy())
 
     if memory_type is not None:
         return [
             document for document in documents if document.memory_type == memory_type
         ]
-    return list(documents)
+    return documents
 
 
 def search_observation_files(
