@@ -286,7 +286,16 @@ class EvoMemoryMiddleware(AgentMiddleware):
         if not enable_observation_memory:
             return
 
-        self._refresh_observation_index_context()
+        # The prompt-facing observation index is rebuilt fresh on every model
+        # call (see ``modify_request`` / ``amodify_request``), so this stored
+        # value never reaches a prompt — it is only the error-fallback returned
+        # by ``_refresh_observation_index_context`` when a refresh raises, and
+        # on an unreadable store that eager build already falls through to "".
+        # Reading the whole observation store here to seed it therefore buys
+        # nothing and costs ~0.5-1.4s per middleware — paid 12x on a
+        # deployed-graph rebuild (main agent + 11 sub-agents). Create the search
+        # dirs (the load-bearing side effect) and defer the read to first use.
+        self._ensure_observation_dirs()
 
     @property
     def project_id(self) -> str:

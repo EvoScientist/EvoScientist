@@ -325,6 +325,65 @@ def test_observation_index_over_budget_keeps_entries_that_fit(tmp_path, monkeypa
     assert "over-budget observation" in context
 
 
+def test_construction_defers_observation_index_read_to_first_request(
+    tmp_path, monkeypatch
+):
+    """Building the middleware must not read the observation store.
+
+    The prompt-facing index is rebuilt fresh on every model call, so the
+    stored construction-time value never reaches a prompt. Reading the whole
+    store to seed it was pure cost, paid once per middleware and 12x per
+    deployed-graph rebuild (main agent + 11 sub-agents). Construction still
+    creates the search dirs, and the first ``modify_request`` still injects a
+    current index built from the store.
+    """
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+
+    record_observation_file(
+        memory_dir=memories,
+        project_id=_path_project_id(workspace),
+        memory_type=MemoryType.PROCEDURAL,
+        summary="Continue the diarization bottleneck investigation.",
+        observation="A prior-session observation the agent should surface.",
+        why_it_matters="First-turn 'hello' should list resumable topics.",
+        scope=MemoryScope.GLOBAL,
+        source_type=MemorySourceType.SUBAGENT,
+        source_session_id="thread-1",
+        source_agent="research-agent",
+    )
+
+    calls: list[int] = []
+    real_build = memory_module.build_observation_index_context
+
+    def _counting_build(*args, **kwargs):
+        calls.append(1)
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(
+        memory_module, "build_observation_index_context", _counting_build
+    )
+
+    middleware = memory_module.create_memory_middleware(str(memories))
+
+    # Construction must not read the observation store ...
+    assert calls == []
+    assert middleware._observation_index_context == ""
+    # ... but must still create the cross-project search dir it prompts agents
+    # to look in.
+    assert (memories / "observations" / "global").is_dir()
+
+    # The first model call injects a freshly built index containing the
+    # prior-session observation, despite the empty construction seed.
+    modified = middleware.modify_request(_request())
+    content = str(modified.system_message.content)
+    assert "Indexed observations:" in content
+    assert "Continue the diarization bottleneck investigation." in content
+    assert len(calls) == 1
+
+
 def test_profile_memory_uses_path_pointers_when_profiles_exceed_budget(
     tmp_path, monkeypatch
 ):
