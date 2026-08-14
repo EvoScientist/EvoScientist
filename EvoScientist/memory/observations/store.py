@@ -367,32 +367,80 @@ def _resolve_document_links(
     ]
 
 
-# Process-scoped mtime cache for ``list_observation_documents``. Keyed on
-# (root, project_id, scope); validated by a frozenset of (path, mtime) pairs
-# over ALL observation files under root (not just the scoped subset) so that
-# cross-scope link resolution stays correct. ``stat()`` is ~50 ms for ~228
-# files vs ~557 ms to re-read + re-parse them, so the validation pays for
-# itself even on the first call after a change. Thread-safe under the GIL:
-# a double-miss (two threads both parse) is wasteful but not incorrect.
-_observation_cache: dict[
-    tuple[Path, str, MemoryScope | None],
-    tuple[frozenset[tuple[str, float]], list[ObservationSearchDocument]],
-] = {}
+# ── Parsed-document cache ─────────────────────────────────────────────
+#
+# Split by scope so global observations are parsed once and shared across all
+# project_ids, and a change in one project's files does not invalidate another
+# project's cache.  Each layer is keyed on its minimal identity (root for
+# global, (root, project_id) for project) and validated by an mtime signature
+# over only the files that layer reads.  Pre-link-resolution tuples are cached;
+# link resolution runs on every call but is O(N) dict lookups with typically no
+# I/O (only falls back to a full file walk when a related-observation ID is
+# missing from the parsed set).
+#
+# Type alias for the cached value: (mtime signature, parsed tuples).
+_ParsedCacheValue = tuple[
+    frozenset[tuple[str, float]],
+    list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
+]
+
+_global_doc_cache: dict[Path, _ParsedCacheValue] = {}
+_project_doc_cache: dict[tuple[Path, str], _ParsedCacheValue] = {}
 
 
-def _observation_file_signature(root: Path) -> frozenset[tuple[str, float]]:
-    """Return ``(path_str, mtime)`` pairs for all observation files under ``root``.
-
-    Covers every scope so that a cross-scope link-resolution target changing
-    invalidates the cache, not just the scoped files the caller asked for.
-    """
+def _file_signature(paths: list[Path]) -> frozenset[tuple[str, float]]:
+    """Return ``(path_str, mtime)`` pairs for the given paths."""
     sig: set[tuple[str, float]] = set()
-    for path in _all_observation_files(root):
+    for path in paths:
         try:
             sig.add((str(path), path.stat().st_mtime))
         except OSError:
             continue
     return frozenset(sig)
+
+
+def _global_files(root: Path) -> list[Path]:
+    """Glob the global observation directory."""
+    directory = root / OBSERVATION_DIR.lstrip("/") / "global"
+    try:
+        return sorted(directory.glob("*.md"))
+    except OSError:
+        return []
+
+
+def _project_files(root: Path, project_id: str) -> list[Path]:
+    """Glob a project's observation directory."""
+    directory = root / OBSERVATION_DIR.lstrip("/") / "projects" / project_id
+    try:
+        return sorted(directory.glob("*.md"))
+    except OSError:
+        return []
+
+
+def _cached_parsed_docs(
+    cache: dict,
+    cache_key,
+    root: Path,
+    paths: list[Path],
+) -> list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]]:
+    """Return parsed documents for *paths*, using *cache* keyed on *cache_key*.
+
+    No copy on read or write: the caller passes the result to ``extend`` (which
+    iterates, not mutates) and then to ``_resolve_document_links`` (which builds
+    a new list via ``replace``).  The cached list is never returned to a caller
+    of ``list_observation_documents`` and never mutated.
+    """
+    signature = _file_signature(paths)
+    cached = cache.get(cache_key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
+    for path in paths:
+        parsed_document = _parse_observation_search_document(root=root, path=path)
+        if parsed_document is not None:
+            parsed.append(parsed_document)
+    cache[cache_key] = (signature, parsed)
+    return parsed
 
 
 def list_observation_documents(
@@ -404,35 +452,25 @@ def list_observation_documents(
 ) -> list[ObservationSearchDocument]:
     """Read candidate observations for the current filters.
 
-    Results are cached per ``(root, project_id, scope)`` and invalidated by
-    mtime changes on any observation file under the root. The cache stores
-    documents after link resolution and before ``memory_type`` filtering, so
-    calls with different filters share the same entry.
+    Global and project observations are cached in separate layers so global
+    docs are parsed once and shared across all project_ids.  Each layer is
+    invalidated by mtime changes on only the files it reads.  Link resolution
+    runs on every call but is O(N) dict lookups with typically no I/O (only
+    falls back to a file walk when a related-observation ID is missing).
     """
     root = Path(memory_dir).expanduser()
-    cache_key = (root, project_id, scope)
-    signature = _observation_file_signature(root)
 
-    cached = _observation_cache.get(cache_key)
-    if cached is not None and cached[0] == signature:
-        documents = cached[1].copy()
-    else:
-        parsed: list[
-            tuple[ObservationSearchDocument, list[RelatedObservationEntry]]
-        ] = []
-        for path in _observation_files(
-            memory_dir=root,
-            project_id=project_id,
-            scope=scope,
-        ):
-            parsed_document = _parse_observation_search_document(root=root, path=path)
-            if parsed_document is not None:
-                parsed.append(parsed_document)
+    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
+    if scope in {None, MemoryScope.GLOBAL}:
+        g_paths = _global_files(root)
+        parsed.extend(_cached_parsed_docs(_global_doc_cache, root, root, g_paths))
+    if scope in {None, MemoryScope.PROJECT}:
+        p_paths = _project_files(root, project_id)
+        parsed.extend(
+            _cached_parsed_docs(_project_doc_cache, (root, project_id), root, p_paths)
+        )
 
-        # Resolve links before filtering by memory_type so a procedural hit can
-        # still surface a linked semantic observation, and vice versa.
-        documents = _resolve_document_links(parsed, root=root)
-        _observation_cache[cache_key] = (signature, documents.copy())
+    documents = _resolve_document_links(parsed, root=root)
 
     if memory_type is not None:
         return [

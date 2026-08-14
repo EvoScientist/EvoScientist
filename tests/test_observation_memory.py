@@ -2919,12 +2919,14 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
 
 @pytest.fixture
 def _clear_observation_cache():
-    """Clear the process-scoped cache before and after each cache test."""
-    from EvoScientist.memory.observations.store import _observation_cache
+    """Clear the process-scoped caches before and after each cache test."""
+    from EvoScientist.memory.observations import store
 
-    _observation_cache.clear()
+    store._global_doc_cache.clear()
+    store._project_doc_cache.clear()
     yield
-    _observation_cache.clear()
+    store._global_doc_cache.clear()
+    store._project_doc_cache.clear()
 
 
 def _write_observation(path, obs_id, summary="test", scope="global"):
@@ -3094,4 +3096,50 @@ def test_observation_cache_shares_entries_across_memory_type_filters(
     assert len(docs_filtered) == 1
     assert len(parse_calls) == 1, (
         "different memory_type filter must share the cache entry"
+    )
+
+
+@pytest.mark.usefixtures("_clear_observation_cache")
+def test_observation_cache_shares_global_docs_across_projects(tmp_path, monkeypatch):
+    """Global observations must be parsed once and shared across project_ids.
+
+    The global and project caches are split so that global docs enter the cache
+    keyed on root only, not per-project. Two projects sharing the same
+    ``memory_dir`` must not each re-parse the global store.
+    """
+    from EvoScientist.memory.observations import store
+
+    memories = tmp_path / "memories"
+    _write_observation(memories / "observations" / "global" / "O-global.md", "O-global")
+    _write_observation(
+        memories / "observations" / "projects" / "P-A" / "O-a.md",
+        "O-a",
+        scope="project",
+    )
+    _write_observation(
+        memories / "observations" / "projects" / "P-B" / "O-b.md",
+        "O-b",
+        scope="project",
+    )
+
+    parse_calls: list[int] = []
+    real_parse = store._parse_observation_search_document
+
+    def _counting_parse(*args, **kwargs):
+        parse_calls.append(1)
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
+
+    # Project A: parses global (1) + project-A (1) = 2
+    docs_a = list_observation_documents(memory_dir=memories, project_id="P-A")
+    assert len(docs_a) == 2
+    assert len(parse_calls) == 2
+
+    # Project B: parses project-B (1), global is a cache hit = 1
+    docs_b = list_observation_documents(memory_dir=memories, project_id="P-B")
+    assert len(docs_b) == 2
+    assert len(parse_calls) == 3, (
+        "global docs must be a cache hit for project B; only the new "
+        "project-B file should be parsed (2 from A + 1 from B = 3)"
     )
