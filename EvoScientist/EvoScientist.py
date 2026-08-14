@@ -407,8 +407,46 @@ def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
     )
 
 
+def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
+    """Append expert-skill sub-agent specs to ``subs``, guarding names.
+
+    Each installed expert skill becomes an in-process sub-agent entry so
+    the main agent's ``task`` tool (and the QuickJS ``task()`` global) can
+    dispatch to it in-turn by name. The same experts independently get a
+    background reach via ``build_expert_async_subagent_specs``; the two
+    reaches land on separate tool schemas, so sharing the name is safe.
+
+    Skips (with a warning) any expert whose ``name`` collides with a
+    subagent already in ``subs`` or with ``general-purpose``. The reserved
+    name matters because ``_ensure_general_purpose_subagent`` runs right
+    after this and early-returns when it sees the slot occupied — an expert
+    named ``general-purpose`` would silently take the slot and deepagents'
+    default subagent prompt would never reach the agent.
+    """
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    from .subagents.expert_container import build_expert_subagent_specs
+
+    logger = logging.getLogger(__name__)
+    taken = {s.get("name") for s in subs} | {GENERAL_PURPOSE_SUBAGENT["name"]}
+    for spec in build_expert_subagent_specs(tool_registry=tool_registry):
+        name = spec["name"]
+        if name in taken:
+            logger.warning(
+                "Expert skill %r collides with an existing sub-agent name; skipping.",
+                name,
+            )
+            continue
+        taken.add(name)
+        subs.append(spec)
+
+
 def _maybe_swap_async_subagents(
-    subs: list, middleware: list | None = None, *, cfg=None
+    subs: list,
+    middleware: list | None = None,
+    *,
+    tool_registry: dict | None = None,
+    cfg=None,
 ) -> list:
     """Replace ``_async``-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
 
@@ -424,17 +462,24 @@ def _maybe_swap_async_subagents(
     Adding a new async sub-agent requires no change here — flip
     ``async: true`` in its yaml and create the matching deployment graph.
 
-    All return paths strip the internal ``_async`` field from sub-agent dicts
-    before handoff, since deepagents may schema-validate the kwarg.
+    YAML tool names stay in the internal ``_tool_names`` field until this
+    decision point. In-process specs resolve them against ``tool_registry``;
+    swapped remote specs discard them because their graph factory resolves
+    tools in its own process. All return paths strip internal fields before
+    handoff, since deepagents may schema-validate the kwargs.
 
     When async subagents are actually swapped in and ``middleware`` is provided,
     appends ``AsyncWatcherMiddleware`` so launches spawn an
     ``async_notifier`` watcher.
     """
+    from .utils import resolve_subagent_tools
+
     cfg = cfg if cfg is not None else _ensure_config()
+    tool_registry = tool_registry or {}
     if not getattr(cfg, "enable_async_subagents", False):
-        # Async fully disabled — strip the internal flag before handoff.
+        # Async fully disabled: every spec will run in-process.
         for s in subs:
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
         return subs
 
@@ -448,9 +493,9 @@ def _maybe_swap_async_subagents(
             "enable_async_subagents=true but langgraph dev is not reachable; "
             "falling back to in-process sync delegation for all sub-agents."
         )
-        # Strip the internal ``_async`` flag (carried from ``load_subagents``)
-        # before sub-agents reach deepagents — it's never a deepagents key.
+        # Every spec falls back to in-process execution.
         for s in subs:
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
         return subs
 
@@ -462,12 +507,18 @@ def _maybe_swap_async_subagents(
 
     if not async_specs:
         for s in subs:
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
         return subs
 
     from deepagents import AsyncSubAgent
 
-    port = int(getattr(cfg, "langgraph_dev_port", 6174))
+    from .langgraph_dev.sdk import langgraph_dev_url
+
+    # Self-dispatch target. Resolved through ``langgraph_dev_url`` so it tracks
+    # both ``langgraph_dev_port`` and ``langgraph_dev_host`` — a wildcard bind
+    # maps back to loopback, a pinned interface is honored verbatim.
+    dev_url = langgraph_dev_url(cfg)
     out = []
     agent_specs: dict[str, AsyncSubAgent] = {}
     # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
@@ -482,12 +533,12 @@ def _maybe_swap_async_subagents(
                 name=name,
                 description=async_specs[name],
                 graph_id=name,
-                url=f"http://localhost:{port}",
+                url=dev_url,
             )
             agent_specs[name] = spec
             out.append(spec)
         else:
-            # Strip the internal flag before handoff to deepagents.
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
             out.append(s)
 
@@ -511,6 +562,105 @@ def _maybe_swap_async_subagents(
     return out
 
 
+def _route_async_specs_through_evo_middleware(
+    subs: list, base_middleware: list, *, cfg=None
+) -> list:
+    """Move ``AsyncSubAgent`` specs from ``subs`` into ``EvoAsyncSubAgentMiddleware``.
+
+    Deepagents' ``create_deep_agent`` auto-composes the vanilla
+    ``AsyncSubAgentMiddleware`` when it sees ``graph_id``-carrying entries
+    in ``subagents=``. We need our payload-aware subclass to handle those
+    (see ``EvoScientist/middleware/expert_async_subagent.py`` for the
+    upstream-workaround rationale). To prevent the auto-composition and
+    route all async dispatch through our subclass, we strip AsyncSubAgent
+    specs from ``subs`` here and hand them to our middleware.
+
+    Also folds in ``AsyncSubAgent`` specs for installed
+    installed expert skills — all pointing at the shared
+    ``expert-container-async`` graph, marked ``is_expert=True`` so the
+    middleware requires a payload with ``skill_name``.
+
+    Returns:
+        ``subs`` with ``graph_id``-carrying entries removed. Safe to pass
+        as ``create_deep_agent(subagents=...)`` — the async-auto-compose
+        branch is skipped for empty async lists.
+    """
+    from .middleware.async_watcher import AsyncWatcherMiddleware
+    from .middleware.expert_async_subagent import EvoAsyncSubAgentMiddleware
+    from .subagents.expert_container_async import build_expert_async_subagent_specs
+
+    cfg = cfg if cfg is not None else _ensure_config()
+
+    async_specs = [s for s in subs if "graph_id" in s]
+    sync_subs = [s for s in subs if "graph_id" not in s]
+    expert_specs = build_expert_async_subagent_specs(cfg=cfg)
+    async_specs.extend(expert_specs)
+
+    if async_specs:
+        # ``_maybe_swap_async_subagents`` installs the model-passthrough patch
+        # only when the yaml-async spec list is non-empty. An expert-only setup
+        # (no ``writing-agent`` / ``data-analysis-agent`` / ``scheduler`` in
+        # yaml) would otherwise miss the patch entirely, so we install it here
+        # too. Idempotent — the shared ``_model_passthrough_patched`` flag
+        # guards against double-patching.
+        from .llm.patches import _patch_deepagents_model_passthrough
+
+        _patch_deepagents_model_passthrough()
+
+        # Prepend rather than append so the ``## Async subagents`` prompt
+        # section stays in the stable prefix. Appending pushes it past the
+        # volatile memory tail, invalidating the cached prefix on every
+        # memory change.
+        base_middleware.insert(
+            0, EvoAsyncSubAgentMiddleware(async_subagents=async_specs)
+        )
+
+    # Extend AsyncWatcherMiddleware's client cache with expert specs so
+    # start_async_task launches for experts spawn a completion watcher —
+    # otherwise the watcher's ``get_async(agent_name)`` KeyErrors on the
+    # expert name, no notification is enqueued, and the main agent never
+    # learns the task finished. ``_maybe_swap_async_subagents`` above only
+    # populates the watcher with YAML-defined async subagents (writing-agent,
+    # data-analysis-agent, scheduler); this hook folds in the experts too.
+    if expert_specs:
+        watcher = next(
+            (m for m in base_middleware if isinstance(m, AsyncWatcherMiddleware)),
+            None,
+        )
+        if watcher is not None:
+            # The mutation reaches through two layers of private state:
+            # ``AsyncWatcherMiddleware._clients`` (our own) and
+            # ``_ClientCache._agents`` (upstream deepagents). If upstream ever
+            # renames ``_agents`` or wraps it in an immutable snapshot, the
+            # ``.update(...)`` below silently lands on nothing — expert
+            # completion nudges then stop firing without a diagnostic surface.
+            # Convert that silent-drop into a grep-able error line and bail
+            # out of the extension path; expert dispatches still work, just
+            # without completion notifications until upstream drift is fixed.
+            if not hasattr(watcher._clients, "_agents"):
+                logging.getLogger(__name__).error(
+                    "AsyncWatcherMiddleware._clients has no `_agents` slot — "
+                    "deepagents internal renamed; expert completion "
+                    "notifications will not fire until the extension hook is "
+                    "updated to the new attribute name."
+                )
+                return sync_subs
+            watcher._clients._agents.update({s["name"]: s for s in expert_specs})
+        else:
+            # No YAML async subagents were registered, so ``_maybe_swap`` did
+            # not install the watcher. Install it now so experts still get
+            # completion notifications.
+            from .cli import async_notifier
+
+            base_middleware.append(
+                AsyncWatcherMiddleware(
+                    {s["name"]: s for s in expert_specs},
+                    notifier=async_notifier,
+                )
+            )
+    return sync_subs
+
+
 def _build_base_kwargs(
     base_backend, base_middleware, *, cfg=None, chat_model=None, workspace_dir=None
 ):
@@ -524,20 +674,24 @@ def _build_base_kwargs(
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
-    # ``async_swap_pending=True`` because ``_maybe_swap_async_subagents``
-    # below re-resolves tools for async subagents against the deployed
-    # graph's own registry (via ``subagents/_factory.py``). A tool missing
-    # from ``tool_registry`` for an async spec logs at DEBUG, not WARNING.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=tool_registry,
-        async_swap_pending=True,
     )
+    _fold_expert_subagents(subs, tool_registry)
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
     )
-    subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    subs = _maybe_swap_async_subagents(
+        subs,
+        base_middleware,
+        tool_registry=tool_registry,
+        cfg=cfg,
+    )
+    # Route AsyncSubAgent specs (both standard and expert) through
+    # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
+    # replaces upstream's non-parameterisable one.
+    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
     return {
         "name": "EvoScientist",
         "model": chat_model if chat_model is not None else _ensure_chat_model(),
@@ -603,13 +757,10 @@ def load_mcp_and_build_kwargs(
 
     mcp_main = mcp_by_agent.pop("main", [])
 
-    # Same rationale as ``_build_base_kwargs``: async subagents get
-    # re-resolved downstream by the deployed graph's factory registry.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=registry,
-        async_swap_pending=True,
     )
+    _fold_expert_subagents(subs, registry)
 
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
@@ -623,7 +774,16 @@ def load_mcp_and_build_kwargs(
 
     # Swap selected sub-agents to AsyncSubAgent (must happen AFTER MCP injection
     # since async sub-agents are remote graphs that load their own tools).
-    subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    subs = _maybe_swap_async_subagents(
+        subs,
+        base_middleware,
+        tool_registry=registry,
+        cfg=cfg,
+    )
+    # Mirror the base path: route AsyncSubAgent specs through
+    # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
+    # is the one composed into the main agent.
+    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
 
     return {
         "name": "EvoScientist",
@@ -740,6 +900,7 @@ def _get_default_middleware(
         ModelFallbackMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
+        create_active_team_middleware,
         create_code_interpreter_middleware,
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
@@ -853,6 +1014,15 @@ def _get_default_middleware(
         from .middleware.ask_user import AskUserMiddleware
 
         mw.insert(0, AskUserMiddleware())
+
+    # Expert prompt for the main agent — injects the ## Experts concept every
+    # turn (plus the invited-expert list when experts are invited). Inserted
+    # AFTER AskUser so it sits ahead of AskUser in the stack and runs first,
+    # landing its block right after ## Skills System (experts mirror skills).
+    # Main agent only: a running expert graph must not inject the expert prompt
+    # into its own baked-in persona.
+    if not for_async_subagent:
+        mw.insert(0, create_active_team_middleware())
 
     # Background-process tools (run_in_background / check_process / stop_process /
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and

@@ -18,6 +18,28 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def resolve_subagent_tools(
+    subagent: dict[str, Any], tool_registry: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve deferred YAML tool names while preserving injected tool objects."""
+    tool_names = subagent.pop("_tool_names", None)
+    if tool_names is None:
+        return subagent
+
+    resolved = list(subagent.get("tools", []))
+    for tool_name in tool_names:
+        if tool_name in tool_registry:
+            resolved.append(tool_registry[tool_name])
+        else:
+            logger.warning(
+                "Subagent %r: tool %r not in registry, skipping",
+                subagent.get("name"),
+                tool_name,
+            )
+    subagent["tools"] = resolved
+    return subagent
+
+
 def format_message_content(message):
     """Convert message content to displayable string.
 
@@ -112,11 +134,9 @@ def show_prompt(prompt_text: str, title: str = "Prompt", border_style: str = "bl
 def load_subagents(
     config_path: Path,
     *,
-    tool_registry: dict[str, Any],
     prompt_refs: dict[str, str] | None = None,
-    async_swap_pending: bool = False,
 ) -> list[dict[str, Any]]:
-    """Load subagent definitions from a directory of YAML files and wire up tools.
+    """Load subagent definitions from a directory of YAML files.
 
     NOTE: This is a custom utility. deepagents does not natively load subagents
     from files - they're normally defined inline in the create_deep_agent() call.
@@ -141,16 +161,9 @@ def load_subagents(
           system_prompt: |
             ...
 
-    ``async_swap_pending`` tells the loader that an async-subagent swap will
-    run downstream against a different tool registry (typically the deployed
-    graph's own registry in ``subagents/_factory.py``). When True, a tool
-    missing from ``tool_registry`` for an ``async: true`` spec is logged at
-    DEBUG (it will be re-resolved by the async graph). When False, the
-    caller IS the terminal registry — any missing tool is a genuine typo
-    and logs at WARNING. Sync in-process callers
-    (``EvoScientist._build_base_kwargs``, ``load_mcp_and_build_kwargs``)
-    should pass True; the factory
-    (``subagents/_factory.build_async_subagent_graph``) leaves it False.
+    Tool names are retained until the caller selects an execution mode. This
+    avoids resolving async specs against the in-process registry; the selected
+    in-process or remote graph resolves names against its terminal registry.
     """
     prompt_refs = prompt_refs or {}
 
@@ -224,9 +237,14 @@ def load_subagents(
         if "skills" in spec:
             subagent["skills"] = spec["skills"]
 
-        # Compute the async flag up-front so the tools-resolution block below
-        # can pick the right log level for missing tools. Internal field:
-        # carries the ``async:`` yaml flag through to
+        # Defer YAML-name resolution until the caller decides whether this
+        # spec will run in-process. Async specs are replaced by remote graph
+        # references and must not warn against the caller's unrelated registry.
+        if "tools" in spec:
+            subagent["_tool_names"] = list(spec["tools"])
+            subagent["tools"] = []
+
+        # Internal field: carries the ``async:`` yaml flag through to
         # ``_maybe_swap_async_subagents`` so the swap doesn't need a second
         # yaml pass to discover async-flagged agents. Underscore prefix marks
         # it as internal — must be popped before passing to deepagents.
@@ -239,30 +257,6 @@ def load_subagents(
                 f"Subagent {name!r}: 'async' must be a boolean, "
                 f"got {type(async_val).__name__}: {async_val!r}"
             )
-
-        if "tools" in spec:
-            resolved = []
-            for t in spec["tools"]:
-                if t in tool_registry:
-                    resolved.append(tool_registry[t])
-                elif async_val and async_swap_pending:
-                    # Caller expects an async-subagent swap downstream against
-                    # a different registry. The in-process registry is
-                    # intentionally minimal for async agents — a miss here is
-                    # not degraded state.
-                    logger.debug(
-                        "Subagent %r: tool %r not in the in-process registry; "
-                        "resolved by the async graph",
-                        name,
-                        t,
-                    )
-                else:
-                    # Terminal registry (factory) OR sync subagent — a missing
-                    # tool is a genuine typo and won't be resolved anywhere.
-                    logger.warning(
-                        "Subagent %r: tool %r not in registry, skipping", name, t
-                    )
-            subagent["tools"] = resolved
 
         subagent["_async"] = async_val
 
@@ -280,18 +274,12 @@ def load_subagent(
     *,
     tool_registry: dict[str, Any],
     prompt_refs: dict[str, str] | None = None,
-    async_swap_pending: bool = False,
 ) -> dict[str, Any]:
-    """Load a single sub-agent by name from YAML.
-
-    See :func:`load_subagents` for ``async_swap_pending`` semantics.
-    """
+    """Load and resolve a single sub-agent by name from YAML."""
     for agent in load_subagents(
         config_path,
-        tool_registry=tool_registry,
         prompt_refs=prompt_refs,
-        async_swap_pending=async_swap_pending,
     ):
         if agent.get("name") == name:
-            return agent
+            return resolve_subagent_tools(agent, tool_registry)
     raise KeyError(f"Sub-agent not found: {name}")

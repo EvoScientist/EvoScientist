@@ -213,11 +213,24 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
+    # Network interface the langgraph dev subprocess binds to. Loopback by
+    # default — this is the unauthenticated agent API (the agent can run
+    # shell), so "0.0.0.0" is opt-in and every launcher prints a PUBLIC BIND
+    # banner while exposed. Internal callers *connect* via manager._probe_host,
+    # so widening never redirects their traffic off-box.
+    langgraph_dev_host: str = "127.0.0.1"
+
     # Port for the WebUI front-end (Next.js server from @evoscientist/webui),
     # used only when ui_backend == "webui". 4716 is 6174 reversed — a memorable
     # pairing with the langgraph dev port that it connects to. The backend keeps
     # its own port (langgraph_dev_port); this is just the browser server.
     webui_port: int = 4716
+
+    # Network interface the WebUI front-end binds to. Loopback by default,
+    # matching langgraph_dev_host: this server is not a passive app shell —
+    # its API reads, writes and uploads workspace files and installs skills,
+    # all unauthenticated. Set "0.0.0.0" (with langgraph_dev_host) for LAN.
+    webui_host: str = "127.0.0.1"
 
     # --- Scheduled tasks (cron) ---
     # Master switch for scheduled tasks (/schedule, NL tools, scheduler context). Defaults
@@ -243,6 +256,15 @@ class EvoScientistConfig:
     # machines if multiple async sub-agents in flight cause noticeable
     # slowdown.
     langgraph_dev_jobs_per_worker: int = 10
+
+    # Keep the auto-started langgraph dev subprocess running after the CLI
+    # exits. The next `EvoSci` start in the same workspace reuses it instantly
+    # instead of paying the cold boot (~15s). Starting in a DIFFERENT workspace
+    # raises WorkspaceMismatchError with the leftover server's pid — stop it
+    # manually (the server is pinned to one workspace per process). Known
+    # limitation: changing langgraph_dev_port/host while a keepalive server
+    # runs orphans its records — run `EvoSci server stop` before switching.
+    langgraph_dev_keepalive: bool = False
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -488,6 +510,17 @@ class EvoScientistConfig:
             self.auto_approve = True
 
         _normalize_str_enum_fields(self)
+
+        # Bind hosts reach socket.bind() / the langgraph CLI verbatim, where a
+        # stray-whitespace or empty value surfaces as an opaque gaierror at
+        # startup. Normalize to the field's own default instead.
+        for _host_field, _host_default in (
+            ("langgraph_dev_host", "127.0.0.1"),
+            ("webui_host", "127.0.0.1"),
+        ):
+            _host = getattr(self, _host_field, _host_default)
+            _host = _host.strip() if isinstance(_host, str) else ""
+            setattr(self, _host_field, _host or _host_default)
 
         synthesis_time = _normalize_hhmm(self.memory_skill_synthesis_time)
         if synthesis_time is None:
@@ -802,7 +835,9 @@ _ENV_MAPPINGS = {
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "langgraph_dev_host": "EVOSCIENTIST_LANGGRAPH_DEV_HOST",
     "webui_port": "EVOSCIENTIST_WEBUI_PORT",
+    "webui_host": "EVOSCIENTIST_WEBUI_HOST",
     "enable_scheduler": "EVOSCIENTIST_ENABLE_SCHEDULER",
     "scheduler_default_timezone": "EVOSCIENTIST_SCHEDULER_DEFAULT_TIMEZONE",
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
@@ -810,6 +845,7 @@ _ENV_MAPPINGS = {
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
+    "langgraph_dev_keepalive": "EVOSCIENTIST_LANGGRAPH_DEV_KEEPALIVE",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
     "memory_profile_enabled": "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
     "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",

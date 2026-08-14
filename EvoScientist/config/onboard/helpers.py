@@ -102,6 +102,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
             validate_volcengine_key,
         ),
+        "volcengine-code": (
+            "Volcengine Coding Plan",
+            config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
+            validate_volcengine_key,
+        ),
         "dashscope": (
             "DashScope",
             config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),

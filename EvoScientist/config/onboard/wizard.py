@@ -124,6 +124,7 @@ _PROVIDER_KEY_ATTR = {
     "zhipu": "zhipu_api_key",
     "zhipu-code": "zhipu_api_key",
     "volcengine": "volcengine_api_key",
+    "volcengine-code": "volcengine_api_key",
     "dashscope": "dashscope_api_key",
     "dashscope-code": "dashscope_api_key",
     "moonshot": "moonshot_api_key",

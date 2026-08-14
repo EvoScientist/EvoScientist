@@ -16,19 +16,25 @@ import typer
 from rich.markup import escape
 from rich.table import Table
 
-from ..commands.base import ChannelRuntime, Command, CommandContext
+from ..commands.base import (
+    ChannelRuntime,
+    Command,
+    CommandContext,
+    active_teams_configurable_extra,
+)
 from ..gateway import (
     GraphGateway,
     GraphTarget,
     RunRequest,
-    RuntimeGateways,
-    create_runtime_gateways,
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
 from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
 from ..runtime import AsyncRuntime
 from ..stream.console import console
-from . import async_notifier
+from . import (
+    async_notifier,
+    server_cmd,  # noqa: F401 — registers `EvoSci server` commands
+)
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
@@ -67,6 +73,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from ..config import EvoScientistConfig
+    from ..gateway import RuntimeGateways
 
 
 _ASYNC_RUNTIME_META_KEY = "evoscientist.async_runtime"
@@ -503,7 +510,13 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     state would route async sub-agent calls to a process pinned to /A
     while the main agent runs in /B.
     """
-    from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
+    from ..langgraph_dev.manager import (
+        _DEFAULT_HOST,
+        WorkspaceMismatchError,
+        _is_loopback_host,
+        ensure_langgraph_dev,
+        is_async_subagents_available,
+    )
 
     try:
         with console.status(
@@ -515,6 +528,32 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+    from ..langgraph_dev import manager as _lg_manager
+
+    if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+        console.print(
+            "[yellow]⚠ Config changed since the background agent server was "
+            "launched — async sub-agents still use the old settings. Apply "
+            "them with [bold]EvoSci server stop[/bold], then restart "
+            "EvoSci.[/yellow]"
+        )
+
+    # The backend is shared by every UI mode, so the exposure warning lives
+    # here, not just in deploy/WebUI. Gated on the server being up: warning
+    # about a bind that never happened would be worse than saying nothing.
+    bind_host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
+    if (
+        bind_host
+        and not _is_loopback_host(bind_host)
+        and is_async_subagents_available()
+    ):
+        console.print(
+            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+            f"[bold red]Agent server listening on {bind_host} — no auth, and "
+            f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
+            f"networks.[/bold red]"
+        )
 
 
 def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
@@ -913,7 +952,7 @@ class ServeRuntimeState:
     thread_id: str
     workspace_dir: str | None
     config: "EvoScientistConfig | None"
-    runtime_gateways: RuntimeGateways
+    runtime_gateways: "RuntimeGateways"
     async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
 
@@ -1296,6 +1335,7 @@ def _serve_process_message(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                configurable_extra=active_teams_configurable_extra(channel_runtime),
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
@@ -1327,6 +1367,7 @@ def _serve_drain_notifications(
     model: str | None,
     workspace_dir: str,
     show_thinking: bool,
+    channel_runtime: ChannelRuntime | None = None,
 ) -> None:
     """Drain the async-task notification queue in headless serve mode.
 
@@ -1358,6 +1399,7 @@ def _serve_drain_notifications(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
+                configurable_extra=active_teams_configurable_extra(channel_runtime),
                 gateway=runtime_state.runtime_gateways.graph_gateway,
                 runtime=runtime_state.async_runtime,
             )
@@ -1412,6 +1454,13 @@ def serve(
     workdir: str | None = typer.Option(
         None, "--workdir", help="Override workspace directory"
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Interface to bind the langgraph dev backend to (default: "
+        "langgraph_dev_host = 127.0.0.1). Pass 0.0.0.0 to reach it from "
+        "another machine — the backend has no auth.",
+    ),
     auto_approve: bool = typer.Option(
         False,
         "--auto-approve",
@@ -1446,6 +1495,9 @@ def serve(
     from ..config import apply_config_to_env, get_effective_config
 
     cli_overrides = {}
+    # serve starts no front-end, so only the backend bind applies here.
+    if host is not None and host.strip():
+        cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:
         cli_overrides["auto_approve"] = True
     if auto_mode:
@@ -1512,6 +1564,8 @@ def serve(
         )
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
+
+    from ..gateway import create_runtime_gateways
 
     runtime_gateways = create_runtime_gateways()
     tid = async_runtime.run_sync(
@@ -1634,6 +1688,7 @@ def serve(
                         model=config.model,
                         workspace_dir=ws,
                         show_thinking=effective_channel_thinking,
+                        channel_runtime=channel_runtime,
                     )
                 finally:
                     active_cancel_scope = no_active_cancel_scope
@@ -2130,6 +2185,15 @@ def _main_callback(
         "--ui",
         help="UI backend: tui (default), cli, or webui.",
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Interface to bind servers to (default: 127.0.0.1 for both). "
+        "Sets langgraph_dev_host — the backend shared by every UI mode — and "
+        "webui_host (WebUI mode only). Applies to the default entry; the "
+        "serve and deploy subcommands take their own --host. Pass 0.0.0.0 to "
+        "reach both from another machine (the backend has no auth).",
+    ),
     output_format: str | None = typer.Option(
         None,
         "--output-format",
@@ -2190,6 +2254,11 @@ def _main_callback(
         cli_overrides["show_thinking"] = False
     if ui:
         cli_overrides["ui_backend"] = ui
+    if host is not None and host.strip():
+        # One flag drives both servers; the backend applies in EVERY UI mode
+        # (auto-started for tui/cli/serve too), webui_host only in WebUI mode.
+        cli_overrides["webui_host"] = host.strip()
+        cli_overrides["langgraph_dev_host"] = host.strip()
     if auto_approve:
         cli_overrides["auto_approve"] = True
     if effective_auto_mode:
@@ -2357,6 +2426,7 @@ def _main_callback(
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
 
+        from ..gateway import create_runtime_gateways
         from ..sessions import get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import _wait_for_memory_workers_before_exit, cmd_run
