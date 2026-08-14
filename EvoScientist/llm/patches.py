@@ -24,6 +24,7 @@ Utilities:
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import os
 from collections.abc import (
@@ -1261,14 +1262,11 @@ def _patch_langgraph_goto_none_crash() -> None:
         _orig_map_cmd = getattr(_cmd_mod, "map_cmd", None)
         if _orig_map_cmd and not hasattr(_orig_map_cmd, "_evosci_goto_none_fix"):
 
+            @functools.wraps(_orig_map_cmd)
             def _patched_map_cmd(cmd: Any) -> _Command:
                 result = _orig_map_cmd(cmd)
                 if result.goto is None:
-                    return _Command(
-                        update=result.update,
-                        goto=[],
-                        resume=result.resume,
-                    )
+                    return dataclasses.replace(result, goto=[])
                 return result
 
             _patched_map_cmd._evosci_goto_none_fix = True  # type: ignore[attr-defined]
@@ -1276,45 +1274,29 @@ def _patch_langgraph_goto_none_crash() -> None:
     except ImportError:
         pass
 
-    # ── 2. _control_branch — handle goto=None defensively ────────────────
+    # ── 2. _control_branch — handle goto=None defensively ───────────────
+    # Wrap (not reimplement) the upstream function so only the goto=None→[]
+    # normalization is ours; all other routing logic delegates to the
+    # original, avoiding drift as upstream evolves.
     try:
         import langgraph.graph.state as _state_mod
         from langgraph.types import Command as _Command
-        from langgraph.types import Send as _Send
 
         _orig_ctrl = getattr(_state_mod, "_control_branch", None)
         if _orig_ctrl and not hasattr(_orig_ctrl, "_evosci_goto_none_fix"):
-            _TASKS = getattr(_state_mod, "TASKS", "__tasks__")
-            _BRANCH_TO = getattr(_state_mod, "_CHANNEL_BRANCH_TO", "branch:{}")
 
+            def _fix_goto(cmd: Any) -> Any:
+                if isinstance(cmd, _Command) and cmd.goto is None:
+                    return dataclasses.replace(cmd, goto=[])
+                return cmd
+
+            @functools.wraps(_orig_ctrl)
             def _patched_ctrl(value: Any) -> Sequence[tuple[str, Any]]:
-                if isinstance(value, _Send):
-                    return ((str(_TASKS), value),)
-                commands: list[_Command] = []
-                if isinstance(value, _Command):
-                    commands.append(value)
-                elif isinstance(value, (list, tuple)):
-                    for cmd in value:
-                        if isinstance(cmd, _Command):
-                            commands.append(cmd)
-                rtn: list[tuple[str, Any]] = []
-                for command in commands:
-                    if command.graph == _Command.PARENT:
-                        raise _state_mod.ParentCommand(command)
-
-                    # THE FIX: use `or []` instead of bare `command.goto`
-                    goto_targets = (
-                        [command.goto]
-                        if isinstance(command.goto, (_Send, str))
-                        else (command.goto or [])
-                    )
-
-                    for go in goto_targets:
-                        if isinstance(go, _Send):
-                            rtn.append((str(_TASKS), go))
-                        elif isinstance(go, str) and go != "END":
-                            rtn.append((_BRANCH_TO.format(go), None))
-                return rtn
+                if isinstance(value, (list, tuple)):
+                    value = [_fix_goto(v) for v in value]
+                else:
+                    value = _fix_goto(value)
+                return _orig_ctrl(value)
 
             _patched_ctrl._evosci_goto_none_fix = True  # type: ignore[attr-defined]
             _state_mod._control_branch = _patched_ctrl

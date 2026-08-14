@@ -5,7 +5,7 @@ Root cause
 When a client sends a ``command`` parameter (e.g. ``{"resume": {...}}``) in
 the run request body **without** a ``goto`` field, ``langgraph_api.command.map_cmd``
 produces ``Command(goto=None, resume=...)``.  LangGraph 1.2.9's
-``_control_branch`` (``langgraph/graph/state.py:1754``) then tries to iterate
+``_control_branch`` (``langgraph/graph/state.py``) then tries to iterate
 over ``None``::
 
     goto_targets = (
@@ -19,17 +19,19 @@ checkpoint ``values`` are reset to defaults (``messages: []``, ``files: {}``,
 ``async_tasks: {}``), corrupting the previous conversation state.  Every UI
 (WebUI, TUI, CLI) renders a blank session.
 
-These tests assert the **desired** behaviour: ``Command(goto=None)`` should be
-handled gracefully (treated as "no goto targets"), not crash.  They **fail**
-while the bug is live in langgraph 1.2.9 and **pass** once the fix is applied
-(either upstream in ``_control_branch`` or locally in ``map_cmd``).
+These tests verify two properties:
+
+1. **No crash**: ``Command(goto=None)`` is handled gracefully (treated as
+   "no goto targets"), not as a ``TypeError``.
+2. **Session preservation**: an existing checkpoint with messages survives
+   a resume-only or update-only command — the messages remain after the
+   command completes.
 
 Matches upstream issue langchain-ai/langgraph#5656.
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated
 
 import pytest
@@ -81,31 +83,28 @@ class TestMapCmdGotoNone:
     """``map_cmd`` must not emit ``Command(goto=None)``.
 
     A ``Command`` with ``goto=None`` crashes ``_control_branch`` when used as
-    graph input.  The fix is to emit ``goto=[]`` (or omit the kwarg) so that
-    the "no goto targets" path is taken cleanly.
-
-    These tests fail while the bug is live (``goto`` is ``None``) and pass
-    after ``map_cmd`` is patched.
+    graph input.  The fix is to emit ``goto=[]`` so that the "no goto targets"
+    path is taken cleanly.
     """
 
-    def test_resume_only_command_goto_is_not_none(self):
-        """A resume command without goto must not produce ``goto=None``."""
+    def test_resume_only_command_goto_is_empty_list(self):
+        """A resume command without goto must produce ``goto=[]``, not ``None``."""
         from langgraph_api.command import map_cmd
 
         result = map_cmd({"resume": {"status": "answered", "answers": ["yes"]}})
 
-        assert result.goto is not None, (
+        assert result.goto == [], (
             "map_cmd produces Command(goto=None) for resume-only commands, "
             "which crashes _control_branch when used as graph input"
         )
 
-    def test_update_only_command_goto_is_not_none(self):
-        """An update command without goto must not produce ``goto=None``."""
+    def test_update_only_command_goto_is_empty_list(self):
+        """An update command without goto must produce ``goto=[]``, not ``None``."""
         from langgraph_api.command import map_cmd
 
         result = map_cmd({"update": {"messages": [{"role": "user", "content": "hi"}]}})
 
-        assert result.goto is not None, (
+        assert result.goto == [], (
             "map_cmd produces Command(goto=None) for update-only commands, "
             "which crashes _control_branch when used as graph input"
         )
@@ -119,38 +118,110 @@ class TestMapCmdGotoNone:
 class TestCommandGotoNoneAsInput:
     """Feeding ``Command(goto=None)`` as graph input should be handled
     gracefully, not crash with ``TypeError``.
-
-    These tests fail while the bug is live in ``_control_branch``
-    (langgraph 1.2.9) and pass once the fix — ``command.goto or []`` — is
-    applied.
     """
 
-    def test_resume_command_does_not_crash(self, minimal_graph, thread_config):
+    async def test_resume_command_does_not_crash(self, minimal_graph, thread_config):
         """``Command(goto=None, resume=...)`` — the exact shape ``map_cmd``
         produces for a resume request — should not raise."""
         cmd = Command(goto=None, resume={"answer": "yes"})
         # Should complete without TypeError
-        asyncio.run(minimal_graph.ainvoke(cmd, config=thread_config))
+        await minimal_graph.ainvoke(cmd, config=thread_config)
 
-    def test_update_command_does_not_crash(self, minimal_graph, thread_config):
+    async def test_update_command_does_not_crash(self, minimal_graph, thread_config):
         """``Command(goto=None, update=...)`` should also not raise."""
         cmd = Command(
             goto=None,
             update={"messages": [{"role": "user", "content": "hi"}]},
         )
-        asyncio.run(minimal_graph.ainvoke(cmd, config=thread_config))
+        await minimal_graph.ainvoke(cmd, config=thread_config)
 
-    def test_normal_dict_input_still_works(self, minimal_graph, thread_config):
+    async def test_normal_dict_input_still_works(self, minimal_graph, thread_config):
         """Regression guard: regular dict input is unaffected."""
-        result = asyncio.run(
-            minimal_graph.ainvoke(
-                {"messages": [{"role": "user", "content": "hello"}]},
-                config=thread_config,
-            )
+        result = await minimal_graph.ainvoke(
+            {"messages": [{"role": "user", "content": "hello"}]},
+            config=thread_config,
         )
         assert len(result["messages"]) == 1
 
-    def test_command_with_goto_still_works(self, minimal_graph, thread_config):
+    async def test_command_with_goto_still_works(self, minimal_graph, thread_config):
         """Regression guard: a Command with a valid goto is unaffected."""
         cmd = Command(goto="model", update={})
-        asyncio.run(minimal_graph.ainvoke(cmd, config=thread_config))
+        result = await minimal_graph.ainvoke(cmd, config=thread_config)
+        assert len(result["messages"]) == 0, (
+            "Command with valid goto should complete and return state"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 3. Session preservation: existing messages survive a goto=None command
+# ---------------------------------------------------------------------------
+
+
+class TestSessionPreservation:
+    """An existing checkpoint with messages must survive a resume-only or
+    update-only command — the messages should remain after the command
+    completes, not be replaced with defaults.
+    """
+
+    async def test_messages_survive_resume_command(self, minimal_graph, thread_config):
+        """Seed a checkpoint with messages, then send a resume-only command;
+        the original messages must remain in the thread state."""
+        # Seed: create a checkpoint with one message
+        await minimal_graph.ainvoke(
+            {"messages": [{"role": "user", "content": "hello"}]},
+            config=thread_config,
+        )
+        # Act: send a resume command (the shape that triggers the crash)
+        cmd = Command(goto=None, resume={"answer": "yes"})
+        await minimal_graph.ainvoke(cmd, config=thread_config)
+        # Assert: the original message is preserved
+        state = await minimal_graph.aget_state(thread_config)
+        assert len(state.values["messages"]) >= 1, (
+            "Session was emptied: messages lost after resume command"
+        )
+        assert state.values["messages"][0].content == "hello"
+
+    async def test_messages_survive_update_command(self, minimal_graph, thread_config):
+        """Seed a checkpoint with messages, then send an update-only command;
+        the original messages must remain in the thread state."""
+        # Seed: create a checkpoint with one message
+        await minimal_graph.ainvoke(
+            {"messages": [{"role": "user", "content": "hello"}]},
+            config=thread_config,
+        )
+        # Act: send an update command (the shape that triggers the crash)
+        cmd = Command(
+            goto=None,
+            update={"messages": [{"role": "user", "content": "world"}]},
+        )
+        await minimal_graph.ainvoke(cmd, config=thread_config)
+        # Assert: both messages are present (original + update)
+        state = await minimal_graph.aget_state(thread_config)
+        assert len(state.values["messages"]) >= 2, (
+            "Session was emptied: messages lost after update command"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 4. _control_branch directly: END routing must not produce a branch
+# ---------------------------------------------------------------------------
+
+
+class TestControlBranchEndRouting:
+    """Regression guard: ``Command(goto=END)`` must not produce a spurious
+    ``branch:to:__end__`` channel.  The original ``_control_branch`` skips
+    branching for ``END``; the patched version must preserve that behavior.
+    """
+
+    def test_goto_end_is_not_a_branch_target(self):
+        """``_control_branch(Command(goto=END))`` must return ``[]`` — END
+        is a terminal sentinel, not a node to branch to."""
+        from langgraph.graph.state import _control_branch
+
+        assert _control_branch(Command(goto=END)) == []
+
+    def test_goto_end_in_list_is_not_a_branch_target(self):
+        """Same check with ``goto=[END]`` (list form)."""
+        from langgraph.graph.state import _control_branch
+
+        assert _control_branch(Command(goto=[END])) == []
