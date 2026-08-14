@@ -2996,8 +2996,14 @@ def test_observation_cache_invalidates_on_file_modification(tmp_path, monkeypatc
     assert docs1[0].summary == "original"
     assert len(parse_calls) == 1
 
-    # Modify the file (new content + new mtime).
+    # Modify the file (new content + new mtime).  Explicit bump because
+    # Windows NTFS mtime resolution can be coarse enough that a same-tick
+    # rewrite keeps the old signature and the cache returns stale data.
     _write_observation(obs_path, "O-1", "updated")
+    import os
+
+    st = obs_path.stat()
+    os.utime(obs_path, (st.st_atime, st.st_mtime + 1.0))
 
     docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
     assert docs2[0].summary == "updated"
