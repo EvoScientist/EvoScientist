@@ -27,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import os
+import sys
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -1271,6 +1272,13 @@ def _patch_langgraph_goto_none_crash() -> None:
 
             _patched_map_cmd._evosci_goto_none_fix = True  # type: ignore[attr-defined]
             _cmd_mod.map_cmd = _patched_map_cmd
+            # Rebind on already-loaded consumers that grabbed map_cmd via
+            # ``from langgraph_api.command import map_cmd`` — those hold the
+            # original reference and wouldn't see the module-level rebind.
+            for _name in ("langgraph_api.stream", "langgraph_api.grpc.ops.threads"):
+                _mod = sys.modules.get(_name)
+                if _mod is not None and getattr(_mod, "map_cmd", None) is _orig_map_cmd:
+                    _mod.map_cmd = _patched_map_cmd
     except ImportError:
         pass
 

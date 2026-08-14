@@ -23,9 +23,11 @@ These tests verify two properties:
 
 1. **No crash**: ``Command(goto=None)`` is handled gracefully (treated as
    "no goto targets"), not as a ``TypeError``.
-2. **Session preservation**: an existing checkpoint with messages survives
-   a resume-only or update-only command — the messages remain after the
-   command completes.
+2. **Crash path coverage**: when a thread's checkpoint has been deleted
+   (mimicking a cancelled/rolled-back run), a subsequent ``goto=None``
+   command reaches ``__start__`` and ``_control_branch`` — the exact crash
+   path. On ``main`` this crashes; with the patch it completes cleanly and
+   any update payload is applied.
 
 Matches upstream issue langchain-ai/langgraph#5656.
 """
@@ -153,53 +155,75 @@ class TestCommandGotoNoneAsInput:
 
 
 # ---------------------------------------------------------------------------
-# 3. Session preservation: existing messages survive a goto=None command
+# 3. Crash path via __start__: goto=None command after checkpoint deletion
 # ---------------------------------------------------------------------------
 
 
-class TestSessionPreservation:
-    """An existing checkpoint with messages must survive a resume-only or
-    update-only command — the messages should remain after the command
-    completes, not be replaced with defaults.
+class TestGotoNoneCrashPath:
+    """Tests that exercise the actual crash path: ``_control_branch`` via the
+    ``__start__`` pseudo-node.
+
+    The scenario mimics the production trigger: a thread that previously had
+    messages has its checkpoint deleted (e.g. by a cancelled/rolled-back run),
+    then a resume or update command with ``goto=None`` fires against the same
+    thread. With no checkpoint, ``is_resuming`` is ``False``, so LangGraph
+    takes the ``map_input`` path, writes the ``Command`` to the ``START``
+    channel, and ``__start__`` fires — calling ``_control_branch`` with
+    ``Command(goto=None)``.
+
+    On ``main`` (unpatched), this crashes with ``TypeError: 'NoneType' object
+    is not iterable`` and the thread is left in an error state with default
+    values. With the patch, ``goto=None`` is normalized to ``[]`` and the
+    command completes cleanly.
     """
 
-    async def test_messages_survive_resume_command(self, minimal_graph, thread_config):
-        """Seed a checkpoint with messages, then send a resume-only command;
-        the original messages must remain in the thread state."""
+    async def test_resume_after_checkpoint_deletion_does_not_crash(
+        self, minimal_graph, thread_config
+    ):
+        """Seed messages, delete the checkpoint (mimicking rollback), then
+        resume — reaches ``__start__`` with ``goto=None``, crashes on main."""
         # Seed: create a checkpoint with one message
         await minimal_graph.ainvoke(
             {"messages": [{"role": "user", "content": "hello"}]},
             config=thread_config,
         )
-        # Act: send a resume command (the shape that triggers the crash)
+        # Delete the checkpoint — mimics a cancelled/rolled-back run
+        minimal_graph.checkpointer.delete_thread(
+            thread_config["configurable"]["thread_id"]
+        )
+        # Act: resume command with goto=None — __start__ fires, _control_branch
+        # is called with Command(goto=None). Crashes on main, completes with patch.
         cmd = Command(goto=None, resume={"answer": "yes"})
         await minimal_graph.ainvoke(cmd, config=thread_config)
-        # Assert: the original message is preserved
-        state = await minimal_graph.aget_state(thread_config)
-        assert len(state.values["messages"]) >= 1, (
-            "Session was emptied: messages lost after resume command"
-        )
-        assert state.values["messages"][0].content == "hello"
 
-    async def test_messages_survive_update_command(self, minimal_graph, thread_config):
-        """Seed a checkpoint with messages, then send an update-only command;
-        the original messages must remain in the thread state."""
+    async def test_update_after_checkpoint_deletion_applies_update(
+        self, minimal_graph, thread_config
+    ):
+        """Seed messages, delete the checkpoint (mimicking rollback), then
+        send an update command — the update must be applied despite going
+        through ``__start__`` with ``goto=None``."""
         # Seed: create a checkpoint with one message
         await minimal_graph.ainvoke(
             {"messages": [{"role": "user", "content": "hello"}]},
             config=thread_config,
         )
-        # Act: send an update command (the shape that triggers the crash)
+        # Delete the checkpoint — mimics a cancelled/rolled-back run
+        minimal_graph.checkpointer.delete_thread(
+            thread_config["configurable"]["thread_id"]
+        )
+        # Act: update command with goto=None — __start__ fires, _control_branch
+        # is called. Crashes on main, applies the update with patch.
         cmd = Command(
             goto=None,
             update={"messages": [{"role": "user", "content": "world"}]},
         )
         await minimal_graph.ainvoke(cmd, config=thread_config)
-        # Assert: both messages are present (original + update)
+        # Assert: the update was applied (not lost to a crash)
         state = await minimal_graph.aget_state(thread_config)
-        assert len(state.values["messages"]) >= 2, (
-            "Session was emptied: messages lost after update command"
+        assert len(state.values.get("messages", [])) >= 1, (
+            "Update was lost: no messages after goto=None command via __start__"
         )
+        assert state.values["messages"][0].content == "world"
 
 
 # ---------------------------------------------------------------------------
