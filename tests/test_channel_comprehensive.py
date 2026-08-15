@@ -1220,6 +1220,14 @@ class TestChannelReconnect:
         assert ch._startup_error == "fatal"
 
 
+class _MockSDKError(Exception):
+    """Exception that mimics SlackApiError / httpx errors with structured response."""
+
+    def __init__(self, message: str = "", response: object = None) -> None:
+        super().__init__(message)
+        self.response = response
+
+
 class TestExtractRetryAfter:
     def test_generic_errors_use_default_retry_delay(self):
         """Generic transient errors should use the base retry delay."""
@@ -1250,6 +1258,83 @@ class TestExtractRetryAfter:
         ch = StubChannel()
         result = ch._extract_retry_after(RuntimeError("HTTP 429 Too Many Requests"))
         assert result == 1.0
+
+    # ── Structured SDK error code / status code tests ─────────────────
+
+    def test_slack_auth_error_not_retryable(self):
+        """Slack invalid_auth error code should return None (no retry)."""
+        ch = StubChannel()
+        exc = _MockSDKError("invalid_auth", response={"error": "invalid_auth"})
+        result = ch._extract_retry_after(exc)
+        assert result is None
+
+    def test_status_401_not_retryable(self):
+        """HTTP 401 status code should return None (no retry)."""
+        ch = StubChannel()
+
+        class Http401Error(Exception):
+            pass
+
+        exc = Http401Error("Unauthorized")
+        exc.response = type("Resp", (), {"status_code": 401})()
+        result = ch._extract_retry_after(exc)
+        assert result is None
+
+    def test_status_403_not_retryable(self):
+        """HTTP 403 status code should return None (no retry)."""
+        ch = StubChannel()
+
+        class Http403Error(Exception):
+            pass
+
+        exc = Http403Error("Forbidden")
+        exc.response = type("Resp", (), {"status_code": 403})()
+        result = ch._extract_retry_after(exc)
+        assert result is None
+
+    def test_status_500_is_retryable(self):
+        """HTTP 500 status code should still retry (default 1.0s)."""
+        ch = StubChannel()
+
+        class Http500Error(Exception):
+            pass
+
+        exc = Http500Error("Internal Server Error")
+        exc.response = type("Resp", (), {"status_code": 500})()
+        result = ch._extract_retry_after(exc)
+        assert result == 1.0
+
+    def test_extract_sdk_error_code_from_dict(self):
+        """_extract_sdk_error_code returns the 'error' key from a dict response."""
+        ch = StubChannel()
+        exc = _MockSDKError("oops", response={"error": "not_authed"})
+        result = ch._extract_sdk_error_code(exc)
+        assert result == "not_authed"
+
+    def test_extract_sdk_error_code_from_status(self):
+        """_extract_sdk_error_code returns status_code from an object response."""
+        ch = StubChannel()
+
+        class HttpError(Exception):
+            pass
+
+        exc = HttpError("boom")
+        exc.response = type("Resp", (), {"status_code": 401})()
+        result = ch._extract_sdk_error_code(exc)
+        assert result == 401
+
+    def test_extract_sdk_error_code_no_response_returns_none(self):
+        """_extract_sdk_error_code returns None when exc has no response."""
+        ch = StubChannel()
+        result = ch._extract_sdk_error_code(RuntimeError("plain error"))
+        assert result is None
+
+    def test_extract_sdk_error_code_empty_response_returns_none(self):
+        """_extract_sdk_error_code returns None when response is empty."""
+        ch = StubChannel()
+        exc = _MockSDKError("empty", response={})
+        result = ch._extract_sdk_error_code(exc)
+        assert result is None
 
 
 class TestChannelAttachments:

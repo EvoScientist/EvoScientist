@@ -746,6 +746,20 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
     # ── Send retry abstraction ──────────────────────────────────────
 
+    # HTTP status codes that should never be retried (auth/permission errors)
+    _non_retryable_status_codes: tuple[int, ...] = (401, 403)
+
+    # Structured SDK error codes that should never be retried
+    # Examples: Slack (invalid_auth, expired_token), Feishu (10003), DingTalk (40014)
+    _non_retryable_error_codes: tuple[str, ...] = (
+        "invalid_auth",
+        "invalid_token",
+        "expired_token",
+        "account_inactive",
+        "not_authed",
+        "no_permission",
+    )
+
     _non_retryable_patterns: tuple[str, ...] = (
         "unauthorized",
         "forbidden",
@@ -766,13 +780,16 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         Pipeline:
         1. SDK-provided ``retry_after`` attribute (Telegram / Slack SDKs).
         2. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
-        3. Non-retryable pattern match → ``None``.
+        3. Non-retryable detection → ``None``. Combines structured SDK error
+           codes (e.g. Slack ``invalid_auth``, HTTP 401/403) with message
+           pattern matching (e.g. ``"unauthorized"``, ``"forbidden"``).
         4. Rate-limit pattern match → ``_rate_limit_delay``.
         5. Default ``1.0`` s for generic transient errors.
 
         Channels can customize behavior declaratively via class attributes
-        ``_non_retryable_patterns``, ``_rate_limit_patterns``, and
-        ``_rate_limit_delay``, or override this method entirely.
+        ``_non_retryable_patterns``, ``_rate_limit_patterns``,
+        ``_non_retryable_status_codes``, ``_non_retryable_error_codes``,
+        and ``_rate_limit_delay``, or override this method entirely.
         """
         # 1. SDK retry_after attribute
         retry = getattr(exc, "retry_after", None)
@@ -784,9 +801,19 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         if header_val is not None:
             return header_val
 
-        msg = str(exc).lower()
+        # 3. Non-retryable detection: structured SDK error codes + message
+        #    patterns. Either signal means the error is permanent and must
+        #    not be retried.
+        sdk_error = self._extract_sdk_error_code(exc)
+        if sdk_error is not None:
+            if isinstance(sdk_error, int):
+                if sdk_error in self._non_retryable_status_codes:
+                    return None
+            elif isinstance(sdk_error, str):
+                if sdk_error in self._non_retryable_error_codes:
+                    return None
 
-        # 3. Non-retryable patterns
+        msg = str(exc).lower()
         if self._non_retryable_patterns and any(
             p in msg for p in self._non_retryable_patterns
         ):
@@ -800,6 +827,38 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
         # 5. Default: transient error, retry with the standard delay
         return 1.0
+
+    def _extract_sdk_error_code(self, exc: Exception) -> int | str | None:
+        """Extract structured SDK error code from exception's response.
+
+        Safely inspects response object or dict for error codes.
+        Returns int (HTTP status code) or str (SDK error code), or None.
+
+        Handles two patterns:
+        - Slack SDK: response["error"] (dict-like, e.g. "invalid_auth")
+        - HTTP SDK: response.status_code (object attribute, e.g. 401)
+        """
+        resp = getattr(exc, "response", None)
+        if resp is None:
+            return None
+
+        # Try dict-like access (Slack SDK pattern)
+        try:
+            error = resp.get("error")
+            if error and isinstance(error, str):
+                return error
+        except (AttributeError, TypeError):
+            pass
+
+        # Try object attribute (HTTP status code pattern)
+        try:
+            status = getattr(resp, "status_code", None)
+            if status and isinstance(status, int):
+                return status
+        except AttributeError:
+            pass
+
+        return None
 
     def _parse_retry_after_header(self, exc: Exception) -> float | None:
         """Try to extract a ``Retry-After`` value from an HTTP response."""
