@@ -59,6 +59,12 @@ sessions_app = typer.Typer(
 )
 app.add_typer(sessions_app, name="sessions")
 
+# Background langgraph dev server management — the explicit counterpart to
+# langgraph_dev_keepalive: a server that outlives its CLI needs a first-class
+# way to inspect and stop it.
+server_app = typer.Typer(help="Manage the background langgraph dev server")
+app.add_typer(server_app, name="server")
+
 # Configure subcommand group — re-run a single onboarding section.
 configure_app = typer.Typer(
     help=(

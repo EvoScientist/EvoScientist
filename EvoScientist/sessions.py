@@ -544,6 +544,50 @@ async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
         return await cur.fetchone() is not None
 
 
+async def _ensure_thread_meta_index(conn: aiosqlite.Connection, db_path: str) -> None:
+    """Create the expression index behind thread listing, if missing.
+
+    ``list_threads`` filters + groups on ``json_extract(metadata, ...)``;
+    without an index SQLite scans every checkpoint row, dragging each row's
+    multi-KB checkpoint blob through the page cache (~1.3s on a 700MB DB vs
+    ~0.1s indexed). The four columns are exactly the per-row expressions:
+    agent_name + graph_id feed the WHERE and updated_at feeds the MAX, so
+    none of them may fall back to a per-row metadata fetch; workspace_dir /
+    model are only materialized for the surviving groups (~dozens), so they
+    stay out of the index (measured: same speed as a 6-column variant at
+    60% of its size, and two fewer json_extract per checkpoint write).
+
+    The existence probe is a cheap catalog read on the caller's connection
+    (it can still wait on an exclusive schema lock, bounded by that
+    connection's timeout); the one-time build runs on a separate connection
+    whose 2s timeout bounds its lock wait, with build time after acquiring
+    (~0.2s measured on a 700MB DB) on top. Best-effort: on any failure the
+    listing simply runs unindexed and the next call retries.
+    """
+    try:
+        async with conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+            ("idx_evoscientist_thread_meta",),
+        ) as cur:
+            if await cur.fetchone() is not None:
+                return
+        async with aiosqlite.connect(db_path, timeout=2.0) as ddl_conn:
+            await ddl_conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_evoscientist_thread_meta
+                ON checkpoints (
+                    json_extract(metadata, '$.agent_name'),
+                    thread_id,
+                    json_extract(metadata, '$.updated_at'),
+                    json_extract(metadata, '$.graph_id')
+                )
+                """
+            )
+            await ddl_conn.commit()
+    except aiosqlite.Error:
+        _logger.debug("Could not ensure thread meta index", exc_info=True)
+
+
 def _reduce_messages_delta(
     state: list[AnyMessage] | None, writes: list[Any]
 ) -> list[AnyMessage]:
@@ -889,6 +933,7 @@ async def list_threads(
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return []
+        await _ensure_thread_meta_index(conn, db_path)
 
         query = f"""
             SELECT thread_id,

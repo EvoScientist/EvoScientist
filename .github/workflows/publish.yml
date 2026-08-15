@@ -1,0 +1,67 @@
+name: Publish to PyPI
+
+# Publishes EvoScientist to PyPI via OpenID Connect (trusted publishing) — no
+# API token or password involved. Fires when a GitHub Release is published
+# (i.e. after `gh release create vX.Y.Z`), builds the sdist + wheel, guards
+# that the package version matches the release tag, then uploads with a
+# short-lived OIDC token.
+#
+# One-time PyPI setup (Manage project -> Publishing -> Add a new publisher):
+#   Owner:            EvoScientist
+#   Repository:       EvoScientist
+#   Workflow name:    publish.yml
+#   Environment name: pypi
+on:
+  release:
+    types: [published]
+  # Manual re-run escape hatch — dispatch it from the release tag; the version
+  # guard rejects any non-tag ref.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/EvoScientist/
+    permissions:
+      id-token: write  # required to mint the OIDC token PyPI verifies
+    steps:
+      # Actions in this job are pinned to full commit SHAs (like docker.yml):
+      # it holds id-token: write and PyPI publishing authority.
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          python-version: "3.11"
+          # No shared cache in the publishing job — build from clean sources only.
+          enable-cache: false
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Guard — package version must match the release tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::This workflow must run from a version tag (got ${GITHUB_REF_TYPE} '${GITHUB_REF_NAME}'); dispatch it from the release tag."
+            exit 1
+          fi
+          VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "(.*)"/\1/')
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "pyproject version: $VERSION | release tag: $TAG"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::pyproject version ($VERSION) does not match release tag ($TAG); refusing to publish."
+            exit 1
+          fi
+
+      - name: Twine metadata check
+        run: uvx twine check dist/*
+
+      - name: Publish to PyPI (trusted publishing)
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2

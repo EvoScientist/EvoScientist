@@ -21,6 +21,7 @@ VALID_PROVIDERS: frozenset[str] = frozenset(
         "zhipu",
         "zhipu-code",
         "volcengine",
+        "volcengine-code",
         "dashscope",
         "dashscope-code",
         "deepseek",

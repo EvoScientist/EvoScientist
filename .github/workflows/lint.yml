@@ -11,7 +11,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      # Pinned to a full tag on purpose: setup-uv stopped publishing major /
+      # minor tags in v8.0.0 (supply-chain hardening), so `@v9` does not exist
+      # and would fail the job. Releases are immutable, so the tag is as safe
+      # as a SHA. v7 is where the action moved off the deprecated node20.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: "3.11"
           cache-dependency-glob: "**/pyproject.toml"

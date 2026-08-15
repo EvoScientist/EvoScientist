@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.5" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.7" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,8 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[14 Aug 2026]** **[v0.2.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.7)** — Faster startup (lazy imports, reusable kept-alive langgraph dev server, indexed thread listing); new models: Gemini 3.7 Flash (Google + OpenRouter), DeepSeek V4 Pro 0813, Grok 4.6, and GLM-5.3 (Zhipu + OpenRouter); encrypted-webhook channels reject unsigned POSTs; MCP stdio servers start reliably under redirected streams on Windows; sub-agent tools resolve at dispatch time; `/compact` history offload restored on deepagents 0.7.6.
+- **[07 Aug 2026]** **[v0.2.6](https://github.com/EvoScientist/EvoScientist/releases/tag/V0.2.6)** — Agent teams: invite installed expert skills into a session (`/expert <name>`) for in-turn consults, parallel panels, or background jobs; configurable bind hosts for the langgraph dev backend and WebUI (loopback by default); Volcengine Coding Plan provider (`glm-5.2`, `kimi-k2.5`); Qwen3.8-Max on DashScope and OpenRouter (1M context); deepagents 0.7.5 with media placeholders instead of provider 400s; a blank tool-call ID fix for Kimi/Zhipu sessions.
 - **[01 Aug 2026]** **[v0.2.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.5)** — Unified human-in-the-loop approval across the main agent and sync + async sub-agents; deepagents 0.7.0 with leaner built-in prompts and a recursive `delete` tool gated behind the same approval as `execute`; Requesty and Atlas Cloud as new LLM providers; fixes for unnamed tool calls, interrupted tool-call history on sync sub-agents, and deploy-mode port propagation.
 - **[26 Jul 2026]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 selectable on Anthropic and OpenRouter (incl. fast), plus Gemini 3.6 Flash and 3.5 Flash Lite on Google and OpenRouter; Kimi K3 now works over Anthropic-protocol channels (Kimi For Coding, custom endpoints), covering structured output, history replay, and multi-turn thinking; fixes for interrupted tool-call history, skill-install path leaks, and OpenRouter SSE streaming (pinned below 0.11).
 - **[18 Jul 2026]** **[v0.2.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.3)** — Kimi K3 selectable on Moonshot and OpenRouter (1M context); async sub-agent runs no longer get stuck pending thanks to orphaned-run cleanup; Telegram slash commands; provider fixes (DeepSeek native SDK, GPT-5.x via ChatGPT OAuth, OpenAI `reasoning_effort`); quieter tool-selector streaming and smaller checkpoints.
@@ -453,6 +455,24 @@ EvoSci config set webui_port 4800    # change the front-end port (must differ fr
 ```
 
 Requires **Node.js 24 LTS** (for `npx`); the first launch downloads `@evoscientist/webui` and needs network. Note: the WebUI does not show your CLI/TUI chat history, and `-p` / `--resume` fall back to the classic CLI.
+
+**Opening it from another machine.** Both servers bind loopback (`127.0.0.1`) by default, so the WebUI is local-only out of the box. To use it over the LAN, widen both — the UI connects to the backend **from the browser**, so also point the UI's deployment URL at `http://<this-machine-ip>:6174` rather than leaving it on localhost:
+
+```bash
+EvoSci --host 0.0.0.0                          # this session only, both servers
+EvoSci config set webui_host 0.0.0.0           # persist, front-end (port 4716)
+EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
+```
+
+`EvoSci deploy` and `EvoSci serve` take the same flag: `EvoSci deploy --host 0.0.0.0`.
+
+> 🚨 **WARNING**
+>
+> The backend is an **unauthenticated API whose agent can run shell commands**. Anyone who can reach port 6174 controls it, so only widen it on a trusted network — EvoSci prints a red `⚠ PUBLIC BIND` banner at every startup while it's exposed.
+>
+> **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so `--host` puts port 6174 on the network in every mode. The front-end port (4716) is WebUI-only but not harmless either: its API reads, writes and uploads workspace files and installs skills, so it gets the same banner and the same trusted-network rule.
+>
+> On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
 
 </details>
 

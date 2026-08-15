@@ -525,6 +525,7 @@ def run_textual_interactive(
             CompactingWidget,
             LoadingWidget,
             MCPLoaderWidget,
+            PanelWidget,
             SubAgentWidget,
             SummarizationWidget,
             SystemMessage,
@@ -1590,6 +1591,7 @@ def run_textual_interactive(
             todo_w: TodoWidget | None = None
             tool_widgets: dict[str, ToolCallWidget] = {}
             subagent_widgets: dict[str, SubAgentWidget] = {}
+            panel_widgets: dict[str, PanelWidget] = {}
 
             @dataclass
             class _ResponseDisplayState:
@@ -1791,6 +1793,10 @@ def run_textual_interactive(
                     summarization_w = None
                 try:
                     _anchor_engaged = False
+                    _active_teams = list(self._channel_runtime.active_teams)
+                    _configurable_extra = (
+                        {"active_teams": _active_teams} if _active_teams else None
+                    )
                     async for event in iter_with_stream_cancel(
                         graph_gateway.stream_events(
                             RunRequest(
@@ -1803,6 +1809,7 @@ def run_textual_interactive(
                                     local_graph=agent,
                                     workspace_dir=self._workspace_dir,
                                 ),
+                                configurable_extra=_configurable_extra,
                             )
                         ),
                         cancel_scope,
@@ -2100,6 +2107,40 @@ def run_textual_interactive(
                             if sa_w is not None:
                                 sa_w.finalize()
 
+                        elif event_type == "panel_dispatch_start":
+                            eval_id = event.get("eval_id", "") or "_unbatched"
+                            panel_w = panel_widgets.get(eval_id)
+                            if panel_w is None:
+                                panel_w = PanelWidget(eval_id)
+                                # Register before awaiting mount: a cancel
+                                # during the await would otherwise orphan a
+                                # ticking panel outside the cleanup loop.
+                                panel_widgets[eval_id] = panel_w
+                                await container.mount(panel_w)
+                            await panel_w.start_dispatch(
+                                event["id"],
+                                event.get("subagent_type", ""),
+                                event.get("label", "") or event.get("description", ""),
+                            )
+
+                        elif event_type == "panel_dispatch_complete":
+                            eval_id = event.get("eval_id", "") or "_unbatched"
+                            panel_w = panel_widgets.get(eval_id)
+                            if panel_w is not None:
+                                panel_w.complete_dispatch(
+                                    event["id"], int(event.get("duration_ms", 0))
+                                )
+
+                        elif event_type == "panel_dispatch_error":
+                            eval_id = event.get("eval_id", "") or "_unbatched"
+                            panel_w = panel_widgets.get(eval_id)
+                            if panel_w is not None:
+                                panel_w.fail_dispatch(
+                                    event["id"],
+                                    int(event.get("duration_ms", 0)),
+                                    event.get("error", ""),
+                                )
+
                         elif event_type == "ask_user":
                             questions = event.get("questions", [])
                             if questions:
@@ -2320,6 +2361,13 @@ def run_textual_interactive(
                                 sa_w.finalize()
                             except Exception:
                                 pass
+                    # Finalize any still-running panel dispatches so their
+                    # per-row spinner timers stop instead of ticking forever.
+                    for panel_w in panel_widgets.values():
+                        try:
+                            panel_w.finalize_running()
+                        except Exception:
+                            pass
                     # Finalize thinking widget
                     if thinking_w is not None and thinking_w._is_active:
                         try:
