@@ -442,7 +442,11 @@ def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
 
 
 def _maybe_swap_async_subagents(
-    subs: list, middleware: list | None = None, *, cfg=None
+    subs: list,
+    middleware: list | None = None,
+    *,
+    tool_registry: dict | None = None,
+    cfg=None,
 ) -> list:
     """Replace ``_async``-flagged sub-agents with ``AsyncSubAgent`` specs when enabled.
 
@@ -458,17 +462,24 @@ def _maybe_swap_async_subagents(
     Adding a new async sub-agent requires no change here — flip
     ``async: true`` in its yaml and create the matching deployment graph.
 
-    All return paths strip the internal ``_async`` field from sub-agent dicts
-    before handoff, since deepagents may schema-validate the kwarg.
+    YAML tool names stay in the internal ``_tool_names`` field until this
+    decision point. In-process specs resolve them against ``tool_registry``;
+    swapped remote specs discard them because their graph factory resolves
+    tools in its own process. All return paths strip internal fields before
+    handoff, since deepagents may schema-validate the kwargs.
 
     When async subagents are actually swapped in and ``middleware`` is provided,
     appends ``AsyncWatcherMiddleware`` so launches spawn an
     ``async_notifier`` watcher.
     """
+    from .utils import resolve_subagent_tools
+
     cfg = cfg if cfg is not None else _ensure_config()
+    tool_registry = tool_registry or {}
     if not getattr(cfg, "enable_async_subagents", False):
-        # Async fully disabled — strip the internal flag before handoff.
+        # Async fully disabled: every spec will run in-process.
         for s in subs:
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
         return subs
 
@@ -482,9 +493,9 @@ def _maybe_swap_async_subagents(
             "enable_async_subagents=true but langgraph dev is not reachable; "
             "falling back to in-process sync delegation for all sub-agents."
         )
-        # Strip the internal ``_async`` flag (carried from ``load_subagents``)
-        # before sub-agents reach deepagents — it's never a deepagents key.
+        # Every spec falls back to in-process execution.
         for s in subs:
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
         return subs
 
@@ -496,6 +507,7 @@ def _maybe_swap_async_subagents(
 
     if not async_specs:
         for s in subs:
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
         return subs
 
@@ -526,7 +538,7 @@ def _maybe_swap_async_subagents(
             agent_specs[name] = spec
             out.append(spec)
         else:
-            # Strip the internal flag before handoff to deepagents.
+            resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
             out.append(s)
 
@@ -662,21 +674,20 @@ def _build_base_kwargs(
         tool_registry["tavily_search"] = tavily_search
     base_tools = [think_tool, skill_manager]
 
-    # ``async_swap_pending=True`` because ``_maybe_swap_async_subagents``
-    # below re-resolves tools for async subagents against the deployed
-    # graph's own registry (via ``subagents/_factory.py``). A tool missing
-    # from ``tool_registry`` for an async spec logs at DEBUG, not WARNING.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=tool_registry,
-        async_swap_pending=True,
     )
     _fold_expert_subagents(subs, tool_registry)
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
     )
-    subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    subs = _maybe_swap_async_subagents(
+        subs,
+        base_middleware,
+        tool_registry=tool_registry,
+        cfg=cfg,
+    )
     # Route AsyncSubAgent specs (both standard and expert) through
     # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
     # replaces upstream's non-parameterisable one.
@@ -746,12 +757,8 @@ def load_mcp_and_build_kwargs(
 
     mcp_main = mcp_by_agent.pop("main", [])
 
-    # Same rationale as ``_build_base_kwargs``: async subagents get
-    # re-resolved downstream by the deployed graph's factory registry.
     subs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=registry,
-        async_swap_pending=True,
     )
     _fold_expert_subagents(subs, registry)
 
@@ -767,7 +774,12 @@ def load_mcp_and_build_kwargs(
 
     # Swap selected sub-agents to AsyncSubAgent (must happen AFTER MCP injection
     # since async sub-agents are remote graphs that load their own tools).
-    subs = _maybe_swap_async_subagents(subs, base_middleware, cfg=cfg)
+    subs = _maybe_swap_async_subagents(
+        subs,
+        base_middleware,
+        tool_registry=registry,
+        cfg=cfg,
+    )
     # Mirror the base path: route AsyncSubAgent specs through
     # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
     # is the one composed into the main agent.
