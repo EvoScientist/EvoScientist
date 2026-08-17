@@ -96,6 +96,31 @@ def _resolve_reasoning_effort(default: str) -> str:
     return os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
 
 
+_DASHSCOPE_REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+_DASHSCOPE_CODE_REASONING_EFFORTS = frozenset({"low", "high", "xhigh"})
+
+
+def _validate_dashscope_reasoning_effort(
+    provider: str,
+    model_id: str,
+    effort: str,
+) -> None:
+    """Reject reasoning levels unsupported by the selected DashScope endpoint."""
+    allowed = (
+        _DASHSCOPE_REASONING_EFFORTS
+        if provider == "dashscope"
+        else _DASHSCOPE_CODE_REASONING_EFFORTS
+    )
+    if effort not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ValueError(
+            f"Unsupported EVOSCIENTIST_REASONING_EFFORT={effort!r} for "
+            f"{provider} model {model_id!r}. Supported values: {choices}."
+        )
+
+
 def _apply_openai_compat_reasoning_config(
     provider: str,
     model_id: str,
@@ -125,11 +150,17 @@ def _apply_openai_compat_reasoning_config(
     short_model_id = model_id.rsplit("/", 1)[-1]
 
     if provider == "dashscope" and short_model_id.startswith("qwen3.8-max"):
-        kwargs.setdefault("reasoning_effort", configured or "medium")
+        if "reasoning_effort" not in kwargs:
+            effort = configured or "medium"
+            _validate_dashscope_reasoning_effort(provider, model_id, effort)
+            kwargs["reasoning_effort"] = effort
         return
 
     if provider == "dashscope-code" and short_model_id.startswith("qwen3.8-max"):
-        kwargs.setdefault("reasoning_effort", configured or "high")
+        if "reasoning_effort" not in kwargs:
+            effort = configured or "high"
+            _validate_dashscope_reasoning_effort(provider, model_id, effort)
+            kwargs["reasoning_effort"] = effort
         return
 
     if provider == "custom-openai" and configured:

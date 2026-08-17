@@ -1226,6 +1226,65 @@ class TestThirdPartyRouting:
 
         assert mock_init.call_args[1]["reasoning_effort"] == "medium"
 
+    @pytest.mark.parametrize(
+        ("provider", "effort"),
+        [
+            ("dashscope", "none"),
+            ("dashscope", "minimal"),
+            ("dashscope", "low"),
+            ("dashscope", "medium"),
+            ("dashscope", "high"),
+            ("dashscope", "xhigh"),
+            ("dashscope", "max"),
+            ("dashscope-code", "low"),
+            ("dashscope-code", "high"),
+            ("dashscope-code", "xhigh"),
+        ],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_accepts_supported_reasoning_effort(
+        self, mock_init, provider, effort, monkeypatch
+    ):
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", effort)
+
+        get_chat_model("qwen3.8-max", provider=provider)
+
+        assert mock_init.call_args[1]["reasoning_effort"] == effort
+
+    @pytest.mark.parametrize(
+        ("provider", "effort"),
+        [
+            ("dashscope", "invalid"),
+            ("dashscope-code", "medium"),
+            ("dashscope-code", "none"),
+        ],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_rejects_unsupported_reasoning_effort(
+        self, mock_init, provider, effort, monkeypatch
+    ):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", effort)
+
+        with pytest.raises(ValueError, match=provider):
+            get_chat_model("qwen3.8-max", provider=provider)
+
+        mock_init.assert_not_called()
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_explicit_effort_overrides_invalid_environment(
+        self, mock_init, monkeypatch
+    ):
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "invalid")
+
+        get_chat_model("qwen3.8-max", provider="dashscope-code", reasoning_effort="low")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "low"
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_dashscope_code_routes_through_openai(self, mock_init, monkeypatch):
         """DashScope-Code (sk-sp-* subscription keys) routes through OpenAI
