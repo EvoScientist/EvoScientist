@@ -313,7 +313,9 @@ class FakeGraphGateway(GraphGateway):
         self.clone_calls: list[
             tuple[str, dict[str, Any] | None, GraphTarget | None]
         ] = []
-        self.updated_states: list[tuple[GraphTarget, str, GraphStateValues]] = []
+        self.updated_states: list[
+            tuple[GraphTarget, str, GraphStateValues, str | None]
+        ] = []
 
     async def create_thread(
         self,
@@ -414,8 +416,10 @@ class FakeGraphGateway(GraphGateway):
         target: GraphTarget,
         thread_id: str,
         values: GraphStateValues,
+        *,
+        as_node: str | None = None,
     ) -> None:
-        self.updated_states.append((target, thread_id, values))
+        self.updated_states.append((target, thread_id, values, as_node))
 
 
 class FakeLangGraphRunModule:

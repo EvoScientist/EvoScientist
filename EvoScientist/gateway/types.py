@@ -182,5 +182,15 @@ class GraphGateway(Protocol):
         target: GraphTarget,
         thread_id: str,
         values: GraphStateValues,
+        *,
+        as_node: str | None = None,
     ) -> None:
-        """Update graph state values for a thread."""
+        """Update graph state values for a thread.
+
+        ``as_node`` controls which graph node's writers apply the update.
+        ``None`` lets LangGraph infer the node from checkpoint history (the
+        pre-existing default). A real node name (e.g. ``"model"``) runs that
+        node's channel writers — required for appending to the ``messages``
+        channel. ``END`` is only valid with ``values=None`` (clears pending
+        tasks; ``next`` becomes empty).
+        """

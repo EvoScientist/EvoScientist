@@ -911,6 +911,7 @@ async def compact_conversation(
         target,
         thread_id,
         {"_summarization_event": new_event, "_summarization_session_id": session_id},
+        as_node="model",
     )
 
     return CompactResult(
