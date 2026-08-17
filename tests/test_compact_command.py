@@ -240,7 +240,7 @@ class TestCompactSuccess:
         mock_middleware_inst._partition_messages.return_value = (to_summarize, to_keep)
         mock_middleware_inst._acreate_summary = AsyncMock(return_value="Summary text")
         mock_middleware_inst._aoffload_to_backend = AsyncMock(
-            return_value="/conversation_history/tid.md"
+            return_value="/conversation_history/session_abc123.md"
         )
         mock_middleware_inst._build_new_messages_with_path.return_value = [summary_msg]
         mock_middleware_inst._compute_state_cutoff.return_value = 15
@@ -340,6 +340,84 @@ class TestCompactSuccess:
         # file_path should be None in the event
         event_data = graph_gateway.updated_states[0][2]
         assert event_data["_summarization_event"]["file_path"] is None
+
+
+class TestCompactOffloadWire:
+    """Offload flow against the REAL SummarizationMiddleware and backend.
+
+    ``_aoffload_to_backend`` is deliberately not mocked: /compact swallows
+    offload exceptions, so a signature drift in deepagents (0.7.6 added a
+    required ``session_id``) silently skips offload instead of crashing —
+    only a wire-level test catches that.
+    """
+
+    @staticmethod
+    def _build_messages():
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        msgs = []
+        for i in range(4):
+            msgs.append(HumanMessage(content=f"question {i} " * 50))
+            msgs.append(AIMessage(content=f"answer {i} " * 50))
+        return msgs
+
+    async def _compact_real(self, graph_gateway, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from langchain_core.language_models import FakeListChatModel
+
+        model = FakeListChatModel(responses=["SUMMARY"])
+        backend = FilesystemBackend(root_dir=tmp_path)
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_chat_model", return_value=model),
+            patch(
+                "EvoScientist.EvoScientist._get_default_backend",
+                return_value=backend,
+            ),
+            patch(
+                "deepagents.middleware.summarization.compute_summarization_defaults",
+                return_value={"keep": ("messages", 2)},
+            ),
+        ):
+            return await _compact(graph_gateway, input_tokens_hint=150_000)
+
+    async def test_offload_writes_history_and_persists_session_id(self, tmp_path):
+        graph_gateway = FakeGraphGateway(
+            state_values={
+                "messages": self._build_messages(),
+                "_summarization_event": None,
+            }
+        )
+
+        result = await self._compact_real(graph_gateway, tmp_path)
+
+        assert result.status == "ok"
+        history_files = list((tmp_path / "conversation_history").glob("*.md"))
+        assert len(history_files) == 1, "offload silently skipped — no history file"
+        assert "question 0" in history_files[0].read_text()
+
+        update = graph_gateway.updated_states[0][2]
+        session_id = update["_summarization_session_id"]
+        assert history_files[0].name == f"{session_id}.md"
+        event = update["_summarization_event"]
+        assert event["file_path"] == f"/conversation_history/{session_id}.md"
+
+    async def test_offload_reuses_persisted_session_id(self, tmp_path):
+        graph_gateway = FakeGraphGateway(
+            state_values={
+                "messages": self._build_messages(),
+                "_summarization_event": None,
+                "_summarization_session_id": "session_deadbeef",
+            }
+        )
+
+        result = await self._compact_real(graph_gateway, tmp_path)
+
+        assert result.status == "ok"
+        history_file = tmp_path / "conversation_history" / "session_deadbeef.md"
+        assert history_file.exists(), "offload did not reuse the persisted session id"
+        update = graph_gateway.updated_states[0][2]
+        assert update["_summarization_session_id"] == "session_deadbeef"
 
 
 class TestRenderCompactResult:

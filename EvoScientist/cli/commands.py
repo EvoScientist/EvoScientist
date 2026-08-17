@@ -750,9 +750,6 @@ async def compact_conversation(
     Returns a structured ``CompactResult``.
     """
     from langchain_core.messages.utils import count_tokens_approximately
-    from langchain_core.runnables import RunnableConfig
-
-    config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
 
     try:
         state_values = await graph_gateway.get_state_values(target, thread_id)
@@ -856,22 +853,18 @@ async def compact_conversation(
     # Generate summary (LLM call)
     summary = await middleware._acreate_summary(to_summarize)
 
-    # Inject thread_id into LangGraph contextvar so _get_thread_id() finds it
-    # (compact runs outside a runnable context, so get_config() would fail
-    # and the middleware would generate a random "session_xxx" filename instead
-    # of reusing the real thread_id).
-    from langgraph.config import var_child_runnable_config
-
-    _token = var_child_runnable_config.set(config)
+    # Reuse the persisted _summarization_session_id (or generate one) so
+    # history keeps appending to a single file; re-persisted below.
+    session_id = middleware._get_session_id(state_values)
 
     # Offload old messages to backend
     file_path: str | None = None
     try:
-        file_path = await middleware._aoffload_to_backend(backend, to_summarize)
+        file_path = await middleware._aoffload_to_backend(
+            backend, to_summarize, session_id
+        )
     except Exception:
         pass  # non-fatal — proceed without offloaded history
-    finally:
-        var_child_runnable_config.reset(_token)
 
     from langchain_core.messages import HumanMessage
 
@@ -917,7 +910,7 @@ async def compact_conversation(
     await graph_gateway.update_state_values(
         target,
         thread_id,
-        {"_summarization_event": new_event},
+        {"_summarization_event": new_event, "_summarization_session_id": session_id},
     )
 
     return CompactResult(
