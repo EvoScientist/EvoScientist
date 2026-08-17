@@ -184,6 +184,7 @@ class GraphGateway(Protocol):
         values: GraphStateValues,
         *,
         as_node: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Update graph state values for a thread.
 
@@ -193,4 +194,14 @@ class GraphGateway(Protocol):
         node's channel writers — required for appending to the ``messages``
         channel. ``END`` is only valid with ``values=None`` (clears pending
         tasks; ``next`` becomes empty).
+
+        ``metadata`` is merged into the LangGraph checkpoint metadata via
+        the config (``config["metadata"]``) — the same mechanism normal
+        turns use (``stream_agent_events`` sets ``config["metadata"]``
+        from ``build_metadata``). The checkpoint saver's
+        ``get_checkpoint_metadata`` merges string scalars from
+        ``config["metadata"]`` into the stored checkpoint metadata, so
+        keys like ``agent_name`` and ``workspace_dir`` land on the
+        checkpoint row. When ``None``, behavior is byte-identical to the
+        pre-existing default (no metadata key on the config).
         """
