@@ -14,6 +14,8 @@ Patches:
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
+    - _patch_langgraph_goto_none_crash: handle Command(goto=None)
+      defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
 
 Utilities:
     - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
@@ -22,8 +24,10 @@ Utilities:
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import os
+import sys
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -1235,3 +1239,77 @@ def _patch_deepagents_model_passthrough() -> None:
     ds_mod._build_start_tool = _patched_build_start
     ds_mod._build_update_tool = _patched_build_update
     _model_passthrough_patched = True
+
+
+# ---------------------------------------------------------------------------
+# Patch: LangGraph 1.2.9 _control_branch crashes with TypeError when
+# Command.goto is None (e.g. from a resume command). We patch both the
+# generator (map_cmd) and the consumer (_control_branch).
+# ---------------------------------------------------------------------------
+def _patch_langgraph_goto_none_crash() -> None:
+    """Handle Command(goto=None) defensively in langgraph and langgraph-api.
+
+    Either patch alone prevents the production crash; both together cover
+    all code paths (a Command(goto=None) could in principle be created
+    by code other than map_cmd).
+
+    Matches upstream issue langchain-ai/langgraph#5656.
+    """
+    # ── 1. map_cmd — prevent goto=None from being created ────────────────
+    try:
+        import langgraph_api.command as _cmd_mod
+        from langgraph.types import Command as _Command
+
+        _orig_map_cmd = getattr(_cmd_mod, "map_cmd", None)
+        if _orig_map_cmd and not hasattr(_orig_map_cmd, "_evosci_goto_none_fix"):
+
+            @functools.wraps(_orig_map_cmd)
+            def _patched_map_cmd(cmd: Any) -> _Command:
+                result = _orig_map_cmd(cmd)
+                if result.goto is None:
+                    return dataclasses.replace(result, goto=[])
+                return result
+
+            _patched_map_cmd._evosci_goto_none_fix = True  # type: ignore[attr-defined]
+            _cmd_mod.map_cmd = _patched_map_cmd
+            # Rebind on already-loaded consumers that grabbed map_cmd via
+            # ``from langgraph_api.command import map_cmd`` — those hold the
+            # original reference and wouldn't see the module-level rebind.
+            for _name in ("langgraph_api.stream", "langgraph_api.grpc.ops.threads"):
+                _mod = sys.modules.get(_name)
+                if _mod is not None and getattr(_mod, "map_cmd", None) is _orig_map_cmd:
+                    _mod.map_cmd = _patched_map_cmd
+    except ImportError:
+        pass
+
+    # ── 2. _control_branch — handle goto=None defensively ───────────────
+    # Wrap (not reimplement) the upstream function so only the goto=None→[]
+    # normalization is ours; all other routing logic delegates to the
+    # original, avoiding drift as upstream evolves.
+    try:
+        import langgraph.graph.state as _state_mod
+        from langgraph.types import Command as _Command
+
+        _orig_ctrl = getattr(_state_mod, "_control_branch", None)
+        if _orig_ctrl and not hasattr(_orig_ctrl, "_evosci_goto_none_fix"):
+
+            def _fix_goto(cmd: Any) -> Any:
+                if isinstance(cmd, _Command) and cmd.goto is None:
+                    return dataclasses.replace(cmd, goto=[])
+                return cmd
+
+            @functools.wraps(_orig_ctrl)
+            def _patched_ctrl(value: Any) -> Sequence[tuple[str, Any]]:
+                if isinstance(value, (list, tuple)):
+                    value = [_fix_goto(v) for v in value]
+                else:
+                    value = _fix_goto(value)
+                return _orig_ctrl(value)
+
+            _patched_ctrl._evosci_goto_none_fix = True  # type: ignore[attr-defined]
+            _state_mod._control_branch = _patched_ctrl
+    except (ImportError, AttributeError):
+        pass
+
+
+_patch_langgraph_goto_none_crash()

@@ -52,7 +52,7 @@ def build_async_subagent_graph(name: str) -> Any:
         _inject_subagent_middleware,
     )
     from EvoScientist.tools import skill_manager, tavily_search, think_tool
-    from EvoScientist.utils import load_subagents
+    from EvoScientist.utils import load_subagents, resolve_subagent_tools
 
     # Surface API keys as env vars so downstream SDKs (openai, anthropic, …)
     # find them on subprocess invocations from langgraph dev.
@@ -68,7 +68,6 @@ def build_async_subagent_graph(name: str) -> Any:
     # all wired the same way as the in-process sync version.
     specs = load_subagents(
         SUBAGENTS_CONFIG,
-        tool_registry=tool_registry,
     )
     spec = next((s for s in specs if s.get("name") == name), None)
     if spec is None:
@@ -76,6 +75,7 @@ def build_async_subagent_graph(name: str) -> Any:
             f"Sub-agent {name!r} not found in {SUBAGENTS_CONFIG}. "
             f"Available: {[s.get('name') for s in specs]}"
         )
+    resolve_subagent_tools(spec, tool_registry)
 
     # Load MCP tools routed to THIS agent via ``expose_to: <name>`` in
     # ``mcp.yaml``. Use the cached helper so multiple ``build_async_subagent_graph``

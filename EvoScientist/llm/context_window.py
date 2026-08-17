@@ -22,8 +22,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.7 closed-source tiers — Max flagship and Plus (1M).
     "qwen3.7-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
-    # xAI Grok — per-model windows (build-0.1: 256K, 4.5: 500K).
+    # xAI Grok — per-model windows (build-0.1: 256K, 4.5/4.6: 500K).
     "grok-build-0.1": 256_000,
+    "grok-4.6": 500_000,
     "grok-4.5": 500_000,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
     "claude-haiku-4-5": 200_000,
@@ -31,8 +32,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Covers OpenRouter ``minimax/minimax-m3`` (via split('/')[-1]) and direct
     # ``MiniMax-M3`` (via lowercased exact match).
     "minimax-m3": 1_000_000,
-    # Zhipu GLM-5.2 — 1M context, an exception to the ``glm-5`` family (203K).
-    # Matches OpenRouter ``z-ai/glm-5.2`` via split('/')[-1].
+    # Zhipu GLM-5.3/5.2 — 1M context, exceptions to the ``glm-5`` family (203K).
+    # Matches OpenRouter ``z-ai/glm-5.x`` via split('/')[-1].
+    "glm-5.3": 1_000_000,
     "glm-5.2": 1_000_000,
     # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2.
     "glm-5-2": 1_000_000,

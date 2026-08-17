@@ -13,13 +13,20 @@ from unittest.mock import patch
 from EvoScientist.EvoScientist import _maybe_swap_async_subagents
 
 
-def _sub(name: str, *, async_flag: bool, description: str = "desc") -> dict:
+def _sub(
+    name: str,
+    *,
+    async_flag: bool,
+    description: str = "desc",
+    tool_names: list[str] | None = None,
+) -> dict:
     """Build a sub-agent dict shaped like ``utils.load_subagents`` output."""
     return {
         "name": name,
         "description": description,
         "system_prompt": "x",
         "tools": [],
+        "_tool_names": tool_names or [],
         "_async": async_flag,
     }
 
@@ -45,6 +52,7 @@ def test_returns_unchanged_when_async_disabled_and_strips_flag():
     assert out is subs
     for s in out:
         assert "_async" not in s, f"_async leaked into {s['name']}"
+        assert "_tool_names" not in s
 
 
 # =============================================================================
@@ -156,6 +164,30 @@ def test_swaps_async_flagged_subs():
     data = by_name["data-analysis-agent"]
     assert data["graph_id"] == "data-analysis-agent"
     assert data["url"] == "http://127.0.0.1:6174"
+
+
+def test_only_in_process_specs_resolve_against_the_caller_registry():
+    cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+    sync_tool = object()
+    subs = [
+        _sub("planner-agent", async_flag=False, tool_names=["think_tool"]),
+        _sub("writing-agent", async_flag=True, tool_names=["remote_only"]),
+    ]
+    with patch(
+        "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+        return_value=True,
+    ):
+        out = _maybe_swap_async_subagents(
+            subs,
+            tool_registry={"think_tool": sync_tool},
+            cfg=cfg,
+        )
+
+    planner = next(s for s in out if s["name"] == "planner-agent")
+    assert planner["tools"] == [sync_tool]
+    assert "_tool_names" not in planner
+    writing = next(s for s in out if s["name"] == "writing-agent")
+    assert writing["graph_id"] == "writing-agent"
 
 
 def test_swap_uses_configured_port():
