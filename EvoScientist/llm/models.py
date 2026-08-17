@@ -96,10 +96,11 @@ def _resolve_reasoning_effort(default: str) -> str:
     return os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
 
 
-_DASHSCOPE_REASONING_EFFORTS = frozenset(
+# Qwen 3.8 Max canonical levels and documented OpenAI alias mappings:
+# https://docs.qwencloud.com/api-reference/chat/openai-chat#reasoning-effort
+_DASHSCOPE_QWEN38_REASONING_EFFORTS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 )
-_DASHSCOPE_CODE_REASONING_EFFORTS = frozenset({"low", "high", "xhigh"})
 
 
 def _validate_dashscope_reasoning_effort(
@@ -107,14 +108,9 @@ def _validate_dashscope_reasoning_effort(
     model_id: str,
     effort: str,
 ) -> None:
-    """Reject reasoning levels unsupported by the selected DashScope endpoint."""
-    allowed = (
-        _DASHSCOPE_REASONING_EFFORTS
-        if provider == "dashscope"
-        else _DASHSCOPE_CODE_REASONING_EFFORTS
-    )
-    if effort not in allowed:
-        choices = ", ".join(sorted(allowed))
+    """Reject reasoning levels unsupported by DashScope Qwen 3.8 Max."""
+    if effort not in _DASHSCOPE_QWEN38_REASONING_EFFORTS:
+        choices = ", ".join(sorted(_DASHSCOPE_QWEN38_REASONING_EFFORTS))
         raise ValueError(
             f"Unsupported EVOSCIENTIST_REASONING_EFFORT={effort!r} for "
             f"{provider} model {model_id!r}. Supported values: {choices}."
@@ -137,9 +133,6 @@ def _apply_openai_compat_reasoning_config(
       maps the OpenAI aliases (including ``none``).  Its server default is
       extremely large, so use the standard ``medium`` level unless the user
       selected another level.
-    * DashScope Coding Plan exposes ``low`` / ``high`` / ``xhigh`` for the same
-      model.  Use its middle ``high`` level instead of sending the unsupported
-      ``medium`` default used by the regular endpoint.
     * ``custom-openai`` is user-owned.  Forward an *explicit* setting only;
       with no setting, preserve compatibility with endpoints that reject the
       field (including many non-reasoning OpenAI-compatible APIs).
@@ -152,13 +145,6 @@ def _apply_openai_compat_reasoning_config(
     if provider == "dashscope" and short_model_id.startswith("qwen3.8-max"):
         if "reasoning_effort" not in kwargs:
             effort = configured or "medium"
-            _validate_dashscope_reasoning_effort(provider, model_id, effort)
-            kwargs["reasoning_effort"] = effort
-        return
-
-    if provider == "dashscope-code" and short_model_id.startswith("qwen3.8-max"):
-        if "reasoning_effort" not in kwargs:
-            effort = configured or "high"
             _validate_dashscope_reasoning_effort(provider, model_id, effort)
             kwargs["reasoning_effort"] = effort
         return
