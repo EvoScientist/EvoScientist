@@ -488,6 +488,26 @@ class TestMiddleware:
 
         assert isinstance(excinfo.value.__cause__, ModelOutputTruncatedError)
 
+    def test_redacted_thinking_only_with_max_tokens_is_detected(self):
+        response = ModelResponse(
+            result=[
+                AIMessage(
+                    content=[{"type": "redacted_thinking", "data": "opaque-payload"}],
+                    response_metadata={"stop_reason": "max_tokens"},
+                )
+            ]
+        )
+
+        def handler(_req):
+            return response
+
+        with pytest.raises(ProviderStreamError) as excinfo:
+            ErrorNormalizationMiddleware().wrap_model_call(
+                _request(_anthropic_model()), handler
+            )
+
+        assert isinstance(excinfo.value.__cause__, ModelOutputTruncatedError)
+
     @pytest.mark.parametrize(
         "message",
         [
@@ -498,6 +518,13 @@ class TestMiddleware:
                 response_metadata={"finish_reason": "length"},
             ),
             AIMessage(content="", response_metadata={"finish_reason": "stop"}),
+            AIMessage(
+                content=[
+                    {"type": "redacted_thinking", "data": "opaque-payload"},
+                    {"type": "text", "text": "answer"},
+                ],
+                response_metadata={"stop_reason": "max_tokens"},
+            ),
         ],
     )
     def test_nonempty_tool_and_normal_stop_responses_are_not_rejected(self, message):

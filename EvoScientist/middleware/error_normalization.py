@@ -68,7 +68,12 @@ def _has_answer_content(content: object) -> bool:
     if not isinstance(content, list):
         return content is not None
 
-    reasoning_types = {"thinking", "reasoning", "reasoning_content"}
+    reasoning_types = {
+        "thinking",
+        "redacted_thinking",
+        "reasoning",
+        "reasoning_content",
+    }
     text_types = {"text", "output_text"}
     for block in content:
         if isinstance(block, str):
@@ -139,9 +144,9 @@ def _check_truncated_output(response: ModelResponse) -> ModelResponse:
     )
     raise ModelOutputTruncatedError(
         "The model exhausted its output budget during reasoning and returned "
-        f"no answer (finish reason: {reason}). Lower reasoning_effort "
-        "(recommended: low), disable reasoning with none, or increase the "
-        "provider output-token limit."
+        f"no answer (finish reason: {reason}). Lower reasoning_effort, disable "
+        "reasoning with none when supported, or increase the provider "
+        "output-token limit."
     )
 
 

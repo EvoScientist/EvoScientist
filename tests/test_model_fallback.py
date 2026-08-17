@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -40,6 +41,22 @@ def _fake_request():
 
 
 AI_RESPONSE = AIMessage(content="ok")
+
+
+def _truncated_response() -> ModelResponse:
+    return ModelResponse(
+        result=[
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "still thinking"},
+                response_metadata={"finish_reason": "length"},
+            )
+        ]
+    )
+
+
+def _successful_response() -> ModelResponse:
+    return ModelResponse(result=[AIMessage(content="ok")])
 
 
 @pytest.fixture(autouse=True)
@@ -453,6 +470,94 @@ class TestSynchronousFallback:
 
         assert result is response
         assert handler.call_count == 2
+
+    def test_truncated_primary_response_uses_fallback(self):
+        from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
+
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        response = _successful_response()
+        handler = MagicMock(side_effect=[_truncated_response(), response])
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            result = ModelFallbackMiddleware().wrap_model_call(req, handler)
+
+        assert result is response
+        assert handler.call_count == 2
+
+
+class TestTruncatedResponseFallback:
+    """Empty truncated model results must participate in the fallback chain."""
+
+    async def test_truncated_primary_response_uses_fallback(self):
+        from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
+
+        add_fallback("fb", "prov")
+        req = _fake_request()
+        response = _successful_response()
+        handler = AsyncMock(side_effect=[_truncated_response(), response])
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            result = await ModelFallbackMiddleware().awrap_model_call(req, handler)
+
+        assert result is response
+        assert handler.await_count == 2
+
+    async def test_truncated_fallback_continues_to_next_model(self):
+        from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
+
+        add_fallback("fb-a", "prov-a")
+        add_fallback("fb-b", "prov-b")
+        req = _fake_request()
+        response = _successful_response()
+        handler = AsyncMock(
+            side_effect=[_truncated_response(), _truncated_response(), response]
+        )
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            result = await ModelFallbackMiddleware().awrap_model_call(req, handler)
+
+        assert result is response
+        assert handler.await_count == 3
+        assert mock_gcm.call_count == 2
+
+    async def test_exhausted_truncated_fallbacks_use_last_provider(self):
+        from EvoScientist.llm.errors import ProviderStreamError
+        from EvoScientist.middleware.error_normalization import (
+            ModelOutputTruncatedError,
+        )
+        from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
+
+        def _make_openai_model(base_url=None):
+            cls = type(
+                "ChatOpenAI",
+                (),
+                {"__module__": "langchain_openai.chat_models.base"},
+            )
+            model = cls()
+            model.openai_api_base = base_url
+            return model
+
+        add_fallback("moonshot-model", "moonshot")
+        req = _fake_request()
+        req.model = _make_openai_model()
+        fallback_model = _make_openai_model(base_url="https://api.moonshot.cn/v1")
+        req.override = MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(model=kw.get("model", req.model))
+        )
+        handler = AsyncMock(return_value=_truncated_response())
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = fallback_model
+            with pytest.raises(ProviderStreamError) as exc_info:
+                await ModelFallbackMiddleware().awrap_model_call(req, handler)
+
+        assert exc_info.value.provider == "moonshot"
+        assert isinstance(exc_info.value.__cause__, ModelOutputTruncatedError)
+        assert handler.await_count == 2
 
 
 # ═════════════════════════════════════════════════════════════════

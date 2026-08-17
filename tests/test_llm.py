@@ -1197,19 +1197,22 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "ds-key-456"
         assert "reasoning_effort" not in call_kwargs
 
-    @pytest.mark.parametrize("provider", ["dashscope", "dashscope-code"])
+    @pytest.mark.parametrize(
+        ("provider", "expected_effort"),
+        [("dashscope", "medium"), ("dashscope-code", "high")],
+    )
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_qwen38_dashscope_defaults_to_low_reasoning(
-        self, mock_init, provider, monkeypatch
+    def test_qwen38_dashscope_uses_bounded_provider_default(
+        self, mock_init, provider, expected_effort, monkeypatch
     ):
-        """Qwen 3.8 must not inherit DashScope's enormous xhigh default."""
+        """Qwen 3.8 avoids xhigh using each endpoint's middle effort level."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
         monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
 
         get_chat_model("qwen3.8-max", provider=provider)
 
-        assert mock_init.call_args[1]["reasoning_effort"] == "low"
+        assert mock_init.call_args[1]["reasoning_effort"] == expected_effort
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_qwen38_dashscope_respects_configured_reasoning_effort(

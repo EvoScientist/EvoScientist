@@ -110,7 +110,11 @@ def _apply_openai_compat_reasoning_config(
 
     * DashScope Qwen 3.8 Max supports ``low`` / ``medium`` / ``xhigh`` and
       maps the OpenAI aliases (including ``none``).  Its server default is
-      extremely large, so use ``low`` unless the user selected another level.
+      extremely large, so use the standard ``medium`` level unless the user
+      selected another level.
+    * DashScope Coding Plan exposes ``low`` / ``high`` / ``xhigh`` for the same
+      model.  Use its middle ``high`` level instead of sending the unsupported
+      ``medium`` default used by the regular endpoint.
     * ``custom-openai`` is user-owned.  Forward an *explicit* setting only;
       with no setting, preserve compatibility with endpoints that reject the
       field (including many non-reasoning OpenAI-compatible APIs).
@@ -120,10 +124,12 @@ def _apply_openai_compat_reasoning_config(
     configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip()
     short_model_id = model_id.rsplit("/", 1)[-1]
 
-    if provider in {"dashscope", "dashscope-code"} and short_model_id.startswith(
-        "qwen3.8-max"
-    ):
-        kwargs.setdefault("reasoning_effort", configured or "low")
+    if provider == "dashscope" and short_model_id.startswith("qwen3.8-max"):
+        kwargs.setdefault("reasoning_effort", configured or "medium")
+        return
+
+    if provider == "dashscope-code" and short_model_id.startswith("qwen3.8-max"):
+        kwargs.setdefault("reasoning_effort", configured or "high")
         return
 
     if provider == "custom-openai" and configured:
