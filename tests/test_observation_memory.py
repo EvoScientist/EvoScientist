@@ -2917,235 +2917,240 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
 # ──────────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def _clear_observation_cache():
-    """Clear the process-scoped caches before and after each cache test."""
-    from EvoScientist.memory.observations import store
-
-    store._global_doc_cache.clear()
-    store._project_doc_cache.clear()
-    yield
-    store._global_doc_cache.clear()
-    store._project_doc_cache.clear()
-
-
 def _write_observation(path, obs_id, summary="test", scope="global"):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "---\n"
         f"id: {obs_id}\n"
-        "summary: {summary}\n"
+        f"summary: {summary}\n"
         "memory_type: procedural\n"
         f"scope: {scope}\n"
         "source:\n"
         "  type: turn\n"
         "  agent: EvoScientist\n"
         "---\n"
-        "Body text.\n".format(summary=summary),
+        "Body text.\n",
         encoding="utf-8",
     )
 
 
-@pytest.mark.usefixtures("_clear_observation_cache")
-def test_observation_cache_returns_same_documents_without_reparse(
-    tmp_path, monkeypatch
-):
-    """A second call with unchanged files must hit the cache, not re-read."""
-    from EvoScientist.memory.observations import store
+class TestObservationCache:
+    """Cache behaviour tests with automatic cache isolation."""
 
-    memories = tmp_path / "memories"
-    _write_observation(memories / "observations" / "global" / "O-1.md", "O-1", "first")
+    @pytest.fixture(autouse=True)
+    def _clear_observation_cache(self):
+        """Clear the process-scoped caches before and after each test."""
+        from EvoScientist.memory.observations import store
 
-    parse_calls: list[int] = []
-    real_parse = store._parse_observation_search_document
+        store._global_doc_cache.clear()
+        store._project_doc_cache.clear()
+        yield
+        store._global_doc_cache.clear()
+        store._project_doc_cache.clear()
 
-    def _counting_parse(*args, **kwargs):
-        parse_calls.append(1)
-        return real_parse(*args, **kwargs)
+    def test_cache_returns_same_documents_without_reparse(self, tmp_path, monkeypatch):
+        """A second call with unchanged files must hit the cache, not re-read."""
+        from EvoScientist.memory.observations import store
 
-    monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
+        memories = tmp_path / "memories"
+        _write_observation(
+            memories / "observations" / "global" / "O-1.md", "O-1", "first"
+        )
 
-    docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs1) == 1
-    assert len(parse_calls) == 1
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
 
-    docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs2) == 1
-    assert len(parse_calls) == 1, "second call must hit the cache, not re-parse"
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
 
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
 
-@pytest.mark.usefixtures("_clear_observation_cache")
-def test_observation_cache_invalidates_on_file_modification(tmp_path, monkeypatch):
-    """Changing a file's mtime must force a re-read."""
-    from EvoScientist.memory.observations import store
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 1
+        assert len(parse_calls) == 1
 
-    memories = tmp_path / "memories"
-    obs_path = memories / "observations" / "global" / "O-1.md"
-    _write_observation(obs_path, "O-1", "original")
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 1
+        assert len(parse_calls) == 1, "second call must hit the cache, not re-parse"
 
-    parse_calls: list[int] = []
-    real_parse = store._parse_observation_search_document
+    def test_cache_invalidates_on_file_modification(self, tmp_path, monkeypatch):
+        """Changing a file's mtime must force a re-read."""
+        import os
 
-    def _counting_parse(*args, **kwargs):
-        parse_calls.append(1)
-        return real_parse(*args, **kwargs)
+        from EvoScientist.memory.observations import store
 
-    monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
+        memories = tmp_path / "memories"
+        obs_path = memories / "observations" / "global" / "O-1.md"
+        _write_observation(obs_path, "O-1", "original")
 
-    docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert docs1[0].summary == "original"
-    assert len(parse_calls) == 1
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
 
-    # Modify the file (new content + new mtime).  Explicit bump because
-    # Windows NTFS mtime resolution can be coarse enough that a same-tick
-    # rewrite keeps the old signature and the cache returns stale data.
-    _write_observation(obs_path, "O-1", "updated")
-    import os
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
 
-    st = obs_path.stat()
-    os.utime(obs_path, (st.st_atime, st.st_mtime + 1.0))
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
 
-    docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert docs2[0].summary == "updated"
-    assert len(parse_calls) == 2, "modified file must invalidate the cache"
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert docs1[0].summary == "original"
+        assert len(parse_calls) == 1
 
+        # Modify the file (new content + new mtime).  Explicit bump because
+        # Windows NTFS mtime resolution can be coarse enough that a same-tick
+        # rewrite keeps the old signature and the cache returns stale data.
+        _write_observation(obs_path, "O-1", "updated")
+        st = obs_path.stat()
+        os.utime(obs_path, (st.st_atime, st.st_mtime + 1.0))
 
-@pytest.mark.usefixtures("_clear_observation_cache")
-def test_observation_cache_invalidates_on_file_addition(tmp_path, monkeypatch):
-    """Adding a new file must invalidate the cache."""
-    from EvoScientist.memory.observations import store
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert docs2[0].summary == "updated"
+        assert len(parse_calls) == 2, "modified file must invalidate the cache"
 
-    memories = tmp_path / "memories"
-    _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
+    def test_cache_invalidates_on_file_addition(self, tmp_path, monkeypatch):
+        """Adding a new file must invalidate the cache."""
+        from EvoScientist.memory.observations import store
 
-    parse_calls: list[int] = []
-    real_parse = store._parse_observation_search_document
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
 
-    def _counting_parse(*args, **kwargs):
-        parse_calls.append(1)
-        return real_parse(*args, **kwargs)
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
 
-    monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
 
-    docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs1) == 1
-    assert len(parse_calls) == 1
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
 
-    _write_observation(memories / "observations" / "global" / "O-2.md", "O-2")
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 1
+        assert len(parse_calls) == 1
 
-    docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs2) == 2
-    assert len(parse_calls) >= 2, "new file must invalidate the cache"
+        _write_observation(memories / "observations" / "global" / "O-2.md", "O-2")
 
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 2
+        assert len(parse_calls) >= 2, "new file must invalidate the cache"
 
-@pytest.mark.usefixtures("_clear_observation_cache")
-def test_observation_cache_invalidates_on_file_deletion(tmp_path, monkeypatch):
-    """Deleting a file must invalidate the cache and re-parse remaining files."""
-    from EvoScientist.memory.observations import store
+    def test_cache_invalidates_on_file_deletion(self, tmp_path, monkeypatch):
+        """Deleting a file must invalidate the cache and re-parse remaining files."""
+        from EvoScientist.memory.observations import store
 
-    memories = tmp_path / "memories"
-    obs_a = memories / "observations" / "global" / "O-1.md"
-    obs_b = memories / "observations" / "global" / "O-2.md"
-    _write_observation(obs_a, "O-1")
-    _write_observation(obs_b, "O-2")
+        memories = tmp_path / "memories"
+        obs_a = memories / "observations" / "global" / "O-1.md"
+        obs_b = memories / "observations" / "global" / "O-2.md"
+        _write_observation(obs_a, "O-1")
+        _write_observation(obs_b, "O-2")
 
-    parse_calls: list[int] = []
-    real_parse = store._parse_observation_search_document
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
 
-    def _counting_parse(*args, **kwargs):
-        parse_calls.append(1)
-        return real_parse(*args, **kwargs)
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
 
-    monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
 
-    docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs1) == 2
-    assert len(parse_calls) == 2
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 2
+        assert len(parse_calls) == 2
 
-    obs_a.unlink()
+        obs_a.unlink()
 
-    docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs2) == 1
-    assert docs2[0].observation_id == "O-2"
-    assert len(parse_calls) == 3, (
-        "deleted file changes the signature; the cache miss must re-parse "
-        "the remaining file (2 from first call + 1 from second)"
-    )
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 1
+        assert docs2[0].observation_id == "O-2"
+        assert len(parse_calls) == 3, (
+            "deleted file changes the signature; the cache miss must re-parse "
+            "the remaining file (2 from first call + 1 from second)"
+        )
 
+    def test_cache_shares_entries_across_memory_type_filters(
+        self, tmp_path, monkeypatch
+    ):
+        """Calls with different ``memory_type`` filters share one cache entry."""
+        from EvoScientist.memory.observations import store
 
-@pytest.mark.usefixtures("_clear_observation_cache")
-def test_observation_cache_shares_entries_across_memory_type_filters(
-    tmp_path, monkeypatch
-):
-    """Calls with different ``memory_type`` filters share one cache entry."""
-    from EvoScientist.memory.observations import store
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
 
-    memories = tmp_path / "memories"
-    _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
 
-    parse_calls: list[int] = []
-    real_parse = store._parse_observation_search_document
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
 
-    def _counting_parse(*args, **kwargs):
-        parse_calls.append(1)
-        return real_parse(*args, **kwargs)
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
 
-    monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
+        docs_all = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs_all) == 1
+        assert len(parse_calls) == 1
 
-    docs_all = list_observation_documents(memory_dir=memories, project_id="P-test")
-    assert len(docs_all) == 1
-    assert len(parse_calls) == 1
+        docs_filtered = list_observation_documents(
+            memory_dir=memories, project_id="P-test", memory_type=MemoryType.PROCEDURAL
+        )
+        assert len(docs_filtered) == 1
+        assert len(parse_calls) == 1, (
+            "different memory_type filter must share the cache entry"
+        )
 
-    docs_filtered = list_observation_documents(
-        memory_dir=memories, project_id="P-test", memory_type=MemoryType.PROCEDURAL
-    )
-    assert len(docs_filtered) == 1
-    assert len(parse_calls) == 1, (
-        "different memory_type filter must share the cache entry"
-    )
+    def test_cache_shares_global_docs_across_projects(self, tmp_path, monkeypatch):
+        """Global observations must be parsed once and shared across project_ids.
 
+        The global and project caches are split so that global docs enter the
+        cache keyed on root only, not per-project. Two projects sharing the
+        same ``memory_dir`` must not each re-parse the global store.
+        """
+        from EvoScientist.memory.observations import store
 
-@pytest.mark.usefixtures("_clear_observation_cache")
-def test_observation_cache_shares_global_docs_across_projects(tmp_path, monkeypatch):
-    """Global observations must be parsed once and shared across project_ids.
+        memories = tmp_path / "memories"
+        _write_observation(
+            memories / "observations" / "global" / "O-global.md", "O-global"
+        )
+        _write_observation(
+            memories / "observations" / "projects" / "P-A" / "O-a.md",
+            "O-a",
+            scope="project",
+        )
+        _write_observation(
+            memories / "observations" / "projects" / "P-B" / "O-b.md",
+            "O-b",
+            scope="project",
+        )
 
-    The global and project caches are split so that global docs enter the cache
-    keyed on root only, not per-project. Two projects sharing the same
-    ``memory_dir`` must not each re-parse the global store.
-    """
-    from EvoScientist.memory.observations import store
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
 
-    memories = tmp_path / "memories"
-    _write_observation(memories / "observations" / "global" / "O-global.md", "O-global")
-    _write_observation(
-        memories / "observations" / "projects" / "P-A" / "O-a.md",
-        "O-a",
-        scope="project",
-    )
-    _write_observation(
-        memories / "observations" / "projects" / "P-B" / "O-b.md",
-        "O-b",
-        scope="project",
-    )
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
 
-    parse_calls: list[int] = []
-    real_parse = store._parse_observation_search_document
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
 
-    def _counting_parse(*args, **kwargs):
-        parse_calls.append(1)
-        return real_parse(*args, **kwargs)
+        # Project A: parses global (1) + project-A (1) = 2
+        docs_a = list_observation_documents(memory_dir=memories, project_id="P-A")
+        assert len(docs_a) == 2
+        assert len(parse_calls) == 2
 
-    monkeypatch.setattr(store, "_parse_observation_search_document", _counting_parse)
-
-    # Project A: parses global (1) + project-A (1) = 2
-    docs_a = list_observation_documents(memory_dir=memories, project_id="P-A")
-    assert len(docs_a) == 2
-    assert len(parse_calls) == 2
-
-    # Project B: parses project-B (1), global is a cache hit = 1
-    docs_b = list_observation_documents(memory_dir=memories, project_id="P-B")
-    assert len(docs_b) == 2
-    assert len(parse_calls) == 3, (
-        "global docs must be a cache hit for project B; only the new "
-        "project-B file should be parsed (2 from A + 1 from B = 3)"
-    )
+        # Project B: parses project-B (1), global is a cache hit = 1
+        docs_b = list_observation_documents(memory_dir=memories, project_id="P-B")
+        assert len(docs_b) == 2
+        assert len(parse_calls) == 3, (
+            "global docs must be a cache hit for project B; only the new "
+            "project-B file should be parsed (2 from A + 1 from B = 3)"
+        )
