@@ -13,6 +13,7 @@ from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import TypeVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -255,19 +256,11 @@ def _observation_files(
 ) -> list[Path]:
     """Return candidate observation files for the current project context."""
     root = Path(memory_dir).expanduser()
-    memory_paths: list[str] = []
-    if scope in {None, MemoryScope.GLOBAL}:
-        memory_paths.append(f"{OBSERVATION_DIR}/global")
-    if scope in {None, MemoryScope.PROJECT}:
-        memory_paths.append(f"{OBSERVATION_DIR}/projects/{project_id}")
-
     paths: list[Path] = []
-    for memory_path in memory_paths:
-        directory = root / memory_path.lstrip("/")
-        try:
-            paths.extend(sorted(directory.glob("*.md")))
-        except OSError:
-            continue
+    if scope in {None, MemoryScope.GLOBAL}:
+        paths.extend(_global_files(root))
+    if scope in {None, MemoryScope.PROJECT}:
+        paths.extend(_project_files(root, project_id))
     return paths
 
 
@@ -391,6 +384,8 @@ _ParsedCacheValue = tuple[
     list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
 ]
 
+_CacheKey = TypeVar("_CacheKey")
+
 _global_doc_cache: dict[Path, _ParsedCacheValue] = {}
 
 _project_doc_cache: OrderedDict[tuple[Path, str], _ParsedCacheValue] = OrderedDict()
@@ -433,8 +428,8 @@ def _project_files(root: Path, project_id: str) -> list[Path]:
 
 
 def _cached_parsed_docs(
-    cache: dict,
-    cache_key,
+    cache: dict[_CacheKey, _ParsedCacheValue],
+    cache_key: _CacheKey,
     root: Path,
     paths: list[Path],
 ) -> list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]]:
