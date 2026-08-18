@@ -1011,6 +1011,11 @@ _RECOMMENDED_SKILLS = [
         "label": "HuggingFace Skills  (dataset creation, model training & evaluation, third party by HuggingFace)",
         "source": "huggingface/skills@skills",
     },
+    # ── Third-party (NVIDIA BioNeMo) ──
+    {
+        "label": "BioNeMo Skills  (31 protein folding, docking, generative chemistry & genomics skills, third party by NVIDIA)",
+        "source": "NVIDIA-BioNeMo/bionemo-agent-toolkit@plugins/bionemo-agent-toolkit/skills",
+    },
 ]
 
 
