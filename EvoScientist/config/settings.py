@@ -306,6 +306,12 @@ class EvoScientistConfig:
         DEFAULT_MEMORY_SKILL_SYNTHESIS_CADENCE
     )
     memory_skill_synthesis_time: str = DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME
+    # Max number of project-scoped observation caches kept in memory. Each
+    # entry holds parsed documents for one project; the LRU evicts the
+    # least-recently-used when the cap is exceeded. 8 is generous for the
+    # single-workspace deploy model; raise for a long-running server that
+    # cycles through many workspaces.
+    memory_observation_cache_max_projects: int = 8
 
     # Workspace Settings
     default_mode: Literal["daemon", "run"] = "daemon"
@@ -855,6 +861,7 @@ _ENV_MAPPINGS = {
     "memory_skill_synthesis_mode": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_MODE",
     "memory_skill_synthesis_cadence": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_CADENCE",
     "memory_skill_synthesis_time": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_TIME",
+    "memory_observation_cache_max_projects": "EVOSCIENTIST_MAX_CACHED_PROJECTS",
 }
 
 

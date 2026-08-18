@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -378,6 +379,12 @@ def _resolve_document_links(
 # I/O (only falls back to a full file walk when a related-observation ID is
 # missing from the parsed set).
 #
+# The project cache is LRU-bounded by
+# ``config.memory_observation_cache_max_projects`` (default 8, env var
+# ``EVOSCIENTIST_MAX_CACHED_PROJECTS``) to prevent unbounded memory growth on
+# a long-running server that cycles through workspaces.  The global cache
+# holds at most one entry per root.
+#
 # Type alias for the cached value: (mtime signature, parsed tuples).
 _ParsedCacheValue = tuple[
     frozenset[tuple[str, float]],
@@ -385,7 +392,15 @@ _ParsedCacheValue = tuple[
 ]
 
 _global_doc_cache: dict[Path, _ParsedCacheValue] = {}
-_project_doc_cache: dict[tuple[Path, str], _ParsedCacheValue] = {}
+
+_project_doc_cache: OrderedDict[tuple[Path, str], _ParsedCacheValue] = OrderedDict()
+
+
+def _max_cached_projects() -> int:
+    """Return the configured cache cap, read lazily from config on first call."""
+    from ...config import get_effective_config
+
+    return get_effective_config().memory_observation_cache_max_projects
 
 
 def _file_signature(paths: list[Path]) -> frozenset[tuple[str, float]]:
@@ -466,9 +481,15 @@ def list_observation_documents(
         parsed.extend(_cached_parsed_docs(_global_doc_cache, root, root, g_paths))
     if scope in {None, MemoryScope.PROJECT}:
         p_paths = _project_files(root, project_id)
+        project_key = (root, project_id)
         parsed.extend(
-            _cached_parsed_docs(_project_doc_cache, (root, project_id), root, p_paths)
+            _cached_parsed_docs(_project_doc_cache, project_key, root, p_paths)
         )
+        # LRU: move the accessed project to the most-recent end, then evict
+        # the least-recently-used entry if the cache exceeds its cap.
+        _project_doc_cache.move_to_end(project_key)
+        while len(_project_doc_cache) > _max_cached_projects():
+            _project_doc_cache.popitem(last=False)
 
     documents = _resolve_document_links(parsed, root=root)
 
