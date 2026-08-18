@@ -508,6 +508,16 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
+        # A non-positive cache cap would evict every project entry immediately,
+        # defeating the cache entirely.
+        cap = self.memory_observation_cache_max_projects
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+            logging.getLogger(__name__).warning(
+                "Invalid memory_observation_cache_max_projects %r; falling back to 8.",
+                cap,
+            )
+            self.memory_observation_cache_max_projects = 8
+
         # auto_mode and dangerous_mode both imply auto_approve regardless of
         # source (CLI, env, config file, direct construction) — done here so the
         # "unattended → zero prompts" contract holds even when either is set via

@@ -685,6 +685,40 @@ class TestPriorityChain:
         assert set_config_value("sandbox_execute_timeout", 600) is True
         assert get_config_value("sandbox_execute_timeout") == 600
 
+    def test_observation_cache_max_projects_default(self, temp_config_dir, clean_env):
+        """Observation cache cap defaults to 8."""
+        assert EvoScientistConfig().memory_observation_cache_max_projects == 8
+        assert get_effective_config().memory_observation_cache_max_projects == 8
+
+    def test_env_observation_cache_max_projects_override(
+        self, temp_config_dir, monkeypatch
+    ):
+        """Observation cache cap can be set via env var."""
+        monkeypatch.setenv("EVOSCIENTIST_MAX_CACHED_PROJECTS", "16")
+        config = get_effective_config()
+        assert config.memory_observation_cache_max_projects == 16
+
+    def test_observation_cache_max_projects_invalid_falls_back(self):
+        """Non-positive / non-int values fall back to the default."""
+        assert (
+            EvoScientistConfig(
+                memory_observation_cache_max_projects=0
+            ).memory_observation_cache_max_projects
+            == 8
+        )
+        assert (
+            EvoScientistConfig(
+                memory_observation_cache_max_projects=-1
+            ).memory_observation_cache_max_projects
+            == 8
+        )
+        assert (
+            EvoScientistConfig(
+                memory_observation_cache_max_projects=True
+            ).memory_observation_cache_max_projects
+            == 8
+        )
+
     def test_env_api_key_override(self, temp_config_dir, monkeypatch):
         """Test API keys from env override file."""
         save_config(EvoScientistConfig(anthropic_api_key="file-key"))
