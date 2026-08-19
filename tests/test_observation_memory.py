@@ -2917,8 +2917,17 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _write_observation(path, obs_id, summary="test", scope="global"):
+def _write_observation(path, obs_id, summary="test", scope="global", related_id=""):
     path.parent.mkdir(parents=True, exist_ok=True)
+    related_block = ""
+    if related_id:
+        related_block = (
+            "related_observations:\n"
+            f"  - id: {related_id}\n"
+            "    relation: complements\n"
+            f"    reason: links to {related_id}\n"
+            "    linked_at: '2026-01-01T00:00:00Z'\n"
+        )
     path.write_text(
         "---\n"
         f"id: {obs_id}\n"
@@ -2928,6 +2937,7 @@ def _write_observation(path, obs_id, summary="test", scope="global"):
         "source:\n"
         "  type: turn\n"
         "  agent: EvoScientist\n"
+        f"{related_block}"
         "---\n"
         "Body text.\n",
         encoding="utf-8",
@@ -2944,9 +2954,13 @@ class TestObservationCache:
 
         store._global_doc_cache.clear()
         store._project_doc_cache.clear()
+        store._resolved_cache.clear()
+        store._cached_max_projects = None
         yield
         store._global_doc_cache.clear()
         store._project_doc_cache.clear()
+        store._resolved_cache.clear()
+        store._cached_max_projects = None
 
     def test_cache_returns_same_documents_without_reparse(self, tmp_path, monkeypatch):
         """A second call with unchanged files must hit the cache, not re-read."""
@@ -3038,7 +3052,7 @@ class TestObservationCache:
 
         docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
         assert len(docs2) == 2
-        assert len(parse_calls) >= 2, "new file must invalidate the cache"
+        assert len(parse_calls) == 3, "new file must invalidate the cache"
 
     def test_cache_invalidates_on_file_deletion(self, tmp_path, monkeypatch):
         """Deleting a file must invalidate the cache and re-parse remaining files."""
@@ -3154,3 +3168,78 @@ class TestObservationCache:
             "global docs must be a cache hit for project B; only the new "
             "project-B file should be parsed (2 from A + 1 from B = 3)"
         )
+
+    def test_lru_evicts_least_recently_used_project(self, tmp_path, monkeypatch):
+        """Project and resolved caches must evict the LRU entry past the cap."""
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        for project in ("P-A", "P-B", "P-C"):
+            _write_observation(
+                memories / "observations" / "projects" / project / f"O-{project}.md",
+                f"O-{project}",
+                scope="project",
+            )
+
+        monkeypatch.setattr(store, "_max_cached_projects", lambda: 2)
+
+        for project in ("P-A", "P-B", "P-C"):
+            list_observation_documents(memory_dir=memories, project_id=project)
+
+        # P-A was added first and is the LRU; cap=2 evicts it when P-C is added.
+        assert (memories, "P-A") not in store._project_doc_cache
+        assert len(store._project_doc_cache) == 2
+        assert len(store._resolved_cache) == 2
+
+    def test_resolved_cache_avoids_repeated_link_resolution(
+        self, tmp_path, monkeypatch
+    ):
+        """The resolved cache must prevent re-running link resolution on every call.
+
+        When ``scope=PROJECT``, only project files are parsed.  If a project
+        observation links to a global observation, the link-resolution
+        fallback walks all files to find it.  Without the resolved cache this
+        walk repeats on every call; with it, the second call hits the cache.
+        """
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-g.md", "O-g")
+        _write_observation(
+            memories / "observations" / "projects" / "P-A" / "O-a.md",
+            "O-a",
+            scope="project",
+            related_id="O-g",
+        )
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        # First call with scope=PROJECT: parses the project file, then the
+        # link-resolution fallback walks all files and parses the global target.
+        docs1 = list_observation_documents(
+            memory_dir=memories, project_id="P-A", scope=MemoryScope.PROJECT
+        )
+        first_call_count = len(parse_calls)
+        assert first_call_count >= 2, (
+            "first call must parse the project file and the fallback must "
+            "walk to find the linked global observation"
+        )
+
+        # Second call: resolved cache hit, no parsing at all.
+        docs2 = list_observation_documents(
+            memory_dir=memories, project_id="P-A", scope=MemoryScope.PROJECT
+        )
+        assert len(parse_calls) == first_call_count, (
+            "second call must hit the resolved cache; re-parsing means "
+            "link resolution is not cached"
+        )
+        assert len(docs1) == len(docs2)

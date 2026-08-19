@@ -363,25 +363,41 @@ def _resolve_document_links(
 
 # ── Parsed-document cache ─────────────────────────────────────────────
 #
-# Split by scope so global observations are parsed once and shared across all
-# project_ids, and a change in one project's files does not invalidate another
-# project's cache.  Each layer is keyed on its minimal identity (root for
-# global, (root, project_id) for project) and validated by an mtime signature
-# over only the files that layer reads.  Pre-link-resolution tuples are cached;
-# link resolution runs on every call but is O(N) dict lookups with typically no
-# I/O (only falls back to a full file walk when a related-observation ID is
-# missing from the parsed set).
+# Three layers:
 #
-# The project cache is LRU-bounded by
+# 1. ``_global_doc_cache`` — pre-link-resolution global docs, keyed on root.
+#    Shared across all project_ids so global files are parsed once per root.
+# 2. ``_project_doc_cache`` — pre-link-resolution project docs, keyed on
+#    (root, project_id).  LRU-bounded so a long-running server that cycles
+#    through many workspaces does not grow without bound.
+# 3. ``_resolved_cache`` — post-link-resolution docs, keyed on
+#    (root, project_id, scope).  Avoids re-running link resolution (and its
+#    fallback file walk) on every ``list_observation_documents`` call.
+#    Validated by the full file signature (all observation files under root)
+#    so that cross-scope link-resolution targets invalidate it.  LRU-bounded
+#    with the same cap as the project cache.
+#
+# Layers 1-2 avoid re-parsing files when the resolved cache misses but the
+# underlying files have not changed (e.g. a file in another scope changed,
+# invalidating the resolved cache, but the current project's files are
+# unchanged).  Layer 3 avoids re-running link resolution on every call.
+# Note: the link-resolution fallback in ``_resolve_document_links`` parses
+# missing targets directly, bypassing layers 1-2; this only fires on a
+# resolved-cache miss, not on every call.
+#
+# The project and resolved caches are LRU-bounded by
 # ``config.memory_observation_cache_max_projects`` (default 8, env var
-# ``EVOSCIENTIST_MAX_CACHED_PROJECTS``) to prevent unbounded memory growth on
-# a long-running server that cycles through workspaces.  The global cache
-# holds at most one entry per root.
+# ``EVOSCIENTIST_MAX_CACHED_PROJECTS``).  The global cache holds at most one
+# entry per root.
 #
-# Type alias for the cached value: (mtime signature, parsed tuples).
 _ParsedCacheValue = tuple[
     frozenset[tuple[str, float]],
     list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
+]
+
+_ResolvedCacheValue = tuple[
+    frozenset[tuple[str, float]],
+    list[ObservationSearchDocument],
 ]
 
 _CacheKey = TypeVar("_CacheKey")
@@ -390,12 +406,28 @@ _global_doc_cache: dict[Path, _ParsedCacheValue] = {}
 
 _project_doc_cache: OrderedDict[tuple[Path, str], _ParsedCacheValue] = OrderedDict()
 
+_resolved_cache: OrderedDict[
+    tuple[Path, str, MemoryScope | None], _ResolvedCacheValue
+] = OrderedDict()
+
+_cached_max_projects: int | None = None
+
 
 def _max_cached_projects() -> int:
-    """Return the configured cache cap, read lazily from config on first call."""
-    from ...config import get_effective_config
+    """Return the configured cache cap.
 
-    return get_effective_config().memory_observation_cache_max_projects
+    Read once from ``get_effective_config()`` on first call and cached at
+    module level; a runtime config change requires a process restart to take
+    effect.
+    """
+    global _cached_max_projects
+    if _cached_max_projects is None:
+        from ...config import get_effective_config
+
+        _cached_max_projects = (
+            get_effective_config().memory_observation_cache_max_projects
+        )
+    return _cached_max_projects
 
 
 def _file_signature(paths: list[Path]) -> frozenset[tuple[str, float]]:
@@ -407,6 +439,16 @@ def _file_signature(paths: list[Path]) -> frozenset[tuple[str, float]]:
         except OSError:
             continue
     return frozenset(sig)
+
+
+def _all_observation_signature(root: Path) -> frozenset[tuple[str, float]]:
+    """Return ``(path_str, mtime)`` pairs for all observation files under *root*.
+
+    Composed from ``_all_observation_files`` so the walk logic stays in one
+    place.  Covers every scope so that a cross-scope link-resolution target
+    changing invalidates the resolved cache.
+    """
+    return _file_signature(_all_observation_files(root))
 
 
 def _global_files(root: Path) -> list[Path]:
@@ -462,37 +504,51 @@ def list_observation_documents(
 ) -> list[ObservationSearchDocument]:
     """Read candidate observations for the current filters.
 
-    Global and project observations are cached in separate layers so global
-    docs are parsed once and shared across all project_ids.  Each layer is
-    invalidated by mtime changes on only the files it reads.  Link resolution
-    runs on every call but is O(N) dict lookups with typically no I/O (only
-    falls back to a file walk when a related-observation ID is missing).
+    Global and project observations are cached in separate pre-link-resolution
+    layers so global docs are parsed once and shared across all project_ids.
+    A resolved-document cache avoids re-running link resolution on every call;
+    it is validated by the full file signature so cross-scope link targets
+    invalidate it.
     """
     root = Path(memory_dir).expanduser()
+    resolved_key = (root, project_id, scope)
+    signature = _all_observation_signature(root)
 
-    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
-    if scope in {None, MemoryScope.GLOBAL}:
-        g_paths = _global_files(root)
-        parsed.extend(_cached_parsed_docs(_global_doc_cache, root, root, g_paths))
-    if scope in {None, MemoryScope.PROJECT}:
-        p_paths = _project_files(root, project_id)
-        project_key = (root, project_id)
-        parsed.extend(
-            _cached_parsed_docs(_project_doc_cache, project_key, root, p_paths)
-        )
-        # LRU: move the accessed project to the most-recent end, then evict
-        # the least-recently-used entry if the cache exceeds its cap.
-        _project_doc_cache.move_to_end(project_key)
-        while len(_project_doc_cache) > _max_cached_projects():
-            _project_doc_cache.popitem(last=False)
+    cached = _resolved_cache.get(resolved_key)
+    if cached is not None and cached[0] == signature:
+        _resolved_cache.move_to_end(resolved_key)
+        documents = cached[1]
+    else:
+        cap = _max_cached_projects()
+        parsed: list[
+            tuple[ObservationSearchDocument, list[RelatedObservationEntry]]
+        ] = []
+        if scope in {None, MemoryScope.GLOBAL}:
+            g_paths = _global_files(root)
+            parsed.extend(_cached_parsed_docs(_global_doc_cache, root, root, g_paths))
+        if scope in {None, MemoryScope.PROJECT}:
+            p_paths = _project_files(root, project_id)
+            project_key = (root, project_id)
+            parsed.extend(
+                _cached_parsed_docs(_project_doc_cache, project_key, root, p_paths)
+            )
+            # LRU: move the accessed project to the most-recent end, then
+            # evict the least-recently-used entry if the cache exceeds its cap.
+            _project_doc_cache.move_to_end(project_key)
+            while len(_project_doc_cache) > cap:
+                _project_doc_cache.popitem(last=False)
 
-    documents = _resolve_document_links(parsed, root=root)
+        documents = _resolve_document_links(parsed, root=root)
+        _resolved_cache[resolved_key] = (signature, documents)
+        _resolved_cache.move_to_end(resolved_key)
+        while len(_resolved_cache) > cap:
+            _resolved_cache.popitem(last=False)
 
     if memory_type is not None:
         return [
             document for document in documents if document.memory_type == memory_type
         ]
-    return documents
+    return list(documents)
 
 
 def search_observation_files(

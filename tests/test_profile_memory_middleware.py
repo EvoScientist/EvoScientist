@@ -426,6 +426,8 @@ def test_two_middlewares_share_the_observation_cache(tmp_path, monkeypatch):
 
     store._global_doc_cache.clear()
     store._project_doc_cache.clear()
+    store._resolved_cache.clear()
+    store._cached_max_projects = None
 
     middleware_a = memory_module.create_memory_middleware(
         str(memories), workspace_dir=workspace
