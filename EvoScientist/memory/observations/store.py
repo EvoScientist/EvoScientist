@@ -391,12 +391,12 @@ def _resolve_document_links(
 # entry per root.
 #
 _ParsedCacheValue = tuple[
-    frozenset[tuple[str, float]],
+    frozenset[tuple[str, int, int]],
     list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
 ]
 
 _ResolvedCacheValue = tuple[
-    frozenset[tuple[str, float]],
+    frozenset[tuple[str, int, int]],
     list[ObservationSearchDocument],
 ]
 
@@ -430,18 +430,26 @@ def _max_cached_projects() -> int:
     return _cached_max_projects
 
 
-def _file_signature(paths: list[Path]) -> frozenset[tuple[str, float]]:
-    """Return ``(path_str, mtime)`` pairs for the given paths."""
-    sig: set[tuple[str, float]] = set()
+def _file_signature(paths: list[Path]) -> frozenset[tuple[str, int, int]]:
+    """Return ``(path_str, mtime_ns, size)`` pairs for the given paths.
+
+    Uses ``st_mtime_ns`` (integer nanoseconds) instead of ``st_mtime`` (float
+    seconds) so the signature preserves full filesystem resolution.  Includes
+    ``st_size`` so a rewrite that keeps the same mtime (observed on NTFS when
+    the OS caches metadata between rapid writes) still invalidates the cache
+    when content length changes.
+    """
+    sig: set[tuple[str, int, int]] = set()
     for path in paths:
         try:
-            sig.add((str(path), path.stat().st_mtime))
+            st = path.stat()
+            sig.add((str(path), st.st_mtime_ns, st.st_size))
         except OSError:
             continue
     return frozenset(sig)
 
 
-def _all_observation_signature(root: Path) -> frozenset[tuple[str, float]]:
+def _all_observation_signature(root: Path) -> frozenset[tuple[str, int, int]]:
     """Return ``(path_str, mtime)`` pairs for all observation files under *root*.
 
     Composed from ``_all_observation_files`` so the walk logic stays in one
