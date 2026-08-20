@@ -77,7 +77,7 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_OPENROUTER_APP_TITLE",
         "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
-        "EVOSCIENTIST_MAX_CACHED_PROJECTS",
+        "EVOSCIENTIST_MAX_CACHED_FILES",
     ]:
         monkeypatch.delenv(key, raising=False)
     return config_dir
@@ -109,7 +109,7 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_OPENROUTER_APP_TITLE",
         "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
-        "EVOSCIENTIST_MAX_CACHED_PROJECTS",
+        "EVOSCIENTIST_MAX_CACHED_FILES",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -687,38 +687,38 @@ class TestPriorityChain:
         assert set_config_value("sandbox_execute_timeout", 600) is True
         assert get_config_value("sandbox_execute_timeout") == 600
 
-    def test_observation_cache_max_projects_default(self, temp_config_dir, clean_env):
-        """Observation cache cap defaults to 8."""
-        assert EvoScientistConfig().memory_observation_cache_max_projects == 8
-        assert get_effective_config().memory_observation_cache_max_projects == 8
+    def test_observation_cache_max_files_default(self, temp_config_dir, clean_env):
+        """Observation cache cap defaults to 2048."""
+        assert EvoScientistConfig().memory_observation_cache_max_files == 2048
+        assert get_effective_config().memory_observation_cache_max_files == 2048
 
-    def test_env_observation_cache_max_projects_override(
+    def test_env_observation_cache_max_files_override(
         self, temp_config_dir, monkeypatch
     ):
         """Observation cache cap can be set via env var."""
-        monkeypatch.setenv("EVOSCIENTIST_MAX_CACHED_PROJECTS", "16")
+        monkeypatch.setenv("EVOSCIENTIST_MAX_CACHED_FILES", "16")
         config = get_effective_config()
-        assert config.memory_observation_cache_max_projects == 16
+        assert config.memory_observation_cache_max_files == 16
 
-    def test_observation_cache_max_projects_invalid_falls_back(self):
+    def test_observation_cache_max_files_invalid_falls_back(self):
         """Non-positive / non-int values fall back to the default."""
         assert (
             EvoScientistConfig(
-                memory_observation_cache_max_projects=0
-            ).memory_observation_cache_max_projects
-            == 8
+                memory_observation_cache_max_files=0
+            ).memory_observation_cache_max_files
+            == 2048
         )
         assert (
             EvoScientistConfig(
-                memory_observation_cache_max_projects=-1
-            ).memory_observation_cache_max_projects
-            == 8
+                memory_observation_cache_max_files=-1
+            ).memory_observation_cache_max_files
+            == 2048
         )
         assert (
             EvoScientistConfig(
-                memory_observation_cache_max_projects=True
-            ).memory_observation_cache_max_projects
-            == 8
+                memory_observation_cache_max_files=True
+            ).memory_observation_cache_max_files
+            == 2048
         )
 
     def test_env_api_key_override(self, temp_config_dir, monkeypatch):

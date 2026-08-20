@@ -2913,7 +2913,7 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# mtime-keyed cache for list_observation_documents
+# per-file parse cache for list_observation_documents
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -2949,18 +2949,14 @@ class TestObservationCache:
 
     @pytest.fixture(autouse=True)
     def _clear_observation_cache(self):
-        """Clear the process-scoped caches before and after each test."""
+        """Clear the process-scoped parse cache before and after each test."""
         from EvoScientist.memory.observations import store
 
-        store._global_doc_cache.clear()
-        store._project_doc_cache.clear()
-        store._resolved_cache.clear()
-        store._cached_max_projects = None
+        store._file_parse_cache.clear()
+        store._cached_max_files = None
         yield
-        store._global_doc_cache.clear()
-        store._project_doc_cache.clear()
-        store._resolved_cache.clear()
-        store._cached_max_projects = None
+        store._file_parse_cache.clear()
+        store._cached_max_files = None
 
     def test_cache_returns_same_documents_without_reparse(self, tmp_path, monkeypatch):
         """A second call with unchanged files must hit the cache, not re-read."""
@@ -3026,8 +3022,10 @@ class TestObservationCache:
         assert docs2[0].summary == "updated"
         assert len(parse_calls) == 2, "modified file must invalidate the cache"
 
-    def test_cache_invalidates_on_file_addition(self, tmp_path, monkeypatch):
-        """Adding a new file must invalidate the cache."""
+    def test_cache_adds_new_file_without_reparsing_existing(
+        self, tmp_path, monkeypatch
+    ):
+        """Adding a new file parses only the new file; cached files stay cached."""
         from EvoScientist.memory.observations import store
 
         memories = tmp_path / "memories"
@@ -3052,10 +3050,13 @@ class TestObservationCache:
 
         docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
         assert len(docs2) == 2
-        assert len(parse_calls) == 3, "new file must invalidate the cache"
+        assert len(parse_calls) == 2, (
+            "only the new file must be parsed; the existing file stays cached "
+            "(1 from the first call + 1 new = 2)"
+        )
 
-    def test_cache_invalidates_on_file_deletion(self, tmp_path, monkeypatch):
-        """Deleting a file must invalidate the cache and re-parse remaining files."""
+    def test_cache_deletion_drops_file_without_reparsing(self, tmp_path, monkeypatch):
+        """Deleting a file drops it from the results without re-parsing the rest."""
         from EvoScientist.memory.observations import store
 
         memories = tmp_path / "memories"
@@ -3084,9 +3085,55 @@ class TestObservationCache:
         docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
         assert len(docs2) == 1
         assert docs2[0].observation_id == "O-2"
+        assert len(parse_calls) == 2, (
+            "the deleted file must simply drop out of the glob and the "
+            "surviving file must stay cached, so the second call re-parses "
+            "nothing (2 parses total, both from the first call)"
+        )
+
+    def test_unparsable_file_is_not_cached(self, tmp_path, monkeypatch):
+        """An unparsable file is skipped without poisoning the cache.
+
+        Parse failures are not cached: the broken file is retried on every
+        call, while the healthy file stays cached.
+        """
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        global_dir = memories / "observations" / "global"
+        _write_observation(global_dir / "O-good.md", "O-good")
+        broken = global_dir / "missing-id.md"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text(
+            "---\n"
+            "summary: Missing id so this file is skipped\n"
+            "memory_type: procedural\n"
+            "scope: global\n"
+            "---\n"
+            "Body\n",
+            encoding="utf-8",
+        )
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert [document.observation_id for document in docs1] == ["O-good"]
+        assert len(parse_calls) == 2
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert [document.observation_id for document in docs2] == ["O-good"]
         assert len(parse_calls) == 3, (
-            "deleted file changes the signature; the cache miss must re-parse "
-            "the remaining file (2 from first call + 1 from second)"
+            "the healthy file must stay cached while the unparsable file is "
+            "retried on each call"
         )
 
     def test_cache_shares_entries_across_memory_type_filters(
@@ -3124,9 +3171,10 @@ class TestObservationCache:
     def test_cache_shares_global_docs_across_projects(self, tmp_path, monkeypatch):
         """Global observations must be parsed once and shared across project_ids.
 
-        The global and project caches are split so that global docs enter the
-        cache keyed on root only, not per-project. Two projects sharing the
-        same ``memory_dir`` must not each re-parse the global store.
+        The parse cache is keyed on the file path, so a global document is a
+        single entry regardless of which project reads it. Two projects
+        sharing the same ``memory_dir`` must not each re-parse the global
+        store.
         """
         from EvoScientist.memory.observations import store
 
@@ -3169,8 +3217,8 @@ class TestObservationCache:
             "project-B file should be parsed (2 from A + 1 from B = 3)"
         )
 
-    def test_lru_evicts_least_recently_used_project(self, tmp_path, monkeypatch):
-        """Project and resolved caches must evict the LRU entry past the cap."""
+    def test_lru_evicts_least_recently_used_file(self, tmp_path, monkeypatch):
+        """The per-file cache must evict the least-recently-used file past the cap."""
         from EvoScientist.memory.observations import store
 
         memories = tmp_path / "memories"
@@ -3181,25 +3229,80 @@ class TestObservationCache:
                 scope="project",
             )
 
-        monkeypatch.setattr(store, "_max_cached_projects", lambda: 2)
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
 
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+        monkeypatch.setattr(store, "_max_cached_files", lambda: 2)
+
+        # Three calls, one file each. cap=2 evicts the LRU file (P-A) at the
+        # end of the third call, when P-C is added.
         for project in ("P-A", "P-B", "P-C"):
             list_observation_documents(memory_dir=memories, project_id=project)
 
-        # P-A was added first and is the LRU; cap=2 evicts it when P-C is added.
-        assert (memories, "P-A") not in store._project_doc_cache
-        assert len(store._project_doc_cache) == 2
-        assert len(store._resolved_cache) == 2
+        assert len(parse_calls) == 3
+        assert len(store._file_parse_cache) == 2
 
-    def test_resolved_cache_avoids_repeated_link_resolution(
-        self, tmp_path, monkeypatch
-    ):
-        """The resolved cache must prevent re-running link resolution on every call.
+        # P-B and P-C are still cached: re-listing them re-parses nothing.
+        list_observation_documents(memory_dir=memories, project_id="P-B")
+        list_observation_documents(memory_dir=memories, project_id="P-C")
+        assert len(parse_calls) == 3, "cached files must not be re-parsed"
 
-        When ``scope=PROJECT``, only project files are parsed.  If a project
-        observation links to a global observation, the link-resolution
-        fallback walks all files to find it.  Without the resolved cache this
-        walk repeats on every call; with it, the second call hits the cache.
+        # P-A was evicted: re-listing it must re-parse its file.
+        list_observation_documents(memory_dir=memories, project_id="P-A")
+        assert len(parse_calls) == 4, "the evicted file must be re-parsed"
+
+    def test_cache_keeps_working_set_above_cap(self, tmp_path, monkeypatch):
+        """A call must never evict entries its own working set needs.
+
+        With a store bigger than the cap, the end-of-call trim keeps every
+        touched entry, so the cache temporarily exceeds the cap instead of
+        thrashing, and a second identical call re-parses nothing.
+        """
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
+        _write_observation(memories / "observations" / "global" / "O-2.md", "O-2")
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+        monkeypatch.setattr(store, "_max_cached_files", lambda: 1)
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 2
+        assert len(parse_calls) == 2
+        # Both files were touched by the call, so both stay despite cap=1.
+        assert len(store._file_parse_cache) == 2
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 2
+        assert len(parse_calls) == 2, (
+            "a second identical call must hit the cache, not thrash and re-parse"
+        )
+
+    def test_fallback_link_resolution_reuses_cached_parses(self, tmp_path, monkeypatch):
+        """Link resolution reruns each call but must reuse the memoized parses.
+
+        When ``scope=PROJECT``, only project files are parsed up front. A
+        project observation linking to a global observation triggers the
+        link-resolution fallback, which walks all files. Because those walks
+        parse through the per-file cache, a second call re-parses nothing even
+        though link resolution runs again.
         """
         from EvoScientist.memory.observations import store
 
@@ -3224,22 +3327,22 @@ class TestObservationCache:
         )
 
         # First call with scope=PROJECT: parses the project file, then the
-        # link-resolution fallback walks all files and parses the global target.
+        # link-resolution fallback walks and parses the linked global target.
         docs1 = list_observation_documents(
             memory_dir=memories, project_id="P-A", scope=MemoryScope.PROJECT
         )
         first_call_count = len(parse_calls)
         assert first_call_count >= 2, (
             "first call must parse the project file and the fallback must "
-            "walk to find the linked global observation"
+            "parse the linked global observation"
         )
 
-        # Second call: resolved cache hit, no parsing at all.
+        # Second call: link resolution reruns, but every parse is a cache hit.
         docs2 = list_observation_documents(
             memory_dir=memories, project_id="P-A", scope=MemoryScope.PROJECT
         )
         assert len(parse_calls) == first_call_count, (
-            "second call must hit the resolved cache; re-parsing means "
-            "link resolution is not cached"
+            "second call must reuse the memoized parses; re-parsing means the "
+            "fallback bypasses the per-file cache"
         )
         assert len(docs1) == len(docs2)
