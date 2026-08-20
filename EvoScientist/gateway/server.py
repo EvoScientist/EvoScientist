@@ -620,6 +620,54 @@ class LangGraphServerGateway:
         )
         await stream.run.respond(response, interrupt_id=interrupt_id or None)
 
+    async def _repair_stuck_thread_state(self, thread_id: str) -> None:
+        """Clear a non-empty ``next`` left by a failed run, preserving HITL pauses.
+
+        When an exception occurs mid-run the LangGraph checkpoint can be left
+        with a non-empty ``next`` tuple — the graph is stuck waiting to resume
+        at a specific node. On the next invocation the server replays the
+        broken step instead of starting a fresh turn. This mirrors the local
+        path's ``_clear_interrupted_graph_state`` (``stream/events.py``): it
+        fetches thread state, clears ``next`` via ``update_state(values=None,
+        as_node="__end__")`` — but only when the state is *not* a genuine
+        human-in-the-loop interrupt (those also leave ``next`` non-empty and
+        must be preserved). Best-effort: failures are logged at DEBUG.
+        """
+        try:
+            state = await self.thread_store.client.threads.get_state(thread_id)
+        except NotFoundError:
+            return
+        except Exception:
+            logger.debug(
+                "Could not read thread state for repair on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+            return
+
+        next_nodes = state.get("next")
+        if not next_nodes:
+            return
+
+        if _state_interrupts(state):
+            logger.debug(
+                "Leaving interrupted thread state intact for thread %s "
+                "(pending human-in-the-loop interrupt)",
+                thread_id,
+            )
+            return
+
+        await self.thread_store.client.threads.update_state(
+            thread_id,
+            values=None,
+            as_node="__end__",
+        )
+        logger.debug(
+            "Cleared interrupted thread state for thread %s (was stuck at: %s)",
+            thread_id,
+            next_nodes,
+        )
+
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         return self._stream_events(request)
 
@@ -744,6 +792,7 @@ class LangGraphServerGateway:
                         yield event
         except Exception as exc:
             yield emitter.error(str(exc)).data
+            await self._repair_stuck_thread_state(request.thread_id)
             raise
         finally:
             if run_started and not run_completed:

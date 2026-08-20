@@ -1377,6 +1377,121 @@ async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
             pass
 
 
+async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            for event in self.events:
+                yield event
+            raise RuntimeError("provider connection lost")
+
+    failing_stream = _FailingStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "abc12345": {
+                "values": {},
+                "next": ("model",),
+            }
+        },
+        streams={"abc12345": failing_stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    with pytest.raises(RuntimeError, match="provider connection lost"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert threads.state_updates == [
+        ("abc12345", None, "__end__"),
+    ]
+
+
+async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failure():
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            for event in self.events:
+                yield event
+            raise RuntimeError("provider connection lost")
+
+    failing_stream = _FailingStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "abc12345": {
+                "values": {},
+                "next": ("model",),
+                "interrupts": [
+                    {"id": "hitl-interrupt-1", "value": None},
+                ],
+            }
+        },
+        streams={"abc12345": failing_stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    with pytest.raises(RuntimeError, match="provider connection lost"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert threads.state_updates == []
+
+
 async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
     stream = FakeLangGraphThreadStream(
         "abc12345",
