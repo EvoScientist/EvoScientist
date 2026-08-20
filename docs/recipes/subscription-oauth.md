@@ -128,14 +128,12 @@ The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT accou
 **Fix:** disable the mappings so requested models pass through unmodified.
 EvoScientist (with #324) generates this config and passes it via
 `ccproxy serve --config` when it starts ccproxy itself. For a ccproxy
-instance you manage yourself, add the global config and restart it:
+instance you manage yourself, add this section to your global config
+(`~/.config/ccproxy/config.toml`) and restart it:
 
-```bash
-mkdir -p ~/.config/ccproxy
-cat > ~/.config/ccproxy/config.toml << 'EOF'
+```toml
 [plugins.codex]
 model_mappings = []
-EOF
 ```
 
 (ccproxy also reads `.ccproxy.toml` in its working directory and
