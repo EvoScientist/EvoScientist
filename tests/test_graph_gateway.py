@@ -20,6 +20,7 @@ from EvoScientist.gateway import (
     create_runtime_gateways,
 )
 from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
+from EvoScientist.gateway.types import DEFAULT_GRAPH_ID
 from EvoScientist.stream import display as display_mod
 from tests.fakes import (
     FakeGraphGateway,
@@ -540,6 +541,41 @@ async def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
     ]
 
 
+async def test_langgraph_server_thread_store_explicitly_clears_agent_name():
+    """Non-default graphs must set ``agent_name: None`` so a previously
+    stored main-graph stamp is overwritten under PATCH merge semantics.
+
+    Without the explicit clear (``pop``), the key is absent from the
+    payload and a stale ``agent_name`` from an earlier default-graph run
+    survives the merge, leaving the thread visible to the main-thread
+    filter.
+    """
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": "thread-1",
+                "metadata": {
+                    "graph_id": DEFAULT_GRAPH_ID,
+                    "agent_name": DEFAULT_GRAPH_ID,
+                },
+            }
+        ]
+    )
+    store = LangGraphServerThreadStore(
+        client=FakeLangGraphClient(threads),
+    )
+
+    new_id = await store.create_thread(
+        graph_id="writing-agent",
+        metadata={"model": "test-model"},
+        workspace_dir="/tmp/ws",
+    )
+
+    assert new_id == "server-thread"
+    created_metadata = threads.created[0]["metadata"]
+    assert created_metadata["agent_name"] is None
+
+
 async def test_langgraph_server_thread_store_clones_thread_with_metadata():
     clone_metadata = {
         "clone_purpose": "memory_extraction",
@@ -762,14 +798,10 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert threads.created[0]["thread_id"] == "abc12345"
     created_metadata = threads.created[0]["metadata"]
     assert created_metadata["graph_id"] == "writing-agent"
+    assert created_metadata["agent_name"] is None
     assert created_metadata["workspace_dir"] == "/tmp/ws"
     assert isinstance(created_metadata["updated_at"], str)
-    assert len(threads.metadata_updates) == 1
-    update_thread_id, update_metadata = threads.metadata_updates[0]
-    assert update_thread_id == "abc12345"
-    assert update_metadata["graph_id"] == "writing-agent"
-    assert update_metadata["workspace_dir"] == "/tmp/ws"
-    assert isinstance(update_metadata["updated_at"], str)
+    assert threads.metadata_updates == []
     assert threads.stream_calls == [("abc12345", "writing-agent")]
     assert stream.run.starts == [
         {
@@ -778,6 +810,131 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
             "metadata": {"workspace_dir": "/tmp/ws"},
         }
     ]
+    assert events == [
+        {"type": "text", "content": "hello"},
+        {"type": "done", "content": "hello", "response": "hello"},
+    ]
+
+
+async def test_langgraph_server_gateway_forwards_configurable_extra():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _collect():
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(
+                    message="hi",
+                    thread_id="abc12345",
+                    configurable_extra={
+                        "active_teams": ["code-agent"],
+                        "custom_key": "custom_value",
+                    },
+                )
+            )
+        ]
+
+    events = await _collect()
+
+    assert stream.run.starts == [
+        {
+            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "config": {
+                "configurable": {
+                    "active_teams": ["code-agent"],
+                    "custom_key": "custom_value",
+                    "thread_id": "abc12345",
+                }
+            },
+            "metadata": None,
+        }
+    ]
+    assert events == [
+        {"type": "text", "content": "hello"},
+        {"type": "done", "content": "hello", "response": "hello"},
+    ]
+
+
+async def test_langgraph_server_gateway_warns_on_pre_run_state_fetch_failure(
+    caplog: pytest.LogCaptureFixture,
+):
+    class _StateErrorThreadsClient(FakeLangGraphThreadsClient):
+        async def get_state(self, thread_id: str) -> dict[str, Any]:
+            raise RuntimeError("connection reset")
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {"namespace": [], "data": {"event": "message-finish"}},
+            },
+        ],
+    )
+    threads = _StateErrorThreadsClient(
+        threads=[],
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+        events = [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(message="hi", thread_id="abc12345")
+            )
+        ]
+
+    assert any(
+        "value-message processing disabled" in record.message
+        and "abc12345" in record.message
+        for record in caplog.records
+    )
     assert events == [
         {"type": "text", "content": "hello"},
         {"type": "done", "content": "hello", "response": "hello"},
