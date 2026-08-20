@@ -196,10 +196,11 @@ print(get_chat_model('claude-sonnet-4-6', provider='anthropic').invoke('Reply wi
 "
 ```
 
-End-to-end Codex probe (headers required — Pitfall B):
+End-to-end Codex probe (headers required — Pitfall B).
+Any recent Codex CLI version string works here; the backend only checks that the client is new enough:
 
 ```bash
-CODEX_VERSION="$(python -c 'from EvoScientist.llm.models import _resolve_codex_client_version; print(_resolve_codex_client_version())')"
+CODEX_VERSION="<recent Codex CLI version>"   # e.g. what `codex --version` prints
 curl -sN http://127.0.0.1:8000/codex/v1/responses \
   -H "content-type: application/json" \
   -H "originator: codex_cli_rs" \
