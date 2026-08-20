@@ -695,9 +695,12 @@ class LangGraphServerGateway:
             assistant_id=self._target_graph_id(request.target),
         )
 
+        run_started = False
+        run_completed = False
         try:
             async with stream:
                 await self._start_or_resume(stream, request)
+                run_started = True
                 emitted_interrupt = False
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
@@ -711,6 +714,7 @@ class LangGraphServerGateway:
                             normalized
                         )
                         yield normalized
+                run_completed = True
                 if not emitted_interrupt:
                     for event in await self._pending_interrupt_events(
                         stream,
@@ -722,6 +726,12 @@ class LangGraphServerGateway:
             yield emitter.error(str(exc)).data
             raise
         finally:
+            if run_started and not run_completed:
+                await _acancel_thread_runs(
+                    self.thread_store.client,
+                    request.thread_id,
+                    name="consumer abort",
+                )
             for event in tracker.finish():
                 yield event
         yield emitter.done(processor.full_response).data

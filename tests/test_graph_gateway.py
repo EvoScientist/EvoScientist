@@ -1246,6 +1246,112 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
     assert events == [{"type": "done", "content": "", "response": ""}]
 
 
+async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "running":
+                return [{"run_id": "run-active", "status": "running"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    gen = gateway.stream_events(RunRequest(message="hi", thread_id="abc12345"))
+    await gen.__anext__()
+    await gen.aclose()
+
+    assert cancel_calls == [("abc12345", ["run-active"])]
+
+
+async def test_langgraph_server_gateway_does_not_cancel_on_normal_completion():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    assert cancel_calls == []
+    assert events == [
+        {"type": "text", "content": "hello"},
+        {"type": "done", "content": "hello", "response": "hello"},
+    ]
+
+
 async def test_langgraph_server_thread_store_cancels_runs_before_delete():
     events: list[tuple[str, object]] = []
 
