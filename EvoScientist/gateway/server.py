@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
@@ -39,6 +40,8 @@ from .types import (
     ThreadStore,
 )
 
+logger = logging.getLogger(__name__)
+
 _THREAD_SEARCH_LIMIT = 1000
 _RUN_SUBSCRIBE_CHANNELS = [
     "messages",
@@ -67,7 +70,7 @@ def _build_thread_metadata(
     if graph_id == DEFAULT_GRAPH_ID:
         merged["agent_name"] = DEFAULT_GRAPH_ID
     else:
-        merged.pop("agent_name", None)
+        merged["agent_name"] = None
     if workspace_dir is not None:
         merged["workspace_dir"] = workspace_dir
     merged.setdefault("updated_at", datetime.now(UTC).isoformat())
@@ -457,6 +460,14 @@ class LangGraphServerGateway:
     graph_id: str = DEFAULT_GRAPH_ID
     interrupt_wait_seconds: float = 5.0
     events: SessionEvents | None = None
+    """Frontend event sink — always ``None`` on the server gateway today.
+
+    Consumers read ``gateway.events`` via the ``GraphGateway`` protocol
+    (``tui_interactive.py``, ``commands/implementation/model.py``), so the
+    attribute must exist even though the server path does not use it.
+    Wiring ``SessionEvents`` through the server stream is a Stage 2c
+    decision (custom-channel bridge); until then ``None`` is correct.
+    """
 
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
         return target.graph_id if target is not None else self.graph_id
@@ -544,7 +555,11 @@ class LangGraphServerGateway:
         stream: AsyncThreadStream,
         request: RunRequest,
     ) -> None:
-        config: dict[str, Any] = {"configurable": {"thread_id": request.thread_id}}
+        configurable: dict[str, Any] = {
+            **(request.configurable_extra or {}),
+            "thread_id": request.thread_id,
+        }
+        config: dict[str, Any] = {"configurable": configurable}
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
@@ -553,18 +568,6 @@ class LangGraphServerGateway:
                 request.target.workspace_dir if request.target is not None else None
             ),
         )
-        request_workspace = (
-            request.target.workspace_dir if request.target is not None else None
-        )
-        if request.metadata or request_workspace is not None:
-            await self.thread_store.client.threads.update(
-                request.thread_id,
-                metadata=_build_thread_metadata(
-                    graph_id=self._target_graph_id(request.target),
-                    workspace_dir=request_workspace,
-                    metadata=request.metadata,
-                ),
-            )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
                 await self._respond_to_interrupt(stream, request.message.resume)
@@ -671,6 +674,12 @@ class LangGraphServerGateway:
             pass
         except Exception:
             process_value_messages = False
+            logger.warning(
+                "Pre-run state fetch failed for thread %s; "
+                "value-message processing disabled for this run",
+                request.thread_id,
+                exc_info=True,
+            )
 
         subagents = _SubagentRegistry()
         processor = _V3EventProcessor(
