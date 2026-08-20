@@ -286,6 +286,38 @@ class TestToolCallWidget(unittest.TestCase):
 
 
 @unittest.skipUnless(_has_textual, "textual not installed")
+class TestApprovalWidgetCommandExtraction(unittest.TestCase):
+    """ApprovalWidget's compact-line command extraction.
+
+    ``compose()`` itself needs a mounted App (it opens a Container context
+    manager), so — per the widget's existing style of unit-testing its
+    private helpers directly (see TestToolCallWidget) — these exercise the
+    extraction helper `compose()` calls rather than the full render.
+    """
+
+    def test_extract_command_prefers_command(self):
+        from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
+
+        assert ApprovalWidget._extract_command({"command": "ls", "path": "/x"}) == "ls"
+
+    def test_extract_command_falls_back_to_path(self):
+        from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
+
+        assert ApprovalWidget._extract_command({"path": "/out.txt"}) == "/out.txt"
+
+    def test_extract_command_falls_back_to_file_path(self):
+        # deepagents 0.7.0's `delete` tool uses `file_path`, not `command`/
+        # `path` — without this fallback the approval prompt shows only the
+        # tool name and hides the deletion target.
+        from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
+
+        assert (
+            ApprovalWidget._extract_command({"file_path": "/results/run-3"})
+            == "/results/run-3"
+        )
+
+
+@unittest.skipUnless(_has_textual, "textual not installed")
 class TestSubAgentWidget(unittest.TestCase):
     """SubAgentWidget construction and name display."""
 
@@ -695,7 +727,6 @@ class TestCompletionLogic(unittest.TestCase):
 
     def _make_app(self, comp_items=None, comp_index=-1):
         """Return a stub app-like object with completion state."""
-        from rich.text import Text
 
         # Fake Input widget -------------------------------------------------
         class _FakeInput:
@@ -795,29 +826,12 @@ class TestCompletionLogic(unittest.TestCase):
                 self.query_one("#completions").display = False
 
             def _render_completions(self):
+                from EvoScientist.cli.tui_interactive import _render_completion_text
+
                 comp_widget = self.query_one("#completions")
-                comp_text = Text()
-                for i, candidate in enumerate(self._comp_items):
-                    cmd, desc = candidate.text, candidate.description
-                    cat = getattr(candidate, "category", "")
-                    if cat and (
-                        i == 0
-                        or getattr(self._comp_items[i - 1], "category", "") != cat
-                    ):
-                        if i > 0:
-                            comp_text.append("\n")
-                        comp_text.append(f" {cat}\n", style="bold #6b7280")
-                    if i == self._comp_index:
-                        comp_text.append("  \u25b8 ", style="bold")
-                        comp_text.append(f"{cmd:<28}", style="bold")
-                        comp_text.append(desc, style="bold")
-                    else:
-                        comp_text.append("    ", style="#888888")
-                        comp_text.append(f"{cmd:<28}", style="#888888")
-                        comp_text.append(desc, style="#888888")
-                    if i < len(self._comp_items) - 1:
-                        comp_text.append("\n")
-                comp_widget.update(comp_text)
+                comp_widget.update(
+                    _render_completion_text(self._comp_items, self._comp_index, 15)
+                )
 
             def on_key(self, key: str):
                 comp_widget = self.query_one("#completions")

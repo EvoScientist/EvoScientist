@@ -1,21 +1,24 @@
 """LLMToolSelectorMiddleware configuration for EvoScientist.
 
 Wraps LangChain's built-in ``LLMToolSelectorMiddleware`` with project-specific
-defaults and an optional stream tracker that captures which tools were selected.
+defaults. The wrapper reports what it did through an injected
+:class:`~EvoScientist.middleware.events.MiddlewareEventSink`; the frontend sink
+owns any display state (there are no process-global variables here).
 
 The selector only activates when the agent has more than ``threshold`` tools
-(default 20).  Below that, the extra LLM call isn't worth the token savings.
+(default 26). Below that, the extra LLM call isn't worth the token savings.
 
 Usage::
 
     from EvoScientist.middleware import create_tool_selector_middleware
 
-    middleware = create_tool_selector_middleware()  # returns [selector, tracker]
+    middleware = create_tool_selector_middleware(events=sink)
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
@@ -26,17 +29,14 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
+from langgraph.constants import TAG_NOSTREAM
+
+from .events import NO_OP_SINK, MiddlewareEventSink
 
 logger = logging.getLogger(__name__)
-
-# Module-level storage for main-agent tool-selection UI state.
-# Updated only when stream tracking is enabled; read by stream/events.py.
-_current_selected_tools: list[str] = []
-_last_emitted_tools: list[str] = []  # last selection shown to user
-_total_tools_count: int = 0  # total tools before selection
-_selector_active: bool = False
 
 # Default threshold: only run tool selection when tools exceed this count.
 # Base tools are ~14; selector activates when MCP tools push count above 26.
@@ -50,6 +50,53 @@ DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
         "search_observations",
     }
 )
+
+
+class _SelectorFloodDetector(BaseCallbackHandler):
+    """Log a WARNING when the selector's model returns an AIMessage with
+    an unexpectedly large ``tool_calls`` list — signal of the provider-side
+    duplicate-tool_call quirk that motivated the hidden-tag fix.
+
+    Normal selector output is one tool_call to ``ToolSelectionResponse``.
+    Anything above :attr:`THRESHOLD` is the pathology we're workarounding.
+    Runs regardless of any filtering tag on the model (callbacks fire on
+    every invocation; the ``nostream`` tag only stops langgraph's messages
+    handler from emitting downstream). Ensures the workaround self-reports
+    so we notice if the provider quirk persists / worsens / gets fixed
+    upstream.
+    """
+
+    THRESHOLD = 5
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        try:
+            for gen_list in response.generations:
+                for gen in gen_list:
+                    msg = getattr(gen, "message", None)
+                    tool_calls = getattr(msg, "tool_calls", None) or []
+                    if len(tool_calls) < self.THRESHOLD:
+                        continue
+                    names = {
+                        (
+                            tc.get("name")
+                            if isinstance(tc, dict)
+                            else getattr(tc, "name", "?")
+                        )
+                        for tc in tool_calls
+                    }
+                    logger.warning(
+                        "tool_selector.flood n_tool_calls=%d names=%s",
+                        len(tool_calls),
+                        names,
+                    )
+        except Exception:
+            # Observability must never crash the model call. Log at DEBUG so
+            # a real bug (e.g. langchain changing the response shape) is
+            # recoverable from the trace, while normal operation stays quiet.
+            logger.debug("flood detector traversal failed", exc_info=True)
+
+
+_FLOOD_DETECTOR = _SelectorFloodDetector()
 
 
 def _tool_name(tool: BaseTool | dict[str, Any]) -> str | None:
@@ -74,8 +121,12 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
     Skips the selection LLM call when ``len(request.tools) <= threshold``,
     avoiding unnecessary overhead for agents with few tools.
 
-    When stream tracking is enabled, sets ``_selector_active`` during the
-    selector's internal LLM call so the streaming layer can suppress its output.
+    When selection runs, reports the lifecycle to the injected sink:
+    ``on_tool_selection_started`` before the selector call, ``on_tool_selection``
+    with the surviving tools once the selector hands off the filtered request,
+    and ``on_tool_selection_ended`` when the call finishes (or fails). The sink
+    (a frontend one, or :class:`NoOpSink` for subagent / headless stacks) owns
+    all display state.
     """
 
     name = "conditional_tool_selector"
@@ -86,16 +137,18 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         threshold: int = DEFAULT_TOOL_THRESHOLD,
         *,
         always_include: frozenset[str] | None = None,
-        track_stream_selection: bool = True,
+        events: MiddlewareEventSink | None = None,
     ):
         super().__init__()
         self._selector_factory = selector_factory
         self._threshold = threshold
         self._always_include = always_include or frozenset()
-        self._track_stream_selection = track_stream_selection
+        self._events = events or NO_OP_SINK
         # Agent tools are fixed after graph construction, so the filtered
         # always-include set is stable for this middleware instance.
         self._selector: AgentMiddleware | None = None
+        self._fallback_warning_emitted = False
+        self._fallback_warning_lock = threading.Lock()
 
     def _build_selector(self, request: ModelRequest) -> AgentMiddleware:
         if self._selector is None:
@@ -103,6 +156,23 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             self._selector = self._selector_factory(names)
         return self._selector
 
+    @staticmethod
+    def _selected_names(request: ModelRequest) -> list[str]:
+        return [name for tool in request.tools if (name := _tool_name(tool))]
+
+    def _report_selector_failure(self, exc: Exception) -> None:
+        """Expose selector degradation once without flooding normal logs."""
+        with self._fallback_warning_lock:
+            emit_warning = not self._fallback_warning_emitted
+            self._fallback_warning_emitted = True
+        if emit_warning:
+            logger.warning(
+                "tool_selector.fallback error_type=%s using_all_tools=true; "
+                "details and subsequent failures are logged at DEBUG",
+                type(exc).__name__,
+            )
+        logger.debug("Tool selector failed, using all tools", exc_info=True)
+
     def wrap_model_call(
         self,
         request: ModelRequest,
@@ -111,38 +181,49 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         if len(request.tools) <= self._threshold:
             return handler(request)
 
-        if self._track_stream_selection:
-            global _selector_active, _total_tools_count
-            _selector_active = True
-            _total_tools_count = len(request.tools)
+        total = len(request.tools)
+        self._events.on_tool_selection_started(total)
 
         # Track whether handler was called — if so, any exception is from
         # the downstream model, not the selector, and must propagate.
         _handler_called = False
+        _selection_open = True
+
+        def _end_selection() -> None:
+            nonlocal _selection_open
+            if _selection_open:
+                self._events.on_tool_selection_ended()
+                _selection_open = False
 
         def _handler_after_selection(req: ModelRequest) -> ModelResponse:
             nonlocal _handler_called
             _handler_called = True
-            if self._track_stream_selection:
-                global _selector_active
-                _selector_active = False
+            # ``req.tools`` is the selector-filtered set here.
+            selected = self._selected_names(req)
+            self._events.on_tool_selection(selected, total)
+            if selected:
+                logger.debug("Selected tools: %s", selected)
+            _end_selection()
             return handler(req)
 
         try:
             return self._build_selector(request).wrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception:
+        except Exception as exc:
             if _handler_called:
                 raise  # Error from downstream model — don't retry
-            # Selector itself failed (e.g., structured output not supported).
-            logger.debug("Tool selector failed, using all tools", exc_info=True)
-            if self._track_stream_selection:
-                _selector_active = False
+            # The selector is an optimization, so every selector-only failure
+            # degrades to all tools. This includes provider failures: the
+            # downstream model-fallback middleware may replace the request's
+            # primary model, but it cannot replace this selector's fixed
+            # auxiliary model. Re-raising here would make a healthy fallback
+            # retry the same failed selector and never reach the model call.
+            self._report_selector_failure(exc)
+            _end_selection()
             return handler(request)
         finally:
-            if self._track_stream_selection:
-                _selector_active = False
+            _end_selection()
 
     async def awrap_model_call(
         self,
@@ -152,94 +233,62 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         if len(request.tools) <= self._threshold:
             return await handler(request)
 
-        if self._track_stream_selection:
-            global _selector_active, _total_tools_count
-            _selector_active = True
-            _total_tools_count = len(request.tools)
+        total = len(request.tools)
+        self._events.on_tool_selection_started(total)
 
         _handler_called = False
+        _selection_open = True
+
+        def _end_selection() -> None:
+            nonlocal _selection_open
+            if _selection_open:
+                self._events.on_tool_selection_ended()
+                _selection_open = False
 
         async def _handler_after_selection(req: ModelRequest) -> ModelResponse:
             nonlocal _handler_called
             _handler_called = True
-            if self._track_stream_selection:
-                global _selector_active
-                _selector_active = False
+            selected = self._selected_names(req)
+            self._events.on_tool_selection(selected, total)
+            if selected:
+                logger.debug("Selected tools: %s", selected)
+            _end_selection()
             return await handler(req)
 
         try:
             return await self._build_selector(request).awrap_model_call(
                 request, _handler_after_selection
             )
-        except Exception:
+        except Exception as exc:
             if _handler_called:
                 raise
-            logger.debug("Tool selector failed, using all tools", exc_info=True)
-            if self._track_stream_selection:
-                _selector_active = False
+            self._report_selector_failure(exc)
+            _end_selection()
             return await handler(request)
         finally:
-            if self._track_stream_selection:
-                _selector_active = False
-
-
-class _ToolSelectionTrackerMiddleware(AgentMiddleware):
-    """Captures which tools the model actually receives after filtering.
-
-    Sits right AFTER the selector in the middleware chain (more inner),
-    so ``request.tools`` already contains only the selected tools when
-    this middleware's ``wrap_model_call`` runs.
-    """
-
-    name = "tool_selection_tracker"
-
-    def wrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], ModelResponse],
-    ) -> ModelResponse:
-        global _current_selected_tools
-        tools = [name for tool in request.tools if (name := _tool_name(tool))]
-        _current_selected_tools = tools
-        if tools:
-            logger.debug("Selected tools: %s", tools)
-        return handler(request)
-
-    async def awrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
-    ) -> ModelResponse:
-        global _current_selected_tools
-        tools = [name for tool in request.tools if (name := _tool_name(tool))]
-        _current_selected_tools = tools
-        if tools:
-            logger.debug("Selected tools: %s", tools)
-        return await handler(request)
+            _end_selection()
 
 
 def create_tool_selector_middleware(
     threshold: int = DEFAULT_TOOL_THRESHOLD,
     *,
     model: BaseChatModel | None = None,
-    track_stream_selection: bool = True,
+    events: MiddlewareEventSink | None = None,
 ):
-    """Build LLMToolSelectorMiddleware + tracker with EvoScientist defaults.
+    """Build the conditional ``LLMToolSelectorMiddleware`` wrapper.
 
-    Returns middleware for adaptive tool selection:
-    1. Conditional wrapper around ``LLMToolSelectorMiddleware`` — only
-       activates when ``len(tools) > threshold``
-    2. Optional ``_ToolSelectionTrackerMiddleware`` — captures selected tool
-       names for the main-agent stream UI when ``track_stream_selection`` is true
+    Returns a single-element middleware list (kept as a list so the assembly
+    site can splat it) that adaptively selects tools only when
+    ``len(tools) > threshold``. The wrapper reports the selection lifecycle to
+    ``events``; pass a frontend sink for the main agent, or omit it (subagent /
+    headless stacks) to get the silent :class:`NoOpSink`.
 
     Args:
         model: Chat model for tool selection.  If *None*, the default
             model is resolved via ``_ensure_chat_model()``.
         threshold: Minimum number of tools to trigger selection.
             Default 26.  Set to 0 to always run selection.
-        track_stream_selection: Whether to update process-global stream/UI
-            state. Disable for async sub-agents that should still select tools
-            but should not drive the main-agent tool-selection widget.
+        events: Frontend event sink to report selection to.
 
     ``think_tool``, ``task``, and memory tools are always included because:
 
@@ -251,13 +300,33 @@ def create_tool_selector_middleware(
     """
     from langchain.agents.middleware import LLMToolSelectorMiddleware
 
-    from .utils import disable_thinking
+    from .utils import disable_streaming, disable_thinking
 
     if model is None:
         from EvoScientist.EvoScientist import _ensure_chat_model
 
         model = _ensure_chat_model()
-    safe_model = disable_thinking(model)
+
+    # Model-field wiring: the ``nostream`` tag reaches langgraph's messages
+    # callback (``pregel/_messages.py:141``), which skips registering the
+    # selector's chat-model call so no ``messages/*`` frame is ever emitted
+    # for it - WebUI's action panel never sees the (potentially thousands
+    # of duplicate) ``ToolSelectionResponse`` tool_calls the provider may
+    # produce. ``_FLOOD_DETECTOR`` self-reports when the provider quirk
+    # fires. Both propagate via ``CallbackManager.configure`` reading
+    # ``self.tags`` / ``self.callbacks`` at ``chat_models.py:746-750`` on
+    # every ``invoke`` / ``ainvoke``.
+    #
+    # Append (rather than replace) so any tags/callbacks the main-agent
+    # model may carry are preserved - relevant if a future factory adds
+    # e.g. langsmith tracing tags to the base model.
+    base = disable_streaming(disable_thinking(model))
+    safe_model = base.model_copy(
+        update={
+            "tags": [*(base.tags or []), TAG_NOSTREAM],
+            "callbacks": [*(base.callbacks or []), _FLOOD_DETECTOR],
+        }
+    )
 
     system_prompt = (
         "You are selecting tools for a scientific research agent. "
@@ -275,31 +344,11 @@ def create_tool_selector_middleware(
             always_include=always_include,
         )
 
-    middleware: list[AgentMiddleware] = [
+    return [
         _ConditionalToolSelectorMiddleware(
             selector_factory=selector_factory,
             threshold=threshold,
             always_include=DEFAULT_ALWAYS_INCLUDE_TOOLS,
-            track_stream_selection=track_stream_selection,
+            events=events,
         ),
     ]
-    if track_stream_selection:
-        middleware.append(_ToolSelectionTrackerMiddleware())
-    return middleware
-
-
-def reset_tool_selection_state_for_tests() -> None:
-    """Reset the process-global tool-selection state.
-
-    The selector/tracker record the last selected tools and the selector-active
-    flag in module globals that ``stream/tool_selection.py`` reads to suppress
-    selector chatter. Tests that drive the selector must not leak that state
-    into later tests; an autouse fixture resets it around every test.
-    """
-    global _current_selected_tools, _last_emitted_tools
-    global _total_tools_count, _selector_active
-
-    _current_selected_tools = []
-    _last_emitted_tools = []
-    _total_tools_count = 0
-    _selector_active = False

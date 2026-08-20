@@ -9,6 +9,7 @@ import uuid
 from datetime import UTC
 from unittest.mock import patch
 
+import aiosqlite
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -231,6 +232,19 @@ class TestThreadFunctions(unittest.IsolatedAsyncioTestCase):
     async def test_list_threads_with_message_count(self):
         threads = await list_threads(limit=10, include_message_count=True)
         assert "message_count" in threads[0]
+
+    async def test_list_threads_creates_meta_index(self):
+        """Thread listing must run off the expression index, not a blob scan."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.execute("DROP INDEX IF EXISTS idx_evoscientist_thread_meta")
+            await conn.commit()
+        await list_threads(limit=10)
+        async with aiosqlite.connect(self._db_path) as conn:
+            async with conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                ("idx_evoscientist_thread_meta",),
+            ) as cur:
+                assert await cur.fetchone() is not None
 
     async def test_thread_exists_true(self):
         assert await thread_exists("abc12345")
@@ -2863,6 +2877,178 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
                 await _run_inner()
 
         assert restore_called, "_restore_webui_threads_to_global_store must be called"
+
+
+class TestOrphanedRunSweep:
+    """Startup sweep for runs whose thread no longer exists (issue #358)."""
+
+    def test_removes_runs_whose_thread_is_missing(self):
+        from EvoScientist.sessions import _sweep_orphaned_global_store_entries
+
+        alive = uuid.uuid4()
+        store = {
+            "threads": [{"thread_id": alive}],
+            "runs": [
+                {"run_id": "keep", "thread_id": alive, "status": "pending"},
+                {
+                    "run_id": "zombie-pending",
+                    "thread_id": uuid.uuid4(),
+                    "status": "pending",
+                },
+                {
+                    "run_id": "zombie-error",
+                    "thread_id": uuid.uuid4(),
+                    "status": "error",
+                },
+            ],
+            "crons": [{"cron_id": "c1"}],
+        }
+
+        removed = _sweep_orphaned_global_store_entries(store)
+
+        assert removed == 2
+        assert [r["run_id"] for r in store["runs"]] == ["keep"]
+        assert store["crons"] == [{"cron_id": "c1"}]
+
+    def test_matches_uuid_and_str_thread_ids(self):
+        from EvoScientist.sessions import _sweep_orphaned_global_store_entries
+
+        alive = uuid.uuid4()
+        store = {
+            "threads": [{"thread_id": str(alive)}],
+            "runs": [{"run_id": "keep", "thread_id": alive, "status": "pending"}],
+        }
+
+        assert _sweep_orphaned_global_store_entries(store) == 0
+        assert [r["run_id"] for r in store["runs"]] == ["keep"]
+
+    def test_empty_store_is_noop(self):
+        from EvoScientist.sessions import _sweep_orphaned_global_store_entries
+
+        assert _sweep_orphaned_global_store_entries({}) == 0
+
+    def test_mutates_runs_list_in_place(self):
+        from EvoScientist.sessions import _sweep_orphaned_global_store_entries
+
+        runs = [{"run_id": "zombie", "thread_id": uuid.uuid4(), "status": "pending"}]
+        store = {"threads": [], "runs": runs}
+
+        _sweep_orphaned_global_store_entries(store)
+
+        assert store["runs"] is runs
+        assert runs == []
+
+    def test_removes_thread_bound_crons_whose_thread_is_missing(self):
+        from EvoScientist.sessions import _sweep_orphaned_global_store_entries
+
+        alive = uuid.uuid4()
+        store = {
+            "threads": [{"thread_id": alive}],
+            "runs": [],
+            "crons": [
+                {"cron_id": "keep-stateless", "thread_id": None},
+                {"cron_id": "keep-bound", "thread_id": alive},
+                {"cron_id": "zombie-bound", "thread_id": uuid.uuid4()},
+            ],
+        }
+
+        removed = _sweep_orphaned_global_store_entries(store)
+
+        assert removed == 1
+        assert [c["cron_id"] for c in store["crons"]] == [
+            "keep-stateless",
+            "keep-bound",
+        ]
+
+    def test_stateless_crons_survive_empty_thread_registry(self):
+        from EvoScientist.sessions import _sweep_orphaned_global_store_entries
+
+        store = {
+            "threads": [],
+            "runs": [],
+            "crons": [{"cron_id": "keep-stateless", "thread_id": None}],
+        }
+
+        assert _sweep_orphaned_global_store_entries(store) == 0
+        assert [c["cron_id"] for c in store["crons"]] == ["keep-stateless"]
+
+    async def test_create_checkpointer_calls_sweep(self):
+        """create_checkpointer_for_langgraph_api runs the orphan sweep."""
+        from unittest.mock import patch
+
+        from EvoScientist.sessions import create_checkpointer_for_langgraph_api
+
+        sweep_called = []
+
+        async def fake_restore():
+            return True
+
+        async def fake_sweep():
+            sweep_called.append(True)
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch(
+                    "EvoScientist.sessions._restore_webui_threads_to_global_store",
+                    side_effect=fake_restore,
+                ),
+                patch(
+                    "EvoScientist.sessions._sweep_orphaned_runs_in_global_store",
+                    side_effect=fake_sweep,
+                ),
+            ):
+
+                async def _run_inner():
+                    async with create_checkpointer_for_langgraph_api():
+                        pass
+
+                await _run_inner()
+
+        assert sweep_called, "_sweep_orphaned_runs_in_global_store must be called"
+
+    async def test_sweep_skipped_when_restore_fails(self):
+        """A failed thread restore must not be followed by a destructive sweep."""
+        from unittest.mock import patch
+
+        from EvoScientist.sessions import create_checkpointer_for_langgraph_api
+
+        sweep_called = []
+
+        async def fake_restore():
+            return False
+
+        async def fake_sweep():  # pragma: no cover - must not run
+            sweep_called.append(True)
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch(
+                    "EvoScientist.sessions._restore_webui_threads_to_global_store",
+                    side_effect=fake_restore,
+                ),
+                patch(
+                    "EvoScientist.sessions._sweep_orphaned_runs_in_global_store",
+                    side_effect=fake_sweep,
+                ),
+            ):
+
+                async def _run_inner():
+                    async with create_checkpointer_for_langgraph_api():
+                        pass
+
+                await _run_inner()
+
+        assert sweep_called == []
 
 
 if __name__ == "__main__":

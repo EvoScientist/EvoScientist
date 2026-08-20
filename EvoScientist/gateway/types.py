@@ -6,13 +6,15 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
-from langgraph.types import Command
-
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
+    from langgraph.types import Command
+
+    from ..middleware.events import SessionEvents
 
 GraphEvent: TypeAlias = dict[str, Any]
-GraphRunInput: TypeAlias = str | Command
+# String alias keeps this module langgraph-free at import time (~950 modules).
+GraphRunInput: TypeAlias = "str | Command"
 GraphStateValues: TypeAlias = dict[str, Any]
 DEFAULT_GRAPH_ID = "EvoScientist"
 
@@ -39,6 +41,13 @@ class RunRequest:
     metadata: dict[str, Any] | None = None
     media: list[str] | None = None
     target: GraphTarget | None = None
+    configurable_extra: dict[str, Any] | None = None
+    """Extra keys to merge into the LangGraph ``configurable`` dict alongside
+    ``thread_id`` — e.g. ``{"active_teams": [...]}`` from the TUI
+    ``/expert`` command. WebUI callers achieve the same effect via
+    ``langgraph_sdk``'s ``config.configurable`` on their own; this field is
+    the local-gateway equivalent so CLI / TUI / headless serve can bias
+    the run identically."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +102,8 @@ class ThreadStore(Protocol):
 
 class GraphGateway(Protocol):
     """One authority for graph runs and thread lifecycle operations."""
+
+    events: SessionEvents | None
 
     async def create_thread(
         self,

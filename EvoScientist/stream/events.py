@@ -10,7 +10,7 @@ import mimetypes
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
 from langgraph.graph import END
@@ -26,6 +26,9 @@ from .summarization import (
 from .tool_results import _extract_command_tool_content, _extract_tool_content
 from .tool_selection import _ToolSelectionSuppressor
 from .utils import DisplayLimits, is_success
+
+if TYPE_CHECKING:
+    from ..middleware.events import ToolSelectionView
 from .v3_payloads import (
     RawMap,
     _as_raw_map,
@@ -195,7 +198,10 @@ class _V3EventProcessor:
         existing_summarization_event: Mapping[str, object] | None,
         existing_messages: object = None,
         process_value_messages: bool = False,
+        events: "ToolSelectionView | None" = None,
     ) -> None:
+        from ..middleware.events import NO_OP_SINK
+
         self.emitter = emitter
         self.subagents = subagents
         self._suppressed_summarization_signature = _summarization_event_signature(
@@ -210,7 +216,7 @@ class _V3EventProcessor:
         ] = {}
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
-        self._selector = _ToolSelectionSuppressor(emitter)
+        self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
 
     @staticmethod
     def _tool_scope(
@@ -249,6 +255,64 @@ class _V3EventProcessor:
             return events
         if method == "input.requested":
             return self._process_input_requested(event.get("params"))
+        if method == "custom":
+            return self._process_custom_event(_event_data(event))
+        return []
+
+    def _process_custom_event(self, data: object) -> list[dict[str, Any]]:
+        """Translate a ``custom`` stream payload into UI events.
+
+        Currently handles the ``subagent`` lifecycle emitted by
+        ``langchain_quickjs`` for in-eval ``task()`` fan-out: ``start`` /
+        ``complete`` / ``error`` become ``panel_dispatch_start`` /
+        ``panel_dispatch_complete`` / ``panel_dispatch_error`` UI events.
+        Unrecognised event types are ignored so future producers can extend
+        the custom channel without breaking existing consumers.
+        """
+        payload = _as_raw_map(data)
+        if payload is None or payload.get("type") != "subagent":
+            return []
+        phase = payload.get("phase")
+        eval_id = payload.get("eval_id")
+        dispatch_id = payload.get("id")
+        if not isinstance(dispatch_id, str):
+            return []
+        eval_id_str = eval_id if isinstance(eval_id, str) else ""
+        if phase == "start":
+            subagent_type = payload.get("subagent_type")
+            label = payload.get("label")
+            description = payload.get("description")
+            return [
+                self.emitter.panel_dispatch_start(
+                    eval_id=eval_id_str,
+                    dispatch_id=dispatch_id,
+                    subagent_type=subagent_type
+                    if isinstance(subagent_type, str)
+                    else "",
+                    label=label if isinstance(label, str) else "",
+                    description=description if isinstance(description, str) else "",
+                ).data
+            ]
+        raw_duration = payload.get("duration_ms")
+        duration_ms = raw_duration if isinstance(raw_duration, int) else 0
+        if phase == "complete":
+            return [
+                self.emitter.panel_dispatch_complete(
+                    eval_id=eval_id_str,
+                    dispatch_id=dispatch_id,
+                    duration_ms=duration_ms,
+                ).data
+            ]
+        if phase == "error":
+            error = payload.get("error")
+            return [
+                self.emitter.panel_dispatch_error(
+                    eval_id=eval_id_str,
+                    dispatch_id=dispatch_id,
+                    duration_ms=duration_ms,
+                    error=error if isinstance(error, str) else "",
+                ).data
+            ]
         return []
 
     @classmethod
@@ -797,6 +861,8 @@ async def stream_agent_events(
     thread_id: str,
     metadata: dict[str, Any] | None = None,
     media: list[str] | None = None,
+    events: "ToolSelectionView | None" = None,
+    configurable_extra: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -812,13 +878,26 @@ async def stream_agent_events(
         metadata: Optional metadata dict merged into the LangGraph config
             (e.g. agent_name, updated_at for checkpoint persistence).
         media: Optional list of local file paths for attachments.
+        configurable_extra: Optional extra keys merged into ``configurable``
+            alongside ``thread_id`` — e.g. ``{"active_teams": [...]}`` from
+            TUI ``/expert`` bindings, mirroring what WebUI writes via
+            langgraph-sdk. Ignored if ``None`` or empty.
 
     Yields:
         Event dicts: thinking, text, tool_call, tool_result,
                      subagent_start, subagent_tool_call, subagent_tool_result, subagent_end,
                      done, error
     """
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    if events is None:
+        from .sink import SessionEventSink
+
+        events = SessionEventSink()
+
+    configurable: dict[str, Any] = {
+        **(configurable_extra or {}),
+        "thread_id": thread_id,
+    }
+    config: dict[str, Any] = {"configurable": configurable}
     if metadata:
         config["metadata"] = metadata
     emitter = StreamEventEmitter()
@@ -837,15 +916,25 @@ async def stream_agent_events(
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
     _run_raised: bool = False
+    event_sink_token = None
     try:
-        from langgraph.stream.transformers import UpdatesTransformer
+        from langgraph.stream.transformers import CustomTransformer, UpdatesTransformer
+
+        from ..middleware.events import (
+            MiddlewareEventSink,
+            bind_run_event_sink,
+            reset_run_event_sink,
+        )
+
+        if isinstance(events, MiddlewareEventSink):
+            event_sink_token = bind_run_event_sink(events)
 
         try:
             stream_result = agent.astream_events(
                 astream_input,
                 config=config,
                 version="v3",
-                transformers=[UpdatesTransformer],
+                transformers=[UpdatesTransformer, CustomTransformer],
             )
         except AttributeError as exc:
             raise RuntimeError(
@@ -858,6 +947,7 @@ async def stream_agent_events(
             emitter,
             subagents,
             existing_summarization_event,
+            events=events,
         )
         queue: asyncio.Queue[Any] = asyncio.Queue()
         producer_done = object()
@@ -964,6 +1054,8 @@ async def stream_agent_events(
                 task.cancel()
         if producers:
             await asyncio.gather(*producers, return_exceptions=True)
+        if event_sink_token is not None:
+            reset_run_event_sink(event_sink_token)
         # When the run ended with an exception the LangGraph checkpoint may be
         # left interrupted (``next`` non-empty). Clear it — unless it's a real
         # human-in-the-loop pause — so the next user message starts a fresh turn

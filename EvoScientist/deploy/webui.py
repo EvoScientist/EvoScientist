@@ -42,6 +42,7 @@ from ..stream.console import console
 # Front-end npm package + spec. ``@latest`` → always the newest published UI.
 _WEBUI_PACKAGE = "@evoscientist/webui@latest"
 _DEFAULT_WEBUI_PORT = 4716
+_DEFAULT_WEBUI_HOST = "127.0.0.1"
 
 
 def run_webui(config: Any, workspace_dir: str | None = None) -> None:
@@ -58,10 +59,15 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     """
     from ..config import apply_config_to_env
     from ..langgraph_dev.manager import (
+        _DEFAULT_HOST,
         _DEFAULT_PORT,
         RUNTIME,
+        _base_url,
+        _format_hostport,
+        _is_loopback_host,
         _is_port_occupied,
         _read_workspace_sidecar,
+        _server_config_fingerprint,
         is_langgraph_dev_running,
         start_langgraph_dev,
         stop_langgraph_dev,
@@ -84,6 +90,14 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     # webui_port = the local Next.js server the browser actually opens.
     backend_port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     webui_port = int(getattr(config, "webui_port", _DEFAULT_WEBUI_PORT))
+    # ...and their bind interfaces, both loopback by default — the front-end
+    # carries workspace/skill APIs of its own (see config.webui_host).
+    backend_host = (
+        str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
+    ).strip() or _DEFAULT_HOST
+    webui_host = (
+        str(getattr(config, "webui_host", _DEFAULT_WEBUI_HOST) or _DEFAULT_WEBUI_HOST)
+    ).strip() or _DEFAULT_WEBUI_HOST
     for label, p in (("langgraph dev", backend_port), ("WebUI", webui_port)):
         if not (1 <= p <= 65535):
             console.print(
@@ -128,8 +142,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     # else start a fresh deploy-mode one (full MCP + async). Refuse a foreign
     # occupant — that's a configuration error, not something to silently share.
     started_proc = None
-    if _is_port_occupied(backend_port):
-        if is_langgraph_dev_running(port=backend_port):
+    if _is_port_occupied(backend_port, backend_host):
+        if is_langgraph_dev_running(port=backend_port, host=backend_host):
             # Reuse an existing EvoSci server only when it serves THIS workspace
             # — mirror the sidecar guard in ensure_langgraph_dev so WebUI started
             # from workspace B never silently binds to a server pinned to
@@ -150,6 +164,31 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                     f"[/dim]"
                 )
                 raise typer.Exit(1)
+            if sidecar is not None and sidecar.get("deploy_mode") is False:
+                # A stripped (CLI-started) server has no MCP and no async
+                # sub-agents — silently reusing it would degrade the WebUI
+                # with no visible cause. Refuse; never auto-kill.
+                console.print(
+                    f"[red]Port {backend_port} is serving a stripped "
+                    f"(CLI-mode) langgraph dev — the WebUI needs the full "
+                    f"deploy-mode server (MCP + async sub-agents).[/red]"
+                )
+                console.print(
+                    "[dim]Stop it with [bold]EvoSci server stop[/bold], then "
+                    "re-run [bold]EvoSci[/bold].[/dim]"
+                )
+                raise typer.Exit(1)
+            if sidecar is not None:
+                recorded_fp = sidecar.get("config_fingerprint")
+                if isinstance(
+                    recorded_fp, str
+                ) and recorded_fp != _server_config_fingerprint(config):
+                    console.print(
+                        "[yellow]⚠ Config changed since this server was "
+                        "launched — it still serves the old settings. Apply "
+                        "them with [bold]EvoSci server stop[/bold], then "
+                        "re-run EvoSci.[/yellow]"
+                    )
             console.print(
                 f"[green]✓[/green] Reusing langgraph dev already serving "
                 f"port {backend_port}"
@@ -174,17 +213,28 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                 started_proc = start_langgraph_dev(
                     workspace_dir=Path(ws),
                     port=backend_port,
+                    host=backend_host,
                     file_persistence=file_persistence,
                     jobs_per_worker=jobs_per_worker,
                     deploy_mode=True,
+                    config_fingerprint=_server_config_fingerprint(config),
                 )
-            atexit.register(stop_langgraph_dev, started_proc)
+            if getattr(config, "langgraph_dev_keepalive", False):
+                # Keepalive: the deploy-mode backend outlives this session so
+                # the next same-workspace launch reuses it instantly. The npx
+                # front-end below still stops on exit as usual.
+                console.print(
+                    "[dim]keepalive: backend server stays up after exit — "
+                    "stop it with [bold]EvoSci server stop[/bold].[/dim]"
+                )
+            else:
+                atexit.register(stop_langgraph_dev, started_proc)
         except Exception as exc:
             console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
             raise typer.Exit(1) from exc
         console.print("[green]✓[/green] langgraph dev ready")
 
-    if _is_port_occupied(webui_port):
+    if _is_port_occupied(webui_port, webui_host):
         console.print(
             f"[yellow]⚠ Port {webui_port} is already in use; the WebUI server "
             f"may fail to start. Change it with "
@@ -197,20 +247,37 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     # inherited so it all shows in THIS terminal. EVOSCIENTIST_LANGGRAPH_DEV_PORT
     # lets the UI's config prefill point at our backend automatically. Secrets
     # are scrubbed — the browser UI never needs LLM provider API keys.
+    #
+    # HOSTNAME is the front-end's only bind knob: the package has no --host
+    # flag; its launcher forwards `HOSTNAME || "127.0.0.1"` to the Next server.
     webui_env = _scrubbed_env(
         {
             "EVOSCIENTIST_LANGGRAPH_DEV_PORT": str(backend_port),
             "PORT": str(webui_port),
+            "HOSTNAME": webui_host,
         }
     )
+    # The UI reaches the backend from the BROWSER; when only the front-end is
+    # exposed, remote pages load but every request fails — say so.
+    remote_backend_hint = ""
+    if not _is_loopback_host(webui_host) and _is_loopback_host(backend_host):
+        remote_backend_hint = (
+            f"\n[yellow]Note:[/yellow] the UI connects to the backend from the "
+            f"browser. Remote visitors cannot reach a loopback backend — run "
+            f"[bold]EvoSci config set langgraph_dev_host 0.0.0.0[/bold] and "
+            f"point the UI at [bold]http://<this-machine-ip>:{backend_port}"
+            f"[/bold].\n"
+        )
     console.print(
         Panel(
             Text.from_markup(
-                f"[bold]Backend:[/bold]  http://localhost:{backend_port}  "
+                f"[bold]Backend:[/bold]  {_base_url(backend_port, backend_host)}  "
                 f"[dim](langgraph dev — Assistant: EvoScientist)[/dim]\n"
-                f"[bold]WebUI:[/bold]    http://localhost:{webui_port}  "
+                f"[bold]WebUI:[/bold]    "
+                f"http://{_format_hostport(webui_host, webui_port)}  "
                 f"[dim](opens in your browser)[/dim]\n"
-                f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n\n"
+                f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n"
+                f"{remote_backend_hint}\n"
                 f"[dim]Fetching {_WEBUI_PACKAGE} via npx (first run may take a "
                 f"moment)…  Press Ctrl+C to stop.[/dim]"
             ),
@@ -218,6 +285,19 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             border_style="green",
         )
     )
+    if not _is_loopback_host(backend_host):
+        console.print(
+            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+            f"[bold red]Backend listening on {backend_host} — no auth, and the "
+            f"agent can run shell. Trusted networks only.[/bold red]"
+        )
+    if not _is_loopback_host(webui_host):
+        console.print(
+            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+            f"[bold red]WebUI listening on {webui_host} — its API reads, writes "
+            f"and uploads workspace files and installs skills, with no auth. "
+            f"Trusted networks only.[/bold red]"
+        )
 
     popen_kwargs: dict[str, Any] = {"env": webui_env}
     if os.name == "posix":

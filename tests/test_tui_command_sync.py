@@ -24,6 +24,7 @@ class _StubApp:
         self._agent_loader = _Loader()
         self._conversation_tid = "thread-1"
         self._channel_runtime = ChannelRuntime()
+        self._exiting = False
         self.model_updates: list[tuple[str, str | None]] = []
         self.refresh_calls: list[bool] = []
 
@@ -89,6 +90,29 @@ async def test_sync_tui_command_completion_refreshes_without_agent_swap(monkeypa
     assert app._agent_loader.adopt_calls == []
     assert app.model_updates == []
     assert app.refresh_calls == [True]
+
+
+async def test_sync_tui_command_completion_skips_unmounted_app(monkeypatch):
+    import EvoScientist.cli.tui_interactive as tui_mod
+
+    app = _StubApp()
+    app._exiting = True
+    ctx = CommandContext(
+        agent="new-agent",
+        thread_id="thread-1",
+        ui=SimpleNamespace(),
+    )
+    cmd = SimpleNamespace(name="/exit")
+
+    monkeypatch.setattr(tui_mod, "_channels_is_running", lambda: True)
+
+    await tui_mod._sync_tui_command_completion(app, ctx, "old-agent", cmd)
+
+    assert app._agent_loader.adopt_calls == []
+    assert app.model_updates == []
+    assert app.refresh_calls == []
+    assert app._channel_runtime.agent is None
+    assert app._channel_runtime.thread_id is None
 
 
 async def test_sync_tui_rebinds_runtime_on_thread_rotation_without_agent_swap(

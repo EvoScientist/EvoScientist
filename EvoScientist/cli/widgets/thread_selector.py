@@ -23,11 +23,11 @@ from rich.text import Text
 from textual.binding import Binding, BindingType
 from textual.containers import Container
 from textual.message import Message
-from textual.widget import Widget
 from textual.widgets import Static
 
+from .picker_base import PickerWidgetBase, first_selectable_index, move_selection
+
 if TYPE_CHECKING:
-    from textual import events
     from textual.app import ComposeResult
 
 
@@ -237,15 +237,12 @@ def build_row_text(
 # ---------------------------------------------------------------------------
 
 
-class ThreadPickerWidget(Widget):
+class ThreadPickerWidget(PickerWidgetBase):
     """Inline thread picker — mounts in chat, keyboard-driven.
 
     Posts ``Picked(thread_id)`` on Enter, ``Cancelled()`` on Esc.
     Threads are displayed in a two-level workspace hierarchy.
     """
-
-    can_focus = True
-    can_focus_children = False
 
     DEFAULT_CSS = """
     ThreadPickerWidget {
@@ -323,22 +320,19 @@ class ThreadPickerWidget(Widget):
         self._selected = self._first_thread_index()
         self._row_widgets: list[Static] = []
 
+    @staticmethod
+    def _is_thread(item: dict) -> bool:
+        return item["type"] == "thread"
+
     def _first_thread_index(self) -> int:
-        for i, item in enumerate(self._items):
-            if item["type"] == "thread":
-                return i
-        return 0
+        return first_selectable_index(self._items, self._is_thread)
 
     def _move(self, direction: int) -> None:
         if not self._items:
             return
-        i = (self._selected + direction) % len(self._items)
-        steps = 0
-        while self._items[i]["type"] != "thread" and steps < len(self._items):
-            i = (i + direction) % len(self._items)
-            steps += 1
-        if self._items[i]["type"] == "thread":
-            self._selected = i
+        new = move_selection(self._items, self._selected, direction, self._is_thread)
+        if self._is_thread(self._items[new]):
+            self._selected = new
             self._update_rows()
 
     def compose(self) -> ComposeResult:
@@ -358,18 +352,18 @@ class ThreadPickerWidget(Widget):
             classes="picker-help",
         )
 
-    def on_mount(self) -> None:
+    def _refresh_view(self) -> None:
         self._update_rows()
-        self.call_later(self.focus)
 
     def _update_rows(self) -> None:
         for i, (item, widget) in enumerate(
             zip(self._items, self._row_widgets, strict=False)
         ):
-            widget.remove_class("picker-row-selected")
             if item["type"] == "header":
+                widget.remove_class("picker-row-selected")
                 widget.update(build_header_text(item["label"]))
             elif item["type"] == "subheader":
+                widget.remove_class("picker-row-selected")
                 widget.update(build_subheader_text(item["label"]))
             else:
                 thread = item["thread"]
@@ -381,9 +375,7 @@ class ThreadPickerWidget(Widget):
                     indented=item.get("indented", False),
                 )
                 widget.update(text)
-                if is_selected:
-                    widget.add_class("picker-row-selected")
-                    widget.scroll_visible()
+                self.apply_row_highlight(widget, is_selected)
 
     def action_move_up(self) -> None:
         self._move(-1)
@@ -403,6 +395,3 @@ class ThreadPickerWidget(Widget):
 
     def action_cancel(self) -> None:
         self.post_message(self.Cancelled())
-
-    def on_blur(self, event: events.Blur) -> None:
-        self.call_after_refresh(self.focus)

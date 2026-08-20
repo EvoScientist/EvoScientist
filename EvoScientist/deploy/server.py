@@ -46,6 +46,13 @@ def deploy(
         "--port",
         help="Port for langgraph dev (default: config.langgraph_dev_port = 6174)",
     ),
+    host: str | None = typer.Option(
+        None,
+        "--host",
+        help="Interface to bind (default: config.langgraph_dev_host = "
+        "127.0.0.1, i.e. this machine only — pass 0.0.0.0 to reach it from "
+        "other machines, but note the server has no auth)",
+    ),
     tunnel: bool = typer.Option(
         False,
         "--tunnel",
@@ -66,9 +73,15 @@ def deploy(
     """
     from ..config import apply_config_to_env, get_effective_config
     from ..langgraph_dev.manager import (
+        _DEFAULT_HOST,
         _DEFAULT_PORT,
         RUNTIME,
+        _base_url,
+        _is_loopback_host,
         _is_port_occupied,
+        _pid_serves_port,
+        _read_workspace_sidecar,
+        _server_config_fingerprint,
         is_langgraph_dev_running,
         read_tunnel_url,
         start_langgraph_dev,
@@ -114,20 +127,46 @@ def deploy(
         )
         raise typer.Exit(1)
 
+    # A blank ``--host`` means "not passed" (matching serve), so it can never
+    # discard the configured bind. Both branches strip: whitespace reaching
+    # socket.bind() surfaces as an opaque gaierror, and duck-typed configs
+    # handed to this function never ran ``__post_init__`` normalization.
+    cli_host = host.strip() if host is not None else ""
+    effective_host = (
+        cli_host
+        or str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
+        or _DEFAULT_HOST
+    )
+
     # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
     # holding the port. If an existing EvoSci langgraph dev is already up,
     # also refuse (deploy is the "primary server" — running multiple on the
     # same port is a configuration error).
-    if _is_port_occupied(effective_port):
-        if is_langgraph_dev_running(port=effective_port):
+    if _is_port_occupied(effective_port, effective_host):
+        if is_langgraph_dev_running(port=effective_port, host=effective_host):
             console.print(
                 f"[red]Port {effective_port} is already serving a langgraph dev "
                 f"instance.[/red]"
             )
-            console.print(
-                "[dim]Stop the existing EvoSci/serve session first, or use "
-                "[bold]--port[/bold] to deploy on a different port.[/dim]"
-            )
+            sidecar = _read_workspace_sidecar()
+            if sidecar is not None and _pid_serves_port(
+                sidecar.get("pid"), effective_port
+            ):
+                # Surface what we know about the occupant — with keepalive it
+                # may be an ownerless leftover rather than a live session.
+                # Only when the recorded pid verifiably serves THIS port, so a
+                # stale or other-port record is never blamed.
+                console.print(
+                    f"[dim]It serves workspace {sidecar.get('workspace')} "
+                    f"(pid {sidecar.get('pid')}). Stop it with "
+                    f"[bold]EvoSci server stop[/bold], or use "
+                    f"[bold]--port[/bold] to deploy on a different port.[/dim]"
+                )
+            else:
+                console.print(
+                    "[dim]Stop the existing EvoSci/serve session first, or use "
+                    "[bold]--port[/bold] to deploy on a different port.[/dim]"
+                )
         else:
             console.print(
                 f"[red]Port {effective_port} is occupied by another process.[/red]"
@@ -144,6 +183,7 @@ def deploy(
         Panel(
             Text.from_markup(
                 f"[bold]Workspace:[/bold] {_shorten(ws)}\n"
+                f"[bold]Host:[/bold]      {effective_host}\n"
                 f"[bold]Port:[/bold]      {effective_port}\n"
                 f"[bold]Auth:[/bold]      {_auth_label}"
             ),
@@ -160,6 +200,13 @@ def deploy(
         console.print(
             f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
+        )
+
+    if not _is_loopback_host(effective_host):
+        console.print(
+            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+            f"[bold red]Listening on {effective_host} — no auth, and the agent "
+            f"can run shell. Trusted networks only.[/bold red]"
         )
 
     if tunnel:
@@ -197,10 +244,12 @@ def deploy(
             proc = start_langgraph_dev(
                 workspace_dir=Path(ws),
                 port=effective_port,
+                host=effective_host,
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
                 deploy_mode=True,
                 tunnel=tunnel,
+                config_fingerprint=_server_config_fingerprint(config),
             )
         atexit.register(stop_langgraph_dev, proc)
     except Exception as exc:
@@ -236,7 +285,7 @@ def deploy(
         Panel(
             Text.from_markup(
                 f"[bold]Endpoint:[/bold]     "
-                f"http://localhost:{effective_port}\n"
+                f"{_base_url(effective_port, effective_host)}\n"
                 f"{public_line}"
                 f"[bold]Assistant ID:[/bold] EvoScientist\n"
                 f"[bold]Connect via:[/bold]  any LangChain SDK / "

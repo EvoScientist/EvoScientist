@@ -1,8 +1,9 @@
 """Configuration management for EvoScientist.
 
-Handles loading, saving, and merging configuration from multiple sources
-with the following priority (highest to lowest):
-    CLI arguments > Environment variables > Config file > Defaults
+Handles loading, saving, and merging configuration from multiple sources.
+See :func:`get_effective_config` for the authoritative priority chain —
+``EVOSCIENTIST_*`` shell values and third-party keys are treated
+asymmetrically with respect to workspace ``.env`` handling.
 """
 
 from __future__ import annotations
@@ -16,13 +17,17 @@ from pathlib import Path
 from typing import Any, Literal, get_type_hints
 
 import yaml
-from dotenv import find_dotenv, load_dotenv
+from dotenv import dotenv_values, find_dotenv
 
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
-# (stream/display.py, channels/consumer.py) — keep aligned with the agent's
+# (stream/display.py, channels/interaction.py) — keep aligned with the agent's
 # `interrupt_on` set in EvoScientist.py.
 HITL_SHELL_TOOLS = ("execute", "run_in_background")
+
+# Armed non-shell destructive tools must always prompt — no allow-list carve-outs
+# (their args carry paths, not commands). Keep aligned with HITL_INTERRUPT_ON.
+HITL_ALWAYS_PROMPT_TOOLS = ("delete", "schedule_task")
 
 
 class MemoryObservationTarget(StrEnum):
@@ -123,6 +128,16 @@ def get_config_path() -> Path:
 # Configuration dataclass
 # =============================================================================
 
+# OpenRouter app-attribution defaults (issue #339). Single source of truth: the
+# EvoScientistConfig fields below default to these, and llm/models.py imports
+# them for its env-fallback, so the values never drift across the two layers.
+OPENROUTER_DEFAULT_HTTP_REFERER = "https://github.com/EvoScientist/EvoScientist"
+OPENROUTER_DEFAULT_APP_TITLE = "EvoScientist"
+# OpenRouter honors only the first 2 categories per request (server-side limit)
+# and silently ignores the rest, so keep the two most relevant ones. Chosen per
+# maintainer review — creative-writing is a less competitive marketplace group.
+OPENROUTER_DEFAULT_APP_CATEGORIES = "creative-writing,personal-agent"
+
 
 @dataclass
 class EvoScientistConfig:
@@ -155,6 +170,9 @@ class EvoScientistConfig:
     minimax_base_url: str = ""
     siliconflow_api_key: str = ""
     openrouter_api_key: str = ""
+    atlascloud_api_key: str = ""
+    requesty_api_key: str = ""
+    novita_api_key: str = ""
     deepseek_api_key: str = ""
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
@@ -196,11 +214,24 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
+    # Network interface the langgraph dev subprocess binds to. Loopback by
+    # default — this is the unauthenticated agent API (the agent can run
+    # shell), so "0.0.0.0" is opt-in and every launcher prints a PUBLIC BIND
+    # banner while exposed. Internal callers *connect* via manager._probe_host,
+    # so widening never redirects their traffic off-box.
+    langgraph_dev_host: str = "127.0.0.1"
+
     # Port for the WebUI front-end (Next.js server from @evoscientist/webui),
     # used only when ui_backend == "webui". 4716 is 6174 reversed — a memorable
     # pairing with the langgraph dev port that it connects to. The backend keeps
     # its own port (langgraph_dev_port); this is just the browser server.
     webui_port: int = 4716
+
+    # Network interface the WebUI front-end binds to. Loopback by default,
+    # matching langgraph_dev_host: this server is not a passive app shell —
+    # its API reads, writes and uploads workspace files and installs skills,
+    # all unauthenticated. Set "0.0.0.0" (with langgraph_dev_host) for LAN.
+    webui_host: str = "127.0.0.1"
 
     # --- Scheduled tasks (cron) ---
     # Master switch for scheduled tasks (/schedule, NL tools, scheduler context). Defaults
@@ -226,6 +257,15 @@ class EvoScientistConfig:
     # machines if multiple async sub-agents in flight cause noticeable
     # slowdown.
     langgraph_dev_jobs_per_worker: int = 10
+
+    # Keep the auto-started langgraph dev subprocess running after the CLI
+    # exits. The next `EvoSci` start in the same workspace reuses it instantly
+    # instead of paying the cold boot (~15s). Starting in a DIFFERENT workspace
+    # raises WorkspaceMismatchError with the leftover server's pid — stop it
+    # manually (the server is pinned to one workspace per process). Known
+    # limitation: changing langgraph_dev_port/host while a keepalive server
+    # runs orphans its records — run `EvoSci server stop` before switching.
+    langgraph_dev_keepalive: bool = False
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -278,10 +318,21 @@ class EvoScientistConfig:
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     log_level: str = "warning"
-    reasoning_effort: str = "high"
+    # Empty means use the provider/model default. A non-empty value is an
+    # explicit user override exported as EVOSCIENTIST_REASONING_EFFORT.
+    reasoning_effort: str = ""
     # Anthropic prompt caching for OpenRouter anthropic/* models. Opt out if
     # cache-write costs outweigh the benefit for a workflow.
     openrouter_anthropic_prompt_cache: bool = True
+    # OpenRouter app attribution (issue #339). Sent only for the openrouter
+    # provider; identifies EvoScientist in OpenRouter's app rankings/analytics.
+    # Override (e.g. a private fork) via these fields or their env vars.
+    # Defaults live in the module constants above (also imported by llm/models.py).
+    openrouter_http_referer: str = OPENROUTER_DEFAULT_HTTP_REFERER
+    openrouter_app_title: str = OPENROUTER_DEFAULT_APP_TITLE
+    # Comma-separated; split into a list before being passed to
+    # langchain-openrouter (its app_categories kwarg expects list[str]).
+    openrouter_app_categories: str = OPENROUTER_DEFAULT_APP_CATEGORIES
 
     # Channel Settings
     channel_enabled: str = ""  # "imessage" | "telegram" | "discord" | "slack" | "wechat" | "dingtalk" | "feishu" | "email" | "qq" | "signal" | "" (comma-separated for multiple)
@@ -452,13 +503,25 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
-        # Dangerous mode implies auto_approve regardless of source (CLI, env,
-        # config file). Mirrors how auto_mode implies auto_approve — done here so
-        # the coupling holds even when dangerous_mode is set via `config set`.
-        if self.dangerous_mode:
+        # auto_mode and dangerous_mode both imply auto_approve regardless of
+        # source (CLI, env, config file, direct construction) — done here so the
+        # "unattended → zero prompts" contract holds even when either is set via
+        # `config set` or a config file rather than a CLI flag.
+        if self.auto_mode or self.dangerous_mode:
             self.auto_approve = True
 
         _normalize_str_enum_fields(self)
+
+        # Bind hosts reach socket.bind() / the langgraph CLI verbatim, where a
+        # stray-whitespace or empty value surfaces as an opaque gaierror at
+        # startup. Normalize to the field's own default instead.
+        for _host_field, _host_default in (
+            ("langgraph_dev_host", "127.0.0.1"),
+            ("webui_host", "127.0.0.1"),
+        ):
+            _host = getattr(self, _host_field, _host_default)
+            _host = _host.strip() if isinstance(_host, str) else ""
+            setattr(self, _host_field, _host or _host_default)
 
         synthesis_time = _normalize_hhmm(self.memory_skill_synthesis_time)
         if synthesis_time is None:
@@ -738,6 +801,9 @@ _ENV_MAPPINGS = {
     "minimax_base_url": "MINIMAX_BASE_URL",
     "siliconflow_api_key": "SILICONFLOW_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
+    "atlascloud_api_key": "ATLASCLOUD_API_KEY",
+    "requesty_api_key": "REQUESTY_API_KEY",
+    "novita_api_key": "NOVITA_API_KEY",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
@@ -761,6 +827,9 @@ _ENV_MAPPINGS = {
     "openrouter_anthropic_prompt_cache": (
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ),
+    "openrouter_http_referer": "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+    "openrouter_app_title": "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+    "openrouter_app_categories": "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
     "dangerous_mode": "EVOSCIENTIST_DANGEROUS_MODE",
     "channel_debug_tracing": "EVOSCIENTIST_CHANNEL_DEBUG_TRACING",
     "ccproxy_port": "EVOSCIENTIST_CCPROXY_PORT",
@@ -768,7 +837,9 @@ _ENV_MAPPINGS = {
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "langgraph_dev_host": "EVOSCIENTIST_LANGGRAPH_DEV_HOST",
     "webui_port": "EVOSCIENTIST_WEBUI_PORT",
+    "webui_host": "EVOSCIENTIST_WEBUI_HOST",
     "enable_scheduler": "EVOSCIENTIST_ENABLE_SCHEDULER",
     "scheduler_default_timezone": "EVOSCIENTIST_SCHEDULER_DEFAULT_TIMEZONE",
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
@@ -776,6 +847,7 @@ _ENV_MAPPINGS = {
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",
     "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
+    "langgraph_dev_keepalive": "EVOSCIENTIST_LANGGRAPH_DEV_KEEPALIVE",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
     "memory_profile_enabled": "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
     "memory_observations_enabled": "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
@@ -794,10 +866,33 @@ def get_effective_config(
     """Get effective configuration by merging all sources.
 
     Priority (highest to lowest):
-        1. CLI arguments (cli_overrides)
-        2. Environment variables
-        3. Config file
-        4. Defaults
+        1. CLI arguments (``cli_overrides``)
+        2. Parent-process environment variables for any ``EVOSCIENTIST_*`` key
+        3. ``.env`` file at (or above) the current working directory
+        4. Parent-process environment variables for everything else
+           (third-party API keys / base URLs, plus arbitrary unmapped keys)
+        5. Config file (``~/.config/evoscientist/config.yaml``)
+        6. Dataclass defaults
+
+    Rows 2 and 4 differ because ``.env`` values need different treatment
+    for our own namespaced config knobs vs third-party credentials.
+    Third-party keys (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, ...)
+    follow the industry convention that ``.env`` is the per-project
+    credential store; extending shell-wins to them would silently flip
+    a workspace key back to a global ``.bashrc`` key. Our own
+    ``EVOSCIENTIST_*`` keys are the opposite: an explicit CLI/parent-
+    process value (e.g. the bind port that ``EvoSci deploy --port X``
+    hands to the langgraph dev subprocess) must not be shadowed by a
+    workspace ``.env``. We implement this by reading ``.env`` into a
+    dict via ``dotenv_values`` (no ``os.environ`` mutation), then
+    writing third-party keys unconditionally and ``EVOSCIENTIST_*`` keys
+    only when the shell doesn't already have a non-empty value.
+
+    Tradeoff: ``OPENAI_API_KEY=xxx evoscientist ...`` inline overrides
+    still lose to a workspace ``.env`` containing ``OPENAI_API_KEY``,
+    because the merge writes third-party keys from ``.env``
+    unconditionally. Users who need to override a ``.env``-defined
+    credential inline must edit or unset the ``.env`` entry.
 
     Args:
         cli_overrides: Dictionary of CLI argument overrides.
@@ -805,7 +900,34 @@ def get_effective_config(
     Returns:
         EvoScientistConfig with merged values.
     """
-    load_dotenv(find_dotenv(usecwd=True), override=True)
+    # Merge workspace ``.env`` into ``os.environ`` without going through
+    # ``load_dotenv``. The previous snapshot → ``load_dotenv`` → restore
+    # sequence was a read-modify-write on ``os.environ`` that could race with
+    # concurrent ``get_effective_config`` calls in the langgraph dev subprocess
+    # (per-request threads in ``langgraph_dev/http.py``, ``sessions.py``
+    # checkpoint writes, memory workers): one thread's mid-flight ``.env``
+    # value could be re-captured by another as "parent env" and then restored
+    # last, promoting the ``.env`` value into the snapshot permanently.
+    #
+    # ``dotenv_values`` returns a dict without touching ``os.environ``, so the
+    # merge below is a pure write sequence and idempotent under interleaving.
+    # Third-party keys keep ``.env``-wins (industry convention).
+    # ``EVOSCIENTIST_*`` keys are our own namespaced config knobs where
+    # CLI/parent-process intent should stay authoritative — write from ``.env``
+    # only when the shell doesn't already have a non-empty value. Treating an
+    # empty shell value as "unset" matches the ``if env_value:`` truthy check
+    # in the ``_ENV_MAPPINGS`` loop below; without this, an empty parent export
+    # would silently regress vs main by falling through to file/defaults.
+    dotenv_path = find_dotenv(usecwd=True)
+    dotenv_map = dotenv_values(dotenv_path) if dotenv_path else {}
+    for env_key, env_value in dotenv_map.items():
+        if env_value is None:
+            continue  # bare ``FOO`` without ``=`` — nothing to write
+        if env_key.startswith("EVOSCIENTIST_"):
+            if not os.environ.get(env_key):
+                os.environ[env_key] = env_value
+        else:
+            os.environ[env_key] = env_value
 
     # Start with file config (includes defaults for missing values)
     config = load_config()
@@ -862,6 +984,12 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["SILICONFLOW_API_KEY"] = config.siliconflow_api_key
     if config.openrouter_api_key and not os.environ.get("OPENROUTER_API_KEY"):
         os.environ["OPENROUTER_API_KEY"] = config.openrouter_api_key
+    if config.atlascloud_api_key and not os.environ.get("ATLASCLOUD_API_KEY"):
+        os.environ["ATLASCLOUD_API_KEY"] = config.atlascloud_api_key
+    if config.requesty_api_key and not os.environ.get("REQUESTY_API_KEY"):
+        os.environ["REQUESTY_API_KEY"] = config.requesty_api_key
+    if config.novita_api_key and not os.environ.get("NOVITA_API_KEY"):
+        os.environ["NOVITA_API_KEY"] = config.novita_api_key
     if config.deepseek_api_key and not os.environ.get("DEEPSEEK_API_KEY"):
         os.environ["DEEPSEEK_API_KEY"] = config.deepseek_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):
@@ -892,6 +1020,22 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["TAVILY_API_KEY"] = config.tavily_api_key
     if config.reasoning_effort and not os.environ.get("EVOSCIENTIST_REASONING_EFFORT"):
         os.environ["EVOSCIENTIST_REASONING_EFFORT"] = config.reasoning_effort
+    if config.openrouter_http_referer and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_HTTP_REFERER"] = (
+            config.openrouter_http_referer
+        )
+    if config.openrouter_app_title and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_TITLE"] = config.openrouter_app_title
+    if config.openrouter_app_categories and not os.environ.get(
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"
+    ):
+        os.environ["EVOSCIENTIST_OPENROUTER_APP_CATEGORIES"] = (
+            config.openrouter_app_categories
+        )
     if not config.openrouter_anthropic_prompt_cache and not os.environ.get(
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):

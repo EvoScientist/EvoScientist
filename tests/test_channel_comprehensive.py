@@ -15,6 +15,7 @@ Test groups:
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -37,8 +38,9 @@ from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.channels.formatter import convert_markdown
-from EvoScientist.channels.middleware import DedupCache
+from EvoScientist.channels.middleware import DedupCache, MentionGatingMiddleware
 from EvoScientist.channels.retry import RetryConfig, RetryInfo, retry_async
+from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
 
 # ═══════════════════════════════════════════════════════════════════
 # Helpers
@@ -72,6 +74,41 @@ async def _flush_debounce(ch: StubChannel, sender: str) -> None:
 async def _wait_for_async(predicate) -> None:
     while not predicate():
         await asyncio.sleep(0)
+
+
+class TestInboundSyncAdapter:
+    def test_reuses_explicit_runtime(self):
+        channel = StubChannel()
+        channel._inbound_middlewares = []
+        raw = RawIncoming(sender_id="user", chat_id="chat", text="hello")
+
+        with AsyncRuntime(thread_name="test-channel-adapter") as runtime:
+            message = channel._build_inbound(raw, runtime=runtime)
+
+        assert message is not None
+        assert message.content == "hello"
+
+    def test_direct_sync_call_scopes_and_closes_runtime(self):
+        channel = StubChannel()
+        channel._inbound_middlewares = []
+        raw = RawIncoming(sender_id="user", chat_id="chat", text="hello")
+
+        message = channel._build_inbound(raw)
+
+        assert message is not None
+        assert not any(
+            thread.name == "evosci-channel-adapter-runtime" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+
+    async def test_async_caller_must_use_async_api(self):
+        channel = StubChannel()
+        channel._inbound_middlewares = []
+        raw = RawIncoming(sender_id="user", chat_id="chat", text="hello")
+
+        with AsyncRuntime(thread_name="test-channel-adapter") as runtime:
+            with pytest.raises(AsyncRuntimeError, match="running event loop"):
+                channel._build_inbound(raw, runtime=runtime)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -590,6 +627,47 @@ class TestChannelMentionGating:
         )
         assert ch._should_process(raw) is True
 
+    async def test_private_plain_text_keeps_mentions_but_command_strips_suffix(self):
+        middleware = MentionGatingMiddleware(
+            require_mention="group",
+            strip_fn=lambda text: text.replace("@botname", ""),
+        )
+
+        plain = await middleware.process_inbound(
+            RawIncoming(
+                sender_id="u1",
+                chat_id="c1",
+                text="please ask @botname about this",
+                is_group=False,
+            ),
+            {},
+        )
+        command = await middleware.process_inbound(
+            RawIncoming(
+                sender_id="u1",
+                chat_id="c1",
+                text="/help@botname",
+                is_group=False,
+            ),
+            {},
+        )
+        command_with_mention_argument = await middleware.process_inbound(
+            RawIncoming(
+                sender_id="u1",
+                chat_id="c1",
+                text="  /help@botname ask @botname for status",
+                is_group=False,
+            ),
+            {},
+        )
+
+        assert plain is not None
+        assert plain.text == "please ask @botname about this"
+        assert command is not None
+        assert command.text == "/help"
+        assert command_with_mention_argument is not None
+        assert command_with_mention_argument.text == "  /help ask @botname for status"
+
 
 class TestChannelBuildInbound:
     def test_builds_valid_inbound(self):
@@ -769,6 +847,197 @@ class TestChannelDebounce:
         assert "part1" in received.content
         assert "part2" in received.content
 
+    async def test_command_flushes_pending_prompt_as_separate_message(self):
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="do X",
+                message_id="m1",
+            )
+        )
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="/stop",
+                message_id="m2",
+            )
+        )
+
+        first = await bus.consume_inbound()
+        second = await bus.consume_inbound()
+        assert (first.content, second.content) == ("do X", "/stop")
+
+    async def test_command_does_not_cancel_backpressured_prompt_flush(self):
+        """Once a prompt has detached from the debounce buffer and is waiting
+        for queue capacity, a later command must remain behind it without
+        cancelling or losing either message."""
+        bus = MessageBus()
+        bus.inbound = asyncio.Queue(maxsize=1)
+        ch = StubChannel()
+        ch.set_bus(bus)
+        ch.initial_debounce = 0
+
+        await bus.publish_inbound(
+            InboundMessage(
+                channel="stub",
+                sender_id="blocker",
+                chat_id="blocker",
+                content="queue filler",
+            )
+        )
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="do X",
+                message_id="m1",
+            )
+        )
+        flush_task = ch._debounce_tasks["u1"]
+        await asyncio.wait_for(
+            _wait_for_async(
+                lambda: (
+                    "u1" not in ch._message_buffers and "u1" not in ch._debounce_tasks
+                )
+            ),
+            timeout=1.0,
+        )
+        assert not flush_task.done()
+
+        command_task = asyncio.create_task(
+            ch.queue_message(
+                InboundMessage(
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="/help",
+                    message_id="m2",
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        assert not command_task.done()
+
+        filler = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        prompt = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        command = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        await asyncio.wait_for(flush_task, timeout=1.0)
+        await asyncio.wait_for(command_task, timeout=1.0)
+
+        assert filler.content == "queue filler"
+        assert (prompt.content, command.content) == ("do X", "/help")
+
+    async def test_command_wait_preserves_outer_cancellation(self):
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+        child_cancelling = asyncio.Event()
+        release_child = asyncio.Event()
+
+        async def slow_to_cancel():
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                child_cancelling.set()
+                await release_child.wait()
+                raise
+
+        debounce_task = asyncio.create_task(slow_to_cancel())
+        ch._debounce_tasks["u1"] = debounce_task
+        command_task = asyncio.create_task(
+            ch.queue_message(
+                InboundMessage(
+                    channel="stub",
+                    sender_id="u1",
+                    chat_id="c1",
+                    content="/help",
+                    message_id="m2",
+                )
+            )
+        )
+
+        await asyncio.wait_for(child_cancelling.wait(), timeout=1.0)
+        command_task.cancel()
+        release_child.set()
+        with pytest.raises(asyncio.CancelledError):
+            await command_task
+        assert bus.inbound.empty()
+
+    async def test_command_publishes_even_when_buffer_flush_fails(self):
+        """A failing buffered-prompt flush must not swallow the command —
+        losing /stop exactly when the pipeline misbehaves is the worst case."""
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="do X",
+                message_id="m1",
+            )
+        )
+
+        async def _boom(sender):
+            raise RuntimeError("flush broke")
+
+        ch._process_buffered_messages = _boom
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="/stop",
+                message_id="m2",
+            )
+        )
+
+        published = await asyncio.wait_for(bus.consume_inbound(), timeout=1.0)
+        assert published.content == "/stop"
+
+    async def test_prompt_after_command_starts_new_debounce_batch(self):
+        bus = MessageBus()
+        ch = StubChannel()
+        ch.set_bus(bus)
+
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="/new",
+                message_id="m1",
+            )
+        )
+        await ch.queue_message(
+            InboundMessage(
+                channel="stub",
+                sender_id="u1",
+                chat_id="c1",
+                content="summarize this paper",
+                message_id="m2",
+            )
+        )
+        await _flush_debounce(ch, "u1")
+
+        first = await bus.consume_inbound()
+        second = await bus.consume_inbound()
+        assert (first.content, second.content) == (
+            "/new",
+            "summarize this paper",
+        )
+
     async def test_dedup_skips_duplicate(self):
         """Dedup is now handled in _enqueue_raw pipeline, not queue_message."""
 
@@ -847,11 +1116,16 @@ class TestChannelTyping:
 
 
 class TestChannelReconnect:
-    async def test_run_reconnects_on_error(self):
+    async def test_run_reconnects_on_error(self, monkeypatch):
         """Channel.run() should reconnect with backoff on transient errors."""
 
         ch = StubChannel()
+        mgr = ChannelManager(MessageBus())
+        mgr.register(ch)
         start_count = 0
+        sleep_count = 0
+        first_retry_waiting = asyncio.Event()
+        allow_retries = asyncio.Event()
         original_start = ch.start
 
         async def flaky_start():
@@ -863,9 +1137,73 @@ class TestChannelReconnect:
             # Stop after successful start to end the test
             ch._running = False
 
+        async def controlled_sleep(_delay):
+            nonlocal sleep_count
+            sleep_count += 1
+            if sleep_count == 1:
+                first_retry_waiting.set()
+                await allow_retries.wait()
+
         ch.start = flaky_start
-        await ch.run()
+        monkeypatch.setattr(asyncio, "sleep", controlled_sleep)
+
+        run_task = asyncio.create_task(ch.run())
+        await first_retry_waiting.wait()
+
+        try:
+            assert ch._startup_event.is_set() is False
+            assert ch._startup_error is None
+            assert mgr.startup_results() == [("stub", False, "starting (bus)")]
+        finally:
+            allow_retries.set()
+
+        await run_task
         assert start_count == 3
+        assert ch._startup_event.is_set()
+        assert ch._startup_error is None
+
+    async def test_runtime_error_does_not_overwrite_successful_startup(
+        self, monkeypatch
+    ):
+        """A receive failure should preserve the completed startup result."""
+
+        ch = StubChannel()
+        start_count = 0
+        receive_count = 0
+        state_before_reconnect: list[tuple[bool, str | None]] = []
+        original_start = ch.start
+
+        async def tracking_start():
+            nonlocal start_count
+            start_count += 1
+            if start_count == 2:
+                state_before_reconnect.append(
+                    (ch._startup_event.is_set(), ch._startup_error)
+                )
+            await original_start()
+            if start_count == 2:
+                ch._running = False
+
+        async def flaky_receive():
+            nonlocal receive_count
+            receive_count += 1
+            if receive_count == 1:
+                raise ConnectionError("receive transient")
+            if False:  # pragma: no cover - marks this as an async generator
+                yield None
+
+        async def no_sleep(_delay):
+            return None
+
+        ch.start = tracking_start
+        ch.receive = flaky_receive
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+        await ch.run()
+
+        assert state_before_reconnect == [(True, None)]
+        assert ch._startup_event.is_set()
+        assert ch._startup_error is None
 
     async def test_run_stops_on_channel_error(self):
         """ChannelError should stop the channel permanently."""
@@ -878,6 +1216,8 @@ class TestChannelReconnect:
         ch.start = fatal_start
         await ch.run()
         assert ch._running is False
+        assert ch._startup_event.is_set()
+        assert ch._startup_error == "fatal"
 
 
 class TestExtractRetryAfter:
@@ -1061,6 +1401,119 @@ class TestChannelManagerDispatch:
         assert health.total_successes == 0
         assert health.total_failures == 1
         assert health.consecutive_failures == 1
+
+    async def test_dispatch_uses_short_notice_when_command_output_fails(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        sent: list[OutboundMessage] = []
+
+        async def fail_content_then_send_notice(msg):
+            sent.append(msg)
+            return len(sent) > 1
+
+        ch.send = fail_content_then_send_notice
+        mgr.register(ch)
+
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="content rejected by platform",
+                failure_notice="Command output could not be delivered.",
+            )
+        )
+        await asyncio.wait_for(
+            _wait_for_async(lambda: mgr._health["stub"].total_failures == 1),
+            timeout=1.0,
+        )
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert [message.content for message in sent] == [
+            "content rejected by platform",
+            "Command output could not be delivered.",
+        ]
+        assert sent[1].failure_notice is None
+
+    async def test_shutdown_drain_sends_failure_notice(self):
+        """The stop_all drain mirrors the dispatch fallback: a payload that
+        fails during shutdown still produces the short failure notice."""
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        sent: list[OutboundMessage] = []
+
+        async def fail_content_then_send_notice(msg):
+            sent.append(msg)
+            return len(sent) > 1
+
+        ch.send = fail_content_then_send_notice
+        mgr.register(ch)
+        ch._running = True
+
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="content rejected by platform",
+                failure_notice="Command output could not be delivered.",
+            )
+        )
+
+        await mgr.stop_all()
+
+        assert [message.content for message in sent] == [
+            "content rejected by platform",
+            "Command output could not be delivered.",
+        ]
+        assert sent[1].failure_notice is None
+
+    async def test_dispatch_sends_notice_when_content_send_raises(self):
+        """A raising send() must reach the failure notice, not the outer
+        handler — exceptions are the common transport failure mode."""
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        sent: list[OutboundMessage] = []
+
+        async def raise_then_send_notice(msg):
+            sent.append(msg)
+            if len(sent) == 1:
+                raise RuntimeError("network down")
+            return True
+
+        ch.send = raise_then_send_notice
+        mgr.register(ch)
+
+        task = asyncio.create_task(mgr._dispatch_outbound())
+        await bus.publish_outbound(
+            OutboundMessage(
+                channel="stub",
+                chat_id="c1",
+                content="payload",
+                failure_notice="Command output could not be delivered.",
+            )
+        )
+        await asyncio.wait_for(
+            _wait_for_async(lambda: mgr._health["stub"].total_failures == 1),
+            timeout=1.0,
+        )
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert [message.content for message in sent] == [
+            "payload",
+            "Command output could not be delivered.",
+        ]
+        assert mgr._health["stub"].last_failure_error == "network down"
 
     async def test_dispatch_send_media_return_false_counts_failure(self):
         """send_media() returning False should mark the delivery as failed."""
@@ -1273,6 +1726,23 @@ class TestChannelManagerStatus:
         assert mgr.running_channels() == []
         ch._running = True
         assert mgr.running_channels() == ["stub"]
+
+    def test_startup_results_report_fatal_error(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        ch = StubChannel()
+        mgr.register(ch)
+        ch._startup_error = "dependency missing"
+        ch._startup_event.set()
+
+        assert mgr.startup_results() == [("stub", False, "failed: dependency missing")]
+
+    def test_startup_results_do_not_assume_pending_channel_is_connected(self):
+        bus = MessageBus()
+        mgr = ChannelManager(bus)
+        mgr.register(StubChannel())
+
+        assert mgr.startup_results() == [("stub", False, "starting (bus)")]
 
     def test_get_stats(self):
         bus = MessageBus()

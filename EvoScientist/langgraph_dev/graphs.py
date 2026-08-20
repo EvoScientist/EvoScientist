@@ -29,10 +29,19 @@ from EvoScientist.memory.agents import (
 )
 from EvoScientist.memory.types import MemorySourceType
 from EvoScientist.subagents._factory import build_async_subagent_graph
+from EvoScientist.subagents.expert_container_async import (
+    build_expert_container_async_graph,
+)
 
 writing_agent = build_async_subagent_graph("writing-agent")
 data_analysis_agent = build_async_subagent_graph("data-analysis-agent")
 scheduler = build_async_subagent_graph("scheduler")
+# Generic async container for expert-skill dispatch. One graph, parameterised
+# per invocation by the ``skill_name`` payload the main agent passes through
+# ``EvoAsyncSubAgentMiddleware.start_async_task``. Any installed expert skill
+# dispatches through this graph; the loader middleware resolves the skill
+# body at model-call time.
+expert_container_async = build_expert_container_async_graph()
 evomemory_subagent_worker = build_memory_worker_graph(MemorySourceType.SUBAGENT)
 evomemory_turn_worker = build_memory_worker_graph(MemorySourceType.TURN)
 evomemory_observation_linker = build_observation_linker_graph()

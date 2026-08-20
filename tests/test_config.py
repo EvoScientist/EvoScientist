@@ -53,15 +53,11 @@ def temp_config_dir(tmp_path, monkeypatch):
     """Use a temporary directory for config during tests."""
     config_dir = tmp_path / "evoscientist"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    # Prevent load_dotenv from loading the project's real .env file
-    monkeypatch.setattr(
-        "EvoScientist.config.settings.find_dotenv",
-        lambda *a, **k: str(tmp_path / ".env"),
-    )
     # Also clear any API keys from environment
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "ATLASCLOUD_API_KEY",
         "TAVILY_API_KEY",
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
@@ -77,6 +73,9 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -89,6 +88,7 @@ def clean_env(monkeypatch):
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "ATLASCLOUD_API_KEY",
         "TAVILY_API_KEY",
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
@@ -104,6 +104,9 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_AUXILIARY_MODEL",
         "EVOSCIENTIST_AUXILIARY_PROVIDER",
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
+        "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+        "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+        "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
     ]:
         monkeypatch.delenv(key, raising=False)
@@ -129,8 +132,13 @@ class TestEvoScientistConfig:
         assert config.show_thinking is True
         assert config.ui_backend == "tui"
         assert config.log_level == "warning"
-        assert config.reasoning_effort == "high"
+        assert config.reasoning_effort == ""
         assert config.openrouter_anthropic_prompt_cache is True
+        assert config.openrouter_http_referer == (
+            "https://github.com/EvoScientist/EvoScientist"
+        )
+        assert config.openrouter_app_title == "EvoScientist"
+        assert config.openrouter_app_categories == "creative-writing,personal-agent"
         assert config.memory_profile_enabled is True
         assert config.memory_observations_enabled is True
         assert config.memory_observation_writer == MemoryObservationWriter.ALL
@@ -145,6 +153,45 @@ class TestEvoScientistConfig:
         assert config.channel_debug_tracing is False
         assert config.imessage_enabled is False
         assert config.imessage_allowed_senders == ""
+
+    def test_bind_hosts_default_to_loopback(self):
+        """Both servers stay off the network until asked.
+
+        The backend is an unauthenticated API whose agent can run shell
+        commands; the front-end serves the workspace file/upload and
+        skill-install endpoints. Neither is a safe default to publish, so
+        ``--host 0.0.0.0`` / ``config set`` opts in to LAN exposure.
+        """
+        config = EvoScientistConfig()
+
+        assert config.langgraph_dev_host == "127.0.0.1"
+        assert config.webui_host == "127.0.0.1"
+
+    @pytest.mark.parametrize(
+        ("field", "default"),
+        [("langgraph_dev_host", "127.0.0.1"), ("webui_host", "127.0.0.1")],
+    )
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_blank_bind_host_falls_back_to_default(self, field, blank, default):
+        """A blank host would reach socket.bind() verbatim and surface as an
+        opaque gaierror; it degrades to the field's own default instead."""
+        config = EvoScientistConfig(**{field: blank})
+        assert getattr(config, field) == default
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("langgraph_dev_host", "0.0.0.0"), ("webui_host", "0.0.0.0")],
+    )
+    def test_bind_host_opt_out_is_preserved(self, field, value):
+        """The LAN escape hatch — widening either bind to the wildcard — must
+        survive normalization untouched."""
+        config = EvoScientistConfig(**{field: value})
+        assert getattr(config, field) == value
+
+    @pytest.mark.parametrize("field", ["langgraph_dev_host", "webui_host"])
+    def test_bind_host_is_stripped(self, field):
+        config = EvoScientistConfig(**{field: "  0.0.0.0  "})
+        assert getattr(config, field) == "0.0.0.0"
 
     def test_auth_mode_default(self):
         """Test that anthropic_auth_mode defaults to api_key."""
@@ -672,6 +719,22 @@ class TestPriorityChain:
         config = get_effective_config()
         assert config.openrouter_anthropic_prompt_cache is False
 
+    def test_env_openrouter_app_attribution_override(
+        self, temp_config_dir, monkeypatch
+    ):
+        """OpenRouter app-attribution env vars should override file config."""
+        save_config(EvoScientistConfig())
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_HTTP_REFERER", "https://acme.test")
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "Acme")
+        monkeypatch.setenv(
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES", "cli-agent,programming-app"
+        )
+
+        config = get_effective_config()
+        assert config.openrouter_http_referer == "https://acme.test"
+        assert config.openrouter_app_title == "Acme"
+        assert config.openrouter_app_categories == "cli-agent,programming-app"
+
     def test_set_openrouter_anthropic_prompt_cache(self, temp_config_dir, clean_env):
         """Test OpenRouter Anthropic prompt cache can be set through config."""
         save_config(EvoScientistConfig())
@@ -691,6 +754,7 @@ class TestApplyConfigToEnv:
         config = EvoScientistConfig(
             anthropic_api_key="config-ant-key",
             openai_api_key="config-oai-key",
+            atlascloud_api_key="config-atlas-key",
             tavily_api_key="config-tav-key",
         )
 
@@ -698,6 +762,7 @@ class TestApplyConfigToEnv:
 
         assert os.environ.get("ANTHROPIC_API_KEY") == "config-ant-key"
         assert os.environ.get("OPENAI_API_KEY") == "config-oai-key"
+        assert os.environ.get("ATLASCLOUD_API_KEY") == "config-atlas-key"
         assert os.environ.get("TAVILY_API_KEY") == "config-tav-key"
 
     def test_does_not_override_existing_env(self, monkeypatch):
@@ -716,6 +781,7 @@ class TestApplyConfigToEnv:
 
         assert os.environ.get("ANTHROPIC_API_KEY") is None
         assert os.environ.get("OPENAI_API_KEY") is None
+        assert os.environ.get("ATLASCLOUD_API_KEY") is None
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") is None
 
     def test_openrouter_anthropic_prompt_cache_opt_out_applied(
@@ -731,6 +797,60 @@ class TestApplyConfigToEnv:
         assert os.environ.get("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE") == (
             "false"
         )
+
+    def test_openrouter_app_attribution_applied_to_env(self, clean_env, monkeypatch):
+        """Config app-attribution values are exported to env for models.py."""
+        for env in (
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+            "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+        ):
+            monkeypatch.delenv(env, raising=False)
+        config = EvoScientistConfig(
+            openrouter_http_referer="https://acme.test",
+            openrouter_app_title="Acme",
+            openrouter_app_categories="cli-agent,programming-app",
+        )
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER") == (
+            "https://acme.test"
+        )
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") == "Acme"
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES") == (
+            "cli-agent,programming-app"
+        )
+
+    def test_openrouter_app_attribution_env_not_overwritten(
+        self, clean_env, monkeypatch
+    ):
+        """apply_config_to_env must not clobber an already-set attribution env var."""
+        monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "existing-title")
+        config = EvoScientistConfig(openrouter_app_title="config-title")
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") == "existing-title"
+
+    def test_openrouter_app_attribution_empty_config_not_applied(
+        self, clean_env, monkeypatch
+    ):
+        """Empty-string attribution config must not create env vars."""
+        for env in (
+            "EVOSCIENTIST_OPENROUTER_HTTP_REFERER",
+            "EVOSCIENTIST_OPENROUTER_APP_TITLE",
+            "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
+        ):
+            monkeypatch.delenv(env, raising=False)
+        config = EvoScientistConfig(
+            openrouter_http_referer="",
+            openrouter_app_title="",
+            openrouter_app_categories="",
+        )
+        apply_config_to_env(config)
+
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_HTTP_REFERER") is None
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE") is None
+        assert os.environ.get("EVOSCIENTIST_OPENROUTER_APP_CATEGORIES") is None
 
     def test_dangerous_mode_round_trips_to_env(self, clean_env, monkeypatch):
         """dangerous_mode set via CLI override must survive a fresh re-read.
@@ -849,3 +969,143 @@ def test_scheduler_config_defaults_and_env(monkeypatch):
     assert eff2.memory_skill_synthesis_mode == MemorySkillSynthesisMode.AUTO
     assert eff2.memory_skill_synthesis_cadence == MemorySkillSynthesisCadence.MONTHLY
     assert eff2.memory_skill_synthesis_time == "04:30"
+
+
+# =============================================================================
+# Dotenv isolation (issue #322)
+# =============================================================================
+
+
+class TestDotenvIsolation:
+    def test_env_file_not_leaked_into_process_env(self, tmp_path, monkeypatch):
+        """A .env in cwd must not leak into os.environ during tests.
+
+        Without the suite-wide ``_isolate_dotenv`` fixture,
+        ``get_effective_config`` loads the developer's real .env with
+        ``override=True``; an empty-valued line like ``MINIMAX_BASE_URL=``
+        then poisons ``os.environ.get(key, default)`` lookups for every
+        test that runs afterwards in the same process.
+        """
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        repro_dir = tmp_path / "repro"
+        repro_dir.mkdir()
+        (repro_dir / ".env").write_text("MINIMAX_BASE_URL=\n")
+        monkeypatch.chdir(repro_dir)
+        monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
+
+        get_effective_config()
+
+        assert "MINIMAX_BASE_URL" not in os.environ
+
+    def test_parent_env_wins_over_dotenv_for_mapped_keys(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Parent-process env values for ``EVOSCIENTIST_*`` keys must not be
+        shadowed by a workspace ``.env``. ``EvoSci deploy --port X`` propagates
+        the resolved bind port via ``EVOSCIENTIST_LANGGRAPH_DEV_PORT`` on the
+        subprocess env; without the prefix-based merge, a workspace ``.env``
+        with the same key would clobber it and every self-loop async task
+        would target the wrong port.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("EVOSCIENTIST_LANGGRAPH_DEV_PORT=9999\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "6606")
+
+        config = get_effective_config()
+
+        assert config.langgraph_dev_port == 6606
+        assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+
+    @pytest.mark.parametrize(
+        ("field", "env_var", "value"),
+        [
+            ("langgraph_dev_host", "EVOSCIENTIST_LANGGRAPH_DEV_HOST", "0.0.0.0"),
+            ("webui_host", "EVOSCIENTIST_WEBUI_HOST", "0.0.0.0"),
+        ],
+    )
+    def test_bind_hosts_are_env_overridable(
+        self, temp_config_dir, monkeypatch, field, env_var, value
+    ):
+        """``start_langgraph_dev`` propagates the resolved bind host to the
+        subprocess through ``EVOSCIENTIST_LANGGRAPH_DEV_HOST``, so both host
+        fields must be declared in ``_ENV_MAPPINGS`` or the subprocess would
+        fall back to whatever the config file says."""
+        monkeypatch.setenv(env_var, value)
+
+        config = get_effective_config()
+
+        assert getattr(config, field) == value
+
+    def test_dotenv_wins_over_shell_for_third_party_api_keys(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Third-party API keys (``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``,
+        ...) are conventionally set per-project via a workspace ``.env`` to
+        shadow whatever global key sits in the shell (e.g. ``~/.bashrc``).
+        The prefix-based ``.env`` merge must not disturb that: only
+        ``EVOSCIENTIST_*`` keys are treated as parent-process-authoritative.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=workspace-key\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "shell-key")
+
+        config = get_effective_config()
+
+        assert config.openai_api_key == "workspace-key"
+        assert os.environ["OPENAI_API_KEY"] == "workspace-key"
+
+    def test_snapshot_covers_evoscientist_keys_not_in_env_mappings(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """The snapshot must protect every ``EVOSCIENTIST_*`` key in the shell,
+        not just the ones declared in ``_ENV_MAPPINGS``. Concrete case: the
+        langgraph_dev manager sets ``EVOSCIENTIST_DEPLOY_MODE`` on the
+        subprocess env to dispatch MCP-load / async-subagent behavior, but
+        that key is read directly via ``os.environ.get(...)`` and never goes
+        through ``get_effective_config`` — so it never made it into
+        ``_ENV_MAPPINGS``. Without the prefix-based snapshot, a workspace
+        ``.env`` with ``EVOSCIENTIST_DEPLOY_MODE=stripped`` could clobber the
+        parent-injected ``full`` and silently disable async subagents.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("EVOSCIENTIST_DEPLOY_MODE=stripped\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
+
+        get_effective_config()
+
+        assert os.environ["EVOSCIENTIST_DEPLOY_MODE"] == "full"
+
+    def test_empty_shell_evoscientist_key_defers_to_dotenv(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """A set-but-empty shell export of an ``EVOSCIENTIST_*`` key is
+        treated as "unset" for merge purposes, so a workspace ``.env`` value
+        can still populate the config. Matches the ``if env_value:`` truthy
+        check in the ``_ENV_MAPPINGS`` loop; without this coupling, an empty
+        parent export would silently regress vs main by causing the key to
+        fall through to file/defaults instead of ``.env``.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text("EVOSCIENTIST_LANGGRAPH_DEV_PORT=6606\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "")
+
+        config = get_effective_config()
+
+        assert config.langgraph_dev_port == 6606
+        assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"

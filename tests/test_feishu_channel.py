@@ -2,6 +2,7 @@
 
 import json
 import sys
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -624,3 +625,94 @@ class TestFeishuWebSocketMode:
         assert channel._main_loop is None
         assert channel._ws_event_queue is None
         assert channel._access_token is None
+
+
+# ── Webhook signature bypass regression (issue #392) ──────────────
+
+
+class _FakeFeishuRequest:
+    """Minimal stand-in for aiohttp.web.Request for _handle_event tests."""
+
+    def __init__(self, json_body):
+        self._json = json_body
+
+    async def json(self):
+        return self._json
+
+
+class TestFeishuWebhookSignatureBypass:
+    """Regression tests for issue #392: when ``encrypt_key`` is configured,
+    a plaintext POST (no ``encrypt`` field) must NOT reach the agent."""
+
+    FORGED_V2_EVENT: ClassVar[dict] = {
+        "schema": "2.0",
+        "header": {"event_type": "im.message.receive_v1", "token": ""},
+        "event": {
+            "sender": {"sender_id": {"open_id": "attacker"}, "sender_type": "user"},
+            "message": {
+                "chat_id": "oc_chat",
+                "message_type": "text",
+                "message_id": "om_msg",
+                "content": json.dumps({"text": "forged"}),
+            },
+        },
+    }
+
+    def _make_channel_with_encrypt_key(self) -> FeishuChannel:
+        config = FeishuConfig(
+            app_id="id",
+            app_secret="secret",
+            encrypt_key="my-encrypt-key",
+        )
+        channel = FeishuChannel(config)
+        channel._running = True
+        channel._http_client = MagicMock()
+        channel._access_token = "fake-token"
+        channel._token_expires = 9999999999
+        channel._on_message = AsyncMock()  # type: ignore[assignment]
+        return channel
+
+    def _make_channel_without_encrypt_key(self) -> FeishuChannel:
+        config = FeishuConfig(app_id="id", app_secret="secret")
+        channel = FeishuChannel(config)
+        channel._running = True
+        channel._http_client = MagicMock()
+        channel._access_token = "fake-token"
+        channel._token_expires = 9999999999
+        channel._on_message = AsyncMock()  # type: ignore[assignment]
+        return channel
+
+    async def test_plaintext_rejected_when_encrypt_key_configured(self):
+        """Plaintext POST with no `encrypt` field → 403, agent not reached."""
+        channel = self._make_channel_with_encrypt_key()
+        resp = await channel._handle_event(_FakeFeishuRequest(self.FORGED_V2_EVENT))
+        assert resp.status == 403
+        channel._on_message.assert_not_called()
+
+    async def test_non_dict_body_rejected_when_encrypt_key_configured(self):
+        """Defensive: a non-dict JSON body (list/str/etc.) → 403."""
+        channel = self._make_channel_with_encrypt_key()
+        for junk in ([1, 2, 3], "string-body", 42):
+            resp = await channel._handle_event(_FakeFeishuRequest(junk))
+            assert resp.status == 403, f"body={junk!r} should be rejected"
+        channel._on_message.assert_not_called()
+
+    async def test_encrypted_body_decrypts_and_processes(self):
+        """A valid encrypted body → 200, agent reached (no behavior change)."""
+        channel = self._make_channel_with_encrypt_key()
+        decrypted_event = self.FORGED_V2_EVENT
+        with patch.object(
+            FeishuChannel, "_decrypt_event", return_value=decrypted_event
+        ):
+            resp = await channel._handle_event(
+                _FakeFeishuRequest({"encrypt": "encrypted-blob"})
+            )
+        assert resp.status == 200
+        channel._on_message.assert_called_once()
+
+    async def test_plaintext_accepted_when_encrypt_key_not_configured(self):
+        """No-regression: plaintext mode keeps working when no encrypt_key."""
+        channel = self._make_channel_without_encrypt_key()
+        resp = await channel._handle_event(_FakeFeishuRequest(self.FORGED_V2_EVENT))
+        assert resp.status == 200
+        channel._on_message.assert_called_once()

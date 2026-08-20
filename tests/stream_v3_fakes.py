@@ -20,16 +20,27 @@ async def collect_events(
     agent,
     message: str = "hi",
     thread_id: str = "t1",
+    *,
+    events=None,
+    configurable_extra: dict[str, Any] | None = None,
 ):
-    """Collect stream_agent_events output for tests."""
-    events = []
+    """Collect stream_agent_events output for tests.
+
+    ``events`` is the frontend tool-selection sink to drive suppression /
+    selection rendering (defaults to the silent NoOpSink inside the stream).
+    ``configurable_extra`` is forwarded verbatim to ``stream_agent_events``
+    for tests that assert plumbing into the LangGraph ``configurable`` dict.
+    """
+    collected = []
     async for ev in stream_agent_events(
         agent,
         message,
         thread_id,
+        events=events,
+        configurable_extra=configurable_extra,
     ):
-        events.append(ev)
-    return events
+        collected.append(ev)
+    return collected
 
 
 def protocol_event(
@@ -104,6 +115,18 @@ def message_tool_call_block(
         ),
         namespace,
     )
+
+
+def custom_subagent_event(
+    payload: dict[str, Any],
+    namespace: Iterable[Any] = (),
+) -> dict[str, Any]:
+    """Build a ``custom``-method v3 event carrying a subagent-lifecycle payload.
+
+    Mirrors the shape ``langchain_quickjs._subagent`` emits via
+    ``stream_writer(event)`` for in-eval ``task()`` fan-out.
+    """
+    return protocol_event("custom", payload, namespace)
 
 
 def tool_started(

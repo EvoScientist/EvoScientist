@@ -1,5 +1,6 @@
 """Skill management tool (LangChain @tool wrapper)."""
 
+from pathlib import Path
 from typing import Literal
 
 from langchain_core.tools import tool
@@ -12,6 +13,7 @@ def skill_manager(
     name: str = "",
     tag: str = "",
     include_system: bool = False,
+    skill_type: Literal["all", "expert", "utility"] = "all",
 ) -> str:
     """Manage user-installable skills: install from GitHub or local path, list available skills, browse remote skills, get details, or uninstall.
 
@@ -27,6 +29,8 @@ def skill_manager(
     action="list":
       List installed skills. By default only shows user-installed skills.
       Set include_system=True to also show built-in system skills.
+      Set skill_type="expert" to show only expert skills (agent teams);
+      set skill_type="utility" to exclude them; leave as "all" (default) for no filter.
       Built-in skills evolve over time, so use action="list" to see the current set.
 
     action="browse" (optional tag):
@@ -36,6 +40,7 @@ def skill_manager(
 
     action="info" (requires name):
       Get details (description, source, path, tags) about a specific skill by name.
+      Expert skills also surface their role, byline, and capability tags.
       Searches both user and system skills.
 
     action="uninstall" (requires name):
@@ -47,6 +52,7 @@ def skill_manager(
         name: Required for info and uninstall — the skill name (for example, one returned by action="list")
         tag: Optional for browse — filter by tag (e.g. "core", "writing", "experiments", "research")
         include_system: Only for list — set True to include built-in system skills in the output
+        skill_type: Only for list — one of "all" (default; no filter), "expert" (agent-team skills), or "utility"
 
     Returns:
         Result message
@@ -67,19 +73,60 @@ def skill_manager(
                 "a GitHub URL, or a local directory path."
             )
         result = install_skill(source)
-        if result["success"]:
-            return (
-                f"Successfully installed skill: {result['name']}\n"
-                f"Description: {result.get('description', '(none)')}\n"
-                f"Path: {result['path']}\n\n"
+        if not result["success"]:
+            # ``_batch_install_local`` returns ``{"success": False, "batch":
+            # True, "installed": [], "failed": [...]}`` with no top-level
+            # ``error`` key — a bare ``result['error']`` KeyErrors here.
+            if result.get("batch"):
+                failed = result.get("failed") or []
+                if not failed:
+                    return "Failed to install skills: no skills found in source"
+                lines = ["Failed to install skills:"]
+                for f in failed:
+                    lines.append(f"  - {f.get('name', '?')}: {f.get('error', '?')}")
+                return "\n".join(lines)
+            return f"Failed to install skill: {result['error']}"
+
+        # Success path — batch and single-install shapes handled uniformly.
+        # Report ``Path: /skills/<name>``: the sandbox-visible virtual mount
+        # segment (a directory name), not the host filesystem path. Surfacing
+        # ``result['path']`` (e.g. ``/home/.../EvoScientist/skills/<name>``)
+        # invited ``cd <host-path> && …`` chains that fail in the sandbox.
+        entries = result["installed"] if result.get("batch") else [result]
+        blocks = []
+        for entry in entries:
+            mount = Path(entry["path"]).name
+            blocks.append(
+                f"Successfully installed skill: {entry['name']}\n"
+                f"Description: {entry.get('description', '(none)')}\n"
+                f"Path: /skills/{mount}\n\n"
                 f"Read its SKILL.md for full instructions."
             )
-        else:
-            return f"Failed to install skill: {result['error']}"
+        # Batch installs can partially fail — surface each failure rather than
+        # dropping it silently below the success blocks.
+        if result.get("batch"):
+            failed = result.get("failed") or []
+            if failed:
+                fail_lines = ["Partial install — the following skills failed:"]
+                for f in failed:
+                    fail_lines.append(
+                        f"  - {f.get('name', '?')}: {f.get('error', '?')}"
+                    )
+                blocks.append("\n".join(fail_lines))
+        return "\n\n".join(blocks)
 
     elif action == "list":
         skills = list_skills(include_system=include_system)
+        # `skill_type="all"` (default) is the no-filter case. A specific
+        # value ("expert" or "utility") narrows the list to that type.
+        # Empty string is NOT a legal input — Gemini's function-declaration
+        # schema rejects empty enum values (was the root cause of a live
+        # smoke failure); the `Literal` above defends against it.
+        if skill_type in ("expert", "utility"):
+            skills = [s for s in skills if s.type == skill_type]
         if not skills:
+            if skill_type in ("expert", "utility"):
+                return f"No {skill_type} skills found."
             if include_system:
                 return "No skills found."
             return "No user skills installed. Use action='install' to add skills, or set include_system=True to see built-in skills."
@@ -147,13 +194,33 @@ def skill_manager(
                 f"Skill not found: {name}. "
                 f"Use action='list' with include_system=True to see all available skills."
             )
-        tags_str = f"\nTags: {', '.join(info.tags)}" if info.tags else ""
-        return (
-            f"Name: {info.name}\n"
-            f"Description: {info.description}\n"
-            f"Source: {info.source}\n"
-            f"Path: {info.path}{tags_str}"
-        )
+        # ``Path`` reports the sandbox-visible virtual mount segment (the skill's
+        # directory name under ``/skills/``), not the host filesystem path.
+        # Surfacing the host path (e.g. ``/home/.../EvoScientist/skills/<name>``)
+        # invited ``cd <host-path> && …`` chains that fail in the sandbox.
+        lines = [
+            f"Name: {info.name}",
+            f"Description: {info.description}",
+            f"Source: {info.source}",
+            f"Path: /skills/{info.path.name}",
+        ]
+        if info.tags:
+            lines.append(f"Tags: {', '.join(info.tags)}")
+        # Expert surface: shown when the skill can also act as an expert —
+        # declared by a sibling AGENTS.md, or by legacy `type: expert`
+        # frontmatter. The decoration lines below exist only on the legacy
+        # path, so an AGENTS.md expert renders the type line and stops.
+        if info.type == "expert":
+            lines.append("Type: expert")
+            if info.role:
+                lines.append(f"Role: {info.role}")
+            if info.byline:
+                lines.append(f"Byline: {info.byline}")
+            if info.capability_tags:
+                lines.append(f"Capability tags: {', '.join(info.capability_tags)}")
+            if info.avatar_hint:
+                lines.append(f"Avatar hint: {info.avatar_hint}")
+        return "\n".join(lines)
 
     else:
         return f"Unknown action: {action}. Use 'install', 'list', 'browse', 'uninstall', or 'info'."

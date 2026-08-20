@@ -20,10 +20,18 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
     OpenAI reasoning can conflict.  Strip these settings so structured
     output calls work reliably.
 
+    DeepSeek enables thinking server-side by default (no client field to
+    clear), and its thinking mode rejects the forced ``tool_choice`` that
+    ``with_structured_output`` sends ("Thinking mode does not support this
+    tool_choice"). For DeepSeek models the copy gets an explicit
+    ``extra_body["thinking"] = {"type": "disabled"}`` request field instead.
+
     Uses ``model_copy()`` to produce a real new instance — ``bind()`` only
     wraps the model in a ``RunnableBinding`` whose kwargs do NOT override
     first-class Pydantic fields like ``thinking`` on ``ChatAnthropic``.
     """
+    from ..llm.errors import _provider_from_model
+
     updates: dict[str, Any] = {}
     model_kwargs = getattr(model, "model_kwargs", {}) or {}
 
@@ -31,6 +39,17 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         updates["thinking"] = None
     if getattr(model, "reasoning", None) or "reasoning" in model_kwargs:
         updates["reasoning"] = None
+
+    if _provider_from_model(model) == "deepseek":
+        from ..llm.deepseek import (
+            DEEPSEEK_THINKING_DISABLED,
+            is_deepseek_thinking_disabled,
+        )
+
+        extra_body = dict(getattr(model, "extra_body", None) or {})
+        if not is_deepseek_thinking_disabled(extra_body):
+            extra_body["thinking"] = dict(DEEPSEEK_THINKING_DISABLED)
+            updates["extra_body"] = extra_body
 
     if not updates:
         return model
@@ -43,6 +62,31 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         # Fallback for non-Pydantic or unusual model classes
         # Note: bind() may not effectively override first-class Pydantic fields
         return model.bind(**updates)
+
+
+def disable_streaming(model: BaseChatModel) -> BaseChatModel:
+    """Return a copy of the model with ``disable_streaming=True``.
+
+    ``BaseChatModel._streaming_disabled()`` (langchain_core
+    ``chat_models.py:513``) reads only the instance's Pydantic
+    ``disable_streaming`` field — the single gate before langchain routes
+    to ``_stream`` / ``_astream`` when a streaming-aware callback handler
+    is attached (which langgraph's ``astream_events(v3)`` always does).
+
+    Alternatives that don't work:
+
+    - ``model.bind(disable_streaming=True)``: puts kwargs on a
+      ``RunnableBinding``, which ``_streaming_disabled()`` doesn't read.
+      Silent no-op.
+    - ``model.streaming = False``: only honored when ``streaming`` is
+      explicitly in ``model_fields_set``. Provider defaults defeat it
+      (``ChatOpenAI.streaming=False`` is already-False and not
+      explicit-set; ``ChatGoogleGenerativeAI.streaming=None`` is falsy
+      but not ``False``).
+
+    Uses ``model_copy`` to leave the caller's reference untouched.
+    """
+    return model.model_copy(update={"disable_streaming": True})
 
 
 def append_to_system_message(
@@ -60,3 +104,35 @@ def append_to_system_message(
     if system_message is None:
         return SystemMessage(content=new_blocks)
     return system_message.model_copy(update={"content": new_blocks})
+
+
+def replace_block_by_sentinel(
+    system_message: SystemMessage | None,
+    sentinel: str,
+    replacement: str,
+) -> SystemMessage | None:
+    """Swap the block containing ``sentinel`` for ``replacement`` text.
+
+    Iterates ``system_message.content_blocks`` and returns a new
+    ``SystemMessage`` whose block-list has the first block containing
+    ``sentinel`` replaced by ``{"type": "text", "text": replacement}``.
+    Other blocks and metadata (``additional_kwargs``, ``id``, ``name``,
+    ``response_metadata``) are preserved via ``model_copy``.
+
+    Returns ``None`` when no block carries the sentinel — the caller
+    decides fallback policy (typically log-and-append rather than
+    hard-fail, so a deepagents base-stack refactor degrades gracefully
+    instead of killing the graph).
+    """
+    if system_message is None:
+        return None
+    blocks = list(system_message.content_blocks)
+    for i, block in enumerate(blocks):
+        if isinstance(block, dict) and sentinel in block.get("text", ""):
+            new_blocks = [
+                *blocks[:i],
+                {"type": "text", "text": replacement},
+                *blocks[i + 1 :],
+            ]
+            return system_message.model_copy(update={"content": new_blocks})
+    return None

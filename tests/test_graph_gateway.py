@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 from langchain_core.messages import AIMessage, HumanMessage
 
 from EvoScientist.gateway import (
@@ -280,6 +281,33 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
     assert seen["thread_id"] == "generated-thread"
     assert isinstance(seen["gateway"], LocalGraphGateway)
     assert seen["gateway"].thread_store is thread_store
+
+
+def test_cmd_run_converts_stream_failure_to_controlled_exit(monkeypatch):
+    from EvoScientist.cli import interactive
+
+    runtime_gateways = RuntimeGateways(
+        thread_store=FakeThreadStore(),
+        graph_gateway=FakeGraphGateway(),
+    )
+    provider_error = RuntimeError("provider unavailable")
+    monkeypatch.setattr(
+        interactive,
+        "run_streaming",
+        MagicMock(side_effect=provider_error),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        interactive.cmd_run(
+            MagicMock(),
+            "hello",
+            thread_id="failed-thread",
+            show_thinking=False,
+            runtime_gateways=runtime_gateways,
+        )
+
+    assert exc_info.value.exit_code == 1
+    assert exc_info.value.__cause__ is provider_error
 
 
 async def test_langgraph_server_thread_store_delegates_to_sdk_threads():
@@ -1059,3 +1087,42 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
         }
     ]
     assert events == [{"type": "done", "content": "", "response": ""}]
+
+
+async def test_langgraph_server_thread_store_cancels_runs_before_delete():
+    events: list[tuple[str, object]] = []
+
+    class _RecordingThreadsClient(FakeLangGraphThreadsClient):
+        async def delete(self, thread_id: str) -> None:
+            events.append(("delete", thread_id))
+            await super().delete(thread_id)
+
+    threads = _RecordingThreadsClient(threads=[{"thread_id": "abc12345"}])
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "pending":
+                return [{"run_id": "run-pending", "status": "pending"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            events.append(("cancel_many", list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+    store = LangGraphServerThreadStore(client=client)
+
+    assert await store.delete_thread("abc12345") is True
+    assert events == [
+        ("cancel_many", ["run-pending"]),
+        ("delete", "abc12345"),
+    ]
+    assert threads.deleted == ["abc12345"]
+
+
+async def test_langgraph_server_thread_store_delete_survives_missing_runs_client():
+    threads = FakeLangGraphThreadsClient(threads=[{"thread_id": "abc12345"}])
+    store = LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+
+    assert await store.delete_thread("abc12345") is True
+    assert threads.deleted == ["abc12345"]

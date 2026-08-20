@@ -18,6 +18,28 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def resolve_subagent_tools(
+    subagent: dict[str, Any], tool_registry: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve deferred YAML tool names while preserving injected tool objects."""
+    tool_names = subagent.pop("_tool_names", None)
+    if tool_names is None:
+        return subagent
+
+    resolved = list(subagent.get("tools", []))
+    for tool_name in tool_names:
+        if tool_name in tool_registry:
+            resolved.append(tool_registry[tool_name])
+        else:
+            logger.warning(
+                "Subagent %r: tool %r not in registry, skipping",
+                subagent.get("name"),
+                tool_name,
+            )
+    subagent["tools"] = resolved
+    return subagent
+
+
 def format_message_content(message):
     """Convert message content to displayable string.
 
@@ -112,10 +134,9 @@ def show_prompt(prompt_text: str, title: str = "Prompt", border_style: str = "bl
 def load_subagents(
     config_path: Path,
     *,
-    tool_registry: dict[str, Any],
     prompt_refs: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Load subagent definitions from a directory of YAML files and wire up tools.
+    """Load subagent definitions from a directory of YAML files.
 
     NOTE: This is a custom utility. deepagents does not natively load subagents
     from files - they're normally defined inline in the create_deep_agent() call.
@@ -139,6 +160,10 @@ def load_subagents(
           tools: [tavily_search, think_tool]
           system_prompt: |
             ...
+
+    Tool names are retained until the caller selects an execution mode. This
+    avoids resolving async specs against the in-process registry; the selected
+    in-process or remote graph resolves names against its terminal registry.
     """
     prompt_refs = prompt_refs or {}
 
@@ -212,16 +237,12 @@ def load_subagents(
         if "skills" in spec:
             subagent["skills"] = spec["skills"]
 
+        # Defer YAML-name resolution until the caller decides whether this
+        # spec will run in-process. Async specs are replaced by remote graph
+        # references and must not warn against the caller's unrelated registry.
         if "tools" in spec:
-            resolved = []
-            for t in spec["tools"]:
-                if t in tool_registry:
-                    resolved.append(tool_registry[t])
-                else:
-                    logger.warning(
-                        "Subagent %r: tool %r not in registry, skipping", name, t
-                    )
-            subagent["tools"] = resolved
+            subagent["_tool_names"] = list(spec["tools"])
+            subagent["tools"] = []
 
         # Internal field: carries the ``async:`` yaml flag through to
         # ``_maybe_swap_async_subagents`` so the swap doesn't need a second
@@ -236,6 +257,7 @@ def load_subagents(
                 f"Subagent {name!r}: 'async' must be a boolean, "
                 f"got {type(async_val).__name__}: {async_val!r}"
             )
+
         subagent["_async"] = async_val
 
         return subagent
@@ -253,12 +275,11 @@ def load_subagent(
     tool_registry: dict[str, Any],
     prompt_refs: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Load a single sub-agent by name from YAML."""
+    """Load and resolve a single sub-agent by name from YAML."""
     for agent in load_subagents(
         config_path,
-        tool_registry=tool_registry,
         prompt_refs=prompt_refs,
     ):
         if agent.get("name") == name:
-            return agent
+            return resolve_subagent_tools(agent, tool_registry)
     raise KeyError(f"Sub-agent not found: {name}")

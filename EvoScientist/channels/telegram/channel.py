@@ -80,9 +80,7 @@ class TelegramChannel(Channel):
                 | filters.LOCATION
             )
 
-        self._app.add_handler(
-            MessageHandler(media_filter & ~filters.COMMAND, self._on_message)
-        )
+        self._app.add_handler(MessageHandler(media_filter, self._on_message))
 
         await self._app.initialize()
         # Cache bot username for @mention detection in groups
@@ -94,12 +92,17 @@ class TelegramChannel(Channel):
         logger.info("Telegram channel started (polling)")
 
     async def _cleanup(self) -> None:
-        if self._app:
-            if self._app.updater and self._app.updater.running:
-                await self._app.updater.stop()
-            await self._app.stop()
-            await self._app.shutdown()
-            logger.info("Telegram channel stopped")
+        app = self._app
+        self._app = None
+        if app is None:
+            return
+
+        if app.updater and app.updater.running:
+            await app.updater.stop()
+        if app.running:
+            await app.stop()
+        await app.shutdown()
+        logger.info("Telegram channel stopped")
 
     # ── Typing indicator (override base) ────────────────────────────
 
@@ -161,6 +164,21 @@ class TelegramChannel(Channel):
     def _get_bot_identifier(self) -> str | None:
         return self._bot_username or None
 
+    @staticmethod
+    def _command_target(text: str) -> str | None:
+        """Return a Telegram command's target username.
+
+        An empty string represents a bare command; ``None`` means the message
+        is not command-shaped.
+        """
+        parts = text.lstrip().split(None, 1)
+        if not parts or not parts[0].startswith("/"):
+            return None
+        command_token = parts[0][1:]
+        if "@" not in command_token:
+            return ""
+        return command_token.rsplit("@", 1)[1].lower()
+
     async def _send_ack_reaction(
         self, chat_id: str, message_id: str, emoji: str = "👀"
     ) -> None:
@@ -202,10 +220,19 @@ class TelegramChannel(Channel):
 
         # Detect group and mention status for centralized gating
         is_group = message.chat.type in ("group", "supergroup")
-        was_mentioned = True  # DM default
-        if is_group and self._bot_username:
+        was_mentioned = not is_group
+        if is_group:
             text_check = (message.text or message.caption or "").lower()
-            was_mentioned = f"@{self._bot_username}" in text_check
+            command_target = self._command_target(text_check)
+            if command_target is not None:
+                # A bare command that Telegram delivered to this bot is
+                # actionable. Commands explicitly addressed to another bot
+                # must remain ignored.
+                was_mentioned = not command_target or (
+                    bool(self._bot_username) and command_target == self._bot_username
+                )
+            elif self._bot_username:
+                was_mentioned = f"@{self._bot_username}" in text_check
 
         content_parts: list[str] = []
         media_paths: list[str] = []

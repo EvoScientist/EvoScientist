@@ -32,7 +32,7 @@ import atexit
 import logging
 import math
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -544,6 +544,50 @@ async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
         return await cur.fetchone() is not None
 
 
+async def _ensure_thread_meta_index(conn: aiosqlite.Connection, db_path: str) -> None:
+    """Create the expression index behind thread listing, if missing.
+
+    ``list_threads`` filters + groups on ``json_extract(metadata, ...)``;
+    without an index SQLite scans every checkpoint row, dragging each row's
+    multi-KB checkpoint blob through the page cache (~1.3s on a 700MB DB vs
+    ~0.1s indexed). The four columns are exactly the per-row expressions:
+    agent_name + graph_id feed the WHERE and updated_at feeds the MAX, so
+    none of them may fall back to a per-row metadata fetch; workspace_dir /
+    model are only materialized for the surviving groups (~dozens), so they
+    stay out of the index (measured: same speed as a 6-column variant at
+    60% of its size, and two fewer json_extract per checkpoint write).
+
+    The existence probe is a cheap catalog read on the caller's connection
+    (it can still wait on an exclusive schema lock, bounded by that
+    connection's timeout); the one-time build runs on a separate connection
+    whose 2s timeout bounds its lock wait, with build time after acquiring
+    (~0.2s measured on a 700MB DB) on top. Best-effort: on any failure the
+    listing simply runs unindexed and the next call retries.
+    """
+    try:
+        async with conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+            ("idx_evoscientist_thread_meta",),
+        ) as cur:
+            if await cur.fetchone() is not None:
+                return
+        async with aiosqlite.connect(db_path, timeout=2.0) as ddl_conn:
+            await ddl_conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_evoscientist_thread_meta
+                ON checkpoints (
+                    json_extract(metadata, '$.agent_name'),
+                    thread_id,
+                    json_extract(metadata, '$.updated_at'),
+                    json_extract(metadata, '$.graph_id')
+                )
+                """
+            )
+            await ddl_conn.commit()
+    except aiosqlite.Error:
+        _logger.debug("Could not ensure thread meta index", exc_info=True)
+
+
 def _reduce_messages_delta(
     state: list[AnyMessage] | None, writes: list[Any]
 ) -> list[AnyMessage]:
@@ -889,6 +933,7 @@ async def list_threads(
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return []
+        await _ensure_thread_meta_index(conn, db_path)
 
         query = f"""
             SELECT thread_id,
@@ -1532,7 +1577,7 @@ class _RestoredThreadInfo:
     model: str | None
 
 
-async def _restore_webui_threads_to_global_store() -> None:
+async def _restore_webui_threads_to_global_store() -> bool:
     """Re-populate ``GlobalStore["threads"]`` from SQLite on server startup.
 
     The inmem runtime's thread registry lives in memory (pickled to
@@ -1554,7 +1599,10 @@ async def _restore_webui_threads_to_global_store() -> None:
     ``workspace_dir`` are excluded.
 
     Best-effort: any exception is logged and swallowed so a broken restore
-    never prevents the ``langgraph dev`` server from starting.
+    never prevents the ``langgraph dev`` server from starting. Returns True
+    when the restore completed, False when it failed or the runtime is
+    unavailable — a partially-restored registry must not be swept for
+    orphans, or runs of not-yet-appended valid threads would be dropped.
     """
     try:
         from langgraph_runtime_inmem.database import (
@@ -1562,7 +1610,7 @@ async def _restore_webui_threads_to_global_store() -> None:
         )
     except ImportError:
         # langgraph_runtime_inmem not available (unit tests, plain CLI mode).
-        return
+        return False
 
     def _to_uuid_safe(v: Any) -> uuid.UUID | None:
         try:
@@ -1769,6 +1817,64 @@ async def _restore_webui_threads_to_global_store() -> None:
             "empty until new threads are created.",
             exc_info=True,
         )
+        return False
+    return True
+
+
+def _sweep_orphaned_global_store_entries(store: MutableMapping[str, Any]) -> int:
+    """Drop registry runs and crons whose thread no longer exists (issue #358).
+
+    The inmem runtime never discards a run whose thread was deleted:
+    ``Runs.next`` reschedules it forever, and ``.langgraph_ops.pckl``
+    persistence reloads it on every start, so zombies accumulate until the
+    queue starves. Thread-bound crons (``crons.create_for_thread``) keep
+    firing against their deleted thread the same way; stateless crons
+    (``thread_id is None``) are never touched. Must run after the
+    thread-registry restore above so the surviving thread set is final.
+    Mutates the store lists in place — the runtime holds references to the
+    same lists.
+    """
+    valid_thread_ids = {
+        str(entry.get("thread_id")) for entry in store.get("threads") or []
+    }
+    removed = 0
+    runs: list[dict[str, Any]] | None = store.get("runs")
+    if runs:
+        before = len(runs)
+        runs[:] = [run for run in runs if str(run.get("thread_id")) in valid_thread_ids]
+        removed += before - len(runs)
+    crons: list[dict[str, Any]] | None = store.get("crons")
+    if crons:
+        before = len(crons)
+        crons[:] = [
+            cron
+            for cron in crons
+            if cron.get("thread_id") is None
+            or str(cron.get("thread_id")) in valid_thread_ids
+        ]
+        removed += before - len(crons)
+    return removed
+
+
+async def _sweep_orphaned_runs_in_global_store() -> None:
+    """Best-effort orphaned run/cron sweep against the live LangGraph registry."""
+    try:
+        from langgraph_runtime_inmem.database import (
+            GLOBAL_STORE,
+        )
+    except ImportError:
+        # langgraph_runtime_inmem not available (unit tests, plain CLI mode).
+        return
+    try:
+        removed = _sweep_orphaned_global_store_entries(GLOBAL_STORE)
+        if removed:
+            _logger.info(
+                "Dropped %d orphaned run(s)/cron(s) whose thread no longer "
+                "exists from the LangGraph registry.",
+                removed,
+            )
+    except Exception:
+        _logger.warning("Orphaned-run sweep failed (non-fatal).", exc_info=True)
 
 
 @asynccontextmanager
@@ -1802,5 +1908,6 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
     ) as saver:
         await saver.setup()
         await _purge_internal_worker_threads()
-        await _restore_webui_threads_to_global_store()
+        if await _restore_webui_threads_to_global_store():
+            await _sweep_orphaned_runs_in_global_store()
         yield saver

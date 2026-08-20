@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
+
+if TYPE_CHECKING:
+    from .notifier import NotifierPort
 
 logger = logging.getLogger(__name__)
 
@@ -42,42 +45,30 @@ class AsyncWatcherMiddleware(AgentMiddleware):
         async_agents: Mapping of subagent name → ``AsyncSubAgent`` TypedDict
             (must contain at least ``url`` and ``graph_id``). Used to construct
             a ``_ClientCache`` for resolving the LangGraph client per agent.
+        notifier: Injected :class:`~EvoScientist.middleware.notifier.NotifierPort`
+            used to pre-cancel stale watchers and spawn new ones. The composition
+            root supplies ``EvoScientist.cli.async_notifier``.
     """
 
-    def __init__(self, async_agents: dict[str, Any]) -> None:
+    def __init__(self, async_agents: dict[str, Any], notifier: NotifierPort) -> None:
         from deepagents.middleware.async_subagents import _ClientCache
 
         super().__init__()
         self._clients = _ClientCache(async_agents)
+        self._notifier = notifier
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        from EvoScientist.cli import async_notifier
-
         name = request.tool_call.get("name")
         args = request.tool_call.get("args") or {}
 
         # Pre-cancel the existing watcher BEFORE the new run interrupts the old
-        # one. ``update_async_task`` creates a new run on the same thread_id with
-        # ``multitask_strategy="interrupt"``, which closes the old run's stream
-        # cleanly — without pre-cancellation the old watcher would observe a
-        # clean exit and enqueue a stale "success" notification before the new
-        # spawn can replace it.
+        # one (see NotifierPort.pre_cancel_watcher for the full rationale).
         if name == "update_async_task" and (tid := args.get("task_id")):
-            try:
-                old = async_notifier._watcher_by_thread.get(tid)
-                if old is not None and not old.done():
-                    old.cancel()
-            except Exception:
-                logger.warning(
-                    "Pre-cancel of stale watcher for task %s failed; a stale "
-                    "success notification may be enqueued",
-                    tid,
-                    exc_info=True,
-                )
+            self._notifier.pre_cancel_watcher(tid)
 
         result = await handler(request)
 
@@ -96,7 +87,7 @@ class AsyncWatcherMiddleware(AgentMiddleware):
             for task_id, task in tasks_update.items():
                 try:
                     client = self._clients.get_async(task["agent_name"])
-                    async_notifier.spawn_watcher(
+                    self._notifier.spawn_watcher(
                         client,
                         task_id,
                         task["run_id"],

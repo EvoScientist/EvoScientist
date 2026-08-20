@@ -337,9 +337,21 @@ class WeChatChannel(Channel, WebhookMixin, TokenMixin):
         logger.info(f"WeChat callback POST received, body length={len(body)}")
         xml_data = parse_xml(body)
 
-        # If encrypted, decrypt first
+        # If encryption is configured, the inbound POST MUST carry an
+        # <Encrypt> element and a matching msg_signature. An unsigned body
+        # used to fall through to _safe_process_message and reach the agent
+        # regardless of credentials, which made the encryption setup
+        # ineffective (issue #392). Treat a missing <Encrypt> on an
+        # encryption-configured channel as an authentication failure.
         encrypt = xml_data.get("Encrypt", "")
-        if encrypt and self._crypto:
+        if self._crypto:
+            if not encrypt:
+                logger.warning(
+                    "WeChat POST rejected: encryption is configured but the "
+                    "body has no <Encrypt> element (possible signature bypass)"
+                )
+                return web.Response(status=403)
+
             signature = request.query.get("msg_signature", "")
             timestamp = request.query.get("timestamp", "")
             nonce = request.query.get("nonce", "")

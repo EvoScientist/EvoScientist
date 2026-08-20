@@ -7,7 +7,10 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ..middleware.events import SessionEvents
 
 from langchain_core.messages import BaseMessage, convert_to_messages, messages_from_dict
 from langgraph.types import Command
@@ -25,6 +28,7 @@ from ..stream.events import (
 )
 from ..stream.summarization import _find_summarization_event_payload
 from ..stream.v3_payloads import _as_raw_map, _event_namespace
+from .background_runs import _acancel_thread_runs
 from .types import (
     DEFAULT_GRAPH_ID,
     GraphEvent,
@@ -321,6 +325,10 @@ class LangGraphServerThreadStore(ThreadStore):
         return True
 
     async def delete_thread(self, thread_id: str) -> bool:
+        # Interrupt live runs first: the server's cascade delete clears
+        # queued runs from the registry but does not stop a run that is
+        # already executing (issue #358).
+        await _acancel_thread_runs(self.client, thread_id, name="thread delete")
         try:
             await self.client.threads.delete(thread_id)
         except NotFoundError:
@@ -448,6 +456,7 @@ class LangGraphServerGateway:
     thread_store: LangGraphServerThreadStore
     graph_id: str = DEFAULT_GRAPH_ID
     interrupt_wait_seconds: float = 5.0
+    events: SessionEvents | None = None
 
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
         return target.graph_id if target is not None else self.graph_id
