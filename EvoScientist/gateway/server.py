@@ -657,11 +657,19 @@ class LangGraphServerGateway:
             )
             return
 
-        await self.thread_store.client.threads.update_state(
-            thread_id,
-            values=None,
-            as_node="__end__",
-        )
+        try:
+            await self.thread_store.client.threads.update_state(
+                thread_id,
+                values=None,
+                as_node="__end__",
+            )
+        except Exception:
+            logger.debug(
+                "Could not clear interrupted thread state for thread %s",
+                thread_id,
+                exc_info=True,
+            )
+            return
         logger.debug(
             "Cleared interrupted thread state for thread %s (was stuck at: %s)",
             thread_id,
@@ -799,7 +807,7 @@ class LangGraphServerGateway:
                 await _acancel_thread_runs(
                     self.thread_store.client,
                     request.thread_id,
-                    name="consumer abort",
+                    name="incomplete run",
                 )
             for event in tracker.finish():
                 yield event
