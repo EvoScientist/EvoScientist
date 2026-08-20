@@ -171,9 +171,9 @@ smaller context window than the public API for the same model IDs
 > **`reasoning_effort`:** with #324, the ccproxy Codex route uses the
 > Responses API and accepts reasoning configuration. With
 > [#321](https://github.com/EvoScientist/EvoScientist/pull/321), EvoScientist
-> passes an explicitly configured effort (`low`/`medium`/`high`/`xhigh`)
-> while preserving each model's default when it is unset. Older releases that
-> used Chat Completions on this route ignored reasoning effort. Higher
+> passes an explicitly configured effort (`low`/`medium`/`high`/`xhigh`);
+> when unset, EvoScientist applies its own per-model default. Older releases
+> that used Chat Completions on this route ignored reasoning effort. Higher
 > effort costs more latency and more of your subscription quota per request.
 
 ---
