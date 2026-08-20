@@ -136,8 +136,9 @@ instance you manage yourself, add this section to your global config
 model_mappings = []
 ```
 
-(ccproxy also reads `.ccproxy.toml` in its working directory and
-`ccproxy.toml` in a git repository root.)
+(Note: ccproxy loads only the first config file it finds — a `.ccproxy.toml`
+in its working directory or a `ccproxy.toml` in a git repository root takes
+precedence and silently overrides the global config.)
 
 #### Pitfall B — the backend gates models on client identity
 
@@ -224,7 +225,7 @@ Success is an SSE stream ending in `response.completed` whose payload shows
 | `The '<model>' model is not supported…` for the model you actually requested | Your ChatGPT tier does not serve that ID | Try `gpt-5.4`; check tier |
 | `Run: ccproxy auth login codex` (or `claude_api`) on startup | No OAuth credentials on this machine | Run the login command shown |
 | `ccproxy not found` | OAuth extra not installed | `pip install 'evoscientist[oauth]'` |
-| Config change has no effect | A long-running ccproxy instance predates the config | Restart that ccproxy instance |
+| Config change has no effect | A long-running ccproxy instance predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | Restart that ccproxy instance; check for a shadowing config file |
 
 **Debugging tip:** `ccproxy serve --port 8001 --log-level debug` on a spare
 port shows exactly what is forwarded upstream. **Warning:** debug logs print
