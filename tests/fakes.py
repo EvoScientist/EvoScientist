@@ -512,6 +512,7 @@ class FakeLangGraphThreadsClient:
         self.metadata_updates: list[tuple[str, dict[str, Any]]] = []
         self.deleted: list[str] = []
         self.gets: list[str] = []
+        self.state_gets: list[str] = []
         self.searches: list[dict[str, Any]] = []
         self.stream_calls: list[tuple[str, str]] = []
         self.state_updates: list[tuple[str, GraphStateValues, str | None]] = []
@@ -609,6 +610,7 @@ class FakeLangGraphThreadsClient:
     async def get_state(self, thread_id: str) -> dict[str, Any]:
         from langgraph_sdk.errors import NotFoundError
 
+        self.state_gets.append(thread_id)
         if thread_id in self.states:
             return self.states[thread_id]
         raise NotFoundError("not found", response=_not_found_response(), body=None)
