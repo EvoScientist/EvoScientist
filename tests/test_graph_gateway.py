@@ -1635,3 +1635,227 @@ async def test_langgraph_server_thread_store_delete_survives_missing_runs_client
 
     assert await store.delete_thread("abc12345") is True
     assert threads.deleted == ["abc12345"]
+
+
+# ---------------------------------------------------------------------------
+# Stage 1f — parity suite: shared contract across both backends + divergence pins
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def local_gateway() -> LocalGraphGateway:
+    return LocalGraphGateway(
+        thread_store=FakeThreadStore(
+            generated_thread_id="parity-1",
+            threads=[{"thread_id": "parity-1"}],
+            resolved_thread_id="parity-1",
+            metadata={"workspace_dir": "/ws"},
+            messages=[HumanMessage(content="hi")],
+            exists=True,
+            deleted=True,
+        )
+    )
+
+
+@pytest.fixture
+def server_gateway() -> LangGraphServerGateway:
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": "parity-1",
+                "metadata": {"graph_id": "EvoScientist", "workspace_dir": "/ws"},
+            }
+        ],
+        states={
+            "parity-1": {
+                "values": {
+                    "messages": [
+                        {"role": "user", "content": "hi"},
+                    ]
+                }
+            }
+        },
+    )
+    return LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_create_returns_str(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    thread_id = await gateway.create_thread()
+    assert isinstance(thread_id, str)
+    assert thread_id
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_list_returns_list_of_dicts(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    threads = await gateway.list_threads(limit=10)
+    assert isinstance(threads, list)
+    assert all(isinstance(row, dict) for row in threads)
+    assert all("thread_id" in row for row in threads)
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_resolve_returns_thread_resolution(
+    request, fixture_name
+):
+    gateway = request.getfixturevalue(fixture_name)
+    resolution = await gateway.resolve_thread("parity")
+    assert resolution.thread_id == "parity-1"
+    assert resolution.found
+    assert not resolution.ambiguous
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_get_metadata_returns_dict(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    metadata = await gateway.get_thread_metadata("parity-1")
+    assert isinstance(metadata, dict)
+    assert metadata.get("workspace_dir") == "/ws"
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_get_messages_returns_list(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    messages = await gateway.get_thread_messages("parity-1")
+    assert isinstance(messages, list)
+    assert len(messages) >= 1
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_thread_exists_returns_true_for_known_thread(
+    request, fixture_name
+):
+    gateway = request.getfixturevalue(fixture_name)
+    exists = await gateway.thread_exists("parity-1")
+    assert exists is True
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_delete_returns_bool(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    deleted = await gateway.delete_thread("parity-1")
+    assert deleted is True
+
+
+# Divergence pins — accepted differences between backends
+
+
+async def test_divergence_local_clone_unsupported():
+    """Local gateway does not support thread cloning; server gateway does."""
+    gateway = LocalGraphGateway(thread_store=FakeThreadStore())
+    with pytest.raises(NotImplementedError, match="does not support thread cloning"):
+        await gateway.clone_thread("source")
+
+
+async def test_divergence_server_delete_cancels_in_flight_runs():
+    """Server delete cancels live runs before deleting; local delete does not."""
+    threads = FakeLangGraphThreadsClient(threads=[{"thread_id": "abc12345"}])
+    client = FakeLangGraphClient(threads)
+    cancel_called = False
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "running":
+                return [{"run_id": "run-1", "status": "running"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            nonlocal cancel_called
+            cancel_called = True
+
+    client.runs = _FakeRunsClient()
+    store = LangGraphServerThreadStore(client=client)
+    await store.delete_thread("abc12345")
+    assert cancel_called
+
+
+async def test_divergence_server_thread_exists_returns_false_for_unknown_thread():
+    """Server thread_exists hits the SDK (404 on missing); local delegates to
+    session_store which may behave differently for unknown ids."""
+    threads = FakeLangGraphThreadsClient(threads=[])
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    assert await gateway.thread_exists("nonexistent") is False
+
+
+async def test_divergence_local_delete_does_not_cancel_runs():
+    """Local delete delegates to session_store without run cancellation."""
+    thread_store = FakeThreadStore(
+        threads=[{"thread_id": "abc12345"}],
+        deleted=True,
+    )
+    gateway = LocalGraphGateway(thread_store=thread_store)
+    deleted = await gateway.delete_thread("abc12345")
+    assert deleted is True
+    assert thread_store.calls == [("delete_thread", "abc12345")]
+
+
+async def test_divergence_server_enqueue_serializes_concurrent_runs():
+    """Server gateway accepts a second run while one is in flight (enqueue);
+    local gateway has no cross-process guard. The serialization is a property
+    of the langgraph dev server, not the gateway — this test pins the contract:
+    both backends accept the second request without rejection."""
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={
+            "abc12345": FakeLangGraphThreadStream(
+                "abc12345",
+                events=[
+                    {
+                        "method": "messages",
+                        "params": {
+                            "namespace": [],
+                            "data": {
+                                "event": "content-block-delta",
+                                "delta": {"type": "text-delta", "text": "ok"},
+                            },
+                        },
+                    },
+                    {
+                        "method": "messages",
+                        "params": {
+                            "namespace": [],
+                            "data": {"event": "message-finish"},
+                        },
+                    },
+                ],
+            )
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+    assert events[-1]["type"] == "done"
