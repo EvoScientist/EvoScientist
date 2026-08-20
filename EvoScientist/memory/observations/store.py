@@ -13,7 +13,6 @@ from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TypeVar
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -328,6 +327,7 @@ def _resolve_document_links(
     parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
     *,
     root: Path,
+    touched: set[str],
 ) -> list[ObservationSearchDocument]:
     documents_by_id = {document.observation_id: document for document, _ in parsed}
     missing_related_ids = {
@@ -340,7 +340,7 @@ def _resolve_document_links(
         for path in _all_observation_files(root):
             if not missing_related_ids:
                 break
-            parsed_document = _parse_observation_search_document(root=root, path=path)
+            parsed_document = _parse_with_cache(root, path, touched)
             if parsed_document is None:
                 continue
             document, _entries = parsed_document
@@ -363,100 +363,94 @@ def _resolve_document_links(
 
 # ── Parsed-document cache ─────────────────────────────────────────────
 #
-# Three layers:
+# One layer: a per-file parse cache keyed on the observation file path.
+# Each value carries the file's ``(st_mtime_ns, st_size)`` signature, so a
+# rewrite invalidates exactly that entry and replaces it in place.  Scope
+# filtering is just which directories get globbed, and link resolution
+# reruns on every call over the memoized parses — its fallback walk parses
+# through the same cache, so fallback visits are dict hits instead of
+# whole-tree reparses.
 #
-# 1. ``_global_doc_cache`` — pre-link-resolution global docs, keyed on root.
-#    Shared across all project_ids so global files are parsed once per root.
-# 2. ``_project_doc_cache`` — pre-link-resolution project docs, keyed on
-#    (root, project_id).  LRU-bounded so a long-running server that cycles
-#    through many workspaces does not grow without bound.
-# 3. ``_resolved_cache`` — post-link-resolution docs, keyed on
-#    (root, project_id, scope).  Avoids re-running link resolution (and its
-#    fallback file walk) on every ``list_observation_documents`` call.
-#    Validated by the full file signature (all observation files under root)
-#    so that cross-scope link-resolution targets invalidate it.  LRU-bounded
-#    with the same cap as the project cache.
+# Deletion needs no invalidation: a deleted file is never globbed, so its
+# cached entry can never be served again; the LRU bounds the leftover
+# memory.  Eviction runs only at the end of a call, down to
+# ``max(cap, entries touched by the call)``, so a call never evicts its own
+# working set and a store larger than the cap temporarily exceeds it
+# instead of thrashing.
 #
-# Layers 1-2 avoid re-parsing files when the resolved cache misses but the
-# underlying files have not changed (e.g. a file in another scope changed,
-# invalidating the resolved cache, but the current project's files are
-# unchanged).  Layer 3 avoids re-running link resolution on every call.
-# Note: the link-resolution fallback in ``_resolve_document_links`` parses
-# missing targets directly, bypassing layers 1-2; this only fires on a
-# resolved-cache miss, not on every call.
+# The cap is ``config.memory_observation_cache_max_files`` (default 2048,
+# env var ``EVOSCIENTIST_MAX_CACHED_FILES``), read lazily from config on
+# first call.  With the working-set rule it bounds retained memory for
+# inactive workspaces rather than correctness.
 #
-# The project and resolved caches are LRU-bounded by
-# ``config.memory_observation_cache_max_projects`` (default 8, env var
-# ``EVOSCIENTIST_MAX_CACHED_PROJECTS``).  The global cache holds at most one
-# entry per root.
-#
-_ParsedCacheValue = tuple[
-    frozenset[tuple[str, int, int]],
-    list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
+_FileParseValue = tuple[
+    tuple[int, int],
+    tuple[ObservationSearchDocument, list[RelatedObservationEntry]],
 ]
 
-_ResolvedCacheValue = tuple[
-    frozenset[tuple[str, int, int]],
-    list[ObservationSearchDocument],
-]
+_file_parse_cache: OrderedDict[str, _FileParseValue] = OrderedDict()
 
-_CacheKey = TypeVar("_CacheKey")
-
-_global_doc_cache: dict[Path, _ParsedCacheValue] = {}
-
-_project_doc_cache: OrderedDict[tuple[Path, str], _ParsedCacheValue] = OrderedDict()
-
-_resolved_cache: OrderedDict[
-    tuple[Path, str, MemoryScope | None], _ResolvedCacheValue
-] = OrderedDict()
-
-_cached_max_projects: int | None = None
+_cached_max_files: int | None = None
 
 
-def _max_cached_projects() -> int:
+def _max_cached_files() -> int:
     """Return the configured cache cap.
 
     Read once from ``get_effective_config()`` on first call and cached at
     module level; a runtime config change requires a process restart to take
     effect.
     """
-    global _cached_max_projects
-    if _cached_max_projects is None:
+    global _cached_max_files
+    if _cached_max_files is None:
         from ...config import get_effective_config
 
-        _cached_max_projects = (
-            get_effective_config().memory_observation_cache_max_projects
-        )
-    return _cached_max_projects
+        _cached_max_files = get_effective_config().memory_observation_cache_max_files
+    return _cached_max_files
 
 
-def _file_signature(paths: list[Path]) -> frozenset[tuple[str, int, int]]:
-    """Return ``(path_str, mtime_ns, size)`` pairs for the given paths.
+def _parse_with_cache(
+    root: Path,
+    path: Path,
+    touched: set[str],
+) -> tuple[ObservationSearchDocument, list[RelatedObservationEntry]] | None:
+    """Return the parsed document for *path*, memoized per file.
 
-    Uses ``st_mtime_ns`` (integer nanoseconds) instead of ``st_mtime`` (float
-    seconds) so the signature preserves full filesystem resolution.  Includes
-    ``st_size`` so a rewrite that keeps the same mtime (observed on NTFS when
-    the OS caches metadata between rapid writes) still invalidates the cache
-    when content length changes.
+    The cached entry is validated against the file's current
+    ``(st_mtime_ns, st_size)`` signature, so a rewrite replaces it in
+    place.  Parse failures are not cached; the file is retried on the next
+    call.  No copy on read or write: callers only iterate the documents or
+    build new ones via ``replace``.
     """
-    sig: set[tuple[str, int, int]] = set()
-    for path in paths:
-        try:
-            st = path.stat()
-            sig.add((str(path), st.st_mtime_ns, st.st_size))
-        except OSError:
-            continue
-    return frozenset(sig)
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    signature = (st.st_mtime_ns, st.st_size)
+    cached = _file_parse_cache.get(key)
+    if cached is not None and cached[0] == signature:
+        _file_parse_cache.move_to_end(key)
+        touched.add(key)
+        return cached[1]
+    parsed_document = _parse_observation_search_document(root=root, path=path)
+    if parsed_document is None:
+        return None
+    _file_parse_cache[key] = (signature, parsed_document)
+    _file_parse_cache.move_to_end(key)
+    touched.add(key)
+    return parsed_document
 
 
-def _all_observation_signature(root: Path) -> frozenset[tuple[str, int, int]]:
-    """Return ``(path_str, mtime)`` pairs for all observation files under *root*.
+def _trim_parse_cache(touched: set[str]) -> None:
+    """Trim the cache at the end of a call down to ``max(cap, len(touched))``.
 
-    Composed from ``_all_observation_files`` so the walk logic stays in one
-    place.  Covers every scope so that a cross-scope link-resolution target
-    changing invalidates the resolved cache.
+    Every entry touched by the call was moved or appended to the
+    most-recent end, so trimming from the least-recent end down to at least
+    ``len(touched)`` entries never evicts the call's own working set.
     """
-    return _file_signature(_all_observation_files(root))
+    target = max(_max_cached_files(), len(touched))
+    while len(_file_parse_cache) > target:
+        _file_parse_cache.popitem(last=False)
 
 
 def _global_files(root: Path) -> list[Path]:
@@ -477,32 +471,6 @@ def _project_files(root: Path, project_id: str) -> list[Path]:
         return []
 
 
-def _cached_parsed_docs(
-    cache: dict[_CacheKey, _ParsedCacheValue],
-    cache_key: _CacheKey,
-    root: Path,
-    paths: list[Path],
-) -> list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]]:
-    """Return parsed documents for *paths*, using *cache* keyed on *cache_key*.
-
-    No copy on read or write: the caller passes the result to ``extend`` (which
-    iterates, not mutates) and then to ``_resolve_document_links`` (which builds
-    a new list via ``replace``).  The cached list is never returned to a caller
-    of ``list_observation_documents`` and never mutated.
-    """
-    signature = _file_signature(paths)
-    cached = cache.get(cache_key)
-    if cached is not None and cached[0] == signature:
-        return cached[1]
-    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
-    for path in paths:
-        parsed_document = _parse_observation_search_document(root=root, path=path)
-        if parsed_document is not None:
-            parsed.append(parsed_document)
-    cache[cache_key] = (signature, parsed)
-    return parsed
-
-
 def list_observation_documents(
     *,
     memory_dir: str | Path,
@@ -512,45 +480,24 @@ def list_observation_documents(
 ) -> list[ObservationSearchDocument]:
     """Read candidate observations for the current filters.
 
-    Global and project observations are cached in separate pre-link-resolution
-    layers so global docs are parsed once and shared across all project_ids.
-    A resolved-document cache avoids re-running link resolution on every call;
-    it is validated by the full file signature so cross-scope link targets
-    invalidate it.
+    Observation files are parsed once per file and shared across every
+    project_id and scope; each cached entry is validated against the file's
+    current ``(st_mtime_ns, st_size)`` signature.  A deleted file simply
+    drops out of the glob.  Link resolution reruns on each call over the
+    memoized parses.
     """
     root = Path(memory_dir).expanduser()
-    resolved_key = (root, project_id, scope)
-    signature = _all_observation_signature(root)
+    paths = _observation_files(memory_dir=root, project_id=project_id, scope=scope)
 
-    cached = _resolved_cache.get(resolved_key)
-    if cached is not None and cached[0] == signature:
-        _resolved_cache.move_to_end(resolved_key)
-        documents = cached[1]
-    else:
-        cap = _max_cached_projects()
-        parsed: list[
-            tuple[ObservationSearchDocument, list[RelatedObservationEntry]]
-        ] = []
-        if scope in {None, MemoryScope.GLOBAL}:
-            g_paths = _global_files(root)
-            parsed.extend(_cached_parsed_docs(_global_doc_cache, root, root, g_paths))
-        if scope in {None, MemoryScope.PROJECT}:
-            p_paths = _project_files(root, project_id)
-            project_key = (root, project_id)
-            parsed.extend(
-                _cached_parsed_docs(_project_doc_cache, project_key, root, p_paths)
-            )
-            # LRU: move the accessed project to the most-recent end, then
-            # evict the least-recently-used entry if the cache exceeds its cap.
-            _project_doc_cache.move_to_end(project_key)
-            while len(_project_doc_cache) > cap:
-                _project_doc_cache.popitem(last=False)
+    touched: set[str] = set()
+    parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
+    for path in paths:
+        parsed_document = _parse_with_cache(root, path, touched)
+        if parsed_document is not None:
+            parsed.append(parsed_document)
 
-        documents = _resolve_document_links(parsed, root=root)
-        _resolved_cache[resolved_key] = (signature, documents)
-        _resolved_cache.move_to_end(resolved_key)
-        while len(_resolved_cache) > cap:
-            _resolved_cache.popitem(last=False)
+    documents = _resolve_document_links(parsed, root=root, touched=touched)
+    _trim_parse_cache(touched)
 
     if memory_type is not None:
         return [
