@@ -1489,7 +1489,61 @@ async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failu
         ):
             pass
 
+    assert "abc12345" in threads.state_gets
     assert threads.state_updates == []
+
+
+async def test_langgraph_server_gateway_repair_swallows_update_state_failure():
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            for event in self.events:
+                yield event
+            raise RuntimeError("provider connection lost")
+
+    failing_stream = _FailingStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+
+    class _FailingUpdateThreadsClient(FakeLangGraphThreadsClient):
+        async def update_state(self, thread_id, values, *, as_node=None):
+            raise RuntimeError("repair-time connection reset")
+
+    threads = _FailingUpdateThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}, "next": ("model",)}},
+        streams={"abc12345": failing_stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    with pytest.raises(RuntimeError, match="provider connection lost"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
 
 
 async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
