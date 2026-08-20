@@ -1246,6 +1246,137 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
     assert events == [{"type": "done", "content": "", "response": ""}]
 
 
+async def test_langgraph_server_gateway_resume_discovers_interrupt_from_state():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {},
+                "interrupts": [
+                    {
+                        "id": "state-interrupt-1",
+                        "value": {
+                            "action_requests": [
+                                {
+                                    "name": "execute",
+                                    "args": {"command": "echo hi"},
+                                    "id": "tool-1",
+                                }
+                            ],
+                            "review_configs": [
+                                {
+                                    "action_name": "execute",
+                                    "allowed_decisions": ["approve", "reject"],
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        },
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        ),
+        interrupt_wait_seconds=0.01,
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(
+                message=Command(resume={"decisions": [{"allowed": True}]}),
+                thread_id="abc12345",
+            )
+        )
+    ]
+
+    assert stream.run.responses == [
+        {
+            "response": {"decisions": [{"allowed": True}]},
+            "interrupt_id": "state-interrupt-1",
+        }
+    ]
+    assert events == [{"type": "done", "content": "", "response": ""}]
+
+
+async def test_langgraph_server_gateway_resume_raises_on_multiple_interrupts():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {},
+                "interrupts": [
+                    {"id": "interrupt-a", "value": None},
+                    {"id": "interrupt-b", "value": None},
+                ],
+            }
+        },
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        ),
+        interrupt_wait_seconds=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="2 pending interrupts"):
+        async for _event in gateway.stream_events(
+            RunRequest(
+                message=Command(resume={"decisions": [{"allowed": True}]}),
+                thread_id="abc12345",
+            )
+        ):
+            pass
+
+
+async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        ),
+        interrupt_wait_seconds=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="No pending interrupt"):
+        async for _event in gateway.stream_events(
+            RunRequest(
+                message=Command(resume={"decisions": [{"allowed": True}]}),
+                thread_id="abc12345",
+            )
+        ):
+            pass
+
+
 async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
     stream = FakeLangGraphThreadStream(
         "abc12345",

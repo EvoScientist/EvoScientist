@@ -570,7 +570,9 @@ class LangGraphServerGateway:
         )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
-                await self._respond_to_interrupt(stream, request.message.resume)
+                await self._respond_to_interrupt(
+                    stream, request.thread_id, request.message.resume
+                )
                 return
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
@@ -589,15 +591,33 @@ class LangGraphServerGateway:
     async def _respond_to_interrupt(
         self,
         stream: AsyncThreadStream,
+        thread_id: str,
         response: object,
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
         while not stream.interrupts and loop.time() < deadline:
             await asyncio.sleep(0.05)
-        interrupt_id = None
-        if len(stream.interrupts) == 1:
-            interrupt_id = str(stream.interrupts[0].get("interrupt_id") or "")
+
+        interrupts = list(stream.interrupts)
+        if not interrupts:
+            state = await self.thread_store.client.threads.get_state(thread_id)
+            interrupts = _state_interrupts(state)
+
+        if len(interrupts) > 1:
+            raise RuntimeError(
+                f"Thread {thread_id} has {len(interrupts)} pending interrupts; "
+                "only single-interrupt resume is supported"
+            )
+        if not interrupts:
+            raise RuntimeError(
+                f"No pending interrupt found on thread {thread_id}; "
+                "the thread may not be in an interrupted state"
+            )
+
+        interrupt_id = str(
+            interrupts[0].get("interrupt_id") or interrupts[0].get("id") or ""
+        )
         await stream.run.respond(response, interrupt_id=interrupt_id or None)
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
