@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -390,6 +391,11 @@ _FileParseValue = tuple[
 
 _file_parse_cache: OrderedDict[str, _FileParseValue] = OrderedDict()
 
+# Serializes cache transactions (lookup+recency, insert+recency, trim) so
+# concurrent calls cannot evict a key between another call's lookup and its
+# recency update. Parsing stays outside the lock; only dict mutations hold it.
+_cache_lock = threading.Lock()
+
 _cached_max_files: int | None = None
 
 
@@ -427,17 +433,19 @@ def _parse_with_cache(
     except OSError:
         return None
     signature = (st.st_mtime_ns, st.st_size)
-    cached = _file_parse_cache.get(key)
-    if cached is not None and cached[0] == signature:
-        _file_parse_cache.move_to_end(key)
-        touched.add(key)
-        return cached[1]
+    with _cache_lock:
+        cached = _file_parse_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            _file_parse_cache.move_to_end(key)
+            touched.add(key)
+            return cached[1]
     parsed_document = _parse_observation_search_document(root=root, path=path)
     if parsed_document is None:
         return None
-    _file_parse_cache[key] = (signature, parsed_document)
-    _file_parse_cache.move_to_end(key)
-    touched.add(key)
+    with _cache_lock:
+        _file_parse_cache[key] = (signature, parsed_document)
+        _file_parse_cache.move_to_end(key)
+        touched.add(key)
     return parsed_document
 
 
@@ -449,8 +457,9 @@ def _trim_parse_cache(touched: set[str]) -> None:
     ``len(touched)`` entries never evicts the call's own working set.
     """
     target = max(_max_cached_files(), len(touched))
-    while len(_file_parse_cache) > target:
-        _file_parse_cache.popitem(last=False)
+    with _cache_lock:
+        while len(_file_parse_cache) > target:
+            _file_parse_cache.popitem(last=False)
 
 
 def _global_files(root: Path) -> list[Path]:

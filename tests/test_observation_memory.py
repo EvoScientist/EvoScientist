@@ -3346,3 +3346,62 @@ class TestObservationCache:
             "fallback bypasses the per-file cache"
         )
         assert len(docs1) == len(docs2)
+
+    def test_concurrent_calls_survive_cache_eviction(self, tmp_path, monkeypatch):
+        """Concurrent callers must not race the eviction path.
+
+        A tiny cap forces ``_trim_parse_cache`` to evict on every call while
+        several threads hit ``list_observation_documents`` at once. Without
+        serialized cache transactions, one thread can evict a key between
+        another thread's lookup and recency update (KeyError), or between its
+        insert and recency update. The switch interval is shrunk so the GIL
+        switches threads inside those windows often enough to make the race
+        reproducible; it is restored before the test exits.
+        """
+        import sys
+        import threading
+
+        from EvoScientist.memory.observations import store
+
+        memories_a = tmp_path / "memories-a"
+        memories_b = tmp_path / "memories-b"
+        for memories in (memories_a, memories_b):
+            for index in range(1, 9):
+                _write_observation(
+                    memories / "observations" / "global" / f"O-{index}.md",
+                    f"O-{index}",
+                )
+
+        monkeypatch.setattr(store, "_max_cached_files", lambda: 1)
+
+        errors: list[BaseException] = []
+
+        def _hammer(memory_dir):
+            try:
+                for _ in range(500):
+                    docs = list_observation_documents(
+                        memory_dir=memory_dir, project_id="P-test"
+                    )
+                    assert len(docs) == 8
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_hammer, args=(memories_a,)),
+            threading.Thread(target=_hammer, args=(memories_a,)),
+            threading.Thread(target=_hammer, args=(memories_a,)),
+            threading.Thread(target=_hammer, args=(memories_b,)),
+            threading.Thread(target=_hammer, args=(memories_b,)),
+            threading.Thread(target=_hammer, args=(memories_b,)),
+        ]
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            sys.setswitchinterval(old_interval)
+
+        assert errors == [], f"racing cache transactions raised: {errors[:3]}"
