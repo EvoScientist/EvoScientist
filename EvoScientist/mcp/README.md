@@ -320,6 +320,15 @@ stdio server fails to start — install Node.js and `npx`, or replace `npx` with
 </details>
 
 <details>
+<summary><strong>Windows: stdio server fails with <code>[Errno 9] Bad file descriptor</code></strong></summary>
+
+On Windows, the TUI redirects `sys.stderr` to an in-memory capture whose `fileno()` is not a real OS handle. The MCP SDK forwards that `stderr` to the stdio server subprocess, and `subprocess.Popen` rejects the invalid handle with `OSError: [Errno 9] Bad file descriptor` — so only stdio servers fail to load (HTTP/SSE servers are unaffected).
+
+EvoScientist wraps the SDK's stdio client so that, whenever the configured `stderr` has no usable file descriptor, it falls back to the original console handle (`sys.__stderr__`, or `os.devnull` in GUI hosts). If you still see this error, run from a real console (not `pythonw.exe`) and check the server's own startup output.
+
+</details>
+
+<details>
 <summary><strong><code>--env-ref</code> or <code>${VAR}</code> not resolving</strong></summary>
 
 Auth header/env becomes empty — ensure the variable exists in your environment before launching EvoScientist. `${VAR}` interpolation happens at runtime; missing vars are replaced with empty strings and logged as warnings.

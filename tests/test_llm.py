@@ -48,6 +48,7 @@ class TestModelsRegistry:
         assert "moonshot" in providers
         assert "kimi-coding" in providers
         assert "atlascloud" in providers
+        assert "novita" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -72,6 +73,7 @@ class TestModelsRegistry:
             "moonshot",
             "kimi-coding",
             "atlascloud",
+            "novita",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
@@ -98,6 +100,8 @@ class TestModelsRegistry:
         atlas_models = get_models_for_provider("atlascloud")
         assert ("qwen3.5-27b", "qwen/qwen3.5-27b") in atlas_models
         assert get_models_for_provider("atlas") == []
+        novita_models = get_models_for_provider("novita")
+        assert ("kimi-k3", "moonshotai/kimi-k3") in novita_models
 
 
 # =============================================================================
@@ -448,6 +452,29 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://router.requesty.ai/v1"
         assert call_kwargs["api_key"] == "rq-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_novita_routes_through_openai(self, mock_init, monkeypatch):
+        """Novita provider should route through OpenAI with correct base_url."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("NOVITA_API_KEY", "novita-key-123")
+
+        get_chat_model("kimi-k3", provider="novita")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "moonshotai/kimi-k3"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.novita.ai/openai/v1"
+        assert call_kwargs["api_key"] == "novita-key-123"
+
+    def test_novita_host_maps_to_provider(self):
+        """Provider error envelopes should identify Novita by host."""
+        from EvoScientist.llm.errors import _lookup_host_or_compat
+
+        assert (
+            _lookup_host_or_compat("https://api.novita.ai/openai/v1", "openai")
+            == "novita"
+        )
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_requesty_anthropic_prompt_cache_enabled_by_default(
@@ -1078,6 +1105,34 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "custom-key-789"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_openai_forwards_explicit_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        """User-owned compatible endpoints receive an explicit effort only."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://opencode.example/v1")
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "custom-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("reasoning-model", provider="custom-openai")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "low"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_custom_openai_omits_unconfigured_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        """Unknown compatible endpoints stay compatible by default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://plain.example/v1")
+        monkeypatch.setenv("CUSTOM_OPENAI_API_KEY", "custom-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("plain-model", provider="custom-openai")
+
+        assert "reasoning_effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_base_url_override(self, mock_init, monkeypatch):
         """Anthropic provider should support base_url override (e.g. ccproxy)."""
         mock_init.return_value = "mock_model"
@@ -1167,6 +1222,90 @@ class TestThirdPartyRouting:
             == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
         assert call_kwargs["api_key"] == "ds-key-456"
+        assert "reasoning_effort" not in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_uses_bounded_default(self, mock_init, monkeypatch):
+        """Qwen 3.8 avoids the regular endpoint's xhigh default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("qwen3.8-max", provider="dashscope")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "medium"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_respects_configured_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "medium")
+
+        get_chat_model("qwen3.8-max", provider="dashscope")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "medium"
+
+    @pytest.mark.parametrize(
+        "effort",
+        [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_accepts_supported_reasoning_effort(
+        self, mock_init, effort, monkeypatch
+    ):
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", effort)
+
+        get_chat_model("qwen3.8-max", provider="dashscope")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == effort
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_rejects_unsupported_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "invalid")
+
+        with pytest.raises(ValueError, match="dashscope"):
+            get_chat_model("qwen3.8-max", provider="dashscope")
+
+        mock_init.assert_not_called()
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_explicit_effort_overrides_invalid_environment(
+        self, mock_init, monkeypatch
+    ):
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "ds-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "invalid")
+
+        get_chat_model("qwen3.8-max", provider="dashscope", reasoning_effort="low")
+
+        assert mock_init.call_args[1]["reasoning_effort"] == "low"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_qwen38_dashscope_code_omits_undocumented_reasoning_effort(
+        self, mock_init, monkeypatch
+    ):
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-sp-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "medium")
+
+        get_chat_model("qwen3.8-max", provider="dashscope-code")
+
+        assert "reasoning_effort" not in mock_init.call_args[1]
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_dashscope_code_routes_through_openai(self, mock_init, monkeypatch):

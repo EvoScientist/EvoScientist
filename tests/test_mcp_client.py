@@ -1,8 +1,11 @@
 """Tests for EvoScientist.mcp module."""
 
 import asyncio
+import os
+import sys
 import textwrap
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -277,6 +280,344 @@ class TestBuildConnections:
         }
         conns = _build_connections(config)
         assert set(conns.keys()) == {"a", "b"}
+
+
+# ---- stdio errlog safety patch (issue #418) ----
+
+
+class _FakeTextualStderr:
+    """Stand-in for ``textual.app._PrintCapture``.
+
+    Mirrors the TUI's redirected stderr: a file-like object whose ``fileno()``
+    returns ``-1`` (no real OS handle), which makes ``subprocess.Popen`` fail
+    with ``OSError: [Errno 9] Bad file descriptor`` when it is passed as
+    ``stderr``.
+    """
+
+    def write(self, data):
+        return len(data)
+
+    def flush(self):  # pragma: no cover - trivial
+        pass
+
+    def fileno(self):  # pragma: no cover - exercised via the helper
+        return -1
+
+    def isatty(self):
+        return True
+
+
+class TestStdioErrlogSafetyPatch:
+    """The stdio errlog guard (issue #418) keeps stdio MCP subprocesses alive
+    when the parent's ``sys.stderr`` is a redirected stream with no fileno."""
+
+    def test_bad_fileno_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        assert _stdio_errlog_is_usable(_FakeTextualStderr()) is False
+
+    def test_negative_fileno_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        class _Neg:
+            def fileno(self):
+                return -1
+
+        assert _stdio_errlog_is_usable(_Neg()) is False
+
+    def test_fileno_raising_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        class _Raises:
+            def fileno(self):
+                raise OSError("no fileno")
+
+        assert _stdio_errlog_is_usable(_Raises()) is False
+
+    def test_missing_fileno_rejected(self):
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        assert _stdio_errlog_is_usable(object()) is False
+
+    def test_closed_fd_rejected(self):
+        """A closed stream may still report its former positive fd; the helper
+        must reject it via os.fstat so subprocess.Popen doesn't fail later."""
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        r, w = os.pipe()
+        # Capture the descriptor number, then close both ends. The stub
+        # below still reports ``r`` (now closed) from fileno(), exercising
+        # the os.fstat branch rather than the ValueError path.
+        stale_fd = r
+        os.close(r)
+        os.close(w)
+
+        class _StaleFd:
+            """Reports a positive fd number that is no longer open."""
+
+            def fileno(self):
+                return stale_fd
+
+        assert _stdio_errlog_is_usable(_StaleFd()) is False
+
+    def test_real_stderr_accepted(self):
+
+        from EvoScientist.mcp.client import _stdio_errlog_is_usable
+
+        # sys.__stderr__ is the original console handle; usable unless the
+        # process is a GUI host (pythonw). Skip there since there's nothing
+        # usable to assert.
+        if getattr(sys, "__stderr__", None) is None:
+            pytest.skip("no console stderr in this host")
+        assert _stdio_errlog_is_usable(sys.__stderr__) is True
+
+    def test_safe_errlog_returns_usable_stream(self):
+
+        from EvoScientist.mcp.client import _safe_stdio_errlog, _stdio_errlog_is_usable
+
+        stream, opened_by_us = _safe_stdio_errlog()
+        try:
+            assert _stdio_errlog_is_usable(stream) is True
+            # sys.__stderr__ path is not owned; devnull path is.
+            assert opened_by_us is (stream is not sys.__stderr__)
+        finally:
+            if opened_by_us:
+                stream.close()
+
+    def test_patch_wraps_stdio_client(self):
+        """Importing the MCP client wraps ``mcp.client.stdio.stdio_client``."""
+        import mcp.client.stdio as stdio_mod
+
+        # Importing EvoScientist.mcp.client applies the patch at module load.
+        import EvoScientist.mcp.client  # noqa: F401
+
+        assert getattr(stdio_mod.stdio_client, "_evosci_errlog_safe", False) is True
+
+    def test_wrapped_stdio_client_swaps_bad_errlog(self, monkeypatch):
+        """The wrapped ``stdio_client`` substitutes a usable errlog when the
+        caller's default has no fileno (the issue #418 condition), and closes
+        the wrapper-created fallback after the session exits."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        captured = {}
+        sentinel_server = object()
+
+        @asynccontextmanager
+        async def fake_original(server, errlog, *args, **kwargs):
+            captured["server"] = server
+            captured["errlog"] = errlog
+            yield ("read", "write")
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        # Re-run the patch logic against the fake.
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            cm = stdio_mod.stdio_client(sentinel_server)
+
+            async def _run():
+                async with cm as streams:
+                    assert streams == ("read", "write")
+                    # Inside the context the fallback errlog is usable.
+                    assert mcp_client._stdio_errlog_is_usable(captured["errlog"])
+                    fallback = captured["errlog"]
+                # After exit, a wrapper-owned devnull fallback is closed.
+                return fallback
+
+            fallback = asyncio.run(_run())
+            assert captured["server"] is sentinel_server
+            import sys
+
+            if fallback is not sys.__stderr__:
+                # closed stream is no longer usable
+                assert mcp_client._stdio_errlog_is_usable(fallback) is False
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+    def test_wrapped_stdio_client_keeps_good_errlog(self, monkeypatch):
+        """An explicitly-passed usable errlog is forwarded unchanged and is NOT
+        closed by the wrapper (it's caller-owned)."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        if getattr(sys, "__stderr__", None) is None:
+            pytest.skip("no console stderr in this host")
+
+        captured = {}
+
+        @asynccontextmanager
+        async def fake_original(server, errlog, *args, **kwargs):
+            captured["errlog"] = errlog
+            yield ("read", "write")
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+
+            async def _run():
+                async with stdio_mod.stdio_client(object(), errlog=sys.__stderr__):
+                    pass
+
+            asyncio.run(_run())
+            assert captured["errlog"] is sys.__stderr__
+            # Caller-owned errlog must remain usable (not closed by wrapper).
+            assert mcp_client._stdio_errlog_is_usable(sys.__stderr__) is True
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+    def test_wrapped_stdio_client_swaps_explicit_bad_errlog(self, monkeypatch):
+        """Cover the ``not _stdio_errlog_is_usable(errlog)`` branch: when the
+        caller explicitly passes an errlog whose fileno is unusable (e.g. a
+        redirected stream like Textual's _PrintCapture), the wrapper substitutes
+        a usable fallback rather than forwarding the broken stream."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        captured = {}
+
+        @asynccontextmanager
+        async def fake_original(server, *args, **kwargs):
+            captured["errlog"] = kwargs["errlog"]
+            yield ("read", "write")
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            # Explicitly pass the unusable redirected stream (NOT relying on
+            # the `errlog is ...` default sentinel).
+            bad_errlog = _FakeTextualStderr()
+
+            async def _run():
+                async with stdio_mod.stdio_client(object(), errlog=bad_errlog):
+                    pass
+
+            asyncio.run(_run())
+            # The wrapper must have swapped in a usable fallback, not forwarded
+            # the broken _FakeTextualStderr.
+            assert captured["errlog"] is not bad_errlog
+            assert mcp_client._stdio_errlog_is_usable(captured["errlog"]) is True
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+    def test_fallback_devnull_closed_after_session(self, monkeypatch):
+        """Forcing the devnull fallback path closes the handle once the stdio
+        session exits — no fd leak across MCP reloads."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        # Force the devnull fallback by making sys.__stderr__ unusable.
+        monkeypatch.setattr("sys.__stderr__", None, raising=False)
+
+        opened = {}
+
+        real_open = open
+
+        def tracking_open(path, *args, **kwargs):
+            f = real_open(path, *args, **kwargs)
+            if str(path) == os.devnull:
+                opened["stream"] = f
+            return f
+
+        monkeypatch.setattr("builtins.open", tracking_open)
+
+        @asynccontextmanager
+        async def fake_original(server, errlog, *args, **kwargs):
+            yield ("read", "write")
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            cm = stdio_mod.stdio_client(object())
+
+            async def _run():
+                async with cm:
+                    assert "stream" in opened, "fallback devnull was opened"
+                    fd = opened["stream"].fileno()
+                    assert fd >= 0
+
+            asyncio.run(_run())
+            # After the session exits the devnull stream must be closed.
+            assert opened["stream"].closed is True
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+    def test_fallback_closed_when_construction_fails(self, monkeypatch):
+        """If the SDK's ``stdio_client`` raises during construction, the
+        wrapper-owned fallback stream is still closed — no fd leak on the
+        construction-failure path."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        # Force the devnull fallback by making sys.__stderr__ unusable.
+        monkeypatch.setattr("sys.__stderr__", None, raising=False)
+
+        opened = {}
+        real_open = open
+
+        def tracking_open(path, *args, **kwargs):
+            f = real_open(path, *args, **kwargs)
+            if str(path) == os.devnull:
+                opened["stream"] = f
+            return f
+
+        monkeypatch.setattr("builtins.open", tracking_open)
+
+        @asynccontextmanager
+        async def fake_original(server, *args, **kwargs):
+            # Construction itself fails (e.g. bad command / SDK error).
+            raise RuntimeError("construction failed")
+            yield  # pragma: no cover - unreachable
+
+        import mcp.client.stdio as stdio_mod
+
+        monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+        mcp_client._patch_mcp_stdio_errlog_safe()
+        try:
+            cm = stdio_mod.stdio_client(object())
+
+            async def _run():
+                with pytest.raises(RuntimeError, match="construction failed"):
+                    async with cm:
+                        pass
+
+            asyncio.run(_run())
+            # The fallback stream must be closed despite the construction error.
+            assert "stream" in opened, "fallback devnull was opened"
+            assert opened["stream"].closed is True
+        finally:
+            monkeypatch.setattr(stdio_mod, "stdio_client", fake_original)
+
+    def test_adapter_binds_patched_stdio_client(self):
+        """``langchain-mcp-adapters`` binds ``stdio_client`` via a ``from``
+        import at its module load, so it could capture the unwrapped function
+        if imported before the patch. The patch re-binds the adapter's
+        reference too, so either import order reaches the wrapped function.
+
+        Verifies the binding rather than spawning a real server, which keeps
+        the test deterministic and free of handshake deadlocks.
+        """
+        import mcp.client.stdio as stdio_mod
+        from langchain_mcp_adapters import sessions as adapter_sessions
+
+        import EvoScientist.mcp.client  # noqa: F401 — applies the patch
+
+        # Both the SDK module and the adapter must resolve to the same wrapped
+        # object, regardless of which was imported first.
+        assert adapter_sessions.stdio_client is stdio_mod.stdio_client
+        assert getattr(adapter_sessions.stdio_client, "_evosci_errlog_safe", False)
 
 
 # ---- _filter_tools ----
@@ -1201,7 +1542,6 @@ class TestUvToolCompat:
     def test_install_library_goes_straight_to_pip_outside_uv_tool(self, monkeypatch):
         """install_library outside a uv-tool env must skip ``uv tool install
         <pkg>`` entirely — standalone uv tools aren't importable."""
-        import sys
 
         import EvoScientist.mcp.registry as reg
 
@@ -1257,7 +1597,6 @@ class TestUvToolCompat:
         """install_cli_tool: if the binary isn't in uv's tool bin dir after
         ``uv tool install`` (e.g. package has no console-script), fall
         through to ``uv pip install``."""
-        import sys
 
         import EvoScientist.mcp.registry as reg
 
@@ -1321,7 +1660,6 @@ class TestUvToolCompat:
         assert captured[0][:3] == ["uv", "tool", "install"]
 
     def test_install_library_falls_back_to_pip_when_no_uv(self, monkeypatch):
-        import sys
 
         import EvoScientist.mcp.registry as reg
 
@@ -1349,7 +1687,6 @@ class TestUvToolCompat:
         assert _resolve_command_path("/usr/bin/my-tool") == "/usr/bin/my-tool"
 
     def test_resolve_command_path_found_in_bin_dir(self, monkeypatch, tmp_path):
-        import sys
 
         import EvoScientist.mcp.registry as reg
 
@@ -1372,7 +1709,6 @@ class TestUvToolCompat:
 
     def test_resolve_command_path_windows_exe_suffix(self, monkeypatch, tmp_path):
         import os
-        import sys
 
         import EvoScientist.mcp.registry as reg
 
@@ -1392,7 +1728,6 @@ class TestUvToolCompat:
     def test_resolve_command_path_returns_bare_when_not_found(
         self, monkeypatch, tmp_path
     ):
-        import sys
 
         import EvoScientist.mcp.registry as reg
 

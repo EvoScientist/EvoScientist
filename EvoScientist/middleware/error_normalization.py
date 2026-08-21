@@ -46,6 +46,110 @@ if TYPE_CHECKING:
     from ..llm.errors import ProviderStreamError
 
 
+class ModelOutputTruncatedError(RuntimeError):
+    """The provider exhausted its output budget before producing an answer."""
+
+
+_TRUNCATED_FINISH_REASONS = frozenset(
+    {
+        "length",
+        "max_tokens",
+        "max_output_tokens",
+        "max_completion_tokens",
+        "incomplete",
+    }
+)
+
+
+def _has_answer_content(content: object) -> bool:
+    """Return whether message content contains something beyond reasoning."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return content is not None
+
+    reasoning_types = {
+        "thinking",
+        "redacted_thinking",
+        "reasoning",
+        "reasoning_content",
+    }
+    text_types = {"text", "output_text"}
+    for block in content:
+        if isinstance(block, str):
+            if block.strip():
+                return True
+            continue
+        if not isinstance(block, dict):
+            return True
+        block_type = str(block.get("type", "")).lower()
+        if block_type in reasoning_types:
+            continue
+        if block_type in text_types:
+            text = block.get("text")
+            if isinstance(text, str):
+                if text.strip():
+                    return True
+            elif text:
+                return True
+            continue
+        # Any non-reasoning block is meaningful output (text, image, refusal,
+        # server tool result, etc.), even when its provider-specific payload
+        # does not use a ``text`` key.
+        return True
+    return False
+
+
+def _truncated_empty_message(response: ModelResponse):
+    """Return the empty truncated AI message in *response*, if present."""
+    from langchain_core.messages import AIMessage
+
+    if getattr(response, "structured_response", None) is not None:
+        return None
+    messages = getattr(response, "result", None) or []
+    message = next(
+        (item for item in reversed(messages) if isinstance(item, AIMessage)), None
+    )
+    if message is None:
+        return None
+    if _has_answer_content(message.content):
+        return None
+    if message.tool_calls or getattr(message, "invalid_tool_calls", None):
+        return None
+
+    metadata = message.response_metadata or {}
+    reasons = {
+        str(metadata.get(key, "")).strip().lower()
+        for key in ("finish_reason", "stop_reason", "status")
+    }
+    incomplete_details = metadata.get("incomplete_details")
+    if isinstance(incomplete_details, dict):
+        reasons.add(str(incomplete_details.get("reason", "")).strip().lower())
+    if reasons.isdisjoint(_TRUNCATED_FINISH_REASONS):
+        return None
+    return message
+
+
+def _check_truncated_output(response: ModelResponse) -> ModelResponse:
+    """Raise a visible error instead of silently accepting an empty answer."""
+    message = _truncated_empty_message(response)
+    if message is None:
+        return response
+    metadata = message.response_metadata or {}
+    reason = (
+        metadata.get("finish_reason")
+        or metadata.get("stop_reason")
+        or metadata.get("status")
+        or "output limit"
+    )
+    raise ModelOutputTruncatedError(
+        "The model exhausted its output budget during reasoning and returned "
+        f"no answer (finish reason: {reason}). Lower reasoning_effort, disable "
+        "reasoning with none when supported, or increase the provider "
+        "output-token limit."
+    )
+
+
 def _should_pass_through(exc: BaseException) -> bool:
     """True if *exc* is a LangGraph-level signal that must propagate
     untouched — either a control-flow signal or a structural error
@@ -210,7 +314,7 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         try:
-            return handler(request)
+            return _check_truncated_output(handler(request))
         except Exception as exc:
             normalized = _normalize(request, exc)
             if normalized is None:
@@ -223,7 +327,7 @@ class ErrorNormalizationMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
         try:
-            return await handler(request)
+            return _check_truncated_output(await handler(request))
         except Exception as exc:
             normalized = _normalize(request, exc)
             if normalized is None:

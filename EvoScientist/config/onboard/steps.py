@@ -323,6 +323,10 @@ def _step_provider(
             value="requesty",
         ),
         Choice(
+            title="Novita (aggregator — DeepSeek, Qwen, GLM, etc.)",
+            value="novita",
+        ),
+        Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
         ),
@@ -1006,6 +1010,11 @@ _RECOMMENDED_SKILLS = [
     {
         "label": "HuggingFace Skills  (dataset creation, model training & evaluation, third party by HuggingFace)",
         "source": "huggingface/skills@skills",
+    },
+    # ── Third-party (NVIDIA BioNeMo) ──
+    {
+        "label": "BioNeMo Skills  (31 protein folding, docking, generative chemistry & genomics skills, third party by NVIDIA)",
+        "source": "NVIDIA-BioNeMo/bionemo-agent-toolkit@plugins/bionemo-agent-toolkit/skills",
     },
 ]
 

@@ -120,6 +120,7 @@ _PROVIDER_KEY_ATTR = {
     "openrouter": "openrouter_api_key",
     "atlascloud": "atlascloud_api_key",
     "requesty": "requesty_api_key",
+    "novita": "novita_api_key",
     "deepseek": "deepseek_api_key",
     "zhipu": "zhipu_api_key",
     "zhipu-code": "zhipu_api_key",

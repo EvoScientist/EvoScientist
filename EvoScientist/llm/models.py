@@ -3,9 +3,9 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and custom
-OpenAI/Anthropic-compatible endpoints) and convenient short names for common
-models.
+Novita, ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and
+custom OpenAI/Anthropic-compatible endpoints) and convenient short names for
+common models.
 """
 
 from __future__ import annotations
@@ -94,6 +94,63 @@ def _resolve_codex_client_version() -> str:
 def _resolve_reasoning_effort(default: str) -> str:
     """Return the configured reasoning effort or a provider-specific default."""
     return os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
+
+
+# Qwen 3.8 Max canonical levels and documented OpenAI alias mappings:
+# https://docs.qwencloud.com/api-reference/chat/openai-chat#reasoning-effort
+_DASHSCOPE_QWEN38_REASONING_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+
+
+def _validate_dashscope_reasoning_effort(
+    provider: str,
+    model_id: str,
+    effort: str,
+) -> None:
+    """Reject reasoning levels unsupported by DashScope Qwen 3.8 Max."""
+    if effort not in _DASHSCOPE_QWEN38_REASONING_EFFORTS:
+        choices = ", ".join(sorted(_DASHSCOPE_QWEN38_REASONING_EFFORTS))
+        raise ValueError(
+            f"Unsupported EVOSCIENTIST_REASONING_EFFORT={effort!r} for "
+            f"{provider} model {model_id!r}. Supported values: {choices}."
+        )
+
+
+def _apply_openai_compat_reasoning_config(
+    provider: str,
+    model_id: str,
+    kwargs: dict[str, Any],
+) -> None:
+    """Apply reasoning controls supported by OpenAI-compatible providers.
+
+    Routed providers deliberately skip the native-OpenAI branch in
+    :func:`_apply_auto_config`, because most compatible endpoints reject
+    OpenAI-only ``reasoning`` payloads.  A small subset does support the
+    standard ``reasoning_effort`` field, though:
+
+    * DashScope Qwen 3.8 Max supports ``low`` / ``medium`` / ``xhigh`` and
+      maps the OpenAI aliases (including ``none``).  Its server default is
+      extremely large, so use the standard ``medium`` level unless the user
+      selected another level.
+    * ``custom-openai`` is user-owned.  Forward an *explicit* setting only;
+      with no setting, preserve compatibility with endpoints that reject the
+      field (including many non-reasoning OpenAI-compatible APIs).
+
+    Explicit caller kwargs always win.
+    """
+    configured = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip()
+    short_model_id = model_id.rsplit("/", 1)[-1]
+
+    if provider == "dashscope" and short_model_id.startswith("qwen3.8-max"):
+        if "reasoning_effort" not in kwargs:
+            effort = configured or "medium"
+            _validate_dashscope_reasoning_effort(provider, model_id, effort)
+            kwargs["reasoning_effort"] = effort
+        return
+
+    if provider == "custom-openai" and configured:
+        kwargs.setdefault("reasoning_effort", configured)
 
 
 def _is_deepseek_endpoint(base_url: str | None) -> bool:
@@ -396,6 +453,7 @@ def get_chat_model(
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
+        _apply_openai_compat_reasoning_config(provider, model_id, kwargs)
         # SiliconFlow: disable thinking — LangChain drops reasoning_content
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
