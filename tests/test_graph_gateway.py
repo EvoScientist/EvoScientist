@@ -801,7 +801,7 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert created_metadata["agent_name"] is None
     assert created_metadata["workspace_dir"] == "/tmp/ws"
     assert isinstance(created_metadata["updated_at"], str)
-    assert threads.metadata_updates == []
+    assert threads.metadata_updates == [("abc12345", threads.created[0]["metadata"])]
     assert threads.stream_calls == [("abc12345", "writing-agent")]
     assert stream.run.starts == [
         {
