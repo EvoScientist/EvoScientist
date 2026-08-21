@@ -1228,7 +1228,9 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
             event
             async for event in gateway.stream_events(
                 RunRequest(
-                    message=Command(resume={"decisions": [{"allowed": True}]}),
+                    message=Command(
+                        resume={"interrupt-1": {"decisions": [{"allowed": True}]}}
+                    ),
                     thread_id="abc12345",
                 )
             )
@@ -1294,7 +1296,9 @@ async def test_langgraph_server_gateway_resume_discovers_interrupt_from_state():
         event
         async for event in gateway.stream_events(
             RunRequest(
-                message=Command(resume={"decisions": [{"allowed": True}]}),
+                message=Command(
+                    resume={"state-interrupt-1": {"decisions": [{"allowed": True}]}}
+                ),
                 thread_id="abc12345",
             )
         )
@@ -1340,7 +1344,9 @@ async def test_langgraph_server_gateway_resume_raises_on_multiple_interrupts():
     with pytest.raises(RuntimeError, match="2 pending interrupts"):
         async for _event in gateway.stream_events(
             RunRequest(
-                message=Command(resume={"decisions": [{"allowed": True}]}),
+                message=Command(
+                    resume={"interrupt-a": {"decisions": [{"allowed": True}]}}
+                ),
                 thread_id="abc12345",
             )
         ):
@@ -1370,11 +1376,62 @@ async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
     with pytest.raises(RuntimeError, match="No pending interrupt"):
         async for _event in gateway.stream_events(
             RunRequest(
-                message=Command(resume={"decisions": [{"allowed": True}]}),
+                message=Command(
+                    resume={"unknown-id": {"decisions": [{"allowed": True}]}}
+                ),
                 thread_id="abc12345",
             )
         ):
             pass
+
+
+async def test_langgraph_server_gateway_abort_during_subagent_does_not_raise():
+    """aclose() mid-subagent must not raise RuntimeError from yields in finally."""
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "lifecycle",
+                "params": {
+                    "namespace": ["data-analysis-agent:tool-1"],
+                    "data": {"event": "started"},
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": ["data-analysis-agent:tool-1"],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    gen = gateway.stream_events(RunRequest(message="hi", thread_id="abc12345"))
+    await gen.__anext__()
+    # Consumer aborts while a subagent is still tracked
+    await gen.aclose()
 
 
 async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
