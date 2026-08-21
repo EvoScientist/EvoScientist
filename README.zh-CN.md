@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.7" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.8" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 8 月 21 日]** **[v0.2.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.8)** — deploy 模式图重建从约 15 秒降至 1 秒内；resume 命令不再崩溃清空会话历史；新增 Novita AI provider；onboard 推荐技能包新增 NVIDIA BioNeMo Agent Toolkit；路由 reasoning 参数收敛、空截断显式报错；文档新增订阅 OAuth 配置指南；升级 deepagents 0.7.8。
 - **[2026 年 8 月 14 日]** **[v0.2.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.7)** — 启动更快（依赖延迟加载、langgraph dev 服务保活复用、会话列表索引查询）；新增模型：Gemini 3.7 Flash（Google 与 OpenRouter）、DeepSeek V4 Pro 0813、Grok 4.6、GLM-5.3（智谱与 OpenRouter）；配置加密 webhook 的渠道拒绝未签名 POST；MCP stdio 服务在重定向流下可正常启动（修复 Windows 报错）；子 agent 工具改在派发时解析；`/compact` 历史 offload 适配 deepagents 0.7.6。
 - **[2026 年 8 月 7 日]** **[v0.2.6](https://github.com/EvoScientist/EvoScientist/releases/tag/V0.2.6)** — Agent teams：可将已安装的专家技能邀请进会话（`/expert <name>`），支持轮内咨询、并行面板与后台任务；langgraph dev 后端与 WebUI 绑定地址可配置（默认仅回环）；新增火山引擎代码计划 provider（`glm-5.2`、`kimi-k2.5`）；Qwen3.8-Max 可在 DashScope 与 OpenRouter 选用（1M 上下文）；deepagents 0.7.5，不支持的媒体改为占位符、不再触发 provider 400；修复 Kimi/Zhipu 会话的空白 tool-call ID 问题。
 - **[2026 年 8 月 1 日]** **[v0.2.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.5)** — 主 agent 与同步/异步子 agent 统一 human-in-the-loop 审批；升级 deepagents 0.7.0，内置 prompt 更精简，新增递归 `delete` 工具、与 `execute` 同级审批；新增 Requesty 与 Atlas Cloud 两个 LLM provider；修复无名工具调用、同步子 agent 的中断工具历史，以及 deploy 模式端口传播。
