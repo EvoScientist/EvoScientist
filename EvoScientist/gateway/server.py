@@ -568,6 +568,19 @@ class LangGraphServerGateway:
                 request.target.workspace_dir if request.target is not None else None
             ),
         )
+        # Refresh metadata on every run: ensure_thread_exists is a no-op on
+        # existing threads (if_exists="do_nothing"), so without this update
+        # fields like updated_at and model would go stale after the first run.
+        await self.thread_store.client.threads.update(
+            request.thread_id,
+            metadata=_build_thread_metadata(
+                graph_id=self._target_graph_id(request.target),
+                workspace_dir=(
+                    request.target.workspace_dir if request.target is not None else None
+                ),
+                metadata=request.metadata,
+            ),
+        )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
                 await self._respond_to_interrupt(
@@ -601,8 +614,12 @@ class LangGraphServerGateway:
 
         interrupts = list(stream.interrupts)
         if not interrupts:
-            state = await self.thread_store.client.threads.get_state(thread_id)
-            interrupts = _state_interrupts(state)
+            try:
+                state = await self.thread_store.client.threads.get_state(thread_id)
+            except NotFoundError:
+                state = None
+            if state is not None:
+                interrupts = _state_interrupts(state)
 
         if len(interrupts) > 1:
             raise RuntimeError(
@@ -631,6 +648,14 @@ class LangGraphServerGateway:
             and interrupt_id in response
         ):
             resolved = response[interrupt_id]
+        elif isinstance(response, Mapping) and len(response) == 1 and interrupt_id:
+            logger.warning(
+                "Resume payload key %s does not match pending interrupt %s on "
+                "thread %s; forwarding payload unchanged",
+                next(iter(response)),
+                interrupt_id,
+                thread_id,
+            )
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
 
     async def _repair_stuck_thread_state(self, thread_id: str) -> None:
@@ -786,11 +811,11 @@ class LangGraphServerGateway:
 
         run_started = False
         run_completed = False
+        emitted_interrupt = False
         try:
             async with stream:
                 await self._start_or_resume(stream, request)
                 run_started = True
-                emitted_interrupt = False
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
@@ -815,11 +840,12 @@ class LangGraphServerGateway:
                 yield event
         except Exception as exc:
             yield emitter.error(str(exc)).data
-            tracker.finish()
+            for event in tracker.finish():
+                yield event
             await self._repair_stuck_thread_state(request.thread_id)
             raise
         finally:
-            if run_started and not run_completed:
+            if run_started and not run_completed and not emitted_interrupt:
                 await _acancel_thread_runs(
                     self.thread_store.client,
                     request.thread_id,
