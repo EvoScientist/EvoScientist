@@ -575,10 +575,10 @@ def _route_async_specs_through_evo_middleware(
     route all async dispatch through our subclass, we strip AsyncSubAgent
     specs from ``subs`` here and hand them to our middleware.
 
-    Also folds in ``AsyncSubAgent`` specs for installed
-    installed expert skills — all pointing at the shared
-    ``expert-container-async`` graph, marked ``is_expert=True`` so the
-    middleware requires a payload with ``skill_name``.
+    Also folds in ``AsyncSubAgent`` specs for installed expert skills —
+    all pointing at the shared ``expert-container-async`` graph, marked
+    ``is_expert=True`` so the middleware requires a payload with
+    ``skill_name``.
 
     The completion watcher (``AsyncWatcherMiddleware``) is found or created
     before the middleware so the middleware's resolve-on-miss start tool can
@@ -656,6 +656,12 @@ def _route_async_specs_through_evo_middleware(
             watcher = None
         else:
             watcher._clients._agents.update({s["name"]: s for s in expert_specs})
+    # The second ``hasattr`` is not redundant with the one in the ``elif``
+    # above: that check only runs when ``expert_specs`` is non-empty. When a
+    # pre-existing watcher has an empty expert set, this is the only guard
+    # standing between an upstream rename of ``_ClientCache._agents`` and an
+    # AttributeError that would kill agent construction — without it, the
+    # drift degrades to "no completion nudges" instead of crashing.
     if watcher is not None and hasattr(watcher._clients, "_agents"):
         watcher_agents = watcher._clients._agents
 
@@ -677,7 +683,12 @@ def _route_async_specs_through_evo_middleware(
         base_middleware.insert(
             0,
             EvoAsyncSubAgentMiddleware(
-                async_subagents=async_specs, watcher_agents=watcher_agents
+                async_subagents=async_specs,
+                watcher_agents=watcher_agents,
+                # The construction cfg, so resolve-on-miss specs the same
+                # langgraph_dev_port the construction-time specs used instead
+                # of re-reading config from disk at dispatch time.
+                cfg=cfg,
             ),
         )
     return sync_subs

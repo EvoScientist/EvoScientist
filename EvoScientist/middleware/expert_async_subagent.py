@@ -138,6 +138,7 @@ def _build_task_envelope(
 def _resolve_missing_experts(
     agent_map: dict[str, AsyncSubAgent],
     watcher_agents: dict[str, AsyncSubAgent] | None,
+    cfg: Any | None = None,
 ) -> None:
     """Resolve newly installed experts into the dispatch and watcher tables.
 
@@ -154,10 +155,18 @@ def _resolve_missing_experts(
     spec costs nothing extra and N newly installed experts resolve on the
     first miss rather than one walk each.
 
-    ``setdefault`` semantics — an existing entry is never overwritten. The
-    middleware's constructor already raised on duplicate names at build
-    time, so an overwrite here could only smuggle in a spec the running
-    agent was not validated against.
+    ``setdefault`` semantics on both dicts — an existing entry is never
+    overwritten. The middleware's constructor already raised on duplicate
+    names at build time, so an overwrite here could only smuggle in a spec
+    the running agent was not validated against.
+
+    *cfg* is the config the agent was constructed with, threaded through
+    the middleware. The specs must point at the same ``langgraph_dev_port``
+    the construction-time specs used — re-deriving config from disk here
+    (the builder's ``get_effective_config()`` fallback) would let a
+    mid-session port change spec a newly resolved expert onto a port the
+    running dev subprocess is not on: dispatch accepts the name and only
+    ``runs.create`` fails, an advertise/provide split.
 
     ``watcher_agents`` is ``AsyncWatcherMiddleware._clients._agents`` —
     a *separate* dict from ``agent_map`` (the watcher's cache was built
@@ -173,11 +182,9 @@ def _resolve_missing_experts(
     """
     from ..subagents.expert_container_async import build_expert_async_subagent_specs
 
-    for spec in build_expert_async_subagent_specs():
+    for spec in build_expert_async_subagent_specs(cfg=cfg):
         name = spec["name"]
-        if name in agent_map:
-            continue
-        agent_map[name] = spec
+        agent_map.setdefault(name, spec)
         if watcher_agents is not None:
             watcher_agents.setdefault(name, spec)
 
@@ -187,6 +194,7 @@ def _build_expert_start_tool(
     clients: _ClientCache,
     tool_description: str,
     watcher_agents: dict[str, AsyncSubAgent] | None = None,
+    cfg: Any | None = None,
 ) -> StructuredTool:
     """Build the skill-name-injecting ``start_async_task`` tool.
 
@@ -209,7 +217,7 @@ def _build_expert_start_tool(
     ) -> str | Command:
         error = _validate_agent_type(agent_map, subagent_type)
         if error:
-            _resolve_missing_experts(agent_map, watcher_agents)
+            _resolve_missing_experts(agent_map, watcher_agents, cfg)
             error = _validate_agent_type(agent_map, subagent_type)
             if error:
                 return error
@@ -242,7 +250,9 @@ def _build_expert_start_tool(
             # to_thread: the resolver walks the skills tree synchronously,
             # and this coroutine runs on the event loop where langgraph-dev's
             # blockbuster guard raises BlockingError on filesystem calls.
-            await asyncio.to_thread(_resolve_missing_experts, agent_map, watcher_agents)
+            await asyncio.to_thread(
+                _resolve_missing_experts, agent_map, watcher_agents, cfg
+            )
             error = _validate_agent_type(agent_map, subagent_type)
             if error:
                 return error
@@ -296,6 +306,7 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         async_subagents: list[AsyncSubAgent],
         system_prompt: str | None = None,
         watcher_agents: dict[str, AsyncSubAgent] | None = None,
+        cfg: Any | None = None,
     ) -> None:
         # Install the model-passthrough patch BEFORE ``super().__init__(...)``
         # so upstream's ``_build_async_subagent_tools`` sees the patched
@@ -337,7 +348,9 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         )
         launch_desc = ASYNC_TASK_TOOL_DESCRIPTION.format(available_agents=agents_desc)
         self.tools = [
-            _build_expert_start_tool(agent_map, clients, launch_desc, watcher_agents),
+            _build_expert_start_tool(
+                agent_map, clients, launch_desc, watcher_agents, cfg
+            ),
             _build_check_tool(clients),
             _build_update_tool(agent_map, clients),
             _build_cancel_tool(clients),

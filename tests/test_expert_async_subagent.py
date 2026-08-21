@@ -505,6 +505,37 @@ class TestResolveOnMiss:
         assert "Unknown async subagent type" in result
         assert "brand-new-expert" in result
 
+    def test_resolution_uses_the_construction_cfg(self):
+        """The miss-walk must spec against the cfg the agent was constructed
+        with, not a fresh ``get_effective_config()`` read. Re-deriving config
+        at dispatch time would let a mid-session ``langgraph_dev_port`` change
+        spec a newly resolved expert onto a port the running dev subprocess
+        is not on — dispatch accepts the name, only ``runs.create`` fails."""
+        construction_cfg = SimpleNamespace(enable_async_subagents=True)
+        mw = EvoAsyncSubAgentMiddleware(
+            async_subagents=[_standard_spec()], cfg=construction_cfg
+        )
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        captured: dict = {}
+
+        def capture_cfg(cfg=None, **kwargs):
+            captured["cfg"] = cfg
+            return [_newly_installed_expert_spec()]
+
+        with patch(
+            "EvoScientist.subagents.expert_container_async"
+            ".build_expert_async_subagent_specs",
+            side_effect=capture_cfg,
+        ):
+            start.func(
+                description="hi",
+                subagent_type="brand-new-expert",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        assert captured["cfg"] is construction_cfg
+
 
 class TestAstartResolveOnMiss:
     """Async twins of ``TestResolveOnMiss`` — the coroutine langgraph_api
