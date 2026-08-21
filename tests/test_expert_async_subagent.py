@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -576,7 +577,7 @@ class TestAstartResolveOnMiss:
         assert kwargs["input"]["skill_name"] == "brand-new-expert"
         # The resolution ran off the event loop — langgraph-dev's blockbuster
         # guard turns a skills-tree walk on the loop into a BlockingError.
-        assert to_thread_calls == ["_resolve_missing_experts"]
+        assert to_thread_calls == ["_resolve_merge_validate"]
 
     @pytest.mark.asyncio
     async def test_astart_resolution_updates_the_watcher_dict(self):
@@ -623,3 +624,186 @@ class TestAstartResolveOnMiss:
             )
         assert isinstance(result, str)
         assert "Unknown async subagent type" in result
+
+    @pytest.mark.asyncio
+    async def test_astart_negative_miss_returns_refreshed_error(self):
+        """The async miss path must honor the threaded call's return value:
+        the error comes from the worker's merge-and-validate under the
+        lock, so its allowed-type list already includes the names the walk
+        just merged. A caller that dropped the ``to_thread`` result and
+        re-derived the error from a stale message would lose the new
+        names."""
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        with patch(
+            "EvoScientist.subagents.expert_container_async"
+            ".build_expert_async_subagent_specs",
+            return_value=[_newly_installed_expert_spec()],
+        ):
+            result = await start.coroutine(
+                description="hi",
+                subagent_type="still-does-not-exist",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+        assert isinstance(result, str)
+        assert "Unknown async subagent type" in result
+        assert "brand-new-expert" in result
+
+    @pytest.mark.asyncio
+    async def test_astart_known_name_dispatch_skips_the_lock(self):
+        """A known-name dispatch on the event loop must never touch
+        ``_resolve_lock``: the miss check is a keyed lookup, and all lock
+        work lives on the ``to_thread`` worker. Holding the lock from this
+        coroutine pins the property — the dispatch completes while the
+        lock is unavailable. The pre-reshape shape ran its validation
+        under the lock on the loop and hung here until the timeout."""
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_async_client()
+        acquired = mw._resolve_lock.acquire()
+        assert acquired
+        try:
+            with patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+                return_value=client,
+            ):
+                result = await asyncio.wait_for(
+                    start.coroutine(
+                        description="hi",
+                        subagent_type="writing-agent",
+                        runtime=SimpleNamespace(tool_call_id="tc1"),
+                    ),
+                    timeout=2.0,
+                )
+        finally:
+            mw._resolve_lock.release()
+        assert "async_tasks" in result.update
+
+
+class TestResolveOnMissLocking:
+    """The resolver's merge and the start tool's map iteration serialize on
+    one lock. Deterministic, blocking-based — no timing lottery: each test
+    blocks a participant on an event we control and asserts the other side
+    genuinely waits for the lock."""
+
+    def test_resolver_merge_waits_for_the_lock(self):
+        """With the lock held by an unrelated holder, the resolver's merge
+        must not insert into ``agent_map`` until the lock is released.
+        Without the lock parameter (or without locking in the resolver),
+        the ``setdefault`` lands immediately and the mid-hold assertion
+        fails. The return value is the refreshed validation: ``None`` once
+        the merged name resolves."""
+        import threading
+        import time
+
+        from EvoScientist.middleware.expert_async_subagent import (
+            _resolve_merge_validate,
+        )
+
+        agent_map: dict = {"writing-agent": _standard_spec()}
+        watcher_agents: dict = {}
+        lock = threading.Lock()
+        done = threading.Event()
+
+        def resolver():
+            with patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[_newly_installed_expert_spec()],
+            ):
+                result = _resolve_merge_validate(
+                    agent_map, watcher_agents, None, "brand-new-expert", lock
+                )
+            assert result is None
+            done.set()
+
+        with lock:
+            thread = threading.Thread(target=resolver)
+            thread.start()
+            time.sleep(0.05)
+            # The merge is locked out while we hold the lock.
+            assert "brand-new-expert" not in agent_map
+
+        thread.join(timeout=5)
+        assert done.is_set()
+        assert "brand-new-expert" in agent_map
+        assert "brand-new-expert" in watcher_agents
+
+    def test_validate_blocks_while_resolver_holds_the_lock(self):
+        """End to end through the middleware's own lock, on the SYNC tool
+        path (a blocked coroutine would freeze the event loop, making the
+        blocking unobservable from the same loop; the sync variant shares
+        the identical locked-validation closure). A resolver whose merge
+        blocks on an event we control holds the lock; a concurrent
+        ``start_async_task`` at a KNOWN name (validation only, no
+        resolution) must not complete while the lock is held — its
+        ``_validate_agent_type`` joins over ``agent_map`` under the same
+        lock. Without the lock, the known-name dispatch completes during
+        the resolver's block and the ``thread.is_alive()`` assertion
+        fails."""
+        import threading
+        import time
+
+        from EvoScientist.middleware import expert_async_subagent as mod
+
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        resolver_entered = threading.Event()
+        resolver_release = threading.Event()
+        orig_merge = mod._merge_expert_specs
+
+        def blocking_merge(agent_map, watcher_agents, specs):
+            resolver_entered.set()
+            assert resolver_release.wait(timeout=10)
+            orig_merge(agent_map, watcher_agents, specs)
+
+        def miss_dispatch():
+            with patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[_newly_installed_expert_spec()],
+            ):
+                return start.func(
+                    description="one",
+                    subagent_type="brand-new-expert",
+                    runtime=SimpleNamespace(tool_call_id="tc1"),
+                )
+
+        def known_name_dispatch(done_event):
+            client = _fake_sync_client()
+            with patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ):
+                start.func(
+                    description="two",
+                    subagent_type="writing-agent",
+                    runtime=SimpleNamespace(tool_call_id="tc2"),
+                )
+            done_event.set()
+
+        with patch.object(mod, "_merge_expert_specs", blocking_merge):
+            # Thread A: a miss -> resolver enters the merge, acquires the
+            # lock, and blocks on our event.
+            t1 = threading.Thread(target=miss_dispatch)
+            t1.start()
+            assert resolver_entered.wait(timeout=10)
+
+            # Thread B: a KNOWN name -> validation only. Must block on the
+            # lock the resolver holds.
+            b_done = threading.Event()
+            t2 = threading.Thread(target=known_name_dispatch, args=(b_done,))
+            t2.start()
+            time.sleep(0.1)
+            assert t2.is_alive()
+            assert not b_done.is_set()
+
+            resolver_release.set()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+            assert b_done.is_set()
+            assert not t1.is_alive()
+            assert not t2.is_alive()
