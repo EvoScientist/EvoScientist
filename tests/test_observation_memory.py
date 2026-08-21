@@ -3357,9 +3357,17 @@ class TestObservationCache:
         insert and recency update. The switch interval is shrunk so the GIL
         switches threads inside those windows often enough to make the race
         reproducible; it is restored before the test exits.
+
+        The hammer is deadline-bounded rather than iteration-bounded: a fixed
+        iteration count overran the 30s CI per-test timeout on Windows runners
+        (context switches and file I/O are much slower there), while on fast
+        runners a fixed count needlessly capped race coverage. A deadline
+        finishes within budget on every platform and still maximizes race
+        opportunities where threads are cheap.
         """
         import sys
         import threading
+        import time
 
         from EvoScientist.memory.observations import store
 
@@ -3375,10 +3383,11 @@ class TestObservationCache:
         monkeypatch.setattr(store, "_max_cached_files", lambda: 1)
 
         errors: list[BaseException] = []
+        deadline = time.monotonic() + 8.0
 
         def _hammer(memory_dir):
             try:
-                for _ in range(500):
+                while time.monotonic() < deadline and not errors:
                     docs = list_observation_documents(
                         memory_dir=memory_dir, project_id="P-test"
                     )
