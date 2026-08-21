@@ -221,6 +221,13 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
 def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
     """Build ``AsyncSubAgent``-shaped specs for every installed expert skill.
 
+    Called from two places: agent construction (fold-in via
+    ``EvoScientist.py::_route_async_specs_through_evo_middleware``) and the
+    resolve-on-miss path in ``middleware/expert_async_subagent.py`` — an
+    expert installed mid-session is spec'd here the first time
+    ``start_async_task`` names it, which is what makes background dispatch
+    live without an agent rebuild.
+
     Every expert gets a background reach here, and
     ``build_expert_subagent_specs`` independently gives every expert an
     in-turn reach. Nothing classifies a skill into one or the other — the
