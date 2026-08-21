@@ -133,8 +133,8 @@ class TestComposePrompt:
         assert composed.startswith("ERROR:")
         assert "empty SKILL.md body" in composed
 
-    def test_agents_md_expert_prompted_from_actor_definition(self):
-        """AGENTS.md experts are prompted from AGENTS.md, not SKILL.md.
+    def test_expert_md_expert_prompted_from_actor_definition(self):
+        """EXPERT.md experts are prompted from EXPERT.md, not SKILL.md.
 
         Both files exist for these skills, so composing from ``.body`` would
         silently work — and hand the expert a knowledge document written for
@@ -146,8 +146,8 @@ class TestComposePrompt:
             role="",
             body="# Knowledge\n\nThe 5-aspect checklist.\n",
         )
-        info.expert_source = "agents_md"
-        info.agents_body = "## Persona\n\nYou are an adversarial reviewer.\n"
+        info.expert_source = "expert_md"
+        info.expert_body = "## Persona\n\nYou are an adversarial reviewer.\n"
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[info],
@@ -156,10 +156,10 @@ class TestComposePrompt:
         assert "You are an adversarial reviewer." in composed
         assert "5-aspect checklist" not in composed
 
-    def test_empty_actor_definition_names_agents_md_in_error(self):
+    def test_empty_actor_definition_names_expert_md_in_error(self):
         """The error cue names the file the author has to fix.
 
-        An AGENTS.md expert with a healthy SKILL.md would otherwise be told
+        An EXPERT.md expert with a healthy SKILL.md would otherwise be told
         its SKILL.md body is empty, sending the author to the wrong file.
         """
         mw = ExpertSkillLoaderMiddleware()
@@ -168,15 +168,15 @@ class TestComposePrompt:
             role="",
             body="# Knowledge\n\nPlenty of content here.\n",
         )
-        info.expert_source = "agents_md"
-        info.agents_body = "  \n"
+        info.expert_source = "expert_md"
+        info.expert_body = "  \n"
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[info],
         ):
             composed = mw._compose_prompt({"skill_name": "paper-review"})
         assert composed.startswith("ERROR:")
-        assert "empty AGENTS.md body" in composed
+        assert "empty EXPERT.md body" in composed
         assert "paper-review" in composed
 
     def test_runtime_context_tail_surfaces_skill_name(self):

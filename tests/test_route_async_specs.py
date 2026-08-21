@@ -120,19 +120,19 @@ class TestBuildExpertAsyncSubagentSpecs:
             specs = build_expert_async_subagent_specs(cfg=cfg)
         assert [s["name"] for s in specs] == ["literature-review"]
 
-    def test_agents_md_expert_registered_and_gated_on_its_own_file(self):
-        """AGENTS.md experts reach async dispatch, and their gate is AGENTS.md.
+    def test_expert_md_expert_registered_and_gated_on_its_own_file(self):
+        """EXPERT.md experts reach async dispatch, and their gate is EXPERT.md.
 
         The empty-persona gate has to follow the skill's contract: a healthy
         SKILL.md must not vouch for a skill whose actor definition is blank.
         """
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         healthy = _skill("paper-review")
-        healthy.expert_source = "agents_md"
-        healthy.agents_body = "## Persona\n\nYou are an adversarial reviewer.\n"
+        healthy.expert_source = "expert_md"
+        healthy.expert_body = "## Persona\n\nYou are an adversarial reviewer.\n"
         blank_actor = _skill("blank-actor")
-        blank_actor.expert_source = "agents_md"
-        blank_actor.agents_body = "   \n"  # SKILL.md body is fine; actor isn't
+        blank_actor.expert_source = "expert_md"
+        blank_actor.expert_body = "   \n"  # SKILL.md body is fine; actor isn't
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",

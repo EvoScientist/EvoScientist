@@ -58,10 +58,10 @@ class _FakeSkillInfo:
     # exercise the empty-body reject path pass ``body=""``.
     body: str = "persona"
     # Legacy-frontmatter expert by default: ``expert_prompt_body`` reads
-    # ``body`` for these. Set ``expert_source="agents_md"`` plus
-    # ``agents_body`` to fake an expert on the current contract.
+    # ``body`` for these. Set ``expert_source="expert_md"`` plus
+    # ``expert_body`` to fake an expert on the current contract.
     expert_source: str = "frontmatter"
-    agents_body: str = ""
+    expert_body: str = ""
 
 
 def _make_ctx(active_teams: list[str] | None = None) -> tuple[CommandContext, _FakeUI]:
