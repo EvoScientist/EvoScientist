@@ -1546,11 +1546,13 @@ async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failu
         ):
             pass
 
-    assert "abc12345" in threads.state_gets
+    assert threads.state_gets.count("abc12345") >= 2
     assert threads.state_updates == []
 
 
-async def test_langgraph_server_gateway_repair_swallows_update_state_failure():
+async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
+    caplog: pytest.LogCaptureFixture,
+):
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
             for event in self.events:
@@ -1596,11 +1598,17 @@ async def test_langgraph_server_gateway_repair_swallows_update_state_failure():
         LangGraphServerThreadStore(client=client),
     )
 
-    with pytest.raises(RuntimeError, match="provider connection lost"):
-        async for _event in gateway.stream_events(
-            RunRequest(message="hi", thread_id="abc12345")
-        ):
-            pass
+    with caplog.at_level("DEBUG", logger="EvoScientist.gateway.server"):
+        with pytest.raises(RuntimeError, match="provider connection lost"):
+            async for _event in gateway.stream_events(
+                RunRequest(message="hi", thread_id="abc12345")
+            ):
+                pass
+
+    assert any(
+        "Could not clear interrupted thread state" in record.message
+        for record in caplog.records
+    )
 
 
 async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
