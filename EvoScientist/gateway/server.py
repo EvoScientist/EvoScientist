@@ -618,7 +618,20 @@ class LangGraphServerGateway:
         interrupt_id = str(
             interrupts[0].get("interrupt_id") or interrupts[0].get("id") or ""
         )
-        await stream.run.respond(response, interrupt_id=interrupt_id or None)
+        # build_hitl_resume produces Command(resume={interrupt_id: {decisions}}),
+        # keyed by id so the graph can route multi-interrupt resumes. The server's
+        # run.respond takes interrupt_id separately, so the id-keyed wrapper must
+        # be unwrapped to avoid double-wrapping the payload server-side (the
+        # input.respond handler re-wraps response into {interrupt_id: response}).
+        resolved = response
+        if (
+            isinstance(response, Mapping)
+            and len(response) == 1
+            and interrupt_id
+            and interrupt_id in response
+        ):
+            resolved = response[interrupt_id]
+        await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
 
     async def _repair_stuck_thread_state(self, thread_id: str) -> None:
         """Clear a non-empty ``next`` left by a failed run, preserving HITL pauses.
@@ -798,8 +811,11 @@ class LangGraphServerGateway:
                         processor,
                     ):
                         yield event
+            for event in tracker.finish():
+                yield event
         except Exception as exc:
             yield emitter.error(str(exc)).data
+            tracker.finish()
             await self._repair_stuck_thread_state(request.thread_id)
             raise
         finally:
@@ -809,6 +825,4 @@ class LangGraphServerGateway:
                     request.thread_id,
                     name="incomplete run",
                 )
-            for event in tracker.finish():
-                yield event
         yield emitter.done(processor.full_response).data
