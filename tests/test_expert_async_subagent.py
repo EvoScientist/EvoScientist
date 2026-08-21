@@ -238,11 +238,18 @@ class TestStartToolInvocation:
         mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
-        result = start.func(
-            description="hi",
-            subagent_type="does-not-exist",
-            runtime=SimpleNamespace(tool_call_id="tc1"),
-        )
+        # Patch the resolve-on-miss walk so the negative-miss path stays
+        # hermetic — an unpatched call would read the real skills tree.
+        with patch(
+            "EvoScientist.subagents.expert_container_async"
+            ".build_expert_async_subagent_specs",
+            return_value=[],
+        ):
+            result = start.func(
+                description="hi",
+                subagent_type="does-not-exist",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
         assert isinstance(result, str)
         assert "Unknown async subagent type" in result
 
@@ -331,10 +338,257 @@ class TestAstartToolInvocation:
         mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
-        result = await start.coroutine(
-            description="hi",
-            subagent_type="does-not-exist",
-            runtime=SimpleNamespace(tool_call_id="tc1"),
+        # Patch the resolve-on-miss walk — see the sync twin.
+        with patch(
+            "EvoScientist.subagents.expert_container_async"
+            ".build_expert_async_subagent_specs",
+            return_value=[],
+        ):
+            result = await start.coroutine(
+                description="hi",
+                subagent_type="does-not-exist",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+        assert isinstance(result, str)
+        assert "Unknown async subagent type" in result
+
+
+def _newly_installed_expert_spec():
+    """An expert spec as ``build_expert_async_subagent_specs`` would return
+    it for a skill installed after the agent was built."""
+    return {
+        "name": "brand-new-expert",
+        "description": "freshly installed expert",
+        "graph_id": "expert-container-async",
+        "is_expert": True,
+    }
+
+
+class TestResolveOnMiss:
+    """Resolve-on-miss: an unknown ``subagent_type`` that names a real,
+    newly installed expert becomes dispatchable on the first launch —
+    no agent rebuild, no restart. A name that is still unknown after one
+    resolution walk gets upstream's error with the refreshed type list."""
+
+    def test_unknown_expert_resolves_and_dispatches(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_sync_client()
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[_newly_installed_expert_spec()],
+            ),
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+        ):
+            result = start.func(
+                description="hi",
+                subagent_type="brand-new-expert",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        # Dispatch succeeded rather than returning the unknown-type error.
+        assert "async_tasks" in result.update
+        kwargs = client.runs.create.call_args.kwargs
+        assert kwargs["input"]["skill_name"] == "brand-new-expert"
+
+    def test_resolution_updates_the_watcher_dict(self):
+        """The watcher holds a SEPARATE agent dict from ``agent_map``; the
+        resolution must land in both or the completion notification for the
+        newly resolved expert silently never fires (the watcher's
+        ``get_async`` KeyError is swallowed by its ``try/except``)."""
+        watcher_agents: dict = {}
+        mw = EvoAsyncSubAgentMiddleware(
+            async_subagents=[_standard_spec()], watcher_agents=watcher_agents
         )
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_sync_client()
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[_newly_installed_expert_spec()],
+            ),
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+        ):
+            start.func(
+                description="hi",
+                subagent_type="brand-new-expert",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        assert "brand-new-expert" in watcher_agents
+
+    def test_resolution_never_overwrites_existing_entries(self):
+        """``setdefault`` semantics: a spec already in ``agent_map`` keeps its
+        identity — an overwrite could smuggle in a spec the running agent
+        was not validated against (the constructor already raised on
+        duplicate names at build time)."""
+        incumbent = {
+            "name": "literature-review",
+            "description": "original description",
+            "graph_id": "incumbent-graph",
+            "is_expert": True,
+        }
+        challenger = {
+            "name": "literature-review",
+            "description": "different description",
+            "graph_id": "challenger-graph",
+            "is_expert": True,
+        }
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[incumbent])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        # The miss-walk returns BOTH a new expert and a same-name challenger
+        # for the incumbent; the dispatch goes to the new name so the walk
+        # runs, then to the incumbent to observe which spec survived.
+        client = _fake_sync_client()
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[challenger, _newly_installed_expert_spec()],
+            ),
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+        ):
+            start.func(
+                description="hi",
+                subagent_type="brand-new-expert",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+            start.func(
+                description="hi",
+                subagent_type="literature-review",
+                runtime=SimpleNamespace(tool_call_id="tc2"),
+            )
+
+        # The incumbent's graph_id served both the survivor check and the
+        # dispatch: had the challenger overwritten it, this would be
+        # "challenger-graph".
+        assistant_ids = [
+            call.kwargs["assistant_id"] for call in client.runs.create.call_args_list
+        ]
+        assert "incumbent-graph" in assistant_ids
+        assert "challenger-graph" not in assistant_ids
+
+    def test_negative_miss_returns_error_with_refreshed_list(self):
+        """A hallucinated name is still an error after the one resolution
+        walk — and the message's allowed-type list now includes names the
+        walk just added (the second ``_validate_agent_type`` call reads the
+        mutated map)."""
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        with patch(
+            "EvoScientist.subagents.expert_container_async"
+            ".build_expert_async_subagent_specs",
+            return_value=[_newly_installed_expert_spec()],
+        ):
+            result = start.func(
+                description="hi",
+                subagent_type="still-does-not-exist",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+        assert isinstance(result, str)
+        assert "Unknown async subagent type" in result
+        assert "brand-new-expert" in result
+
+
+class TestAstartResolveOnMiss:
+    """Async twins of ``TestResolveOnMiss`` — the coroutine langgraph_api
+    actually runs in production."""
+
+    @pytest.mark.asyncio
+    async def test_astart_unknown_expert_resolves_and_dispatches(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_async_client()
+        to_thread_calls = []
+
+        async def _fake_to_thread(fn, *args):
+            to_thread_calls.append(fn.__name__)
+            return fn(*args)
+
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[_newly_installed_expert_spec()],
+            ),
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+                return_value=client,
+            ),
+            patch("asyncio.to_thread", new=_fake_to_thread),
+        ):
+            result = await start.coroutine(
+                description="hi",
+                subagent_type="brand-new-expert",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        assert "async_tasks" in result.update
+        kwargs = client.runs.create.await_args.kwargs
+        assert kwargs["input"]["skill_name"] == "brand-new-expert"
+        # The resolution ran off the event loop — langgraph-dev's blockbuster
+        # guard turns a skills-tree walk on the loop into a BlockingError.
+        assert to_thread_calls == ["_resolve_missing_experts"]
+
+    @pytest.mark.asyncio
+    async def test_astart_resolution_updates_the_watcher_dict(self):
+        watcher_agents: dict = {}
+        mw = EvoAsyncSubAgentMiddleware(
+            async_subagents=[_standard_spec()], watcher_agents=watcher_agents
+        )
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_async_client()
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[_newly_installed_expert_spec()],
+            ),
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+                return_value=client,
+            ),
+        ):
+            await start.coroutine(
+                description="hi",
+                subagent_type="brand-new-expert",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        assert "brand-new-expert" in watcher_agents
+
+    @pytest.mark.asyncio
+    async def test_astart_negative_miss_returns_error(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        with patch(
+            "EvoScientist.subagents.expert_container_async"
+            ".build_expert_async_subagent_specs",
+            return_value=[],
+        ):
+            result = await start.coroutine(
+                description="hi",
+                subagent_type="still-does-not-exist",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
         assert isinstance(result, str)
         assert "Unknown async subagent type" in result

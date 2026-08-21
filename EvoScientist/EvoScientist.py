@@ -580,6 +580,10 @@ def _route_async_specs_through_evo_middleware(
     ``expert-container-async`` graph, marked ``is_expert=True`` so the
     middleware requires a payload with ``skill_name``.
 
+    The completion watcher (``AsyncWatcherMiddleware``) is found or created
+    before the middleware so the middleware's resolve-on-miss start tool can
+    hold the watcher's agent dict by reference — see the wiring block below.
+
     Returns:
         ``subs`` with ``graph_id``-carrying entries removed. Safe to pass
         as ``create_deep_agent(subagents=...)`` — the async-auto-compose
@@ -595,6 +599,65 @@ def _route_async_specs_through_evo_middleware(
     sync_subs = [s for s in subs if "graph_id" not in s]
     expert_specs = build_expert_async_subagent_specs(cfg=cfg)
     async_specs.extend(expert_specs)
+
+    # Find or create the completion watcher BEFORE constructing
+    # ``EvoAsyncSubAgentMiddleware``: the middleware's resolve-on-miss start
+    # tool must hold the watcher's agent dict by reference, so an expert
+    # discovered mid-session lands in the dispatch table and the watcher in
+    # one step. Without the watcher update, dispatch succeeds but the
+    # watcher's ``get_async(agent_name)`` raises KeyError inside its
+    # ``try/except`` and the completion notification silently never fires.
+    watcher_agents: dict | None = None
+    watcher = next(
+        (m for m in base_middleware if isinstance(m, AsyncWatcherMiddleware)),
+        None,
+    )
+    if watcher is None:
+        # No YAML async subagents were registered, so ``_maybe_swap`` did
+        # not install the watcher. Install it now so experts still get
+        # completion notifications. Appended before the middleware's
+        # index-0 insert below, which yields the same final order as
+        # append-after-insert: ``[EvoAsync..., ..., watcher]``.
+        if expert_specs:
+            from .cli import async_notifier
+
+            watcher = AsyncWatcherMiddleware(
+                {s["name"]: s for s in expert_specs},
+                notifier=async_notifier,
+            )
+            base_middleware.append(watcher)
+    elif expert_specs:
+        # Extend AsyncWatcherMiddleware's client cache with expert specs so
+        # start_async_task launches for experts spawn a completion watcher —
+        # otherwise the watcher's ``get_async(agent_name)`` KeyErrors on the
+        # expert name, no notification is enqueued, and the main agent never
+        # learns the task finished. ``_maybe_swap_async_subagents`` above only
+        # populates the watcher with YAML-defined async subagents
+        # (writing-agent, data-analysis-agent, scheduler); this hook folds in
+        # the experts too.
+        #
+        # The mutation reaches through two layers of private state:
+        # ``AsyncWatcherMiddleware._clients`` (our own) and
+        # ``_ClientCache._agents`` (upstream deepagents). If upstream ever
+        # renames ``_agents`` or wraps it in an immutable snapshot, the
+        # ``.update(...)`` below silently lands on nothing — expert
+        # completion nudges then stop firing without a diagnostic surface.
+        # Convert that silent-drop into a grep-able error line and leave
+        # ``watcher_agents`` unset; expert dispatches still work (without
+        # completion notifications and without mid-session resolution into
+        # the watcher) until upstream drift is fixed.
+        if not hasattr(watcher._clients, "_agents"):
+            logging.getLogger(__name__).error(
+                "AsyncWatcherMiddleware._clients has no `_agents` slot — "
+                "deepagents internal renamed; expert completion "
+                "notifications will not fire until the extension hook is "
+                "updated to the new attribute name."
+            )
+            watcher = None
+        else:
+            watcher._clients._agents.update({s["name"]: s for s in expert_specs})
+    if watcher is not None and hasattr(watcher._clients, "_agents"):
+        watcher_agents = watcher._clients._agents
 
     if async_specs:
         # ``_maybe_swap_async_subagents`` installs the model-passthrough patch
@@ -612,52 +675,11 @@ def _route_async_specs_through_evo_middleware(
         # volatile memory tail, invalidating the cached prefix on every
         # memory change.
         base_middleware.insert(
-            0, EvoAsyncSubAgentMiddleware(async_subagents=async_specs)
+            0,
+            EvoAsyncSubAgentMiddleware(
+                async_subagents=async_specs, watcher_agents=watcher_agents
+            ),
         )
-
-    # Extend AsyncWatcherMiddleware's client cache with expert specs so
-    # start_async_task launches for experts spawn a completion watcher —
-    # otherwise the watcher's ``get_async(agent_name)`` KeyErrors on the
-    # expert name, no notification is enqueued, and the main agent never
-    # learns the task finished. ``_maybe_swap_async_subagents`` above only
-    # populates the watcher with YAML-defined async subagents (writing-agent,
-    # data-analysis-agent, scheduler); this hook folds in the experts too.
-    if expert_specs:
-        watcher = next(
-            (m for m in base_middleware if isinstance(m, AsyncWatcherMiddleware)),
-            None,
-        )
-        if watcher is not None:
-            # The mutation reaches through two layers of private state:
-            # ``AsyncWatcherMiddleware._clients`` (our own) and
-            # ``_ClientCache._agents`` (upstream deepagents). If upstream ever
-            # renames ``_agents`` or wraps it in an immutable snapshot, the
-            # ``.update(...)`` below silently lands on nothing — expert
-            # completion nudges then stop firing without a diagnostic surface.
-            # Convert that silent-drop into a grep-able error line and bail
-            # out of the extension path; expert dispatches still work, just
-            # without completion notifications until upstream drift is fixed.
-            if not hasattr(watcher._clients, "_agents"):
-                logging.getLogger(__name__).error(
-                    "AsyncWatcherMiddleware._clients has no `_agents` slot — "
-                    "deepagents internal renamed; expert completion "
-                    "notifications will not fire until the extension hook is "
-                    "updated to the new attribute name."
-                )
-                return sync_subs
-            watcher._clients._agents.update({s["name"]: s for s in expert_specs})
-        else:
-            # No YAML async subagents were registered, so ``_maybe_swap`` did
-            # not install the watcher. Install it now so experts still get
-            # completion notifications.
-            from .cli import async_notifier
-
-            base_middleware.append(
-                AsyncWatcherMiddleware(
-                    {s["name"]: s for s in expert_specs},
-                    notifier=async_notifier,
-                )
-            )
     return sync_subs
 
 
