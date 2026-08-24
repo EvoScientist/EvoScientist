@@ -780,7 +780,9 @@ class LangGraphServerGateway:
             )
         return events
 
-    def _deliver_custom_middleware_events(self, raw_event: Mapping[str, Any]) -> None:
+    def _deliver_custom_middleware_events(
+        self, raw_event: Mapping[str, Any]
+    ) -> list[GraphEvent]:
         """Dispatch tagged middleware payloads from the ``custom`` channel.
 
         Wire shape (v3 protocol): ``{"method": "custom", "params": {"data":
@@ -789,36 +791,70 @@ class LangGraphServerGateway:
         custom-channel traffic — are ignored, as are malformed ones: this is
         display narration, so a bad payload must degrade to silence rather
         than fail the run. Headless runs (``events is None``) drop everything.
+
+        Fallback notices render directly through the sink's display callback,
+        but tool-selection state is only *recorded* by the sink — its read
+        side (``consume_tool_selection``, the dedup + render decision) is
+        polled by the local stream suppressor, which does not exist on this
+        path. So after dispatching writes, this method polls the read side
+        and returns ``tool_selection`` events (same shape the local path
+        yields) for the caller to emit — frontends render both identically.
+        The poll runs only on custom events: pending is set only by the
+        dispatched ``tool_selection`` write above, and consume-once in the
+        sink guarantees it is drained by the poll on this very event.
         """
-        if self.events is None or raw_event.get("method") != "custom":
-            return
+        if self.events is None:
+            return []
+        if raw_event.get("method") != "custom":
+            return []
         params = _as_raw_map(raw_event.get("params"))
         payload = _as_raw_map(params.get("data")) if params is not None else None
-        if payload is None:
-            return
-        payload = _as_raw_map(payload.get(MIDDLEWARE_EVENT_TAG))
-        if payload is None:
-            return
-        kind = payload.get("kind")
-        try:
-            if kind == "tool_selection_started":
-                self.events.on_tool_selection_started(int(payload["total_tools"]))
-            elif kind == "tool_selection":
-                selected = payload.get("selected")
-                if isinstance(selected, list):
-                    self.events.on_tool_selection(
-                        [str(item) for item in selected], int(payload["total_tools"])
+        if payload is not None:
+            payload = _as_raw_map(payload.get(MIDDLEWARE_EVENT_TAG))
+        if payload is not None:
+            kind = payload.get("kind")
+            try:
+                if kind == "tool_selection_started":
+                    self.events.on_tool_selection_started(int(payload["total_tools"]))
+                elif kind == "tool_selection":
+                    selected = payload.get("selected")
+                    if isinstance(selected, list):
+                        self.events.on_tool_selection(
+                            [str(item) for item in selected],
+                            int(payload["total_tools"]),
+                        )
+                elif kind == "tool_selection_ended":
+                    self.events.on_tool_selection_ended()
+                elif kind == "fallback_notice":
+                    self.events.emit_fallback_notice(
+                        str(payload.get("text", "")),
+                        str(payload.get("style", "yellow")),
                     )
-            elif kind == "tool_selection_ended":
-                self.events.on_tool_selection_ended()
-            elif kind == "fallback_notice":
-                self.events.emit_fallback_notice(
-                    str(payload.get("text", "")), str(payload.get("style", "yellow"))
+            except Exception:
+                logger.debug(
+                    "malformed middleware custom event %r", dict(payload), exc_info=True
                 )
+        return self._poll_tool_selection()
+
+    def _poll_tool_selection(self) -> list[GraphEvent]:
+        """Consume any pending selection and shape it as a stream event.
+
+        Consume-once/dedup semantics live in the sink; polling returns at
+        most one event per pending selection. Outside the stream loop, the
+        ``GraphGateway`` protocol's sink is a ``SessionEvents`` (write+read
+        sides); guard with getattr for sinks missing the read side.
+        """
+        consume = getattr(self.events, "consume_tool_selection", None)
+        if consume is None:
+            return []
+        try:
+            had_pending, render = consume()
         except Exception:
-            logger.debug(
-                "malformed middleware custom event %r", dict(payload), exc_info=True
-            )
+            logger.debug("tool-selection poll failed", exc_info=True)
+            return []
+        if had_pending and render is not None:
+            return [StreamEventEmitter.tool_selection(render).data]
+        return []
 
     async def _stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         emitter = StreamEventEmitter()
@@ -866,7 +902,10 @@ class LangGraphServerGateway:
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
                         continue
-                    self._deliver_custom_middleware_events(raw_event)
+                    for selection_event in self._deliver_custom_middleware_events(
+                        raw_event
+                    ):
+                        yield selection_event
                     event_map: dict[str, Any] = dict(raw_event)
                     for subagent_event in tracker.process(event_map):
                         yield subagent_event

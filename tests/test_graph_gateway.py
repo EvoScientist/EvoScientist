@@ -985,7 +985,16 @@ async def test_langgraph_server_gateway_delivers_custom_middleware_events():
         states={"abc12345": {"values": {}}},
         streams={"abc12345": stream},
     )
-    sink = _RecordingSessionEvents()
+    # Real session sink: fallback renders via the callback; tool-selection
+    # writes are only recorded, and the gateway must poll the read side and
+    # emit a tool_selection event (frontends render that event type on both
+    # backends).
+    fallback_lines: list[tuple[str, str]] = []
+    from EvoScientist.stream.sink import SessionEventSink
+
+    sink = SessionEventSink(
+        fallback_display=lambda text, style: fallback_lines.append((text, style))
+    )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(client=FakeLangGraphClient(threads)),
         events=sink,
@@ -998,14 +1007,18 @@ async def test_langgraph_server_gateway_delivers_custom_middleware_events():
         )
     ]
 
-    # The stream still yields its normal text/done graph events...
-    assert [e["type"] for e in events] == ["text", "done"]
-    # ...and the middleware payloads were dispatched onto the sink in order.
-    assert sink.calls == [
-        ("started", 9),
-        ("selection", ["read_file"], 9),
-        ("fallback", "fb", "red"),
-        ("ended",),
+    # Fallback notice rendered via the sink's display callback...
+    assert fallback_lines == [("fb", "red")]
+    # ...and the pending tool selection was polled off the read side and
+    # yielded as a stream event in the same shape the local path emits.
+    assert {
+        "type": "tool_selection",
+        "tools": ["read_file"],
+    } in events
+    # Normal graph events unaffected.
+    assert [e["type"] for e in events if e["type"] != "tool_selection"] == [
+        "text",
+        "done",
     ]
     # The subscription must include the custom channel or nothing arrives.
     assert "custom" in stream.subscribed_channels[0]
