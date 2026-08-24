@@ -33,6 +33,57 @@ logger = logging.getLogger(__name__)
 _fallback_chain_lock = threading.Lock()
 _fallback_chain: list[tuple[str, str]] = []
 """Ordered list of ``(model_name, provider)`` fallback entries."""
+_chain_initialized = False
+"""Whether ``_fallback_chain`` has been seeded yet.
+
+The chain lazily initializes from ``get_effective_config().model_fallbacks``
+on first access (see ``_ensure_chain_initialized``). Graph builds must NOT
+re-seed it: at server import every registered graph runs through the
+middleware factory, and a build-time load would make the last-built graph
+clobber session edits made via ``/model-fallback`` (last-build-wins).
+"""
+
+
+def _parse_fallback_chain(raw: str) -> list[tuple[str, str]]:
+    """Parse a serialized ``"model:provider"`` chain into tuples.
+
+    Empty or whitespace-only segments are silently skipped.
+    """
+    chain: list[tuple[str, str]] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            model, provider = part.rsplit(":", 1)
+            chain.append((model.strip(), provider.strip()))
+    return chain
+
+
+def _ensure_chain_initialized() -> None:
+    """Seed the fallback chain from config on first access. Lock must be held.
+
+    Runs at most once per process: after the first touch, later config
+    reads (including graph rebuilds) never overwrite the chain, so
+    in-process edits via ``/model-fallback`` survive every rebuild.
+    """
+    global _fallback_chain, _chain_initialized
+    if _chain_initialized:
+        return
+    from ..config.settings import get_effective_config
+
+    raw = getattr(get_effective_config(), "model_fallbacks", "") or ""
+    _fallback_chain = _parse_fallback_chain(raw)
+    _chain_initialized = True
+
+
+def _reset_chain_initialization() -> None:
+    """Reset the lazy-init state so the next access re-seeds from config."""
+    global _fallback_chain, _chain_initialized
+    with _fallback_chain_lock:
+        _fallback_chain = []
+        _chain_initialized = False
+
 
 _CONTEXT_LIMIT_PATTERNS: list[str] = [
     "context_length_exceeded",
@@ -71,6 +122,7 @@ def get_fallback_chain() -> list[tuple[str, str]]:
         List of ``(model_name, provider)`` tuples in priority order.
     """
     with _fallback_chain_lock:
+        _ensure_chain_initialized()
         return list(_fallback_chain)
 
 
@@ -80,9 +132,10 @@ def set_fallback_chain(chain: list[tuple[str, str]]) -> None:
     Args:
         chain: New list of ``(model_name, provider)`` tuples.
     """
-    global _fallback_chain
+    global _fallback_chain, _chain_initialized
     with _fallback_chain_lock:
         _fallback_chain = list(chain)
+        _chain_initialized = True
 
 
 def add_fallback(model: str, provider: str) -> bool:
@@ -97,6 +150,7 @@ def add_fallback(model: str, provider: str) -> bool:
     """
     entry = (model, provider)
     with _fallback_chain_lock:
+        _ensure_chain_initialized()
         if entry in _fallback_chain:
             return False
         _fallback_chain.append(entry)
@@ -114,6 +168,7 @@ def remove_fallback(model: str) -> bool:
     """
     global _fallback_chain
     with _fallback_chain_lock:
+        _ensure_chain_initialized()
         before = len(_fallback_chain)
         _fallback_chain = [(m, p) for m, p in _fallback_chain if m != model]
         return len(_fallback_chain) < before
@@ -129,6 +184,7 @@ def remove_fallback_at(index: int) -> tuple[str, str] | None:
         The removed ``(model, provider)`` tuple, or ``None`` if out of range.
     """
     with _fallback_chain_lock:
+        _ensure_chain_initialized()
         if 0 <= index < len(_fallback_chain):
             return _fallback_chain.pop(index)
         return None
@@ -136,9 +192,10 @@ def remove_fallback_at(index: int) -> tuple[str, str] | None:
 
 def clear_fallbacks() -> None:
     """Remove every entry from the fallback chain."""
-    global _fallback_chain
+    global _fallback_chain, _chain_initialized
     with _fallback_chain_lock:
         _fallback_chain = []
+        _chain_initialized = True
 
 
 def serialize_fallback_chain() -> str:
@@ -148,27 +205,21 @@ def serialize_fallback_chain() -> str:
         Comma-separated ``"model:provider,model:provider"`` string.
     """
     with _fallback_chain_lock:
+        _ensure_chain_initialized()
         return ",".join(f"{m}:{p}" for m, p in _fallback_chain)
 
 
 def load_fallback_chain(raw: str) -> None:
-    """Populate the chain from a serialized config string.
+    """Replace the chain from a serialized config string.
 
     Args:
         raw: Comma-separated ``"model:provider"`` pairs.  Empty or
             whitespace-only segments are silently skipped.
     """
-    global _fallback_chain
-    chain: list[tuple[str, str]] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if ":" in part:
-            model, provider = part.rsplit(":", 1)
-            chain.append((model.strip(), provider.strip()))
+    global _fallback_chain, _chain_initialized
     with _fallback_chain_lock:
-        _fallback_chain = chain
+        _fallback_chain = _parse_fallback_chain(raw)
+        _chain_initialized = True
 
 
 def _is_non_fallbackable(exc: Exception) -> str | None:
@@ -424,9 +475,9 @@ def _guard_and_fallback_sync(
 class ModelFallbackMiddleware(AgentMiddleware):
     """LangChain AgentMiddleware that retries failed model calls on fallbacks.
 
-    On each invocation the middleware reads the module-level
-    ``_fallback_chain`` so that ``/model-fallback add`` takes effect
-    immediately without rebuilding the agent.
+    On each invocation the middleware reads the module-level chain (lazily
+    seeded from config on first access) so that ``/model-fallback add``
+    takes effect immediately without rebuilding the agent.
 
     Attributes:
         name: Middleware identifier used by the framework.
@@ -445,7 +496,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        if not _fallback_chain:
+        if not get_fallback_chain():
             return handler(request)
 
         from .error_normalization import _check_truncated_output
@@ -463,7 +514,7 @@ class ModelFallbackMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        if not _fallback_chain:
+        if not get_fallback_chain():
             return await handler(request)
 
         from .error_normalization import _check_truncated_output

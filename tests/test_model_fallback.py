@@ -660,3 +660,111 @@ class TestUiEmit:
 
         texts = [t for t, _ in messages]
         assert any("not eligible for fallback" in t for t in texts)
+
+
+# ═════════════════════════════════════════════════════════════════
+# 5. Lazy initialization from config
+# ═════════════════════════════════════════════════════════════════
+
+
+class TestLazyInitialization:
+    """The chain seeds from config on first access and never re-seeds.
+
+    Graph builds (including every sub-agent graph at server import) must
+    not touch the chain: re-seeding on build made the last-built graph
+    clobber ``/model-fallback`` session edits (last-build-wins).
+    """
+
+    def test_first_read_loads_from_config(self):
+        from EvoScientist.middleware.model_fallback import (
+            _reset_chain_initialization,
+            get_fallback_chain,
+        )
+
+        cfg = SimpleNamespace(model_fallbacks="cfg-a:prov-a, cfg-b:prov-b")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg
+        ):
+            _reset_chain_initialization()
+            assert get_fallback_chain() == [
+                ("cfg-a", "prov-a"),
+                ("cfg-b", "prov-b"),
+            ]
+
+    def test_add_fallback_extends_config_base(self):
+        from EvoScientist.middleware.model_fallback import (
+            _reset_chain_initialization,
+            get_fallback_chain,
+        )
+
+        cfg = SimpleNamespace(model_fallbacks="cfg-a:prov-a")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg
+        ):
+            _reset_chain_initialization()
+            assert add_fallback("session", "prov-s") is True
+            assert get_fallback_chain() == [
+                ("cfg-a", "prov-a"),
+                ("session", "prov-s"),
+            ]
+
+    def test_chain_seeds_at_most_once(self):
+        """A later config read (e.g. a graph rebuild) must not clobber edits."""
+        from EvoScientist.middleware.model_fallback import (
+            _reset_chain_initialization,
+            get_fallback_chain,
+        )
+
+        cfg_v1 = SimpleNamespace(model_fallbacks="cfg-a:prov-a")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg_v1
+        ):
+            _reset_chain_initialization()
+            get_fallback_chain()
+
+        add_fallback("session", "prov-s")
+        # Simulate another graph build re-reading config (now different).
+        cfg_v2 = SimpleNamespace(model_fallbacks="other:prov")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg_v2
+        ):
+            assert get_fallback_chain() == [
+                ("cfg-a", "prov-a"),
+                ("session", "prov-s"),
+            ]
+
+    def test_clear_blocks_lazy_init(self):
+        from EvoScientist.middleware.model_fallback import (
+            _reset_chain_initialization,
+            get_fallback_chain,
+        )
+
+        cfg = SimpleNamespace(model_fallbacks="cfg-a:prov-a")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg
+        ):
+            _reset_chain_initialization()
+            clear_fallbacks()
+            assert get_fallback_chain() == []
+
+    def test_middleware_presence_check_seeds_from_config(self):
+        """The wrap/awrap fast-path must see the config-seeded chain."""
+        from EvoScientist.middleware.model_fallback import ModelFallbackMiddleware
+
+        cfg = SimpleNamespace(model_fallbacks="cfg-a:prov-a")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg
+        ) as mock_cfg:
+            from EvoScientist.middleware.model_fallback import (
+                _reset_chain_initialization,
+            )
+
+            _reset_chain_initialization()
+            req = _fake_request()
+            handler = MagicMock(side_effect=[Exception("503 down"), AI_RESPONSE])
+            with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+                mock_gcm.return_value = MagicMock()
+                result = ModelFallbackMiddleware().wrap_model_call(req, handler)
+
+        assert result is AI_RESPONSE
+        assert mock_cfg.called
