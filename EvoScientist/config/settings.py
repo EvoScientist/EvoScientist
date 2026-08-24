@@ -267,6 +267,15 @@ class EvoScientistConfig:
     # runs orphans its records — run `EvoSci server stop` before switching.
     langgraph_dev_keepalive: bool = False
 
+    # Which backend serves the CLI/TUI's graph runs: the in-process local
+    # gateway (default) or the langgraph dev server via LangGraphServerGateway.
+    # Server-gateway-migration rollback flag: flipping back to "local" restores
+    # the in-process path without code changes. While "langgraph_server" is
+    # set, the auto-started langgraph dev spawns in full deploy mode (MCP +
+    # async sub-agents loaded server-side); reusing a stripped-mode leftover
+    # is refused rather than silently degraded.
+    gateway_backend: Literal["local", "langgraph_server"] = "local"
+
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
     # ``agent.invoke()`` — i.e., this is per-turn, NOT per-conversation. For
@@ -820,6 +829,7 @@ _ENV_MAPPINGS = {
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
+    "gateway_backend": "EVOSCIENTIST_GATEWAY_BACKEND",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
