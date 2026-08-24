@@ -904,6 +904,211 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
     ]
 
 
+class _RecordingSessionEvents:
+    """SessionEvents double recording middleware-event dispatches."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def on_tool_selection_started(self, total_tools: int) -> None:
+        self.calls.append(("started", total_tools))
+
+    def on_tool_selection(self, selected, total_tools: int) -> None:
+        self.calls.append(("selection", list(selected), total_tools))
+
+    def on_tool_selection_ended(self) -> None:
+        self.calls.append(("ended",))
+
+    def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        self.calls.append(("fallback", text, style))
+
+
+def _custom_stream_event(payload: object) -> dict:
+    return {"method": "custom", "params": {"data": payload}}
+
+
+async def test_langgraph_server_gateway_delivers_custom_middleware_events():
+    """Tagged middleware payloads on the ``custom`` channel reach the
+    gateway's ``events`` sink — the delivery path for server-side
+    tool-selection / fallback narration (StreamBroadcastSink mirror)."""
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            _custom_stream_event(
+                {
+                    "evoscientist": {
+                        "kind": "tool_selection_started",
+                        "total_tools": 9,
+                    }
+                }
+            ),
+            _custom_stream_event(
+                {
+                    "evoscientist": {
+                        "kind": "tool_selection",
+                        "selected": ["read_file"],
+                        "total_tools": 9,
+                    }
+                }
+            ),
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            _custom_stream_event(
+                {
+                    "evoscientist": {
+                        "kind": "fallback_notice",
+                        "text": "fb",
+                        "style": "red",
+                    }
+                }
+            ),
+            _custom_stream_event({"evoscientist": {"kind": "tool_selection_ended"}}),
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    sink = _RecordingSessionEvents()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads)),
+        events=sink,
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    # The stream still yields its normal text/done graph events...
+    assert [e["type"] for e in events] == ["text", "done"]
+    # ...and the middleware payloads were dispatched onto the sink in order.
+    assert sink.calls == [
+        ("started", 9),
+        ("selection", ["read_file"], 9),
+        ("fallback", "fb", "red"),
+        ("ended",),
+    ]
+    # The subscription must include the custom channel or nothing arrives.
+    assert "custom" in stream.subscribed_channels[0]
+
+
+async def test_langgraph_server_gateway_ignores_untagged_custom_events():
+    """Custom-channel traffic without the middleware tag is not ours — it
+    must be ignored, and malformed tagged payloads degrade to silence
+    instead of failing the run."""
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            _custom_stream_event({"someone_else": {"kind": "tool_selection_started"}}),
+            _custom_stream_event({"evoscientist": {"kind": "tool_selection_started"}}),
+            _custom_stream_event(
+                {"evoscientist": {"kind": "tool_selection", "selected": "not-a-list"}}
+            ),
+            _custom_stream_event({"evoscientist": {"kind": "unknown_kind"}}),
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    sink = _RecordingSessionEvents()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads)),
+        events=sink,
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    # Untagged traffic, missing fields (started without total_tools),
+    # wrong-typed fields (selected not a list), and unknown kinds all
+    # degrade to silence — nothing dispatches, run completes.
+    assert sink.calls == []
+    assert events[-1]["type"] == "done"
+
+
+async def test_langgraph_server_gateway_custom_events_dropped_headless():
+    """``events=None`` (headless single-shot) must drop custom payloads
+    silently — no crash, run completes."""
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            _custom_stream_event(
+                {"evoscientist": {"kind": "tool_selection_started", "total_tools": 1}}
+            ),
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads)),
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    assert events[-1]["type"] == "done"
+
+
+def test_runtime_gateways_attach_events_to_server_backend():
+    threads = FakeLangGraphThreadsClient()
+    client = FakeLangGraphClient(threads)
+    sink = _RecordingSessionEvents()
+
+    runtime_gateways = create_runtime_gateways(
+        backend="langgraph_server",
+        langgraph_client=client,
+        events=sink,
+    )
+
+    assert runtime_gateways.graph_gateway.events is sink
+
+
 async def test_resolve_per_run_config_extras_win_over_session_model():
     """An explicit per-run ``configurable_extra.model`` beats the live-config
     default — explicit injection is more specific than session state."""

@@ -20,6 +20,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..middleware.events import MIDDLEWARE_EVENT_TAG
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
 from ..stream.events import (
@@ -52,6 +53,7 @@ _RUN_SUBSCRIBE_CHANNELS = [
     "tasks",
     "lifecycle",
     "input",
+    "custom",
 ]
 
 
@@ -461,13 +463,16 @@ class LangGraphServerGateway:
     graph_id: str = DEFAULT_GRAPH_ID
     interrupt_wait_seconds: float = 5.0
     events: SessionEvents | None = None
-    """Frontend event sink — always ``None`` on the server gateway today.
+    """Frontend event sink — delivery point for middleware custom events.
 
     Consumers read ``gateway.events`` via the ``GraphGateway`` protocol
-    (``tui_interactive.py``, ``commands/implementation/model.py``), so the
-    attribute must exist even though the server path does not use it.
-    Wiring ``SessionEvents`` through the server stream is a Stage 2c
-    decision (custom-channel bridge); until then ``None`` is correct.
+    (``tui_interactive.py``, ``commands/implementation/model.py``). On the
+    server backend this sink additionally receives middleware events
+    (tool-selection lifecycle, fallback narration) mirrored by the server
+    process onto the run's ``custom`` stream channel
+    (``StreamBroadcastSink``): each tagged payload consumed from the stream
+    is dispatched onto this sink during ``stream_events`` iteration.
+    ``None`` (headless single-shot runs) drops those events.
     """
 
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
@@ -775,6 +780,46 @@ class LangGraphServerGateway:
             )
         return events
 
+    def _deliver_custom_middleware_events(self, raw_event: Mapping[str, Any]) -> None:
+        """Dispatch tagged middleware payloads from the ``custom`` channel.
+
+        Wire shape (v3 protocol): ``{"method": "custom", "params": {"data":
+        {MIDDLEWARE_EVENT_TAG: {"kind": ..., ...}}}}``, written server-side by
+        ``StreamBroadcastSink``. Payloads without the tag — any other
+        custom-channel traffic — are ignored, as are malformed ones: this is
+        display narration, so a bad payload must degrade to silence rather
+        than fail the run. Headless runs (``events is None``) drop everything.
+        """
+        if self.events is None or raw_event.get("method") != "custom":
+            return
+        params = _as_raw_map(raw_event.get("params"))
+        payload = _as_raw_map(params.get("data")) if params is not None else None
+        if payload is None:
+            return
+        payload = _as_raw_map(payload.get(MIDDLEWARE_EVENT_TAG))
+        if payload is None:
+            return
+        kind = payload.get("kind")
+        try:
+            if kind == "tool_selection_started":
+                self.events.on_tool_selection_started(int(payload["total_tools"]))
+            elif kind == "tool_selection":
+                selected = payload.get("selected")
+                if isinstance(selected, list):
+                    self.events.on_tool_selection(
+                        [str(item) for item in selected], int(payload["total_tools"])
+                    )
+            elif kind == "tool_selection_ended":
+                self.events.on_tool_selection_ended()
+            elif kind == "fallback_notice":
+                self.events.emit_fallback_notice(
+                    str(payload.get("text", "")), str(payload.get("style", "yellow"))
+                )
+        except Exception:
+            logger.debug(
+                "malformed middleware custom event %r", dict(payload), exc_info=True
+            )
+
     async def _stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         emitter = StreamEventEmitter()
         state_values: GraphStateValues = {}
@@ -821,6 +866,7 @@ class LangGraphServerGateway:
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
                         continue
+                    self._deliver_custom_middleware_events(raw_event)
                     event_map: dict[str, Any] = dict(raw_event)
                     for subagent_event in tracker.process(event_map):
                         yield subagent_event
