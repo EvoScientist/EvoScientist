@@ -40,7 +40,16 @@ def create_context_editing_middleware(model: BaseChatModel | None = None):
 
     Args:
         model: Chat model used to determine context window size.
-            If *None*, the default model is resolved via ``_ensure_chat_model()``.
+            If *None*, the default model is resolved via ``_ensure_chat_model()``
+
+    Known divergence: the trigger integer is FROZEN at construction time from
+    this model's context window. A per-run ``configurable.model`` override
+    (``ConfigurableModelMiddleware``, server backend) swaps the chat model
+    but does NOT resize the trigger — a run on a model with a smaller window
+    keeps the construction model's larger trigger, and vice versa. Accepted
+    for now: context editing trims old tool uses, so a stale trigger costs
+    over- or under-trimming, not a hard failure. Recomputing per run is a
+    follow-up only if the mismatch bites in practice.
     """
     from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
 

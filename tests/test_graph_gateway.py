@@ -792,7 +792,11 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
             )
         ]
 
-    events = await _collect()
+    live_cfg = SimpleNamespace(
+        model="live-model", provider="live-provider", recursion_limit=4242
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
+        events = await _collect()
 
     assert len(threads.created) == 1
     assert threads.created[0]["thread_id"] == "abc12345"
@@ -806,7 +810,14 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert stream.run.starts == [
         {
             "input": {"messages": [{"role": "user", "content": "hi"}]},
-            "config": {"configurable": {"thread_id": "abc12345"}},
+            "config": {
+                "configurable": {
+                    "model": "live-model",
+                    "model_provider": "live-provider",
+                    "thread_id": "abc12345",
+                },
+                "recursion_limit": 4242,
+            },
             "metadata": {"workspace_dir": "/tmp/ws"},
         }
     ]
@@ -865,17 +876,24 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
             )
         ]
 
-    events = await _collect()
+    live_cfg = SimpleNamespace(
+        model="live-model", provider="live-provider", recursion_limit=4242
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
+        events = await _collect()
 
     assert stream.run.starts == [
         {
             "input": {"messages": [{"role": "user", "content": "hi"}]},
             "config": {
                 "configurable": {
+                    "model": "live-model",
+                    "model_provider": "live-provider",
                     "active_teams": ["code-agent"],
                     "custom_key": "custom_value",
                     "thread_id": "abc12345",
-                }
+                },
+                "recursion_limit": 4242,
             },
             "metadata": None,
         }
@@ -884,6 +902,51 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
         {"type": "text", "content": "hello"},
         {"type": "done", "content": "hello", "response": "hello"},
     ]
+
+
+async def test_resolve_per_run_config_extras_win_over_session_model():
+    """An explicit per-run ``configurable_extra.model`` beats the live-config
+    default — explicit injection is more specific than session state."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    cfg = SimpleNamespace(
+        model="session-model", provider="session-provider", recursion_limit=100
+    )
+    run_config = resolve_per_run_config(
+        "t1",
+        {"model": "explicit-model"},
+        include_per_run_overrides=True,
+        config=cfg,
+    )
+    assert run_config["configurable"]["model"] == "explicit-model"
+    assert run_config["configurable"]["model_provider"] == "session-provider"
+    assert run_config["recursion_limit"] == 100
+
+
+def test_resolve_per_run_config_local_mode_is_legacy_shape():
+    """Local backend mode (default) must match the pre-channel config shape:
+    only caller extras + thread_id, no config object consulted."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    sentinel = object()  # would explode if read in local mode
+    run_config = resolve_per_run_config(
+        "t1",
+        {"active_teams": ["a"]},
+        include_per_run_overrides=False,
+        config=sentinel,
+    )
+    assert run_config == {"configurable": {"active_teams": ["a"], "thread_id": "t1"}}
+
+
+def test_resolve_per_run_config_server_mode_skips_invalid_limit():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    cfg = SimpleNamespace(model="m", provider="p", recursion_limit=0)
+    run_config = resolve_per_run_config(
+        "t1", None, include_per_run_overrides=True, config=cfg
+    )
+    assert "recursion_limit" not in run_config
+    assert run_config["configurable"]["model"] == "m"
 
 
 async def test_langgraph_server_gateway_warns_on_pre_run_state_fetch_failure(
