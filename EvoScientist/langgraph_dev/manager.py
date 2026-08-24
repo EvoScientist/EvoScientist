@@ -220,6 +220,21 @@ class WorkspaceMismatchError(RuntimeError):
     """
 
 
+class DeployModeMismatchError(WorkspaceMismatchError):
+    """Raised when a full-mode caller would reuse a stripped-mode langgraph dev.
+
+    With ``gateway_backend = "langgraph_server"`` the served graphs must load
+    MCP and async sub-agents server-side (full deploy mode). Reusing a server
+    recorded as stripped would serve a degraded main graph with no MCP tools
+    — silently, since everything else about the server looks healthy. The
+    sidecar's ``deploy_mode`` record is the cross-process source of truth, so
+    ``ensure_langgraph_dev`` refuses the reuse with a stop-and-restart hint.
+
+    Subclasses ``WorkspaceMismatchError`` so every existing handler
+    (print-and-exit at the CLI / TUI entry points) treats it identically.
+    """
+
+
 def _write_workspace_sidecar(
     workspace_dir: Path,
     pid: int,
@@ -313,6 +328,13 @@ _PROCESS: subprocess.Popen | None = None
 # a thread from a different workspace) and trigger a restart so the deployed
 # sub-agents' cwd / EVOSCIENTIST_WORKSPACE_DIR env match the new workspace.
 _PROCESS_WORKSPACE: Path | None = None
+
+# Deploy mode the running subprocess was launched with (True = full: MCP +
+# async sub-agents loaded server-side). Mirrors ``_PROCESS_WORKSPACE`` so
+# ``ensure_langgraph_dev`` can detect a stripped subprocess that a
+# ``gateway_backend = "langgraph_server"`` caller needs restarted in full
+# mode. None when we never started the process (reuse path).
+_PROCESS_DEPLOY_MODE: bool | None = None
 
 # Byte offset into ``RUNTIME.log_file`` captured the instant before the current
 # subprocess was spawned. ``read_tunnel_url`` scans only bytes written after
@@ -946,9 +968,11 @@ def start_langgraph_dev(
     # Subprocess mode flag — single env var with enum values:
     #
     #   - ``EVOSCIENTIST_DEPLOY_MODE=full`` (deploy_mode=True): set by
-    #     ``EvoSci deploy``. Subprocess is the primary programmatic entry
-    #     point; main agent loads MCP and ``_ASYNC_SUBAGENTS_AVAILABLE``
-    #     flips to True at module load, enabling self-loop async dispatch.
+    #     ``EvoSci deploy`` and by ``ensure_langgraph_dev`` when
+    #     ``gateway_backend = "langgraph_server"``. Subprocess is the primary
+    #     programmatic entry point; main agent loads MCP and
+    #     ``_ASYNC_SUBAGENTS_AVAILABLE`` flips to True at module load,
+    #     enabling self-loop async dispatch.
     #
     #   - ``EVOSCIENTIST_DEPLOY_MODE=stripped`` (deploy_mode=False): set by
     #     ``EvoSci`` / ``EvoSci serve``. The CLI's main agent already loaded
@@ -956,6 +980,9 @@ def start_langgraph_dev(
     #     spawning a SECOND copy of every MCP server. The deployed main
     #     agent in this mode is dead code — only sub-agent graphs are
     #     invoked over HTTP — so the duplicate MCP pool would be pure waste.
+    #     NOTE: with ``gateway_backend = "langgraph_server"`` the served
+    #     main graph is live (not dead code), which is why that setting
+    #     forces full mode above.
     #
     #   - (unset): parent process or plain ``import EvoScientist``. Loads
     #     MCP normally; async sub-agents stay disabled (no langgraph dev
@@ -1023,9 +1050,10 @@ def start_langgraph_dev(
         config_fingerprint=config_fingerprint,
         deploy_mode=deploy_mode,
     )
-    global _PROCESS_WORKSPACE
+    global _PROCESS_WORKSPACE, _PROCESS_DEPLOY_MODE
     _PROCESS = proc
     _PROCESS_WORKSPACE = workspace_dir
+    _PROCESS_DEPLOY_MODE = deploy_mode
 
     # langgraph dev cold-starts in ~10-15s normally; first-time npx-based MCP
     # servers can push this to 30-60s while npm fetches packages, so the budget
@@ -1109,7 +1137,7 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
     ``_PROCESS_WORKSPACE`` so concurrent ``ensure_langgraph_dev`` callers
     (which also hold ``_LOCK``) don't observe partially-cleared state.
     """
-    global _PROCESS, _PROCESS_WORKSPACE
+    global _PROCESS, _PROCESS_WORKSPACE, _PROCESS_DEPLOY_MODE
     with _LOCK:
         proc = proc if proc is not None else _PROCESS
         if proc is None:
@@ -1158,6 +1186,7 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
             if proc is _PROCESS:
                 _PROCESS = None
                 _PROCESS_WORKSPACE = None
+                _PROCESS_DEPLOY_MODE = None
     if RUNTIME.pid_file.exists():
         try:
             RUNTIME.pid_file.unlink()
@@ -1248,6 +1277,15 @@ def _ensure_langgraph_dev_locked(
 
     ws_path = Path(workspace_dir) if workspace_dir is not None else None
 
+    # Server-gateway backend: with ``gateway_backend = "langgraph_server"``
+    # the subprocess must serve the full graph (MCP + async sub-agents
+    # server-side), i.e. full deploy mode. The local default keeps the
+    # historical stripped spawn (the CLI process loads its own MCP).
+    need_full = (
+        str(getattr(config, "gateway_backend", "local") or "local")
+        == "langgraph_server"
+    )
+
     # If a subprocess we own is running with a *different* workspace than what
     # was just requested (typical trigger: user just /resumed a thread from a
     # different workspace), the deployed sub-agents' cwd / EVOSCIENTIST_WORKSPACE_DIR
@@ -1278,6 +1316,25 @@ def _ensure_langgraph_dev_locked(
         _wait_for_port_release(port, host=host)
         _ASYNC_SUBAGENTS_AVAILABLE = False  # cleared until restart succeeds
 
+    # Same owned-restart logic for deploy mode: a subprocess we started in
+    # stripped mode cannot serve a ``gateway_backend = "langgraph_server"``
+    # caller (no MCP / async sub-agents loaded server-side). Restart it in
+    # full mode. Externally-managed stripped servers are refused further
+    # below — we never kill a process we don't own.
+    if (
+        need_full
+        and _PROCESS is not None
+        and _PROCESS.poll() is None
+        and _PROCESS_DEPLOY_MODE is False
+    ):
+        logger.info(
+            "Deploy mode mismatch (running stripped, need full); restarting "
+            "langgraph dev in full mode."
+        )
+        stop_langgraph_dev()
+        _wait_for_port_release(port, host=host)
+        _ASYNC_SUBAGENTS_AVAILABLE = False  # cleared until restart succeeds
+
     if is_langgraph_dev_running(port=port, host=host):
         # If WE own the running process AND it's still alive, workspace was
         # already verified above via _PROCESS_WORKSPACE comparison. Otherwise
@@ -1289,29 +1346,46 @@ def _ensure_langgraph_dev_locked(
         # short-circuit this check, or we'd silently reuse a wrong-workspace
         # server.
         owned_running = _PROCESS is not None and _PROCESS.poll() is None
-        if not owned_running and ws_path is not None:
+        if not owned_running and (ws_path is not None or need_full):
             sidecar = _read_workspace_sidecar()
             if sidecar is not None:
-                recorded = Path(sidecar["workspace"]).resolve()
-                if recorded != ws_path.resolve():
-                    hint = ""
-                    if getattr(config, "langgraph_dev_keepalive", False):
-                        # Only under keepalive can the server be an ownerless
-                        # leftover; without the flag the mismatch means a live
-                        # session, where a stop suggestion would be misleading.
-                        # Point at `EvoSci server stop` (not a raw kill): it
-                        # verifies ownership and cleans the PID/sidecar files,
-                        # so no stale records are left behind.
-                        hint = (
-                            " If it is a leftover keepalive server, stop it"
-                            " with: EvoSci server stop."
+                if ws_path is not None:
+                    recorded = Path(sidecar["workspace"]).resolve()
+                    if recorded != ws_path.resolve():
+                        hint = ""
+                        if getattr(config, "langgraph_dev_keepalive", False):
+                            # Only under keepalive can the server be an ownerless
+                            # leftover; without the flag the mismatch means a live
+                            # session, where a stop suggestion would be misleading.
+                            # Point at `EvoSci server stop` (not a raw kill): it
+                            # verifies ownership and cleans the PID/sidecar files,
+                            # so no stale records are left behind.
+                            hint = (
+                                " If it is a leftover keepalive server, stop it"
+                                " with: EvoSci server stop."
+                            )
+                        raise WorkspaceMismatchError(
+                            f"An EvoScientist langgraph dev is already running on "
+                            f"{_base_url(port, host)} for workspace {recorded}, but the "
+                            f"current process requested workspace {ws_path}. "
+                            f"Stop the other EvoSci session (deploy / TUI / serve) "
+                            f"or rerun with --workdir {recorded}." + hint
                         )
-                    raise WorkspaceMismatchError(
-                        f"An EvoSci langgraph dev is already running on "
-                        f"{_base_url(port, host)} for workspace {recorded}, but the "
-                        f"current process requested workspace {ws_path}. "
-                        f"Stop the other EvoSci session (deploy / TUI / serve) "
-                        f"or rerun with --workdir {recorded}." + hint
+                # Full-mode callers must not reuse a server recorded as
+                # stripped: it would serve a degraded main graph (no MCP
+                # tools, no async sub-agents) while everything else looks
+                # healthy. A missing ``deploy_mode`` key means a sidecar from
+                # before this protocol existed - mode unknown, so warn and
+                # reuse rather than brick pre-existing servers.
+                if need_full and sidecar.get("deploy_mode") is False:
+                    raise DeployModeMismatchError(
+                        f"An EvoScientist langgraph dev is already running on "
+                        f"{_base_url(port, host)} in stripped mode, but this "
+                        f"session requires a full-mode server "
+                        f"(gateway_backend=langgraph_server) with MCP tools "
+                        f"and async sub-agents loaded server-side. Stop it "
+                        f"with: EvoSci server stop (or stop the other EvoSci "
+                        f"session), then restart."
                     )
                 recorded_fp = sidecar.get("config_fingerprint")
                 if isinstance(recorded_fp, str) and recorded_fp != config_fp:
@@ -1322,12 +1396,18 @@ def _ensure_langgraph_dev_locked(
                         "settings until the server is restarted "
                         "(EvoSci server stop)."
                     )
-                logger.info(
-                    "Reusing externally-managed langgraph dev on %s; sidecar "
-                    "confirms matching workspace %s.",
-                    _base_url(port, host),
-                    recorded,
-                )
+                if ws_path is not None:
+                    logger.info(
+                        "Reusing externally-managed langgraph dev on %s; sidecar "
+                        "confirms matching workspace %s.",
+                        _base_url(port, host),
+                        recorded,
+                    )
+                else:
+                    logger.info(
+                        "Reusing externally-managed langgraph dev on %s.",
+                        _base_url(port, host),
+                    )
             else:
                 # Pre-feature langgraph dev — no sidecar to verify against.
                 # Fall back to the original log-warning behavior so users
@@ -1338,7 +1418,7 @@ def _ensure_langgraph_dev_locked(
                     "%s. Async sub-agents may operate on a different workspace's "
                     "files.",
                     _base_url(port, host),
-                    ws_path,
+                    ws_path or "(unspecified workspace)",
                 )
         else:
             logger.info(
@@ -1354,6 +1434,7 @@ def _ensure_langgraph_dev_locked(
             host=host,
             file_persistence=file_persistence,
             jobs_per_worker=jobs_per_worker,
+            deploy_mode=need_full,
             config_fingerprint=config_fp,
         )
     except (FileNotFoundError, RuntimeError) as exc:
