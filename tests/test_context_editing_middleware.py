@@ -98,6 +98,36 @@ def test_create_middleware_model_none_fallback(mock_model):
     mock_model.assert_called_once()
 
 
+def test_trigger_is_frozen_at_construction_divergence_pin():
+    """PIN (known divergence): the trigger integer is computed once from the
+    construction-time model's context window. A per-run
+    ``configurable.model`` override (server backend) swaps the chat model
+    via ConfigurableModelMiddleware but does NOT resize this trigger — a
+    run on a model with a different window keeps the construction model's
+    trigger. If this pin ever fails because the trigger became per-run,
+    update it consciously and drop the divergence note in
+    ``create_context_editing_middleware``'s docstring.
+    """
+    from EvoScientist.middleware.context_editing import (
+        create_context_editing_middleware,
+    )
+
+    construction_model = MagicMock()
+    construction_model.profile = {"max_input_tokens": 200_000}
+    mw = create_context_editing_middleware(construction_model)
+    trigger_at_construction = mw.edits[0].trigger
+    assert trigger_at_construction == 100_000
+
+    # A "per-run override" to a much smaller-window model: the middleware
+    # instance is shared per graph, so its trigger stays frozen.
+    override_model = MagicMock()
+    override_model.profile = {"max_input_tokens": 32_768}
+    assert mw.edits[0].trigger == trigger_at_construction
+    assert compute_context_editing_trigger(override_model) == 16_384, (
+        "sanity: the override model WOULD compute a different trigger"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Middleware list integration tests
 # ---------------------------------------------------------------------------

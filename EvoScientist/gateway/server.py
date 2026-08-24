@@ -38,6 +38,7 @@ from .types import (
     RunRequest,
     ThreadResolution,
     ThreadStore,
+    resolve_per_run_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -555,11 +556,11 @@ class LangGraphServerGateway:
         stream: AsyncThreadStream,
         request: RunRequest,
     ) -> None:
-        configurable: dict[str, Any] = {
-            **(request.configurable_extra or {}),
-            "thread_id": request.thread_id,
-        }
-        config: dict[str, Any] = {"configurable": configurable}
+        config = resolve_per_run_config(
+            request.thread_id,
+            request.configurable_extra,
+            include_per_run_overrides=True,
+        )
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
