@@ -36,8 +36,16 @@ a slow sink from the run.
 
 from __future__ import annotations
 
+import os
 from contextvars import ContextVar, Token
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+MIDDLEWARE_EVENT_TAG = "evoscientist"
+"""Wire tag for middleware events carried on the LangGraph ``custom`` channel.
+
+Payloads are ``{MIDDLEWARE_EVENT_TAG: {"kind": ..., ...}}`` so consumers can
+distinguish middleware events from any other custom-channel traffic without
+inspecting payload internals."""
 
 
 @runtime_checkable
@@ -189,3 +197,98 @@ class RunScopedEventSink:
 
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
         self._sink().emit_fallback_notice(text, style)
+
+
+class StreamBroadcastSink:
+    """Mirror sink writes onto the run's LangGraph ``custom`` stream channel.
+
+    Installed on main-agent stacks inside the langgraph dev subprocess, where
+    no frontend sink can exist: the wrapped :class:`RunScopedEventSink` has no
+    binder there, so its writes are silent, and the custom stream event —
+    delivered to the client on the ``custom`` channel and mapped by
+    ``LangGraphServerGateway`` onto its ``events`` sink — is the actual
+    delivery channel. Every write still forwards to the wrapped sink first,
+    preserving local in-process consumers if a binder ever exists.
+
+    Delivery is single-rendered per backend by construction, with no
+    suppression flag: the local CLI process never sets
+    ``EVOSCIENTIST_DEPLOY_MODE``, so local stacks never broadcast and render
+    once via the injected frontend sink; server stacks broadcast, and their
+    silent wrapped sink renders nothing.
+
+    The stream write is best-effort and must never break a model call:
+    ``get_stream_writer()`` raises ``RuntimeError`` outside a runnable
+    context (e.g. background in-process invocations) — such writes are
+    skipped, and any other writer failure is swallowed after logging. Honours
+    the module threading/blocking contract.
+    """
+
+    __slots__ = ("_sink",)
+
+    def __init__(self, sink: MiddlewareEventSink) -> None:
+        self._sink = sink
+
+    def _emit(self, payload: dict[str, Any]) -> None:
+        try:
+            from langgraph.config import get_stream_writer
+
+            get_stream_writer()({MIDDLEWARE_EVENT_TAG: payload})
+        except RuntimeError:
+            # Outside a runnable context — nothing subscribes anyway.
+            pass
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "custom-channel mirror failed for %r", payload, exc_info=True
+            )
+
+    def on_tool_selection_started(self, total_tools: int) -> None:
+        self._sink.on_tool_selection_started(total_tools)
+        self._emit({"kind": "tool_selection_started", "total_tools": total_tools})
+
+    def on_tool_selection(self, selected: list[str], total_tools: int) -> None:
+        self._sink.on_tool_selection(selected, total_tools)
+        self._emit(
+            {
+                "kind": "tool_selection",
+                "selected": list(selected),
+                "total_tools": total_tools,
+            }
+        )
+
+    def on_tool_selection_ended(self) -> None:
+        self._sink.on_tool_selection_ended()
+        self._emit({"kind": "tool_selection_ended"})
+
+    def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
+        self._sink.emit_fallback_notice(text, style)
+        self._emit({"kind": "fallback_notice", "text": text, "style": style})
+
+
+def resolve_middleware_event_sink(
+    events: MiddlewareEventSink | None,
+    *,
+    for_async_subagent: bool,
+) -> MiddlewareEventSink:
+    """Select the middleware event sink for a middleware stack.
+
+    Policy (single home for the decision):
+
+    * subagent stacks always use :class:`NoOpSink` — they never drive the
+      main-agent frontend widgets, and their results reach the client via
+      thread state, not live custom events;
+    * main stacks without an explicit sink use :class:`RunScopedEventSink`;
+    * main stacks inside a langgraph dev subprocess (``EVOSCIENTIST_DEPLOY_MODE``
+      set — i.e. the process serves graphs over HTTP, where no frontend sink
+      can exist) are additionally wrapped in :class:`StreamBroadcastSink` so
+      middleware events reach the client over the ``custom`` channel. The
+      local CLI process never sets that variable, so local stacks never
+      broadcast (single render via the injected sink).
+    """
+    if for_async_subagent:
+        return NO_OP_SINK
+    sink = events if events is not None else RunScopedEventSink()
+    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+        return StreamBroadcastSink(sink)
+    return sink

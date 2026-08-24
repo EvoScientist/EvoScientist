@@ -41,7 +41,9 @@ def create_runtime_gateways(
 
     ``events`` is the frontend event sink; it is attached to the local gateway
     so the streaming path shares the same sink instance the frontend injects
-    into the agent's middleware. Server backends ignore it (headless).
+    into the agent's middleware. On the server backend it is the delivery
+    point for middleware events mirrored over the run's ``custom`` stream
+    channel.
     """
     if backend == "langgraph_server":
         if base_url is None and langgraph_client is None:
@@ -58,6 +60,7 @@ def create_runtime_gateways(
             graph_gateway=LangGraphServerGateway(
                 server_thread_store,
                 graph_id=graph_id,
+                events=events,
             ),
         )
 
