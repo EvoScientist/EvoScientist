@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.7" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.8" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[21 Aug 2026]** **[v0.2.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.8)** — Deploy-mode graph rebuilds drop from ~15 s to under a second; resume commands no longer crash and empty session history; Novita AI as a new LLM provider; NVIDIA BioNeMo Agent Toolkit in onboarding's recommended skill packs; bounded routed reasoning with empty truncations surfaced as errors; a subscription OAuth recipe in the docs; deepagents 0.7.8.
 - **[14 Aug 2026]** **[v0.2.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.7)** — Faster startup (lazy imports, reusable kept-alive langgraph dev server, indexed thread listing); new models: Gemini 3.7 Flash (Google + OpenRouter), DeepSeek V4 Pro 0813, Grok 4.6, and GLM-5.3 (Zhipu + OpenRouter); encrypted-webhook channels reject unsigned POSTs; MCP stdio servers start reliably under redirected streams on Windows; sub-agent tools resolve at dispatch time; `/compact` history offload restored on deepagents 0.7.6.
 - **[07 Aug 2026]** **[v0.2.6](https://github.com/EvoScientist/EvoScientist/releases/tag/V0.2.6)** — Agent teams: invite installed expert skills into a session (`/expert <name>`) for in-turn consults, parallel panels, or background jobs; configurable bind hosts for the langgraph dev backend and WebUI (loopback by default); Volcengine Coding Plan provider (`glm-5.2`, `kimi-k2.5`); Qwen3.8-Max on DashScope and OpenRouter (1M context); deepagents 0.7.5 with media placeholders instead of provider 400s; a blank tool-call ID fix for Kimi/Zhipu sessions.
 - **[01 Aug 2026]** **[v0.2.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.5)** — Unified human-in-the-loop approval across the main agent and sync + async sub-agents; deepagents 0.7.0 with leaner built-in prompts and a recursive `delete` tool gated behind the same approval as `execute`; Requesty and Atlas Cloud as new LLM providers; fixes for unnamed tool calls, interrupted tool-call history on sync sub-agents, and deploy-mode port propagation.
