@@ -750,6 +750,15 @@ class LangGraphServerGateway:
             return {}
         return {str(key): value for key, value in values.items()}
 
+    async def get_run_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        run_id: str,
+    ) -> str:
+        run = await self.thread_store.client.runs.get(thread_id, run_id)
+        return run["status"]
+
     async def _pending_interrupt_events(
         self,
         stream: AsyncThreadStream,

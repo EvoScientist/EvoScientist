@@ -199,6 +199,24 @@ class LocalGraphGateway:
             as_node=as_node,
         )
 
+    async def get_run_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        run_id: str,
+    ) -> str:
+        # The main graph runs in-process, but async sub-agent tasks still run
+        # on the langgraph dev server (launching them requires it up), so their
+        # run status lives there — read it through the dev-server SDK client.
+        from ..langgraph_dev.sdk import (
+            cached_langgraph_async_client,
+            configured_langgraph_dev_url,
+        )
+
+        client = cached_langgraph_async_client(configured_langgraph_dev_url())
+        run = await client.runs.get(thread_id, run_id)
+        return run["status"]
+
     def _require_local_graph(self, target: GraphTarget | None) -> CompiledStateGraph:
         if target is None or target.local_graph is None:
             raise RuntimeError("LocalGraphGateway requires GraphTarget.local_graph")
