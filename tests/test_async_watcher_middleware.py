@@ -80,8 +80,12 @@ def _build_request(tool_name: str, args: dict, *, thread_id: str | None = None):
     )
 
 
-def _make_middleware():
-    """Build an AsyncWatcherMiddleware with a stubbed ``_ClientCache``."""
+def _make_middleware(notifier=async_notifier):
+    """Build an AsyncWatcherMiddleware with a stubbed ``_ClientCache``.
+
+    ``notifier`` defaults to the real module port; pass ``None`` to exercise
+    the server-process no-op path.
+    """
     from EvoScientist.middleware.async_watcher import AsyncWatcherMiddleware
 
     fake_client = MagicMock(name="LangGraphClient")
@@ -100,7 +104,7 @@ def _make_middleware():
                     "graph_id": "writing-agent",
                 }
             },
-            notifier=async_notifier,
+            notifier=notifier,
         )
     return mw, fake_client
 
@@ -467,3 +471,98 @@ async def test_middleware_pre_cancel_swallows_unexpected_errors():
         async_notifier._watcher_by_thread.pop("t1", None)
 
     assert handler_called["value"] is True
+
+
+# --- server-process no-op path (notifier=None) ---------------------------------
+
+
+async def test_middleware_noop_on_start_when_notifier_none():
+    """With notifier=None (server process), start_async_task spawns no watcher.
+
+    The state-driven reader delivers completions client-side, so the watcher
+    must be a pure pass-through: no spawn, result returned unchanged.
+    """
+    from langgraph.types import Command
+
+    mw, _ = _make_middleware(notifier=None)
+
+    async def fake_handler(req):
+        return Command(
+            update={
+                "async_tasks": {
+                    "t1": {
+                        "task_id": "t1",
+                        "agent_name": "writing-agent",
+                        "run_id": "r1",
+                        "thread_id": "t1",
+                        "status": "running",
+                    }
+                }
+            }
+        )
+
+    request = _build_request(
+        "start_async_task",
+        {"description": "x", "subagent_type": "writing-agent"},
+        thread_id="t",
+    )
+
+    with patch.object(async_notifier, "spawn_watcher") as mock_spawn:
+        result = await mw.awrap_tool_call(request, fake_handler)
+
+    assert isinstance(result, Command)
+    assert mock_spawn.call_count == 0
+
+
+async def test_middleware_noop_on_update_when_notifier_none():
+    """With notifier=None, update_async_task neither pre-cancels nor spawns.
+
+    A registered stale watcher must be left untouched (no ``cancel``) because
+    the no-op path returns before reaching the pre-cancel branch.
+    """
+    from langgraph.types import Command
+
+    mw, _ = _make_middleware(notifier=None)
+
+    old_watcher = MagicMock()
+    old_watcher.done.return_value = False
+    async_notifier._watcher_by_thread["t1"] = old_watcher
+
+    handler_called = {"value": False}
+
+    async def fake_handler(req):
+        handler_called["value"] = True
+        return Command(update={"async_tasks": {}})
+
+    request = _build_request(
+        "update_async_task", {"task_id": "t1", "message": "x"}, thread_id="t"
+    )
+
+    try:
+        with patch.object(async_notifier, "spawn_watcher") as mock_spawn:
+            await mw.awrap_tool_call(request, fake_handler)
+    finally:
+        async_notifier._watcher_by_thread.pop("t1", None)
+
+    assert handler_called["value"] is True
+    assert mock_spawn.call_count == 0
+    assert old_watcher.cancel.call_count == 0
+
+
+# --- deploy-mode notifier gate -------------------------------------------------
+
+
+def test_async_watcher_notifier_is_none_in_deploy_mode(monkeypatch):
+    """``_async_watcher_notifier`` returns None when EVOSCIENTIST_DEPLOY_MODE set."""
+    from EvoScientist import EvoScientist as evo
+
+    monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
+    assert evo._async_watcher_notifier() is None
+
+
+def test_async_watcher_notifier_is_module_in_local_process(monkeypatch):
+    """``_async_watcher_notifier`` returns the notifier module in the local CLI process."""
+    from EvoScientist import EvoScientist as evo
+
+    monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+    assert evo._async_watcher_notifier() is async_notifier
