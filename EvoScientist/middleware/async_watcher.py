@@ -47,10 +47,21 @@ class AsyncWatcherMiddleware(AgentMiddleware):
             a ``_ClientCache`` for resolving the LangGraph client per agent.
         notifier: Injected :class:`~EvoScientist.middleware.notifier.NotifierPort`
             used to pre-cancel stale watchers and spawn new ones. The composition
-            root supplies ``EvoScientist.cli.async_notifier``.
+            root supplies ``EvoScientist.cli.async_notifier`` in the local CLI
+            process, where the notifier's queues have a live drain. ``None`` when
+            the main agent is built inside the langgraph dev server process
+            (``EVOSCIENTIST_DEPLOY_MODE`` set): there the queues have no consumer
+            and completions are delivered client-side by the state-driven reader
+            (``async_notifier.enqueue_completions_from_state``), so the watcher
+            has nothing to do and every method below no-ops. The middleware
+            still stays in the stack so the expert-spec client-cache extension in
+            ``_route_async_specs_through_evo_middleware`` keeps its mutation
+            target.
     """
 
-    def __init__(self, async_agents: dict[str, Any], notifier: NotifierPort) -> None:
+    def __init__(
+        self, async_agents: dict[str, Any], notifier: NotifierPort | None = None
+    ) -> None:
         from deepagents.middleware.async_subagents import _ClientCache
 
         super().__init__()
@@ -64,6 +75,13 @@ class AsyncWatcherMiddleware(AgentMiddleware):
     ) -> ToolMessage | Command:
         name = request.tool_call.get("name")
         args = request.tool_call.get("args") or {}
+
+        # No notifier means the main agent is built in the langgraph dev server
+        # process, where the notifier's queues have no drain. The state-driven
+        # reader delivers completions client-side instead, so the watcher is a
+        # pure pass-through: don't pre-cancel and don't spawn.
+        if self._notifier is None:
+            return await handler(request)
 
         # Pre-cancel the existing watcher BEFORE the new run interrupts the old
         # one (see NotifierPort.pre_cancel_watcher for the full rationale).
