@@ -38,6 +38,10 @@ class AsyncTaskState(TypedDict, total=False):
     status: str
     last_checked_at: str
     last_updated_at: str
+    # Registry fields carried by the deepagents ``async_tasks`` channel; the
+    # state-based reader needs these to look up and label a task's live run.
+    agent_name: str
+    run_id: str
 
 
 AsyncTasksState: TypeAlias = dict[str, AsyncTaskState]
@@ -215,6 +219,64 @@ async def read_async_tasks_from_gateway(
     except Exception:
         return {}
     return values.get("async_tasks", {})
+
+
+# Task ids the reader has already enqueued a completion for. The persisted
+# ``async_tasks[*].status`` lags the live run (it only advances when the agent
+# calls ``check_async_task``), so without this a fast reader would re-enqueue
+# the same completion every poll until the agent checks. Combined with the
+# terminal-in-state skip below, one completion yields exactly one enqueue.
+_reader_enqueued_task_ids: set[str] = set()
+
+
+async def enqueue_completions_from_state(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+) -> None:
+    """State-based counterpart to the in-process watcher.
+
+    Read the ``async_tasks`` registry through the gateway and, for each task not
+    already known terminal, ask the gateway for the live run status. Newly
+    terminal tasks are enqueued onto the same consumer queue the watcher feeds,
+    so ``consume_notifications`` handles dedup/batching/injection unchanged.
+    Both reads go through the gateway, so it behaves identically on either
+    backend.
+
+    Intended cadence: call once per turn boundary (after a turn / on stream
+    close), not on the fast queue-poll tick — it issues one ``get_run_status``
+    per active task. Best-effort throughout: a failed status read leaves the
+    task for the next poll (treated as not-yet-terminal), mirroring
+    ``read_async_tasks_from_gateway``.
+    """
+    registry = await read_async_tasks_from_gateway(gateway, target, thread_id)
+    for task_id, task in registry.items():
+        if task_id in _reader_enqueued_task_ids:
+            continue
+        if task.get("status") in TERMINAL_STATUSES:
+            # Already terminal in state → the agent saw it via a check-tool
+            # writeback; nothing for the reader to surface.
+            continue
+        run_id = task.get("run_id")
+        if not run_id:
+            continue
+        # task_id == the sub-agent thread_id (deepagents keys the registry by it).
+        try:
+            status = await gateway.get_run_status(target, task_id, run_id)
+        except Exception:
+            continue  # server unavailable / transient — retry next poll
+        if status not in TERMINAL_STATUSES:
+            continue
+        enqueue_task_notification(
+            AsyncTaskNotification(
+                task_id=task_id,
+                agent_name=task.get("agent_name", ""),
+                status=status,
+                received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                origin_cli_thread_id=thread_id,
+            )
+        )
+        _reader_enqueued_task_ids.add(task_id)
 
 
 async def watch_run_and_notify(
