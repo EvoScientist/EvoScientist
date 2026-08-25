@@ -749,15 +749,19 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
     # HTTP status codes that should never be retried (auth/permission errors)
     _non_retryable_status_codes: tuple[int, ...] = (401, 403)
 
-    # Structured SDK error codes that should never be retried
-    # Examples: Slack (invalid_auth, expired_token), Feishu (10003), DingTalk (40014)
+    # Structured SDK error codes that should never be retried (e.g. Slack invalid_auth)
+    # Channel-specific message patterns (e.g. Feishu 10003, DingTalk 40014) are handled
+    # via _non_retryable_patterns in respective channel subclasses.
     _non_retryable_error_codes: tuple[str, ...] = (
         "invalid_auth",
         "invalid_token",
         "expired_token",
+        "token_expired",
+        "token_revoked",
         "account_inactive",
         "not_authed",
         "no_permission",
+        "missing_scope",
     )
 
     _non_retryable_patterns: tuple[str, ...] = (
@@ -780,9 +784,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         Pipeline:
         1. SDK-provided ``retry_after`` attribute (Telegram / Slack SDKs).
         2. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
-        3. Non-retryable detection → ``None``. Combines structured SDK error
-           codes (e.g. Slack ``invalid_auth``, HTTP 401/403) with message
-           pattern matching (e.g. ``"unauthorized"``, ``"forbidden"``).
+        3. Non-retryable detection → ``None``. Evaluates HTTP status codes
+           (e.g. 401, 403), structured SDK error codes (e.g. Slack
+           ``"invalid_auth"``), and message pattern matching
+           (e.g. ``"unauthorized"``, ``"forbidden"``).
         4. Rate-limit pattern match → ``_rate_limit_delay``.
         5. Default ``1.0`` s for generic transient errors.
 
@@ -794,24 +799,25 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         # 1. SDK retry_after attribute
         retry = getattr(exc, "retry_after", None)
         if retry is not None:
-            return float(retry)
+            try:
+                return float(retry)
+            except (ValueError, TypeError):
+                pass
 
         # 2. HTTP Retry-After header
         header_val = self._parse_retry_after_header(exc)
         if header_val is not None:
             return header_val
 
-        # 3. Non-retryable detection: structured SDK error codes + message
-        #    patterns. Either signal means the error is permanent and must
-        #    not be retried.
+        # 3. Non-retryable detection: evaluate status codes, structured SDK
+        #    error codes, and message patterns independently.
+        status_code = self._extract_status_code(exc)
+        if status_code is not None and status_code in self._non_retryable_status_codes:
+            return None
+
         sdk_error = self._extract_sdk_error_code(exc)
-        if sdk_error is not None:
-            if isinstance(sdk_error, int):
-                if sdk_error in self._non_retryable_status_codes:
-                    return None
-            elif isinstance(sdk_error, str):
-                if sdk_error in self._non_retryable_error_codes:
-                    return None
+        if sdk_error is not None and sdk_error in self._non_retryable_error_codes:
+            return None
 
         msg = str(exc).lower()
         if self._non_retryable_patterns and any(
@@ -828,35 +834,82 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         # 5. Default: transient error, retry with the standard delay
         return 1.0
 
-    def _extract_sdk_error_code(self, exc: Exception) -> int | str | None:
-        """Extract structured SDK error code from exception's response.
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status code from an exception or its response.
 
-        Safely inspects response object or dict for error codes.
-        Returns int (HTTP status code) or str (SDK error code), or None.
-
-        Handles two patterns:
-        - Slack SDK: response["error"] (dict-like, e.g. "invalid_auth")
-        - HTTP SDK: response.status_code (object attribute, e.g. 401)
+        Returns an integer status code (e.g. 401, 403, 500), or ``None`` if
+        no status code is found.
         """
         resp = getattr(exc, "response", None)
-        if resp is None:
+        if resp is not None:
+            if isinstance(resp, dict):
+                status = resp.get("status_code") or resp.get("status")
+            else:
+                status = getattr(resp, "status_code", None) or getattr(
+                    resp, "status", None
+                )
+            if isinstance(status, int):
+                return status
+            if isinstance(status, str) and status.isdigit():
+                return int(status)
+
+        status = (
+            getattr(exc, "status_code", None)
+            or getattr(exc, "status", None)
+            or getattr(exc, "code", None)
+        )
+        if isinstance(status, int):
+            return status
+        if isinstance(status, str) and status.isdigit():
+            return int(status)
+
+        return None
+
+    def _extract_sdk_error_code(self, exc: Exception) -> str | None:
+        """Extract structured SDK error code string from exception or its response.
+
+        Safely inspects dict responses (e.g. Slack SDK ``response["error"]``) and
+        object attributes (e.g. ``exc.code``, ``exc.error``, or ``resp.error``).
+        Returns a lowercase error string (e.g. ``"invalid_auth"``), or ``None``.
+        """
+
+        def _to_code_str(val: Any) -> str | None:
+            if isinstance(val, str):
+                return val.lower()
+            if isinstance(val, dict):
+                code = val.get("code") or val.get("type") or val.get("error")
+                if isinstance(code, str):
+                    return code.lower()
             return None
 
-        # Try dict-like access (Slack SDK pattern)
-        try:
-            error = resp.get("error")
-            if error and isinstance(error, str):
-                return error
-        except (AttributeError, TypeError):
-            pass
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            if isinstance(resp, dict):
+                res = _to_code_str(resp.get("error"))
+                if res:
+                    return res
+            else:
+                get_fn = getattr(resp, "get", None)
+                if callable(get_fn):
+                    try:
+                        res = _to_code_str(get_fn("error"))
+                        if res:
+                            return res
+                    except Exception:
+                        pass
+                res = _to_code_str(getattr(resp, "error", None))
+                if res:
+                    return res
+                data = getattr(resp, "data", None)
+                if isinstance(data, dict):
+                    res = _to_code_str(data.get("error"))
+                    if res:
+                        return res
 
-        # Try object attribute (HTTP status code pattern)
-        try:
-            status = getattr(resp, "status_code", None)
-            if status and isinstance(status, int):
-                return status
-        except AttributeError:
-            pass
+        for attr in ("code", "error", "error_code"):
+            res = _to_code_str(getattr(exc, attr, None))
+            if res:
+                return res
 
         return None
 
@@ -866,7 +919,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         if resp is None:
             return None
         headers = getattr(resp, "headers", None)
-        if not headers:
+        if not headers or not hasattr(headers, "get"):
             return None
         raw = headers.get("Retry-After") or headers.get("retry-after")
         if raw is None:

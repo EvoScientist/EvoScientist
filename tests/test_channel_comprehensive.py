@@ -1268,6 +1268,58 @@ class TestExtractRetryAfter:
         result = ch._extract_retry_after(exc)
         assert result is None
 
+    def test_slack_uppercase_error_not_retryable(self):
+        """Case-insensitive SDK error code should return None (no retry)."""
+        ch = StubChannel()
+        exc = _MockSDKError("INVALID_AUTH", response={"error": "INVALID_AUTH"})
+        result = ch._extract_retry_after(exc)
+        assert result is None
+
+    def test_dual_signal_status_200_with_auth_error_not_retryable(self):
+        """Slack response with status_code 200 and invalid_auth error code is not retryable."""
+        ch = StubChannel()
+        resp = type(
+            "SlackResp",
+            (),
+            {
+                "status_code": 200,
+                "get": lambda self, k: {"error": "invalid_auth"}.get(k),
+            },
+        )()
+        exc = _MockSDKError("Slack auth failed", response=resp)
+        result = ch._extract_retry_after(exc)
+        assert result is None
+
+    def test_dual_signal_status_401_with_unknown_error_not_retryable(self):
+        """Response with status_code 401 and an unlisted error code is not retryable."""
+        ch = StubChannel()
+        resp = type(
+            "SlackResp",
+            (),
+            {
+                "status_code": 401,
+                "get": lambda self, k: {"error": "unknown_custom_error"}.get(k),
+            },
+        )()
+        exc = _MockSDKError("HTTP 401", response=resp)
+        result = ch._extract_retry_after(exc)
+        assert result is None
+
+    def test_dual_signal_status_403_not_retryable(self):
+        """Response with status_code 403 is not retryable even if error code is unlisted."""
+        ch = StubChannel()
+        resp = type(
+            "SlackResp",
+            (),
+            {
+                "status_code": 403,
+                "get": lambda self, k: {"error": "team_access_not_granted"}.get(k),
+            },
+        )()
+        exc = _MockSDKError("HTTP 403", response=resp)
+        result = ch._extract_retry_after(exc)
+        assert result is None
+
     def test_status_401_not_retryable(self):
         """HTTP 401 status code should return None (no retry)."""
         ch = StubChannel()
@@ -1304,24 +1356,97 @@ class TestExtractRetryAfter:
         result = ch._extract_retry_after(exc)
         assert result == 1.0
 
+    def test_invalid_retry_after_attribute_falls_back(self):
+        """Non-numeric retry_after attribute should not raise, but fall through."""
+        ch = StubChannel()
+
+        class BadRetryError(Exception):
+            retry_after = "not-a-number"
+
+        result = ch._extract_retry_after(BadRetryError("bad retry"))
+        assert result == 1.0
+
+    # ── _extract_status_code tests ───────────────────────────────────
+
+    def test_extract_status_code_from_object(self):
+        """_extract_status_code extracts status_code attribute from response."""
+        ch = StubChannel()
+        exc = _MockSDKError("oops", response=type("Resp", (), {"status_code": 401})())
+        assert ch._extract_status_code(exc) == 401
+
+    def test_extract_status_code_from_status_attr(self):
+        """_extract_status_code extracts status attribute (aiohttp/discord style)."""
+        ch = StubChannel()
+        exc = _MockSDKError("oops", response=type("Resp", (), {"status": 403})())
+        assert ch._extract_status_code(exc) == 403
+
+    def test_extract_status_code_from_dict(self):
+        """_extract_status_code extracts status_code or status key from response dict."""
+        ch = StubChannel()
+        exc = _MockSDKError("oops", response={"status_code": 401})
+        assert ch._extract_status_code(exc) == 401
+        exc_alt = _MockSDKError("oops", response={"status": 403})
+        assert ch._extract_status_code(exc_alt) == 403
+
+    def test_extract_status_code_from_exc_attr(self):
+        """_extract_status_code extracts status_code/status/code from exception itself."""
+        ch = StubChannel()
+
+        class DirectStatusError(Exception):
+            status = 401
+
+        assert ch._extract_status_code(DirectStatusError("auth error")) == 401
+
+        class UrllibHttpError(Exception):
+            code = 403
+
+        assert ch._extract_status_code(UrllibHttpError("forbidden")) == 403
+
+    def test_extract_status_code_none(self):
+        """_extract_status_code returns None when no status code is available."""
+        ch = StubChannel()
+        assert ch._extract_status_code(RuntimeError("plain error")) is None
+
+    # ── _extract_sdk_error_code tests ─────────────────────────────────
+
     def test_extract_sdk_error_code_from_dict(self):
-        """_extract_sdk_error_code returns the 'error' key from a dict response."""
+        """_extract_sdk_error_code returns the lowercase 'error' key from a dict response."""
         ch = StubChannel()
         exc = _MockSDKError("oops", response={"error": "not_authed"})
         result = ch._extract_sdk_error_code(exc)
         assert result == "not_authed"
 
-    def test_extract_sdk_error_code_from_status(self):
-        """_extract_sdk_error_code returns status_code from an object response."""
+    def test_extract_sdk_error_code_from_nested_dict(self):
+        """_extract_sdk_error_code handles nested dict error format."""
+        ch = StubChannel()
+        exc = _MockSDKError("oops", response={"error": {"code": "token_expired"}})
+        result = ch._extract_sdk_error_code(exc)
+        assert result == "token_expired"
+
+    def test_extract_sdk_error_code_from_object(self):
+        """_extract_sdk_error_code returns error from an object response."""
+        ch = StubChannel()
+        exc = _MockSDKError(
+            "oops", response=type("Resp", (), {"error": "invalid_auth"})()
+        )
+        result = ch._extract_sdk_error_code(exc)
+        assert result == "invalid_auth"
+
+    def test_extract_sdk_error_code_from_exc_code(self):
+        """_extract_sdk_error_code returns code/error attribute on exception."""
         ch = StubChannel()
 
-        class HttpError(Exception):
-            pass
+        class CodeError(Exception):
+            code = "account_inactive"
 
-        exc = HttpError("boom")
-        exc.response = type("Resp", (), {"status_code": 401})()
-        result = ch._extract_sdk_error_code(exc)
-        assert result == 401
+        exc = CodeError("account deactivated")
+        assert ch._extract_sdk_error_code(exc) == "account_inactive"
+
+        class ErrorAttrException(Exception):
+            error = "missing_scope"
+
+        exc2 = ErrorAttrException("insufficient scope")
+        assert ch._extract_sdk_error_code(exc2) == "missing_scope"
 
     def test_extract_sdk_error_code_no_response_returns_none(self):
         """_extract_sdk_error_code returns None when exc has no response."""
@@ -1335,6 +1460,36 @@ class TestExtractRetryAfter:
         exc = _MockSDKError("empty", response={})
         result = ch._extract_sdk_error_code(exc)
         assert result is None
+
+    # ── _parse_retry_after_header tests ───────────────────────────────
+
+    def test_parse_retry_after_header_integer(self):
+        """_parse_retry_after_header parses integer string from headers."""
+        ch = StubChannel()
+        resp = type("Resp", (), {"headers": {"Retry-After": "10"}})()
+        exc = _MockSDKError("429", response=resp)
+        assert ch._parse_retry_after_header(exc) == 10.0
+
+    def test_parse_retry_after_header_float(self):
+        """_parse_retry_after_header parses float string from lowercase headers."""
+        ch = StubChannel()
+        resp = type("Resp", (), {"headers": {"retry-after": "2.5"}})()
+        exc = _MockSDKError("429", response=resp)
+        assert ch._parse_retry_after_header(exc) == 2.5
+
+    def test_parse_retry_after_header_invalid_value(self):
+        """_parse_retry_after_header returns None for non-numeric header."""
+        ch = StubChannel()
+        resp = type("Resp", (), {"headers": {"Retry-After": "invalid-date"}})()
+        exc = _MockSDKError("429", response=resp)
+        assert ch._parse_retry_after_header(exc) is None
+
+    def test_parse_retry_after_header_missing(self):
+        """_parse_retry_after_header returns None when no Retry-After header exists."""
+        ch = StubChannel()
+        resp = type("Resp", (), {"headers": {"Content-Type": "application/json"}})()
+        exc = _MockSDKError("429", response=resp)
+        assert ch._parse_retry_after_header(exc) is None
 
 
 class TestChannelAttachments:
