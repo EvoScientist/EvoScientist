@@ -148,6 +148,46 @@ async def test_local_graph_gateway_reads_state_values():
     )
 
 
+# ---------------------------------------------------------------------------
+# get_run_status seam (Slice 2.4a) — both backends read the live run status
+# the state-based client reader uses to detect async-task completion.
+# ---------------------------------------------------------------------------
+
+
+async def test_server_gateway_get_run_status_reads_run_status():
+    client = MagicMock()
+    client.runs.get = AsyncMock(return_value={"status": "success"})
+    thread_store = MagicMock()
+    thread_store.client = client
+    gateway = LangGraphServerGateway(thread_store=thread_store)
+
+    status = await gateway.get_run_status(GraphTarget(), "task-thread", "run-1")
+
+    assert status == "success"
+    client.runs.get.assert_awaited_once_with("task-thread", "run-1")
+
+
+async def test_local_gateway_get_run_status_reads_dev_server_run(monkeypatch):
+    # Async tasks run on the dev server even under the local backend, so
+    # get_run_status reads through a dev-server SDK client.
+    client = MagicMock()
+    client.runs.get = AsyncMock(return_value={"status": "error"})
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.sdk.configured_langgraph_dev_url",
+        lambda: "http://dev",
+    )
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client",
+        lambda url: client,
+    )
+    gateway = LocalGraphGateway()
+
+    status = await gateway.get_run_status(GraphTarget(), "task-thread", "run-1")
+
+    assert status == "error"
+    client.runs.get.assert_awaited_once_with("task-thread", "run-1")
+
+
 async def test_local_graph_gateway_updates_state_values():
     agent = MagicMock()
     agent.aupdate_state = AsyncMock()

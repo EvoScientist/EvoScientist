@@ -1509,6 +1509,19 @@ def cmd_interactive(
                                 )
                             ),
                         )
+                        # On stream close, read async_tasks off thread state and
+                        # enqueue any completions not yet surfaced (state-based
+                        # path, additive to the in-process watcher; the poller
+                        # above drains + injects). Best-effort — never blocks the
+                        # prompt on a status-read failure.
+                        await async_notifier.enqueue_completions_from_state(
+                            runtime_gateways.graph_gateway,
+                            GraphTarget(
+                                local_graph=ready_agent,
+                                workspace_dir=state["workspace_dir"],
+                            ),
+                            state["thread_id"],
+                        )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
                         _print_separator()

@@ -1643,6 +1643,22 @@ def serve(
     _orig_sigint = signal.signal(signal.SIGINT, _handle_shutdown)
     _orig_sigterm = signal.signal(signal.SIGTERM, _handle_shutdown)
 
+    async def _serve_enqueue_completions() -> None:
+        # On turn close, read async_tasks off thread state and enqueue any
+        # completions not yet surfaced (state-based path, additive to the
+        # watcher; the idle drain below injects them).
+        thread_id = runtime_state.thread_id
+        if not thread_id:
+            return
+        await async_notifier.enqueue_completions_from_state(
+            runtime_state.runtime_gateways.graph_gateway,
+            GraphTarget(
+                local_graph=runtime_state.agent,
+                workspace_dir=runtime_state.workspace_dir,
+            ),
+            thread_id,
+        )
+
     try:
         while not shutdown_event.is_set():
             try:
@@ -1670,6 +1686,7 @@ def serve(
                     break
                 finally:
                     active_cancel_scope = no_active_cancel_scope
+                runtime_state.async_runtime.run_sync(_serve_enqueue_completions)
 
             # Poll notification queue when idle (no channel message was pending).
             if async_notifier.has_pending_notifications(runtime_state.thread_id):

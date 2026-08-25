@@ -69,6 +69,27 @@ def get_langgraph_async_client(*, url: str, headers: Mapping[str, str] | None = 
     return get_client(url=url, headers=langgraph_dev_headers(headers))
 
 
+_ASYNC_CLIENT_CACHE: dict[str, object] = {}
+
+
+def cached_langgraph_async_client(
+    url: str, *, headers: Mapping[str, str] | None = None
+):
+    """Return a per-URL cached async SDK client.
+
+    The async client wraps an ``httpx.AsyncClient`` bound to the event loop it
+    is first used on; caching avoids leaking a new connection pool on every
+    call. The CLI drives its whole session from a single ``asyncio.run`` loop,
+    so one cached client per URL is safe. Callers that only read (e.g. the
+    async-task completion poll) reuse this rather than constructing per poll.
+    """
+    client = _ASYNC_CLIENT_CACHE.get(url)
+    if client is None:
+        client = get_langgraph_async_client(url=url, headers=headers)
+        _ASYNC_CLIENT_CACHE[url] = client
+    return client
+
+
 def default_scheduler_timezone(config: object | None = None) -> str | None:
     """Return configured scheduler timezone, falling back to the host timezone."""
     if config is None:
