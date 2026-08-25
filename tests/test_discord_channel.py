@@ -40,32 +40,47 @@ class TestDiscordChannel:
 
 
 class TestDiscordRetryErrorExtraction:
-    """Test Discord-specific status code and error code extraction."""
-
-    class HTTPException(Exception):
-        """Mock discord.HTTPException for test environment."""
-
-        def __init__(self, message: str, status: int, code: int | None = None) -> None:
-            super().__init__(message)
-            self.status = status
-            self.code = code
+    """Test Discord-specific status code extraction."""
 
     def test_discord_status_code_401_not_retryable(self):
+        from unittest.mock import MagicMock
+
+        import discord
+
         ch = DiscordChannel(DiscordConfig(bot_token="test"))
-        exc = self.HTTPException("401 Unauthorized", status=401, code=0)
+        resp = MagicMock()
+        resp.status = 401
+        resp.reason = "Unauthorized"
+        resp.headers = {}
+        exc = discord.HTTPException(resp, "401 Unauthorized")
         assert ch._extract_status_code(exc) == 401
         assert ch._extract_retry_after(exc) is None
 
     def test_discord_status_code_403_not_retryable(self):
+        from unittest.mock import MagicMock
+
+        import discord
+
         ch = DiscordChannel(DiscordConfig(bot_token="test"))
-        exc = self.HTTPException("50001 Missing Access", status=403, code=50001)
+        resp = MagicMock()
+        resp.status = 403
+        resp.reason = "Forbidden"
+        resp.headers = {}
+        exc = discord.HTTPException(resp, "50001 Missing Access")
         assert ch._extract_status_code(exc) == 403
-        assert ch._extract_sdk_error_code(exc) == "50001"
         assert ch._extract_retry_after(exc) is None
 
     def test_discord_status_code_500_is_retryable(self):
+        from unittest.mock import MagicMock
+
+        import discord
+
         ch = DiscordChannel(DiscordConfig(bot_token="test"))
-        exc = self.HTTPException("500 Internal Server Error", status=500, code=0)
+        resp = MagicMock()
+        resp.status = 500
+        resp.reason = "Internal Server Error"
+        resp.headers = {}
+        exc = discord.HTTPException(resp, "500 Internal Server Error")
         assert ch._extract_status_code(exc) == 500
         assert ch._extract_retry_after(exc) == 1.0
 

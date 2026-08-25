@@ -203,19 +203,9 @@ class SlackChannel(Channel):
             from slack_sdk.errors import SlackApiError
 
             if isinstance(exc, SlackApiError):
-                resp = getattr(exc, "response", None)
-                if resp is not None:
-                    return getattr(resp, "status_code", None)
+                return exc.response.status_code
         except ImportError:
             pass
-
-        if type(exc).__name__ == "SlackApiError":
-            resp = getattr(exc, "response", None)
-            if resp is not None:
-                status = getattr(resp, "status_code", None)
-                if isinstance(status, int):
-                    return status
-
         return super()._extract_status_code(exc)
 
     def _extract_sdk_error_code(self, exc: Exception) -> str | None:
@@ -224,39 +214,10 @@ class SlackChannel(Channel):
             from slack_sdk.errors import SlackApiError
 
             if isinstance(exc, SlackApiError):
-                resp = getattr(exc, "response", None)
-                if resp is not None:
-                    error = None
-                    if hasattr(resp, "get"):
-                        try:
-                            error = resp.get("error")
-                        except Exception:
-                            pass
-                    if (
-                        not error
-                        and hasattr(resp, "data")
-                        and isinstance(resp.data, dict)
-                    ):
-                        error = resp.data.get("error")
-                    if isinstance(error, str):
-                        return error.lower()
+                error = exc.response.get("error")
+                return error.lower() if isinstance(error, str) else None
         except ImportError:
             pass
-
-        if type(exc).__name__ == "SlackApiError":
-            resp = getattr(exc, "response", None)
-            if resp is not None:
-                error = None
-                if hasattr(resp, "get"):
-                    try:
-                        error = resp.get("error")
-                    except Exception:
-                        pass
-                if not error and hasattr(resp, "data") and isinstance(resp.data, dict):
-                    error = resp.data.get("error")
-                if isinstance(error, str):
-                    return error.lower()
-
         return super()._extract_sdk_error_code(exc)
 
     # ── ACK Reactions ───────────────────────────────────────────────

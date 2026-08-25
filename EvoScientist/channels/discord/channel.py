@@ -216,37 +216,10 @@ class DiscordChannel(Channel):
             import discord
 
             if isinstance(exc, discord.HTTPException):
-                status = getattr(exc, "status", None)
-                if isinstance(status, int):
-                    return status
+                return exc.status
         except ImportError:
             pass
-
-        if type(exc).__name__ == "HTTPException" and hasattr(exc, "status"):
-            status = getattr(exc, "status", None)
-            if isinstance(status, int):
-                return status
-
         return super()._extract_status_code(exc)
-
-    def _extract_sdk_error_code(self, exc: Exception) -> str | None:
-        """Extract structured error code string from discord.HTTPException."""
-        try:
-            import discord
-
-            if isinstance(exc, discord.HTTPException):
-                code = getattr(exc, "code", None)
-                if code is not None:
-                    return str(code).lower()
-        except ImportError:
-            pass
-
-        if type(exc).__name__ == "HTTPException" and hasattr(exc, "code"):
-            code = getattr(exc, "code", None)
-            if code is not None:
-                return str(code).lower()
-
-        return super()._extract_sdk_error_code(exc)
 
     # ── Inbound ─────────────────────────────────────────────────────
 
