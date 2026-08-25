@@ -195,6 +195,70 @@ class SlackChannel(Channel):
     def _get_bot_identifier(self) -> str | None:
         return getattr(self, "_bot_user_id", None)
 
+    # ── Retry error code extraction (override base) ─────────────────
+
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status code from SlackApiError or fallback to base."""
+        try:
+            from slack_sdk.errors import SlackApiError
+
+            if isinstance(exc, SlackApiError):
+                resp = getattr(exc, "response", None)
+                if resp is not None:
+                    return getattr(resp, "status_code", None)
+        except ImportError:
+            pass
+
+        if type(exc).__name__ == "SlackApiError":
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                status = getattr(resp, "status_code", None)
+                if isinstance(status, int):
+                    return status
+
+        return super()._extract_status_code(exc)
+
+    def _extract_sdk_error_code(self, exc: Exception) -> str | None:
+        """Extract structured error code string from SlackApiError."""
+        try:
+            from slack_sdk.errors import SlackApiError
+
+            if isinstance(exc, SlackApiError):
+                resp = getattr(exc, "response", None)
+                if resp is not None:
+                    error = None
+                    if hasattr(resp, "get"):
+                        try:
+                            error = resp.get("error")
+                        except Exception:
+                            pass
+                    if (
+                        not error
+                        and hasattr(resp, "data")
+                        and isinstance(resp.data, dict)
+                    ):
+                        error = resp.data.get("error")
+                    if isinstance(error, str):
+                        return error.lower()
+        except ImportError:
+            pass
+
+        if type(exc).__name__ == "SlackApiError":
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                error = None
+                if hasattr(resp, "get"):
+                    try:
+                        error = resp.get("error")
+                    except Exception:
+                        pass
+                if not error and hasattr(resp, "data") and isinstance(resp.data, dict):
+                    error = resp.data.get("error")
+                if isinstance(error, str):
+                    return error.lower()
+
+        return super()._extract_sdk_error_code(exc)
+
     # ── ACK Reactions ───────────────────────────────────────────────
 
     async def _send_ack_reaction(

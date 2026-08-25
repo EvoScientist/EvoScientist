@@ -835,82 +835,33 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         return 1.0
 
     def _extract_status_code(self, exc: Exception) -> int | None:
-        """Extract HTTP status code from an exception or its response.
+        """Extract HTTP status from an httpx or aiohttp error.
 
-        Returns an integer status code (e.g. 401, 403, 500), or ``None`` if
-        no status code is found.
+        Channels with other SDKs (e.g. ``SlackChannel``, ``DiscordChannel``)
+        override this method.
         """
-        resp = getattr(exc, "response", None)
-        if resp is not None:
-            if isinstance(resp, dict):
-                status = resp.get("status_code") or resp.get("status")
-            else:
-                status = getattr(resp, "status_code", None) or getattr(
-                    resp, "status", None
-                )
-            if isinstance(status, int):
-                return status
-            if isinstance(status, str) and status.isdigit():
-                return int(status)
+        import httpx
 
-        status = (
-            getattr(exc, "status_code", None)
-            or getattr(exc, "status", None)
-            or getattr(exc, "code", None)
-        )
-        if isinstance(status, int):
-            return status
-        if isinstance(status, str) and status.isdigit():
-            return int(status)
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code
+
+        try:
+            import aiohttp
+
+            if isinstance(exc, aiohttp.ClientResponseError):
+                return exc.status
+        except ImportError:
+            pass
 
         return None
 
     def _extract_sdk_error_code(self, exc: Exception) -> str | None:
-        """Extract structured SDK error code string from exception or its response.
+        """Extract structured SDK error code string from an exception.
 
-        Safely inspects dict responses (e.g. Slack SDK ``response["error"]``) and
-        object attributes (e.g. ``exc.code``, ``exc.error``, or ``resp.error``).
-        Returns a lowercase error string (e.g. ``"invalid_auth"``), or ``None``.
+        Plain HTTP carries no structured error code by default (returns ``None``).
+        Subclasses with specialized SDKs (e.g. ``SlackChannel``, ``DiscordChannel``)
+        override this method.
         """
-
-        def _to_code_str(val: Any) -> str | None:
-            if isinstance(val, str):
-                return val.lower()
-            if isinstance(val, dict):
-                code = val.get("code") or val.get("type") or val.get("error")
-                if isinstance(code, str):
-                    return code.lower()
-            return None
-
-        resp = getattr(exc, "response", None)
-        if resp is not None:
-            if isinstance(resp, dict):
-                res = _to_code_str(resp.get("error"))
-                if res:
-                    return res
-            else:
-                get_fn = getattr(resp, "get", None)
-                if callable(get_fn):
-                    try:
-                        res = _to_code_str(get_fn("error"))
-                        if res:
-                            return res
-                    except Exception:
-                        pass
-                res = _to_code_str(getattr(resp, "error", None))
-                if res:
-                    return res
-                data = getattr(resp, "data", None)
-                if isinstance(data, dict):
-                    res = _to_code_str(data.get("error"))
-                    if res:
-                        return res
-
-        for attr in ("code", "error", "error_code"):
-            res = _to_code_str(getattr(exc, attr, None))
-            if res:
-                return res
-
         return None
 
     def _parse_retry_after_header(self, exc: Exception) -> float | None:

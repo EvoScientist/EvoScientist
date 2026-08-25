@@ -208,6 +208,46 @@ class DiscordChannel(Channel):
             return str(self._client.user.id)
         return None
 
+    # ── Retry error code extraction (override base) ─────────────────
+
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status code from discord.HTTPException or fallback to base."""
+        try:
+            import discord
+
+            if isinstance(exc, discord.HTTPException):
+                status = getattr(exc, "status", None)
+                if isinstance(status, int):
+                    return status
+        except ImportError:
+            pass
+
+        if type(exc).__name__ == "HTTPException" and hasattr(exc, "status"):
+            status = getattr(exc, "status", None)
+            if isinstance(status, int):
+                return status
+
+        return super()._extract_status_code(exc)
+
+    def _extract_sdk_error_code(self, exc: Exception) -> str | None:
+        """Extract structured error code string from discord.HTTPException."""
+        try:
+            import discord
+
+            if isinstance(exc, discord.HTTPException):
+                code = getattr(exc, "code", None)
+                if code is not None:
+                    return str(code).lower()
+        except ImportError:
+            pass
+
+        if type(exc).__name__ == "HTTPException" and hasattr(exc, "code"):
+            code = getattr(exc, "code", None)
+            if code is not None:
+                return str(code).lower()
+
+        return super()._extract_sdk_error_code(exc)
+
     # ── Inbound ─────────────────────────────────────────────────────
 
     async def _on_message(self, message) -> None:
