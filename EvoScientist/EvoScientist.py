@@ -441,6 +441,25 @@ def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
         subs.append(spec)
 
 
+def _async_watcher_notifier():
+    """Return the notifier to wire into ``AsyncWatcherMiddleware``, or ``None``.
+
+    The watcher's completion signal is only reachable when the notifier's
+    queues are drained in the same process — that is the local CLI process,
+    which never sets ``EVOSCIENTIST_DEPLOY_MODE`` (mirrors the same gate in
+    ``middleware/events.py``). Inside the langgraph dev server process the env
+    var is set and no drain exists, so return ``None``: the state-driven reader
+    (``async_notifier.enqueue_completions_from_state``) delivers completions
+    client-side and the watcher no-ops. Kept as a function, not a module
+    constant, so a test can flip the env var per case.
+    """
+    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+        return None
+    from .cli import async_notifier
+
+    return async_notifier
+
+
 def _maybe_swap_async_subagents(
     subs: list,
     middleware: list | None = None,
@@ -543,12 +562,15 @@ def _maybe_swap_async_subagents(
             out.append(s)
 
     if agent_specs and middleware is not None:
-        from .cli import async_notifier
         from .middleware.async_watcher import AsyncWatcherMiddleware
 
         # Composition root wires the concrete notifier port into the middleware;
-        # the middleware itself never imports the CLI layer.
-        middleware.append(AsyncWatcherMiddleware(agent_specs, notifier=async_notifier))
+        # the middleware itself never imports the CLI layer. ``None`` in the
+        # server process, where the watcher no-ops (state-driven reader delivers
+        # completions instead).
+        middleware.append(
+            AsyncWatcherMiddleware(agent_specs, notifier=_async_watcher_notifier())
+        )
 
     # Forward the CLI's live (model, provider) into deepagents'
     # start/update_async_task tool calls so the deployed graph can
@@ -649,13 +671,12 @@ def _route_async_specs_through_evo_middleware(
         else:
             # No YAML async subagents were registered, so ``_maybe_swap`` did
             # not install the watcher. Install it now so experts still get
-            # completion notifications.
-            from .cli import async_notifier
-
+            # completion notifications (``None`` notifier in the server process,
+            # where the watcher no-ops).
             base_middleware.append(
                 AsyncWatcherMiddleware(
                     {s["name"]: s for s in expert_specs},
-                    notifier=async_notifier,
+                    notifier=_async_watcher_notifier(),
                 )
             )
     return sync_subs
