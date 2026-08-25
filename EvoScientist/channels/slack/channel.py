@@ -199,25 +199,19 @@ class SlackChannel(Channel):
 
     def _extract_status_code(self, exc: Exception) -> int | None:
         """Extract HTTP status code from SlackApiError or fallback to base."""
-        try:
-            from slack_sdk.errors import SlackApiError
+        from slack_sdk.errors import SlackApiError
 
-            if isinstance(exc, SlackApiError):
-                return exc.response.status_code
-        except ImportError:
-            pass
+        if isinstance(exc, SlackApiError):
+            return exc.response.status_code
         return super()._extract_status_code(exc)
 
     def _extract_sdk_error_code(self, exc: Exception) -> str | None:
         """Extract structured error code string from SlackApiError."""
-        try:
-            from slack_sdk.errors import SlackApiError
+        from slack_sdk.errors import SlackApiError
 
-            if isinstance(exc, SlackApiError):
-                error = exc.response.get("error")
-                return error.lower() if isinstance(error, str) else None
-        except ImportError:
-            pass
+        if isinstance(exc, SlackApiError):
+            error = exc.response.get("error")
+            return error.lower() if isinstance(error, str) else None
         return super()._extract_sdk_error_code(exc)
 
     # ── ACK Reactions ───────────────────────────────────────────────

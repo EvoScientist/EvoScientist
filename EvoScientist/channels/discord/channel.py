@@ -212,13 +212,10 @@ class DiscordChannel(Channel):
 
     def _extract_status_code(self, exc: Exception) -> int | None:
         """Extract HTTP status code from discord.HTTPException or fallback to base."""
-        try:
-            import discord
+        import discord
 
-            if isinstance(exc, discord.HTTPException):
-                return exc.status
-        except ImportError:
-            pass
+        if isinstance(exc, discord.HTTPException):
+            return exc.status
         return super()._extract_status_code(exc)
 
     # ── Inbound ─────────────────────────────────────────────────────

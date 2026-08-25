@@ -1335,15 +1335,15 @@ class TestExtractRetryAfter:
         )
         assert StubChannel()._extract_retry_after(exc) == 1.0
 
-    def test_invalid_retry_after_attribute_falls_back(self):
-        """Non-numeric retry_after attribute should not raise, but fall through."""
+    def test_httpx_401_with_retry_after_header_is_still_not_retryable(self):
+        """Non-retryable 401 takes precedence over Retry-After header."""
         ch = StubChannel()
-
-        class BadRetryError(Exception):
-            retry_after = "not-a-number"
-
-        result = ch._extract_retry_after(BadRetryError("bad retry"))
-        assert result == 1.0
+        exc = httpx.HTTPStatusError(
+            "unauthorized",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(401, headers={"Retry-After": "10"}),
+        )
+        assert ch._extract_retry_after(exc) is None
 
     # ── _extract_status_code tests ───────────────────────────────────
 
@@ -1356,25 +1356,6 @@ class TestExtractRetryAfter:
             response=httpx.Response(401),
         )
         assert ch._extract_status_code(exc) == 401
-
-    def test_extract_status_code_from_aiohttp(self):
-        """_extract_status_code extracts status from aiohttp.ClientResponseError."""
-        import aiohttp
-        from yarl import URL
-
-        ch = StubChannel()
-        exc = aiohttp.ClientResponseError(
-            request_info=aiohttp.RequestInfo(
-                url=URL("https://example.invalid"),
-                method="POST",
-                headers={},
-                real_url=URL("https://example.invalid"),
-            ),
-            history=(),
-            status=403,
-            message="Forbidden",
-        )
-        assert ch._extract_status_code(exc) == 403
 
     def test_extract_status_code_non_http_returns_none(self):
         """_extract_status_code returns None for non-HTTP exceptions."""
