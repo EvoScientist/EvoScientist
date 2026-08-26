@@ -713,39 +713,48 @@ class TestResolveHitlApprovalWithPromptFn:
 
 
 class TestInterruptOnWiring:
-    """interrupt_on must be passed natively and gated on auto_approve."""
+    """interrupt_on is always armed; per-run suppression rides a predicate."""
 
-    def test_hitl_interrupt_on_helper_gates_on_auto_approve(self):
-        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+    def test_hitl_interrupt_on_helper_arms_every_shell_tool(self):
+        """The graph is always armed — no ``auto_approve`` gate at construction.
+        Each entry is an ``InterruptOnConfig`` carrying a ``when`` predicate."""
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on, _hitl_when
 
-        assert _build_hitl_interrupt_on(auto_approve=True) is None
+        cfg = _build_hitl_interrupt_on()
+        assert set(cfg) == {"execute", "run_in_background", "schedule_task", "delete"}
+        for entry in cfg.values():
+            assert entry["when"] is _hitl_when
+            assert "approve" in entry["allowed_decisions"]
 
-    def test_hitl_interrupt_on_helper_returns_shell_tools(self):
-        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+    def test_hitl_when_arms_by_default_outside_a_run(self):
+        """No ambient run config → interrupt (armed). This would fail with the
+        old ``auto_approve`` gate reinstated, since that returned ``None``."""
+        from EvoScientist.EvoScientist import _hitl_when
 
-        cfg = _build_hitl_interrupt_on(auto_approve=False)
-        assert cfg == {
-            "execute": True,
-            "run_in_background": True,
-            "schedule_task": True,
-            "delete": True,
-        }
+        assert _hitl_when(None) is True
 
-    def test_auto_mode_implies_auto_approve_so_nothing_is_armed(self):
-        """auto_mode must imply auto_approve from ANY source (not just the CLI
-        flag), so a config-file / direct-construction auto_mode run arms no
-        interrupt and never prompts."""
-        from EvoScientist.config.settings import EvoScientistConfig
-        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+    def test_hitl_when_disarms_when_run_is_suppressed(self, monkeypatch):
+        """configurable.hitl_suppressed=True → predicate returns False (no
+        interrupt). The argument is ignored, covering langchain's batch
+        (tool=None) request shape."""
+        import langgraph.config as lg_config
 
-        cfg = EvoScientistConfig(auto_mode=True)
-        assert cfg.auto_approve is True
-        assert _build_hitl_interrupt_on(auto_approve=cfg.auto_approve) is None
+        from EvoScientist.EvoScientist import _hitl_when
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {"configurable": {"hitl_suppressed": True}},
+        )
+        # Argument ignored: same verdict for a batch (None) and a per-call req.
+        assert _hitl_when(None) is False
+        assert _hitl_when(object()) is False
 
     def test_hitl_interrupt_on_reaches_create_deep_agent(self):
         """The kwarg must actually reach ``create_deep_agent`` — not just the
         pure helper — so a future edit that drops it or re-adds a bare
-        ``HumanInTheLoopMiddleware`` append gets caught."""
+        ``HumanInTheLoopMiddleware`` append gets caught. Now armed regardless
+        of ``auto_approve``."""
         import EvoScientist.EvoScientist as es_mod
         from EvoScientist.EvoScientist import _build_hitl_interrupt_on
 
@@ -782,17 +791,9 @@ class TestInterruptOnWiring:
                                 chat_model=MagicMock(),
                             )
 
-        assert captured == [
-            _build_hitl_interrupt_on(auto_approve=False),
-            _build_hitl_interrupt_on(auto_approve=True),
-        ]
-        assert captured[0] == {
-            "execute": True,
-            "run_in_background": True,
-            "schedule_task": True,
-            "delete": True,
-        }
-        assert captured[1] is None
+        # Always armed — auto_approve no longer disarms at construction.
+        expected = _build_hitl_interrupt_on()
+        assert captured == [expected, expected]
 
 
 # =============================================================================

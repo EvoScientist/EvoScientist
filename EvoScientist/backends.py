@@ -360,6 +360,38 @@ class ActionVerdict:
     reason: str = ""
 
 
+# Per-run ``configurable`` key that disarms HITL and hands the dangerous-command
+# gate to the backend. Set client-side by ``resolve_per_run_config`` from
+# ``config.auto_mode`` (unattended runs); read by the HITL ``when`` predicate and
+# the backend/background guards. A per-run channel (not a construction flag) so a
+# keepalive server can disarm one run without disarming the armed graph.
+HITL_SUPPRESSED_KEY = "hitl_suppressed"
+
+
+def is_hitl_suppressed(config=None) -> bool:
+    """Whether the current run has HITL suppressed via ``configurable``.
+
+    Reads :data:`HITL_SUPPRESSED_KEY` off an explicit *config* (the run's
+    ``RunnableConfig`` dict) or, when omitted, the ambient
+    ``langgraph.config.get_config()``. Returns ``False`` outside a runnable
+    context (direct calls, tests) — the safe floor: armed graph, no backend
+    guard. Mirrors ``middleware.active_team._read_active_teams``.
+    """
+    if config is None:
+        try:
+            from langgraph.config import get_config
+
+            config = get_config()
+        except Exception:
+            return False
+    if not isinstance(config, dict):
+        return False
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return False
+    return bool(configurable.get(HITL_SUPPRESSED_KEY))
+
+
 def resolve_action_decision(
     command: str,
     *,
@@ -1627,12 +1659,25 @@ class CustomSandboxBackend(LocalShellBackend):
             self.cwd,
             virtual_mode=self.virtual_mode,
             dangerous=self._dangerous,
-            guard_dangerous=self._guard_dangerous,
+            guard_dangerous=self._effective_guard_dangerous(),
         )
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)
 
         return self._execute_prepared_command(command, timeout=timeout)
+
+    def _effective_guard_dangerous(self) -> bool:
+        """Guard the dangerous-command set for this call.
+
+        The construction flag stays a floor (``True`` for guarded async
+        sub-agents, which have no approval path at all). On top of it, a run
+        with HITL suppressed (unattended ``auto_mode``) is guarded per call:
+        the interrupt is disarmed there, so the backend is the only gate. An
+        armed run (attended, incl. config ``auto_approve``) is NOT guarded here
+        — the HITL interrupt plus the client policy decide, so the flag is not
+        baked at construction and a mid-session flip can never leave it stale.
+        """
+        return self._guard_dangerous or is_hitl_suppressed()
 
     def _execute_prepared_command(
         self,
