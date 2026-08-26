@@ -261,6 +261,67 @@ def config_auto_approve(action_requests: list[dict]) -> bool:
     return True
 
 
+def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
+    """Resolve HITL decisions from config rules alone, or ``None`` to prompt.
+
+    Per-request policy chokepoint shared by every attended UI (CLI display, TUI):
+    non-shell tools auto-approve; shell tools go through
+    :func:`~EvoScientist.backends.resolve_action_decision` (``shell_allow_list``
+    token-boundary match, dangerous commands rejected with a reason under
+    ``auto_approve``). Returns a full ``decisions`` list when config clears every
+    request, or ``None`` when any request needs a human — the caller then prompts
+    (mounts a widget, calls ``input()``, routes to a channel). Fail-closed to
+    ``None`` on config-load errors and malformed requests. The richer sibling of
+    :func:`config_auto_approve`, which collapses this to a single bool.
+    """
+    if not action_requests:
+        return [{"type": "approve"}]
+
+    try:
+        from ..backends import ActionDecision, resolve_action_decision
+        from ..config.settings import (
+            HITL_ALWAYS_PROMPT_TOOLS,
+            HITL_SHELL_TOOLS,
+            load_config,
+        )
+
+        cfg = load_config()
+    except Exception:
+        return None  # fail-closed: prompt the human
+
+    shell_allow_list = (
+        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
+        if cfg.shell_allow_list
+        else []
+    )
+
+    decisions: list[dict] = []
+    for req in action_requests:
+        if not isinstance(req, dict):
+            return None  # malformed request — never silently approve
+        name = req.get("name", "")
+        if name in HITL_ALWAYS_PROMPT_TOOLS:
+            return None
+        if name not in HITL_SHELL_TOOLS:
+            decisions.append({"type": "approve"})
+            continue
+        args = req.get("args", {})
+        command = args.get("command", "") if isinstance(args, dict) else ""
+        verdict = resolve_action_decision(
+            command,
+            auto_approve=cfg.auto_approve,
+            dangerous_mode=cfg.dangerous_mode,
+            allow_list=shell_allow_list,
+        )
+        if verdict.decision is ActionDecision.APPROVE:
+            decisions.append({"type": "approve"})
+        elif verdict.decision is ActionDecision.REJECT:
+            decisions.append({"type": "reject", "message": verdict.reason})
+        else:
+            return None  # needs a human decision
+    return decisions
+
+
 class ApprovalPolicy:
     """Auto-approve policy backed by config rules and session grants.
 

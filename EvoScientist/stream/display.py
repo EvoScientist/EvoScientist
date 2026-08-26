@@ -1170,12 +1170,7 @@ def _resolve_hitl_approval(
     """
     global _session_auto_approve
 
-    from ..backends import ActionDecision, resolve_action_decision
-    from ..config.settings import (
-        HITL_ALWAYS_PROMPT_TOOLS,
-        HITL_SHELL_TOOLS,
-        load_config,
-    )
+    from ..channels.interaction import resolve_config_decisions
 
     action_requests = interrupt_data.get("action_requests", [])
     if not action_requests:
@@ -1186,54 +1181,15 @@ def _resolve_hitl_approval(
     if _session_auto_approve:
         return [{"type": "approve"} for _ in action_requests]
 
-    cfg = load_config()
-    auto_approve = cfg.auto_approve
-    allow_list = (
-        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
-        if cfg.shell_allow_list
-        else []
-    )
+    # Config-rule fast path (shared with the TUI). Returns full decisions when
+    # config clears every request, or None when a human decision is needed.
+    decisions = resolve_config_decisions(action_requests)
+    if decisions is not None:
+        return decisions
 
-    decisions: list[dict] = []
-    needs_prompt = False
-    for req in action_requests:
-        if not isinstance(req, dict):
-            # Malformed request on an approval gate — never silently approve;
-            # surface it for a human decision (or fail loud in the prompt path).
-            needs_prompt = True
-            break
-        name = req.get("name", "")
-        args = req.get("args", {})
-
-        if name in HITL_ALWAYS_PROMPT_TOOLS:
-            needs_prompt = True
-            break
-
-        if name not in HITL_SHELL_TOOLS:
-            decisions.append({"type": "approve"})
-            continue
-
-        command = args.get("command", "") if isinstance(args, dict) else ""
-        verdict = resolve_action_decision(
-            command,
-            auto_approve=auto_approve,
-            dangerous_mode=cfg.dangerous_mode,
-            allow_list=allow_list,
-        )
-        if verdict.decision is ActionDecision.APPROVE:
-            decisions.append({"type": "approve"})
-        elif verdict.decision is ActionDecision.REJECT:
-            decisions.append({"type": "reject", "message": verdict.reason})
-        else:
-            needs_prompt = True
-            break
-
-    if needs_prompt:
-        if prompt_fn is not None:
-            return prompt_fn(action_requests)
-        return _prompt_hitl_approval(action_requests, question_runner=question_runner)
-
-    return decisions
+    if prompt_fn is not None:
+        return prompt_fn(action_requests)
+    return _prompt_hitl_approval(action_requests, question_runner=question_runner)
 
 
 def _prompt_hitl_approval(
