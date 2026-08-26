@@ -449,28 +449,8 @@ def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
         subs.append(spec)
 
 
-def _async_watcher_notifier():
-    """Return the notifier to wire into ``AsyncWatcherMiddleware``, or ``None``.
-
-    The watcher's completion signal is only reachable when the notifier's
-    queues are drained in the same process — that is the local CLI process,
-    which never sets ``EVOSCIENTIST_DEPLOY_MODE`` (mirrors the same gate in
-    ``middleware/events.py``). Inside the langgraph dev server process the env
-    var is set and no drain exists, so return ``None``: the state-driven reader
-    (``async_notifier.enqueue_completions_from_state``) delivers completions
-    client-side and the watcher no-ops. Kept as a function, not a module
-    constant, so a test can flip the env var per case.
-    """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
-        return None
-    from .cli import async_notifier
-
-    return async_notifier
-
-
 def _maybe_swap_async_subagents(
     subs: list,
-    middleware: list | None = None,
     *,
     tool_registry: dict | None = None,
     cfg=None,
@@ -494,10 +474,6 @@ def _maybe_swap_async_subagents(
     swapped remote specs discard them because their graph factory resolves
     tools in its own process. All return paths strip internal fields before
     handoff, since deepagents may schema-validate the kwargs.
-
-    When async subagents are actually swapped in and ``middleware`` is provided,
-    appends ``AsyncWatcherMiddleware`` so launches spawn an
-    ``async_notifier`` watcher.
     """
     from .utils import resolve_subagent_tools
 
@@ -547,7 +523,6 @@ def _maybe_swap_async_subagents(
     # maps back to loopback, a pinned interface is honored verbatim.
     dev_url = langgraph_dev_url(cfg)
     out = []
-    agent_specs: dict[str, AsyncSubAgent] = {}
     # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
     # mcp.yaml) ARE delivered — the deployed factory
     # ``subagents/_factory.py:build_async_subagent_graph`` loads its own MCP
@@ -556,38 +531,28 @@ def _maybe_swap_async_subagents(
     for s in subs:
         name = s.get("name")
         if name in async_specs:
-            spec = AsyncSubAgent(
-                name=name,
-                description=async_specs[name],
-                graph_id=name,
-                url=dev_url,
+            out.append(
+                AsyncSubAgent(
+                    name=name,
+                    description=async_specs[name],
+                    graph_id=name,
+                    url=dev_url,
+                )
             )
-            agent_specs[name] = spec
-            out.append(spec)
         else:
             resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
             out.append(s)
 
-    if agent_specs and middleware is not None:
-        from .middleware.async_watcher import AsyncWatcherMiddleware
-
-        # Composition root wires the concrete notifier port into the middleware;
-        # the middleware itself never imports the CLI layer. ``None`` in the
-        # server process, where the watcher no-ops (state-driven reader delivers
-        # completions instead).
-        middleware.append(
-            AsyncWatcherMiddleware(agent_specs, notifier=_async_watcher_notifier())
-        )
-
     # Forward the CLI's live (model, provider) into deepagents'
     # start/update_async_task tool calls so the deployed graph can
     # re-resolve its chat model per run via ConfigurableModelMiddleware.
-    # Idempotent — safe to call on every CLI startup.
-    if agent_specs:
-        from .llm.patches import _patch_deepagents_model_passthrough
+    # Idempotent — safe to call on every CLI startup. ``async_specs`` is
+    # non-empty here (early-returned above otherwise), so at least one spec
+    # was swapped in.
+    from .llm.patches import _patch_deepagents_model_passthrough
 
-        _patch_deepagents_model_passthrough()
+    _patch_deepagents_model_passthrough()
 
     return out
 
@@ -610,16 +575,11 @@ def _route_async_specs_through_evo_middleware(
     ``is_expert=True`` so the middleware requires a payload with
     ``skill_name``.
 
-    The completion watcher (``AsyncWatcherMiddleware``) is found or created
-    before the middleware so the middleware's resolve-on-miss start tool can
-    hold the watcher's agent dict by reference — see the wiring block below.
-
     Returns:
         ``subs`` with ``graph_id``-carrying entries removed. Safe to pass
         as ``create_deep_agent(subagents=...)`` — the async-auto-compose
         branch is skipped for empty async lists.
     """
-    from .middleware.async_watcher import AsyncWatcherMiddleware
     from .middleware.expert_async_subagent import EvoAsyncSubAgentMiddleware
     from .subagents.expert_container_async import build_expert_async_subagent_specs
 
@@ -629,71 +589,6 @@ def _route_async_specs_through_evo_middleware(
     sync_subs = [s for s in subs if "graph_id" not in s]
     expert_specs = build_expert_async_subagent_specs(cfg=cfg)
     async_specs.extend(expert_specs)
-
-    # Find or create the completion watcher BEFORE constructing
-    # ``EvoAsyncSubAgentMiddleware``: the middleware's resolve-on-miss start
-    # tool must hold the watcher's agent dict by reference, so an expert
-    # discovered mid-session lands in the dispatch table and the watcher in
-    # one step. Without the watcher update, dispatch succeeds but the
-    # watcher's ``get_async(agent_name)`` raises KeyError inside its
-    # ``try/except`` and the completion notification silently never fires.
-    watcher_agents: dict | None = None
-    watcher = next(
-        (m for m in base_middleware if isinstance(m, AsyncWatcherMiddleware)),
-        None,
-    )
-    if watcher is None:
-        # No YAML async subagents were registered, so ``_maybe_swap`` did
-        # not install the watcher. Install it now so experts still get
-        # completion notifications. Appended before the middleware's
-        # index-0 insert below, which yields the same final order as
-        # append-after-insert: ``[EvoAsync..., ..., watcher]``.
-        if expert_specs:
-            from .cli import async_notifier
-
-            watcher = AsyncWatcherMiddleware(
-                {s["name"]: s for s in expert_specs},
-                notifier=async_notifier,
-            )
-            base_middleware.append(watcher)
-    elif expert_specs:
-        # Extend AsyncWatcherMiddleware's client cache with expert specs so
-        # start_async_task launches for experts spawn a completion watcher —
-        # otherwise the watcher's ``get_async(agent_name)`` KeyErrors on the
-        # expert name, no notification is enqueued, and the main agent never
-        # learns the task finished. ``_maybe_swap_async_subagents`` above only
-        # populates the watcher with YAML-defined async subagents
-        # (writing-agent, data-analysis-agent, scheduler); this hook folds in
-        # the experts too.
-        #
-        # The mutation reaches through two layers of private state:
-        # ``AsyncWatcherMiddleware._clients`` (our own) and
-        # ``_ClientCache._agents`` (upstream deepagents). If upstream ever
-        # renames ``_agents`` or wraps it in an immutable snapshot, the
-        # ``.update(...)`` below silently lands on nothing — expert
-        # completion nudges then stop firing without a diagnostic surface.
-        # Convert that silent-drop into a grep-able error line and leave
-        # ``watcher_agents`` unset; expert dispatches still work (without
-        # completion notifications and without mid-session resolution into
-        # the watcher) until upstream drift is fixed.
-        if not hasattr(watcher._clients, "_agents"):
-            logging.getLogger(__name__).error(
-                "AsyncWatcherMiddleware._clients has no `_agents` slot — "
-                "deepagents internal renamed; expert completion "
-                "notifications will not fire until the extension hook is "
-                "updated to the new attribute name."
-            )
-            watcher = None
-        else:
-            watcher._clients._agents.update({s["name"]: s for s in expert_specs})
-    # The second ``hasattr`` is not redundant with the one in the ``elif``
-    # above: that check only runs when ``expert_specs`` is non-empty. When a
-    # pre-existing watcher has an empty expert set, this is the only guard
-    # standing between an upstream rename of ``_ClientCache._agents`` and an
-    # AttributeError that would kill agent construction — without it, the
-    # drift degrades to "no completion nudges" instead of crashing.
-    if watcher is not None and hasattr(watcher._clients, "_agents"):
-        watcher_agents = watcher._clients._agents
 
     if async_specs:
         # ``_maybe_swap_async_subagents`` installs the model-passthrough patch
@@ -714,13 +609,17 @@ def _route_async_specs_through_evo_middleware(
             0,
             EvoAsyncSubAgentMiddleware(
                 async_subagents=async_specs,
-                watcher_agents=watcher_agents,
                 # The construction cfg, so resolve-on-miss specs the same
                 # langgraph_dev_port the construction-time specs used instead
                 # of re-reading config from disk at dispatch time.
                 cfg=cfg,
             ),
         )
+
+    # Expert completions (like all async-task completions) are detected from
+    # thread state by the client-side reader, so no per-agent watcher client
+    # cache is needed here — the expert specs are already routed through
+    # ``EvoAsyncSubAgentMiddleware`` above.
     return sync_subs
 
 
@@ -747,7 +646,6 @@ def _build_base_kwargs(
     )
     subs = _maybe_swap_async_subagents(
         subs,
-        base_middleware,
         tool_registry=tool_registry,
         cfg=cfg,
     )
@@ -839,7 +737,6 @@ def load_mcp_and_build_kwargs(
     # since async sub-agents are remote graphs that load their own tools).
     subs = _maybe_swap_async_subagents(
         subs,
-        base_middleware,
         tool_registry=registry,
         cfg=cfg,
     )
