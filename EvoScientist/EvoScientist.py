@@ -974,15 +974,14 @@ def _get_default_middleware(
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
     # must not spawn local OS processes.
     if not for_async_subagent:
-        from .cli import async_notifier
         from .middleware.background import BackgroundExecutionMiddleware
 
-        # Inject the notifier port + the assembly-time dangerous-mode policy
-        # (agents rebuild on config change, so the captured flag never staler
-        # than the agent it lives on).
+        # Capture the assembly-time dangerous-mode policy (agents rebuild on config
+        # change, so the flag is never staler than the agent it lives on). Process-exit
+        # notifications are delivered client-side from the ``bg_processes`` thread-state
+        # mirror, not pushed from here.
         mw.append(
             BackgroundExecutionMiddleware(
-                async_notifier,
                 dangerous=cfg.dangerous_mode,
                 guard_dangerous=cfg.auto_approve,
             )

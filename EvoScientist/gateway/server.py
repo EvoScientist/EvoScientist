@@ -759,6 +759,20 @@ class LangGraphServerGateway:
         run = await self.thread_store.client.runs.get(thread_id, run_id)
         return run["status"]
 
+    async def get_process_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        process_id: str,
+    ) -> str:
+        # Background processes run in the langgraph dev server process; read their
+        # status from the custom route on the server's http sub-app (there is no
+        # SDK resource for OS processes, unlike runs).
+        data = await self.thread_store.client.http.get(
+            "/api/bg_process_status", params={"process_id": process_id}
+        )
+        return data["status"]
+
     async def _pending_interrupt_events(
         self,
         stream: AsyncThreadStream,

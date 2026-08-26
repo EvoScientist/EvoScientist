@@ -269,3 +269,20 @@ class GraphGateway(Protocol):
         not found) like the other state reads; the reader treats a failed read
         as "not yet terminal".
         """
+
+    async def get_process_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        process_id: str,
+    ) -> str:
+        """Return a background process's live status from the graph process.
+
+        Background processes launched via ``run_in_background`` run in the graph
+        process (in-process on the local backend, the langgraph dev server on the
+        server backend), so their status lives in that process's registry. The
+        client-side ``bg_processes`` read path polls this to detect exit without
+        the in-process notifier, mirroring :meth:`get_run_status`. Returns one of
+        ``running`` / ``success`` / ``error`` / ``interrupted`` / ``unknown``;
+        a failed read is treated as "not yet terminal" by the reader.
+        """
