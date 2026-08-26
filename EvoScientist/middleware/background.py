@@ -33,7 +33,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 
 from .. import background, paths
-from ..backends import prepare_sandbox_command
+from ..backends import is_hitl_suppressed, prepare_sandbox_command
 
 
 def _bg_processes_reducer(
@@ -103,9 +103,10 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
 
     ``dangerous`` is captured from ``cfg.dangerous_mode`` at assembly (the agent is
     rebuilt when config changes, so the captured value never goes stale).
-    ``guard_dangerous`` mirrors ``execute``'s backstop: with no interactive approval
-    reachable (``auto_approve``), refuse the narrow dangerous set instead of running it
-    unattended.
+    ``guard_dangerous`` mirrors ``execute``'s backstop and is a construction-time
+    floor; on top of it, a run with HITL suppressed (unattended ``auto_mode``) is
+    guarded per call, since the spawn interrupt is disarmed there and the backend
+    is the only gate. An armed run relies on the interrupt + client policy instead.
     """
 
     @tool(parse_docstring=True)
@@ -131,7 +132,7 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
             cwd,
             virtual_mode=not dangerous,
             dangerous=dangerous,
-            guard_dangerous=guard_dangerous,
+            guard_dangerous=guard_dangerous or is_hitl_suppressed(),
         )
         if error:
             return error

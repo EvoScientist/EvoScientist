@@ -42,6 +42,7 @@ from .prompts import get_system_prompt
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 
 if TYPE_CHECKING:
+    from langchain.agents.middleware import InterruptOnConfig
     from langgraph.graph.state import CompiledStateGraph
 
     from .middleware.events import MiddlewareEventSink
@@ -752,10 +753,13 @@ def _get_default_backend(
 ):
     """Build the default composite backend from current paths.
 
-    ``guard_dangerous`` — when ``None`` (default) follows ``cfg.auto_approve``;
-    the two research async sub-agent graphs (``writing-agent`` /
+    ``guard_dangerous`` — when ``None`` (default) the backend derives the guard
+    per call from the run's HITL-suppression state (``is_hitl_suppressed``): an
+    unattended run is guarded, an armed run relies on the interrupt + client
+    policy. The two research async sub-agent graphs (``writing-agent`` /
     ``data-analysis-agent``) pass ``True`` because their remote thread has no
-    approval path at all (see ``subagents/_factory._GUARDED_ASYNC_SUBAGENTS``).
+    approval path at all (see ``subagents/_factory._GUARDED_ASYNC_SUBAGENTS``);
+    that becomes an always-on floor.
     ``refuse_delete`` — the same two async graphs pass ``True`` so the recursive
     ``delete`` FS tool is refused and relayed to the orchestrator for approval,
     rather than deleting unattended.
@@ -770,7 +774,9 @@ def _get_default_backend(
 
     cfg = _ensure_config()
     if guard_dangerous is None:
-        guard_dangerous = cfg.auto_approve
+        # Not baked from cfg.auto_approve: the backend derives it per call from
+        # the run's HITL-suppression state so a mid-session flip can't go stale.
+        guard_dangerous = False
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
     set_active_workspace(workspace_dir)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
@@ -979,28 +985,55 @@ def _get_default_middleware(
         # Capture the assembly-time dangerous-mode policy (agents rebuild on config
         # change, so the flag is never staler than the agent it lives on). Process-exit
         # notifications are delivered client-side from the ``bg_processes`` thread-state
-        # mirror, not pushed from here.
+        # mirror, not pushed from here. The dangerous-command guard is NOT baked from
+        # auto_approve: run_in_background derives it per call from the run's
+        # HITL-suppression state, mirroring execute().
         mw.append(
             BackgroundExecutionMiddleware(
                 dangerous=cfg.dangerous_mode,
-                guard_dangerous=cfg.auto_approve,
+                guard_dangerous=False,
             )
         )
 
     return mw
 
 
-def _build_hitl_interrupt_on(*, auto_approve: bool) -> dict[str, bool] | None:
-    """Return :data:`HITL_INTERRUPT_ON` for ``create_deep_agent``, or ``None``
-    when the user opted out (``auto_approve`` / ``auto_mode`` /
-    ``dangerous_mode``) so nothing is armed and unattended runs never pause.
-    Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``) lets
-    declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not — so
-    async agents can't hang on an approval nobody can deliver.
+def _hitl_when(_request) -> bool:
+    """HITL ``when`` predicate: interrupt unless the run is suppressed.
+
+    Reads ``configurable.hitl_suppressed`` off the ambient run config, so an
+    unattended run (``auto_mode`` — set per run by ``resolve_per_run_config``)
+    disarms while the *graph* stays armed for every attended run sharing a
+    keepalive server. Runs in-graph (``HumanInTheLoopMiddleware`` evaluates it
+    after the model), so ``get_config()`` is always available here; the argument
+    is ignored to stay robust across langchain's batch (``tool=None``) and
+    per-call request shapes.
     """
-    if auto_approve:
-        return None
-    return dict(HITL_INTERRUPT_ON)
+    from .backends import is_hitl_suppressed
+
+    return not is_hitl_suppressed()
+
+
+def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
+    """Return the always-armed HITL config for ``create_deep_agent``.
+
+    The main graph is *always* armed; per-run suppression is delegated to the
+    :func:`_hitl_when` predicate rather than keyed on ``auto_approve`` at
+    construction — otherwise a graph built once for an unattended session would
+    silently disable HITL for a later attended session on the same keepalive
+    server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
+    lets declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not —
+    so async agents can't hang on an approval nobody can deliver.
+    """
+    from langchain.agents.middleware import InterruptOnConfig
+
+    return {
+        tool: InterruptOnConfig(
+            allowed_decisions=["approve", "edit", "reject", "respond"],
+            when=_hitl_when,
+        )
+        for tool in HITL_INTERRUPT_ON
+    }
 
 
 def _get_default_agent():
@@ -1049,7 +1082,7 @@ def _get_default_agent():
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
-            interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
+            interrupt_on=_build_hitl_interrupt_on(),
         ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
@@ -1162,7 +1195,9 @@ def create_cli_agent(
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
-        guard_dangerous=cfg.auto_approve,
+        # Guard derived per call from the run's HITL-suppression state (see
+        # CustomSandboxBackend._effective_guard_dangerous), not baked here.
+        guard_dangerous=False,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,
@@ -1201,5 +1236,5 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
-        interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
+        interrupt_on=_build_hitl_interrupt_on(),
     ).with_config({"recursion_limit": cfg.recursion_limit})
