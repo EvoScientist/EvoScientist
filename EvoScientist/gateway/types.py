@@ -49,8 +49,11 @@ def resolve_per_run_config(
 
     The local backend passes ``include_per_run_overrides=False``: its agent
     is rebuilt on model switches and already binds ``recursion_limit`` at
-    construction from the same live config, so per-run injection there is
-    redundant — and would couple every local stream call to a config read.
+    construction from the same live config, so per-run *model/limit* injection
+    there is redundant. ``hitl_suppressed`` is the exception — it is a genuine
+    per-run signal both backends need, because the graph is now *always* armed
+    (see ``_build_hitl_interrupt_on``) and an unattended run must disarm the
+    interrupt itself — so ``config.auto_mode`` is read on both paths.
 
     ``config`` defaults to the live config object (``_ensure_config`` — the
     cached, in-place-mutated session config), NOT a fresh disk read: a disk
@@ -58,13 +61,14 @@ def resolve_per_run_config(
     ``--save``d. The deferred import keeps this module import-light and
     cycle-free.
     """
+    if config is None:
+        from ..EvoScientist import _ensure_config
+
+        config = _ensure_config()
+
     resolved_overrides: dict[str, Any] = {}
     recursion_limit: int | None = None
     if include_per_run_overrides:
-        if config is None:
-            from ..EvoScientist import _ensure_config
-
-            config = _ensure_config()
         model = getattr(config, "model", None)
         provider = getattr(config, "provider", None)
         if model:
@@ -74,6 +78,16 @@ def resolve_per_run_config(
         limit = getattr(config, "recursion_limit", None)
         if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
             recursion_limit = limit
+
+    # Unattended runs (``auto_mode``) disarm HITL for THIS run: the graph stays
+    # armed, but this run's ``configurable`` disables the interrupt (and hands the
+    # dangerous-command gate to the backend). Keyed on ``auto_mode``, NOT
+    # ``auto_approve`` — an attended ``auto_approve`` session stays armed and
+    # auto-resolves the interrupt client-side.
+    if getattr(config, "auto_mode", False):
+        from ..backends import HITL_SUPPRESSED_KEY
+
+        resolved_overrides[HITL_SUPPRESSED_KEY] = True
 
     configurable: dict[str, Any] = dict(resolved_overrides)
     if configurable_extra:

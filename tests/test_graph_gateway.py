@@ -1216,24 +1216,74 @@ async def test_resolve_per_run_config_extras_win_over_session_model():
 
 
 def test_resolve_per_run_config_local_mode_is_legacy_shape():
-    """Local backend mode (default) must match the pre-channel config shape:
-    only caller extras + thread_id, no config object consulted."""
+    """Local backend mode (default) with an attended run keeps the pre-channel
+    shape: only caller extras + thread_id, no model/limit overrides. Config is
+    consulted only for ``auto_mode`` (False here → no hitl_suppressed key)."""
     from EvoScientist.gateway.types import resolve_per_run_config
 
-    sentinel = object()  # would explode if read in local mode
+    cfg = SimpleNamespace(auto_mode=False)
     run_config = resolve_per_run_config(
         "t1",
         {"active_teams": ["a"]},
         include_per_run_overrides=False,
-        config=sentinel,
+        config=cfg,
     )
     assert run_config == {"configurable": {"active_teams": ["a"], "thread_id": "t1"}}
+
+
+def test_resolve_per_run_config_auto_mode_suppresses_hitl_local():
+    """An unattended (auto_mode) local run injects hitl_suppressed so the
+    always-armed graph disarms the interrupt for THIS run."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    cfg = SimpleNamespace(auto_mode=True)
+    run_config = resolve_per_run_config(
+        "t1", None, include_per_run_overrides=False, config=cfg
+    )
+    assert run_config["configurable"]["hitl_suppressed"] is True
+
+
+def test_resolve_per_run_config_auto_mode_suppresses_hitl_server():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    cfg = SimpleNamespace(model="m", provider="p", recursion_limit=100, auto_mode=True)
+    run_config = resolve_per_run_config(
+        "t1", None, include_per_run_overrides=True, config=cfg
+    )
+    assert run_config["configurable"]["hitl_suppressed"] is True
+    assert run_config["configurable"]["model"] == "m"
+
+
+def test_resolve_per_run_config_attended_run_omits_suppression():
+    """auto_mode=False (attended, even with auto_approve) → no suppression key,
+    so the graph stays armed and auto-resolves the interrupt client-side."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    cfg = SimpleNamespace(auto_mode=False, auto_approve=True)
+    run_config = resolve_per_run_config(
+        "t1", None, include_per_run_overrides=False, config=cfg
+    )
+    assert "hitl_suppressed" not in run_config["configurable"]
+
+
+def test_resolve_per_run_config_caller_extra_overrides_suppression():
+    """An explicit per-run configurable_extra beats the auto_mode-derived value."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    cfg = SimpleNamespace(auto_mode=True)
+    run_config = resolve_per_run_config(
+        "t1",
+        {"hitl_suppressed": False},
+        include_per_run_overrides=False,
+        config=cfg,
+    )
+    assert run_config["configurable"]["hitl_suppressed"] is False
 
 
 def test_resolve_per_run_config_server_mode_skips_invalid_limit():
     from EvoScientist.gateway.types import resolve_per_run_config
 
-    cfg = SimpleNamespace(model="m", provider="p", recursion_limit=0)
+    cfg = SimpleNamespace(model="m", provider="p", recursion_limit=0, auto_mode=False)
     run_config = resolve_per_run_config(
         "t1", None, include_per_run_overrides=True, config=cfg
     )
