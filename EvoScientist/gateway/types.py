@@ -25,28 +25,40 @@ def resolve_per_run_config(
     *,
     per_run_overrides: Mapping[str, Any] | None = None,
     recursion_limit: int | None = None,
+    hitl_suppressed: bool = False,
 ) -> dict[str, Any]:
     """Assemble the per-run LangGraph config for a gateway stream call.
 
-    Pure assembly - this module reads no config. The server gateway extracts
-    the per-run overrides (``configurable.model`` /
-    ``configurable.model_provider`` from the live session config,
-    ``recursion_limit`` as a first-class ``RunnableConfig`` key) and passes
-    them in; a per-call ``recursion_limit`` overrides the server's
-    construction-time ``.with_config`` binding, so a keepalive server picks
-    up the client's live limit per run instead of at restart. The local
-    backend passes neither: its agent is rebuilt on model switches and
-    already binds ``recursion_limit`` at construction from the same live
-    config, so per-run injection there is redundant.
+    Pure assembly - this module reads no config. Each backend resolves the
+    per-run values and passes them in:
+
+    - the server gateway extracts ``model`` / ``model_provider`` /
+      ``recursion_limit`` from the live session config (a per-call
+      ``recursion_limit`` overrides the server's construction-time
+      ``.with_config`` binding, so a keepalive server picks up the client's
+      live limit per run instead of at restart);
+    - both backends pass ``hitl_suppressed`` from ``config.auto_mode`` (see
+      ``backends.hitl_suppressed_for_run``): an unattended run must disarm
+      the always-armed interrupt itself. Keyed on ``auto_mode``, NOT
+      ``auto_approve`` - an attended ``auto_approve`` session stays armed
+      and auto-resolves the interrupt client-side;
+    - the local backend passes no model/limit overrides: its agent is
+      rebuilt on model switches and already binds ``recursion_limit`` at
+      construction from the same live config.
 
     Merges, in precedence order (lowest to highest):
 
     1. ``per_run_overrides`` (server backend session defaults),
-    2. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
+    2. the suppression key (when ``hitl_suppressed``),
+    3. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
        explicit per-run injection is more specific than the session default,
-    3. ``thread_id`` - structural key, always set last.
+    4. ``thread_id`` - structural key, always set last.
     """
     configurable: dict[str, Any] = dict(per_run_overrides or {})
+    if hitl_suppressed:
+        from ..backends import HITL_SUPPRESSED_KEY
+
+        configurable[HITL_SUPPRESSED_KEY] = True
     if configurable_extra:
         configurable.update(configurable_extra)
     configurable["thread_id"] = thread_id

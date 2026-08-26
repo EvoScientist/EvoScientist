@@ -1232,6 +1232,44 @@ def test_resolve_per_run_config_default_shape_is_extras_only():
     assert run_config == {"configurable": {"active_teams": ["a"], "thread_id": "t1"}}
 
 
+def test_resolve_per_run_config_hitl_suppression_local():
+    """An unattended (auto_mode) run injects hitl_suppressed so the
+    always-armed graph disarms the interrupt for THIS run."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    run_config = resolve_per_run_config("t1", None, hitl_suppressed=True)
+    assert run_config["configurable"]["hitl_suppressed"] is True
+
+
+def test_resolve_per_run_config_hitl_suppression_server():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    run_config = resolve_per_run_config(
+        "t1", None, per_run_overrides={"model": "m"}, hitl_suppressed=True
+    )
+    assert run_config["configurable"]["hitl_suppressed"] is True
+    assert run_config["configurable"]["model"] == "m"
+
+
+def test_resolve_per_run_config_attended_run_omits_suppression():
+    """An attended run (even with auto_approve) gets no suppression key, so
+    the graph stays armed and auto-resolves the interrupt client-side."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    run_config = resolve_per_run_config("t1", None, hitl_suppressed=False)
+    assert "hitl_suppressed" not in run_config["configurable"]
+
+
+def test_resolve_per_run_config_caller_extra_overrides_suppression():
+    """An explicit per-run configurable_extra beats the derived value."""
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    run_config = resolve_per_run_config(
+        "t1", {"hitl_suppressed": False}, hitl_suppressed=True
+    )
+    assert run_config["configurable"]["hitl_suppressed"] is False
+
+
 async def test_server_gateway_resolves_per_run_overrides_from_live_session_config():
     """The gateway reads the live session config and forwards model/provider
     per run; an invalid recursion_limit is filtered out."""
@@ -1277,6 +1315,29 @@ async def test_server_gateway_forwards_valid_recursion_limit_per_run():
 
     (start,) = stream.run.starts
     assert start["config"]["recursion_limit"] == 100
+
+
+async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
+    """The gateway derives the run's HITL suppression from the live session
+    config's auto_mode and forwards it per run."""
+    cfg = SimpleNamespace(model="m", provider="p", auto_mode=True)
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    (start,) = stream.run.starts
+    assert start["config"]["configurable"]["hitl_suppressed"] is True
 
 
 async def test_langgraph_server_gateway_warns_on_pre_run_state_fetch_failure(
