@@ -48,6 +48,7 @@ from .async_notifier import (
     AsyncTasksState,
     consume_notifications,
     enqueue_completions_from_state,
+    enqueue_completions_from_state_throttled,
     has_pending_notifications,
     read_async_tasks_from_gateway,
 )
@@ -657,6 +658,9 @@ def run_textual_interactive(
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
             )
+            self._idle_reader_inflight: bool = (
+                False  # prevent overlapping throttled idle state reads
+            )
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
@@ -1165,6 +1169,15 @@ def run_textual_interactive(
                 )
                 return
 
+            # Throttled idle state read so a completion surfaces while the user
+            # sits idle; the next tick's has_pending check drains what it
+            # enqueues. Guarded so overlapping ticks don't stack reads.
+            if not self._busy and not self._idle_reader_inflight:
+                self._idle_reader_inflight = True
+                self.call_later(
+                    lambda: asyncio.ensure_future(self._idle_reader_tick_tui())
+                )
+
             # Notification path (only when idle and NOT already consuming).
             # _notification_consuming is set synchronously at the schedule point
             # so that the next poll tick cannot schedule a second consumer before
@@ -1209,6 +1222,34 @@ def run_textual_interactive(
                 # Clear the guard flag regardless of success or exception so
                 # future notifications can schedule a new consume coroutine.
                 self._notification_consuming = False
+
+        async def _idle_reader_tick_tui(self) -> None:
+            """Throttled idle-tick state reader (preserves idle auto-notify).
+
+            Best-effort: an exception here must not bubble out of the
+            ``asyncio.ensure_future(...)`` scheduled by ``_poll_channel_queue``
+            or it would silently kill the poller.
+            """
+            try:
+                agent = self._agent_loader.agent
+                tid = self._conversation_tid
+                if agent is not None and tid:
+                    await enqueue_completions_from_state_throttled(
+                        self._graph_gateway(),
+                        GraphTarget(
+                            local_graph=agent,
+                            workspace_dir=self._workspace_dir,
+                        ),
+                        tid,
+                    )
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "async-notifier idle reader failed (TUI)", exc_info=True
+                )
+            finally:
+                self._idle_reader_inflight = False
 
         async def _inject_notification_tui(
             self,

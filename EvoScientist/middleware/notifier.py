@@ -1,9 +1,9 @@
 """Notifier port for async-task / background-process notifications.
 
-The ``async_watcher`` and ``background`` middleware need to (a) pre-cancel a
-stale watcher, (b) spawn a watcher, and (c) enqueue a completion notification.
-Those are infrastructure calls with behaviour, not display events — so they do
-not belong on the :mod:`~EvoScientist.middleware.events` display sink.
+The ``background`` middleware needs to enqueue a completion notification when an
+OS background process exits. That is an infrastructure call with behaviour, not
+a display event — so it does not belong on the
+:mod:`~EvoScientist.middleware.events` display sink.
 
 Instead the composition root injects a :class:`NotifierPort`: a small,
 structural interface implemented by ``EvoScientist.cli.async_notifier`` (the
@@ -13,10 +13,7 @@ middleware depends only on this port, never on ``EvoScientist.cli``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    import asyncio
+from typing import Any, Protocol
 
 
 class NotifierPort(Protocol):
@@ -25,27 +22,6 @@ class NotifierPort(Protocol):
     ``EvoScientist.cli.async_notifier`` implements this structurally; the
     composition root passes that module in as the port.
     """
-
-    def pre_cancel_watcher(self, task_id: str) -> None:
-        """Cancel any in-flight watcher registered for ``task_id``.
-
-        No-op when there is no live watcher. Swallows cancellation errors —
-        a failed pre-cancel only risks a stale success notification, never a
-        crash of the launching tool call.
-        """
-        ...
-
-    def spawn_watcher(
-        self,
-        client: Any,
-        thread_id: str,
-        run_id: str,
-        agent_name: str,
-        prompt: str = "",
-        origin_cli_thread_id: str | None = None,
-    ) -> asyncio.Task[None]:
-        """Spawn a run watcher on the caller's asyncio loop."""
-        ...
 
     def enqueue_task_notification(self, notification: Any) -> None:
         """Route a completed-task notification onto the consumer queue."""
