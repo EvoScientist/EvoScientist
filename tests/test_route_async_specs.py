@@ -346,85 +346,14 @@ class TestRouteAsyncSpecs:
             result = _route_async_specs_through_evo_middleware(
                 subs, middleware, cfg=cfg
             )
-        # sync-a stays; middleware got the expert spec, and an
-        # AsyncWatcherMiddleware was installed so expert launches spawn
-        # completion watchers (previously the watcher's client cache had no
-        # entry for the expert name, KeyErrored on `get_async`, and silently
-        # dropped the notification).
-        from EvoScientist.middleware.async_watcher import AsyncWatcherMiddleware
-
+        # sync-a stays; the expert spec is routed into EvoAsyncSubAgentMiddleware.
+        # Expert completions are detected from thread state by the reader, so no
+        # per-agent watcher client cache is installed here.
         assert [s["name"] for s in result] == ["sync-a"]
-        assert len(middleware) == 2
+        assert len(middleware) == 1
         evo_mw = next(
             m for m in middleware if isinstance(m, EvoAsyncSubAgentMiddleware)
-        )
-        watcher_mw = next(
-            m for m in middleware if isinstance(m, AsyncWatcherMiddleware)
         )
         # The middleware's start tool schema advertises literature-review.
         start = next(t for t in evo_mw.tools if t.name == "start_async_task")
         assert "literature-review" in start.description
-        # The watcher's client cache knows how to construct a client for the
-        # expert so the completion nudge can spawn.
-        assert "literature-review" in watcher_mw._clients._agents
-
-    def test_watcher_cache_extends_when_yaml_watcher_preinstalled(self):
-        """Default deployed shape — ``_maybe_swap_async_subagents`` installed
-        ``AsyncWatcherMiddleware`` for a yaml async agent, then the routing
-        helper extends the cache with expert specs. Without the extension
-        branch, an expert completion nudge would KeyError on the watcher's
-        ``get_async(<expert>)`` and silently drop the notification."""
-        from EvoScientist.cli import async_notifier
-        from EvoScientist.EvoScientist import _route_async_specs_through_evo_middleware
-        from EvoScientist.middleware.async_watcher import AsyncWatcherMiddleware
-        from EvoScientist.middleware.expert_async_subagent import (
-            EvoAsyncSubAgentMiddleware,
-        )
-
-        yaml_async_spec = {
-            "name": "writing-agent",
-            "description": "std",
-            "graph_id": "writing_agent",
-            "url": "http://localhost:6174",
-        }
-        subs = [{"name": "sync-a", "system_prompt": ""}, yaml_async_spec]
-        # Simulate the state after ``_maybe_swap_async_subagents``: watcher is
-        # already installed and carries the yaml async agent.
-        middleware: list = [
-            AsyncWatcherMiddleware(
-                {"writing-agent": yaml_async_spec}, notifier=async_notifier
-            )
-        ]
-        cfg = self._cfg(enable_async=True)
-        with (
-            patch(
-                "EvoScientist.tools.skills_manager.list_expert_skills",
-                return_value=[_skill("literature-review")],
-            ),
-            patch(
-                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
-                return_value=True,
-            ),
-            patch(
-                "EvoScientist.subagents.expert_container._reserved_subagent_names",
-                return_value=frozenset({"general-purpose"}),
-            ),
-        ):
-            result = _route_async_specs_through_evo_middleware(
-                subs, middleware, cfg=cfg
-            )
-        # `writing-agent` (graph_id-carrying) stripped from subs; sync-a stays.
-        assert [s["name"] for s in result] == ["sync-a"]
-        evo_mw = next(
-            m for m in middleware if isinstance(m, EvoAsyncSubAgentMiddleware)
-        )
-        watcher_mw = next(
-            m for m in middleware if isinstance(m, AsyncWatcherMiddleware)
-        )
-        # Both the yaml async agent and the expert reach the start-task schema.
-        start = next(t for t in evo_mw.tools if t.name == "start_async_task")
-        assert "writing-agent" in start.description
-        assert "literature-review" in start.description
-        # The pre-existing watcher was extended in place — both names route.
-        assert "writing-agent" in watcher_mw._clients._agents
-        assert "literature-review" in watcher_mw._clients._agents

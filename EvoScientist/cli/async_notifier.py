@@ -1,9 +1,14 @@
 """Async sub-agent auto-notification.
 
-When a sub-agent on langgraph dev reaches a terminal state, a watcher coroutine
-pushes a lightweight notification onto a thread-safe queue. The CLI loop drains
-the queue, dedups against deepagents' async_tasks state, batches survivors,
-and injects a synthetic user message that triggers one LLM turn.
+Completions are detected from thread state by the client-side reader
+(:func:`enqueue_completions_from_state`): it reads deepagents' ``async_tasks``
+registry through the graph gateway, checks each active task's live run status,
+and enqueues a lightweight notification onto a thread-safe queue. The CLI loop
+drains the queue, dedups against ``async_tasks`` state, batches survivors, and
+injects a synthetic user message that triggers one LLM turn. The reader runs at
+every turn/stream-close boundary and, throttled, on the idle poll tick
+(:func:`enqueue_completions_from_state_throttled`) so a completion still surfaces
+while the user sits idle.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,12 +32,6 @@ TERMINAL_STATUSES: Final = frozenset({"success", "error", "timeout", "interrupte
 
 Cancel operations transition runs into ``interrupted`` (not ``cancelled``).
 """
-
-# How many times the watcher will re-join the SSE stream when it closes
-# cleanly but ``runs.get`` reports the run is still alive (typical cause:
-# HTTP keep-alive timeout on long static periods). Bounded to prevent an
-# unbounded loop if the server permanently misreports status.
-_MAX_RECONNECT_ATTEMPTS: Final = 10
 
 
 class AsyncTaskState(TypedDict, total=False):
@@ -49,7 +49,7 @@ AsyncTasksState: TypeAlias = dict[str, AsyncTaskState]
 
 @dataclass(frozen=True)
 class AsyncTaskNotification:
-    """A completed-async-task signal pushed by a watcher."""
+    """A completed-async-task signal enqueued by the state reader."""
 
     task_id: str
     agent_name: str
@@ -57,7 +57,7 @@ class AsyncTaskNotification:
     received_at: str  # ISO-8601 UTC timestamp
     prompt: str = ""  # original task description sent to the sub-agent
     kind: str = "agent"  # "agent" (sub-agent) | "bg-process" (background shell)
-    # The CLI/main-agent thread_id under which the watcher was spawned. Used
+    # The CLI/main-agent thread_id the task was launched under. Used
     # to route the notification back to the originating CLI session so a
     # /new between launch and completion does not inject the synthetic
     # message into an unrelated thread (where ``check_async_task`` cannot
@@ -77,31 +77,6 @@ _unrouted_queue: queue.Queue[AsyncTaskNotification] = queue.Queue()
 # external direct callers that did ``_notification_queue.put(...)`` keep
 # working unchanged. New code should call ``_enqueue`` instead.
 _notification_queue = _unrouted_queue
-
-# Track active watcher tasks/futures for clean shutdown.
-# dict[handle, origin_cli_thread_id] so the consumer's batching grace loop
-# can filter for watchers tied to the current CLI thread (or unrouted)
-# without being delayed by sibling-thread watchers.
-_active_watchers: dict[object, str | None] = {}
-# Map thread_id (sub-agent thread) → current watcher handle (supports
-# replacement on update_async_task).
-_watcher_by_thread: dict[str, asyncio.Task[None]] = {}
-
-
-def _has_relevant_active_watchers(current_thread_id: str | None) -> bool:
-    """Are there any in-flight watchers whose notifications would drain on
-    a ``consume_notifications`` call for ``current_thread_id``?
-
-    A watcher is relevant if its ``origin_cli_thread_id`` matches the
-    current CLI thread or is ``None`` (unrouted bucket drains for any
-    consumer). Sibling-thread watchers are ignored.
-    """
-    if current_thread_id is None:
-        return bool(_active_watchers)
-    return any(
-        origin == current_thread_id or origin is None
-        for origin in _active_watchers.values()
-    )
 
 
 logger = logging.getLogger(__name__)
@@ -159,33 +134,6 @@ def enqueue_bg_process_notification(
     )
 
 
-def pre_cancel_watcher(task_id: str) -> None:
-    """Cancel a stale watcher for ``task_id`` before a new run replaces it.
-
-    ``update_async_task`` starts a new run on the same ``thread_id`` with
-    ``multitask_strategy="interrupt"``, which closes the old run's stream
-    cleanly. Without pre-cancellation the old watcher would observe that clean
-    exit and enqueue a stale "success" notification before the new spawn can
-    replace it. Cancellation propagates ``CancelledError`` (a ``BaseException``)
-    which the watcher's ``except Exception:`` does not catch, so ``_enqueue``
-    never runs for the cancelled watcher.
-
-    No-op when there is no live watcher; swallows any error (a failed
-    pre-cancel only risks one stale notification, never a crashed tool call).
-    """
-    try:
-        old = _watcher_by_thread.get(task_id)
-        if old is not None and not old.done():
-            old.cancel()
-    except Exception:
-        logger.warning(
-            "Pre-cancel of stale watcher for task %s failed; a stale success "
-            "notification may be enqueued",
-            task_id,
-            exc_info=True,
-        )
-
-
 def has_pending_notifications(current_thread_id: str | None = None) -> bool:
     """Cheap predicate for poller idle paths — true iff there's anything to consume.
 
@@ -228,28 +176,42 @@ async def read_async_tasks_from_gateway(
 # terminal-in-state skip below, one completion yields exactly one enqueue.
 _reader_enqueued_task_ids: set[str] = set()
 
+# Idle-tick throttle state for ``enqueue_completions_from_state_throttled``:
+# the last monotonic time the reader polled per thread_id, and whether that
+# poll still saw an active (not-yet-terminal) task worth re-polling. The active
+# flag is refreshed on EVERY reader call (turn-boundary and idle), so a freshly
+# launched task re-arms idle polling and a fully-terminal registry lets idle
+# ticks skip the state read entirely.
+IDLE_READER_MIN_INTERVAL_SECONDS: Final = 3.0
+_idle_reader_last_poll: dict[str | None, float] = {}
+_idle_reader_active_seen: dict[str | None, bool] = {}
+
 
 async def enqueue_completions_from_state(
     gateway: GraphGateway,
     target: GraphTarget,
     thread_id: str,
-) -> None:
-    """State-based counterpart to the in-process watcher.
+) -> int:
+    """Detect async-task completions from thread state and enqueue them.
 
     Read the ``async_tasks`` registry through the gateway and, for each task not
     already known terminal, ask the gateway for the live run status. Newly
-    terminal tasks are enqueued onto the same consumer queue the watcher feeds,
-    so ``consume_notifications`` handles dedup/batching/injection unchanged.
-    Both reads go through the gateway, so it behaves identically on either
-    backend.
+    terminal tasks are enqueued onto the shared consumer queue, so
+    ``consume_notifications`` handles dedup/batching/injection unchanged. Both
+    reads go through the gateway, so it behaves identically on either backend.
+    This is the sole async-task completion mechanism on both backends.
 
-    Intended cadence: call once per turn boundary (after a turn / on stream
-    close), not on the fast queue-poll tick — it issues one ``get_run_status``
-    per active task. Best-effort throughout: a failed status read leaves the
-    task for the next poll (treated as not-yet-terminal), mirroring
-    ``read_async_tasks_from_gateway``.
+    Called at every turn/stream-close boundary and, throttled, on the idle poll
+    tick (via :func:`enqueue_completions_from_state_throttled`). Best-effort
+    throughout: a failed status read leaves the task for the next poll (treated
+    as not-yet-terminal), mirroring ``read_async_tasks_from_gateway``.
+
+    Returns the number of still-active tasks (non-terminal, or not yet
+    pollable / transiently unread) seen this pass — used to arm/disarm the idle
+    throttle so idle polling stops once every launched task is terminal.
     """
     registry = await read_async_tasks_from_gateway(gateway, target, thread_id)
+    still_active = 0
     for task_id, task in registry.items():
         if task_id in _reader_enqueued_task_ids:
             continue
@@ -259,13 +221,18 @@ async def enqueue_completions_from_state(
             continue
         run_id = task.get("run_id")
         if not run_id:
+            # Mid-launch: no run to poll yet, but it may gain one — keep idle
+            # polling armed so we don't stop before the run exists.
+            still_active += 1
             continue
         # task_id == the sub-agent thread_id (deepagents keys the registry by it).
         try:
             status = await gateway.get_run_status(target, task_id, run_id)
         except Exception:
-            continue  # server unavailable / transient — retry next poll
+            still_active += 1  # server unavailable / transient — retry next poll
+            continue
         if status not in TERMINAL_STATUSES:
+            still_active += 1
             continue
         enqueue_task_notification(
             AsyncTaskNotification(
@@ -277,207 +244,37 @@ async def enqueue_completions_from_state(
             )
         )
         _reader_enqueued_task_ids.add(task_id)
+    _idle_reader_active_seen[thread_id] = still_active > 0
+    return still_active
 
 
-async def watch_run_and_notify(
-    client,
+async def enqueue_completions_from_state_throttled(
+    gateway: GraphGateway,
+    target: GraphTarget,
     thread_id: str,
-    run_id: str,
-    agent_name: str,
-    prompt: str = "",
-    origin_cli_thread_id: str | None = None,
+    *,
+    min_interval_s: float = IDLE_READER_MIN_INTERVAL_SECONDS,
 ) -> None:
-    """Subscribe to a run's event stream; enqueue notification when it terminates.
+    """Idle-poll counterpart to :func:`enqueue_completions_from_state`.
 
-    Status detection strategy (priority order):
-
-      1. **In-band ``event="error"`` SSE part** — authoritative error signal
-         from langgraph dev, no race against server-side state writeback.
-      2. **Server-side state via ``runs.get``** — invoked after the stream
-         closes (cleanly or with exception) to verify the run is actually
-         done. Required because SSE long-poll can close on HTTP keep-alive
-         timeout while the run is still running, which would otherwise be
-         misread as ``"success"`` (observed in production with long-running
-         literature search tasks under concurrency).
-      3. **Re-join loop** — if ``runs.get`` reports ``pending`` / ``running``,
-         the run is alive but we lost the stream; re-join up to
-         ``_MAX_RECONNECT_ATTEMPTS`` times before giving up.
-
-    The previous implementation trusted clean stream exits as success
-    without any verification, which produced false-positive notifications
-    when SSE keep-alive timeouts closed the stream early.
-
-    Race-safety note: ``runs.get`` returning ``"error"`` immediately after
-    a clean stream close can be a transient state for an actually-successful
-    run (server hasn't finalized the writeback). We trust the absence of
-    in-band error event over a stale ``runs.get="error"`` — see the
-    ``status == "error" and not saw_error_event`` branch below.
+    Preserves idle auto-notification (a completion surfacing while the user sits
+    idle) without issuing a state read on every fast poll tick. It runs the
+    reader at most once per ``min_interval_s`` per thread, and skips entirely
+    once the last poll saw no active task — a turn-boundary reader call re-arms
+    it when a new task launches. This bounds the (HTTP, on the server backend)
+    idle state read to zero when nothing is pending, and to one poll per
+    interval while a task is in flight.
     """
-    for attempt in range(_MAX_RECONNECT_ATTEMPTS + 1):
-        stream_failed = False
-        saw_error_event = False
-        try:
-            async for chunk in client.runs.join_stream(
-                thread_id=thread_id, run_id=run_id, stream_mode="values"
-            ):
-                ev = getattr(chunk, "event", None)
-                data = getattr(chunk, "data", None)
-                if ev == "error":
-                    saw_error_event = True
-                    logger.info(
-                        "Watcher saw error event for task %s: %r", thread_id, data
-                    )
-        except Exception:
-            stream_failed = True
-            logger.warning(
-                "Watcher stream failed for task %s", thread_id, exc_info=True
-            )
-
-        if saw_error_event:
-            status = "error"
-            break
-
-        # Verify with server before deciding the run is done — clean stream
-        # close does NOT guarantee terminal state.
-        try:
-            run = await client.runs.get(thread_id=thread_id, run_id=run_id)
-            raw = run.get("status", "")
-        except Exception:
-            # Cannot verify terminal state. Defaulting to "success" here would
-            # reintroduce the false-positive class this watcher exists to
-            # prevent (clean stream + transient runs.get failure → unverified
-            # success). Retry within the reconnect budget; on exhaustion drop
-            # the notification rather than guess.
-            if attempt >= _MAX_RECONNECT_ATTEMPTS:
-                logger.warning(
-                    "Watcher runs.get failed for task %s after %d reconnects; "
-                    "unable to verify terminal state, skipping notification",
-                    thread_id,
-                    _MAX_RECONNECT_ATTEMPTS,
-                    exc_info=True,
-                )
-                return
-            logger.warning(
-                "Watcher runs.get failed for task %s; retrying after backoff "
-                "(attempt %d)",
-                thread_id,
-                attempt + 1,
-                exc_info=True,
-            )
-            await asyncio.sleep(min(0.25 * (attempt + 1), 2.0))
-            continue
-
-        if raw not in TERMINAL_STATUSES:
-            # Non-terminal status — includes the documented ``pending`` /
-            # ``running`` values AND any future / unknown status the SDK may
-            # introduce. Stream closed early but run is not done; re-join
-            # unless we've exhausted attempts. Treating unknown statuses as
-            # non-terminal is the safe default — better to retry once more
-            # than to enqueue a false-positive on an unrecognized state.
-            if attempt >= _MAX_RECONNECT_ATTEMPTS:
-                logger.warning(
-                    "Watcher gave up on task %s after %d reconnects "
-                    "(server still reports %r); skipping notification",
-                    thread_id,
-                    _MAX_RECONNECT_ATTEMPTS,
-                    raw,
-                )
-                return
-            logger.info(
-                "Watcher SSE closed for task %s but run reports %r; "
-                "re-joining (attempt %d)",
-                thread_id,
-                raw,
-                attempt + 1,
-            )
-            continue
-
-        if raw == "error":
-            # Race-safe interpretation: no in-band error event → trust the
-            # absence over the server-side ``error`` (likely transient
-            # writeback state for a successful run). Stream-failure path
-            # is the one case where we DO trust ``error`` — the stream
-            # blowing up usually means something genuinely went wrong.
-            status = "error" if stream_failed else "success"
-            break
-
-        # success / timeout / interrupted — trust authoritative terminal status.
-        status = raw
-        break
-    else:
-        # Loop exhausted without a break — should be unreachable because the
-        # re-join branch returns explicitly when attempts are exhausted, but
-        # guard against future refactors.
+    now = time.monotonic()
+    last = _idle_reader_last_poll.get(thread_id)
+    if last is not None and (now - last) < min_interval_s:
         return
-
-    notification = AsyncTaskNotification(
-        task_id=thread_id,
-        agent_name=agent_name,
-        status=status,
-        received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        prompt=prompt,
-        origin_cli_thread_id=origin_cli_thread_id,
-    )
-    _enqueue(notification)
-    logger.info(
-        "Enqueued async notification: task=%s agent=%s status=%s origin_thread=%s",
-        thread_id,
-        agent_name,
-        status,
-        origin_cli_thread_id or "<unrouted>",
-    )
-
-
-def spawn_watcher(
-    client,
-    thread_id: str,
-    run_id: str,
-    agent_name: str,
-    prompt: str = "",
-    origin_cli_thread_id: str | None = None,
-) -> asyncio.Task[None]:
-    """Spawn a watcher on the caller's asyncio loop.
-
-    Replacement semantics support ``update_async_task`` which creates a new
-    run_id on the same thread_id — we want the new watcher to take over
-    without the old (now obsolete) watcher firing a stale notification.
-    Cancellation propagates ``CancelledError`` (a BaseException), which the
-    watcher's ``except Exception:`` does NOT catch — so ``_enqueue(...)``
-    never executes for the cancelled watcher (no stale notification).
-
-    ``origin_cli_thread_id`` tags the resulting notification so the consumer
-    only injects it back into the originating CLI session.
-
-    Caller must already be in a running asyncio event loop. Serve mode's
-    ephemeral per-turn loop kills watchers spawned during a turn — that
-    limitation is tracked separately.
-    """
-    old_task = _watcher_by_thread.get(thread_id)
-    if old_task is not None and not old_task.done():
-        old_task.cancel()
-
-    task = asyncio.create_task(
-        watch_run_and_notify(
-            client,
-            thread_id,
-            run_id,
-            agent_name,
-            prompt,
-            origin_cli_thread_id=origin_cli_thread_id,
-        )
-    )
-    _watcher_by_thread[thread_id] = task
-    _active_watchers[task] = origin_cli_thread_id
-
-    def _cleanup(t: asyncio.Task[None]) -> None:
-        _active_watchers.pop(t, None)
-        # Only remove if THIS task is still the registered one — could
-        # have been replaced by a newer spawn_watcher call already.
-        if _watcher_by_thread.get(thread_id) is t:
-            del _watcher_by_thread[thread_id]
-
-    task.add_done_callback(_cleanup)
-    return task
+    # Skip the read once the last observation saw nothing active. Default True so
+    # a thread with no prior observation still polls once, then disarms itself.
+    if not _idle_reader_active_seen.get(thread_id, True):
+        return
+    _idle_reader_last_poll[thread_id] = now
+    await enqueue_completions_from_state(gateway, target, thread_id)
 
 
 def _drain_one_queue(q: queue.Queue) -> list[AsyncTaskNotification]:
@@ -661,10 +458,6 @@ def format_batch_message(notifs: list[AsyncTaskNotification]) -> str:
 
 # Brief grace window after the last drain: catch one final burst of arrivals
 NOTIFICATION_BATCH_GRACE_SECONDS = 0.3
-# Max time we'll wait for in-flight watchers to settle before triggering the
-# agent turn — bounds latency for long-running tasks while still batching
-# co-completing ones.
-NOTIFICATION_ACTIVE_WATCHER_WAIT_SECONDS = 3.0
 
 
 async def consume_notifications(
@@ -692,16 +485,8 @@ async def consume_notifications(
     notifs = drain_notifications(current_thread_id)
     if not notifs:
         return
-    # Adaptive grace: if other watchers tied to THIS thread (or unrouted) are
-    # still in flight, wait briefly for them to settle so co-completing tasks
-    # batch into a single agent turn. Sibling-thread watchers don't count —
-    # their notifications wouldn't drain on this tick anyway.
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + NOTIFICATION_ACTIVE_WATCHER_WAIT_SECONDS
-    while _has_relevant_active_watchers(current_thread_id) and loop.time() < deadline:
-        await asyncio.sleep(0.2)
-        notifs.extend(drain_notifications(current_thread_id))
-    # Final brief grace to catch arrivals enqueued just before this tick
+    # Brief fixed grace to catch reader enqueues arriving just before this tick,
+    # so co-completing tasks batch into a single agent turn.
     await asyncio.sleep(NOTIFICATION_BATCH_GRACE_SECONDS)
     notifs.extend(drain_notifications(current_thread_id))
 
