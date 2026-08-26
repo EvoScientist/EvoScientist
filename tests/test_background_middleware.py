@@ -16,11 +16,14 @@ from EvoScientist.middleware.background import (
 )
 
 
-def _run_bg(
-    *, dangerous: bool = False, guard_dangerous: bool = False, notifier=async_notifier
-):
-    """Build the injected ``run_in_background`` tool for direct-invoke tests."""
-    return _make_run_in_background(notifier, dangerous, guard_dangerous)
+def _run_bg(*, dangerous: bool = False, guard_dangerous: bool = False):
+    """Build the ``run_in_background`` tool for direct-invoke tests.
+
+    Invoked via ``.invoke({...})`` without a ToolCall, so ``runtime.tool_call_id``
+    is ``None`` and the tool returns its plain status string (``_bg_command``
+    falls back to the string when there is no tool_call_id to carry a Command).
+    """
+    return _make_run_in_background(dangerous, guard_dangerous)
 
 
 def _sleep_cmd(seconds: int) -> str:
@@ -49,8 +52,6 @@ def _wait_until(predicate, timeout=4.0, interval=0.05):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    from EvoScientist.cli import async_notifier
-
     bg._PROCESSES.clear()
     async_notifier.drain_notifications(None)
     yield
@@ -64,7 +65,7 @@ def _clean_registry():
 
 
 def test_middleware_registers_four_tools():
-    mw = BackgroundExecutionMiddleware(async_notifier)
+    mw = BackgroundExecutionMiddleware()
     names = {t.name for t in mw.tools}
     assert names == {
         "run_in_background",
@@ -76,8 +77,48 @@ def test_middleware_registers_four_tools():
 
 def test_no_job_in_tool_names():
     """Naming ADR: the word 'job' must not appear in the tool surface."""
-    mw = BackgroundExecutionMiddleware(async_notifier)
+    mw = BackgroundExecutionMiddleware()
     assert not any("job" in t.name.lower() for t in mw.tools)
+
+
+def test_middleware_declares_bg_processes_state_channel():
+    """The middleware registers the ``bg_processes`` channel + merge reducer."""
+    from EvoScientist.middleware.background import (
+        BackgroundState,
+        _bg_processes_reducer,
+    )
+
+    assert BackgroundExecutionMiddleware.state_schema is BackgroundState
+    # dict-merge reducer: last write per key wins, existing keys preserved.
+    merged = _bg_processes_reducer({"a": {"status": "running"}}, {"b": {"status": "x"}})
+    assert set(merged) == {"a", "b"}
+    assert _bg_processes_reducer(None, {"a": {"status": "running"}}) == {
+        "a": {"status": "running"}
+    }
+
+
+def test_bg_command_builds_state_update_with_runtime():
+    """With a tool_call_id, the tool returns a Command carrying the message + records."""
+    from types import SimpleNamespace
+
+    from langgraph.types import Command
+
+    from EvoScientist.middleware.background import _bg_command
+
+    runtime = SimpleNamespace(tool_call_id="call-1")
+    rec = {"process_id": "p1", "name": "demo", "status": "running"}
+    result = _bg_command("started p1", [rec], runtime)
+    assert isinstance(result, Command)
+    assert result.update["bg_processes"] == {"p1": rec}
+    assert result.update["messages"][0].content == "started p1"
+
+
+def test_bg_command_falls_back_to_string():
+    """No tool_call_id or no records -> plain string (usable outside a graph)."""
+    from EvoScientist.middleware.background import _bg_command
+
+    assert _bg_command("hi", [{"process_id": "p1"}], None) == "hi"
+    assert _bg_command("hi", [None], object()) == "hi"
 
 
 def test_run_rejects_dangerous_command_without_launching(monkeypatch):
@@ -171,23 +212,6 @@ def test_run_dangerous_still_blocks_privileged_command(tmp_path, monkeypatch):
     assert "blocked" in out.lower()
 
 
-def test_run_enqueues_completion_notification(tmp_path, monkeypatch):
-    """A finished background process enqueues a shell completion notification."""
-    from EvoScientist.cli import async_notifier
-
-    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _run_bg().invoke({"command": _true_cmd(), "name": "quick"})
-    # drain consumes, so accumulate across polls until the watcher's on_exit enqueues.
-    notifs = []
-    deadline = time.time() + 4.0
-    while time.time() < deadline:
-        notifs.extend(async_notifier.drain_notifications(None))
-        if any(n.kind == "bg-process" for n in notifs):
-            break
-        time.sleep(0.05)
-    assert any(n.kind == "bg-process" and n.status == "success" for n in notifs)
-
-
 def test_origin_thread_id_reads_runtime_config():
     """thread_id is read from runtime.config['configurable'] (graph-injected)."""
     from types import SimpleNamespace
@@ -197,33 +221,6 @@ def test_origin_thread_id_reads_runtime_config():
     runtime = SimpleNamespace(config={"configurable": {"thread_id": "T-7"}})
     assert _origin_thread_id(runtime) == "T-7"
     assert _origin_thread_id(None) is None  # direct .invoke() / no runtime
-
-
-def test_notify_done_routes_to_origin_thread(tmp_path):
-    """_notify_done enqueues the completion notification to the launching thread."""
-    from EvoScientist.cli import async_notifier
-    from EvoScientist.middleware.background import _notify_done
-
-    pid = bg.launch(_true_cmd(), str(tmp_path))  # no on_exit -> no auto-notify here
-    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
-    _notify_done(bg._PROCESSES[pid], "T-123", async_notifier)
-    routed = async_notifier.drain_notifications("T-123")
-    assert any(n.task_id == pid and n.origin_cli_thread_id == "T-123" for n in routed)
-
-
-def test_stopped_process_suppresses_notification(tmp_path, monkeypatch):
-    """A user-stopped process must NOT emit a completion notification."""
-    from EvoScientist.cli import async_notifier
-
-    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _run_bg().invoke({"command": _sleep_cmd(600)})
-    (pid,) = list(bg._PROCESSES.keys())
-    stop_process.invoke({"process_id": pid})
-    # Wait until the watcher observed the exit — it would have enqueued here if the
-    # process weren't user-stopped. _notify_done is a no-op for stopped processes.
-    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
-    notifs = async_notifier.drain_notifications(None)
-    assert not any(n.task_id == pid for n in notifs)
 
 
 def test_checked_after_exit_dedups_notification(tmp_path):

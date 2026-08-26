@@ -1281,21 +1281,28 @@ def cmd_interactive(
                     # kill the poller task — channel + notification dispatch
                     # would silently die otherwise (Fix #4).
                     current_tid = state.get("thread_id")
-                    # Detect async-task completions from state (throttled) so a
-                    # completion surfaces while the prompt sits idle; the drain
-                    # below injects it. Best-effort — never kill the poller task.
+                    # Detect async-task + bg-process completions from state
+                    # (throttled) so a completion surfaces while the prompt sits
+                    # idle; the drain below injects it. Best-effort — never kill the
+                    # poller task.
                     _reader_agent = agent_loader.agent
                     if current_tid and _reader_agent is not None:
+                        _reader_target = GraphTarget(
+                            local_graph=_reader_agent,
+                            workspace_dir=state["workspace_dir"],
+                        )
                         try:
                             await (
                                 async_notifier.enqueue_completions_from_state_throttled(
                                     runtime_gateways.graph_gateway,
-                                    GraphTarget(
-                                        local_graph=_reader_agent,
-                                        workspace_dir=state["workspace_dir"],
-                                    ),
+                                    _reader_target,
                                     current_tid,
                                 )
+                            )
+                            await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+                                runtime_gateways.graph_gateway,
+                                _reader_target,
+                                current_tid,
                             )
                         except Exception:
                             _channel_logger.warning(
@@ -1558,16 +1565,23 @@ def cmd_interactive(
                             )
                         finally:
                             # On stream close — or a raised turn — read async_tasks
-                            # off thread state and enqueue any completions not yet
-                            # surfaced, so a task launched mid-turn still surfaces
-                            # and keeps idle polling armed. Best-effort — never
-                            # blocks the prompt on a status-read failure.
+                            # + bg_processes off thread state and enqueue any
+                            # completions not yet surfaced, so a task launched
+                            # mid-turn still surfaces and keeps idle polling armed.
+                            # Best-effort — never blocks the prompt on a read
+                            # failure.
+                            _close_target = GraphTarget(
+                                local_graph=ready_agent,
+                                workspace_dir=state["workspace_dir"],
+                            )
                             await async_notifier.enqueue_completions_from_state(
                                 runtime_gateways.graph_gateway,
-                                GraphTarget(
-                                    local_graph=ready_agent,
-                                    workspace_dir=state["workspace_dir"],
-                                ),
+                                _close_target,
+                                state["thread_id"],
+                            )
+                            await async_notifier.enqueue_bg_process_completions_from_state(
+                                runtime_gateways.graph_gateway,
+                                _close_target,
                                 state["thread_id"],
                             )
                         await _refresh_status_snapshot(reset_streaming_text=True)
