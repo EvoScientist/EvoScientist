@@ -36,6 +36,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from contextvars import ContextVar
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
@@ -1086,6 +1087,41 @@ def _patch_anthropic_structured_output() -> None:
 # ---------------------------------------------------------------------------
 _model_passthrough_patched = False
 
+# The launching run's per-run (model, provider), set by the async-task tools
+# from ``runtime.config`` for the duration of a single ``runs.create`` call.
+# ``_merge_runs_config_kwargs`` reads it as the highest-precedence source.
+#
+# Why a ContextVar rather than passing ``config=`` through each tool: the fix
+# has to hold at every ``runs.create`` site (``start_async_task`` and
+# ``update_async_task``), but only the tool functions can see the caller's
+# per-run model (via ``runtime.config`` — ``langgraph.config.get_config()`` is
+# unreliable from a tool's execution context). Threading it through a ContextVar
+# lets the single merge point below inject it, so ``update_async_task`` (whose
+# body we delegate to upstream unchanged) is covered without reimplementing it.
+_caller_configurable: ContextVar[dict[str, str] | None] = ContextVar(
+    "_evo_caller_configurable", default=None
+)
+
+
+def _extract_caller_configurable(config: Any) -> dict[str, str]:
+    """Pull ``(model, model_provider)`` out of a launching run's ``config``.
+
+    ``config`` is the tool's ``runtime.config`` (a ``RunnableConfig``-shaped
+    dict). Returns a dict suitable for ``configurable``; empty when the caller
+    carries no model override, so the config-default fallback still applies.
+    ``model_provider`` is only forwarded alongside a model — a bare provider
+    without a model is meaningless to the deployed graph's resolver.
+    """
+    configurable = (config or {}).get("configurable") or {}
+    model = configurable.get("model")
+    provider = configurable.get("model_provider")
+    out: dict[str, str] = {}
+    if isinstance(model, str) and model:
+        out["model"] = model
+        if isinstance(provider, str) and provider:
+            out["model_provider"] = provider
+    return out
+
 
 def _read_cfg_configurable() -> dict[str, str]:
     """Read live ``(model, provider)`` from EvoScientist config.
@@ -1114,11 +1150,21 @@ def _read_cfg_configurable() -> dict[str, str]:
 def _merge_runs_config_kwargs(kwargs: dict) -> dict:
     """Merge the live model override into ``kwargs`` for ``runs.create``.
 
-    Preserves any caller-supplied ``config.configurable`` keys. EvoScientist's
-    keys take precedence on conflict (callers shouldn't be passing model
-    overrides — the CLI is the source of truth).
+    Model source, in increasing precedence:
+
+    1. ``_read_cfg_configurable()`` — the effective EvoScientist config. On the
+       in-process backend this is the CLI's live per-run model; on the
+       ``langgraph_server`` backend this proxy runs inside the dev-server
+       process, where it reports the *server's* config-default model, not the
+       CLI's per-run choice.
+    2. ``_caller_configurable`` — the launching run's actual model, forwarded
+       by the async-task tools from ``runtime.config``. This wins so that a
+       sub-agent launched (or continued) while the caller runs on, say, a free
+       model does not silently fall back to a billed config-default.
+
+    Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
-    overrides = _read_cfg_configurable()
+    overrides = {**_read_cfg_configurable(), **(_caller_configurable.get() or {})}
     if not overrides:
         return kwargs
     existing = kwargs.get("config")
