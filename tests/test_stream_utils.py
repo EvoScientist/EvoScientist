@@ -189,6 +189,18 @@ class TestFormatToolCompact:
 
         assert result == "Reading memory"
 
+    def test_profile_memory_headings_skip_user_profile_frontmatter(self):
+        from EvoScientist.stream import utils
+
+        utils._profile_memory_headings.cache_clear()
+        try:
+            headings = utils._profile_memory_headings()
+        finally:
+            utils._profile_memory_headings.cache_clear()
+
+        assert "# User profile" in headings
+        assert not any(heading.startswith("---") for heading in headings)
+
     def test_project_memory_result_not_special(self):
         result = format_tool_compact_with_result(
             "write_file",
