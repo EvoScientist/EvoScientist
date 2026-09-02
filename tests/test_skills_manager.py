@@ -1178,30 +1178,30 @@ def _write_actor_skill(
     parent: Path,
     name: str,
     *,
-    agents_body: str = "## Persona\n\nYou are the test expert.\n\n## Envelope\n\n{}\n",
+    expert_body: str = "## Persona\n\nYou are the test expert.\n\n## Envelope\n\n{}\n",
     skill_frontmatter: str = "",
     skill_body: str = "# Knowledge\n\nThe portable workflow.\n",
 ) -> Path:
-    """Write a skill declaring itself an expert via a sibling AGENTS.md."""
+    """Write a skill declaring itself an expert via a sibling EXPERT.md."""
     skill_dir = parent / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: A skill that can also act\n"
         f"{skill_frontmatter}---\n\n{skill_body}"
     )
-    (skill_dir / "AGENTS.md").write_text(agents_body)
+    (skill_dir / "EXPERT.md").write_text(expert_body)
     return skill_dir
 
 
 class TestAgentsMdExpertContract:
-    """AGENTS.md presence is the expert declaration; its body is the prompt."""
+    """EXPERT.md presence is the expert declaration; its body is the prompt."""
 
     def test_presence_classifies_as_expert(self, tmp_path):
         skill_dir = _write_actor_skill(tmp_path, "actor-skill")
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
-        assert result.expert_source == "agents_md"
-        assert result.agents_body.startswith("## Persona")
+        assert result.expert_source == "expert_md"
+        assert result.expert_body.startswith("## Persona")
         # SKILL.md stays pure knowledge and is still cached for in-turn use.
         assert "The portable workflow." in result.body
 
@@ -1217,7 +1217,7 @@ class TestAgentsMdExpertContract:
     def test_metadata_type_alone_does_not_classify(self, tmp_path):
         """``metadata.type: [skill, expert]`` is index-facing only.
 
-        It is a projection of the AGENTS.md declaration for consumers that
+        It is a projection of the EXPERT.md declaration for consumers that
         can't stat the directory. Reading it in the runtime would create a
         second classifier free to drift from the file that actually holds the
         persona — a skill would register as an expert with nothing to say.
@@ -1243,40 +1243,40 @@ metadata:
         assert result.tags == ["core"]
 
     def test_frontmatter_stripped_from_actor_definition(self, tmp_path):
-        """AGENTS.md carries no frontmatter, but YAML must never reach the prompt."""
+        """EXPERT.md carries no frontmatter, but YAML must never reach the prompt."""
         skill_dir = _write_actor_skill(
             tmp_path,
             "fm-actor",
-            agents_body="---\nname: ignored\n---\n\n## Persona\n\nBody only.\n",
+            expert_body="---\nname: ignored\n---\n\n## Persona\n\nBody only.\n",
         )
         result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.agents_body == "## Persona\n\nBody only.\n"
+        assert result.expert_body == "## Persona\n\nBody only.\n"
 
     def test_empty_actor_definition_stays_classified(self, tmp_path):
-        """An empty AGENTS.md is still a declaration — a broken expert.
+        """An empty EXPERT.md is still a declaration — a broken expert.
 
         Downgrading it to a utility skill would hide the authoring bug; the
         registration paths refuse it by name instead.
         """
-        skill_dir = _write_actor_skill(tmp_path, "blank-actor", agents_body="   \n")
+        skill_dir = _write_actor_skill(tmp_path, "blank-actor", expert_body="   \n")
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "expert"
-        assert result.expert_source == "agents_md"
-        assert result.agents_body.strip() == ""
+        assert result.expert_source == "expert_md"
+        assert result.expert_body.strip() == ""
 
     def test_unreadable_skill_md_keeps_expert_declaration(self, tmp_path):
-        """SKILL.md and AGENTS.md are separate files with separate failures."""
+        """SKILL.md and EXPERT.md are separate files with separate failures."""
         skill_dir = tmp_path / "half-broken"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_bytes(b"---\nname: bad\n---\n\xff\xfe")
-        (skill_dir / "AGENTS.md").write_text("## Persona\n\nStill valid.\n")
+        (skill_dir / "EXPERT.md").write_text("## Persona\n\nStill valid.\n")
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.description == "(unreadable)"
         assert result.type == "expert"
-        assert result.expert_source == "agents_md"
-        assert result.agents_body == "## Persona\n\nStill valid.\n"
+        assert result.expert_source == "expert_md"
+        assert result.expert_body == "## Persona\n\nStill valid.\n"
 
-    def test_agents_md_overrides_legacy_frontmatter(self, tmp_path, caplog):
+    def test_expert_md_overrides_legacy_frontmatter(self, tmp_path, caplog):
         """A skill mid-migration resolves to one contract, not a blend."""
         import logging
 
@@ -1293,10 +1293,10 @@ metadata:
             logging.WARNING, logger="EvoScientist.tools.skills_manager"
         ):
             result = _parse_skill_md(skill_dir / "SKILL.md")
-        assert result.expert_source == "agents_md"
-        # AGENTS.md wins on every axis: the legacy decoration fields must be
+        assert result.expert_source == "expert_md"
+        # EXPERT.md wins on every axis: the legacy decoration fields must be
         # cleared, not merely warned about — otherwise `role` is prepended to
-        # the AGENTS.md prompt and the gallery chips leak stale frontmatter.
+        # the EXPERT.md prompt and the gallery chips leak stale frontmatter.
         assert result.role == ""
         assert result.byline == ""
         assert result.capability_tags == []
@@ -1306,8 +1306,8 @@ metadata:
             for r in caplog.records
         )
 
-    def test_agents_md_expert_name_is_directory_name(self, tmp_path):
-        """Registry identity for an AGENTS.md expert is the directory name.
+    def test_expert_md_expert_name_is_directory_name(self, tmp_path):
+        """Registry identity for an EXPERT.md expert is the directory name.
 
         A frontmatter ``name:`` that disagrees with the directory would desync
         the dispatch registry key from the skill the orchestrator names.
@@ -1317,7 +1317,7 @@ metadata:
         (skill_dir / "SKILL.md").write_text(
             "---\nname: mismatched-name\ndescription: d\n---\n\n# Knowledge\n"
         )
-        (skill_dir / "AGENTS.md").write_text("## Persona\n\nBody.\n")
+        (skill_dir / "EXPERT.md").write_text("## Persona\n\nBody.\n")
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.name == "real-dir"
 
@@ -1363,7 +1363,7 @@ role: legacy role
         result = _parse_skill_md(skill_dir / "SKILL.md")
         assert result.type == "utility"
         assert result.expert_source == ""
-        assert result.agents_body == ""
+        assert result.expert_body == ""
 
 
 class TestListExpertSkills:

@@ -229,11 +229,16 @@ class ExpertCommand(Command):
         else:
             runtime.active_teams = [*runtime.active_teams, canonical]
             ctx.ui.append_system(f"Invited expert: {canonical}", style="green")
-            # Case (c): expert was installed after agent construction, so it
-            # will not reach ``task()`` until the graph is rebuilt. Cheap
-            # always-print hint mirrors the /install-skill success message.
+            # An expert invited mid-session: the background reach
+            # (``start_async_task``) resolves it on first dispatch, but the
+            # in-turn ``task`` reach is frozen into the running agent, so it
+            # needs a rebuilt agent. State the boundary explicitly rather
+            # than the old unconditional "run /new to activate it", which
+            # oversold the rebuild's necessity.
             ctx.ui.append_system(
-                "If just installed, run /new to activate it.", style="dim"
+                "Background dispatch is available immediately; "
+                "in-turn task dispatch needs /new.",
+                style="dim",
             )
         if runtime.active_teams:
             ctx.ui.append_system(

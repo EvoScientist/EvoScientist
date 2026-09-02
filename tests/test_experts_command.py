@@ -58,10 +58,10 @@ class _FakeSkillInfo:
     # exercise the empty-body reject path pass ``body=""``.
     body: str = "persona"
     # Legacy-frontmatter expert by default: ``expert_prompt_body`` reads
-    # ``body`` for these. Set ``expert_source="agents_md"`` plus
-    # ``agents_body`` to fake an expert on the current contract.
+    # ``body`` for these. Set ``expert_source="expert_md"`` plus
+    # ``expert_body`` to fake an expert on the current contract.
     expert_source: str = "frontmatter"
-    agents_body: str = ""
+    expert_body: str = ""
 
 
 def _make_ctx(active_teams: list[str] | None = None) -> tuple[CommandContext, _FakeUI]:
@@ -169,6 +169,26 @@ class TestExpertToggle:
             await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
         assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
         assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
+
+    async def test_invite_hint_states_the_dispatch_boundary(self):
+        """The invite hint must state the exact boundary: background
+        dispatch resolves immediately, in-turn ``task`` needs a rebuilt
+        agent. Pins the reworded text against both the old wording
+        ("run /new to activate it", which oversold the rebuild) and its
+        full removal."""
+        ctx, ui = _make_ctx()
+        with patch(
+            "EvoScientist.tools.skills_manager.list_expert_skills",
+            return_value=[_FakeSkillInfo(name="idea-brainstorm")],
+        ):
+            await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
+        texts = [text for text, _ in ui.lines]
+        assert any(
+            "Background dispatch is available immediately" in text
+            and "in-turn task dispatch needs /new" in text
+            for text in texts
+        )
+        assert not any("run /new to activate it" in text for text in texts)
 
     async def test_invite_matches_name_case_insensitively(self):
         """Execute honours the same case-insensitive match as completion."""

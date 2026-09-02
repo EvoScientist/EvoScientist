@@ -124,15 +124,15 @@ class SkillInfo:
     # source SKILL.md has no body content.
     body: str = ""
     # How this skill came to be classified as an expert:
-    #   "agents_md"   — a sibling AGENTS.md is present (current contract)
+    #   "expert_md"   — a sibling EXPERT.md is present (current contract)
     #   "frontmatter" — legacy ``type: expert`` in SKILL.md (deprecated)
     #   ""            — not an expert
     expert_source: str = ""
-    # AGENTS.md body — the actor definition (persona + result envelope) that
+    # EXPERT.md body — the actor definition (persona + result envelope) that
     # becomes the expert's runtime prompt. Empty for non-experts and for
     # experts still on the legacy frontmatter path, whose runtime prompt is
     # still sourced from ``body``.
-    agents_body: str = ""
+    expert_body: str = ""
 
 
 # Shared frontmatter split regex. Captures three parts:
@@ -168,7 +168,7 @@ def _split_frontmatter_and_body(content: str) -> tuple[str, str]:
 # rule the skill system already lives by, applied one level down: a directory
 # is a package, a contract file is a capability, presence is the declaration,
 # content is the contract. SKILL.md's presence makes a directory a skill;
-# AGENTS.md's presence makes it an actor.
+# EXPERT.md's presence makes it an actor.
 #
 # The file carries no frontmatter — the directory name is the expert's
 # identity, its presence is the declaration, and its body (persona + result
@@ -180,7 +180,7 @@ def _split_frontmatter_and_body(content: str) -> tuple[str, str]:
 # index-facing consumers (the remote skill index, gallery chips) which can't
 # cheaply stat the directory; the runtime resolves presence directly, so
 # reading it would create a second classifier that can drift from the file.
-_AGENTS_FILENAME = "AGENTS.md"
+_EXPERT_FILENAME = "EXPERT.md"
 
 # Legacy ``type: expert`` frontmatter is a deprecated fallback, so the warning
 # is one-shot per skill name — ``_parse_skill_md`` runs on every ``list_skills``
@@ -197,32 +197,32 @@ def _warn_once(key: str, message: str, *args: object) -> None:
     _logger.warning(message, *args)
 
 
-def _read_agents_md(skill_dir: Path) -> str | None:
-    """Return the AGENTS.md body for *skill_dir*, or None when absent.
+def _read_expert_md(skill_dir: Path) -> str | None:
+    """Return the EXPERT.md body for *skill_dir*, or None when absent.
 
     Returns a string (possibly empty) whenever the file exists, so callers
     can distinguish "not an expert" (None) from "declared expert with an
     empty actor definition" (""). The latter is a skill-authoring bug the
     container paths refuse loudly rather than papering over.
 
-    Frontmatter is stripped if present. The contract says AGENTS.md carries
+    Frontmatter is stripped if present. The contract says EXPERT.md carries
     none, but an author who adds some should not have raw YAML leak into the
     expert's system prompt.
     """
-    agents_path = skill_dir / _AGENTS_FILENAME
+    expert_path = skill_dir / _EXPERT_FILENAME
     try:
-        if not agents_path.is_file():
+        if not expert_path.is_file():
             return None
-        content = agents_path.read_text(encoding="utf-8")
+        content = expert_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        # Presence was the declaration, so an unreadable AGENTS.md is a
+        # Presence was the declaration, so an unreadable EXPERT.md is a
         # broken expert, not a plain skill. Return "" to keep the expert
         # classification and let the empty-body guards in the container
         # factories refuse it with a skill-name-bearing warning.
         _logger.warning(
             "Skill %r: could not read %s (%s); treating actor definition as empty.",
             skill_dir.name,
-            agents_path,
+            expert_path,
             exc,
         )
         return ""
@@ -383,7 +383,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
     whether the skill is also an **expert** — an actor with a persona and a
     result-envelope contract, dispatchable as its own agent.
 
-    Expert classification is structural: a sibling ``AGENTS.md`` in the same
+    Expert classification is structural: a sibling ``EXPERT.md`` in the same
     directory declares the skill an expert, and that file's body is the
     expert's runtime prompt. SKILL.md stays pure knowledge — portable to any
     harness, and readable in-turn off the ``/skills/`` mount whether or not
@@ -391,7 +391,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
 
         my-expert/
           SKILL.md     # knowledge: when to use, workflow, references
-          AGENTS.md    # actor: persona + result envelope  <- the declaration
+          EXPERT.md    # actor: persona + result envelope  <- the declaration
           scripts/
           references/
 
@@ -399,7 +399,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
     frontmatter, alongside actor fields (``role`` / ``byline`` /
     ``capability_tags`` / ``avatar_hint`` / ``default_dispatch``). That path
     still resolves, with a deprecation warning, and is still the source of
-    the WebUI gallery's decoration fields. New experts declare via AGENTS.md
+    the WebUI gallery's decoration fields. New experts declare via EXPERT.md
     and set none of those fields; their gallery cards carry name and
     description only.
 
@@ -407,7 +407,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
     reachable both in-turn and in the background, and the orchestrator picks
     per task — a skill does not declare one dispatch shape for all time.
 
-    When both are present, AGENTS.md wins on every axis (prompt source,
+    When both are present, EXPERT.md wins on every axis (prompt source,
     dispatch) and the frontmatter actor fields are reported as ignored — a
     skill mid-migration must not behave as a blend of the two contracts.
 
@@ -433,8 +433,8 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         SkillInfo with path set to the skill's parent directory.
     """
     parent = skill_md_path.parent
-    agents_body = _read_agents_md(parent)
-    declares_actor = agents_body is not None
+    expert_body = _read_expert_md(parent)
+    declares_actor = expert_body is not None
     try:
         content = skill_md_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -451,7 +451,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             skill_md_path,
             exc,
         )
-        # An unreadable SKILL.md doesn't undo an AGENTS.md declaration — the
+        # An unreadable SKILL.md doesn't undo an EXPERT.md declaration — the
         # actor definition is a separate file and may be perfectly intact —
         # so the expert classification is applied here too.
         return SkillInfo(
@@ -460,8 +460,8 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             path=parent,
             source=source,
             type="expert" if declares_actor else "utility",
-            expert_source="agents_md" if declares_actor else "",
-            agents_body=agents_body or "",
+            expert_source="expert_md" if declares_actor else "",
+            expert_body=expert_body or "",
         )
 
     def _info(
@@ -477,7 +477,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         legacy_dispatch: str = "",
         body: str = "",
     ) -> SkillInfo:
-        # AGENTS.md presence overrides whatever the frontmatter says about
+        # EXPERT.md presence overrides whatever the frontmatter says about
         # actor-hood: the declaration is the file, and a skill mid-migration
         # (both present) must resolve to exactly one contract.
         if declares_actor:
@@ -497,14 +497,14 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
                     "capability_tags / avatar_hint / default_dispatch) is "
                     "ignored and should be removed.",
                     name,
-                    _AGENTS_FILENAME,
+                    _EXPERT_FILENAME,
                 )
             type_ = "expert"
-            expert_source = "agents_md"
-            # AGENTS.md is authoritative on every axis: the actor definition is
+            expert_source = "expert_md"
+            # EXPERT.md is authoritative on every axis: the actor definition is
             # that file, so legacy decoration from SKILL.md frontmatter must not
             # leak onto SkillInfo. ``role`` would otherwise be prepended to the
-            # AGENTS.md prompt (``_compose_system_prompt`` / the async head), and
+            # EXPERT.md prompt (``_compose_system_prompt`` / the async head), and
             # a mismatched frontmatter ``name`` would desync the registry
             # identity from the skill directory.
             name = parent.name
@@ -520,7 +520,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
                 "result envelope instead, and drop the actor fields from "
                 "frontmatter. The frontmatter path still works for now.",
                 name,
-                _AGENTS_FILENAME,
+                _EXPERT_FILENAME,
             )
             expert_source = "frontmatter"
         else:
@@ -539,7 +539,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
             avatar_hint=avatar_hint,
             body=body,
             expert_source=expert_source,
-            agents_body=agents_body or "",
+            expert_body=expert_body or "",
         )
 
     frontmatter_yaml, body = _split_frontmatter_and_body(content)
@@ -578,7 +578,7 @@ def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
         # in-turn and in the background, and the orchestrator picks per task
         # rather than the skill declaring one shape for all time. Still
         # detected here so the mixed-contract warning can name it among the
-        # legacy actor fields an AGENTS.md skill should drop.
+        # legacy actor fields an EXPERT.md skill should drop.
         legacy_dispatch = str(frontmatter.get("default_dispatch") or "")
         # ``.get("name", parent.name)`` only defaults on missing key; a
         # present-but-empty ``name:`` yields None, which would flow into
@@ -1121,7 +1121,7 @@ def list_expert_skills(include_system: bool = True) -> list[SkillInfo]:
     """List installed expert skills.
 
     Filters ``list_skills()`` output to entries classified as experts by
-    ``_parse_skill_md`` — a sibling ``AGENTS.md`` (current contract), or
+    ``_parse_skill_md`` — a sibling ``EXPERT.md`` (current contract), or
     legacy ``type: expert`` SKILL.md frontmatter. Read ``expert_source`` on
     the returned entries to tell the two apart; use
     ``expert_container.expert_prompt_body`` rather than ``.body`` to get an

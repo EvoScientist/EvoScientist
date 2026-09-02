@@ -7,7 +7,7 @@ into its subagent list at construction time so the `task` tool can dispatch to
 each installed expert in-turn; the same registry is reused by the QuickJS
 `task()` global for in-eval fan-out.
 
-A skill declares itself an expert by carrying a sibling `AGENTS.md`, whose body
+A skill declares itself an expert by carrying a sibling `EXPERT.md`, whose body
 is the actor definition and therefore the runtime prompt — see
 `skills_manager._parse_skill_md`. THIS module builds the in-turn (`task()`) spec
 for such experts and for legacy `type: expert` frontmatter experts alike;
@@ -55,7 +55,7 @@ def expert_prompt_body(skill_info: SkillInfo) -> str:
     it differently, and splitting that decision across call sites is how a
     skill ends up registered off one file and prompted off another:
 
-    - ``expert_source == "agents_md"`` — the sibling AGENTS.md body (persona
+    - ``expert_source == "expert_md"`` — the sibling EXPERT.md body (persona
       + result envelope). SKILL.md stays pure knowledge and stays readable
       in-turn off the ``/skills/`` mount, so it is deliberately NOT the
       prompt here.
@@ -68,12 +68,12 @@ def expert_prompt_body(skill_info: SkillInfo) -> str:
     body populated. Returns an empty string if the file can't be read; the
     callers treat that as "refuse to register this expert".
     """
-    if skill_info.expert_source == "agents_md":
-        if skill_info.agents_body:
-            return skill_info.agents_body
-        from ..tools.skills_manager import _read_agents_md
+    if skill_info.expert_source == "expert_md":
+        if skill_info.expert_body:
+            return skill_info.expert_body
+        from ..tools.skills_manager import _read_expert_md
 
-        return _read_agents_md(skill_info.path) or ""
+        return _read_expert_md(skill_info.path) or ""
 
     if skill_info.body:
         return skill_info.body
@@ -95,13 +95,13 @@ def expert_prompt_body(skill_info: SkillInfo) -> str:
 def _compose_system_prompt(skill_info: SkillInfo, body: str) -> str:
     """Compose the expert's system_prompt from its role + prompt body.
 
-    *body* is what :func:`expert_prompt_body` resolved — an AGENTS.md actor
+    *body* is what :func:`expert_prompt_body` resolved — an EXPERT.md actor
     definition, or a legacy expert's SKILL.md body. Either way it carries
     the persona voice, rubrics, and output-style instructions, written in
     second person addressing the expert itself.
 
     The legacy `role` frontmatter (one-line role summary) is prepended as an
-    orientation line when set. AGENTS.md experts declare no `role` — their
+    orientation line when set. EXPERT.md experts declare no `role` — their
     persona section opens with the same orientation in prose — so for those
     the body passes through untouched.
     """
@@ -264,7 +264,7 @@ def build_expert_subagent_specs(
             _logger.warning(
                 "Expert skill %r: %s body is empty; skipping registration.",
                 info.name,
-                "AGENTS.md" if info.expert_source == "agents_md" else "SKILL.md",
+                "EXPERT.md" if info.expert_source == "expert_md" else "SKILL.md",
             )
             continue
         specs.append(build_expert_subagent_spec(info, tool_registry=tool_registry))
