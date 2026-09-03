@@ -109,6 +109,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5-mini", "gpt-5-mini", "openai"),
     ("gpt-5-nano", "gpt-5-nano", "openai"),
     # Google GenAI
+    ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),
     ("gemini-3.6-flash", "gemini-3.6-flash", "google-genai"),
     ("gemini-3.5-flash", "gemini-3.5-flash", "google-genai"),
@@ -178,6 +179,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.5", "openai/gpt-5.5", "openrouter"),
     ("gpt-5.4", "openai/gpt-5.4", "openrouter"),
     ("gpt-5.3-codex", "openai/gpt-5.3-codex", "openrouter"),
+    ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
     ("gemini-3.7-flash", "google/gemini-3.7-flash", "openrouter"),
     ("gemini-3.6-flash", "google/gemini-3.6-flash", "openrouter"),
     ("gemini-3.5-flash", "google/gemini-3.5-flash", "openrouter"),
@@ -207,6 +209,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro-0813", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
+    ("muse-spark-1.3", "meta/muse-spark-1.3", "openrouter"),
     # Volcengine Coding Plan (火山引擎代码计划 — coding-only endpoint)
     # Listed before Zhipu so simple GLM lookups keep their existing default.
     ("glm-5.2", "glm-5-2", "volcengine-code"),
