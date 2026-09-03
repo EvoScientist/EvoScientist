@@ -195,6 +195,25 @@ class SlackChannel(Channel):
     def _get_bot_identifier(self) -> str | None:
         return getattr(self, "_bot_user_id", None)
 
+    # ── Retry error code extraction (override base) ─────────────────
+
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status code from SlackApiError or fallback to base."""
+        from slack_sdk.errors import SlackApiError
+
+        if isinstance(exc, SlackApiError):
+            return exc.response.status_code
+        return super()._extract_status_code(exc)
+
+    def _extract_sdk_error_code(self, exc: Exception) -> str | None:
+        """Extract structured error code string from SlackApiError."""
+        from slack_sdk.errors import SlackApiError
+
+        if isinstance(exc, SlackApiError):
+            error = exc.response.get("error")
+            return error.lower() if isinstance(error, str) else None
+        return super()._extract_sdk_error_code(exc)
+
     # ── ACK Reactions ───────────────────────────────────────────────
 
     async def _send_ack_reaction(

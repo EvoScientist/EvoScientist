@@ -75,3 +75,91 @@ class TestSlackChannelRegistration:
 
         channels = available_channels()
         assert "slack" in channels
+
+
+class TestSlackRetryErrorExtraction:
+    """Test Slack-specific status code and SDK error code extraction."""
+
+    def test_extract_slack_auth_error_not_retryable(self):
+        from slack_sdk.errors import SlackApiError
+        from slack_sdk.web.slack_response import SlackResponse
+
+        ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+        resp = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data={"ok": False, "error": "invalid_auth"},
+            headers={},
+            status_code=200,
+        )
+        exc = SlackApiError("The request to the Slack API failed.", response=resp)
+        assert ch._extract_sdk_error_code(exc) == "invalid_auth"
+        assert ch._extract_retry_after(exc) is None
+
+    def test_extract_slack_token_expired_not_retryable(self):
+        from slack_sdk.errors import SlackApiError
+        from slack_sdk.web.slack_response import SlackResponse
+
+        ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+        resp = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data={"ok": False, "error": "token_expired"},
+            headers={},
+            status_code=200,
+        )
+        exc = SlackApiError("The token has expired.", response=resp)
+        assert ch._extract_sdk_error_code(exc) == "token_expired"
+        assert ch._extract_retry_after(exc) is None
+
+    def test_extract_slack_status_code_401_not_retryable(self):
+        from slack_sdk.errors import SlackApiError
+        from slack_sdk.web.slack_response import SlackResponse
+
+        ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+        resp = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data={"ok": False, "error": "unknown_custom"},
+            headers={},
+            status_code=401,
+        )
+        exc = SlackApiError("Unauthorized", response=resp)
+        assert ch._extract_status_code(exc) == 401
+        assert ch._extract_retry_after(exc) is None
+
+    def test_extract_slack_status_code_500_is_retryable(self):
+        from slack_sdk.errors import SlackApiError
+        from slack_sdk.web.slack_response import SlackResponse
+
+        ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+        resp = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data={"ok": False, "error": "internal_error"},
+            headers={},
+            status_code=500,
+        )
+        exc = SlackApiError("Internal Server Error", response=resp)
+        assert ch._extract_status_code(exc) == 500
+        assert ch._extract_retry_after(exc) == 1.0
+
+    def test_slack_channel_fallback_to_httpx(self):
+        import httpx
+
+        ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+        exc = httpx.HTTPStatusError(
+            "unauthorized",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(401),
+        )
+        assert ch._extract_status_code(exc) == 401
+        assert ch._extract_retry_after(exc) is None

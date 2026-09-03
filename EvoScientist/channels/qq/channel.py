@@ -116,7 +116,7 @@ class QQChannel(Channel):
 
     capabilities = QQ_CAPS
     _ready_attrs = ("_client", "_running")
-    _non_retryable_patterns = ()
+    _non_retryable_patterns = Channel._non_retryable_patterns
     _mention_pattern = r"@\S+\s*"
     _mention_strip_count = 1
     _markdown_fallback_exc_types: ClassVar[tuple[type[Exception], ...]] = (

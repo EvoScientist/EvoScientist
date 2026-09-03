@@ -73,7 +73,12 @@ class EmailChannel(Channel, PollingMixin):
     name = "email"
 
     capabilities = EMAIL_CAPS
-    _non_retryable_patterns = ("auth", "login", "credential")
+    _non_retryable_patterns = (
+        *Channel._non_retryable_patterns,
+        "auth",
+        "login",
+        "credential",
+    )
 
     def __init__(self, config: EmailConfig):
         super().__init__(config)

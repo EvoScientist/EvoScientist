@@ -208,6 +208,16 @@ class DiscordChannel(Channel):
             return str(self._client.user.id)
         return None
 
+    # ── Retry error code extraction (override base) ─────────────────
+
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status code from discord.HTTPException or fallback to base."""
+        import discord
+
+        if isinstance(exc, discord.HTTPException):
+            return exc.status
+        return super()._extract_status_code(exc)
+
     # ── Inbound ─────────────────────────────────────────────────────
 
     async def _on_message(self, message) -> None:

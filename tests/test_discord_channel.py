@@ -37,3 +37,61 @@ class TestDiscordChannel:
         )
         result = await channel.send(msg)
         assert result is False
+
+
+class TestDiscordRetryErrorExtraction:
+    """Test Discord-specific status code extraction."""
+
+    def test_discord_status_code_401_not_retryable(self):
+        from unittest.mock import MagicMock
+
+        import discord
+
+        ch = DiscordChannel(DiscordConfig(bot_token="test"))
+        resp = MagicMock()
+        resp.status = 401
+        resp.reason = "Unauthorized"
+        resp.headers = {}
+        exc = discord.HTTPException(resp, "401 Unauthorized")
+        assert ch._extract_status_code(exc) == 401
+        assert ch._extract_retry_after(exc) is None
+
+    def test_discord_status_code_403_not_retryable(self):
+        from unittest.mock import MagicMock
+
+        import discord
+
+        ch = DiscordChannel(DiscordConfig(bot_token="test"))
+        resp = MagicMock()
+        resp.status = 403
+        resp.reason = "Forbidden"
+        resp.headers = {}
+        exc = discord.HTTPException(resp, "50001 Missing Access")
+        assert ch._extract_status_code(exc) == 403
+        assert ch._extract_retry_after(exc) is None
+
+    def test_discord_status_code_500_is_retryable(self):
+        from unittest.mock import MagicMock
+
+        import discord
+
+        ch = DiscordChannel(DiscordConfig(bot_token="test"))
+        resp = MagicMock()
+        resp.status = 500
+        resp.reason = "Internal Server Error"
+        resp.headers = {}
+        exc = discord.HTTPException(resp, "500 Internal Server Error")
+        assert ch._extract_status_code(exc) == 500
+        assert ch._extract_retry_after(exc) == 1.0
+
+    def test_discord_fallback_to_httpx(self):
+        import httpx
+
+        ch = DiscordChannel(DiscordConfig(bot_token="test"))
+        exc = httpx.HTTPStatusError(
+            "unauthorized",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(401),
+        )
+        assert ch._extract_status_code(exc) == 401
+        assert ch._extract_retry_after(exc) is None

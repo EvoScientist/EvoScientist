@@ -746,43 +746,86 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
     # ── Send retry abstraction ──────────────────────────────────────
 
-    _non_retryable_patterns: tuple[str, ...] = ()
+    # HTTP status codes that should never be retried (auth/permission errors)
+    _non_retryable_status_codes: tuple[int, ...] = (401, 403)
+
+    # Structured SDK error codes that should never be retried (e.g. Slack invalid_auth)
+    # Channel-specific message patterns (e.g. Feishu 10003, DingTalk 40014) are handled
+    # via _non_retryable_patterns in respective channel subclasses.
+    _non_retryable_error_codes: tuple[str, ...] = (
+        "invalid_auth",
+        "invalid_token",
+        "expired_token",
+        "token_expired",
+        "token_revoked",
+        "account_inactive",
+        "not_authed",
+        "no_permission",
+        "missing_scope",
+    )
+
+    _non_retryable_patterns: tuple[str, ...] = (
+        "unauthorized",
+        "forbidden",
+        "permission denied",
+        "invalid token",
+        "invalid api key",
+        "authentication failed",
+    )
     _rate_limit_patterns: tuple[str, ...] = ("429", "ratelimit")
     _rate_limit_delay: float = 1.0
 
     def _extract_retry_after(self, exc: Exception) -> float | None:
         """Extract retry-wait seconds from an exception.
 
-        Returns ``None`` to signal that the error is **not retryable**.
+        Returns a retry delay in seconds, or ``None`` when the error is
+        explicitly non-retryable.
 
         Pipeline:
-        1. SDK-provided ``retry_after`` attribute (Telegram / Slack SDKs).
-        2. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
-        3. Non-retryable pattern match → ``None``.
+        1. Non-retryable detection → ``None``. Evaluates HTTP status codes
+           (e.g. 401, 403), structured SDK error codes (e.g. Slack
+           ``"invalid_auth"``), and message pattern matching
+           (e.g. ``"unauthorized"``, ``"forbidden"``).
+        2. SDK-provided ``retry_after`` attribute (Telegram / Slack SDKs).
+        3. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
         4. Rate-limit pattern match → ``_rate_limit_delay``.
-        5. Default ``1.0`` s (generic transient-error retry).
+        5. Default ``1.0`` s for generic transient errors.
 
         Channels can customize behavior declaratively via class attributes
-        ``_non_retryable_patterns``, ``_rate_limit_patterns``, and
-        ``_rate_limit_delay``, or override this method entirely.
+        ``_non_retryable_patterns``, ``_rate_limit_patterns``,
+        ``_non_retryable_status_codes``, ``_non_retryable_error_codes``,
+        and ``_rate_limit_delay``, or override this method entirely.
         """
-        # 1. SDK retry_after attribute
-        retry = getattr(exc, "retry_after", None)
-        if retry is not None:
-            return float(retry)
+        # 1. Non-retryable detection: evaluate status codes, structured SDK
+        #    error codes, and message patterns independently.
+        status_code = self._extract_status_code(exc)
+        if status_code is not None and status_code in self._non_retryable_status_codes:
+            return None
 
-        # 2. HTTP Retry-After header
-        header_val = self._parse_retry_after_header(exc)
-        if header_val is not None:
-            return header_val
+        sdk_error = self._extract_sdk_error_code(exc)
+        if sdk_error is not None and sdk_error in self._non_retryable_error_codes:
+            return None
 
         msg = str(exc).lower()
-
-        # 3. Non-retryable patterns
         if self._non_retryable_patterns and any(
             p in msg for p in self._non_retryable_patterns
         ):
             return None
+
+        # 2. SDK retry_after attribute
+        retry = getattr(exc, "retry_after", None)
+        if retry is not None and not isinstance(retry, bool):
+            try:
+                val = float(retry)
+                if val >= 0:
+                    return val
+            except (ValueError, TypeError):
+                pass
+
+        # 3. HTTP Retry-After header
+        header_val = self._parse_retry_after_header(exc)
+        if header_val is not None:
+            return header_val
 
         # 4. Rate-limit patterns
         if self._rate_limit_patterns and any(
@@ -790,22 +833,45 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         ):
             return self._rate_limit_delay
 
-        # 5. Default
+        # 5. Default: transient error, retry with the standard delay
         return 1.0
 
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status from an httpx error.
+
+        Channels with other SDKs (e.g. ``SlackChannel``, ``DiscordChannel``)
+        override this method.
+        """
+        import httpx
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code
+
+        return None
+
+    def _extract_sdk_error_code(self, exc: Exception) -> str | None:
+        """Extract structured SDK error code string from an exception.
+
+        Plain HTTP carries no structured error code by default (returns ``None``).
+        Subclasses with specialized SDKs (e.g. ``SlackChannel``, ``DiscordChannel``)
+        override this method.
+        """
+        return None
+
     def _parse_retry_after_header(self, exc: Exception) -> float | None:
-        """Try to extract a ``Retry-After`` value from an HTTP response."""
+        """Try to extract a ``Retry-After`` value from an HTTP response or exception."""
         resp = getattr(exc, "response", None)
         if resp is None:
             return None
         headers = getattr(resp, "headers", None)
-        if not headers:
+        if not headers or not hasattr(headers, "get"):
             return None
         raw = headers.get("Retry-After") or headers.get("retry-after")
         if raw is None:
             return None
         try:
-            return float(raw)
+            val = float(raw)
+            return val if val >= 0 else None
         except (ValueError, TypeError):
             return None
 

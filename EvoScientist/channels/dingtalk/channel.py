@@ -35,7 +35,11 @@ class DingTalkChannel(Channel, WebSocketMixin, TokenMixin):
     capabilities = DINGTALK_CAPS
     name = "dingtalk"
     _ready_attrs = ("_http_client", "_access_token")
-    _non_retryable_patterns = ("invalidauthentication", "forbidden", "40014")
+    _non_retryable_patterns = (
+        *Channel._non_retryable_patterns,
+        "invalidauthentication",
+        "40014",
+    )
     _mention_pattern = r"@\S+\s*"
     _mention_strip_count = 1
 
