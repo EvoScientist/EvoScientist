@@ -578,6 +578,9 @@ Automate recurring research tasks with cron-style schedules.
 /schedule add "0 9 * * 1-5" "Summarise the latest ML papers from arXiv with the paper-navigator skill, and save the summary to /memories/daily-papers.md"
 /schedule add "*/10 * * * *" "Check my running experiment's status and append the result to experiment_log.json"
 
+# Optional acceptance checklist: a separate reviewer grades each run against it
+/schedule add "0 8 * * 1-5" "Collect yesterday's arXiv diffusion papers into scheduled/digest.md" --rubric "- scheduled/digest.md is updated with today's date; - every entry has a title, an arXiv link and a one-line summary"
+
 # Manage schedules
 /schedule list           # list active schedules
 /schedule remove <id>    # delete a schedule
@@ -589,6 +592,8 @@ Automate recurring research tasks with cron-style schedules.
 Note: `/schedule add` requires a cron expression (5 fields, e.g. `*/10 * * * *`). To schedule with natural language ("every 10 minutes"), just ask in chat — the agent translates it via the `schedule_task` tool.
 
 Output goes wherever the task's prompt tells it to write — there is no enforced output directory, so make the prompt specific about file locations. Run `/schedule list` to review schedules; the agent is also made aware of the active schedules via a `<scheduled_tasks>` context block, so you can just ask it what's scheduled.
+
+`--rubric "<checklist>"` is optional. When set, a separate reviewer (the auxiliary model, with read-only access to the workspace) grades the finished run against the checklist and re-runs the task once with the reviewer's feedback if a bullet fails; without a rubric no grading happens at all. Name concrete deliverables the reviewer can check — files that must exist, sections they must contain, minimum counts. When you schedule in chat, the agent fills the rubric itself if your request names such outputs.
 
 > **Cost note:** each scheduled run consumes LLM tokens. Delete unused schedules with `/schedule remove` to avoid accumulating charges.
 

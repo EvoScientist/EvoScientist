@@ -990,7 +990,7 @@ class TestAsyncSubagentGuard:
     @staticmethod
     def _factory_kwargs_for(name: str) -> dict:
         """Run the async factory for ``name`` and capture the backend kwargs."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock, NonCallableMagicMock, patch
 
         import EvoScientist.EvoScientist as ev
         from EvoScientist.subagents import _factory
@@ -999,7 +999,8 @@ class TestAsyncSubagentGuard:
 
         def _spy_backend(**kwargs):
             captured.update(kwargs)
-            return MagicMock()
+            # Non-callable: deepagents rejects callable backends as removed factories.
+            return NonCallableMagicMock()
 
         with (
             patch.object(ev, "_get_default_backend", _spy_backend),

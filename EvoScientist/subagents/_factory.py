@@ -15,12 +15,198 @@ synchronous counterpart: same workspace files, same ``/skills/`` and
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from deepagents.middleware.rubric import (
+    RUBRIC_GRADER_MESSAGE_SOURCE,
+    GraderResponse,
+    RubricMiddleware,
+)
+from langchain.agents import create_agent
+from langchain.agents.middleware.types import AgentMiddleware
+from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+from langchain_core.messages import AIMessage
+
+if TYPE_CHECKING:
+    from deepagents.backends.protocol import BackendProtocol
+    from deepagents.middleware.rubric import RubricEvaluation
+    from langchain_core.language_models import BaseChatModel
+
+logger = logging.getLogger(__name__)
 
 # Async research agents (no approval path) keep the backend guard forced on;
 # internal graphs (scheduler, evomemory, autoskills) run unguarded.
 _GUARDED_ASYNC_SUBAGENTS = frozenset({"writing-agent", "data-analysis-agent"})
+
+# Read-only slice of the filesystem tools handed to the scheduler's grader. A
+# rubric names its deliverables, so reading them is enough; ``grep``/``glob``
+# invited whole-workspace scans (15s timeouts per call on large workspaces).
+_SCHEDULER_GRADER_TOOLS = ("ls", "read_file")
+
+# Structured-output strategy per OpenRouter model family. langchain picks the
+# grader's strategy from the model profile plus a model-name regex table, and
+# OpenRouter breaks each family the other way round: Gemini tool schemas lose
+# the criteria ``oneOf`` (every entry comes back null), Anthropic JSON mode
+# returns non-JSON. Verified live 2026-09-04. Passed explicitly because a
+# profile pin loses to the name regex (``anthropic/claude-fable-5``).
+_OPENROUTER_GRADER_STRATEGY: dict[str, type[ProviderStrategy] | type[ToolStrategy]] = {
+    "google/": ProviderStrategy,
+    "anthropic/": ToolStrategy,
+}
+
+# Model calls one grader attempt may spend before the run fails closed with
+# ``grader_error``. Without it a parse-error retry loop inherits the scheduler
+# graph's recursion limit and spins for minutes. Sized for a 3-5 bullet rubric
+# over a few files: ``ls`` + one ``read_file`` per file + the verdict call.
+_SCHEDULER_GRADER_MAX_CALLS = 12
+
+
+# OpenRouter ids for which neither strategy yields a verdict (probed 2026-09-04):
+# the route rejects forced ``tool_choice`` (reasoning on or off) and JSON mode
+# drops required fields. Exact ids, not families: ``anthropic/claude-fable-5``
+# and the native ``claude-fable-5-1`` grade fine.
+_OPENROUTER_UNGRADABLE_IDS = ("anthropic/claude-fable-5.1",)
+
+
+def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
+    from EvoScientist.llm.errors import _provider_from_model
+
+    if _provider_from_model(model) != "openrouter":
+        return
+    model_id = (getattr(model, "model_name", None) or "").lower()
+    if model_id in _OPENROUTER_UNGRADABLE_IDS:
+        logger.warning(
+            "scheduler rubric: grader model %s via OpenRouter cannot return "
+            "structured verdicts (this route rejects forced tool_choice and its "
+            "JSON mode drops required fields); rubric runs will end in "
+            "grader_error. Use the native anthropic provider for this model, or "
+            "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku "
+            "and Gemini all grade through OpenRouter).",
+            model_id,
+        )
+
+
+def _grader_strategy(model: BaseChatModel) -> ProviderStrategy | ToolStrategy | None:
+    """Explicit grader strategy on OpenRouter routes; ``None`` defers to langchain."""
+    from EvoScientist.llm.errors import _provider_from_model
+
+    if _provider_from_model(model) != "openrouter":
+        return None
+    model_id = (getattr(model, "model_name", None) or "").lower()
+    for prefix, strategy in _OPENROUTER_GRADER_STRATEGY.items():
+        if model_id.startswith(prefix):
+            return strategy(GraderResponse)
+    return None
+
+
+class _SchedulerRubricMiddleware(RubricMiddleware):
+    """``RubricMiddleware`` whose grader gets an explicit structured-output strategy.
+
+    Mirrors upstream ``_ensure_grader`` except for ``response_format``; a bare
+    ``GraderResponse`` there lets langchain choose the strategy, which is wrong
+    on OpenRouter (see ``_OPENROUTER_GRADER_STRATEGY``).
+    """
+
+    def _ensure_grader(self) -> Any:
+        if self._grader is not None:
+            return self._grader
+        from deepagents._models import resolve_model
+
+        resolved_model = resolve_model(self._model)
+        self._resolved_model = resolved_model
+        self._grader = create_agent(
+            model=resolved_model,
+            system_prompt=self._system_prompt,
+            tools=self._tools,
+            middleware=self._grader_middleware,
+            name=RUBRIC_GRADER_MESSAGE_SOURCE,
+            response_format=_grader_strategy(resolved_model) or GraderResponse,
+            state_schema=self._grader_state_schema,
+            context_schema=self._grader_context_schema,
+        )
+        return self._grader
+
+
+class _GraderCallBudget(AgentMiddleware):
+    """Fail closed once one grader attempt has made ``max_calls`` model calls.
+
+    Counts the ``AIMessage``s already in the request, so the budget is per
+    grader invocation by construction and no per-run state is needed. Raised
+    on the first attempt it surfaces as ``grader_error``; raised on the
+    coverage retry, upstream ``_grade`` swallows it and downgrades the first
+    (unusable) verdict to ``needs_revision`` instead. Both terminate.
+    """
+
+    name = "scheduler_rubric_grader_budget"
+
+    def __init__(self, *, max_calls: int) -> None:
+        self.max_calls = max_calls
+
+    def _check(self, request: Any) -> None:
+        spent = sum(isinstance(m, AIMessage) for m in request.messages)
+        if spent >= self.max_calls:
+            msg = (
+                f"scheduler rubric grader exceeded {self.max_calls} model calls "
+                "without a verdict"
+            )
+            raise RuntimeError(msg)
+
+    def wrap_model_call(self, request, handler):
+        self._check(request)
+        return handler(request)
+
+    async def awrap_model_call(self, request, handler):
+        self._check(request)
+        return await handler(request)
+
+
+def _log_rubric_evaluation(evaluation: RubricEvaluation) -> None:
+    logger.info(
+        "scheduler rubric iteration %s: %s — %s",
+        evaluation.get("iteration"),
+        evaluation.get("result"),
+        evaluation.get("explanation"),
+    )
+
+
+def _scheduler_rubric_middleware(*, model: BaseChatModel, backend: BackendProtocol):
+    """Acceptance grading for unattended scheduler runs (no-op without a rubric).
+
+    Must be mounted LAST: ``after_agent`` hooks run in reverse list order, so
+    the grader sees the finished run first and a ``needs_revision`` verdict
+    jumps back to the model before ``EvoMemoryLifecycleMiddleware`` launches
+    its memory worker — the worker fires once, on the accepted run. The grader
+    reads the same backend because the deliverables are files the transcript
+    alone cannot prove exist.
+    """
+    import warnings
+
+    from deepagents import FilesystemMiddleware
+    from langchain_core._api import LangChainBetaWarning
+
+    # Eviction thresholds off: both eviction paths write files through the
+    # backend, which would let the grader touch the shared workspace.
+    grader_fs = FilesystemMiddleware(
+        backend=backend,
+        tools=list(_SCHEDULER_GRADER_TOOLS),
+        tool_token_limit_before_evict=None,
+        human_message_token_limit_before_evict=None,
+    )
+    _warn_if_grader_unsupported(model)
+    with warnings.catch_warnings():
+        # Beta API; graphs build at langgraph dev import, keep the log clean.
+        warnings.simplefilter("ignore", LangChainBetaWarning)
+        return _SchedulerRubricMiddleware(
+            model=model,
+            grader_middleware=[
+                grader_fs,
+                _GraderCallBudget(max_calls=_SCHEDULER_GRADER_MAX_CALLS),
+            ],
+            max_iterations=2,
+            on_evaluation=_log_rubric_evaluation,
+        )
 
 
 def build_async_subagent_graph(name: str) -> Any:
@@ -118,13 +304,19 @@ def build_async_subagent_graph(name: str) -> Any:
     )
 
     guarded = name in _GUARDED_ASYNC_SUBAGENTS
+    backend = _get_default_backend(guard_dangerous=guarded, refuse_delete=guarded)
+    if name == "scheduler":
+        middleware = [
+            *middleware,
+            _scheduler_rubric_middleware(model=model, backend=backend),
+        ]
     return create_deep_agent(
         name=name,
         model=model,
         system_prompt=spec.get("system_prompt", ""),
         tools=spec.get("tools", []) + agent_mcp_tools,
         skills=spec.get("skills"),
-        backend=_get_default_backend(guard_dangerous=guarded, refuse_delete=guarded),
+        backend=backend,
         middleware=middleware,
         subagents=subagents,
     ).with_config({"recursion_limit": cfg.recursion_limit})
