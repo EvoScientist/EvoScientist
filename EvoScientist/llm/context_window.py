@@ -68,6 +68,8 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("deepseek-v4", 1_050_000),
     # Xiaomi MiMo v2.5 family — base, pro, future variants
     ("mimo-v2.5", 1_050_000),
+    # Meta Muse Spark family — 1.1/1.2/1.3 (OpenRouter ``meta/muse-spark-*``, 1M).
+    ("muse-spark", 1_048_576),
     # Qwen 3.6 closed-source family — flash, plus, max-preview, etc.
     # Open-source ``-<size>b`` variants are 262K — listed in the dict above.
     ("qwen3.6", 1_000_000),
