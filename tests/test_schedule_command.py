@@ -93,7 +93,7 @@ async def test_run_with_matching_prefix_fires_matched_prompt():
         ) as rn,
     ):
         await ScheduleCommand().execute(ctx, ["run", "c-123"])
-    rn.assert_called_once_with("do the thing")
+    rn.assert_called_once_with("do the thing", rubric=None)
 
 
 async def test_run_with_no_match_reports():
@@ -230,3 +230,133 @@ async def test_add_name_sanitized_from_nasty_prompt():
     assert "/" not in name
     # Only safe chars: lowercase alphanumeric and hyphens
     assert re.fullmatch(r"[a-z0-9][a-z0-9\-]*", name), f"Unexpected name: {name!r}"
+
+
+# ---------------------------------------------------------------------------
+# Optional --rubric on /schedule add, forwarded by /schedule run, shown in list
+# ---------------------------------------------------------------------------
+
+
+async def test_add_parses_trailing_rubric_flag():
+    from EvoScientist.commands.implementation.schedule import ScheduleCommand
+
+    ctx, _ui = _ctx()
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch(
+            "EvoScientist.cron.schedule.create_schedule",
+            return_value={"cron_id": "c-9"},
+        ) as mk,
+    ):
+        await ScheduleCommand().execute(
+            ctx,
+            [
+                "add",
+                "*/10 * * * *",
+                "write scheduled/digest.md",
+                "--rubric",
+                "- scheduled/digest.md has today's date",
+            ],
+        )
+    kw = mk.call_args.kwargs
+    assert kw["prompt"] == "write scheduled/digest.md"
+    assert kw["rubric"] == "- scheduled/digest.md has today's date"
+
+
+async def test_add_without_rubric_passes_none():
+    from EvoScientist.commands.implementation.schedule import ScheduleCommand
+
+    ctx, _ui = _ctx()
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch(
+            "EvoScientist.cron.schedule.create_schedule",
+            return_value={"cron_id": "c-9"},
+        ) as mk,
+    ):
+        await ScheduleCommand().execute(
+            ctx, ["add", "*/10 * * * *", "search uk weather"]
+        )
+    assert mk.call_args.kwargs["rubric"] is None
+
+
+async def test_run_forwards_stored_rubric():
+    from EvoScientist.commands.implementation.schedule import ScheduleCommand
+
+    ctx, _ui = _ctx()
+    rows = [
+        {
+            "cron_id": "c-12345",
+            "metadata": {"prompt": "do the thing", "rubric": "- out.md exists"},
+        }
+    ]
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
+        patch(
+            "EvoScientist.cron.schedule.run_now",
+            return_value={"run_id": "r-1"},
+        ) as rn,
+    ):
+        await ScheduleCommand().execute(ctx, ["run", "c-123"])
+    rn.assert_called_once_with("do the thing", rubric="- out.md exists")
+
+
+async def test_list_table_marks_graded_rows():
+    from EvoScientist.commands.implementation.schedule import ScheduleCommand
+
+    ctx, ui = _ctx()
+    rows = [
+        {
+            "cron_id": "c-1",
+            "schedule": "0 9 * * *",
+            "enabled": True,
+            "next_run_date": "2026-06-25T09:00:00+00:00",
+            "metadata": {"name": "graded", "rubric": "- out.md exists"},
+        },
+        {
+            "cron_id": "c-2",
+            "schedule": "0 9 * * *",
+            "enabled": True,
+            "next_run_date": "2026-06-25T09:00:00+00:00",
+            "metadata": {"name": "plain"},
+        },
+    ]
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
+    ):
+        await ScheduleCommand().execute(ctx, ["list"])
+    table = ui.mount_renderable.call_args.args[0]
+    rubric_col = next(c for c in table.columns if c.header == "Rubric")
+    assert list(rubric_col._cells) == ["yes", ""]
+
+
+async def test_add_treats_last_rubric_flag_as_the_separator():
+    """An unquoted prompt may mention the flag; only the final one splits."""
+    from EvoScientist.commands.implementation.schedule import ScheduleCommand
+
+    ctx, _ui = _ctx()
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch(
+            "EvoScientist.cron.schedule.create_schedule",
+            return_value={"cron_id": "c-9"},
+        ) as mk,
+    ):
+        await ScheduleCommand().execute(
+            ctx,
+            [
+                "add",
+                "*/10 * * * *",
+                "explain",
+                "the",
+                "--rubric",
+                "flag",
+                "--rubric",
+                "- notes.md explains the flag",
+            ],
+        )
+    kw = mk.call_args.kwargs
+    assert kw["prompt"] == "explain the --rubric flag"
+    assert kw["rubric"] == "- notes.md explains the flag"

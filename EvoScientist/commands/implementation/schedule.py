@@ -10,13 +10,21 @@ from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
 
+def _clean(text: str) -> str:
+    """Trim a shlex-joined argument and drop a stray wrapping quote pair."""
+    return text.strip().strip('"').strip("'")
+
+
 class ScheduleCommand(Command):
     """Manage scheduled (cron) tasks."""
 
     name = "/schedule"
     description = "Manage scheduled (cron) tasks"
     subcommands: ClassVar[list[SubCommand]] = [
-        SubCommand("add", 'Add: /schedule add <m h dom mon dow> "<prompt>"'),
+        SubCommand(
+            "add",
+            'Add: /schedule add <m h dom mon dow> "<prompt>" [--rubric "<checklist>"]',
+        ),
         SubCommand("list", "List scheduled tasks"),
         SubCommand("remove", "Remove a schedule by id"),
         SubCommand("run", "Run a schedule's prompt once now (test)"),
@@ -78,10 +86,19 @@ class ScheduleCommand(Command):
             schedule, prompt_tokens = " ".join(rest[:5]), rest[5:]
         else:
             ctx.ui.append_system(
-                'Usage: /schedule add "<m h dom mon dow>" "<prompt>"', style="yellow"
+                'Usage: /schedule add "<m h dom mon dow>" "<prompt>" '
+                '[--rubric "<checklist>"]',
+                style="yellow",
             )
             return
-        prompt = " ".join(prompt_tokens).strip().strip('"').strip("'")
+        # Optional trailing acceptance checklist; everything after --rubric is it.
+        rubric = None
+        if "--rubric" in prompt_tokens:
+            # Last occurrence wins so an unquoted prompt may mention the flag.
+            split_at = len(prompt_tokens) - 1 - prompt_tokens[::-1].index("--rubric")
+            rubric = _clean(" ".join(prompt_tokens[split_at + 1 :])) or None
+            prompt_tokens = prompt_tokens[:split_at]
+        prompt = _clean(" ".join(prompt_tokens))
         if not prompt:
             ctx.ui.append_system("A task prompt is required.", style="yellow")
             return
@@ -90,7 +107,11 @@ class ScheduleCommand(Command):
         name = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")[:32] or "task"
         try:
             rec = await asyncio.to_thread(
-                crons.create_schedule, name=name, schedule=schedule, prompt=prompt
+                crons.create_schedule,
+                name=name,
+                schedule=schedule,
+                prompt=prompt,
+                rubric=rubric,
             )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
@@ -119,6 +140,7 @@ class ScheduleCommand(Command):
         table.add_column("Schedule", style="green")
         table.add_column("Enabled", style="yellow")
         table.add_column("Next run (UTC)", style="white")
+        table.add_column("Rubric", style="blue")
         for r in rows:
             meta = r.get("metadata") or {}
             table.add_row(
@@ -127,6 +149,7 @@ class ScheduleCommand(Command):
                 str(r.get("schedule", "")),
                 "yes" if r.get("enabled", True) else "no",
                 str(r.get("next_run_date", "")),
+                "yes" if meta.get("rubric") else "",
             )
         ctx.ui.mount_renderable(table)
 
@@ -191,7 +214,8 @@ class ScheduleCommand(Command):
         match = await self._resolve_or_report(ctx, crons, prefix)
         if match is None:
             return
-        prompt = (match.get("metadata") or {}).get("prompt", "")
+        meta = match.get("metadata") or {}
+        prompt = meta.get("prompt", "")
         if not str(prompt).strip():
             ctx.ui.append_system(
                 f"Schedule {prefix} has no stored prompt — cannot run it.",
@@ -199,7 +223,9 @@ class ScheduleCommand(Command):
             )
             return
         try:
-            rec = await asyncio.to_thread(crons.run_now, prompt)
+            rec = await asyncio.to_thread(
+                crons.run_now, prompt, rubric=meta.get("rubric") or None
+            )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
             return

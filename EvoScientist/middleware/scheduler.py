@@ -48,7 +48,9 @@ manage them.
 
 
 @tool
-def schedule_task(name: str, cron: str, prompt: str, timezone: str = "") -> str:
+def schedule_task(
+    name: str, cron: str, prompt: str, timezone: str = "", rubric: str = ""
+) -> str:
     """Create a recurring scheduled task that runs unattended in the background.
 
     Translate the user's natural-language timing into a standard 5-field cron
@@ -60,6 +62,12 @@ def schedule_task(name: str, cron: str, prompt: str, timezone: str = "") -> str:
         cron: 5-field cron expression.
         prompt: the full instruction the background scheduler runs each time.
         timezone: optional IANA tz (e.g. "Europe/London"); empty = host local zone.
+        rubric: optional acceptance checklist, one "- " bullet per line. A
+            separate reviewer grades each run against it and the task is
+            re-run once with the reviewer's feedback when a bullet fails.
+            Fill it only when the request names checkable outputs (a file
+            that must exist, sections it must contain, a minimum count);
+            leave empty otherwise.
     """
     from ..cron import schedule as crons
 
@@ -67,7 +75,11 @@ def schedule_task(name: str, cron: str, prompt: str, timezone: str = "") -> str:
         return "Scheduler unavailable: the langgraph dev backend is not running."
     try:
         rec = crons.create_schedule(
-            name=name, schedule=cron, prompt=prompt, timezone=timezone or None
+            name=name,
+            schedule=cron,
+            prompt=prompt,
+            timezone=timezone or None,
+            rubric=rubric or None,
         )
     except Exception as e:
         return f"Error: {e}"
@@ -93,10 +105,13 @@ def list_scheduled_tasks() -> str:
     lines = []
     for r in rows:
         meta = r.get("metadata") or {}
-        lines.append(
+        line = (
             f"- {str(r.get('cron_id', ''))[:8]} | {meta.get('name', '')} | "
             f"{r.get('schedule', '')} | {'on' if r.get('enabled', True) else 'off'}"
         )
+        if meta.get("rubric"):
+            line += " | rubric"
+        lines.append(line)
     return "\n".join(lines)
 
 
