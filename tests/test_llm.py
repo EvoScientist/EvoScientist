@@ -2757,6 +2757,21 @@ class TestPatchOpenrouterStripResponsesReasoning:
 # =============================================================================
 
 
+def _anthropic_httpx():
+    """Return the httpx flavour the installed anthropic SDK accepts as ``http_client``.
+
+    anthropic >= 1.0 is built on ``httpx2`` and rejects an ``httpx.Client``.
+    """
+    import anthropic
+    from packaging.version import Version
+
+    if Version(anthropic.__version__) >= Version("1"):
+        import httpx2 as httpx
+    else:
+        import httpx
+    return httpx
+
+
 class TestAnthropicStripForeignReasoning:
     def test_strip_removes_reasoning_content_blocks(self):
         """reasoning_content blocks are dropped; text and thinking survive."""
@@ -2832,8 +2847,9 @@ class TestAnthropicStripForeignReasoning:
         import json
 
         import anthropic
-        import httpx
         from langchain_core.messages import AIMessage, HumanMessage
+
+        httpx = _anthropic_httpx()
 
         monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
         monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
@@ -2904,8 +2920,9 @@ class TestAnthropicStructuredOutput:
         import json
 
         import anthropic
-        import httpx
         from pydantic import BaseModel
+
+        httpx = _anthropic_httpx()
 
         class Pick(BaseModel):
             answer: str
