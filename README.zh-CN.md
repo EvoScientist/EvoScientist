@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.9" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.10" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 9 月 5 日]** **[v0.2.10](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.10)** — 新增模型：Claude Fable 5.1、GPT-6 Astra、Gemini 3.8 Flash、Meta Muse Spark 1.3；主动性第一阶段：首次对话建立用户档案，缓解冷启动；定时任务可附加验收清单；工具选择器仅在工具超过 42 个时启用；升级 deepagents 0.7.13。
 - **[2026 年 8 月 29 日]** **[v0.2.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.9)** — 新增模型：GLM-5.3-Flash（智谱与 OpenRouter）、Qwen3.8-Flash（DashScope 与 OpenRouter）、腾讯 HY4 preview（OpenRouter），均为 1M 上下文；升级 deepagents 0.7.11。
 - **[2026 年 8 月 21 日]** **[v0.2.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.8)** — deploy 模式图重建从约 15 秒降至 1 秒内；resume 命令不再崩溃清空会话历史；新增 Novita AI provider；onboard 推荐技能包新增 NVIDIA BioNeMo Agent Toolkit；路由 reasoning 参数收敛、空截断显式报错；文档新增订阅 OAuth 配置指南；升级 deepagents 0.7.8。
 - **[2026 年 8 月 14 日]** **[v0.2.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.7)** — 启动更快（依赖延迟加载、langgraph dev 服务保活复用、会话列表索引查询）；新增模型：Gemini 3.7 Flash（Google 与 OpenRouter）、DeepSeek V4 Pro 0813、Grok 4.6、GLM-5.3（智谱与 OpenRouter）；配置加密 webhook 的渠道拒绝未签名 POST；MCP stdio 服务在重定向流下可正常启动（修复 Windows 报错）；子 agent 工具改在派发时解析；`/compact` 历史 offload 适配 deepagents 0.7.6。

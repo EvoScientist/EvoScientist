@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.9" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.10" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[05 Sep 2026]** **[v0.2.10](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.10)** — New models: Claude Fable 5.1, GPT-6 Astra, Gemini 3.8 Flash, and Meta Muse Spark 1.3; proactivity phase 1: a first-contact profile bootstrap that eases cold start; optional acceptance checklists for scheduled tasks; tool selection only kicks in above 42 tools; deepagents 0.7.13.
 - **[29 Aug 2026]** **[v0.2.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.9)** — New models: GLM-5.3-Flash (Zhipu + OpenRouter), Qwen3.8-Flash (DashScope + OpenRouter), and Tencent HY4 preview (OpenRouter), all with 1M context; deepagents 0.7.11.
 - **[21 Aug 2026]** **[v0.2.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.8)** — Deploy-mode graph rebuilds drop from ~15 s to under a second; resume commands no longer crash and empty session history; Novita AI as a new LLM provider; NVIDIA BioNeMo Agent Toolkit in onboarding's recommended skill packs; bounded routed reasoning with empty truncations surfaced as errors; a subscription OAuth recipe in the docs; deepagents 0.7.8.
 - **[14 Aug 2026]** **[v0.2.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.7)** — Faster startup (lazy imports, reusable kept-alive langgraph dev server, indexed thread listing); new models: Gemini 3.7 Flash (Google + OpenRouter), DeepSeek V4 Pro 0813, Grok 4.6, and GLM-5.3 (Zhipu + OpenRouter); encrypted-webhook channels reject unsigned POSTs; MCP stdio servers start reliably under redirected streams on Windows; sub-agent tools resolve at dispatch time; `/compact` history offload restored on deepagents 0.7.6.
