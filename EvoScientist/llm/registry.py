@@ -54,6 +54,11 @@ _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 # Anthropic-routed providers that support extended thinking.
 _THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
 
+# Model-id prefixes that accept native video content blocks, per direct
+# provider.  The provider name doubles as the video wire-format name resolved by
+# `patches._VIDEO_BLOCK_FORMATTERS`.
+_VIDEO_INPUT_MODEL_PREFIXES: dict[str, tuple[str, ...]] = {"minimax": ("MiniMax-M3",)}
+
 # Moonshot rejects a forced tool choice while thinking is enabled, and kimi-k3
 # cannot disable thinking — structured output must use json_schema there.
 # Moonshot-specific: do NOT widen to other mandatory-reasoning models.
@@ -66,6 +71,25 @@ def _is_mandatory_thinking_kimi(model_id: str) -> bool:
     """True for Kimi models whose thinking cannot be disabled (K3 family)."""
     short_id = model_id.split("/")[-1]
     return short_id.startswith("kimi-k3") or short_id == "kimi-for-coding"
+
+
+def _video_input_format(provider: str | None, model_id: str) -> str | None:
+    """Video block wire format for a video-capable model, else None.
+
+    Keyed on the model family prefix so speed variants of a video-capable model
+    (e.g. a future ``MiniMax-M3-highspeed``, mirroring the M2.5/M2.7 ones) are
+    covered without another registry edit.  Only direct providers are matched:
+    the aggregators (OpenRouter, SiliconFlow, NVIDIA) reach the same weights
+    over their own OpenAI-compatible schema, so each needs its own formatter
+    before video can be enabled there.
+    """
+    if provider is None:
+        return None
+    prefixes = _VIDEO_INPUT_MODEL_PREFIXES.get(provider)
+    if not prefixes:
+        return None
+    short_id = model_id.split("/")[-1]
+    return provider if short_id.startswith(prefixes) else None
 
 
 # Model registry: list of (short_name, model_id, provider)

@@ -1449,6 +1449,51 @@ class TestMiniMaxProvider:
         minimax_models = get_models_for_provider("minimax")
         assert len(minimax_models) > 0
 
+    @patch("EvoScientist.llm.models._patch_openai_compat_content")
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_m3_enables_video_preservation(
+        self, mock_init, mock_content_patch, monkeypatch
+    ):
+        """MiniMax M3 should preserve video blocks for the Anthropic adapter."""
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        get_chat_model("MiniMax-M3", provider="minimax")
+
+        mock_content_patch.assert_called_once_with(
+            mock_init.return_value,
+            hoist_tool_media=False,
+            video_format="minimax",
+        )
+
+    @pytest.mark.parametrize("model_id", ["MiniMax-M2.7", "MiniMax-M2.5-highspeed"])
+    @patch("EvoScientist.llm.models._patch_openai_compat_content")
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_other_minimax_models_do_not_enable_video(
+        self, mock_init, mock_content_patch, monkeypatch, model_id
+    ):
+        """Text-only MiniMax models must not opt into video preservation."""
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        get_chat_model(model_id, provider="minimax")
+
+        mock_content_patch.assert_called_once_with(
+            mock_init.return_value,
+            hoist_tool_media=False,
+            video_format=None,
+        )
+
+    def test_video_input_format_scope(self):
+        """Video is enabled for the M3 family on the direct provider only."""
+        from EvoScientist.llm.registry import _video_input_format
+
+        assert _video_input_format("minimax", "MiniMax-M3") == "minimax"
+        # Future speed variants of the same family stay covered.
+        assert _video_input_format("minimax", "MiniMax-M3-highspeed") == "minimax"
+        assert _video_input_format("minimax", "MiniMax-M2.7") is None
+        # Aggregators need their own formatter before video can be enabled.
+        assert _video_input_format("openrouter", "minimax/minimax-m3") is None
+        assert _video_input_format(None, "minimax/minimax-m3") is None
+
 
 # =============================================================================
 # Test _flatten_message_content
@@ -1535,25 +1580,155 @@ class TestFlattenMessageContent:
         f = {"type": "file", "base64": "FFF", "mime_type": "application/pdf"}
         assert _flatten_message_content([f]) == [f]
 
-    def test_unsupported_media_dropped(self):
-        # video/audio are NOT in the allowlist -> dropped, not crashing
-        # (langchain-openai raises ValueError on `video`).
+    def test_video_dropped_by_default(self):
         from EvoScientist.llm.patches import _flatten_message_content
 
-        for block in (
-            {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
-            {"type": "audio", "base64": "ZZZ", "mime_type": "audio/wav"},
-        ):
-            assert _flatten_message_content([block]) == ""
+        block = {"type": "video", "base64": "VVV", "mime_type": "video/mp4"}
+        assert _flatten_message_content([block]) == ""
 
-    def test_non_image_media_dropped_keeps_text(self):
+    @pytest.mark.parametrize(
+        ("block", "source"),
+        [
+            (
+                {"type": "video", "url": "https://example.com/clip.mp4"},
+                {"type": "url", "url": "https://example.com/clip.mp4"},
+            ),
+            (
+                {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
+                {"type": "base64", "media_type": "video/mp4", "data": "VVV"},
+            ),
+            # v0-style base64 block: source_type + data instead of base64.
+            (
+                {
+                    "type": "video",
+                    "source_type": "base64",
+                    "data": "VVV",
+                    "mime_type": "video/mp4",
+                },
+                {"type": "base64", "media_type": "video/mp4", "data": "VVV"},
+            ),
+            (
+                {"type": "video", "file_id": "file-123"},
+                {"type": "url", "url": "mm_file://file-123"},
+            ),
+            # v0-style file reference: source_type=id + id.
+            (
+                {"type": "video", "source_type": "id", "id": "file-123"},
+                {"type": "url", "url": "mm_file://file-123"},
+            ),
+            (
+                {
+                    "type": "video",
+                    "url": "https://example.com/clip.mp4",
+                    "detail": "low",
+                },
+                {
+                    "type": "url",
+                    "url": "https://example.com/clip.mp4",
+                    "detail": "low",
+                },
+            ),
+            (
+                {
+                    "type": "video",
+                    "url": "https://example.com/clip.mp4",
+                    "extras": {"detail": "high"},
+                },
+                {
+                    "type": "url",
+                    "url": "https://example.com/clip.mp4",
+                    "detail": "high",
+                },
+            ),
+        ],
+    )
+    def test_video_preserved_when_enabled(self, block, source):
+        from EvoScientist.llm.patches import (
+            _flatten_message_content,
+            _format_minimax_video_block,
+        )
+
+        assert _flatten_message_content(
+            [block], video_formatter=_format_minimax_video_block
+        ) == [{"type": "video", "source": source}]
+
+    def test_video_already_formatted_passes_through(self):
+        """A block that already carries `source` is left untouched."""
+        from EvoScientist.llm.patches import (
+            _flatten_message_content,
+            _format_minimax_video_block,
+        )
+
+        block = {
+            "type": "video",
+            "source": {"type": "url", "url": "https://example.com/clip.mp4"},
+        }
+        assert _flatten_message_content(
+            [block], video_formatter=_format_minimax_video_block
+        ) == [block]
+
+    def test_video_preserves_cache_control(self):
+        from EvoScientist.llm.patches import (
+            _flatten_message_content,
+            _format_minimax_video_block,
+        )
+
+        block = {
+            "type": "video",
+            "url": "https://example.com/clip.mp4",
+            "cache_control": {"type": "ephemeral"},
+        }
+        assert _flatten_message_content(
+            [block], video_formatter=_format_minimax_video_block
+        ) == [
+            {
+                "type": "video",
+                "source": {"type": "url", "url": "https://example.com/clip.mp4"},
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            # base64 without a media type cannot be serialized...
+            {"type": "video", "base64": "VVV"},
+            # ...and neither can a block with no recognized payload.
+            {"type": "video", "mime_type": "video/mp4"},
+        ],
+    )
+    def test_video_unserializable_left_for_media_strip(self, block):
+        """Unformattable video blocks stay as-is instead of raising."""
+        from EvoScientist.llm.patches import (
+            _flatten_message_content,
+            _format_minimax_video_block,
+        )
+
+        assert _flatten_message_content(
+            [block], video_formatter=_format_minimax_video_block
+        ) == [block]
+
+    def test_unsupported_audio_dropped(self):
+        from EvoScientist.llm.patches import (
+            _flatten_message_content,
+            _format_minimax_video_block,
+        )
+
+        block = {"type": "audio", "base64": "ZZZ", "mime_type": "audio/wav"}
+        assert (
+            _flatten_message_content(
+                [block], video_formatter=_format_minimax_video_block
+            )
+            == ""
+        )
+
+    def test_video_dropped_by_default_keeps_text(self):
         from EvoScientist.llm.patches import _flatten_message_content
 
         content = [
             {"type": "text", "text": "hi"},
             {"type": "video", "base64": "VVV", "mime_type": "video/mp4"},
         ]
-        # Video dropped, text kept -> plain string (no media list).
         assert _flatten_message_content(content) == "hi"
 
     def test_consolidates_text_and_image(self):
@@ -1721,6 +1896,40 @@ class TestPatchOpenAICompatContent:
 
         called_msgs = orig.call_args[0][0]
         assert called_msgs[0].content == [{"type": "text", "text": "see"}, img]
+
+    def test_generate_preserves_video_when_enabled(self):
+        from langchain_anthropic.chat_models import _format_messages
+        from langchain_core.messages import HumanMessage
+
+        from EvoScientist.llm.patches import _patch_openai_compat_content
+
+        model = self._make_model()
+        orig = model._generate
+        _patch_openai_compat_content(
+            model,
+            hoist_tool_media=False,
+            video_format="minimax",
+        )
+
+        video = {"type": "video", "url": "https://example.com/clip.mp4"}
+        msg = HumanMessage(content=[{"type": "text", "text": "see"}, video])
+        model._generate([msg])
+
+        called_msgs = orig.call_args[0][0]
+        expected_content = [
+            {"type": "text", "text": "see"},
+            {
+                "type": "video",
+                "source": {
+                    "type": "url",
+                    "url": "https://example.com/clip.mp4",
+                },
+            },
+        ]
+        assert called_msgs[0].content == expected_content
+
+        _, formatted_messages = _format_messages(called_msgs)
+        assert formatted_messages[0]["content"] == expected_content
 
     async def test_agenerate_preserves_media(self):
         from langchain_core.messages import HumanMessage
