@@ -874,7 +874,15 @@ def _normalize_anthropic_replay_messages(
             blocks: list[Any] = []
             block_changed = False
             for block in message.content:
-                if isinstance(block, dict):
+                if isinstance(block, str):
+                    # Some Anthropic-compatible endpoints return a mixed list
+                    # of text strings and typed blocks.  Normalize strings to
+                    # the wire shape before replay; downstream serializers
+                    # otherwise assume every list item is subscriptable by
+                    # string keys and raise ``string indices must be integers``.
+                    block = {"type": "text", "text": block}
+                    block_changed = True
+                elif isinstance(block, dict):
                     btype = block.get("type")
                     if btype in _FOREIGN_REASONING_BLOCK_TYPES:
                         block_changed = True
