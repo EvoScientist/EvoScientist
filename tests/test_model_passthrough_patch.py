@@ -507,3 +507,71 @@ class TestPreserveExistingConfig:
         assert merged["config"] == {
             "configurable": {"model": "gpt-5", "model_provider": "openai"}
         }
+
+
+# =============================================================================
+# 8. Caller's per-run model (contextvar) beats the config-default
+# =============================================================================
+
+
+class TestExtractCallerConfigurable:
+    """``_extract_caller_configurable`` pulls (model, provider) from a config."""
+
+    def test_none_config_is_empty(self):
+        assert patches_mod._extract_caller_configurable(None) == {}
+
+    def test_no_configurable_key_is_empty(self):
+        assert patches_mod._extract_caller_configurable({"tags": ["x"]}) == {}
+
+    def test_model_only(self):
+        cfg = {"configurable": {"model": "free"}}
+        assert patches_mod._extract_caller_configurable(cfg) == {"model": "free"}
+
+    def test_model_and_provider(self):
+        cfg = {"configurable": {"model": "free", "model_provider": "openrouter"}}
+        assert patches_mod._extract_caller_configurable(cfg) == {
+            "model": "free",
+            "model_provider": "openrouter",
+        }
+
+    def test_bare_provider_without_model_dropped(self):
+        # A provider with no model is meaningless to the deployed resolver.
+        cfg = {"configurable": {"model_provider": "openrouter"}}
+        assert patches_mod._extract_caller_configurable(cfg) == {}
+
+
+class TestCallerConfigurableWinsOverCfg:
+    """The launching run's model (contextvar) beats ``_ensure_config()``.
+
+    This is the whole point on the ``langgraph_server`` backend: the proxy
+    runs in the dev-server process where ``_ensure_config()`` reports the
+    server's config-default, so the caller's per-run model must win.
+    """
+
+    def test_caller_model_overrides_config_default(self):
+        token = patches_mod._caller_configurable.set(
+            {"model": "free", "model_provider": "openrouter"}
+        )
+        try:
+            with patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=_stub_cfg(
+                    model="gemini-3-flash-preview", provider="openrouter"
+                ),
+            ):
+                merged = patches_mod._merge_runs_config_kwargs({"thread_id": "t1"})
+        finally:
+            patches_mod._caller_configurable.reset(token)
+        assert merged["config"]["configurable"]["model"] == "free"
+        assert merged["config"]["configurable"]["model_provider"] == "openrouter"
+
+    def test_no_caller_model_falls_back_to_config_default(self):
+        # Contextvar unset (default {}) → config-default applies as before.
+        with patch(
+            "EvoScientist.EvoScientist._ensure_config",
+            return_value=_stub_cfg(
+                model="gemini-3-flash-preview", provider="openrouter"
+            ),
+        ):
+            merged = patches_mod._merge_runs_config_kwargs({"thread_id": "t1"})
+        assert merged["config"]["configurable"]["model"] == "gemini-3-flash-preview"

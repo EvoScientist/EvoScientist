@@ -338,3 +338,177 @@ class TestAstartToolInvocation:
         )
         assert isinstance(result, str)
         assert "Unknown async subagent type" in result
+
+
+class TestCallerModelInheritance:
+    """start / update forward the *caller's* per-run model into ``runs.create``,
+    beating the config-default.
+
+    This is the bill-the-config-default bug on the ``langgraph_server`` backend:
+    the model-passthrough proxy runs inside the dev-server process, where
+    ``_ensure_config()`` reports the server's config-default (e.g. a billed
+    ``gemini-3-flash-preview``) rather than the CLI's per-run choice. The
+    launching run's real model reaches the tool as
+    ``runtime.config.configurable.model``, so it must win — otherwise a
+    sub-agent launched (or continued) while the caller is on a free model
+    silently bills the config-default.
+    """
+
+    def _runtime(self, *, model="free", provider="openrouter", state=None):
+        ns = SimpleNamespace(
+            tool_call_id="tc1",
+            config={"configurable": {"model": model, "model_provider": provider}},
+        )
+        if state is not None:
+            ns.state = state
+        return ns
+
+    def _cfg_default(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        return EvoScientistConfig(model="gemini-3-flash-preview", provider="openrouter")
+
+    def _tracked_task(self, agent_name="writing-agent"):
+        return {
+            "task_id": "task-abc",
+            "agent_name": agent_name,
+            "thread_id": "task-abc",
+            "run_id": "old-run",
+            "status": "running",
+            "created_at": "2026-05-07T00:00:00Z",
+            "last_checked_at": "2026-05-07T00:00:00Z",
+            "last_updated_at": "2026-05-07T00:00:00Z",
+        }
+
+    def test_start_forwards_caller_model_over_cfg(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_sync_client()
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=self._cfg_default(),
+            ),
+        ):
+            start.func(
+                description="w",
+                subagent_type="literature-review",
+                runtime=self._runtime(),
+            )
+
+        configurable = client.runs.create.call_args.kwargs["config"]["configurable"]
+        assert configurable["model"] == "free"
+        assert configurable["model_provider"] == "openrouter"
+
+    @pytest.mark.asyncio
+    async def test_astart_forwards_caller_model_over_cfg(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_async_client()
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+                return_value=client,
+            ),
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=self._cfg_default(),
+            ),
+        ):
+            await start.coroutine(
+                description="w",
+                subagent_type="literature-review",
+                runtime=self._runtime(),
+            )
+
+        configurable = client.runs.create.await_args.kwargs["config"]["configurable"]
+        assert configurable["model"] == "free"
+        assert configurable["model_provider"] == "openrouter"
+
+    def test_update_forwards_caller_model_over_cfg(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        update = next(t for t in mw.tools if t.name == "update_async_task")
+
+        client = _fake_sync_client()
+        state = {"async_tasks": {"task-abc": self._tracked_task()}}
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=self._cfg_default(),
+            ),
+        ):
+            update.func(
+                task_id="task-abc",
+                message="keep going",
+                runtime=self._runtime(state=state),
+            )
+
+        kwargs = client.runs.create.call_args.kwargs
+        assert kwargs["config"]["configurable"]["model"] == "free"
+        # Upstream update semantics preserved by delegation.
+        assert kwargs["multitask_strategy"] == "interrupt"
+
+    @pytest.mark.asyncio
+    async def test_aupdate_forwards_caller_model_over_cfg(self):
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        update = next(t for t in mw.tools if t.name == "update_async_task")
+
+        client = _fake_async_client()
+        state = {"async_tasks": {"task-abc": self._tracked_task()}}
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_async",
+                return_value=client,
+            ),
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=self._cfg_default(),
+            ),
+        ):
+            await update.coroutine(
+                task_id="task-abc",
+                message="keep going",
+                runtime=self._runtime(state=state),
+            )
+
+        kwargs = client.runs.create.await_args.kwargs
+        assert kwargs["config"]["configurable"]["model"] == "free"
+        assert kwargs["multitask_strategy"] == "interrupt"
+
+    def test_caller_scope_reset_after_start(self):
+        """The contextvar must not leak past the tool call — a later launch
+        with no override falls back to the config-default, not the prior
+        caller's model."""
+        from EvoScientist.llm import patches as patches_mod
+
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_sync_client()
+        with (
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+            patch(
+                "EvoScientist.EvoScientist._ensure_config",
+                return_value=self._cfg_default(),
+            ),
+        ):
+            start.func(
+                description="w",
+                subagent_type="literature-review",
+                runtime=self._runtime(),
+            )
+        # Reset restores the default (None) — nothing leaks to the next launch.
+        assert not patches_mod._caller_configurable.get()

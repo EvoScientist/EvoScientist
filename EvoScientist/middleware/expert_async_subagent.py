@@ -44,6 +44,7 @@ then called without ``runtime`` and raises ``TypeError``.
 """
 
 import logging
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, NotRequired
 
@@ -66,6 +67,72 @@ from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
 _logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _caller_model_scope(runtime: ToolRuntime):
+    """Forward the launching run's model to any ``runs.create`` in the block.
+
+    An async sub-agent is launched via a bare ``runs.create`` inside the
+    caller's run. Without help it falls back to the server's config-default
+    model rather than the model the caller is running on — so a run started on
+    a free model silently bills the config-default. Read the caller's per-run
+    model from ``runtime.config`` (the same ``configurable`` channel that
+    carries ``thread_id``; ``langgraph.config.get_config()`` is unreliable from
+    a tool's execution context) and publish it, for the duration of the block,
+    to the contextvar the ``runs.create`` proxy reads. A sync ``with`` around an
+    ``await`` is fine: the value is set before the await and reset after, and
+    contextvars propagate across awaits within the same task. Empty when the
+    caller has no override, preserving the default-model behaviour.
+    """
+    from ..llm.patches import _caller_configurable, _extract_caller_configurable
+
+    token = _caller_configurable.set(
+        _extract_caller_configurable(getattr(runtime, "config", None))
+    )
+    try:
+        yield
+    finally:
+        _caller_configurable.reset(token)
+
+
+def _build_expert_update_tool(
+    agent_map: dict[str, AsyncSubAgent],
+    clients: Any,
+) -> StructuredTool:
+    """``update_async_task`` wrapped to inherit the caller's model.
+
+    Delegates to upstream's tool body verbatim — preserving its
+    ``multitask_strategy`` and task-envelope semantics — inside
+    ``_caller_model_scope`` so the follow-up ``runs.create`` reaches the
+    sub-agent on the caller's model, not the config-default. The explicit
+    ``runtime: ToolRuntime`` signature is required: langchain decides runtime
+    injection from ``inspect.signature``, so a ``*args`` wrapper would strip it.
+    """
+    base = _build_update_tool(agent_map, clients)
+    orig_func = base.func
+    orig_coro = base.coroutine
+
+    def update_async_task(
+        task_id: str, message: str, runtime: ToolRuntime
+    ) -> str | Command:
+        with _caller_model_scope(runtime):
+            return orig_func(task_id=task_id, message=message, runtime=runtime)
+
+    async def aupdate_async_task(
+        task_id: str, message: str, runtime: ToolRuntime
+    ) -> str | Command:
+        with _caller_model_scope(runtime):
+            return await orig_coro(task_id=task_id, message=message, runtime=runtime)
+
+    return StructuredTool.from_function(
+        name=base.name,
+        func=update_async_task,
+        coroutine=aupdate_async_task,
+        description=base.description,
+        infer_schema=False,
+        args_schema=base.args_schema,
+    )
 
 
 class ExpertAsyncSubAgent(AsyncSubAgent):
@@ -152,11 +219,12 @@ def _build_expert_start_tool(
         try:
             client = clients.get_sync(subagent_type)
             thread = client.threads.create()
-            run = client.runs.create(
-                thread_id=thread["thread_id"],
-                assistant_id=spec["graph_id"],
-                input=input_dict,
-            )
+            with _caller_model_scope(runtime):
+                run = client.runs.create(
+                    thread_id=thread["thread_id"],
+                    assistant_id=spec["graph_id"],
+                    input=input_dict,
+                )
         except Exception as e:
             _logger.warning(
                 "Failed to launch async subagent '%s': %s", subagent_type, e
@@ -179,11 +247,12 @@ def _build_expert_start_tool(
         try:
             client = clients.get_async(subagent_type)
             thread = await client.threads.create()
-            run = await client.runs.create(
-                thread_id=thread["thread_id"],
-                assistant_id=spec["graph_id"],
-                input=input_dict,
-            )
+            with _caller_model_scope(runtime):
+                run = await client.runs.create(
+                    thread_id=thread["thread_id"],
+                    assistant_id=spec["graph_id"],
+                    input=input_dict,
+                )
         except Exception as e:
             _logger.warning(
                 "Failed to launch async subagent '%s': %s", subagent_type, e
@@ -266,7 +335,7 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         self.tools = [
             _build_expert_start_tool(agent_map, clients, launch_desc),
             _build_check_tool(clients),
-            _build_update_tool(agent_map, clients),
+            _build_expert_update_tool(agent_map, clients),
             _build_cancel_tool(clients),
             _build_list_tasks_tool(clients),
         ]
