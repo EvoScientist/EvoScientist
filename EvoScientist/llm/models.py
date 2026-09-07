@@ -501,6 +501,11 @@ def get_chat_model(
             os.environ.get("EVOSCIENTIST_OPENROUTER_APP_TITLE", "").strip()
             or OPENROUTER_DEFAULT_APP_TITLE,
         )
+        # OpenRouter keys app pages by HTTP-Referer and X-Title only renames that
+        # page, so a custom title on the default referer would rename the shared
+        # EvoScientist page for everyone. Honor it only with a custom referer.
+        if kwargs["app_url"] == OPENROUTER_DEFAULT_HTTP_REFERER:
+            kwargs["app_title"] = OPENROUTER_DEFAULT_APP_TITLE
         # app_categories must be a list[str] (langchain-openrouter joins it into
         # the X-OpenRouter-Categories header); split the comma-separated config
         # value and drop blanks so a stray comma/space can't emit an empty one.
