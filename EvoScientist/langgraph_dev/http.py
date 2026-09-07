@@ -153,10 +153,49 @@ async def get_bg_process_status(request: Request) -> JSONResponse:
     return JSONResponse({"status": status})
 
 
+async def post_policy(request: Request) -> JSONResponse:
+    """Resolve the shell-approval policy for a command, for non-Python clients.
+
+    The one source of truth is ``backends.resolve_action_decision`` (the same
+    function Python clients call in-process). Exposing it here lets a non-Python
+    client (WebUI) stop re-porting the allow-list / dangerous-command logic and
+    ask the backend instead. Pure policy — no agent, no graph, no side effects.
+
+    Body: ``{"command": str, "auto_approve"?: bool, "dangerous_mode"?: bool,
+    "allow_list"?: list[str]}``. Response: ``{"decision": "approve"|"reject"|
+    "prompt", "reason": str}``.
+    """
+    from EvoScientist.backends import resolve_action_decision
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("command"), str):
+        return JSONResponse(
+            {"error": "'command' (string) is required"}, status_code=400
+        )
+    allow_list = body.get("allow_list")
+    if allow_list is not None and not (
+        isinstance(allow_list, list) and all(isinstance(s, str) for s in allow_list)
+    ):
+        return JSONResponse(
+            {"error": "'allow_list' must be a list of strings"}, status_code=400
+        )
+    verdict = resolve_action_decision(
+        body["command"],
+        auto_approve=bool(body.get("auto_approve", False)),
+        dangerous_mode=bool(body.get("dangerous_mode", False)),
+        allow_list=allow_list,
+    )
+    return JSONResponse({"decision": verdict.decision.value, "reason": verdict.reason})
+
+
 app = Starlette(
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),
         Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
+        Route("/api/policy", post_policy, methods=["POST"]),
     ]
 )
