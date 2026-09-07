@@ -2910,3 +2910,534 @@ def test_memory_worker_clear_does_not_recount_already_credited_file(tmp_path):
     assert second_delta == worker_activity.MemoryOutputDelta(memory_dir=memory_dir)
     assert status.is_running is False
     assert status.observations_recorded == 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# per-file parse cache for list_observation_documents
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _write_observation(path, obs_id, summary="test", scope="global", related_id=""):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    related_block = ""
+    if related_id:
+        related_block = (
+            "related_observations:\n"
+            f"  - id: {related_id}\n"
+            "    relation: complements\n"
+            f"    reason: links to {related_id}\n"
+            "    linked_at: '2026-01-01T00:00:00Z'\n"
+        )
+    path.write_text(
+        "---\n"
+        f"id: {obs_id}\n"
+        f"summary: {summary}\n"
+        "memory_type: procedural\n"
+        f"scope: {scope}\n"
+        "source:\n"
+        "  type: turn\n"
+        "  agent: EvoScientist\n"
+        f"{related_block}"
+        "---\n"
+        "Body text.\n",
+        encoding="utf-8",
+    )
+
+
+class TestObservationCache:
+    """Cache behaviour tests with automatic cache isolation."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_observation_cache(self):
+        """Clear the process-scoped parse cache before and after each test."""
+        from EvoScientist.memory.observations import store
+
+        store._file_parse_cache.clear()
+        store._cached_max_files = None
+        yield
+        store._file_parse_cache.clear()
+        store._cached_max_files = None
+
+    def test_cache_returns_same_documents_without_reparse(self, tmp_path, monkeypatch):
+        """A second call with unchanged files must hit the cache, not re-read."""
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(
+            memories / "observations" / "global" / "O-1.md", "O-1", "first"
+        )
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 1
+        assert len(parse_calls) == 1
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 1
+        assert len(parse_calls) == 1, "second call must hit the cache, not re-parse"
+
+    def test_cache_invalidates_on_file_modification(self, tmp_path, monkeypatch):
+        """Changing a file's mtime must force a re-read."""
+        import os
+
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        obs_path = memories / "observations" / "global" / "O-1.md"
+        _write_observation(obs_path, "O-1", "original")
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert docs1[0].summary == "original"
+        assert len(parse_calls) == 1
+
+        # Modify the file (new content + new mtime).  Explicit bump because
+        # Windows NTFS mtime resolution can be coarse enough that a same-tick
+        # rewrite keeps the old signature and the cache returns stale data.
+        _write_observation(obs_path, "O-1", "updated")
+        st = obs_path.stat()
+        os.utime(obs_path, (st.st_atime, st.st_mtime + 1.0))
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert docs2[0].summary == "updated"
+        assert len(parse_calls) == 2, "modified file must invalidate the cache"
+
+    def test_cache_adds_new_file_without_reparsing_existing(
+        self, tmp_path, monkeypatch
+    ):
+        """Adding a new file parses only the new file; cached files stay cached."""
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 1
+        assert len(parse_calls) == 1
+
+        _write_observation(memories / "observations" / "global" / "O-2.md", "O-2")
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 2
+        assert len(parse_calls) == 2, (
+            "only the new file must be parsed; the existing file stays cached "
+            "(1 from the first call + 1 new = 2)"
+        )
+
+    def test_cache_deletion_drops_file_without_reparsing(self, tmp_path, monkeypatch):
+        """Deleting a file drops it from the results without re-parsing the rest."""
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        obs_a = memories / "observations" / "global" / "O-1.md"
+        obs_b = memories / "observations" / "global" / "O-2.md"
+        _write_observation(obs_a, "O-1")
+        _write_observation(obs_b, "O-2")
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 2
+        assert len(parse_calls) == 2
+
+        obs_a.unlink()
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 1
+        assert docs2[0].observation_id == "O-2"
+        assert len(parse_calls) == 2, (
+            "the deleted file must simply drop out of the glob and the "
+            "surviving file must stay cached, so the second call re-parses "
+            "nothing (2 parses total, both from the first call)"
+        )
+
+    def test_unparsable_file_is_not_cached(self, tmp_path, monkeypatch):
+        """An unparsable file is skipped without poisoning the cache.
+
+        Parse failures are not cached: the broken file is retried on every
+        call, while the healthy file stays cached.
+        """
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        global_dir = memories / "observations" / "global"
+        _write_observation(global_dir / "O-good.md", "O-good")
+        broken = global_dir / "missing-id.md"
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        broken.write_text(
+            "---\n"
+            "summary: Missing id so this file is skipped\n"
+            "memory_type: procedural\n"
+            "scope: global\n"
+            "---\n"
+            "Body\n",
+            encoding="utf-8",
+        )
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert [document.observation_id for document in docs1] == ["O-good"]
+        assert len(parse_calls) == 2
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert [document.observation_id for document in docs2] == ["O-good"]
+        assert len(parse_calls) == 3, (
+            "the healthy file must stay cached while the unparsable file is "
+            "retried on each call"
+        )
+
+    def test_cache_shares_entries_across_memory_type_filters(
+        self, tmp_path, monkeypatch
+    ):
+        """Calls with different ``memory_type`` filters share one cache entry."""
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        docs_all = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs_all) == 1
+        assert len(parse_calls) == 1
+
+        docs_filtered = list_observation_documents(
+            memory_dir=memories, project_id="P-test", memory_type=MemoryType.PROCEDURAL
+        )
+        assert len(docs_filtered) == 1
+        assert len(parse_calls) == 1, (
+            "different memory_type filter must share the cache entry"
+        )
+
+    def test_cache_shares_global_docs_across_projects(self, tmp_path, monkeypatch):
+        """Global observations must be parsed once and shared across project_ids.
+
+        The parse cache is keyed on the file path, so a global document is a
+        single entry regardless of which project reads it. Two projects
+        sharing the same ``memory_dir`` must not each re-parse the global
+        store.
+        """
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(
+            memories / "observations" / "global" / "O-global.md", "O-global"
+        )
+        _write_observation(
+            memories / "observations" / "projects" / "P-A" / "O-a.md",
+            "O-a",
+            scope="project",
+        )
+        _write_observation(
+            memories / "observations" / "projects" / "P-B" / "O-b.md",
+            "O-b",
+            scope="project",
+        )
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        # Project A: parses global (1) + project-A (1) = 2
+        docs_a = list_observation_documents(memory_dir=memories, project_id="P-A")
+        assert len(docs_a) == 2
+        assert len(parse_calls) == 2
+
+        # Project B: parses project-B (1), global is a cache hit = 1
+        docs_b = list_observation_documents(memory_dir=memories, project_id="P-B")
+        assert len(docs_b) == 2
+        assert len(parse_calls) == 3, (
+            "global docs must be a cache hit for project B; only the new "
+            "project-B file should be parsed (2 from A + 1 from B = 3)"
+        )
+
+    def test_lru_evicts_least_recently_used_file(self, tmp_path, monkeypatch):
+        """The per-file cache must evict the least-recently-used file past the cap."""
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        for project in ("P-A", "P-B", "P-C"):
+            _write_observation(
+                memories / "observations" / "projects" / project / f"O-{project}.md",
+                f"O-{project}",
+                scope="project",
+            )
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+        monkeypatch.setattr(store, "_max_cached_files", lambda: 2)
+
+        # Three calls, one file each. cap=2 evicts the LRU file (P-A) at the
+        # end of the third call, when P-C is added.
+        for project in ("P-A", "P-B", "P-C"):
+            list_observation_documents(memory_dir=memories, project_id=project)
+
+        assert len(parse_calls) == 3
+        assert len(store._file_parse_cache) == 2
+
+        # P-B and P-C are still cached: re-listing them re-parses nothing.
+        list_observation_documents(memory_dir=memories, project_id="P-B")
+        list_observation_documents(memory_dir=memories, project_id="P-C")
+        assert len(parse_calls) == 3, "cached files must not be re-parsed"
+
+        # P-A was evicted: re-listing it must re-parse its file.
+        list_observation_documents(memory_dir=memories, project_id="P-A")
+        assert len(parse_calls) == 4, "the evicted file must be re-parsed"
+
+    def test_cache_keeps_working_set_above_cap(self, tmp_path, monkeypatch):
+        """A call must never evict entries its own working set needs.
+
+        With a store bigger than the cap, the end-of-call trim keeps every
+        touched entry, so the cache temporarily exceeds the cap instead of
+        thrashing, and a second identical call re-parses nothing.
+        """
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-1.md", "O-1")
+        _write_observation(memories / "observations" / "global" / "O-2.md", "O-2")
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+        monkeypatch.setattr(store, "_max_cached_files", lambda: 1)
+
+        docs1 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs1) == 2
+        assert len(parse_calls) == 2
+        # Both files were touched by the call, so both stay despite cap=1.
+        assert len(store._file_parse_cache) == 2
+
+        docs2 = list_observation_documents(memory_dir=memories, project_id="P-test")
+        assert len(docs2) == 2
+        assert len(parse_calls) == 2, (
+            "a second identical call must hit the cache, not thrash and re-parse"
+        )
+
+    def test_fallback_link_resolution_reuses_cached_parses(self, tmp_path, monkeypatch):
+        """Link resolution reruns each call but must reuse the memoized parses.
+
+        When ``scope=PROJECT``, only project files are parsed up front. A
+        project observation linking to a global observation triggers the
+        link-resolution fallback, which walks all files. Because those walks
+        parse through the per-file cache, a second call re-parses nothing even
+        though link resolution runs again.
+        """
+        from EvoScientist.memory.observations import store
+
+        memories = tmp_path / "memories"
+        _write_observation(memories / "observations" / "global" / "O-g.md", "O-g")
+        _write_observation(
+            memories / "observations" / "projects" / "P-A" / "O-a.md",
+            "O-a",
+            scope="project",
+            related_id="O-g",
+        )
+
+        parse_calls: list[int] = []
+        real_parse = store._parse_observation_search_document
+
+        def _counting_parse(*args, **kwargs):
+            parse_calls.append(1)
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(
+            store, "_parse_observation_search_document", _counting_parse
+        )
+
+        # First call with scope=PROJECT: parses the project file, then the
+        # link-resolution fallback walks and parses the linked global target.
+        docs1 = list_observation_documents(
+            memory_dir=memories, project_id="P-A", scope=MemoryScope.PROJECT
+        )
+        first_call_count = len(parse_calls)
+        assert first_call_count >= 2, (
+            "first call must parse the project file and the fallback must "
+            "parse the linked global observation"
+        )
+
+        # Second call: link resolution reruns, but every parse is a cache hit.
+        docs2 = list_observation_documents(
+            memory_dir=memories, project_id="P-A", scope=MemoryScope.PROJECT
+        )
+        assert len(parse_calls) == first_call_count, (
+            "second call must reuse the memoized parses; re-parsing means the "
+            "fallback bypasses the per-file cache"
+        )
+        assert len(docs1) == len(docs2)
+
+    def test_concurrent_calls_survive_cache_eviction(self, tmp_path, monkeypatch):
+        """Concurrent callers must not race the eviction path.
+
+        A tiny cap forces ``_trim_parse_cache`` to evict on every call while
+        several threads hit ``list_observation_documents`` at once. Without
+        serialized cache transactions, one thread can evict a key between
+        another thread's lookup and recency update (KeyError), or between its
+        insert and recency update. The switch interval is shrunk so the GIL
+        switches threads inside those windows often enough to make the race
+        reproducible; it is restored before the test exits.
+
+        The hammer is deadline-bounded rather than iteration-bounded: a fixed
+        iteration count overran the 30s CI per-test timeout on Windows runners
+        (context switches and file I/O are much slower there), while on fast
+        runners a fixed count needlessly capped race coverage. A deadline
+        finishes within budget on every platform and still maximizes race
+        opportunities where threads are cheap.
+
+        All workers park at a ``threading.Barrier`` and the deadline is armed
+        in the barrier's action, so the clock starts only when every worker is
+        ready and thread startup cannot consume the window. Each worker counts
+        its iterations and the test asserts all of them made progress, so it
+        cannot pass vacuously if a worker never ran.
+        """
+        import sys
+        import threading
+        import time
+
+        from EvoScientist.memory.observations import store
+
+        memories_a = tmp_path / "memories-a"
+        memories_b = tmp_path / "memories-b"
+        for memories in (memories_a, memories_b):
+            for index in range(1, 9):
+                _write_observation(
+                    memories / "observations" / "global" / f"O-{index}.md",
+                    f"O-{index}",
+                )
+
+        monkeypatch.setattr(store, "_max_cached_files", lambda: 1)
+
+        errors: list[BaseException] = []
+        memory_dirs = [
+            memories_a,
+            memories_a,
+            memories_a,
+            memories_b,
+            memories_b,
+            memories_b,
+        ]
+        iterations = [0] * len(memory_dirs)
+        deadline = 0.0
+
+        def _start_clock():
+            # The barrier runs this once, immediately before releasing every
+            # party, so the deadline begins only when all six workers are ready
+            # to hammer - thread startup cannot eat any worker's window.
+            nonlocal deadline
+            deadline = time.monotonic() + 8.0
+
+        gate = threading.Barrier(len(memory_dirs) + 1, action=_start_clock)
+
+        def _hammer(memory_dir, index):
+            gate.wait()
+            try:
+                while time.monotonic() < deadline and not errors:
+                    docs = list_observation_documents(
+                        memory_dir=memory_dir, project_id="P-test"
+                    )
+                    assert len(docs) == 8
+                    iterations[index] += 1
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_hammer, args=(memory_dir, index))
+            for index, memory_dir in enumerate(memory_dirs)
+        ]
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            for thread in threads:
+                thread.start()
+            # Wait for all workers to reach the gate, then release them together.
+            gate.wait()
+            for thread in threads:
+                thread.join()
+        finally:
+            sys.setswitchinterval(old_interval)
+
+        assert errors == [], f"racing cache transactions raised: {errors[:3]}"
+        assert all(count > 0 for count in iterations), (
+            f"every worker must make progress, got iterations={iterations}"
+        )

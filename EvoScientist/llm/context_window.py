@@ -17,8 +17,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.6 open-source variants — exceptions to the ``qwen3.6`` family.
     "qwen3.6-27b": 262_000,
     "qwen3.6-35b-a3b": 262_000,
-    # Qwen 3.8 flagship — Max (1M).
+    # Qwen 3.8 closed-source tiers — Max flagship and Flash (1M).
     "qwen3.8-max": 1_000_000,
+    "qwen3.8-flash": 1_000_000,
     # Qwen 3.7 closed-source tiers — Max flagship and Plus (1M).
     "qwen3.7-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
@@ -35,10 +36,12 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Zhipu GLM-5.3/5.2 — 1M context, exceptions to the ``glm-5`` family (203K).
     # Matches OpenRouter ``z-ai/glm-5.x`` via split('/')[-1].
     "glm-5.3": 1_000_000,
+    "glm-5.3-flash": 1_000_000,
     "glm-5.2": 1_000_000,
     # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2.
     "glm-5-2": 1_000_000,
-    # Tencent Hunyuan HY3 — 262K context (OpenRouter ``tencent/hy3``).
+    # Tencent Hunyuan — HY4 preview 1M, HY3 262K (OpenRouter ``tencent/hy*``).
+    "hy4-preview": 1_048_576,
     "hy3": 262_000,
 }
 
@@ -48,6 +51,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     # All Claude — 1M via the ``context-1m-2025-08-07`` beta header.
     ("claude-", 1_000_000),
+    # OpenAI GPT-6 family — astra, astra-pro, future variants
+    ("gpt-6", 1_050_000),
     # OpenAI GPT-5.6 family — sol, terra, luna variants
     ("gpt-5.6", 1_050_000),
     # OpenAI GPT-5.5 family — base, pro, future variants
@@ -65,6 +70,8 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("deepseek-v4", 1_050_000),
     # Xiaomi MiMo v2.5 family — base, pro, future variants
     ("mimo-v2.5", 1_050_000),
+    # Meta Muse Spark family — 1.1/1.2/1.3 (OpenRouter ``meta/muse-spark-*``, 1M).
+    ("muse-spark", 1_048_576),
     # Qwen 3.6 closed-source family — flash, plus, max-preview, etc.
     # Open-source ``-<size>b`` variants are 262K — listed in the dict above.
     ("qwen3.6", 1_000_000),

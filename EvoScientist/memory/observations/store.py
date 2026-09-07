@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from collections import OrderedDict
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -254,19 +256,11 @@ def _observation_files(
 ) -> list[Path]:
     """Return candidate observation files for the current project context."""
     root = Path(memory_dir).expanduser()
-    memory_paths: list[str] = []
-    if scope in {None, MemoryScope.GLOBAL}:
-        memory_paths.append(f"{OBSERVATION_DIR}/global")
-    if scope in {None, MemoryScope.PROJECT}:
-        memory_paths.append(f"{OBSERVATION_DIR}/projects/{project_id}")
-
     paths: list[Path] = []
-    for memory_path in memory_paths:
-        directory = root / memory_path.lstrip("/")
-        try:
-            paths.extend(sorted(directory.glob("*.md")))
-        except OSError:
-            continue
+    if scope in {None, MemoryScope.GLOBAL}:
+        paths.extend(_global_files(root))
+    if scope in {None, MemoryScope.PROJECT}:
+        paths.extend(_project_files(root, project_id))
     return paths
 
 
@@ -334,6 +328,7 @@ def _resolve_document_links(
     parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]],
     *,
     root: Path,
+    touched: set[str],
 ) -> list[ObservationSearchDocument]:
     documents_by_id = {document.observation_id: document for document, _ in parsed}
     missing_related_ids = {
@@ -346,7 +341,7 @@ def _resolve_document_links(
         for path in _all_observation_files(root):
             if not missing_related_ids:
                 break
-            parsed_document = _parse_observation_search_document(root=root, path=path)
+            parsed_document = _parse_with_cache(root, path, touched)
             if parsed_document is None:
                 continue
             document, _entries = parsed_document
@@ -367,6 +362,124 @@ def _resolve_document_links(
     ]
 
 
+# ── Parsed-document cache ─────────────────────────────────────────────
+#
+# One layer: a per-file parse cache keyed on the observation file path.
+# Each value carries the file's ``(st_mtime_ns, st_size)`` signature, so a
+# rewrite invalidates exactly that entry and replaces it in place.  Scope
+# filtering is just which directories get globbed, and link resolution
+# reruns on every call over the memoized parses — its fallback walk parses
+# through the same cache, so fallback visits are dict hits instead of
+# whole-tree reparses.
+#
+# Deletion needs no invalidation: a deleted file is never globbed, so its
+# cached entry can never be served again; the LRU bounds the leftover
+# memory.  Eviction runs only at the end of a call, down to
+# ``max(cap, entries touched by the call)``, so a call never evicts its own
+# working set and a store larger than the cap temporarily exceeds it
+# instead of thrashing.
+#
+# The cap is ``config.memory_observation_cache_max_files`` (default 2048,
+# env var ``EVOSCIENTIST_MAX_CACHED_FILES``), read lazily from config on
+# first call.  With the working-set rule it bounds retained memory for
+# inactive workspaces rather than correctness.
+#
+_FileParseValue = tuple[
+    tuple[int, int],
+    tuple[ObservationSearchDocument, list[RelatedObservationEntry]],
+]
+
+_file_parse_cache: OrderedDict[str, _FileParseValue] = OrderedDict()
+
+# Serializes cache transactions (lookup+recency, insert+recency, trim) so
+# concurrent calls cannot evict a key between another call's lookup and its
+# recency update. Parsing stays outside the lock; only dict mutations hold it.
+_cache_lock = threading.Lock()
+
+_cached_max_files: int | None = None
+
+
+def _max_cached_files() -> int:
+    """Return the configured cache cap.
+
+    Read once from ``get_effective_config()`` on first call and cached at
+    module level; a runtime config change requires a process restart to take
+    effect.
+    """
+    global _cached_max_files
+    if _cached_max_files is None:
+        from ...config import get_effective_config
+
+        _cached_max_files = get_effective_config().memory_observation_cache_max_files
+    return _cached_max_files
+
+
+def _parse_with_cache(
+    root: Path,
+    path: Path,
+    touched: set[str],
+) -> tuple[ObservationSearchDocument, list[RelatedObservationEntry]] | None:
+    """Return the parsed document for *path*, memoized per file.
+
+    The cached entry is validated against the file's current
+    ``(st_mtime_ns, st_size)`` signature, so a rewrite replaces it in
+    place.  Parse failures are not cached; the file is retried on the next
+    call.  No copy on read or write: callers only iterate the documents or
+    build new ones via ``replace``.
+    """
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    signature = (st.st_mtime_ns, st.st_size)
+    with _cache_lock:
+        cached = _file_parse_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            _file_parse_cache.move_to_end(key)
+            touched.add(key)
+            return cached[1]
+    parsed_document = _parse_observation_search_document(root=root, path=path)
+    if parsed_document is None:
+        return None
+    with _cache_lock:
+        _file_parse_cache[key] = (signature, parsed_document)
+        _file_parse_cache.move_to_end(key)
+        touched.add(key)
+    return parsed_document
+
+
+def _trim_parse_cache(touched: set[str]) -> None:
+    """Trim the cache at the end of a call down to ``max(cap, len(touched))``.
+
+    Every entry touched by the call was moved or appended to the
+    most-recent end, so trimming from the least-recent end down to at least
+    ``len(touched)`` entries never evicts the call's own working set.
+    """
+    target = max(_max_cached_files(), len(touched))
+    with _cache_lock:
+        while len(_file_parse_cache) > target:
+            _file_parse_cache.popitem(last=False)
+
+
+def _global_files(root: Path) -> list[Path]:
+    """Glob the global observation directory."""
+    directory = root / OBSERVATION_DIR.lstrip("/") / "global"
+    try:
+        return sorted(directory.glob("*.md"))
+    except OSError:
+        return []
+
+
+def _project_files(root: Path, project_id: str) -> list[Path]:
+    """Glob a project's observation directory."""
+    directory = root / OBSERVATION_DIR.lstrip("/") / "projects" / project_id
+    try:
+        return sorted(directory.glob("*.md"))
+    except OSError:
+        return []
+
+
 def list_observation_documents(
     *,
     memory_dir: str | Path,
@@ -374,26 +487,32 @@ def list_observation_documents(
     scope: MemoryScope | None = None,
     memory_type: MemoryType | None = None,
 ) -> list[ObservationSearchDocument]:
-    """Read candidate observations for the current filters."""
+    """Read candidate observations for the current filters.
+
+    Observation files are parsed once per file and shared across every
+    project_id and scope; each cached entry is validated against the file's
+    current ``(st_mtime_ns, st_size)`` signature.  A deleted file simply
+    drops out of the glob.  Link resolution reruns on each call over the
+    memoized parses.
+    """
     root = Path(memory_dir).expanduser()
+    paths = _observation_files(memory_dir=root, project_id=project_id, scope=scope)
+
+    touched: set[str] = set()
     parsed: list[tuple[ObservationSearchDocument, list[RelatedObservationEntry]]] = []
-    for path in _observation_files(
-        memory_dir=root,
-        project_id=project_id,
-        scope=scope,
-    ):
-        parsed_document = _parse_observation_search_document(root=root, path=path)
+    for path in paths:
+        parsed_document = _parse_with_cache(root, path, touched)
         if parsed_document is not None:
             parsed.append(parsed_document)
 
-    # Resolve links before filtering by memory_type so a procedural hit can still
-    # surface a linked semantic observation, and vice versa.
-    documents = _resolve_document_links(parsed, root=root)
+    documents = _resolve_document_links(parsed, root=root, touched=touched)
+    _trim_parse_cache(touched)
+
     if memory_type is not None:
         return [
             document for document in documents if document.memory_type == memory_type
         ]
-    return documents
+    return list(documents)
 
 
 def search_observation_files(

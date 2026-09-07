@@ -23,6 +23,7 @@ from .validators import (
     validate_kimi_key,
     validate_minimax_key,
     validate_moonshot_key,
+    validate_novita_key,
     validate_nvidia_key,
     validate_openai_key,
     validate_openrouter_key,
@@ -81,6 +82,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Requesty",
             config.requesty_api_key or os.environ.get("REQUESTY_API_KEY", ""),
             validate_requesty_key,
+        ),
+        "novita": (
+            "Novita",
+            config.novita_api_key or os.environ.get("NOVITA_API_KEY", ""),
+            validate_novita_key,
         ),
         "deepseek": (
             "DeepSeek",

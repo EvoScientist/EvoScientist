@@ -447,10 +447,16 @@ class ModelFallbackMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         if not _fallback_chain:
             return handler(request)
+
+        from .error_normalization import _check_truncated_output
+
+        def invoke(current_request: ModelRequest) -> ModelResponse:
+            return _check_truncated_output(handler(current_request))
+
         try:
-            return handler(request)
+            return invoke(request)
         except Exception as exc:
-            return _guard_and_fallback_sync(exc, request, handler, self._events)
+            return _guard_and_fallback_sync(exc, request, invoke, self._events)
 
     async def awrap_model_call(
         self,
@@ -459,7 +465,13 @@ class ModelFallbackMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         if not _fallback_chain:
             return await handler(request)
+
+        from .error_normalization import _check_truncated_output
+
+        async def invoke(current_request: ModelRequest) -> ModelResponse:
+            return _check_truncated_output(await handler(current_request))
+
         try:
-            return await handler(request)
+            return await invoke(request)
         except Exception as exc:
-            return await _guard_and_fallback(exc, request, handler, self._events)
+            return await _guard_and_fallback(exc, request, invoke, self._events)

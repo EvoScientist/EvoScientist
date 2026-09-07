@@ -14,10 +14,13 @@ import dataclasses
 from types import SimpleNamespace
 
 import pytest
+from langchain.agents.middleware.types import ModelResponse
+from langchain_core.messages import AIMessage
 
 from EvoScientist.llm.errors import ProviderStreamError
 from EvoScientist.middleware.error_normalization import (
     ErrorNormalizationMiddleware,
+    ModelOutputTruncatedError,
     _normalize,
 )
 
@@ -421,3 +424,116 @@ class TestMiddleware:
         req = _request(_openrouter_model())
         mw = ErrorNormalizationMiddleware()
         assert self._run_awrap(mw, req, handler) == "ok"
+
+    def test_empty_length_response_becomes_visible_provider_error(self):
+        """Reasoning-only truncation must not look like a successful idle turn."""
+        response = ModelResponse(
+            result=[
+                AIMessage(
+                    content="",
+                    additional_kwargs={"reasoning_content": "still thinking"},
+                    response_metadata={"finish_reason": "length"},
+                )
+            ]
+        )
+
+        def handler(_req):
+            return response
+
+        req = _request(_openai_model(base_url="https://internal.corp/v1"))
+        with pytest.raises(ProviderStreamError) as excinfo:
+            ErrorNormalizationMiddleware().wrap_model_call(req, handler)
+
+        assert excinfo.value.provider == "openai_compat"
+        assert isinstance(excinfo.value.__cause__, ModelOutputTruncatedError)
+        assert "reasoning_effort" in str(excinfo.value)
+
+    def test_empty_incomplete_responses_api_result_is_detected(self):
+        response = ModelResponse(
+            result=[
+                AIMessage(
+                    content=[],
+                    response_metadata={
+                        "status": "incomplete",
+                        "incomplete_details": {"reason": "max_output_tokens"},
+                    },
+                )
+            ]
+        )
+
+        async def handler(_req):
+            return response
+
+        req = _request(_openai_model())
+        with pytest.raises(ProviderStreamError):
+            self._run_awrap(ErrorNormalizationMiddleware(), req, handler)
+
+    def test_empty_structured_text_block_with_length_is_detected(self):
+        response = ModelResponse(
+            result=[
+                AIMessage(
+                    content=[{"type": "text", "text": "   "}],
+                    response_metadata={"finish_reason": "length"},
+                )
+            ]
+        )
+
+        def handler(_req):
+            return response
+
+        with pytest.raises(ProviderStreamError) as excinfo:
+            ErrorNormalizationMiddleware().wrap_model_call(
+                _request(_openai_model()), handler
+            )
+
+        assert isinstance(excinfo.value.__cause__, ModelOutputTruncatedError)
+
+    def test_redacted_thinking_only_with_max_tokens_is_detected(self):
+        response = ModelResponse(
+            result=[
+                AIMessage(
+                    content=[{"type": "redacted_thinking", "data": "opaque-payload"}],
+                    response_metadata={"stop_reason": "max_tokens"},
+                )
+            ]
+        )
+
+        def handler(_req):
+            return response
+
+        with pytest.raises(ProviderStreamError) as excinfo:
+            ErrorNormalizationMiddleware().wrap_model_call(
+                _request(_anthropic_model()), handler
+            )
+
+        assert isinstance(excinfo.value.__cause__, ModelOutputTruncatedError)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            AIMessage(content="answer", response_metadata={"finish_reason": "length"}),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "search", "args": {}, "id": "call-1"}],
+                response_metadata={"finish_reason": "length"},
+            ),
+            AIMessage(content="", response_metadata={"finish_reason": "stop"}),
+            AIMessage(
+                content=[
+                    {"type": "redacted_thinking", "data": "opaque-payload"},
+                    {"type": "text", "text": "answer"},
+                ],
+                response_metadata={"stop_reason": "max_tokens"},
+            ),
+        ],
+    )
+    def test_nonempty_tool_and_normal_stop_responses_are_not_rejected(self, message):
+        response = ModelResponse(result=[message])
+
+        def handler(_req):
+            return response
+
+        result = ErrorNormalizationMiddleware().wrap_model_call(
+            _request(_openai_model()), handler
+        )
+        assert result is response

@@ -423,6 +423,57 @@ def validate_requesty_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_novita_key(api_key: str) -> tuple[bool, str]:
+    """Validate a Novita API key against the router's auth layer.
+
+    Like Requesty and Atlas Cloud, Novita's ``/v1/models`` endpoint returns
+    HTTP 200 (the public model catalog) even for a missing or invalid key, so
+    it cannot be used to check a key (verified against the live endpoint). We
+    instead issue a minimal ``/v1/chat/completions`` request with a
+    deliberately nonexistent sentinel model: auth is resolved before the
+    model, so a valid key doesn't depend on any real model staying available
+    upstream.
+
+    - invalid/missing key → 401/403 (confirmed against the live endpoint);
+    - valid key → 200 or 404 (model-not-found, auth passed), mirroring the
+      Requesty/Atlas Cloud sentinel pattern;
+    - 429 (rate-limit) / 5xx (service incident) leave validity unknown, so a
+      transient outage doesn't reject a good key.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import httpx
+
+        resp = httpx.post(
+            "https://api.novita.ai/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "novita/auth-preflight",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=10,
+        )
+        if resp.status_code in (200, 404):
+            return True, "Valid"
+        if resp.status_code in (401, 403):
+            return False, "Invalid API key"
+        return False, f"Validation inconclusive (HTTP {resp.status_code})"
+    except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        return False, f"Error: {e}"
+
+
 def validate_deepseek_key(api_key: str) -> tuple[bool, str]:
     """Validate a DeepSeek API key by making a test request.
 

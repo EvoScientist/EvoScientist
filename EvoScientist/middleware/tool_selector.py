@@ -39,8 +39,8 @@ from .events import NO_OP_SINK, MiddlewareEventSink
 logger = logging.getLogger(__name__)
 
 # Default threshold: only run tool selection when tools exceed this count.
-# Base tools are ~14; selector activates when MCP tools push count above 26.
-DEFAULT_TOOL_THRESHOLD = 26
+# Base tools are ~29; selector activates when MCP tools push count above 42.
+DEFAULT_TOOL_THRESHOLD = 42
 DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
     {
         "think_tool",

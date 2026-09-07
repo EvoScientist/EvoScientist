@@ -10,6 +10,7 @@
 | Recipe                                                     | Description                                                                     |
 |------------------------------------------------------------|---------------------------------------------------------------------------------|
 | [macOS 24/7 Deployment](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/deployment-macos-24h.md#running-evoscientist-247-on-macos-telegram-bot--stt--ccproxy)   | Run EvoScientist as an always-on service on macOS with OAuth + Telegram + STT   |
+| [Subscription OAuth (Claude + ChatGPT/Codex)](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/subscription-oauth.md#using-evoscientist-with-your-ai-subscriptions-claude--chatgptcodex-oauth)   | Use Claude and GPT models through your existing subscriptions — no API keys, including Codex-route pitfalls & fixes   |
 
 
 | Guide                                                      | Description                                                                     |
