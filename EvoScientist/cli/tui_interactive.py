@@ -47,6 +47,7 @@ from ._constants import (
 from .async_notifier import (
     AsyncTasksState,
     consume_notifications,
+    enqueue_completions_from_state,
     has_pending_notifications,
     read_async_tasks_from_gateway,
 )
@@ -2400,6 +2401,14 @@ def run_textual_interactive(
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
 
+            # On stream close, enqueue any async-task completions from thread
+            # state (additive to the watcher; the notification poller drains +
+            # injects). Best-effort — never blocks turn return on a read failure.
+            await enqueue_completions_from_state(
+                graph_gateway,
+                GraphTarget(local_graph=agent, workspace_dir=self._workspace_dir),
+                thread_id_override or self._conversation_tid,
+            )
             return response
 
         async def _run_turn(

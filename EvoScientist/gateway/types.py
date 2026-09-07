@@ -253,3 +253,19 @@ class GraphGateway(Protocol):
         values: GraphStateValues,
     ) -> None:
         """Update graph state values for a thread."""
+
+    async def get_run_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        run_id: str,
+    ) -> str:
+        """Return the task run's status from the server it runs on.
+
+        Async sub-agent tasks run on the langgraph dev server under both
+        backends, so this reads the run's status there. The client-side
+        async-task read path uses it to detect completion without the
+        in-process notifier. Propagates read errors (server unavailable, run
+        not found) like the other state reads; the reader treats a failed read
+        as "not yet terminal".
+        """
