@@ -1248,7 +1248,15 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
     assert events == [{"type": "done", "content": "", "response": ""}]
 
 
-async def test_langgraph_server_gateway_resume_discovers_interrupt_from_state():
+async def test_langgraph_server_gateway_resume_raises_on_poll_timeout_without_state_lookup():
+    """Poll timeout raises even when thread state holds a pending interrupt.
+
+    The server replays pending interrupts to a fresh stream within ~1s, so an
+    empty stream.interrupts after the wait means nothing was replayed. The
+    gateway must NOT fall back to a state-derived interrupt id: run.respond
+    validates the id against stream.interrupts, so a state-recovered id would
+    always be rejected there anyway.
+    """
     from langgraph.types import Command
 
     stream = FakeLangGraphThreadStream(
@@ -1292,25 +1300,48 @@ async def test_langgraph_server_gateway_resume_discovers_interrupt_from_state():
         interrupt_wait_seconds=0.01,
     )
 
-    events = [
-        event
-        async for event in gateway.stream_events(
+    with pytest.raises(RuntimeError, match="No interrupt replayed"):
+        async for _event in gateway.stream_events(
             RunRequest(
                 message=Command(
                     resume={"state-interrupt-1": {"decisions": [{"allowed": True}]}}
                 ),
                 thread_id="abc12345",
             )
-        )
-    ]
+        ):
+            pass
+    assert stream.run.responses == []
 
-    assert stream.run.responses == [
-        {
-            "response": {"decisions": [{"allowed": True}]},
-            "interrupt_id": "state-interrupt-1",
-        }
-    ]
-    assert events == [{"type": "done", "content": "", "response": ""}]
+
+async def test_langgraph_server_gateway_resume_raises_on_id_mismatch():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[{"interrupt_id": "interrupt-1"}],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="does not match the pending interrupt"):
+        async for _event in gateway.stream_events(
+            RunRequest(
+                message=Command(
+                    resume={"stale-interrupt": {"decisions": [{"allowed": True}]}}
+                ),
+                thread_id="abc12345",
+            )
+        ):
+            pass
+    assert stream.run.responses == []
 
 
 async def test_langgraph_server_gateway_resume_raises_on_multiple_interrupts():
@@ -1319,26 +1350,17 @@ async def test_langgraph_server_gateway_resume_raises_on_multiple_interrupts():
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[],
-        interrupts=[],
+        interrupts=[{"interrupt_id": "interrupt-a"}, {"interrupt_id": "interrupt-b"}],
     )
     threads = FakeLangGraphThreadsClient(
         threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
-        states={
-            "abc12345": {
-                "values": {},
-                "interrupts": [
-                    {"id": "interrupt-a", "value": None},
-                    {"id": "interrupt-b", "value": None},
-                ],
-            }
-        },
+        states={"abc12345": {"values": {}}},
         streams={"abc12345": stream},
     )
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(
             client=FakeLangGraphClient(threads),
         ),
-        interrupt_wait_seconds=0.01,
     )
 
     with pytest.raises(RuntimeError, match="2 pending interrupts"):
@@ -1373,7 +1395,7 @@ async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
         interrupt_wait_seconds=0.01,
     )
 
-    with pytest.raises(RuntimeError, match="No pending interrupt"):
+    with pytest.raises(RuntimeError, match="No interrupt replayed"):
         async for _event in gateway.stream_events(
             RunRequest(
                 message=Command(
