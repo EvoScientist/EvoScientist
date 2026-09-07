@@ -144,6 +144,48 @@ class ModelCommand(Command):
 
         cfg = _ensure_config()
 
+        # Server backend: runs execute in the langgraph dev process, which
+        # resolves the model per run from ``configurable.model`` /
+        # ``configurable.model_provider`` (ConfigurableModelMiddleware). The
+        # expensive local agent rebuild is pointless there — mutate the live
+        # config (the per-run channel's source) and validate the model, but
+        # skip the rebuild. Local backend keeps the rebuild path unchanged.
+        from ...gateway.server import LangGraphServerGateway
+
+        if isinstance(ctx.graph_gateway, LangGraphServerGateway):
+            temp_cfg = copy.copy(cfg)
+            temp_cfg.model = model_name
+            temp_cfg.provider = provider
+            try:
+                # Validation only — _build_chat_model does not mutate the
+                # cached config/model globals, so a failure below leaves the
+                # session untouched.
+                new_chat_model = _build_chat_model(temp_cfg)
+            except Exception as e:
+                ctx.ui.append_system(f"Failed to switch model: {e}", style="red")
+                return
+            cfg.model = model_name
+            cfg.provider = provider
+            set_active_config(cfg)
+            # Keep the local chat-model cache consistent too — cheap, and any
+            # in-process graph use (e.g. background extraction) then matches.
+            set_chat_model_instance(new_chat_model, (model_name, provider))
+            if save:
+                from ...config.settings import set_config_value
+
+                set_config_value("model", model_name)
+                set_config_value("provider", provider)
+            update_model_fn = getattr(ctx.ui, "update_status_after_model_change", None)
+            if callable(update_model_fn):
+                update_model_fn(model_name, provider)
+            saved_note = " (saved to config)" if save else ""
+            ctx.ui.append_system(
+                f"Switched to {model_name} ({provider}){saved_note} — "
+                f"applies from the next run",
+                style="green",
+            )
+            return
+
         # Build a temporary config + its chat model and verify the agent can be
         # built before committing anything. ``create_cli_agent(config=...,
         # chat_model=...)`` is pure (issue #183) — it writes none of the cached
