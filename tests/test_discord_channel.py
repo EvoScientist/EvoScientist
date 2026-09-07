@@ -101,3 +101,11 @@ class TestDiscordRetryErrorExtraction:
         )
         assert ch._extract_status_code(exc) == 401
         assert ch._extract_retry_after(exc) is None
+
+    def test_discord_rate_limited_uses_retry_after(self):
+        import discord
+
+        ch = DiscordChannel(DiscordConfig(bot_token="test"))
+        exc = discord.RateLimited(12.5)
+        assert ch._extract_retry_delay(exc) == 12.5
+        assert ch._extract_retry_after(exc) == 12.5

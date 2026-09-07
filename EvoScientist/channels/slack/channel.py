@@ -214,6 +214,22 @@ class SlackChannel(Channel):
             return error.lower() if isinstance(error, str) else None
         return super()._extract_sdk_error_code(exc)
 
+    def _extract_retry_delay(self, exc: Exception) -> float | None:
+        """Read Slack's ``Retry-After`` header from a SlackApiError.
+
+        ``SlackResponse.headers`` is a plain ``dict`` whose key casing depends
+        on the HTTP client, so match the key case-insensitively (the same
+        approach slack_sdk's own ``RateLimitErrorRetryHandler`` takes).
+        """
+        from slack_sdk.errors import SlackApiError
+
+        if isinstance(exc, SlackApiError):
+            for key, raw in exc.response.headers.items():
+                if key.lower() == "retry-after":
+                    return float(raw)
+            return None
+        return super()._extract_retry_delay(exc)
+
     # ── ACK Reactions ───────────────────────────────────────────────
 
     async def _send_ack_reaction(

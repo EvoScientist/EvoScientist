@@ -1,5 +1,6 @@
 """Tests for Telegram channel implementation."""
 
+import importlib.util
 import sys
 from datetime import datetime
 from types import ModuleType, SimpleNamespace
@@ -275,3 +276,27 @@ class TestTelegramChannel:
             message_id=789,
         )
         return SimpleNamespace(message=message)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("telegram") is None,
+    reason="python-telegram-bot not installed",
+)
+class TestTelegramRetryDelay:
+    def test_retry_after_honored(self):
+        from telegram.error import RetryAfter
+
+        ch = TelegramChannel(TelegramConfig(bot_token="t"))
+        assert ch._extract_retry_delay(RetryAfter(7)) == 7.0
+        assert ch._extract_retry_after(RetryAfter(7)) == 7.0
+
+    def test_other_errors_fall_through(self):
+        import httpx
+
+        ch = TelegramChannel(TelegramConfig(bot_token="t"))
+        exc = httpx.HTTPStatusError(
+            "429",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(429, headers={"Retry-After": "3"}),
+        )
+        assert ch._extract_retry_delay(exc) == 3.0

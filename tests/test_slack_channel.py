@@ -169,3 +169,21 @@ class TestSlackRetryErrorExtraction:
         )
         assert ch._extract_status_code(exc) == 401
         assert ch._extract_retry_after(exc) is None
+
+    def test_slack_ratelimited_uses_retry_after_header(self):
+        from slack_sdk.errors import SlackApiError
+        from slack_sdk.web.slack_response import SlackResponse
+
+        ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+        resp = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data={"ok": False, "error": "ratelimited"},
+            headers={"Retry-After": "30"},
+            status_code=429,
+        )
+        exc = SlackApiError("ratelimited", response=resp)
+        assert ch._extract_retry_delay(exc) == 30.0
+        assert ch._extract_retry_after(exc) == 30.0

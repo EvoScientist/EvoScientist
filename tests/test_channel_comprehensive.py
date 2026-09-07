@@ -1238,15 +1238,6 @@ class TestExtractRetryAfter:
         result = ch._extract_retry_after(Exception("HTTP 500 Internal Server Error"))
         assert result == 1.0
 
-    def test_extracts_retry_after_attribute(self):
-        ch = StubChannel()
-
-        class RateLimitError(Exception):
-            retry_after = 5.0
-
-        result = ch._extract_retry_after(RateLimitError("rate limited"))
-        assert result == 5.0
-
     def test_detects_429_in_message(self):
         ch = StubChannel()
         result = ch._extract_retry_after(RuntimeError("HTTP 429 Too Many Requests"))
@@ -1375,10 +1366,10 @@ class TestExtractRetryAfter:
         )
         assert ch._extract_sdk_error_code(exc) is None
 
-    # ── _parse_retry_after_header tests ───────────────────────────────
+    # ── _extract_retry_delay tests ───────────────────────────────
 
-    def test_parse_retry_after_header_integer(self):
-        """_parse_retry_after_header parses integer string from headers."""
+    def test_extract_retry_delay_integer(self):
+        """_extract_retry_delay parses integer string from headers."""
         ch = StubChannel()
         resp = httpx.Response(429, headers={"Retry-After": "10"})
         exc = httpx.HTTPStatusError(
@@ -1386,10 +1377,10 @@ class TestExtractRetryAfter:
             request=httpx.Request("POST", "https://example.invalid"),
             response=resp,
         )
-        assert ch._parse_retry_after_header(exc) == 10.0
+        assert ch._extract_retry_delay(exc) == 10.0
 
-    def test_parse_retry_after_header_float(self):
-        """_parse_retry_after_header parses float string from lowercase headers."""
+    def test_extract_retry_delay_float(self):
+        """_extract_retry_delay parses float string from lowercase headers."""
         ch = StubChannel()
         resp = httpx.Response(429, headers={"retry-after": "2.5"})
         exc = httpx.HTTPStatusError(
@@ -1397,10 +1388,10 @@ class TestExtractRetryAfter:
             request=httpx.Request("POST", "https://example.invalid"),
             response=resp,
         )
-        assert ch._parse_retry_after_header(exc) == 2.5
+        assert ch._extract_retry_delay(exc) == 2.5
 
-    def test_parse_retry_after_header_invalid_value(self):
-        """_parse_retry_after_header returns None for non-numeric header."""
+    def test_extract_retry_delay_invalid_value(self):
+        """_extract_retry_delay returns None for non-numeric header."""
         ch = StubChannel()
         resp = httpx.Response(429, headers={"Retry-After": "invalid-date"})
         exc = httpx.HTTPStatusError(
@@ -1408,10 +1399,10 @@ class TestExtractRetryAfter:
             request=httpx.Request("POST", "https://example.invalid"),
             response=resp,
         )
-        assert ch._parse_retry_after_header(exc) is None
+        assert ch._extract_retry_delay(exc) is None
 
-    def test_parse_retry_after_header_missing(self):
-        """_parse_retry_after_header returns None when no Retry-After header exists."""
+    def test_extract_retry_delay_missing(self):
+        """_extract_retry_delay returns None when no Retry-After header exists."""
         ch = StubChannel()
         resp = httpx.Response(429, headers={"Content-Type": "application/json"})
         exc = httpx.HTTPStatusError(
@@ -1419,7 +1410,7 @@ class TestExtractRetryAfter:
             request=httpx.Request("POST", "https://example.invalid"),
             response=resp,
         )
-        assert ch._parse_retry_after_header(exc) is None
+        assert ch._extract_retry_delay(exc) is None
 
 
 class TestChannelAttachments:

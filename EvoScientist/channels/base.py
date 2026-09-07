@@ -786,10 +786,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
            (e.g. 401, 403), structured SDK error codes (e.g. Slack
            ``"invalid_auth"``), and message pattern matching
            (e.g. ``"unauthorized"``, ``"forbidden"``).
-        2. SDK-provided ``retry_after`` attribute (Telegram / Slack SDKs).
-        3. HTTP ``Retry-After`` header via :meth:`_parse_retry_after_header`.
-        4. Rate-limit pattern match → ``_rate_limit_delay``.
-        5. Default ``1.0`` s for generic transient errors.
+        2. Server-supplied delay via :meth:`_extract_retry_delay`
+           (httpx ``Retry-After``; channels override for their SDK).
+        3. Rate-limit pattern match → ``_rate_limit_delay``.
+        4. Default ``1.0`` s for generic transient errors.
 
         Channels can customize behavior declaratively via class attributes
         ``_non_retryable_patterns``, ``_rate_limit_patterns``,
@@ -812,28 +812,18 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         ):
             return None
 
-        # 2. SDK retry_after attribute
-        retry = getattr(exc, "retry_after", None)
-        if retry is not None and not isinstance(retry, bool):
-            try:
-                val = float(retry)
-                if val >= 0:
-                    return val
-            except (ValueError, TypeError):
-                pass
+        # 2. Server-supplied delay
+        delay = self._extract_retry_delay(exc)
+        if delay is not None:
+            return delay
 
-        # 3. HTTP Retry-After header
-        header_val = self._parse_retry_after_header(exc)
-        if header_val is not None:
-            return header_val
-
-        # 4. Rate-limit patterns
+        # 3. Rate-limit patterns
         if self._rate_limit_patterns and any(
             p in msg for p in self._rate_limit_patterns
         ):
             return self._rate_limit_delay
 
-        # 5. Default: transient error, retry with the standard delay
+        # 4. Default: transient error, retry with the standard delay
         return 1.0
 
     def _extract_status_code(self, exc: Exception) -> int | None:
@@ -858,22 +848,23 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         """
         return None
 
-    def _parse_retry_after_header(self, exc: Exception) -> float | None:
-        """Try to extract a ``Retry-After`` value from an HTTP response or exception."""
-        resp = getattr(exc, "response", None)
-        if resp is None:
-            return None
-        headers = getattr(resp, "headers", None)
-        if not headers or not hasattr(headers, "get"):
-            return None
-        raw = headers.get("Retry-After") or headers.get("retry-after")
-        if raw is None:
-            return None
-        try:
-            val = float(raw)
-            return val if val >= 0 else None
-        except (ValueError, TypeError):
-            return None
+    def _extract_retry_delay(self, exc: Exception) -> float | None:
+        """Retry delay the server asked for, in seconds, or ``None``.
+
+        Base implementation reads the ``Retry-After`` header of an httpx
+        error.  Channels whose SDK reports the delay differently
+        (``SlackChannel``, ``TelegramChannel``, ``DiscordChannel``) override.
+        """
+        import httpx
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            raw = exc.response.headers.get("retry-after")
+            if raw is not None:
+                try:
+                    return float(raw)
+                except ValueError:
+                    return None  # HTTP-date form is not supported
+        return None
 
     async def _send_with_retry(
         self,

@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -117,6 +117,21 @@ class TelegramChannel(Channel):
                 chat_id=int(chat_id),
                 action="typing",
             )
+
+    # ── Retry delay extraction (override base) ─────────────────────
+
+    def _extract_retry_delay(self, exc: Exception) -> float | None:
+        """Honor Telegram flood control (``telegram.error.RetryAfter``).
+
+        ``retry_after`` is an ``int`` by default and a ``timedelta`` when the
+        ``PTB_TIMEDELTA`` opt-in is enabled.
+        """
+        from telegram.error import RetryAfter
+
+        if isinstance(exc, RetryAfter):
+            ra = exc.retry_after
+            return ra.total_seconds() if isinstance(ra, timedelta) else float(ra)
+        return super()._extract_retry_delay(exc)
 
     # ── Send (template method overrides) ──────────────────────────
 
