@@ -621,6 +621,7 @@ def get_chat_model(
         and _original_provider not in _no_patch_providers
         and not _uses_native_deepseek
         and not (provider == "anthropic" and _is_mandatory_thinking_kimi(model_id))
+        and _original_provider not in _ANTHROPIC_ROUTED_PROVIDERS
     ):
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.

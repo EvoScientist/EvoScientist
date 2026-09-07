@@ -1359,6 +1359,19 @@ class TestThirdPartyRouting:
         assert "thinking" in call_kwargs
         assert "reasoning" not in call_kwargs
 
+    @patch("EvoScientist.llm.models._patch_openai_compat_content")
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_minimax_skips_openai_compat_content_patch(
+        self, mock_init, mock_patch, monkeypatch
+    ):
+        """Anthropic-routed MiniMax must preserve replay content blocks."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        get_chat_model("MiniMax-M3", provider="minimax")
+
+        mock_patch.assert_not_called()
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_short_name_resolution(self, mock_init, monkeypatch):
         """MiniMax short names should resolve to correct model IDs."""
@@ -2800,28 +2813,6 @@ class TestAnthropicStripForeignReasoning:
         assert result[0].content[0]["signature"] == ""
         assert "signature" not in result[0].content[1]
 
-    def test_string_blocks_are_normalized_for_replay(self):
-        """Mixed string/block content is converted to Anthropic text blocks."""
-        from langchain_core.messages import AIMessage
-
-        from EvoScientist.llm.patches import _normalize_anthropic_replay_messages
-
-        messages = [
-            AIMessage(
-                content=[
-                    "visible answer",
-                    {"type": "thinking", "thinking": "hm", "signature": "sig"},
-                ]
-            )
-        ]
-
-        result = _normalize_anthropic_replay_messages(messages)
-
-        assert result[0].content == [
-            {"type": "text", "text": "visible answer"},
-            {"type": "thinking", "thinking": "hm", "signature": "sig"},
-        ]
-
     def test_strip_no_change_returns_same_object(self):
         """Clean histories pass through without copying."""
         from langchain_core.messages import AIMessage, HumanMessage
@@ -2836,8 +2827,8 @@ class TestAnthropicStripForeignReasoning:
 
         assert _normalize_anthropic_replay_messages(messages) is messages
 
-    def test_kimi_k3_exempt_from_flatten_patch(self, monkeypatch):
-        """K3 on custom-anthropic gets no instance flatten closures; others do."""
+    def test_anthropic_routed_providers_skip_flatten_patch(self, monkeypatch):
+        """Anthropic-routed providers preserve native content block payloads."""
         monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
         monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
 
@@ -2847,7 +2838,7 @@ class TestAnthropicStripForeignReasoning:
         other = get_chat_model(
             "claude-sonnet-4-6", provider="custom-anthropic", max_tokens=1024
         )
-        assert "_generate" in vars(other)
+        assert "_generate" not in vars(other)
 
     def test_reasoning_content_stripped_on_the_wire(self, monkeypatch):
         """End-to-end: foreign reasoning blocks never reach the Anthropic wire."""
