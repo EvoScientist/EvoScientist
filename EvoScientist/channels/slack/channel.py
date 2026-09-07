@@ -226,7 +226,7 @@ class SlackChannel(Channel):
         if isinstance(exc, SlackApiError):
             for key, raw in exc.response.headers.items():
                 if key.lower() == "retry-after":
-                    return float(raw)
+                    return self._parse_retry_after(raw)
             return None
         return super()._extract_retry_delay(exc)
 

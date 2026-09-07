@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -1411,6 +1411,36 @@ class TestExtractRetryAfter:
             response=resp,
         )
         assert ch._extract_retry_delay(exc) is None
+
+    def test_extract_retry_delay_http_date(self):
+        """An HTTP-date Retry-After is honored as seconds until that time."""
+        from datetime import datetime, timedelta
+        from email.utils import format_datetime
+
+        when = datetime.now(UTC) + timedelta(seconds=60)
+        resp = httpx.Response(
+            503, headers={"Retry-After": format_datetime(when, usegmt=True)}
+        )
+        exc = httpx.HTTPStatusError(
+            "unavailable",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        delay = StubChannel()._extract_retry_after(exc)
+        assert delay is not None
+        assert 55.0 <= delay <= 60.0
+
+    def test_extract_retry_delay_http_date_in_past_is_zero(self):
+        """A past HTTP-date yields 0.0 rather than a negative delay."""
+        resp = httpx.Response(
+            503, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        )
+        exc = httpx.HTTPStatusError(
+            "unavailable",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        assert StubChannel()._extract_retry_delay(exc) == 0.0
 
 
 class TestChannelAttachments:

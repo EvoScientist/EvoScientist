@@ -13,7 +13,8 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from collections.abc import Callable as CallableABC
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -860,11 +861,28 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         if isinstance(exc, httpx.HTTPStatusError):
             raw = exc.response.headers.get("retry-after")
             if raw is not None:
-                try:
-                    return float(raw)
-                except ValueError:
-                    return None  # HTTP-date form is not supported
+                return self._parse_retry_after(raw)
         return None
+
+    @staticmethod
+    def _parse_retry_after(raw: str) -> float | None:
+        """Convert a ``Retry-After`` header value to seconds.
+
+        RFC 9110 allows either delay-seconds or an HTTP-date; a date is
+        returned as the non-negative number of seconds until it.  Unparseable
+        values yield ``None`` so the caller can fall back to its own delay.
+        """
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(raw)
+        except (ValueError, TypeError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return max(0.0, (when - datetime.now(UTC)).total_seconds())
 
     async def _send_with_retry(
         self,

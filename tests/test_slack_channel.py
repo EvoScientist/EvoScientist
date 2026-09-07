@@ -187,3 +187,21 @@ class TestSlackRetryErrorExtraction:
         exc = SlackApiError("ratelimited", response=resp)
         assert ch._extract_retry_delay(exc) == 30.0
         assert ch._extract_retry_after(exc) == 30.0
+
+    def test_slack_malformed_retry_after_falls_through(self):
+        from slack_sdk.errors import SlackApiError
+        from slack_sdk.web.slack_response import SlackResponse
+
+        ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+        resp = SlackResponse(
+            client=None,
+            http_verb="POST",
+            api_url="https://slack.com/api/chat.postMessage",
+            req_args={},
+            data={"ok": False, "error": "ratelimited"},
+            headers={"Retry-After": "soon"},
+            status_code=429,
+        )
+        exc = SlackApiError("ratelimited", response=resp)
+        assert ch._extract_retry_delay(exc) is None
+        assert ch._extract_retry_after(exc) == ch._rate_limit_delay
