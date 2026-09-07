@@ -612,14 +612,14 @@ class LangGraphServerGateway:
         while not stream.interrupts and loop.time() < deadline:
             await asyncio.sleep(0.05)
 
+        # The server replays a parked thread's pending interrupts to a fresh
+        # stream within ~1s (verified against a live langgraph dev server),
+        # which is the only source for stream.interrupts. run.respond
+        # validates an explicit interrupt_id against stream.interrupts, so an
+        # id recovered from thread state would always be rejected - do not
+        # re-add a state lookup here. The one resume primitive that does not
+        # gate on stream.interrupts is run.start with Command(resume=...).
         interrupts = list(stream.interrupts)
-        if not interrupts:
-            try:
-                state = await self.thread_store.client.threads.get_state(thread_id)
-            except NotFoundError:
-                state = None
-            if state is not None:
-                interrupts = _state_interrupts(state)
 
         if len(interrupts) > 1:
             raise RuntimeError(
@@ -628,8 +628,9 @@ class LangGraphServerGateway:
             )
         if not interrupts:
             raise RuntimeError(
-                f"No pending interrupt found on thread {thread_id}; "
-                "the thread may not be in an interrupted state"
+                f"No interrupt replayed to the stream on thread {thread_id} "
+                f"within {self.interrupt_wait_seconds}s; the thread may not "
+                "be in an interrupted state"
             )
 
         interrupt_id = str(
@@ -649,12 +650,9 @@ class LangGraphServerGateway:
         ):
             resolved = response[interrupt_id]
         elif isinstance(response, Mapping) and len(response) == 1 and interrupt_id:
-            logger.warning(
-                "Resume payload key %s does not match pending interrupt %s on "
-                "thread %s; forwarding payload unchanged",
-                next(iter(response)),
-                interrupt_id,
-                thread_id,
+            raise RuntimeError(
+                f"Resume payload key {next(iter(response))} does not match the "
+                f"pending interrupt {interrupt_id} on thread {thread_id}"
             )
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
 
