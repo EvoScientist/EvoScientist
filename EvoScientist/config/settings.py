@@ -334,7 +334,9 @@ class EvoScientistConfig:
     openrouter_anthropic_prompt_cache: bool = True
     # OpenRouter app attribution (issue #339). Sent only for the openrouter
     # provider; identifies EvoScientist in OpenRouter's app rankings/analytics.
-    # Override (e.g. a private fork) via these fields or their env vars.
+    # Override (e.g. a private fork) via these fields or their env vars. A custom
+    # title only takes effect together with a custom referer: OpenRouter keys app
+    # pages by referer, so a lone title would rename the shared EvoScientist page.
     # Defaults live in the module constants above (also imported by llm/models.py).
     openrouter_http_referer: str = OPENROUTER_DEFAULT_HTTP_REFERER
     openrouter_app_title: str = OPENROUTER_DEFAULT_APP_TITLE
