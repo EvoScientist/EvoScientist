@@ -909,7 +909,6 @@ def _get_default_middleware(
         create_scheduler_middleware,
         create_tool_selector_middleware,
         default_memory_scheduler,
-        load_fallback_chain,
     )
     from .middleware.events import NO_OP_SINK, RunScopedEventSink
 
@@ -920,8 +919,6 @@ def _get_default_middleware(
     events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
 
     cfg = cfg if cfg is not None else _ensure_config()
-    if cfg.model_fallbacks:
-        load_fallback_chain(cfg.model_fallbacks)
     model = chat_model if chat_model is not None else _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     source_type = (
