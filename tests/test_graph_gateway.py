@@ -20,6 +20,7 @@ from EvoScientist.gateway import (
     create_runtime_gateways,
 )
 from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
+from EvoScientist.gateway.types import DEFAULT_GRAPH_ID
 from EvoScientist.stream import display as display_mod
 from tests.fakes import (
     FakeGraphGateway,
@@ -540,6 +541,41 @@ async def test_langgraph_server_thread_store_uuid_resolution_filters_graph_id():
     ]
 
 
+async def test_langgraph_server_thread_store_explicitly_clears_agent_name():
+    """Non-default graphs must set ``agent_name: None`` so a previously
+    stored main-graph stamp is overwritten under PATCH merge semantics.
+
+    Without the explicit clear (``pop``), the key is absent from the
+    payload and a stale ``agent_name`` from an earlier default-graph run
+    survives the merge, leaving the thread visible to the main-thread
+    filter.
+    """
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": "thread-1",
+                "metadata": {
+                    "graph_id": DEFAULT_GRAPH_ID,
+                    "agent_name": DEFAULT_GRAPH_ID,
+                },
+            }
+        ]
+    )
+    store = LangGraphServerThreadStore(
+        client=FakeLangGraphClient(threads),
+    )
+
+    new_id = await store.create_thread(
+        graph_id="writing-agent",
+        metadata={"model": "test-model"},
+        workspace_dir="/tmp/ws",
+    )
+
+    assert new_id == "server-thread"
+    created_metadata = threads.created[0]["metadata"]
+    assert created_metadata["agent_name"] is None
+
+
 async def test_langgraph_server_thread_store_clones_thread_with_metadata():
     clone_metadata = {
         "clone_purpose": "memory_extraction",
@@ -762,14 +798,10 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert threads.created[0]["thread_id"] == "abc12345"
     created_metadata = threads.created[0]["metadata"]
     assert created_metadata["graph_id"] == "writing-agent"
+    assert created_metadata["agent_name"] is None
     assert created_metadata["workspace_dir"] == "/tmp/ws"
     assert isinstance(created_metadata["updated_at"], str)
-    assert len(threads.metadata_updates) == 1
-    update_thread_id, update_metadata = threads.metadata_updates[0]
-    assert update_thread_id == "abc12345"
-    assert update_metadata["graph_id"] == "writing-agent"
-    assert update_metadata["workspace_dir"] == "/tmp/ws"
-    assert isinstance(update_metadata["updated_at"], str)
+    assert threads.metadata_updates == [("abc12345", threads.created[0]["metadata"])]
     assert threads.stream_calls == [("abc12345", "writing-agent")]
     assert stream.run.starts == [
         {
@@ -778,6 +810,131 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
             "metadata": {"workspace_dir": "/tmp/ws"},
         }
     ]
+    assert events == [
+        {"type": "text", "content": "hello"},
+        {"type": "done", "content": "hello", "response": "hello"},
+    ]
+
+
+async def test_langgraph_server_gateway_forwards_configurable_extra():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    async def _collect():
+        return [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(
+                    message="hi",
+                    thread_id="abc12345",
+                    configurable_extra={
+                        "active_teams": ["code-agent"],
+                        "custom_key": "custom_value",
+                    },
+                )
+            )
+        ]
+
+    events = await _collect()
+
+    assert stream.run.starts == [
+        {
+            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "config": {
+                "configurable": {
+                    "active_teams": ["code-agent"],
+                    "custom_key": "custom_value",
+                    "thread_id": "abc12345",
+                }
+            },
+            "metadata": None,
+        }
+    ]
+    assert events == [
+        {"type": "text", "content": "hello"},
+        {"type": "done", "content": "hello", "response": "hello"},
+    ]
+
+
+async def test_langgraph_server_gateway_warns_on_pre_run_state_fetch_failure(
+    caplog: pytest.LogCaptureFixture,
+):
+    class _StateErrorThreadsClient(FakeLangGraphThreadsClient):
+        async def get_state(self, thread_id: str) -> dict[str, Any]:
+            raise RuntimeError("connection reset")
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {"namespace": [], "data": {"event": "message-finish"}},
+            },
+        ],
+    )
+    threads = _StateErrorThreadsClient(
+        threads=[],
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+        events = [
+            event
+            async for event in gateway.stream_events(
+                RunRequest(message="hi", thread_id="abc12345")
+            )
+        ]
+
+    assert any(
+        "value-message processing disabled" in record.message
+        and "abc12345" in record.message
+        for record in caplog.records
+    )
     assert events == [
         {"type": "text", "content": "hello"},
         {"type": "done", "content": "hello", "response": "hello"},
@@ -1071,7 +1228,9 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
             event
             async for event in gateway.stream_events(
                 RunRequest(
-                    message=Command(resume={"decisions": [{"allowed": True}]}),
+                    message=Command(
+                        resume={"interrupt-1": {"decisions": [{"allowed": True}]}}
+                    ),
                     thread_id="abc12345",
                 )
             )
@@ -1087,6 +1246,475 @@ async def test_langgraph_server_gateway_resumes_interrupt_with_thread_stream():
         }
     ]
     assert events == [{"type": "done", "content": "", "response": ""}]
+
+
+async def test_langgraph_server_gateway_resume_discovers_interrupt_from_state():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {},
+                "interrupts": [
+                    {
+                        "id": "state-interrupt-1",
+                        "value": {
+                            "action_requests": [
+                                {
+                                    "name": "execute",
+                                    "args": {"command": "echo hi"},
+                                    "id": "tool-1",
+                                }
+                            ],
+                            "review_configs": [
+                                {
+                                    "action_name": "execute",
+                                    "allowed_decisions": ["approve", "reject"],
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        },
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        ),
+        interrupt_wait_seconds=0.01,
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(
+                message=Command(
+                    resume={"state-interrupt-1": {"decisions": [{"allowed": True}]}}
+                ),
+                thread_id="abc12345",
+            )
+        )
+    ]
+
+    assert stream.run.responses == [
+        {
+            "response": {"decisions": [{"allowed": True}]},
+            "interrupt_id": "state-interrupt-1",
+        }
+    ]
+    assert events == [{"type": "done", "content": "", "response": ""}]
+
+
+async def test_langgraph_server_gateway_resume_raises_on_multiple_interrupts():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {},
+                "interrupts": [
+                    {"id": "interrupt-a", "value": None},
+                    {"id": "interrupt-b", "value": None},
+                ],
+            }
+        },
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        ),
+        interrupt_wait_seconds=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="2 pending interrupts"):
+        async for _event in gateway.stream_events(
+            RunRequest(
+                message=Command(
+                    resume={"interrupt-a": {"decisions": [{"allowed": True}]}}
+                ),
+                thread_id="abc12345",
+            )
+        ):
+            pass
+
+
+async def test_langgraph_server_gateway_resume_raises_on_no_interrupt():
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        ),
+        interrupt_wait_seconds=0.01,
+    )
+
+    with pytest.raises(RuntimeError, match="No pending interrupt"):
+        async for _event in gateway.stream_events(
+            RunRequest(
+                message=Command(
+                    resume={"unknown-id": {"decisions": [{"allowed": True}]}}
+                ),
+                thread_id="abc12345",
+            )
+        ):
+            pass
+
+
+async def test_langgraph_server_gateway_abort_during_subagent_does_not_raise():
+    """aclose() mid-subagent must not raise RuntimeError from yields in finally."""
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "lifecycle",
+                "params": {
+                    "namespace": ["data-analysis-agent:tool-1"],
+                    "data": {"event": "started"},
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": ["data-analysis-agent:tool-1"],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    gen = gateway.stream_events(RunRequest(message="hi", thread_id="abc12345"))
+    await gen.__anext__()
+    # Consumer aborts while a subagent is still tracked
+    await gen.aclose()
+
+
+async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            for event in self.events:
+                yield event
+            raise RuntimeError("provider connection lost")
+
+    failing_stream = _FailingStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "abc12345": {
+                "values": {},
+                "next": ("model",),
+            }
+        },
+        streams={"abc12345": failing_stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    with pytest.raises(RuntimeError, match="provider connection lost"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert threads.state_updates == [
+        ("abc12345", None, "__end__"),
+    ]
+
+
+async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failure():
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            for event in self.events:
+                yield event
+            raise RuntimeError("provider connection lost")
+
+    failing_stream = _FailingStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "abc12345": {
+                "values": {},
+                "next": ("model",),
+                "interrupts": [
+                    {"id": "hitl-interrupt-1", "value": None},
+                ],
+            }
+        },
+        streams={"abc12345": failing_stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    with pytest.raises(RuntimeError, match="provider connection lost"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert threads.state_gets.count("abc12345") >= 2
+    assert threads.state_updates == []
+
+
+async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
+    caplog: pytest.LogCaptureFixture,
+):
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            for event in self.events:
+                yield event
+            raise RuntimeError("provider connection lost")
+
+    failing_stream = _FailingStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+
+    class _FailingUpdateThreadsClient(FakeLangGraphThreadsClient):
+        async def update_state(self, thread_id, values, *, as_node=None):
+            raise RuntimeError("repair-time connection reset")
+
+    threads = _FailingUpdateThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}, "next": ("model",)}},
+        streams={"abc12345": failing_stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    with caplog.at_level("DEBUG", logger="EvoScientist.gateway.server"):
+        with pytest.raises(RuntimeError, match="provider connection lost"):
+            async for _event in gateway.stream_events(
+                RunRequest(message="hi", thread_id="abc12345")
+            ):
+                pass
+
+    assert any(
+        "Could not clear interrupted thread state" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "running":
+                return [{"run_id": "run-active", "status": "running"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    gen = gateway.stream_events(RunRequest(message="hi", thread_id="abc12345"))
+    await gen.__anext__()
+    await gen.aclose()
+
+    assert cancel_calls == [("abc12345", ["run-active"])]
+
+
+async def test_langgraph_server_gateway_does_not_cancel_on_normal_completion():
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "hello"},
+                    },
+                },
+            },
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {"event": "message-finish"},
+                },
+            },
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    assert cancel_calls == []
+    assert events == [
+        {"type": "text", "content": "hello"},
+        {"type": "done", "content": "hello", "response": "hello"},
+    ]
 
 
 async def test_langgraph_server_thread_store_cancels_runs_before_delete():
@@ -1126,3 +1754,227 @@ async def test_langgraph_server_thread_store_delete_survives_missing_runs_client
 
     assert await store.delete_thread("abc12345") is True
     assert threads.deleted == ["abc12345"]
+
+
+# ---------------------------------------------------------------------------
+# Stage 1f — parity suite: shared contract across both backends + divergence pins
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def local_gateway() -> LocalGraphGateway:
+    return LocalGraphGateway(
+        thread_store=FakeThreadStore(
+            generated_thread_id="parity-1",
+            threads=[{"thread_id": "parity-1"}],
+            resolved_thread_id="parity-1",
+            metadata={"workspace_dir": "/ws"},
+            messages=[HumanMessage(content="hi")],
+            exists=True,
+            deleted=True,
+        )
+    )
+
+
+@pytest.fixture
+def server_gateway() -> LangGraphServerGateway:
+    threads = FakeLangGraphThreadsClient(
+        threads=[
+            {
+                "thread_id": "parity-1",
+                "metadata": {"graph_id": "EvoScientist", "workspace_dir": "/ws"},
+            }
+        ],
+        states={
+            "parity-1": {
+                "values": {
+                    "messages": [
+                        {"role": "user", "content": "hi"},
+                    ]
+                }
+            }
+        },
+    )
+    return LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_create_returns_str(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    thread_id = await gateway.create_thread()
+    assert isinstance(thread_id, str)
+    assert thread_id
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_list_returns_list_of_dicts(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    threads = await gateway.list_threads(limit=10)
+    assert isinstance(threads, list)
+    assert all(isinstance(row, dict) for row in threads)
+    assert all("thread_id" in row for row in threads)
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_resolve_returns_thread_resolution(
+    request, fixture_name
+):
+    gateway = request.getfixturevalue(fixture_name)
+    resolution = await gateway.resolve_thread("parity")
+    assert resolution.thread_id == "parity-1"
+    assert resolution.found
+    assert not resolution.ambiguous
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_get_metadata_returns_dict(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    metadata = await gateway.get_thread_metadata("parity-1")
+    assert isinstance(metadata, dict)
+    assert metadata.get("workspace_dir") == "/ws"
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_get_messages_returns_list(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    messages = await gateway.get_thread_messages("parity-1")
+    assert isinstance(messages, list)
+    assert len(messages) >= 1
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_thread_exists_returns_true_for_known_thread(
+    request, fixture_name
+):
+    gateway = request.getfixturevalue(fixture_name)
+    exists = await gateway.thread_exists("parity-1")
+    assert exists is True
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["local_gateway", "server_gateway"],
+)
+async def test_gateway_contract_delete_returns_bool(request, fixture_name):
+    gateway = request.getfixturevalue(fixture_name)
+    deleted = await gateway.delete_thread("parity-1")
+    assert deleted is True
+
+
+# Divergence pins — accepted differences between backends
+
+
+async def test_divergence_local_clone_unsupported():
+    """Local gateway does not support thread cloning; server gateway does."""
+    gateway = LocalGraphGateway(thread_store=FakeThreadStore())
+    with pytest.raises(NotImplementedError, match="does not support thread cloning"):
+        await gateway.clone_thread("source")
+
+
+async def test_divergence_server_delete_cancels_in_flight_runs():
+    """Server delete cancels live runs before deleting; local delete does not."""
+    threads = FakeLangGraphThreadsClient(threads=[{"thread_id": "abc12345"}])
+    client = FakeLangGraphClient(threads)
+    cancel_called = False
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "running":
+                return [{"run_id": "run-1", "status": "running"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            nonlocal cancel_called
+            cancel_called = True
+
+    client.runs = _FakeRunsClient()
+    store = LangGraphServerThreadStore(client=client)
+    await store.delete_thread("abc12345")
+    assert cancel_called
+
+
+async def test_divergence_server_thread_exists_returns_false_for_unknown_thread():
+    """Server thread_exists hits the SDK (404 on missing); local delegates to
+    session_store which may behave differently for unknown ids."""
+    threads = FakeLangGraphThreadsClient(threads=[])
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    assert await gateway.thread_exists("nonexistent") is False
+
+
+async def test_divergence_local_delete_does_not_cancel_runs():
+    """Local delete delegates to session_store without run cancellation."""
+    thread_store = FakeThreadStore(
+        threads=[{"thread_id": "abc12345"}],
+        deleted=True,
+    )
+    gateway = LocalGraphGateway(thread_store=thread_store)
+    deleted = await gateway.delete_thread("abc12345")
+    assert deleted is True
+    assert thread_store.calls == [("delete_thread", "abc12345")]
+
+
+async def test_divergence_server_enqueue_serializes_concurrent_runs():
+    """Server gateway accepts a second run while one is in flight (enqueue);
+    local gateway has no cross-process guard. The serialization is a property
+    of the langgraph dev server, not the gateway — this test pins the contract:
+    both backends accept the second request without rejection."""
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={
+            "abc12345": FakeLangGraphThreadStream(
+                "abc12345",
+                events=[
+                    {
+                        "method": "messages",
+                        "params": {
+                            "namespace": [],
+                            "data": {
+                                "event": "content-block-delta",
+                                "delta": {"type": "text-delta", "text": "ok"},
+                            },
+                        },
+                    },
+                    {
+                        "method": "messages",
+                        "params": {
+                            "namespace": [],
+                            "data": {"event": "message-finish"},
+                        },
+                    },
+                ],
+            )
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+    assert events[-1]["type"] == "done"
