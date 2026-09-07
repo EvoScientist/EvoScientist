@@ -1255,6 +1255,26 @@ def cmd_interactive(
                     # kill the poller task — channel + notification dispatch
                     # would silently die otherwise (Fix #4).
                     current_tid = state.get("thread_id")
+                    # Detect async-task completions from state (throttled) so a
+                    # completion surfaces while the prompt sits idle; the drain
+                    # below injects it. Best-effort — never kill the poller task.
+                    _reader_agent = agent_loader.agent
+                    if current_tid and _reader_agent is not None:
+                        try:
+                            await (
+                                async_notifier.enqueue_completions_from_state_throttled(
+                                    runtime_gateways.graph_gateway,
+                                    GraphTarget(
+                                        local_graph=_reader_agent,
+                                        workspace_dir=state["workspace_dir"],
+                                    ),
+                                    current_tid,
+                                )
+                            )
+                        except Exception:
+                            _channel_logger.warning(
+                                "async-notifier idle reader failed", exc_info=True
+                            )
                     if async_notifier.has_pending_notifications(current_tid):
                         read_async_tasks_state = (
                             (lambda _tid=current_tid: _read_current_async_tasks(_tid))
