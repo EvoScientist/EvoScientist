@@ -1094,8 +1094,8 @@ _model_passthrough_patched = False
 # Why a ContextVar rather than passing ``config=`` through each tool: the fix
 # has to hold at every ``runs.create`` site (``start_async_task`` and
 # ``update_async_task``), but only the tool functions can see the caller's
-# per-run model (via ``runtime.config`` — ``langgraph.config.get_config()`` is
-# unreliable from a tool's execution context). Threading it through a ContextVar
+# per-run model (via ``runtime.config``, the config langgraph's ToolNode
+# injects into tool calls). Threading it through a ContextVar
 # lets the single merge point below inject it, so ``update_async_task`` (whose
 # body we delegate to upstream unchanged) is covered without reimplementing it.
 _caller_configurable: ContextVar[dict[str, str] | None] = ContextVar(

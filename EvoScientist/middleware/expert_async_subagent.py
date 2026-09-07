@@ -92,9 +92,11 @@ def _caller_model_scope(runtime: ToolRuntime):
     caller's run. Without help it falls back to the server's config-default
     model rather than the model the caller is running on — so a run started on
     a free model silently bills the config-default. Read the caller's per-run
-    model from ``runtime.config`` (the same ``configurable`` channel that
-    carries ``thread_id``; ``langgraph.config.get_config()`` is unreliable from
-    a tool's execution context) and publish it, for the duration of the block,
+    model from ``runtime.config`` — the config langgraph's ToolNode injects
+    into every tool call, the same ``configurable`` channel that carries
+    ``thread_id`` (``runtime`` is already injected into these tool
+    signatures, so it is the channel already in hand) — and publish it, for
+    the duration of the block,
     to the contextvar the ``runs.create`` proxy reads. A sync ``with`` around an
     ``await`` is fine: the value is set before the await and reset after, and
     contextvars propagate across awaits within the same task. Empty when the
