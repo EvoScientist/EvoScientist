@@ -217,6 +217,18 @@ class LocalGraphGateway:
         run = await client.runs.get(thread_id, run_id)
         return run["status"]
 
+    async def get_process_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        process_id: str,
+    ) -> str:
+        # Background processes launched by the in-process main graph live in this
+        # process's registry, so read it directly (no server round-trip).
+        from .. import background
+
+        return background.poll_status(process_id)
+
     def _require_local_graph(self, target: GraphTarget | None) -> CompiledStateGraph:
         if target is None or target.local_graph is None:
             raise RuntimeError("LocalGraphGateway requires GraphTarget.local_graph")

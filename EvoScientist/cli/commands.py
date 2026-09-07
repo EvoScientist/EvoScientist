@@ -1660,17 +1660,26 @@ def serve(
             _serve_reader_target(),
             thread_id,
         )
-
-    async def _serve_enqueue_completions_idle() -> None:
-        # Throttled idle-tick reader: surfaces completions while no channel
-        # message is being processed, without a state read on every poll tick.
-        thread_id = runtime_state.thread_id
-        if not thread_id:
-            return
-        await async_notifier.enqueue_completions_from_state_throttled(
+        await async_notifier.enqueue_bg_process_completions_from_state(
             runtime_state.runtime_gateways.graph_gateway,
             _serve_reader_target(),
             thread_id,
+        )
+
+    async def _serve_enqueue_completions_idle() -> None:
+        # Throttled idle-tick reader: surfaces async-task + bg-process completions
+        # while no channel message is being processed, without a state read on
+        # every poll tick.
+        thread_id = runtime_state.thread_id
+        if not thread_id:
+            return
+        gateway = runtime_state.runtime_gateways.graph_gateway
+        target = _serve_reader_target()
+        await async_notifier.enqueue_completions_from_state_throttled(
+            gateway, target, thread_id
+        )
+        await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+            gateway, target, thread_id
         )
 
     try:

@@ -27,6 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -87,6 +88,40 @@ def _elapsed(proc: BgProcess) -> int:
     return int(end - proc.started_ts)
 
 
+def terminal_status(proc: BgProcess) -> str | None:
+    """Map a finished process's returncode to a notification status, or ``None`` if running.
+
+    Shared by the ``bg_processes`` state snapshot the tools write, the
+    :func:`poll_status` accessor the gateway reads, and the client-side completion
+    notification, so all three agree on the same terminal vocabulary
+    (``success`` / ``error`` / ``interrupted``, aligned with
+    ``async_notifier.TERMINAL_STATUSES``).
+    """
+    rc = proc.returncode
+    if rc is None:
+        return None
+    if rc == 0:
+        return "success"
+    if rc < 0:
+        return "interrupted"  # terminated by a signal
+    return "error"
+
+
+def poll_status(process_id: str) -> str:
+    """Live status of ``process_id`` for the state-driven client reader.
+
+    Records the exit first (like :func:`status`), then returns ``"running"`` or the
+    terminal status. Returns ``"unknown"`` when the process is not in the registry
+    (e.g. a server restart cleared it) so the reader treats it as not-yet-notifiable.
+    """
+    with _LOCK:
+        proc = _PROCESSES.get(process_id)
+        if proc is None:
+            return "unknown"
+        _record_exit(proc)
+        return terminal_status(proc) or "running"
+
+
 def was_observed_done(process_id: str, origin_thread_id: str | None = None) -> bool:
     """True if ``origin_thread_id`` already saw this process's completion itself.
 
@@ -100,6 +135,52 @@ def was_observed_done(process_id: str, origin_thread_id: str | None = None) -> b
             return False
         seen_ts = proc.last_checked_by_thread.get(origin_thread_id)
         return seen_ts is not None and seen_ts >= proc.finished_ts
+
+
+def _record_dict(proc: BgProcess) -> dict[str, Any]:
+    """Plain snapshot of a process for the ``bg_processes`` thread-state channel."""
+    return {
+        "process_id": proc.process_id,
+        "name": proc.name,
+        "command": proc.command,
+        "pid": proc.pid,
+        "status": terminal_status(proc) or "running",
+        "returncode": proc.returncode,
+        "started_at": proc.started_at,
+        "origin_thread_id": proc.origin_thread_id,
+    }
+
+
+def state_record(process_id: str) -> dict[str, Any] | None:
+    """Structured mirror of a single process for ``bg_processes`` state.
+
+    Records the exit first (so ``status`` reflects a just-finished process), then
+    returns the fields the client reader needs to detect completion and build the
+    notification. ``None`` when the process is not tracked. When ``status`` is
+    terminal, writing this into thread state marks the process as observed — the
+    reader skips terminal-in-state records, exactly like the async-task reader.
+    """
+    with _LOCK:
+        proc = _PROCESSES.get(process_id)
+        if proc is None:
+            return None
+        _record_exit(proc)
+        return _record_dict(proc)
+
+
+def list_records(
+    thread_id: str | None = None, *, include_all: bool = False
+) -> list[dict[str, Any]]:
+    """Mirror records for the thread's tracked processes (scoping mirrors :func:`list_all`)."""
+    with _LOCK:
+        procs = [
+            p
+            for p in _PROCESSES.values()
+            if include_all or p.origin_thread_id == thread_id
+        ]
+        for p in procs:
+            _record_exit(p)
+        return [_record_dict(p) for p in procs]
 
 
 def _read_tail(log_path: Path, tail_bytes: int) -> str:

@@ -47,6 +47,8 @@ from ._constants import (
 from .async_notifier import (
     AsyncTasksState,
     consume_notifications,
+    enqueue_bg_process_completions_from_state,
+    enqueue_bg_process_completions_from_state_throttled,
     enqueue_completions_from_state,
     enqueue_completions_from_state_throttled,
     has_pending_notifications,
@@ -1234,13 +1236,15 @@ def run_textual_interactive(
                 agent = self._agent_loader.agent
                 tid = self._conversation_tid
                 if agent is not None and tid:
+                    target = GraphTarget(
+                        local_graph=agent,
+                        workspace_dir=self._workspace_dir,
+                    )
                     await enqueue_completions_from_state_throttled(
-                        self._graph_gateway(),
-                        GraphTarget(
-                            local_graph=agent,
-                            workspace_dir=self._workspace_dir,
-                        ),
-                        tid,
+                        self._graph_gateway(), target, tid
+                    )
+                    await enqueue_bg_process_completions_from_state_throttled(
+                        self._graph_gateway(), target, tid
                     )
             except Exception:
                 import logging
@@ -2442,13 +2446,18 @@ def run_textual_interactive(
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
 
-            # On stream close, enqueue any async-task completions from thread
-            # state (additive to the watcher; the notification poller drains +
-            # injects). Best-effort — never blocks turn return on a read failure.
+            # On stream close, enqueue any async-task + bg-process completions from
+            # thread state; the notification poller drains + injects. Best-effort —
+            # never blocks turn return on a read failure.
+            _close_target = GraphTarget(
+                local_graph=agent, workspace_dir=self._workspace_dir
+            )
+            _close_tid = thread_id_override or self._conversation_tid
             await enqueue_completions_from_state(
-                graph_gateway,
-                GraphTarget(local_graph=agent, workspace_dir=self._workspace_dir),
-                thread_id_override or self._conversation_tid,
+                graph_gateway, _close_target, _close_tid
+            )
+            await enqueue_bg_process_completions_from_state(
+                graph_gateway, _close_target, _close_tid
             )
             return response
 

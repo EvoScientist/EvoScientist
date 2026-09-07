@@ -61,6 +61,48 @@ def test_status_running_then_exited(tmp_path):
     assert "code 0" in out
 
 
+def test_terminal_status_maps_returncode():
+    """terminal_status: None while running, else success/error/interrupted."""
+    proc = bg.BgProcess(
+        process_id="p",
+        name="p",
+        command="x",
+        popen=None,
+        pid=1,
+        log_path=None,
+        started_at="",
+        started_ts=0.0,
+    )
+    assert bg.terminal_status(proc) is None  # returncode None -> running
+    proc.returncode = 0
+    assert bg.terminal_status(proc) == "success"
+    proc.returncode = 3
+    assert bg.terminal_status(proc) == "error"
+    proc.returncode = -9  # killed by signal
+    assert bg.terminal_status(proc) == "interrupted"
+
+
+def test_poll_status_and_state_record(tmp_path):
+    """poll_status/state_record drive the gateway + the client reader."""
+    pid = bg.launch(_true_cmd(), str(tmp_path))
+    assert bg.poll_status("no-such-id") == "unknown"
+    assert _wait_until(lambda: bg.poll_status(pid) == "success")
+    rec = bg.state_record(pid)
+    assert rec["process_id"] == pid
+    assert rec["status"] == "success"
+    assert rec["returncode"] == 0
+    assert rec["command"] == _true_cmd()
+    assert bg.state_record("no-such-id") is None
+
+
+def test_list_records_scopes_to_thread(tmp_path):
+    bg.launch("echo a", str(tmp_path), origin_thread_id="T-1")
+    bg.launch("echo b", str(tmp_path), origin_thread_id="T-2")
+    mine = bg.list_records("T-1")
+    assert {r["origin_thread_id"] for r in mine} == {"T-1"}
+    assert len(bg.list_records(None, include_all=True)) == 2
+
+
 def test_output_captured_in_status(tmp_path):
     pid = bg.launch("echo hello-from-bg", str(tmp_path))
     assert _wait_until(lambda: "hello-from-bg" in bg.status(pid))

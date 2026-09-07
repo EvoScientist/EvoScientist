@@ -494,6 +494,9 @@ def _reset_notifier_state(an_mod):
     an_mod._reader_enqueued_task_ids.clear()
     an_mod._idle_reader_last_poll.clear()
     an_mod._idle_reader_active_seen.clear()
+    an_mod._reader_enqueued_process_ids.clear()
+    an_mod._bg_idle_reader_last_poll.clear()
+    an_mod._bg_idle_reader_active_seen.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -885,3 +888,145 @@ async def test_throttled_reader_disarms_after_task_terminal(monkeypatch):
         gateway, target, "cli-tid", min_interval_s=3.0
     )
     assert async_notifier._idle_reader_last_poll["cli-tid"] == last_poll
+
+
+# ============================================================================
+# Background-process reader (mirror of the async-task reader; polls process
+# status via the gateway and enqueues kind="bg-process" completions).
+# ============================================================================
+
+
+def _bg_running_registry(process_id="proc-1", name="demo", command="sleep 5"):
+    return {
+        "bg_processes": {
+            process_id: {
+                "process_id": process_id,
+                "name": name,
+                "command": command,
+                "status": "running",
+                "origin_thread_id": "cli-tid",
+            }
+        }
+    }
+
+
+async def test_bg_reader_enqueues_completion_from_state():
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "success"},
+    )
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert active == 0
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    n = drained[0]
+    assert n.kind == "bg-process"
+    assert n.task_id == "proc-1"
+    assert n.agent_name == "demo"
+    assert n.status == "success"
+    assert n.prompt == "sleep 5"
+
+
+async def test_bg_reader_skips_terminal_in_state():
+    # Agent already observed the exit (a tool wrote the terminal status into the
+    # record) → nothing to proactively surface, and no live poll.
+    registry = {
+        "bg_processes": {
+            "proc-1": {"process_id": "proc-1", "name": "demo", "status": "success"}
+        }
+    }
+    gateway = FakeGraphGateway(
+        state_values=registry, process_statuses={"proc-1": "success"}
+    )
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+    assert gateway.process_status_calls == []
+
+
+async def test_bg_reader_no_op_while_running():
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "running"},
+    )
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert active == 1  # still running → keeps idle polling armed
+    assert drain_notifications("cli-tid") == []
+
+
+async def test_bg_reader_idempotent_across_polls():
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "error"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+
+    # One enqueue; the seen-set short-circuits the second poll before it re-polls.
+    assert len(drain_notifications("cli-tid")) == 1
+    assert gateway.process_status_calls == ["proc-1"]
+
+
+async def test_bg_reader_unknown_process_stops_polling():
+    # Registry cleared server-side (e.g. restart) → status unknown; give up rather
+    # than spin, and never enqueue.
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert active == 0
+    assert drain_notifications("cli-tid") == []
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert gateway.process_status_calls == ["proc-1"]  # not re-polled
+
+
+async def test_bg_reader_throttle_rate_limits(monkeypatch):
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "running"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 500.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.process_status_calls == ["proc-1"]
+
+    clock["t"] += 1.0
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.process_status_calls == ["proc-1"]  # throttled
+
+    clock["t"] += 3.0
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.process_status_calls == ["proc-1", "proc-1"]
