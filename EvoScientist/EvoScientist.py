@@ -910,13 +910,17 @@ def _get_default_middleware(
         create_tool_selector_middleware,
         default_memory_scheduler,
     )
-    from .middleware.events import NO_OP_SINK, RunScopedEventSink
 
-    # Subagent stacks never drive the main-agent frontend widgets; force the
-    # no-op sink there regardless of what the caller passed. Main stacks built
-    # without an explicit frontend/session sink report into the active stream
-    # run's sink, preserving selector suppression for headless local runs.
-    events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
+    # Sink selection policy lives in middleware/events.py (single home):
+    # subagent stacks get the no-op sink; main stacks get the caller-supplied
+    # or run-scoped sink; main stacks in a langgraph dev subprocess
+    # additionally mirror events onto the run's `custom` stream channel so
+    # the server gateway can render them client-side.
+    from .middleware.events import resolve_middleware_event_sink
+
+    events = resolve_middleware_event_sink(
+        events, for_async_subagent=for_async_subagent
+    )
 
     cfg = cfg if cfg is not None else _ensure_config()
     model = chat_model if chat_model is not None else _ensure_chat_model()
