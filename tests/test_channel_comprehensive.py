@@ -1263,6 +1263,25 @@ class TestExtractRetryAfter:
         )
         assert StubChannel()._extract_retry_after(exc) is None
 
+    @pytest.mark.parametrize("status", [400, 404])
+    def test_httpx_permanent_4xx_not_retryable(self, status):
+        """400 and 404 are permanent for a given request and must not retry."""
+        exc = httpx.HTTPStatusError(
+            "client error",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(status),
+        )
+        assert StubChannel()._extract_retry_after(exc) is None
+
+    def test_httpx_408_still_retries(self):
+        """Not every 4xx is permanent: 408 Request Timeout keeps the default delay."""
+        exc = httpx.HTTPStatusError(
+            "request timeout",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(408),
+        )
+        assert StubChannel()._extract_retry_after(exc) == 1.0
+
     def test_httpx_500_is_retryable(self):
         """httpx.HTTPStatusError with status 500 should retry (default 1.0s)."""
         exc = httpx.HTTPStatusError(

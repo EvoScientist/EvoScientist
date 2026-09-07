@@ -747,8 +747,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
     # ── Send retry abstraction ──────────────────────────────────────
 
-    # HTTP status codes that should never be retried (auth/permission errors)
-    _non_retryable_status_codes: tuple[int, ...] = (401, 403)
+    # HTTP status codes that should never be retried. Listed explicitly
+    # rather than as a 4xx range: 408 and 425 are retryable by definition and
+    # 429 is handled by the rate-limit path.
+    _non_retryable_status_codes: tuple[int, ...] = (400, 401, 403, 404)
 
     # Structured SDK error codes that should never be retried (e.g. Slack invalid_auth)
     # Channel-specific message patterns (e.g. Feishu 10003, DingTalk 40014) are handled
