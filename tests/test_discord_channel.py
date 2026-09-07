@@ -1,5 +1,7 @@
 """Tests for Discord channel implementation."""
 
+import importlib.util
+
 import pytest
 
 from EvoScientist.channels.base import ChannelError
@@ -39,6 +41,10 @@ class TestDiscordChannel:
         assert result is False
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("discord") is None,
+    reason="discord.py not installed",
+)
 class TestDiscordRetryErrorExtraction:
     """Test Discord-specific status code extraction."""
 

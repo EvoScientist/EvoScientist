@@ -1,5 +1,7 @@
 """Tests for Slack channel implementation."""
 
+import importlib.util
+
 import pytest
 
 from EvoScientist.channels.base import ChannelError
@@ -77,6 +79,10 @@ class TestSlackChannelRegistration:
         assert "slack" in channels
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("slack_sdk") is None,
+    reason="slack-sdk not installed",
+)
 class TestSlackRetryErrorExtraction:
     """Test Slack-specific status code and SDK error code extraction."""
 
