@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from EvoScientist.middleware.events import (
     MIDDLEWARE_EVENT_TAG,
     NO_OP_SINK,
@@ -143,3 +145,106 @@ class TestNoOpSinkContract:
         assert sink.tool_selection_active is False
         assert sink.tool_selection_pending() is False
         assert sink.consume_tool_selection() == (False, None)
+
+
+class TestMiddlewareEventWire:
+    """to_wire/from_wire round-trips and the dispatch mapping."""
+
+    def test_round_trip_each_kind(self):
+        from EvoScientist.middleware.events import (
+            FallbackNotice,
+            MiddlewareEvent,
+            ToolSelection,
+            ToolSelectionEnded,
+            ToolSelectionStarted,
+        )
+
+        events = [
+            ToolSelectionStarted(total_tools=7),
+            ToolSelection(selected=["read_file"], total_tools=7),
+            ToolSelectionEnded(),
+            FallbackNotice(text="fb", style="red"),
+        ]
+        for event in events:
+            assert MiddlewareEvent.from_wire(event.to_wire()) == event
+
+    def test_unknown_kind_is_silence_not_error(self):
+        from EvoScientist.middleware.events import MiddlewareEvent
+
+        assert MiddlewareEvent.from_wire({"kind": "someone_elses_event"}) is None
+        assert MiddlewareEvent.from_wire({}) is None
+
+    def test_malformed_known_kind_raises(self):
+        from EvoScientist.middleware.events import MiddlewareEvent
+
+        with pytest.raises(ValueError, match="selected"):
+            MiddlewareEvent.from_wire({"kind": "tool_selection", "selected": "nope"})
+        with pytest.raises(ValueError, match="total_tools"):
+            # missing total_tools
+            MiddlewareEvent.from_wire({"kind": "tool_selection_started"})
+
+    def test_dispatch_maps_each_kind_to_its_sink_method(self):
+        from EvoScientist.middleware.events import (
+            FallbackNotice,
+            ToolSelection,
+            ToolSelectionEnded,
+            ToolSelectionStarted,
+        )
+
+        sink = _RecordingSink()
+        ToolSelectionStarted(total_tools=3).dispatch(sink)
+        ToolSelection(selected=["a"], total_tools=3).dispatch(sink)
+        ToolSelectionEnded().dispatch(sink)
+        FallbackNotice(text="fb", style="red").dispatch(sink)
+        assert sink.calls == [
+            ("started", 3),
+            ("selection", ["a"], 3),
+            ("ended",),
+            ("fallback", "fb", "red"),
+        ]
+
+
+async def test_custom_channel_end_to_end_through_state_graph():
+    """A node writing through StreamBroadcastSink lands on the run's custom
+    stream channel — the real ``get_stream_writer`` path, no patching."""
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    sink = StreamBroadcastSink(_RecordingSink())
+
+    def _emit_events(state):
+        sink.on_tool_selection_started(3)
+        sink.on_tool_selection(["read_file"], 3)
+        sink.on_tool_selection_ended()
+        sink.emit_fallback_notice("fb", "red")
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("emit", _emit_events)
+    builder.add_edge(START, "emit")
+    builder.add_edge("emit", END)
+    graph = builder.compile()
+
+    payloads = [
+        chunk
+        async for chunk in graph.astream(
+            {"messages": [("user", "hi")]}, stream_mode="custom"
+        )
+    ]
+
+    assert payloads == [
+        {MIDDLEWARE_EVENT_TAG: {"kind": "tool_selection_started", "total_tools": 3}},
+        {
+            MIDDLEWARE_EVENT_TAG: {
+                "kind": "tool_selection",
+                "selected": ["read_file"],
+                "total_tools": 3,
+            }
+        },
+        {MIDDLEWARE_EVENT_TAG: {"kind": "tool_selection_ended"}},
+        {
+            MIDDLEWARE_EVENT_TAG: {
+                "kind": "fallback_notice",
+                "text": "fb",
+                "style": "red",
+            }
+        },
+    ]

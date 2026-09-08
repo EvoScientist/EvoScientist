@@ -20,7 +20,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
-from ..middleware.events import MIDDLEWARE_EVENT_TAG
+from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
 from ..stream.events import (
@@ -877,24 +877,13 @@ class LangGraphServerGateway:
         if payload is not None:
             payload = _as_raw_map(payload.get(MIDDLEWARE_EVENT_TAG))
         if payload is not None:
-            kind = payload.get("kind")
+            # Kind dispatch lives on the event dataclasses (middleware.events):
+            # unknown kinds are None (silence), malformed payloads raise and
+            # degrade to the DEBUG log below rather than fail the run.
             try:
-                if kind == "tool_selection_started":
-                    self.events.on_tool_selection_started(int(payload["total_tools"]))
-                elif kind == "tool_selection":
-                    selected = payload.get("selected")
-                    if isinstance(selected, list):
-                        self.events.on_tool_selection(
-                            [str(item) for item in selected],
-                            int(payload["total_tools"]),
-                        )
-                elif kind == "tool_selection_ended":
-                    self.events.on_tool_selection_ended()
-                elif kind == "fallback_notice":
-                    self.events.emit_fallback_notice(
-                        str(payload.get("text", "")),
-                        str(payload.get("style", "yellow")),
-                    )
+                event = MiddlewareEvent.from_wire(payload)
+                if event is not None:
+                    event.dispatch(self.events)
             except Exception:
                 logger.debug(
                     "malformed middleware custom event %r", dict(payload), exc_info=True
