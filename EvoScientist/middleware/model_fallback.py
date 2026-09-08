@@ -126,6 +126,21 @@ def get_fallback_chain() -> list[tuple[str, str]]:
         return list(_fallback_chain)
 
 
+def seed_fallback_chain() -> None:
+    """Seed the fallback chain from config now (idempotent per process).
+
+    ``get_effective_config()`` reloads config from disk on every call, and
+    the langgraph dev server's run loop raises ``BlockingError`` (blockbuster)
+    on sync file IO — so the seeding must happen in a sync context, not lazily
+    inside a run. Call this explicitly from graph registration
+    (``langgraph_dev/main_graph.py``) and agent construction
+    (``create_cli_agent``); the first per-run chain read is then a pure
+    in-memory list read.
+    """
+    with _fallback_chain_lock:
+        _ensure_chain_initialized()
+
+
 def set_fallback_chain(chain: list[tuple[str, str]]) -> None:
     """Replace the entire fallback chain.
 
@@ -475,9 +490,14 @@ def _guard_and_fallback_sync(
 class ModelFallbackMiddleware(AgentMiddleware):
     """LangChain AgentMiddleware that retries failed model calls on fallbacks.
 
-    On each invocation the middleware reads the module-level chain (lazily
-    seeded from config on first access) so that ``/model-fallback add``
-    takes effect immediately without rebuilding the agent.
+    On each invocation the middleware reads the module-level chain, so
+    ``/model-fallback add`` takes effect immediately for *this* process
+    without rebuilding the agent. The chain is seeded from config once per
+    process - explicitly at graph registration (langgraph dev) and agent
+    construction (CLI), lazily on the first read anywhere else. A langgraph
+    dev server therefore serves the chain as of its own startup: edits made
+    in a CLI session persist to config and land on the server after a
+    restart (restart-to-apply).
 
     Attributes:
         name: Middleware identifier used by the framework.
