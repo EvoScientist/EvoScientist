@@ -2,6 +2,7 @@
 
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,12 +17,32 @@ from EvoScientist.middleware.background import (
 )
 
 
-def _run_bg(*, dangerous: bool = False, guard_dangerous: bool = False):
-    """Build the ``run_in_background`` tool for direct-invoke tests.
+def _msg_text(result) -> str:
+    """ToolMessage content of a ``_bg_command`` result (or the plain string
+    for responses that carry no state update)."""
+    if isinstance(result, str):
+        return result
+    (msg,) = result.update["messages"]
+    return msg.content
 
-    Invoked via ``.invoke({...})`` without a ToolCall, so ``runtime.tool_call_id``
-    is ``None`` and the tool returns its plain status string (``_bg_command``
-    falls back to the string when there is no tool_call_id to carry a Command).
+
+_STUB_RUNTIME = SimpleNamespace(
+    tool_call_id="call-test", config={"configurable": {"thread_id": "T-test"}}
+)
+"""ToolRuntime stand-in for success-path calls exercised via ``.func(...)``.
+
+The framework always provides a tool_call_id in a real graph call; tests use
+``.func`` with this stub so they reflect that contract instead of the removed
+no-runtime fallback.
+"""
+
+
+def _run_bg(*, dangerous: bool = False, guard_dangerous: bool = False):
+    """Build the ``run_in_background`` tool for direct tests.
+
+    Error paths (blocked / refused commands) return plain strings and work via
+    ``.invoke({...})``; success paths mirror state and need a ``tool_call_id``,
+    so they are exercised via ``.func(..., runtime=_STUB_RUNTIME)``.
     """
     return _make_run_in_background(dangerous, guard_dangerous)
 
@@ -113,12 +134,14 @@ def test_bg_command_builds_state_update_with_runtime():
     assert result.update["messages"][0].content == "started p1"
 
 
-def test_bg_command_falls_back_to_string():
-    """No tool_call_id or no records -> plain string (usable outside a graph)."""
+def test_bg_command_falls_back_only_without_records():
+    """No records -> plain string (an untracked process id); a missing
+    tool_call_id with records to mirror is a caller bug and raises."""
     from EvoScientist.middleware.background import _bg_command
 
-    assert _bg_command("hi", [{"process_id": "p1"}], None) == "hi"
     assert _bg_command("hi", [None], object()) == "hi"
+    with pytest.raises(RuntimeError, match="tool_call_id"):
+        _bg_command("hi", [{"process_id": "p1"}], None)
 
 
 def test_run_rejects_dangerous_command_without_launching(monkeypatch):
@@ -137,10 +160,14 @@ def test_run_rejects_dangerous_command_without_launching(monkeypatch):
 def test_run_launches_valid_command(tmp_path, monkeypatch):
     # Pin the workspace cwd to a temp dir so the launch is isolated.
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    out = _run_bg().invoke({"command": "echo ok", "name": "demo"})
-    assert "Started background process" in out
-    assert "check_process" in out
+    result = _run_bg().func(command="echo ok", name="demo", runtime=_STUB_RUNTIME)
+    text = _msg_text(result)
+    assert "Started background process" in text
+    assert "check_process" in text
     assert len(bg._PROCESSES) == 1
+    # The state mirror rides along on the same Command.
+    (rec,) = result.update["bg_processes"].values()
+    assert rec["process_id"] in bg._PROCESSES
 
 
 def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
