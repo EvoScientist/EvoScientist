@@ -82,14 +82,21 @@ def _bg_command(
 ) -> "str | Command":
     """Return a ``Command`` carrying the tool message + a ``bg_processes`` state update.
 
-    Falls back to the plain ``text`` string when there is nothing to mirror or no
-    ``tool_call_id`` is reachable (e.g. a direct unit-test call with no runtime), so the
-    tool stays usable outside a graph.
+    Falls back to the plain ``text`` string only when there is nothing to
+    mirror (every record is ``None`` — e.g. an untracked process id). A
+    missing ``tool_call_id`` is a caller bug and raises: in a real graph
+    call the framework always provides one, and tests must reflect that
+    contract instead of silently exercising a no-runtime fallback.
     """
     tool_call_id = getattr(runtime, "tool_call_id", None)
     valid = [r for r in records if r is not None]
-    if not valid or tool_call_id is None:
+    if not valid:
         return text
+    if tool_call_id is None:
+        raise RuntimeError(
+            "_bg_command requires a tool_call_id (a ToolRuntime from a real "
+            "graph tool call); nothing to attach the state update to."
+        )
     return Command(
         update={
             "messages": [ToolMessage(text, tool_call_id=tool_call_id)],
