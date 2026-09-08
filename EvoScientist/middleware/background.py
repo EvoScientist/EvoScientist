@@ -157,7 +157,19 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
             f"Output -> {log_path}. "
             f"Poll with check_process('{process_id}'), stop with stop_process('{process_id}')."
         )
-        return _bg_command(text, [background.state_record(process_id)], runtime)
+        record = background.state_record(process_id)
+        if record is not None and record.get("status") != "running":
+            # The process already exited (e.g. an invalid command that the
+            # shell rejected at spawn). The mirrored record is terminal, so
+            # the client reader will - correctly - never surface a
+            # notification; report the exit here instead so the agent (and
+            # the operator) actually learns the launch did not stick.
+            text = (
+                f"Background process {process_id}{label} exited immediately "
+                f"(code {record.get('returncode')}). "
+                f"Output -> {log_path}."
+            )
+        return _bg_command(text, [record], runtime)
 
     return run_in_background
 
