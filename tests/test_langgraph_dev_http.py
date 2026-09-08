@@ -377,6 +377,39 @@ def test_post_policy_empty_requests_return_no_decisions():
     assert resp.json()["decisions"] == []
 
 
+def test_post_policy_resolves_off_the_event_loop(monkeypatch):
+    """resolve_config_decisions reads config from disk, which blockbuster
+    refuses on the langgraph dev event loop - the route must run it in a
+    worker thread. TestClient has no blockbuster, so the pin is the thread
+    the read runs on: a sync call from the route's coroutine would run on
+    the loop thread (get_running_loop succeeds there), an offloaded call
+    runs with no running loop."""
+    import asyncio
+
+    import EvoScientist.channels.interaction as interaction_mod
+
+    on_loop_thread = []
+
+    real_resolve = interaction_mod.resolve_config_decisions
+
+    def _offloop_recorder(action_requests):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            on_loop_thread.append(False)  # worker thread - off the loop
+        else:
+            on_loop_thread.append(True)  # ran on the event loop thread
+        return real_resolve(action_requests)
+
+    monkeypatch.setattr(interaction_mod, "resolve_config_decisions", _offloop_recorder)
+    resp = client.post(
+        "/api/policy", json={"action_requests": [_shell_req("rm -rf build")]}
+    )
+    assert resp.status_code == 200
+    assert on_loop_thread, "the route must actually call resolve_config_decisions"
+    assert not any(on_loop_thread)
+
+
 def test_post_policy_requires_action_requests():
     resp = client.post("/api/policy", json={"command": "ls"})
     assert resp.status_code == 400
