@@ -180,6 +180,19 @@ def stop_process(process_id: str, runtime: ToolRuntime = None) -> "str | Command
     Args:
         process_id: The id returned by run_in_background.
     """
+    # Thread-scoped ownership (matches list_processes' default scoping): under
+    # a shared keepalive server, one session's agent must not kill another
+    # session's processes. Legacy records without an origin thread stay
+    # stoppable; a caller without a resolvable thread id is treated as
+    # legacy-owner too.
+    caller_tid = _origin_thread_id(runtime)
+    record = background.state_record(process_id)
+    origin = (record or {}).get("origin_thread_id")
+    if origin is not None and caller_tid is not None and origin != caller_tid:
+        return (
+            f"Background process {process_id} belongs to another session "
+            f"({origin}); only its launching session can stop it."
+        )
     text = background.stop(process_id)
     return _bg_command(text, [background.state_record(process_id)], runtime)
 

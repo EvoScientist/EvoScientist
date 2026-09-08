@@ -373,3 +373,40 @@ def test_list_processes_forwards_all_threads(monkeypatch):
     assert captured["include_all"] is True
     list_processes.invoke({})
     assert captured["include_all"] is False
+
+
+def test_stop_process_is_scoped_to_the_launching_thread(tmp_path, monkeypatch):
+    """A session's agent cannot stop another session's process (shared
+    keepalive server); the launching session can."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    owner = SimpleNamespace(
+        tool_call_id="call-owner", config={"configurable": {"thread_id": "T-owner"}}
+    )
+    stranger = SimpleNamespace(
+        tool_call_id="call-stranger",
+        config={"configurable": {"thread_id": "T-stranger"}},
+    )
+    _run_bg().func(command=_sleep_cmd(30), runtime=owner)
+    (pid,) = bg._PROCESSES.keys()
+
+    refusal = stop_process.func(process_id=pid, runtime=stranger)
+    assert "belongs to another session" in _msg_text(refusal)
+    assert bg._PROCESSES[pid].popen.poll() is None  # not killed
+
+    stopped = stop_process.func(process_id=pid, runtime=owner)
+    assert "Stopped" in _msg_text(stopped) or "finished" in _msg_text(stopped)
+
+
+def test_stop_process_allows_legacy_records_without_origin(tmp_path, monkeypatch):
+    """Processes without an origin thread (pre-tracking records) stay
+    stoppable by any caller - refusing would brick them."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    _run_bg().func(command=_sleep_cmd(30), runtime=_STUB_RUNTIME)
+    (pid,) = bg._PROCESSES.keys()
+    bg._PROCESSES[pid].origin_thread_id = None
+
+    caller = SimpleNamespace(
+        tool_call_id="call-x", config={"configurable": {"thread_id": "T-other"}}
+    )
+    out = stop_process.func(process_id=pid, runtime=caller)
+    assert "belongs to another session" not in _msg_text(out)
