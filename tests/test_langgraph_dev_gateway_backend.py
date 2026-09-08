@@ -90,7 +90,11 @@ class TestReuseRefusal:
         with pytest.raises(manager.DeployModeMismatchError) as exc:
             manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path)
         assert "stripped mode" in str(exc.value)
-        assert "EvoSci server stop" in str(exc.value)
+        # No keepalive in this config: the refusal points at the other live
+        # session. The `EvoSci server stop` hint appears only under keepalive
+        # (pinned in test_gateway_backend_deploy_mode_state_machine.py).
+        assert "Stop the other EvoSci session" in str(exc.value)
+        assert "EvoSci server stop" not in str(exc.value)
 
     def test_deploy_mode_mismatch_is_workspace_mismatch_subclass(self):
         """Every existing print-and-exit handler catches the parent class."""

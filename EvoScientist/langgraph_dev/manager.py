@@ -235,6 +235,21 @@ class DeployModeMismatchError(WorkspaceMismatchError):
     """
 
 
+def _keepalive_stop_hint(config: EvoScientistConfig) -> str:
+    """Extra stop hint for mismatch refusals, gated on keepalive.
+
+    Only under keepalive can the running server be an ownerless leftover;
+    without the flag the mismatch means a live session, where a stop
+    suggestion would be misleading. Points at ``EvoSci server stop`` (not a
+    raw kill): it verifies ownership and cleans the PID/sidecar files, so no
+    stale records are left behind. Shared by the workspace-mismatch and
+    deploy-mode-mismatch refusals so the gate cannot drift between them.
+    """
+    if not getattr(config, "langgraph_dev_keepalive", False):
+        return ""
+    return " If it is a leftover keepalive server, stop it with: EvoSci server stop."
+
+
 def _write_workspace_sidecar(
     workspace_dir: Path,
     pid: int,
@@ -1352,24 +1367,13 @@ def _ensure_langgraph_dev_locked(
                 if ws_path is not None:
                     recorded = Path(sidecar["workspace"]).resolve()
                     if recorded != ws_path.resolve():
-                        hint = ""
-                        if getattr(config, "langgraph_dev_keepalive", False):
-                            # Only under keepalive can the server be an ownerless
-                            # leftover; without the flag the mismatch means a live
-                            # session, where a stop suggestion would be misleading.
-                            # Point at `EvoSci server stop` (not a raw kill): it
-                            # verifies ownership and cleans the PID/sidecar files,
-                            # so no stale records are left behind.
-                            hint = (
-                                " If it is a leftover keepalive server, stop it"
-                                " with: EvoSci server stop."
-                            )
                         raise WorkspaceMismatchError(
                             f"An EvoScientist langgraph dev is already running on "
                             f"{_base_url(port, host)} for workspace {recorded}, but the "
                             f"current process requested workspace {ws_path}. "
                             f"Stop the other EvoSci session (deploy / TUI / serve) "
-                            f"or rerun with --workdir {recorded}." + hint
+                            f"or rerun with --workdir {recorded}."
+                            + _keepalive_stop_hint(config)
                         )
                 # Full-mode callers must not reuse a server recorded as
                 # stripped: it would serve a degraded main graph (no MCP
@@ -1377,16 +1381,26 @@ def _ensure_langgraph_dev_locked(
                 # healthy. A missing ``deploy_mode`` key means a sidecar from
                 # before this protocol existed - mode unknown, so warn and
                 # reuse rather than brick pre-existing servers.
-                if need_full and sidecar.get("deploy_mode") is False:
-                    raise DeployModeMismatchError(
-                        f"An EvoScientist langgraph dev is already running on "
-                        f"{_base_url(port, host)} in stripped mode, but this "
-                        f"session requires a full-mode server "
-                        f"(gateway_backend=langgraph_server) with MCP tools "
-                        f"and async sub-agents loaded server-side. Stop it "
-                        f"with: EvoSci server stop (or stop the other EvoSci "
-                        f"session), then restart."
-                    )
+                if need_full:
+                    sidecar_mode = sidecar.get("deploy_mode")
+                    if sidecar_mode is False:
+                        raise DeployModeMismatchError(
+                            f"An EvoScientist langgraph dev is already running on "
+                            f"{_base_url(port, host)} in stripped mode, but this "
+                            f"session requires a full-mode server "
+                            f"(gateway_backend=langgraph_server) with MCP tools "
+                            f"and async sub-agents loaded server-side. "
+                            f"Stop the other EvoSci session, then restart."
+                            + _keepalive_stop_hint(config)
+                        )
+                    if sidecar_mode is None:
+                        logger.warning(
+                            "Reusing a langgraph dev whose sidecar records no "
+                            "deploy mode (written before the full/stripped "
+                            "protocol); if it was spawned stripped, a "
+                            "full-mode session needs it restarted "
+                            "(EvoSci server stop, then relaunch)."
+                        )
                 recorded_fp = sidecar.get("config_fingerprint")
                 if isinstance(recorded_fp, str) and recorded_fp != config_fp:
                     CONFIG_DRIFT_SINCE_LAUNCH = True

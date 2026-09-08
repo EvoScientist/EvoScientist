@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 
 import pytest
 
@@ -241,3 +242,67 @@ class TestGatewayBackendLifecycleE2E:
         # Must not raise; no second spawn.
         manager.ensure_langgraph_dev(_server_backend_cfg(), workspace_dir=workspace)
         assert len(registry.processes) == 1
+
+    async def test_stripped_refusal_without_keepalive_has_no_stop_hint(
+        self, tmp_path, monkeypatch, runtime_paths
+    ):
+        """Without keepalive the running server belongs to a live session.
+
+        The refusal must point at the other session, not at
+        ``EvoSci server stop`` - the stop suggestion is meaningful only for
+        ownerless keepalive leftovers.
+        """
+        registry = _ProcRegistry()
+        registry.install(monkeypatch)
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(runtime_paths, log_file=tmp_path / "langgraph_dev.log"),
+        )
+        workspace = tmp_path / "ws"
+
+        # Session A: a stripped server is left running.
+        _reset_process_state(monkeypatch)
+        manager.ensure_langgraph_dev(_local_backend_cfg(), workspace_dir=workspace)
+
+        # Session B (fresh process): full-mode, keepalive off.
+        _reset_process_state(monkeypatch)
+        cfg = _server_backend_cfg()
+        cfg.langgraph_dev_keepalive = False
+        with pytest.raises(manager.DeployModeMismatchError) as exc:
+            manager.ensure_langgraph_dev(cfg, workspace_dir=workspace)
+        assert "Stop the other EvoSci session" in str(exc.value)
+        assert "EvoSci server stop" not in str(exc.value)
+
+    async def test_full_mode_reuses_legacy_sidecar_without_deploy_mode_record(
+        self, tmp_path, monkeypatch, runtime_paths, caplog
+    ):
+        """A sidecar predating the deploy-mode protocol is reused, with a warning.
+
+        Refusing would brick pre-existing servers whose sidecar has no
+        ``deploy_mode`` key; the warning tells the user a restart may be
+        needed if that leftover was spawned stripped.
+        """
+        registry = _ProcRegistry()
+        registry.install(monkeypatch)
+        monkeypatch.setattr(
+            manager,
+            "RUNTIME",
+            dataclasses.replace(runtime_paths, log_file=tmp_path / "langgraph_dev.log"),
+        )
+        workspace = tmp_path / "ws"
+
+        _reset_process_state(monkeypatch)
+        manager.ensure_langgraph_dev(_local_backend_cfg(), workspace_dir=workspace)
+
+        # Simulate a sidecar written before the deploy-mode protocol existed.
+        sidecar = json.loads(manager.RUNTIME.workspace_sidecar.read_text())
+        del sidecar["deploy_mode"]
+        manager.RUNTIME.workspace_sidecar.write_text(json.dumps(sidecar))
+
+        # Session B (fresh process): full-mode caller reuses the legacy server.
+        _reset_process_state(monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            manager.ensure_langgraph_dev(_server_backend_cfg(), workspace_dir=workspace)
+        assert len(registry.processes) == 1
+        assert "records no deploy mode" in caplog.text
