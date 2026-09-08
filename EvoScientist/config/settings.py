@@ -273,7 +273,10 @@ class EvoScientistConfig:
     # the in-process path without code changes. While "langgraph_server" is
     # set, the auto-started langgraph dev spawns in full deploy mode (MCP +
     # async sub-agents loaded server-side); reusing a stripped-mode leftover
-    # is refused rather than silently degraded.
+    # is refused rather than silently degraded. This flag routes spawn mode
+    # only: the CLI keeps building its in-process agent (and its MCP
+    # sessions) until a surface actually cuts over to the server gateway -
+    # skipping that init lands with the surface cutover, not here.
     gateway_backend: Literal["local", "langgraph_server"] = "local"
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
