@@ -23,7 +23,6 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,7 +52,6 @@ class BgProcess:
     returncode: int | None = None
     finished_at: str | None = None
     finished_ts: float | None = None  # epoch at exit; freezes elapsed once done
-    stopped: bool = False  # set by stop(); suppresses the completion notification
     # epoch each thread last checked this process (status/list); keyed by thread_id
     # so a check from one session can't dedup another session's completion ping.
     last_checked_by_thread: dict[str | None, float] = field(default_factory=dict)
@@ -201,13 +199,13 @@ def _read_tail(log_path: Path, tail_bytes: int) -> str:
     return data.decode("utf-8", "replace")
 
 
-def _watch(proc: BgProcess, on_exit: Callable[[BgProcess], None] | None) -> None:
-    """Block until ``proc`` exits, record the exit promptly, then fire ``on_exit``.
+def _watch(proc: BgProcess) -> None:
+    """Block until ``proc`` exits and record the exit promptly.
 
-    Running in a daemon thread, ``popen.wait()`` lets us record ``finished_ts`` at (very
-    close to) the real exit time — fixing the observation-time inflation — and gives a
-    hook the CLI layer wires to a completion notification, without ``background.py``
-    importing the notifier (kept decoupled via the callback).
+    Running in a daemon thread, ``popen.wait()`` lets us record ``finished_ts`` at
+    (very close to) the real exit time, fixing the observation-time inflation. The
+    CLI completion notification is derived from thread state (mirrored records +
+    the state reader); there is no push callback anymore.
     """
     try:
         proc.popen.wait()
@@ -215,11 +213,6 @@ def _watch(proc: BgProcess, on_exit: Callable[[BgProcess], None] | None) -> None
         pass
     with _LOCK:
         _record_exit(proc)
-    if on_exit is not None:
-        try:
-            on_exit(proc)
-        except Exception:
-            logger.warning("background on_exit callback failed", exc_info=True)
 
 
 def launch(
@@ -228,7 +221,6 @@ def launch(
     name: str | None = None,
     *,
     origin_thread_id: str | None = None,
-    on_exit: Callable[[BgProcess], None] | None = None,
 ) -> str:
     """Launch ``command`` detached in ``cwd``; return a short ``process_id``.
 
@@ -238,8 +230,6 @@ def launch(
     The caller is responsible for validating ``command`` first.
 
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
-    ``on_exit`` (optional) is called with the ``BgProcess`` from a daemon watcher thread
-    once the process exits — used by the CLI layer to emit a completion notification.
     """
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
@@ -275,8 +265,8 @@ def launch(
     )
     with _LOCK:
         _PROCESSES[process_id] = proc
-    # Daemon watcher: records the precise exit time and fires on_exit when done.
-    threading.Thread(target=_watch, args=(proc, on_exit), daemon=True).start()
+    # Daemon watcher: records the precise exit time.
+    threading.Thread(target=_watch, args=(proc,), daemon=True).start()
     return process_id
 
 
@@ -353,9 +343,6 @@ def stop(process_id: str) -> str:
         if proc.popen.poll() is not None:
             _record_exit(proc)
             return f"Process {process_id} already finished (code {proc.returncode})."
-        # Mark as user-stopped so the watcher's on_exit suppresses the completion
-        # notification (the user already knows — no need to ping them).
-        proc.stopped = True
         # The watcher's popen.wait() reaps without the lock, so a tiny PID-reuse race
         # remains (getpgid on a recycled pid).  On POSIX ProcessLookupError covers the
         # common case; on Windows ``Popen.terminate()`` is a no-op on a dead handle

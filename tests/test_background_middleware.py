@@ -148,7 +148,7 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
     captured = {}
 
-    def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
+    def _spy(command, cwd, name=None, *, origin_thread_id=None):
         captured["command"] = command
         return "pidX"
 
@@ -163,7 +163,7 @@ def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
     captured = {}
 
-    def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
+    def _spy(command, cwd, name=None, *, origin_thread_id=None):
         captured["command"] = command
         return "pidX"
 
