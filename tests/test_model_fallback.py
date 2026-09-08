@@ -836,3 +836,59 @@ class TestExplicitSeeding:
                 ("session", "prov-s"),
             ]
         mock_cfg.assert_not_called()
+
+    def test_seed_from_supplied_config_does_no_config_io(self):
+        """An explicit config seeds its own chain with no disk read."""
+        from EvoScientist.middleware.model_fallback import (
+            get_fallback_chain,
+            seed_fallback_chain,
+        )
+
+        cfg = SimpleNamespace(model_fallbacks="cfg-a:prov-a")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config",
+            side_effect=AssertionError("seed must not read config from disk"),
+        ):
+            _reset_chain_initialization()
+            seed_fallback_chain(cfg)
+        assert get_fallback_chain() == [("cfg-a", "prov-a")]
+
+    def test_pure_path_agent_construction_seeds_from_caller_config(self, tmp_path):
+        """create_cli_agent(config=..., chat_model=...) - the pure path -
+        seeds the chain from the caller's config, never from disk."""
+        import EvoScientist.EvoScientist as es_mod
+        from EvoScientist.middleware.model_fallback import get_fallback_chain
+
+        def fake_create_deep_agent(*_args, **_kwargs):
+            agent = MagicMock()
+            agent.with_config.return_value = agent
+            return agent
+
+        cfg = MagicMock()
+        cfg.model_fallbacks = "cfg-a:prov-a"
+        cfg.auto_approve = False
+        cfg.dangerous_mode = False
+        cfg.sandbox_execute_timeout = 300
+        cfg.recursion_limit = 100
+
+        with patch("deepagents.create_deep_agent", side_effect=fake_create_deep_agent):
+            with patch.object(es_mod, "_apply_env_from_config"):
+                with patch.object(es_mod, "_get_default_middleware", return_value=[]):
+                    with patch.object(
+                        es_mod,
+                        "load_mcp_and_build_kwargs",
+                        return_value={"name": "x"},
+                    ):
+                        with patch(
+                            "EvoScientist.config.settings.get_effective_config",
+                            side_effect=AssertionError(
+                                "pure-path seeding must not read config from disk"
+                            ),
+                        ):
+                            _reset_chain_initialization()
+                            es_mod.create_cli_agent(
+                                workspace_dir=str(tmp_path),
+                                config=cfg,
+                                chat_model=MagicMock(),
+                            )
+        assert get_fallback_chain() == [("cfg-a", "prov-a")]
