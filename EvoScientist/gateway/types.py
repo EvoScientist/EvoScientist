@@ -23,62 +23,31 @@ def resolve_per_run_config(
     thread_id: str,
     configurable_extra: Mapping[str, Any] | None,
     *,
-    include_per_run_overrides: bool = False,
-    config: Any = None,
+    per_run_overrides: Mapping[str, Any] | None = None,
+    recursion_limit: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the per-run LangGraph config for a gateway stream call.
 
-    Single assembly point for both gateway backends. Always merges, in
-    precedence order (lowest to highest):
+    Pure assembly - this module reads no config. The server gateway extracts
+    the per-run overrides (``configurable.model`` /
+    ``configurable.model_provider`` from the live session config,
+    ``recursion_limit`` as a first-class ``RunnableConfig`` key) and passes
+    them in; a per-call ``recursion_limit`` overrides the server's
+    construction-time ``.with_config`` binding, so a keepalive server picks
+    up the client's live limit per run instead of at restart. The local
+    backend passes neither: its agent is rebuilt on model switches and
+    already binds ``recursion_limit`` at construction from the same live
+    config, so per-run injection there is redundant.
 
-    1. nothing (see ``include_per_run_overrides`` below),
-    2. caller-supplied ``configurable_extra`` (e.g. ``active_teams``),
-    3. ``thread_id`` — structural key, always set last.
+    Merges, in precedence order (lowest to highest):
 
-    With ``include_per_run_overrides`` (server backend), additionally:
-
-    - ``configurable.model`` / ``configurable.model_provider`` from the LIVE
-      session config, picked up server-side by ``ConfigurableModelMiddleware``
-      (which re-resolves and caches the model per ``(model, provider)``) —
-      this is the per-run model channel that lets ``/model`` apply without
-      an agent rebuild.
-    - ``recursion_limit`` as a first-class top-level ``RunnableConfig`` key;
-      a per-call value overrides the server's construction-time
-      ``.with_config`` binding, so a keepalive server picks up the client's
-      live limit per run instead of at restart.
-
-    The local backend passes ``include_per_run_overrides=False``: its agent
-    is rebuilt on model switches and already binds ``recursion_limit`` at
-    construction from the same live config, so per-run injection there is
-    redundant — and would couple every local stream call to a config read.
-
-    ``config`` defaults to the live config object (``_ensure_config`` — the
-    cached, in-place-mutated session config), NOT a fresh disk read: a disk
-    read would clobber mid-session ``/model`` edits that have not been
-    ``--save``d. The deferred import keeps this module import-light and
-    cycle-free.
+    1. ``per_run_overrides`` (server backend session defaults),
+    2. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
+       explicit per-run injection is more specific than the session default,
+    3. ``thread_id`` - structural key, always set last.
     """
-    resolved_overrides: dict[str, Any] = {}
-    recursion_limit: int | None = None
-    if include_per_run_overrides:
-        if config is None:
-            from ..EvoScientist import _ensure_config
-
-            config = _ensure_config()
-        model = getattr(config, "model", None)
-        provider = getattr(config, "provider", None)
-        if model:
-            resolved_overrides["model"] = model
-        if provider:
-            resolved_overrides["model_provider"] = provider
-        limit = getattr(config, "recursion_limit", None)
-        if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
-            recursion_limit = limit
-
-    configurable: dict[str, Any] = dict(resolved_overrides)
+    configurable: dict[str, Any] = dict(per_run_overrides or {})
     if configurable_extra:
-        # Caller-supplied extras win over the resolved session defaults —
-        # an explicit per-run injection is more specific than the config.
         configurable.update(configurable_extra)
     configurable["thread_id"] = thread_id
 

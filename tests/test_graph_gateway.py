@@ -904,49 +904,80 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
     ]
 
 
-async def test_resolve_per_run_config_extras_win_over_session_model():
-    """An explicit per-run ``configurable_extra.model`` beats the live-config
+async def test_resolve_per_run_config_extras_win_over_per_run_overrides():
+    """An explicit per-run ``configurable_extra.model`` beats the session
     default — explicit injection is more specific than session state."""
     from EvoScientist.gateway.types import resolve_per_run_config
 
-    cfg = SimpleNamespace(
-        model="session-model", provider="session-provider", recursion_limit=100
-    )
     run_config = resolve_per_run_config(
         "t1",
         {"model": "explicit-model"},
-        include_per_run_overrides=True,
-        config=cfg,
+        per_run_overrides={
+            "model": "session-model",
+            "model_provider": "session-provider",
+        },
+        recursion_limit=100,
     )
     assert run_config["configurable"]["model"] == "explicit-model"
     assert run_config["configurable"]["model_provider"] == "session-provider"
     assert run_config["recursion_limit"] == 100
 
 
-def test_resolve_per_run_config_local_mode_is_legacy_shape():
-    """Local backend mode (default) must match the pre-channel config shape:
-    only caller extras + thread_id, no config object consulted."""
+def test_resolve_per_run_config_default_shape_is_extras_only():
+    """Without per-run overrides the config shape is the pre-channel one:
+    only caller extras + thread_id. Pure assembly - there is no config
+    parameter to consult at all."""
     from EvoScientist.gateway.types import resolve_per_run_config
 
-    sentinel = object()  # would explode if read in local mode
-    run_config = resolve_per_run_config(
-        "t1",
-        {"active_teams": ["a"]},
-        include_per_run_overrides=False,
-        config=sentinel,
-    )
+    run_config = resolve_per_run_config("t1", {"active_teams": ["a"]})
     assert run_config == {"configurable": {"active_teams": ["a"], "thread_id": "t1"}}
 
 
-def test_resolve_per_run_config_server_mode_skips_invalid_limit():
-    from EvoScientist.gateway.types import resolve_per_run_config
-
+async def test_server_gateway_resolves_per_run_overrides_from_live_session_config():
+    """The gateway reads the live session config and forwards model/provider
+    per run; an invalid recursion_limit is filtered out."""
     cfg = SimpleNamespace(model="m", provider="p", recursion_limit=0)
-    run_config = resolve_per_run_config(
-        "t1", None, include_per_run_overrides=True, config=cfg
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
     )
-    assert "recursion_limit" not in run_config
-    assert run_config["configurable"]["model"] == "m"
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    (start,) = stream.run.starts
+    assert start["config"]["configurable"]["model"] == "m"
+    assert start["config"]["configurable"]["model_provider"] == "p"
+    assert start["config"]["configurable"]["thread_id"] == "abc12345"
+    assert "recursion_limit" not in start["config"]
+
+
+async def test_server_gateway_forwards_valid_recursion_limit_per_run():
+    cfg = SimpleNamespace(model="m", provider="p", recursion_limit=100)
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    (start,) = stream.run.starts
+    assert start["config"]["recursion_limit"] == 100
 
 
 async def test_langgraph_server_gateway_warns_on_pre_run_state_fetch_failure(
