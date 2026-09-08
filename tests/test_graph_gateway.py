@@ -1344,6 +1344,39 @@ async def test_langgraph_server_gateway_resume_raises_on_id_mismatch():
     assert stream.run.responses == []
 
 
+async def test_langgraph_server_gateway_resume_forwards_non_hitl_single_key_payload():
+    """ask_user resumes ({"status": "cancelled"}) are single-key but keyed by
+    their own schema, not the interrupt id - they must forward unchanged
+    rather than trip the HITL id-mismatch raise."""
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[],
+        interrupts=[{"interrupt_id": "interrupt-1"}],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    async for _event in gateway.stream_events(
+        RunRequest(
+            message=Command(resume={"status": "cancelled"}),
+            thread_id="abc12345",
+        )
+    ):
+        pass
+    assert stream.run.responses == [
+        {"response": {"status": "cancelled"}, "interrupt_id": "interrupt-1"}
+    ]
+
+
 async def test_langgraph_server_gateway_resume_raises_on_multiple_interrupts():
     from langgraph.types import Command
 

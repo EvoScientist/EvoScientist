@@ -128,6 +128,20 @@ def _state_interrupts(state: ThreadState) -> list[Mapping[str, object]]:
     return [interrupt for interrupt in interrupts if isinstance(interrupt, Mapping)]
 
 
+def _is_id_keyed_hitl_resume(response: object) -> bool:
+    """True for a HITL resume payload keyed by interrupt id.
+
+    ``build_hitl_resume`` produces ``{interrupt_id: {"decisions": [...]}}``.
+    ask_user resumes (``{"status": "cancelled"}``,
+    ``{"answers": [...], "status": "answered"}``) are single-key too but key
+    by their own schema, not the interrupt id.
+    """
+    if not isinstance(response, Mapping) or len(response) != 1:
+        return False
+    (value,) = response.values()
+    return isinstance(value, Mapping) and "decisions" in value
+
+
 def _is_interrupt_event(event: Mapping[str, object]) -> bool:
     return event.get("type") in {"interrupt", "ask_user"}
 
@@ -641,6 +655,10 @@ class LangGraphServerGateway:
         # run.respond takes interrupt_id separately, so the id-keyed wrapper must
         # be unwrapped to avoid double-wrapping the payload server-side (the
         # input.respond handler re-wraps response into {interrupt_id: response}).
+        # A wrong-keyed id-keyed HITL resume is always a client bug (stale or
+        # hand-built interrupt id) and raises. Other single-key payloads are
+        # legitimate non-HITL resumes keyed by their own schema (ask_user's
+        # {"status": "cancelled"}), not the interrupt id - they forward unchanged.
         resolved = response
         if (
             isinstance(response, Mapping)
@@ -649,10 +667,18 @@ class LangGraphServerGateway:
             and interrupt_id in response
         ):
             resolved = response[interrupt_id]
-        elif isinstance(response, Mapping) and len(response) == 1 and interrupt_id:
+        elif _is_id_keyed_hitl_resume(response) and interrupt_id:
             raise RuntimeError(
                 f"Resume payload key {next(iter(response))} does not match the "
                 f"pending interrupt {interrupt_id} on thread {thread_id}"
+            )
+        elif isinstance(response, Mapping) and len(response) == 1 and interrupt_id:
+            logger.warning(
+                "Resume payload key %s does not match pending interrupt %s on "
+                "thread %s; forwarding payload unchanged",
+                next(iter(response)),
+                interrupt_id,
+                thread_id,
             )
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
 
