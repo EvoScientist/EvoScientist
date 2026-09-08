@@ -351,13 +351,12 @@ def test_shell_notification_hints_check_process():
 
 def test_check_and_list_route_to_manager(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _run_bg().invoke({"command": _sleep_cmd(1)})
+    _run_bg().func(command=_sleep_cmd(1), runtime=_STUB_RUNTIME)
     (pid,) = bg._PROCESSES.keys()
-    assert pid in check_process.invoke({"process_id": pid})
-    assert pid in list_processes.invoke({})
-    assert "Stopped" in stop_process.invoke(
-        {"process_id": pid}
-    ) or "finished" in stop_process.invoke({"process_id": pid})
+    assert pid in _msg_text(check_process.func(process_id=pid, runtime=_STUB_RUNTIME))
+    assert pid in _msg_text(list_processes.func(runtime=_STUB_RUNTIME))
+    stop_out = _msg_text(stop_process.func(process_id=pid, runtime=_STUB_RUNTIME))
+    assert "Stopped" in stop_out or "finished" in stop_out
 
 
 def test_list_processes_forwards_all_threads(monkeypatch):
@@ -410,3 +409,32 @@ def test_stop_process_allows_legacy_records_without_origin(tmp_path, monkeypatch
     )
     out = stop_process.func(process_id=pid, runtime=caller)
     assert "belongs to another session" not in _msg_text(out)
+
+
+def test_run_reports_immediate_exit(tmp_path, monkeypatch):
+    """A process that exits before the state mirror (e.g. an invalid command
+    the shell rejects at spawn) is reported as an immediate exit, not
+    'Started' - the mirrored terminal record means the client reader will
+    never surface a notification for it (terminal-in-state = observed), so
+    the tool response is the agent's only chance to learn the launch did
+    not stick. Pinned with a stubbed record: real spawn timing races the
+    mirror, and when the exit is NOT yet visible the record says 'running'
+    and the reader notifies normally - both branches stay honest."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    terminal_record = {
+        "process_id": "p1",
+        "name": "instant",
+        "command": "exit 7",
+        "pid": 4242,
+        "status": "error",
+        "returncode": 7,
+        "started_at": "t",
+        "origin_thread_id": "T-test",
+    }
+    monkeypatch.setattr(bg, "state_record", lambda _pid: terminal_record)
+    result = _run_bg().func(command="exit 7", name="instant", runtime=_STUB_RUNTIME)
+    text = _msg_text(result)
+    assert "exited immediately" in text
+    assert "code 7" in text
+    assert "Started background process" not in text
+    assert result.update["bg_processes"]["p1"] is terminal_record
