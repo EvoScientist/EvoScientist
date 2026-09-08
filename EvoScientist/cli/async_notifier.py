@@ -192,6 +192,13 @@ async def read_async_tasks_from_gateway(
 # below, one completion yields exactly one enqueue.
 _reader_enqueued_task_ids: set[tuple[str, str]] = set()
 
+# (task_id, run_id) pairs with a status read currently in flight, so
+# concurrent reader invocations (idle tick racing a turn-boundary read)
+# cannot both pass the enqueued-set check and double-enqueue the same
+# completion. Keyed on the same pair as ``_reader_enqueued_task_ids`` so
+# the claim covers the run the reader is actually about to poll.
+_reader_in_flight: set[tuple[str, str]] = set()
+
 # Idle-tick throttle state for ``enqueue_completions_from_state_throttled``:
 # the last monotonic time the reader polled per thread_id, and whether that
 # poll still saw an active (not-yet-terminal) task worth re-polling. The active
@@ -249,27 +256,33 @@ async def enqueue_completions_from_state(
             still_active += 1
             continue
         run_key = (task_id, run_id)
-        if run_key in _reader_enqueued_task_ids:
+        if run_key in _reader_enqueued_task_ids or run_key in _reader_in_flight:
             continue
-        # task_id == the sub-agent thread_id (deepagents keys the registry by it).
+        # Reserve before the await so a concurrent reader invocation (idle
+        # tick racing a turn-boundary read) cannot double-enqueue.
+        _reader_in_flight.add(run_key)
         try:
-            status = await gateway.get_run_status(target, task_id, run_id)
-        except Exception:
-            still_active += 1  # server unavailable / transient — retry next poll
-            continue
-        if status not in TERMINAL_STATUSES:
-            still_active += 1
-            continue
-        enqueue_task_notification(
-            AsyncTaskNotification(
-                task_id=task_id,
-                agent_name=task.get("agent_name", ""),
-                status=status,
-                received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                origin_cli_thread_id=thread_id,
+            # task_id == the sub-agent thread_id (deepagents keys the registry by it).
+            try:
+                status = await gateway.get_run_status(target, task_id, run_id)
+            except Exception:
+                still_active += 1  # server unavailable / transient — retry next poll
+                continue
+            if status not in TERMINAL_STATUSES:
+                still_active += 1
+                continue
+            enqueue_task_notification(
+                AsyncTaskNotification(
+                    task_id=task_id,
+                    agent_name=task.get("agent_name", ""),
+                    status=status,
+                    received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    origin_cli_thread_id=thread_id,
+                )
             )
-        )
-        _reader_enqueued_task_ids.add(run_key)
+            _reader_enqueued_task_ids.add(run_key)
+        finally:
+            _reader_in_flight.discard(run_key)
     _idle_reader_active_seen[thread_id] = still_active > 0
     return still_active
 

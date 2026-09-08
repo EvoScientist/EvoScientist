@@ -851,9 +851,10 @@ async def test_reader_surfaces_only_the_rerun_across_live_update():
     }
     gateway = FakeGraphGateway(
         state_values=registry,
-        # run-1 was killed by the interrupt → "interrupted", but the reader
-        # must never poll it: the registry already rotated to run-2.
-        run_statuses={"run-1": "interrupted", "run-2": "success"},
+        # run-1 is still live when the update lands; the interrupt kills it
+        # server-side ("interrupted"), but the reader must never observe
+        # that: the registry rotates to run-2 in the same tool turn.
+        run_statuses={"run-1": "running", "run-2": "success"},
     )
     target = GraphTarget(local_graph=MagicMock())
 
@@ -875,6 +876,54 @@ async def test_reader_surfaces_only_the_rerun_across_live_update():
     drained = drain_notifications("cli-tid")
     assert len(drained) == 1
     assert drained[0].status == "success"
+
+
+async def test_concurrent_readers_enqueue_a_completion_once():
+    """Two reader invocations racing the same terminal task (idle tick vs
+    turn-boundary read) must surface the completion exactly once: the
+    (task_id, run_id) pair is claimed in-flight before the status await, so
+    the second reader skips it while the first is still reading."""
+    import asyncio
+
+    registry = {
+        "async_tasks": {
+            "task-1": {
+                "status": "running",
+                "run_id": "run-1",
+                "agent_name": "writing-agent",
+            }
+        }
+    }
+
+    release = asyncio.Event()
+
+    class _SlowStatusGateway(FakeGraphGateway):
+        """Blocks the status read until the test releases it."""
+
+        async def get_run_status(self, target, thread_id, run_id):
+            await release.wait()
+            return "success"
+
+    gateway = _SlowStatusGateway(state_values=registry)
+    target = GraphTarget(local_graph=MagicMock())
+
+    reader1 = asyncio.create_task(
+        async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    )
+    # Give reader1 time to reach (and block inside) its status read.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    reader2 = asyncio.create_task(
+        async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    release.set()
+    await asyncio.gather(reader1, reader2)
+
+    # Exactly one completion surfaced despite two concurrent readers.
+    assert len(drain_notifications("cli-tid")) == 1
 
 
 async def test_throttled_reader_rate_limits_within_interval(monkeypatch):
