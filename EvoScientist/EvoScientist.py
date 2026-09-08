@@ -1023,20 +1023,22 @@ def _get_default_middleware(
     return mw
 
 
-def _hitl_when(_request) -> bool:
+def _hitl_when(request) -> bool:
     """HITL ``when`` predicate: interrupt unless the run is suppressed.
 
-    Reads ``configurable.hitl_suppressed`` off the ambient run config, so an
-    unattended run (``auto_mode`` — set per run by ``resolve_per_run_config``)
-    disarms while the *graph* stays armed for every attended run sharing a
-    keepalive server. Runs in-graph (``HumanInTheLoopMiddleware`` evaluates it
-    after the model), so ``get_config()`` is always available here; the argument
-    is ignored to stay robust across langchain's batch (``tool=None``) and
-    per-call request shapes.
+    Reads ``configurable.hitl_suppressed`` off the run's own config, carried
+    on ``request.runtime.config`` — langchain builds the runtime for both its
+    batch (``tool=None``) and per-call request shapes, so the request always
+    carries it (batch mode falls back to an empty config when langgraph has
+    none, which arms — same as before). Falls back to the ambient
+    ``get_config()`` when there is no runtime, and arms (``True``) when there
+    is no config at all: outside a run there is nothing to suppress.
     """
     from .backends import is_hitl_suppressed
 
-    return not is_hitl_suppressed()
+    runtime = getattr(request, "runtime", None)
+    config = getattr(runtime, "config", None)
+    return not is_hitl_suppressed(config)
 
 
 def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
