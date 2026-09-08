@@ -1416,7 +1416,7 @@ def _serve_drain_notifications(
         thread_id = runtime_state.thread_id
         if not thread_id:
             return {}
-        return await async_notifier.read_async_tasks_from_gateway(
+        registry = await async_notifier.read_async_tasks_from_gateway(
             runtime_state.runtime_gateways.graph_gateway,
             GraphTarget(
                 local_graph=runtime_state.agent,
@@ -1424,6 +1424,7 @@ def _serve_drain_notifications(
             ),
             thread_id,
         )
+        return registry or {}
 
     async def _consume() -> None:
         await async_notifier.consume_notifications(

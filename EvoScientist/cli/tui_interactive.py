@@ -1315,7 +1315,7 @@ def run_textual_interactive(
             if agent is None:
                 return {}
             try:
-                return await read_async_tasks_from_gateway(
+                registry = await read_async_tasks_from_gateway(
                     self._graph_gateway(),
                     GraphTarget(
                         local_graph=agent,
@@ -1323,6 +1323,7 @@ def run_textual_interactive(
                     ),
                     target_thread_id,
                 )
+                return registry or {}
             except Exception:
                 return {}
 
