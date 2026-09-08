@@ -123,16 +123,24 @@ class TestStreamBroadcastSink:
             broadcast.emit_fallback_notice("x")
         assert inner.calls == [("started", 3), ("fallback", "x", "yellow")]
 
-    def test_runtime_error_outside_runnable_context_is_swallowed(self):
+    def test_runtime_error_outside_runnable_context_is_swallowed(self, caplog):
+        import logging
+
         def _raising_writer_factory():
             raise RuntimeError("Called get_config outside of a runnable context")
 
         inner = _RecordingSink()
         broadcast = StreamBroadcastSink(inner)
-        with patch("langgraph.config.get_stream_writer", _raising_writer_factory):
+        with (
+            caplog.at_level(logging.DEBUG, logger="EvoScientist.middleware.events"),
+            patch("langgraph.config.get_stream_writer", _raising_writer_factory),
+        ):
             # Must not raise — the bridge can never break a model call.
             broadcast.on_tool_selection_started(3)
         assert inner.calls == [("started", 3)]
+        # ...but the skip is visible at DEBUG, so an unexpected skip (e.g. a
+        # runnable-context regression) is not silent.
+        assert "custom-channel mirror skipped" in caplog.text
 
 
 class TestNoOpSinkContract:
