@@ -1015,6 +1015,13 @@ async def test_langgraph_server_gateway_delivers_custom_middleware_events():
         "type": "tool_selection",
         "tools": ["read_file"],
     } in events
+    # The selection is decided before the model produces text, so its
+    # event must reach the stream before the first text delta.
+    tool_selection_idx = events.index(
+        {"type": "tool_selection", "tools": ["read_file"]}
+    )
+    first_text_idx = next(i for i, e in enumerate(events) if e["type"] == "text")
+    assert tool_selection_idx < first_text_idx
     # Normal graph events unaffected.
     assert [e["type"] for e in events if e["type"] != "tool_selection"] == [
         "text",

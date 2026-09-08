@@ -951,7 +951,6 @@ def _get_default_middleware(
         create_tool_selector_middleware,
         default_memory_scheduler,
     )
-    from .middleware.model_fallback import seed_fallback_chain
 
     # Sink selection policy lives in middleware/events.py (single home):
     # subagent stacks get the no-op sink; main stacks get the caller-supplied
@@ -959,6 +958,7 @@ def _get_default_middleware(
     # additionally mirror events onto the run's `custom` stream channel so
     # the server gateway can render them client-side.
     from .middleware.events import resolve_middleware_event_sink
+    from .middleware.model_fallback import seed_fallback_chain
 
     events = resolve_middleware_event_sink(
         events, for_async_subagent=for_async_subagent
