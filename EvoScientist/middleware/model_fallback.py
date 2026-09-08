@@ -224,19 +224,6 @@ def serialize_fallback_chain() -> str:
         return ",".join(f"{m}:{p}" for m, p in _fallback_chain)
 
 
-def load_fallback_chain(raw: str) -> None:
-    """Replace the chain from a serialized config string.
-
-    Args:
-        raw: Comma-separated ``"model:provider"`` pairs.  Empty or
-            whitespace-only segments are silently skipped.
-    """
-    global _fallback_chain, _chain_initialized
-    with _fallback_chain_lock:
-        _fallback_chain = _parse_fallback_chain(raw)
-        _chain_initialized = True
-
-
 def _is_non_fallbackable(exc: Exception) -> str | None:
     """Determine whether an exception should bypass the fallback chain.
 
