@@ -102,8 +102,10 @@ class TestResolveConfigDecisions:
         m.shell_allow_list = allow
         return m
 
-    def test_empty_requests_approve(self):
-        assert interaction.resolve_config_decisions([]) == [{"type": "approve"}]
+    def test_empty_requests_return_no_decisions(self):
+        # A one-per-request decision for zero requests would break
+        # HumanInTheLoopMiddleware (it requires the counts to match).
+        assert interaction.resolve_config_decisions([]) == []
 
     def test_allow_listed_command_approves(self, monkeypatch):
         monkeypatch.setattr(
