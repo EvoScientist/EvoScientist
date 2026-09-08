@@ -275,7 +275,9 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
     :func:`config_auto_approve`, which collapses this to a single bool.
     """
     if not action_requests:
-        return [{"type": "approve"}]
+        # No requests → no decisions: a one-per-request decisions list would
+        # break HumanInTheLoopMiddleware, which requires the counts to match.
+        return []
 
     try:
         from ..backends import ActionDecision, resolve_action_decision
