@@ -154,41 +154,41 @@ async def get_bg_process_status(request: Request) -> JSONResponse:
 
 
 async def post_policy(request: Request) -> JSONResponse:
-    """Resolve the shell-approval policy for a command, for non-Python clients.
+    """Resolve HITL decisions for action requests, for non-Python clients.
 
-    The one source of truth is ``backends.resolve_action_decision`` (the same
-    function Python clients call in-process). Exposing it here lets a non-Python
-    client (WebUI) stop re-porting the allow-list / dangerous-command logic and
-    ask the backend instead. Pure policy — no agent, no graph, no side effects.
+    The one source of truth is ``channels.interaction.resolve_config_decisions``
+    (the same chokepoint Python clients call in-process), evaluated against THIS
+    server's own config — the caller never mirrors auto_approve / dangerous_mode
+    / allow_list, which is exactly the part that drifted in client-side ports.
 
-    Body: ``{"command": str, "auto_approve"?: bool, "dangerous_mode"?: bool,
-    "allow_list"?: list[str]}``. Response: ``{"decision": "approve"|"reject"|
-    "prompt", "reason": str}``.
+    Pure policy — no agent, no graph, no side effects.
+
+    Body: ``{"action_requests": list[dict]}`` (the same action request objects
+    the interrupt delivers). Response: ``{"decisions": list[dict] | null}`` —
+    a full per-request decisions list when config clears every request, or
+    ``null`` when a human decision is needed (the client then prompts and
+    hands its own decisions to the resume payload). The decisions shape is
+    what ``build_hitl_resume`` consumes, so the non-null response can be
+    forwarded verbatim.
     """
-    from EvoScientist.backends import resolve_action_decision
+    from EvoScientist.channels.interaction import resolve_config_decisions
 
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("command"), str):
+    action_requests = None
+    if isinstance(body, dict):
+        candidate = body.get("action_requests")
+        if isinstance(candidate, list) and all(isinstance(r, dict) for r in candidate):
+            action_requests = candidate
+    if action_requests is None:
         return JSONResponse(
-            {"error": "'command' (string) is required"}, status_code=400
+            {"error": "'action_requests' (list of objects) is required"},
+            status_code=400,
         )
-    allow_list = body.get("allow_list")
-    if allow_list is not None and not (
-        isinstance(allow_list, list) and all(isinstance(s, str) for s in allow_list)
-    ):
-        return JSONResponse(
-            {"error": "'allow_list' must be a list of strings"}, status_code=400
-        )
-    verdict = resolve_action_decision(
-        body["command"],
-        auto_approve=bool(body.get("auto_approve", False)),
-        dangerous_mode=bool(body.get("dangerous_mode", False)),
-        allow_list=allow_list,
-    )
-    return JSONResponse({"decision": verdict.decision.value, "reason": verdict.reason})
+    decisions = resolve_config_decisions(action_requests)
+    return JSONResponse({"decisions": decisions})
 
 
 app = Starlette(
