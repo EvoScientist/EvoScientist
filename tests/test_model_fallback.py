@@ -19,6 +19,7 @@ from EvoScientist.middleware.model_fallback import (
     _guard_and_fallback,
     _guard_and_fallback_sync,
     _is_non_fallbackable,
+    _reset_chain_initialization,
     _try_fallbacks,
     _try_fallbacks_sync,
     add_fallback,
@@ -768,3 +769,64 @@ class TestLazyInitialization:
 
         assert result is AI_RESPONSE
         assert mock_cfg.called
+
+
+# ═════════════════════════════════════════════════════════════════
+# 6. Explicit seeding
+# ═════════════════════════════════════════════════════════════════
+
+
+class TestExplicitSeeding:
+    """seed_fallback_chain() pre-seeds so per-run reads do no config IO.
+
+    ``get_effective_config()`` reloads config from disk on every call, and
+    inside the langgraph dev event loop that IO raises blockbuster's
+    ``BlockingError``. Graph registration and ``create_cli_agent`` seed
+    explicitly from sync contexts; afterwards every chain read must be a
+    pure in-memory list read.
+    """
+
+    def test_seed_reads_config_once_then_reads_never_do(self):
+        from EvoScientist.middleware.model_fallback import (
+            get_fallback_chain,
+            seed_fallback_chain,
+        )
+
+        cfg = SimpleNamespace(model_fallbacks="cfg-a:prov-a")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg
+        ) as mock_cfg:
+            _reset_chain_initialization()
+            seed_fallback_chain()
+            assert get_fallback_chain() == [("cfg-a", "prov-a")]
+            mock_cfg.assert_called_once()
+            # Subsequent reads (one per model call) must not touch config.
+            get_fallback_chain()
+            get_fallback_chain()
+            mock_cfg.assert_called_once()
+
+    def test_seed_is_idempotent_and_preserves_edits(self):
+        from EvoScientist.middleware.model_fallback import (
+            get_fallback_chain,
+            seed_fallback_chain,
+        )
+
+        cfg_v1 = SimpleNamespace(model_fallbacks="cfg-a:prov-a")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg_v1
+        ):
+            _reset_chain_initialization()
+            seed_fallback_chain()
+        add_fallback("session", "prov-s")
+        # A later seed call (e.g. a second agent build) must not re-read
+        # config and clobber the session edit.
+        cfg_v2 = SimpleNamespace(model_fallbacks="other:prov")
+        with patch(
+            "EvoScientist.config.settings.get_effective_config", return_value=cfg_v2
+        ) as mock_cfg:
+            seed_fallback_chain()
+            assert get_fallback_chain() == [
+                ("cfg-a", "prov-a"),
+                ("session", "prov-s"),
+            ]
+        mock_cfg.assert_not_called()

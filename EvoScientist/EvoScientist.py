@@ -1208,6 +1208,11 @@ def create_cli_agent(
         MemoryFilesystemBackend,
         MergedSkillsBackend,
     )
+    from .middleware.model_fallback import seed_fallback_chain
+
+    # Seed the fallback chain in this sync construction context so the first
+    # per-run chain read does no config IO (see seed_fallback_chain).
+    seed_fallback_chain()
 
     # Pure path only when BOTH config and chat_model are explicit: build from
     # locals and write no module globals. Otherwise keep the legacy
