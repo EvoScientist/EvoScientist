@@ -1238,7 +1238,7 @@ def cmd_interactive(
                 if agent is None:
                     return {}
                 try:
-                    return await async_notifier.read_async_tasks_from_gateway(
+                    registry = await async_notifier.read_async_tasks_from_gateway(
                         runtime_gateways.graph_gateway,
                         GraphTarget(
                             local_graph=agent,
@@ -1246,6 +1246,7 @@ def cmd_interactive(
                         ),
                         target_thread_id,
                     )
+                    return registry or {}
                 except Exception:
                     return {}
 

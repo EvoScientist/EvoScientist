@@ -939,3 +939,34 @@ async def test_throttled_reader_disarms_after_task_terminal(monkeypatch):
         gateway, target, "cli-tid", min_interval_s=3.0
     )
     assert async_notifier._idle_reader_last_poll["cli-tid"] == last_poll
+
+
+async def test_idle_polling_stays_armed_after_failed_state_read(monkeypatch):
+    """A failed state read must not disarm idle polling - it is not the same
+    as an empty registry. Recovery: once the failure clears, the next
+    interval's poll surfaces the completion."""
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "success"},
+        state_error=RuntimeError("transient gateway failure"),
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    # First idle poll: the state read fails - nothing enqueued, and the
+    # reader must stay armed (default/previous observation) rather than
+    # record "nothing active".
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert drain_notifications("cli-tid") == []
+    assert async_notifier._idle_reader_active_seen.get("cli-tid", True) is True
+
+    # Failure clears; after the interval the next poll surfaces the completion.
+    gateway.state_error = None
+    clock["t"] += 5.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
