@@ -302,6 +302,8 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
         if not isinstance(req, dict):
             return None  # malformed request — never silently approve
         name = req.get("name", "")
+        if not isinstance(name, str) or not name:
+            return None  # malformed request — never silently approve
         if name in HITL_ALWAYS_PROMPT_TOOLS:
             return None
         if name not in HITL_SHELL_TOOLS:
@@ -309,6 +311,11 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
             continue
         args = req.get("args", {})
         command = args.get("command", "") if isinstance(args, dict) else ""
+        if not isinstance(command, str) or not command:
+            # Malformed shell request (missing/dict-typed/empty command):
+            # an empty string would sail through auto-approve, so fail
+            # closed to a human decision instead.
+            return None
         verdict = resolve_action_decision(
             command,
             auto_approve=cfg.auto_approve,

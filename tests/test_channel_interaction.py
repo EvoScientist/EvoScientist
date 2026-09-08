@@ -158,6 +158,25 @@ class TestResolveConfigDecisions:
         )
         assert interaction.resolve_config_decisions(["not-a-dict"]) is None
 
+    def test_malformed_shell_request_needs_prompt_under_auto_approve(self, monkeypatch):
+        # A shell request whose args lack a usable command (non-dict args,
+        # missing command, empty or non-string command) must fail closed
+        # even under auto_approve - an empty command string would otherwise
+        # be auto-approved and resumed.
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config",
+            lambda: self._cfg(auto_approve=True),
+        )
+        for bad in (
+            [{"name": "execute", "args": []}],  # non-dict args
+            [{"name": "execute", "args": {}}],  # missing command
+            [{"name": "execute", "args": {"command": ""}}],  # empty command
+            [{"name": "execute", "args": {"command": 42}}],  # non-string command
+            [{"name": "", "args": {"command": "ls"}}],  # empty tool name
+            [{"name": 7, "args": {"command": "ls"}}],  # non-string tool name
+        ):
+            assert interaction.resolve_config_decisions(bad) is None, bad
+
     def test_config_load_error_fails_closed(self, monkeypatch):
         def _boom():
             raise RuntimeError("no config")
