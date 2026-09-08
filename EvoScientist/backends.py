@@ -392,6 +392,25 @@ def is_hitl_suppressed(config=None) -> bool:
     return bool(configurable.get(HITL_SUPPRESSED_KEY))
 
 
+def hitl_suppressed_for_run(config=None) -> bool:
+    """Whether THIS run is unattended (``auto_mode``) and must disarm HITL.
+
+    The pre-run derivation of the suppression flag: both gateway backends
+    call it when assembling a run's config and feed the result into
+    ``gateway.types.resolve_per_run_config(hitl_suppressed=...)``. Keyed on
+    ``auto_mode`` (the "run unattended" flag), NOT ``auto_approve`` — an
+    attended ``auto_approve`` session stays armed and auto-resolves the
+    interrupt client-side. *config* defaults to the live session config
+    (``_ensure_config`` — cached, in-place-mutated), so unsaved mid-session
+    toggles still apply.
+    """
+    if config is None:
+        from .EvoScientist import _ensure_config
+
+        config = _ensure_config()
+    return bool(getattr(config, "auto_mode", False))
+
+
 def resolve_action_decision(
     command: str,
     *,

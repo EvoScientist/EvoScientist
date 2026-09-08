@@ -584,6 +584,7 @@ class LangGraphServerGateway:
         server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
         overrides the server's construction-time ``.with_config`` binding.
         """
+        from ..backends import hitl_suppressed_for_run
         from ..EvoScientist import _ensure_config
 
         cfg = _ensure_config()
@@ -605,6 +606,7 @@ class LangGraphServerGateway:
             configurable_extra,
             per_run_overrides=overrides,
             recursion_limit=recursion_limit,
+            hitl_suppressed=hitl_suppressed_for_run(cfg),
         )
 
     async def _start_or_resume(
