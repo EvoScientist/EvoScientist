@@ -327,6 +327,7 @@ def _inject_subagent_middleware(
     path doesn't fall back to the global-writing ``_ensure_chat_model()``.
     """
     from .middleware import (
+        ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
@@ -365,6 +366,13 @@ def _inject_subagent_middleware(
             ErrorNormalizationMiddleware(),
             # Sync subagents replay their own history to strict providers too.
             ToolHistoryRepairMiddleware(),
+            # Per-run model channel: mirrors the main agent's stack so a
+            # ``configurable.model`` override (server backend, propagated
+            # into subgraph runs) also swaps the subagent's model. First in
+            # the injected list so the swapped model reaches the
+            # context-editing trigger sync below; a no-op when no override
+            # is set (local backend passes none).
+            ConfigurableModelMiddleware(),
             # Subagents share the main agent's model: use the threaded
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).

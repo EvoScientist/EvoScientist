@@ -210,6 +210,19 @@ def test_inject_subagent_includes_context_editing(mock_model):
 
     # Subclass of langchain's ContextEditingMiddleware (per-run trigger).
     assert any(isinstance(m, ContextEditingMiddleware) for m in subs[0]["middleware"])
+    # Per-run model channel reaches sync subagents too (mirrors the main
+    # agent's stack so configurable.model swaps the subagent's model).
+    from EvoScientist.middleware import ConfigurableModelMiddleware
+
+    assert any(
+        isinstance(m, ConfigurableModelMiddleware) for m in subs[0]["middleware"]
+    )
+    # The model swap must wrap the trigger sync: ConfigurableModelMiddleware
+    # comes before the context-editing middleware in the injected list.
+    type_names = [type(m).__name__ for m in subs[0]["middleware"]]
+    assert type_names.index("ConfigurableModelMiddleware") < type_names.index(
+        "_PerRunTriggerContextEditingMiddleware"
+    )
 
 
 @patch(
