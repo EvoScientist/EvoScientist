@@ -735,8 +735,8 @@ class TestInterruptOnWiring:
 
     def test_hitl_when_disarms_when_run_is_suppressed(self, monkeypatch):
         """configurable.hitl_suppressed=True → predicate returns False (no
-        interrupt). The argument is ignored, covering langchain's batch
-        (tool=None) request shape."""
+        interrupt). Covered via both the ambient fallback (batch/no-runtime
+        request shape) and the request's own runtime config."""
         import langgraph.config as lg_config
 
         from EvoScientist.EvoScientist import _hitl_when
@@ -746,9 +746,26 @@ class TestInterruptOnWiring:
             "get_config",
             lambda: {"configurable": {"hitl_suppressed": True}},
         )
-        # Argument ignored: same verdict for a batch (None) and a per-call req.
+        # No runtime on the request → ambient config consulted.
         assert _hitl_when(None) is False
         assert _hitl_when(object()) is False
+
+    def test_hitl_when_reads_the_requests_own_runtime_config(self):
+        """The predicate prefers ``request.runtime.config`` over the ambient
+        config — langchain carries the run config on both request shapes, so
+        no ambient lookup is needed inside a run."""
+        from types import SimpleNamespace
+
+        from EvoScientist.EvoScientist import _hitl_when
+
+        suppressed_req = SimpleNamespace(
+            runtime=SimpleNamespace(config={"configurable": {"hitl_suppressed": True}})
+        )
+        armed_req = SimpleNamespace(
+            runtime=SimpleNamespace(config={"configurable": {}})
+        )
+        assert _hitl_when(suppressed_req) is False
+        assert _hitl_when(armed_req) is True
 
     def test_hitl_interrupt_on_reaches_create_deep_agent(self):
         """The kwarg must actually reach ``create_deep_agent`` — not just the
@@ -981,12 +998,15 @@ class TestAsyncSubagentGuard:
             is False
         )
 
-    def test_get_default_backend_defaults_to_config_auto_approve(self):
-        from EvoScientist.EvoScientist import _ensure_config, _get_default_backend
+    def test_get_default_backend_guard_defaults_false(self):
+        """The construction-time guard default is always False (was cfg.auto_approve):
+        the graph is always armed and the guard derives per call from the run's
+        HITL-suppression state (see CustomSandboxBackend._effective_guard_dangerous),
+        so an attended auto_approve session is guarded by the client policy, not the
+        backend. Independent of the machine's config value."""
+        from EvoScientist.EvoScientist import _get_default_backend
 
-        # No explicit guard → follows cfg.auto_approve (Task 3 behaviour preserved).
-        backend = _get_default_backend()
-        assert backend.default._guard_dangerous == _ensure_config().auto_approve
+        assert _get_default_backend().default._guard_dangerous is False
 
     @staticmethod
     def _factory_kwargs_for(name: str) -> dict:
