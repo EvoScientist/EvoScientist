@@ -631,6 +631,14 @@ class LangGraphServerGateway:
         )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
+                # Known divergence: the resume goes through run.respond,
+                # which takes no config, so the per-run overrides above
+                # (model / recursion_limit) are NOT applied to a resumed
+                # turn - it runs with the thread's construction-time
+                # binding until the next fresh run re-applies them. The
+                # primitive that would carry config on a resume is
+                # run.start with Command(resume=...); switching to it needs
+                # live-server verification first.
                 await self._respond_to_interrupt(
                     stream, request.thread_id, request.message.resume
                 )
