@@ -62,10 +62,16 @@ def _successful_response() -> ModelResponse:
 
 @pytest.fixture(autouse=True)
 def _clean_chain():
-    """Ensure a clean fallback chain for every test."""
+    """Ensure a clean fallback chain for every test.
+
+    Setup marks the chain as seeded-and-empty so tests never read the real
+    config file; teardown restores the pristine uninitialized module state so
+    the next test (and the next test module) starts from scratch instead of
+    inheriting "initialized" from this one.
+    """
     clear_fallbacks()
     yield
-    clear_fallbacks()
+    _reset_chain_initialization()
 
 
 # ═════════════════════════════════════════════════════════════════
