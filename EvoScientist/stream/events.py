@@ -894,12 +894,18 @@ async def stream_agent_events(
         events = SessionEventSink()
 
     # Single assembly point for the run config (see gateway.types). No
-    # per-run overrides on the local path: the local agent is rebuilt on
-    # model switches and binds recursion_limit at construction from the
-    # same live config, so injecting them per run would be redundant.
+    # per-run model/limit overrides on the local path: the local agent is
+    # rebuilt on model switches and binds recursion_limit at construction
+    # from the same live config. The HITL suppression flag is the exception -
+    # a per-run signal both backends need (the graph is always armed).
+    from ..backends import hitl_suppressed_for_run
     from ..gateway.types import resolve_per_run_config
 
-    config = resolve_per_run_config(thread_id, configurable_extra)
+    config = resolve_per_run_config(
+        thread_id,
+        configurable_extra,
+        hitl_suppressed=hitl_suppressed_for_run(),
+    )
     if metadata:
         config["metadata"] = metadata
     emitter = StreamEventEmitter()

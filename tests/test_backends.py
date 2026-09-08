@@ -2114,6 +2114,49 @@ class TestIsHitlSuppressed:
         assert is_hitl_suppressed() is True
 
 
+class TestHitlSuppressedForRun:
+    """Pre-run derivation of the suppression flag from config.auto_mode."""
+
+    def test_auto_mode_true_suppresses(self):
+        from types import SimpleNamespace
+
+        from EvoScientist.backends import hitl_suppressed_for_run
+
+        assert hitl_suppressed_for_run(SimpleNamespace(auto_mode=True)) is True
+
+    def test_attended_run_stays_armed(self):
+        from types import SimpleNamespace
+
+        from EvoScientist.backends import hitl_suppressed_for_run
+
+        # auto_approve alone must NOT suppress: the graph stays armed and the
+        # client auto-resolves the interrupt.
+        assert (
+            hitl_suppressed_for_run(SimpleNamespace(auto_mode=False, auto_approve=True))
+            is False
+        )
+
+    def test_missing_attr_is_false(self):
+        from types import SimpleNamespace
+
+        from EvoScientist.backends import hitl_suppressed_for_run
+
+        assert hitl_suppressed_for_run(SimpleNamespace()) is False
+
+    def test_reads_live_session_config_when_none_passed(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import EvoScientist.EvoScientist as agent_mod
+        from EvoScientist.backends import hitl_suppressed_for_run
+
+        monkeypatch.setattr(
+            agent_mod,
+            "_ensure_config",
+            lambda: SimpleNamespace(auto_mode=True),
+        )
+        assert hitl_suppressed_for_run() is True
+
+
 class TestEffectiveGuardDangerous:
     """CustomSandboxBackend guards per call, not from a construction flag."""
 
