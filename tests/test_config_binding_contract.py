@@ -23,8 +23,6 @@ from __future__ import annotations
 
 from dataclasses import fields as dataclass_fields
 
-import pytest
-
 from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.langgraph_dev.manager import (
     _FINGERPRINT_EXCLUDED_FIELDS,
@@ -163,25 +161,35 @@ class TestFingerprintCoverage:
             EvoScientistConfig()
         ) == _server_config_fingerprint(EvoScientistConfig())
 
-    @pytest.mark.parametrize("field_name", _covered_field_names())
-    def test_covered_field_changes_fingerprint(self, field_name):
-        cfg = EvoScientistConfig()
-        baseline = _server_config_fingerprint(cfg)
-        setattr(cfg, field_name, _mutate(getattr(cfg, field_name)))
-        assert _server_config_fingerprint(cfg) != baseline, (
-            f"'{field_name}' is supposed to be fingerprint-covered"
-            f" (restart-to-apply) but mutating it leaves the fingerprint"
-            f" unchanged."
+    def test_covered_fields_change_fingerprint(self):
+        baseline = _server_config_fingerprint(EvoScientistConfig())
+        offenders = []
+        for field_name in _covered_field_names():
+            cfg = EvoScientistConfig()
+            setattr(cfg, field_name, _mutate(getattr(cfg, field_name)))
+            if _server_config_fingerprint(cfg) == baseline:
+                offenders.append(field_name)
+        assert not offenders, (
+            f"Fields supposed to be fingerprint-covered (restart-to-apply)"
+            f" whose mutation leaves the fingerprint unchanged:"
+            f" {sorted(offenders)}."
         )
 
-    @pytest.mark.parametrize("field_name", sorted(_excluded_field_names()))
-    def test_excluded_field_leaves_fingerprint_unchanged(self, field_name):
-        cfg = EvoScientistConfig()
-        baseline = _server_config_fingerprint(cfg)
-        setattr(cfg, field_name, _mutate(getattr(cfg, field_name)))
-        assert _server_config_fingerprint(cfg) == baseline, (
-            f"'{field_name}' is excluded from the fingerprint with channel"
-            f" '{FIELD_CHANNELS.get(field_name, 'prefix exclusion')}', but"
-            f" mutating it changes the fingerprint — the exclusion list and"
-            f" the channel table disagree."
+    def test_excluded_fields_leave_fingerprint_unchanged(self):
+        baseline = _server_config_fingerprint(EvoScientistConfig())
+        offenders = []
+        for field_name in sorted(_excluded_field_names()):
+            cfg = EvoScientistConfig()
+            setattr(cfg, field_name, _mutate(getattr(cfg, field_name)))
+            if _server_config_fingerprint(cfg) != baseline:
+                offenders.append(
+                    (
+                        field_name,
+                        FIELD_CHANNELS.get(field_name, "prefix exclusion"),
+                    )
+                )
+        assert not offenders, (
+            f"Fields excluded from the fingerprint whose mutation changes"
+            f" it - the exclusion list and the channel table disagree:"
+            f" {offenders}."
         )
