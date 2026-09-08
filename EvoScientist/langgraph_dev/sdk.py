@@ -69,24 +69,31 @@ def get_langgraph_async_client(*, url: str, headers: Mapping[str, str] | None = 
     return get_client(url=url, headers=langgraph_dev_headers(headers))
 
 
-_ASYNC_CLIENT_CACHE: dict[str, object] = {}
+_ASYNC_CLIENT_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], object] = {}
 
 
 def cached_langgraph_async_client(
     url: str, *, headers: Mapping[str, str] | None = None
 ):
-    """Return a per-URL cached async SDK client.
+    """Return a cached async SDK client, keyed on URL and normalized headers.
 
     The async client wraps an ``httpx.AsyncClient`` bound to the event loop it
     is first used on; caching avoids leaking a new connection pool on every
-    call. The CLI drives its whole session from a single ``asyncio.run`` loop,
-    so one cached client per URL is safe. Callers that only read (e.g. the
-    async-task completion poll) reuse this rather than constructing per poll.
+    call. The key includes the *normalized* headers, so ``headers=None``
+    (defaults) and an explicit copy of the default headers share one client,
+    while genuinely different header sets get their own — a caller passing
+    different headers must never silently receive a client built for
+    someone else's. The CLI drives its whole session from a single
+    ``asyncio.run`` loop, so one cached client per key is safe. Callers that
+    only read (e.g. the async-task completion poll) reuse this rather than
+    constructing per poll.
     """
-    client = _ASYNC_CLIENT_CACHE.get(url)
+    normalized = langgraph_dev_headers(headers)
+    key = (url, tuple(sorted(normalized.items())))
+    client = _ASYNC_CLIENT_CACHE.get(key)
     if client is None:
-        client = get_langgraph_async_client(url=url, headers=headers)
-        _ASYNC_CLIENT_CACHE[url] = client
+        client = get_langgraph_async_client(url=url, headers=normalized)
+        _ASYNC_CLIENT_CACHE[key] = client
     return client
 
 
