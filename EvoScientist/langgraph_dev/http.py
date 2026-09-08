@@ -187,7 +187,10 @@ async def post_policy(request: Request) -> JSONResponse:
             {"error": "'action_requests' (list of objects) is required"},
             status_code=400,
         )
-    decisions = resolve_config_decisions(action_requests)
+    # resolve_config_decisions reads config from disk (load_config), which
+    # blockbuster refuses on the dev-server event loop - offload like every
+    # other blocking read this file serves.
+    decisions = await asyncio.to_thread(resolve_config_decisions, action_requests)
     return JSONResponse({"decisions": decisions})
 
 
