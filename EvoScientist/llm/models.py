@@ -630,8 +630,7 @@ def get_chat_model(
     ):
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
-        _hoist = _original_provider not in _ANTHROPIC_ROUTED_PROVIDERS
-        _patch_openai_compat_content(chat_model, hoist_tool_media=_hoist)
+        _patch_openai_compat_content(chat_model)
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)

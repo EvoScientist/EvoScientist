@@ -1394,9 +1394,9 @@ class TestThirdPartyRouting:
         import json
 
         import anthropic
-        import httpx
         from langchain_core.messages import AIMessage, HumanMessage
 
+        httpx = _anthropic_httpx()
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
         model = get_chat_model("MiniMax-M3", provider="minimax", output_version="v1")
@@ -1445,7 +1445,12 @@ class TestThirdPartyRouting:
                         },
                     ]
                 ),
-                HumanMessage("next"),
+                HumanMessage(
+                    content=[
+                        {"type": "image", "base64": "AAA", "mime_type": "image/png"},
+                        {"type": "text", "text": "next"},
+                    ]
+                ),
             ]
         )
 
@@ -1466,6 +1471,29 @@ class TestThirdPartyRouting:
                 "name": "lookup",
                 "input": {"x": 1},
             },
+        ]
+        image_messages = [
+            message
+            for message in captured[1]["messages"]
+            if message["role"] == "user"
+            and isinstance(message["content"], list)
+            and any(block.get("type") == "image" for block in message["content"])
+        ]
+        assert image_messages == [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "AAA",
+                        },
+                    },
+                    {"type": "text", "text": "next"},
+                ],
+            }
         ]
         assert result.content == [{"type": "text", "text": "ok"}]
 
