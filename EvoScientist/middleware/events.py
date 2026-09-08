@@ -366,8 +366,15 @@ class StreamBroadcastSink:
 
             get_stream_writer()({MIDDLEWARE_EVENT_TAG: event.to_wire()})
         except RuntimeError:
-            # Outside a runnable context — nothing subscribes anyway.
-            pass
+            # Outside a runnable context — nothing subscribes anyway. Log
+            # anyway at DEBUG: a write we did not expect to skip (e.g. a
+            # runnable-context regression) would otherwise be silent.
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "custom-channel mirror skipped (outside a runnable context) for %r",
+                event,
+            )
         except Exception:
             import logging
 
