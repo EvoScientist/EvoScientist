@@ -62,11 +62,16 @@ class _FakePsutilProcess:
     not the Popen handle, so a fake pid would raise ``NoSuchProcess`` and the
     fake server would never actually stop. Terminating this fake flips the
     matching ``_FakeLanggraphProcess`` dead, mirroring the real tree-kill.
+    Carries a langgraph-flavored ``cmdline()`` so the PID-file stop path's
+    anti-PID-recycling match sees it as ours.
     """
 
     def __init__(self, pid: int, registry: _ProcRegistry) -> None:
         self._pid = pid
         self._registry = registry
+
+    def cmdline(self) -> list[str]:
+        return ["/usr/bin/langgraph", "dev", "--port", "8123"]
 
     def children(self, recursive: bool = False) -> list:
         return []
@@ -79,16 +84,15 @@ class _FakePsutilProcess:
     def kill(self) -> None:
         self.terminate()
 
-    def wait(self, timeout=None) -> int:
+    def wait(self, timeout: float | None = None) -> int:
+        self.terminate()
         return 0
 
     def is_running(self) -> bool:
         return any(
-            p.pid == self._pid and p.poll() is None for p in self._registry.processes
+            proc.pid == self._pid and proc.poll() is None
+            for proc in self._registry.processes
         )
-
-    def cmdline(self) -> list[str]:
-        return ["langgraph", "dev"]
 
 
 class _ProcRegistry:
@@ -201,10 +205,10 @@ class TestGatewayBackendLifecycleE2E:
         assert registry.processes[0].poll() is None
 
         # --- Cleanup path: `EvoSci server stop` clears the leftover ---
-        # stop_recorded_server must see our fake process as langgraph's.
-        monkeypatch.setattr(manager, "_PROCESS", registry.processes[0])
-        monkeypatch.setattr(manager, "_PROCESS_DEPLOY_MODE", False)
-        monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", workspace)
+        # Session B is a fresh process (no in-memory _PROCESS handle), so
+        # the stop must go through the recorded-files path exactly as in
+        # production: PID file -> psutil -> cmdline match -> terminate ->
+        # PID/sidecar cleanup.
         stopped = manager.stop_recorded_server()
         assert stopped == registry.processes[0].pid
         assert not manager.RUNTIME.pid_file.exists()
