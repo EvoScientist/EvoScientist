@@ -2287,6 +2287,18 @@ def run_textual_interactive(
 
                             _cfg_decisions = resolve_config_decisions(action_reqs)
                             if _cfg_decisions is not None:
+                                # A config-level rejection (e.g. auto_approve
+                                # refusing a dangerous command) must be visible
+                                # before the silent resume - otherwise the
+                                # spinner just turns into a rejection with no
+                                # indication of who rejected it or why.
+                                for _d in _cfg_decisions:
+                                    if _d.get("type") == "reject":
+                                        self._append_system(
+                                            f"Auto-rejected: {_d.get('message', '')}",
+                                            style="yellow",
+                                        )
+                                        break
                                 from ..backends import build_hitl_resume
 
                                 _stream_input = build_hitl_resume(
