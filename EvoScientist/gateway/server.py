@@ -565,16 +565,49 @@ class LangGraphServerGateway:
             metadata=metadata,
         )
 
+    def _resolve_run_config(
+        self,
+        thread_id: str,
+        configurable_extra: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Assemble this run's config, reading the live session config here.
+
+        ``_ensure_config`` returns the cached, in-place-mutated session
+        config — NOT a fresh disk read — so mid-session ``/model`` edits that
+        have not been ``--save``d still reach the server per run. The
+        ``configurable.model`` / ``model_provider`` overrides are picked up
+        server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
+        overrides the server's construction-time ``.with_config`` binding.
+        """
+        from ..EvoScientist import _ensure_config
+
+        cfg = _ensure_config()
+        overrides: dict[str, Any] = {}
+        model = getattr(cfg, "model", None)
+        provider = getattr(cfg, "provider", None)
+        if model:
+            overrides["model"] = model
+        if provider:
+            overrides["model_provider"] = provider
+        limit = getattr(cfg, "recursion_limit", None)
+        recursion_limit = (
+            limit
+            if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
+            else None
+        )
+        return resolve_per_run_config(
+            thread_id,
+            configurable_extra,
+            per_run_overrides=overrides,
+            recursion_limit=recursion_limit,
+        )
+
     async def _start_or_resume(
         self,
         stream: AsyncThreadStream,
         request: RunRequest,
     ) -> None:
-        config = resolve_per_run_config(
-            request.thread_id,
-            request.configurable_extra,
-            include_per_run_overrides=True,
-        )
+        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
