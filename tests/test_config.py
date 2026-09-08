@@ -241,6 +241,25 @@ class TestEvoScientistConfig:
         assert config.dangerous_mode is True
         assert config.auto_approve is True
 
+    def test_literal_field_invalid_value_falls_back_with_warning(self, caplog):
+        """A typo'd Literal (config file / direct construction) never lands.
+
+        ``load_config`` does not coerce file values, so without this
+        normalization an out-of-set value like ``langgraph-server`` (hyphen)
+        would flow verbatim into mode selection and silently select the
+        local gateway path in the manager.
+        """
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="EvoScientist.config.settings"):
+            config = EvoScientistConfig(gateway_backend="langgraph-server")
+        assert config.gateway_backend == "local"
+        assert "Invalid gateway_backend" in caplog.text
+
+    def test_literal_field_valid_value_passes_through(self):
+        config = EvoScientistConfig(gateway_backend="langgraph_server")
+        assert config.gateway_backend == "langgraph_server"
+
 
 # =============================================================================
 # Test config path functions
@@ -598,6 +617,20 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_UI_BACKEND", "tui")
         config = get_effective_config()
         assert config.ui_backend == "tui"
+
+    def test_env_gateway_backend_invalid_value_falls_back_to_local(
+        self, temp_config_dir, monkeypatch
+    ):
+        """An out-of-set env value is skipped, leaving the default in place.
+
+        ``_coerce_value`` rejects values outside the Literal's allowed set,
+        so the env-override loop skips the malformed entry instead of
+        storing it verbatim — consistent with how malformed env values for
+        other field types already degrade to defaults.
+        """
+        monkeypatch.setenv("EVOSCIENTIST_GATEWAY_BACKEND", "langgraph-server")
+        config = get_effective_config()
+        assert config.gateway_backend == "local"
 
     def test_env_log_level_override(self, temp_config_dir, monkeypatch):
         """Log level can be selected via environment variable."""
