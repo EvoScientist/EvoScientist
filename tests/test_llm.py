@@ -1,5 +1,6 @@
 """Tests for EvoScientist LLM module."""
 
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -863,6 +864,34 @@ class TestThirdPartyRouting:
         assert call_kwargs["app_title"] == "MyApp"
         # An explicit list is preserved verbatim, not re-split.
         assert call_kwargs["app_categories"] == ["only-this"]
+
+    @pytest.mark.parametrize("source", ["env", "kwarg"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_title_override_without_referer_falls_back_silently(
+        self, mock_init, monkeypatch, source
+    ):
+        """OpenRouter keys app pages by HTTP-Referer, so a custom title on the
+        default referer would rename the shared EvoScientist page. It is
+        replaced by the default title, without any user-facing warning,
+        whether the title came from the env (config) or an explicit kwarg."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+        extra = {}
+        if source == "env":
+            monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "Acme")
+        else:
+            extra["app_title"] = "Acme"
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            get_chat_model("x-ai/grok-4.3", provider="openrouter", **extra)
+
+        assert not [w for w in caught if "openrouter" in str(w.message).lower()]
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
+        assert call_kwargs["app_title"] == "EvoScientist"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_non_openrouter_providers_get_no_app_attribution(
@@ -2838,6 +2867,21 @@ class TestPatchOpenrouterStripResponsesReasoning:
 # =============================================================================
 
 
+def _anthropic_httpx():
+    """Return the httpx flavour the installed anthropic SDK accepts as ``http_client``.
+
+    anthropic >= 1.0 is built on ``httpx2`` and rejects an ``httpx.Client``.
+    """
+    import anthropic
+    from packaging.version import Version
+
+    if Version(anthropic.__version__) >= Version("1"):
+        import httpx2 as httpx
+    else:
+        import httpx
+    return httpx
+
+
 class TestAnthropicStripForeignReasoning:
     def test_strip_removes_reasoning_content_blocks(self):
         """reasoning_content blocks are dropped; text and thinking survive."""
@@ -2913,8 +2957,9 @@ class TestAnthropicStripForeignReasoning:
         import json
 
         import anthropic
-        import httpx
         from langchain_core.messages import AIMessage, HumanMessage
+
+        httpx = _anthropic_httpx()
 
         monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
         monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
@@ -2985,8 +3030,9 @@ class TestAnthropicStructuredOutput:
         import json
 
         import anthropic
-        import httpx
         from pydantic import BaseModel
+
+        httpx = _anthropic_httpx()
 
         class Pick(BaseModel):
             answer: str

@@ -122,3 +122,73 @@ def test_cancel_empty_cron_id_refuses_without_deleting():
         out = cancel_scheduled_task.invoke({"cron_id": "   "})
     mk.assert_not_called()
     assert "Provide" in out
+
+
+# ---------------------------------------------------------------------------
+# Optional rubric on schedule_task / list_scheduled_tasks
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_task_forwards_rubric():
+    from EvoScientist.middleware.scheduler import schedule_task
+
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch(
+            "EvoScientist.cron.schedule.create_schedule",
+            return_value={"cron_id": "c-8"},
+        ) as mk,
+    ):
+        schedule_task.invoke(
+            {
+                "name": "digest",
+                "cron": "0 8 * * 1-5",
+                "prompt": "write scheduled/digest.md",
+                "timezone": "",
+                "rubric": "- scheduled/digest.md has today's date",
+            }
+        )
+    assert mk.call_args.kwargs["rubric"] == "- scheduled/digest.md has today's date"
+
+
+def test_schedule_task_without_rubric_forwards_none():
+    from EvoScientist.middleware.scheduler import schedule_task
+
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch(
+            "EvoScientist.cron.schedule.create_schedule",
+            return_value={"cron_id": "c-8"},
+        ) as mk,
+    ):
+        schedule_task.invoke(
+            {"name": "ping", "cron": "0 * * * *", "prompt": "ping", "timezone": ""}
+        )
+    assert mk.call_args.kwargs["rubric"] is None
+
+
+def test_list_scheduled_tasks_marks_graded_rows():
+    from EvoScientist.middleware.scheduler import list_scheduled_tasks
+
+    rows = [
+        {
+            "cron_id": "c-1-xyz",
+            "schedule": "0 9 * * *",
+            "enabled": True,
+            "metadata": {"name": "graded", "rubric": "- out.md exists"},
+        },
+        {
+            "cron_id": "c-2-xyz",
+            "schedule": "0 9 * * *",
+            "enabled": True,
+            "metadata": {"name": "plain"},
+        },
+    ]
+    with (
+        patch("EvoScientist.cron.schedule.is_available", return_value=True),
+        patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
+    ):
+        out = list_scheduled_tasks.invoke({})
+    graded, plain = out.splitlines()
+    assert "rubric" in graded
+    assert "rubric" not in plain

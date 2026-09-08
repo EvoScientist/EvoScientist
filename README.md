@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.2.9" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.2.10" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[05 Sep 2026]** **[v0.2.10](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.10)** — New models: Claude Fable 5.1, GPT-6 Astra, Gemini 3.8 Flash, and Meta Muse Spark 1.3; proactivity phase 1: a first-contact profile bootstrap that eases cold start; optional acceptance checklists for scheduled tasks; tool selection only kicks in above 42 tools; deepagents 0.7.13.
 - **[29 Aug 2026]** **[v0.2.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.9)** — New models: GLM-5.3-Flash (Zhipu + OpenRouter), Qwen3.8-Flash (DashScope + OpenRouter), and Tencent HY4 preview (OpenRouter), all with 1M context; deepagents 0.7.11.
 - **[21 Aug 2026]** **[v0.2.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.8)** — Deploy-mode graph rebuilds drop from ~15 s to under a second; resume commands no longer crash and empty session history; Novita AI as a new LLM provider; NVIDIA BioNeMo Agent Toolkit in onboarding's recommended skill packs; bounded routed reasoning with empty truncations surfaced as errors; a subscription OAuth recipe in the docs; deepagents 0.7.8.
 - **[14 Aug 2026]** **[v0.2.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.7)** — Faster startup (lazy imports, reusable kept-alive langgraph dev server, indexed thread listing); new models: Gemini 3.7 Flash (Google + OpenRouter), DeepSeek V4 Pro 0813, Grok 4.6, and GLM-5.3 (Zhipu + OpenRouter); encrypted-webhook channels reject unsigned POSTs; MCP stdio servers start reliably under redirected streams on Windows; sub-agent tools resolve at dispatch time; `/compact` history offload restored on deepagents 0.7.6.
@@ -578,6 +579,9 @@ Automate recurring research tasks with cron-style schedules.
 /schedule add "0 9 * * 1-5" "Summarise the latest ML papers from arXiv with the paper-navigator skill, and save the summary to /memories/daily-papers.md"
 /schedule add "*/10 * * * *" "Check my running experiment's status and append the result to experiment_log.json"
 
+# Optional acceptance checklist: a separate reviewer grades each run against it
+/schedule add "0 8 * * 1-5" "Collect yesterday's arXiv diffusion papers into scheduled/digest.md" --rubric "- scheduled/digest.md is updated with today's date; - every entry has a title, an arXiv link and a one-line summary"
+
 # Manage schedules
 /schedule list           # list active schedules
 /schedule remove <id>    # delete a schedule
@@ -589,6 +593,8 @@ Automate recurring research tasks with cron-style schedules.
 Note: `/schedule add` requires a cron expression (5 fields, e.g. `*/10 * * * *`). To schedule with natural language ("every 10 minutes"), just ask in chat — the agent translates it via the `schedule_task` tool.
 
 Output goes wherever the task's prompt tells it to write — there is no enforced output directory, so make the prompt specific about file locations. Run `/schedule list` to review schedules; the agent is also made aware of the active schedules via a `<scheduled_tasks>` context block, so you can just ask it what's scheduled.
+
+`--rubric "<checklist>"` is optional. When set, a separate reviewer (the auxiliary model, with read-only access to the workspace) grades the finished run against the checklist and re-runs the task once with the reviewer's feedback if a bullet fails; without a rubric no grading happens at all. Name concrete deliverables the reviewer can check — files that must exist, sections they must contain, minimum counts. When you schedule in chat, the agent fills the rubric itself if your request names such outputs.
 
 > **Cost note:** each scheduled run consumes LLM tokens. Delete unused schedules with `/schedule remove` to avoid accumulating charges.
 

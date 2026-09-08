@@ -11,16 +11,22 @@ observation writes go through the structured ``record_observation`` tool.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import re
+import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Literal
 
+import yaml
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.messages import HumanMessage
 
 from .. import paths as _paths
 from ..memory import (
@@ -110,6 +116,233 @@ Do not record routine progress, raw traces, ordinary command output, citation
 lists without synthesis, simple filesystem listings, temporary paths/run ids,
 one-off environment discoveries, or task summaries."""
 
+_PROFILE_BOOTSTRAP_CONSENT = """\
+ — one small question (one `ask_user` call with a single multiple choice if
+that tool is available, otherwise in the same message): are they willing to
+spend a little time letting you get to know them better, so you can grow into
+their research assistant? Offer yes / later / no.
+- later, or they ignore the question → drop the subject and get to work; you
+  will ask again in a future session.
+- no → set `intro: skipped` in the frontmatter with `edit_file` and never
+  raise it again."""
+
+_PROFILE_BOOTSTRAP_CORE = """\
+Ask — with one `ask_user` call if that tool is available, otherwise in one
+plain message — for whatever of these you do not have yet:
+- How they would like to be addressed. A real name or a nickname both work; a
+  real name lets you find their published work later.
+- A homepage, Google Scholar, or GitHub link (optional).
+- Their field, as a multiple choice: Computer science / AI · Life sciences /
+  medicine · Physics / chemistry / materials · Social sciences / psychology ·
+  Mathematics / statistics · Not decided yet — new to research.
+Record the answers in `/memories/profile/USER_PROFILE.md` with `edit_file`: set
+`name:` (required) and `field:` / `homepage:` when given in the frontmatter,
+always double-quoting the value (`name: "…"`); put anything else stable they
+told you as bullets under the existing headings.
+If their answers invite it and they seem engaged, you may continue with one or
+two natural follow-up questions (current project, what they are stuck on, how
+they like reports) — conversationally, not as another form. Write anything
+stable into the profile. Stop as soon as they signal they want to get to work.
+Close briefly with how you will grow (their corrections →
+`/memories/profile/RESEARCH_TASTE.md`; failed runs and environment traps →
+observations; they can edit these files directly), then start their task.
+Do not search the web, read papers, or draft research taste in this turn."""
+
+PROFILE_BOOTSTRAP_FIRST = f"""
+<profile_bootstrap>
+This is your first exchange with this researcher: `USER_PROFILE.md` has no `name` yet.
+
+In this turn, in the user's language: introduce yourself in two or three
+sentences. If <profile_memory> already holds notes about them, greet them as a
+returning collaborator, not a stranger. If their message is already a task,
+acknowledge it first and keep the whole opening shorter.
+
+Ask for consent before any survey{_PROFILE_BOOTSTRAP_CONSENT}
+Only after a yes, ask three things:
+{_PROFILE_BOOTSTRAP_CORE}
+If they brought no task, propose one concrete first task from what they told
+you instead; for someone new to research, offer to map the field together
+first. Keep the opening light.
+</profile_bootstrap>
+"""
+
+PROFILE_BOOTSTRAP_RETRY = f"""
+<profile_bootstrap>
+You have worked with this researcher for several sessions, but `USER_PROFILE.md`
+still has no `name`. Once, lightly, in the user's language, ask for consent
+again{_PROFILE_BOOTSTRAP_CONSENT}
+Only after a yes, continue as on first contact:
+{_PROFILE_BOOTSTRAP_CORE}
+Do not repeat the full introduction.
+</profile_bootstrap>
+"""
+
+_USER_PROFILE_PATH = "/profile/USER_PROFILE.md"
+_BOOKKEEPING_KEY = "evoscientist"
+_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?", re.DOTALL)
+
+USER_PROFILE_FRONTMATTER: dict[str, object] = {
+    "name": "",
+    "field": "",
+    "homepage": "",
+    "intro": "pending",
+    _BOOKKEEPING_KEY: {
+        "sessions": 0,
+        "intro_attempts": 0,
+        "last_thread": "",
+        "intro_asked_thread": "",
+    },
+}
+
+_USER_PROFILE_BODY = """# User profile
+
+Things worth remembering about the person using EvoScientist.
+
+## Stable facts
+
+## Preferences
+
+## Collaboration style
+
+## Constraints
+"""
+
+
+def _default_user_profile_frontmatter() -> dict[str, object]:
+    """Fresh copy of the default frontmatter (nested dict included)."""
+    return {
+        key: dict(value) if isinstance(value, dict) else value
+        for key, value in USER_PROFILE_FRONTMATTER.items()
+    }
+
+
+def _split_frontmatter(text: str) -> tuple[dict[str, object] | None, str]:
+    """Split a leading YAML frontmatter.
+
+    Returns ``({}, text)`` when no frontmatter block is present, and
+    ``(None, text)`` when a block is present but unparsable or not a mapping.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return {}, text
+    try:
+        meta = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as e:
+        logger.debug("Ignoring malformed profile frontmatter: %s", e)
+        return None, text
+    if not isinstance(meta, dict):
+        return None, text
+    return meta, text[match.end() :]
+
+
+def _join_frontmatter(meta: dict[str, object], body: str) -> str:
+    dumped = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).rstrip("\n")
+    return f"---\n{dumped}\n---\n{body}"
+
+
+# Ask again on sessions 1, 2, 4, 8, ... — never gives up, but ever quieter.
+_BOOTSTRAP_MAX_EXPONENT = 62
+
+BootstrapVariant = Literal["first", "retry"]
+
+
+def _meta_str(value: object) -> str:
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _meta_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _bootstrap_view(meta: dict[str, object]) -> dict[str, object]:
+    """Bootstrap-relevant fields of a profile frontmatter with defaults applied."""
+    book = meta.get(_BOOKKEEPING_KEY)
+    if not isinstance(book, dict):
+        book = {}
+    return {
+        "name": _meta_str(meta.get("name")),
+        "intro": _meta_str(meta.get("intro")) or "pending",
+        "sessions": _meta_int(book.get("sessions")),
+        "intro_attempts": _meta_int(book.get("intro_attempts")),
+        "last_thread": _meta_str(book.get("last_thread")),
+        "intro_asked_thread": _meta_str(book.get("intro_asked_thread")),
+    }
+
+
+def _bootstrap_decision(
+    view: dict[str, object],
+    *,
+    thread_id: str | None,
+    human_messages: int,
+) -> BootstrapVariant | None:
+    """Which first-contact block (if any) this model call should carry."""
+    if view["name"] or view["intro"] == "skipped":
+        return None
+    if human_messages != 1:
+        return None
+    if thread_id is None:
+        return "first"
+    if view["intro_asked_thread"] == thread_id:
+        return "first" if view["intro_attempts"] <= 1 else "retry"
+    attempts = min(view["intro_attempts"], _BOOTSTRAP_MAX_EXPONENT)
+    if view["sessions"] >= 1 << attempts:
+        return "first" if attempts == 0 else "retry"
+    return None
+
+
+def _apply_bootstrap_view(
+    meta: dict[str, object], view: dict[str, object]
+) -> dict[str, object]:
+    """Merge bookkeeping from *view* into *meta*, filling missing identity keys."""
+    merged = _default_user_profile_frontmatter()
+    merged.update({k: v for k, v in meta.items() if k != _BOOKKEEPING_KEY})
+    book = meta.get(_BOOKKEEPING_KEY)
+    merged[_BOOKKEEPING_KEY] = {
+        **(book if isinstance(book, dict) else {}),
+        "sessions": view["sessions"],
+        "intro_attempts": view["intro_attempts"],
+        "last_thread": view["last_thread"],
+        "intro_asked_thread": view["intro_asked_thread"],
+    }
+    return merged
+
+
+def _current_thread_id() -> str | None:
+    """Thread id of the running graph, or None outside a runnable context."""
+    try:
+        from langgraph.config import get_config
+
+        config = get_config()
+    except Exception:
+        return None
+    if not isinstance(config, dict):
+        return None
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return None
+    thread_id = configurable.get("thread_id")
+    return thread_id if isinstance(thread_id, str) and thread_id else None
+
+
+def _count_human_messages(state: object) -> int:
+    messages = state.get("messages") if isinstance(state, dict) else None
+    if not isinstance(messages, (list, tuple)):
+        return 0
+    # Skip synthetic HumanMessages (e.g. summarization) — not the user's turn.
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, HumanMessage)
+        and message.additional_kwargs.get("lc_source") is None
+    )
+
+
 PROFILE_TEMPLATES: dict[str, str] = {
     "/profile/SOUL.md": """# EvoScientist soul
 
@@ -121,18 +354,9 @@ Default behavior for this copy of EvoScientist.
 
 ## Lines not to cross
 """,
-    "/profile/USER_PROFILE.md": """# User profile
-
-Things worth remembering about the person using EvoScientist.
-
-## Stable facts
-
-## Preferences
-
-## Collaboration style
-
-## Constraints
-""",
+    "/profile/USER_PROFILE.md": _join_frontmatter(
+        _default_user_profile_frontmatter(), _USER_PROFILE_BODY
+    ),
     "/profile/RESEARCH_TASTE.md": """# Research taste
 
 Research taste to keep in mind: interests, standards, methods that tend to fit, and things to avoid.
@@ -240,12 +464,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_observation_memory: bool = True,
         enable_observation_tool: bool = True,
         memory_scheduler: MemoryScheduler | None = None,
+        enable_profile_bootstrap: bool = False,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
         self._workspace_dir = workspace
         self._project_id = resolve_project_id(workspace)
         self._enable_profile_memory = enable_profile_memory
+        self._enable_profile_bootstrap = enable_profile_bootstrap
         self._enable_observation_memory = enable_observation_memory
         self._memory_scheduler = memory_scheduler
         self._profile_specs = _profile_specs(self._project_id)
@@ -330,12 +556,22 @@ class EvoMemoryMiddleware(AgentMiddleware):
             raise
 
     def _write_text(self, path: Path, content: str) -> bool:
-        """Write UTF-8 text, creating parent directories as needed."""
+        """Write UTF-8 text atomically, creating parent directories as needed."""
+        tmp_path: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            fd, tmp_name = tempfile.mkstemp(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            os.replace(tmp_path, path)
         except OSError as e:
             logger.warning("Failed to write profile memory %s: %s", path, e)
+            if tmp_path is not None:
+                with contextlib.suppress(OSError):
+                    tmp_path.unlink()
             return False
         return True
 
@@ -367,6 +603,16 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 if not self._write_text(path, template):
                     raise OSError(f"Failed to bootstrap profile file: {path}")
                 content = template
+            elif (
+                memory_path == _USER_PROFILE_PATH
+                and content.strip()
+                and _FRONTMATTER_RE.match(content) is None
+            ):
+                # Pre-frontmatter profiles: prepend defaults, keep the body verbatim.
+                content = _join_frontmatter(
+                    _default_user_profile_frontmatter(), content
+                )
+                self._write_text(path, content)
             records.append((memory_path, content))
         return records
 
@@ -468,6 +714,51 @@ class EvoMemoryMiddleware(AgentMiddleware):
             logger.debug("Failed to read profile memory: %s", e)
             return self._profile_pointer_context
 
+    def _bootstrap_context(self, *, thread_id: str | None, human_messages: int) -> str:
+        """First-contact block for this call; also bumps the frontmatter bookkeeping."""
+        if not (self._enable_profile_memory and self._enable_profile_bootstrap):
+            return ""
+        path = self._file_path(_USER_PROFILE_PATH)
+        try:
+            content = self._read_text(path)
+        except Exception as e:
+            logger.debug("Skipping profile bootstrap: %s", e)
+            return ""
+        # Empty means a concurrent writer is mid-truncate: never replace it.
+        if content is None or not content.strip():
+            return ""
+
+        meta, body = _split_frontmatter(content)
+        if meta is None:
+            logger.warning("Unparsable frontmatter in %s; skipping bootstrap", path)
+            return ""
+        view = _bootstrap_view(meta)
+        dirty = False
+        if thread_id is not None and view["last_thread"] != thread_id:
+            view["sessions"] += 1
+            view["last_thread"] = thread_id
+            dirty = True
+        variant = _bootstrap_decision(
+            view, thread_id=thread_id, human_messages=human_messages
+        )
+        if (
+            variant is not None
+            and thread_id is not None
+            and view["intro_asked_thread"] != thread_id
+        ):
+            view["intro_attempts"] += 1
+            view["intro_asked_thread"] = thread_id
+            dirty = True
+        if dirty:
+            merged = _apply_bootstrap_view(meta, view)
+            self._write_text(path, _join_frontmatter(merged, body))
+
+        if variant == "first":
+            return PROFILE_BOOTSTRAP_FIRST
+        if variant == "retry":
+            return PROFILE_BOOTSTRAP_RETRY
+        return ""
+
     def _refresh_observation_index_context(self) -> str:
         """Refresh the prompt observation index from current memory files."""
         if not self._enable_observation_memory:
@@ -534,6 +825,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         *,
         observation_index_context: str,
         profile_content: str,
+        bootstrap_context: str = "",
     ) -> str:
         """Build request memory context ordered from static to dynamic."""
         return "\n\n".join(
@@ -542,6 +834,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 self._memory_instructions_context(),
                 observation_index_context,
                 self._profile_memory_context(profile_content),
+                bootstrap_context.strip(),
             )
             if part
         )
@@ -552,6 +845,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         *,
         observation_index_context: str,
         profile_content: str,
+        bootstrap_context: str = "",
     ) -> ModelRequest:
         """Append memory context and editing guidance to the system prompt."""
         if not self._enable_profile_memory and not self._enable_observation_memory:
@@ -560,6 +854,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         injection = self._memory_context_for_request(
             observation_index_context=observation_index_context,
             profile_content=profile_content,
+            bootstrap_context=bootstrap_context,
         )
         new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
@@ -571,16 +866,25 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
     def modify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for synchronous model calls."""
+        profile_content = self._profile_context_for_request()
         return self._inject_memory_context(
             request,
             observation_index_context=self._refresh_observation_index_context(),
-            profile_content=self._profile_context_for_request(),
+            profile_content=profile_content,
+            bootstrap_context=self._bootstrap_context(
+                thread_id=_current_thread_id(),
+                human_messages=_count_human_messages(request.state),
+            ),
         )
 
     async def amodify_request(self, request: ModelRequest) -> ModelRequest:
         """Apply memory injection for asynchronous model calls."""
         observation_index_context = ""
         profile_context = ""
+        bootstrap_context = ""
+        # Resolved on the event-loop thread: get_config() reads a contextvar.
+        thread_id = _current_thread_id()
+        human_messages = _count_human_messages(request.state)
 
         if self._enable_observation_memory and self._enable_profile_memory:
             observation_index_context, profile_context = await asyncio.gather(
@@ -594,10 +898,19 @@ class EvoMemoryMiddleware(AgentMiddleware):
         elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
 
+        # After the profile read so the file exists on a brand-new memory dir.
+        if self._enable_profile_memory and self._enable_profile_bootstrap:
+            bootstrap_context = await asyncio.to_thread(
+                self._bootstrap_context,
+                thread_id=thread_id,
+                human_messages=human_messages,
+            )
+
         return self._inject_memory_context(
             request,
             observation_index_context=observation_index_context,
             profile_content=profile_context,
+            bootstrap_context=bootstrap_context,
         )
 
     def wrap_model_call(
@@ -627,6 +940,7 @@ def create_memory_middleware(
     enable_observation_memory: bool = True,
     enable_observation_tool: bool = True,
     memory_scheduler: MemoryScheduler | None = None,
+    enable_profile_bootstrap: bool = False,
 ) -> EvoMemoryMiddleware:
     """Build profile-memory middleware, defaulting to the shared memories directory."""
 
@@ -643,4 +957,5 @@ def create_memory_middleware(
         enable_observation_memory=enable_observation_memory,
         enable_observation_tool=enable_observation_tool,
         memory_scheduler=memory_scheduler,
+        enable_profile_bootstrap=enable_profile_bootstrap,
     )

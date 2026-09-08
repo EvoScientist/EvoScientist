@@ -85,6 +85,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
     # Anthropic (current generation)
+    ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-fable-5", "claude-fable-5", "anthropic"),
     ("claude-opus-5", "claude-opus-5", "anthropic"),
     ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
@@ -92,6 +93,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
     # OpenAI
+    ("gpt-6-astra", "gpt-6-astra", "openai"),
     ("gpt-5.6-sol", "gpt-5.6-sol", "openai"),
     ("gpt-5.6-terra", "gpt-5.6-terra", "openai"),
     ("gpt-5.6-luna", "gpt-5.6-luna", "openai"),
@@ -108,6 +110,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5-mini", "gpt-5-mini", "openai"),
     ("gpt-5-nano", "gpt-5-nano", "openai"),
     # Google GenAI
+    ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),
     ("gemini-3.6-flash", "gemini-3.6-flash", "google-genai"),
     ("gemini-3.5-flash", "gemini-3.5-flash", "google-genai"),
@@ -162,6 +165,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5.2", "zai-org/glm-5.2", "novita"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731", "novita"),
     # OpenRouter
+    ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
     ("claude-opus-5-fast", "anthropic/claude-opus-5-fast", "openrouter"),
@@ -169,6 +173,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
     ("claude-sonnet-5", "anthropic/claude-sonnet-5", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
+    ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
     ("gpt-5.6-sol", "openai/gpt-5.6-sol", "openrouter"),
     ("gpt-5.6-terra", "openai/gpt-5.6-terra", "openrouter"),
     ("gpt-5.6-luna", "openai/gpt-5.6-luna", "openrouter"),
@@ -176,6 +181,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.5", "openai/gpt-5.5", "openrouter"),
     ("gpt-5.4", "openai/gpt-5.4", "openrouter"),
     ("gpt-5.3-codex", "openai/gpt-5.3-codex", "openrouter"),
+    ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
     ("gemini-3.7-flash", "google/gemini-3.7-flash", "openrouter"),
     ("gemini-3.6-flash", "google/gemini-3.6-flash", "openrouter"),
     ("gemini-3.5-flash", "google/gemini-3.5-flash", "openrouter"),
@@ -205,6 +211,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro-0813", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
+    ("muse-spark-1.3", "meta/muse-spark-1.3", "openrouter"),
     # Volcengine Coding Plan (火山引擎代码计划 — coding-only endpoint)
     # Listed before Zhipu so simple GLM lookups keep their existing default.
     ("glm-5.2", "glm-5-2", "volcengine-code"),

@@ -125,11 +125,16 @@ def _profile_memory_headings() -> tuple[str, ...]:
     """Return profile headings from the canonical profile templates."""
     from EvoScientist.middleware.memory import PROFILE_TEMPLATES
 
-    return tuple(
-        template.strip().splitlines()[0].strip()
-        for template in PROFILE_TEMPLATES.values()
-        if template.strip()
-    )
+    # First markdown heading, so a leading YAML frontmatter is skipped.
+    headings = []
+    for template in PROFILE_TEMPLATES.values():
+        heading = next(
+            (line.strip() for line in template.splitlines() if line.startswith("# ")),
+            "",
+        )
+        if heading:
+            headings.append(heading)
+    return tuple(headings)
 
 
 def _looks_like_profile_memory(content: str) -> bool:
