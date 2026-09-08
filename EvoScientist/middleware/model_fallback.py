@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -60,20 +60,26 @@ def _parse_fallback_chain(raw: str) -> list[tuple[str, str]]:
     return chain
 
 
-def _ensure_chain_initialized() -> None:
+def _ensure_chain_initialized(config: Any = None) -> None:
     """Seed the fallback chain from config on first access. Lock must be held.
 
     Runs at most once per process: after the first touch, later config
     reads (including graph rebuilds) never overwrite the chain, so
     in-process edits via ``/model-fallback`` survive every rebuild.
+    When ``config`` is supplied (create_cli_agent's already-resolved
+    config), it is used as-is so callers that pass their own config get
+    its chain without any disk read; without one, config is read from
+    disk via ``get_effective_config()``.
     """
     global _fallback_chain, _chain_initialized
     if _chain_initialized:
         return
-    from ..config.settings import get_effective_config
+    if config is None:
+        from ..config.settings import get_effective_config
 
-    raw = getattr(get_effective_config(), "model_fallbacks", "") or ""
-    _fallback_chain = _parse_fallback_chain(raw)
+        config = get_effective_config()
+    raw = getattr(config, "model_fallbacks", "")
+    _fallback_chain = _parse_fallback_chain(raw) if isinstance(raw, str) else []
     _chain_initialized = True
 
 
@@ -126,19 +132,20 @@ def get_fallback_chain() -> list[tuple[str, str]]:
         return list(_fallback_chain)
 
 
-def seed_fallback_chain() -> None:
-    """Seed the fallback chain from config now (idempotent per process).
+def seed_fallback_chain(config: Any = None) -> None:
+    """Seed the fallback chain from ``config`` now (idempotent per process).
 
     ``get_effective_config()`` reloads config from disk on every call, and
     the langgraph dev server's run loop raises ``BlockingError`` (blockbuster)
     on sync file IO — so the seeding must happen in a sync context, not lazily
     inside a run. Call this explicitly from graph registration
     (``langgraph_dev/main_graph.py``) and agent construction
-    (``create_cli_agent``); the first per-run chain read is then a pure
-    in-memory list read.
+    (``create_cli_agent``, which passes its already-resolved config so the
+    pure path performs no disk read); the first per-run chain read is then a
+    pure in-memory list read.
     """
     with _fallback_chain_lock:
-        _ensure_chain_initialized()
+        _ensure_chain_initialized(config)
 
 
 def set_fallback_chain(chain: list[tuple[str, str]]) -> None:

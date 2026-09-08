@@ -1210,10 +1210,6 @@ def create_cli_agent(
     )
     from .middleware.model_fallback import seed_fallback_chain
 
-    # Seed the fallback chain in this sync construction context so the first
-    # per-run chain read does no config IO (see seed_fallback_chain).
-    seed_fallback_chain()
-
     # Pure path only when BOTH config and chat_model are explicit: build from
     # locals and write no module globals. Otherwise keep the legacy
     # global-writing behavior — callers that pass config= only (CLI startup,
@@ -1224,6 +1220,13 @@ def create_cli_agent(
     else:
         cfg = _ensure_config(config)
         chat_model = None
+
+    # Seed the fallback chain from the resolved config so the first per-run
+    # chain read does no config IO (see seed_fallback_chain). This is the one
+    # module global the pure path seeds, and it seeds from locals — no disk
+    # read, and a caller-supplied config's model_fallbacks wins over the
+    # on-disk chain.
+    seed_fallback_chain(cfg)
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver
