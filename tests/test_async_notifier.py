@@ -1025,6 +1025,41 @@ async def test_idle_polling_stays_armed_after_failed_state_read(monkeypatch):
     assert len(drain_notifications("cli-tid")) == 1
 
 
+async def test_failed_read_rearms_disarmed_idle_polling(monkeypatch):
+    """A prior all-terminal read disarms the idle throttle; if the
+    turn-boundary read for a newly launched task then FAILS, the failed read
+    must re-arm rather than preserve the stale disarmed observation -
+    otherwise the completion sits unsurfaced until the next turn boundary."""
+    gateway = FakeGraphGateway(
+        state_values={"async_tasks": {}},
+        run_statuses={"run-1": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    # Successful read with an all-terminal registry: idle polling disarms.
+    async_notifier._idle_reader_active_seen["cli-tid"] = False
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    assert async_notifier._idle_reader_active_seen["cli-tid"] is False
+
+    # A task launches; the turn-boundary read for it fails.
+    gateway.state_values = _running_registry()
+    gateway.state_error = RuntimeError("transient gateway failure")
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+
+    # The failed read must RE-ARM the disarmed thread, not preserve False.
+    assert async_notifier._idle_reader_active_seen["cli-tid"] is True
+
+    # Failure clears; the idle tick (throttled path) surfaces the completion.
+    gateway.state_error = None
+    clock["t"] += 5.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
 # ============================================================================
 # Background-process reader (mirror of the async-task reader; polls process
 # status via the gateway and enqueues kind="bg-process" completions).
@@ -1119,6 +1154,85 @@ async def test_bg_reader_idempotent_across_polls():
     assert gateway.process_status_calls == ["proc-1"]
 
 
+async def test_bg_idle_polling_stays_armed_after_failed_state_read():
+    """A failed bg_processes state read must not disarm idle polling - not the
+    same as an empty registry. Recovery: once the failure clears, the next
+    poll surfaces the exit. Mirrors the async-task reader's contract."""
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "success"},
+        state_error=RuntimeError("transient gateway failure"),
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # First poll: the state read fails - nothing enqueued, the reader stays
+    # armed rather than recording "nothing active".
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert drain_notifications("cli-tid") == []
+    assert async_notifier._bg_idle_reader_active_seen.get("cli-tid", True) is True
+
+    # Failure clears; the next poll surfaces the exit.
+    gateway.state_error = None
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+async def test_bg_failed_read_rearms_disarmed_idle_polling():
+    """A prior all-terminal read disarms the bg idle throttle; if the
+    turn-boundary read for a newly launched process then FAILS, the failed
+    read must re-arm rather than preserve the stale disarmed observation -
+    otherwise the exit sits unsurfaced until the next turn boundary.
+    Mirrors the async-task reader's pin."""
+    gateway = FakeGraphGateway(
+        state_values={"bg_processes": {}},
+        process_statuses={"proc-1": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # Successful read with an all-terminal registry: idle polling disarms.
+    async_notifier._bg_idle_reader_active_seen["cli-tid"] = False
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert async_notifier._bg_idle_reader_active_seen["cli-tid"] is False
+
+    # A process launches; the turn-boundary read for it fails.
+    gateway.state_values = _bg_running_registry()
+    gateway.state_error = RuntimeError("transient gateway failure")
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+
+    # The failed read must RE-ARM the disarmed thread, not preserve False.
+    assert async_notifier._bg_idle_reader_active_seen["cli-tid"] is True
+
+    # Failure clears; the idle tick surfaces the exit.
+    gateway.state_error = None
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=0.0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+async def test_bg_reader_normalizes_state_values_none():
+    """A thread with no checkpoint yet yields values=None; the channel access
+    must not raise."""
+    gateway = FakeGraphGateway()
+    gateway.state_values = None  # bypass the constructor's `or {}` default
+    target = GraphTarget(local_graph=MagicMock())
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+
+    assert active == 0
+    assert drain_notifications("cli-tid") == []
+
+
 async def test_bg_reader_unknown_process_stops_polling():
     # Registry cleared server-side (e.g. restart) → status unknown; give up rather
     # than spin, and never enqueue.
@@ -1204,4 +1318,3 @@ async def test_bg_reader_reserves_process_id_across_concurrent_polls():
 
     assert len(drain_notifications("cli-tid")) == 1
     assert async_notifier._bg_reader_in_flight == set()
->>>>>>> 64d4fb6 (chore: reserve process ids across the concurrent status await)

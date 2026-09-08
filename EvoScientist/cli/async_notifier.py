@@ -358,12 +358,20 @@ async def read_bg_processes_from_gateway(
     gateway: GraphGateway,
     target: GraphTarget,
     thread_id: str,
-) -> dict[str, dict]:
-    """Read the ``bg_processes`` state channel through the active graph gateway."""
+) -> dict[str, dict] | None:
+    """Read the ``bg_processes`` state channel through the active graph gateway.
+
+    Returns ``None`` when the read fails, so the reader can distinguish a
+    transient failure from a genuinely empty registry (``{}``) — mirroring
+    :func:`read_async_tasks_from_gateway`. Also normalizes a successful
+    ``None`` values read (a thread with no checkpoint yet) to ``{}`` before
+    the channel access.
+    """
     try:
         values = await gateway.get_state_values(target, thread_id)
     except Exception:
-        return {}
+        return None
+    values = values or {}
     return values.get("bg_processes", {})
 
 
@@ -384,6 +392,17 @@ async def enqueue_bg_process_completions_from_state(
     still-active count for the idle throttle.
     """
     registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
+    if registry is None:
+        # Failed read - NOT an empty registry. RE-ARM the idle throttle
+        # unconditionally, mirroring the async-task reader: preserving a
+        # prior "disarmed" observation would silence idle polling for a
+        # process launched after the last successful read saw everything
+        # terminal - its exit would then sit unsurfaced until the next turn
+        # boundary. Arming costs one state read per idle interval and
+        # self-corrects on the first successful read (it re-disarms when the
+        # registry is genuinely all-terminal).
+        _bg_idle_reader_active_seen[thread_id] = True
+        return 1
     still_active = 0
     for process_id, record in registry.items():
         if (
