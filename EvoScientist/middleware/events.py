@@ -37,8 +37,10 @@ a slow sink from the run.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from contextvars import ContextVar, Token
-from typing import Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 MIDDLEWARE_EVENT_TAG = "evoscientist"
 """Wire tag for middleware events carried on the LangGraph ``custom`` channel.
@@ -46,6 +48,136 @@ MIDDLEWARE_EVENT_TAG = "evoscientist"
 Payloads are ``{MIDDLEWARE_EVENT_TAG: {"kind": ..., ...}}`` so consumers can
 distinguish middleware events from any other custom-channel traffic without
 inspecting payload internals."""
+
+
+@dataclass(frozen=True)
+class MiddlewareEvent:
+    """One middleware UI event, (de)serializable for the ``custom`` channel.
+
+    ``StreamBroadcastSink`` serializes events with ``to_wire`` server-side;
+    ``LangGraphServerGateway`` rebuilds them with ``from_wire`` and replays
+    them onto its sink with ``dispatch``. Each subclass owns its kind
+    string, its wire fields, and the mapping to the sink method - the kind
+    literals and their de-/serialization live in exactly one place.
+
+    ``from_wire`` returns ``None`` for an unknown kind (not ours - silence,
+    never an error) and raises ``ValueError`` for a malformed payload of a
+    known kind (the gateway logs at DEBUG and drops it).
+    """
+
+    KIND: ClassVar[str] = ""
+
+    def to_wire(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @classmethod
+    def _from_payload(cls, payload: Mapping[str, Any]) -> MiddlewareEvent:
+        raise NotImplementedError
+
+    def dispatch(self, sink: MiddlewareEventSink) -> None:
+        raise NotImplementedError
+
+    @classmethod
+    def from_wire(cls, payload: Mapping[str, Any]) -> MiddlewareEvent | None:
+        event_cls = _EVENT_KINDS.get(str(payload.get("kind")))
+        if event_cls is None:
+            return None
+        return event_cls._from_payload(payload)
+
+
+@dataclass(frozen=True)
+class ToolSelectionStarted(MiddlewareEvent):
+    KIND: ClassVar[str] = "tool_selection_started"
+    total_tools: int
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": self.KIND, "total_tools": self.total_tools}
+
+    @classmethod
+    def _from_payload(cls, payload: Mapping[str, Any]) -> MiddlewareEvent:
+        if "total_tools" not in payload:
+            raise ValueError(f"{cls.KIND}: 'total_tools' is required")
+        return cls(total_tools=int(payload["total_tools"]))
+
+    def dispatch(self, sink: MiddlewareEventSink) -> None:
+        sink.on_tool_selection_started(self.total_tools)
+
+
+@dataclass(frozen=True)
+class ToolSelection(MiddlewareEvent):
+    KIND: ClassVar[str] = "tool_selection"
+    selected: list[str]
+    total_tools: int
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "kind": self.KIND,
+            "selected": list(self.selected),
+            "total_tools": self.total_tools,
+        }
+
+    @classmethod
+    def _from_payload(cls, payload: Mapping[str, Any]) -> MiddlewareEvent:
+        selected = payload.get("selected")
+        if not isinstance(selected, list):
+            raise ValueError(
+                f"{cls.KIND}: 'selected' must be a list, got {type(selected).__name__}"
+            )
+        if "total_tools" not in payload:
+            raise ValueError(f"{cls.KIND}: 'total_tools' is required")
+        return cls(
+            selected=[str(item) for item in selected],
+            total_tools=int(payload["total_tools"]),
+        )
+
+    def dispatch(self, sink: MiddlewareEventSink) -> None:
+        sink.on_tool_selection(self.selected, self.total_tools)
+
+
+@dataclass(frozen=True)
+class ToolSelectionEnded(MiddlewareEvent):
+    KIND: ClassVar[str] = "tool_selection_ended"
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": self.KIND}
+
+    @classmethod
+    def _from_payload(cls, payload: Mapping[str, Any]) -> MiddlewareEvent:
+        return cls()
+
+    def dispatch(self, sink: MiddlewareEventSink) -> None:
+        sink.on_tool_selection_ended()
+
+
+@dataclass(frozen=True)
+class FallbackNotice(MiddlewareEvent):
+    KIND: ClassVar[str] = "fallback_notice"
+    text: str
+    style: str = "yellow"
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"kind": self.KIND, "text": self.text, "style": self.style}
+
+    @classmethod
+    def _from_payload(cls, payload: Mapping[str, Any]) -> MiddlewareEvent:
+        return cls(
+            text=str(payload.get("text", "")),
+            style=str(payload.get("style", "yellow")),
+        )
+
+    def dispatch(self, sink: MiddlewareEventSink) -> None:
+        sink.emit_fallback_notice(self.text, self.style)
+
+
+_EVENT_KINDS: dict[str, type[MiddlewareEvent]] = {
+    event_cls.KIND: event_cls
+    for event_cls in (
+        ToolSelectionStarted,
+        ToolSelection,
+        ToolSelectionEnded,
+        FallbackNotice,
+    )
+}
 
 
 @runtime_checkable
@@ -228,11 +360,11 @@ class StreamBroadcastSink:
     def __init__(self, sink: MiddlewareEventSink) -> None:
         self._sink = sink
 
-    def _emit(self, payload: dict[str, Any]) -> None:
+    def _emit(self, event: MiddlewareEvent) -> None:
         try:
             from langgraph.config import get_stream_writer
 
-            get_stream_writer()({MIDDLEWARE_EVENT_TAG: payload})
+            get_stream_writer()({MIDDLEWARE_EVENT_TAG: event.to_wire()})
         except RuntimeError:
             # Outside a runnable context — nothing subscribes anyway.
             pass
@@ -240,30 +372,24 @@ class StreamBroadcastSink:
             import logging
 
             logging.getLogger(__name__).debug(
-                "custom-channel mirror failed for %r", payload, exc_info=True
+                "custom-channel mirror failed for %r", event, exc_info=True
             )
 
     def on_tool_selection_started(self, total_tools: int) -> None:
         self._sink.on_tool_selection_started(total_tools)
-        self._emit({"kind": "tool_selection_started", "total_tools": total_tools})
+        self._emit(ToolSelectionStarted(total_tools))
 
     def on_tool_selection(self, selected: list[str], total_tools: int) -> None:
         self._sink.on_tool_selection(selected, total_tools)
-        self._emit(
-            {
-                "kind": "tool_selection",
-                "selected": list(selected),
-                "total_tools": total_tools,
-            }
-        )
+        self._emit(ToolSelection(selected=list(selected), total_tools=total_tools))
 
     def on_tool_selection_ended(self) -> None:
         self._sink.on_tool_selection_ended()
-        self._emit({"kind": "tool_selection_ended"})
+        self._emit(ToolSelectionEnded())
 
     def emit_fallback_notice(self, text: str, style: str = "yellow") -> None:
         self._sink.emit_fallback_notice(text, style)
-        self._emit({"kind": "fallback_notice", "text": text, "style": style})
+        self._emit(FallbackNotice(text=text, style=style))
 
 
 def resolve_middleware_event_sink(
