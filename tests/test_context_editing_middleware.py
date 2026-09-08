@@ -1,8 +1,9 @@
 """Tests for ContextEditingMiddleware integration and compute_context_editing_trigger."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain.agents.middleware import ContextEditingMiddleware
+from langchain_core.messages import HumanMessage
 
 from EvoScientist.middleware.context_editing import compute_context_editing_trigger
 
@@ -98,15 +99,21 @@ def test_create_middleware_model_none_fallback(mock_model):
     mock_model.assert_called_once()
 
 
-def test_trigger_is_frozen_at_construction_divergence_pin():
-    """PIN (known divergence): the trigger integer is computed once from the
-    construction-time model's context window. A per-run
-    ``configurable.model`` override (server backend) swaps the chat model
-    via ConfigurableModelMiddleware but does NOT resize this trigger — a
-    run on a model with a different window keeps the construction model's
-    trigger. If this pin ever fails because the trigger became per-run,
-    update it consciously and drop the divergence note in
-    ``create_context_editing_middleware``'s docstring.
+def _fake_model_request(model):
+    """ModelRequest stub for invoking the middleware's wrap path."""
+    request = MagicMock()
+    request.model = model
+    request.messages = [HumanMessage(content="hi")]
+    request.override = MagicMock(side_effect=lambda **kw: request)
+    return request
+
+
+async def test_trigger_resizes_per_run_model():
+    """The edit trigger tracks the current run's model, not construction.
+
+    A per-run ``configurable.model`` override swaps ``request.model`` before
+    ContextEditingMiddleware runs (ConfigurableModelMiddleware sits earlier),
+    so a smaller-window model must get the smaller trigger on that run.
     """
     from EvoScientist.middleware.context_editing import (
         create_context_editing_middleware,
@@ -115,17 +122,53 @@ def test_trigger_is_frozen_at_construction_divergence_pin():
     construction_model = MagicMock()
     construction_model.profile = {"max_input_tokens": 200_000}
     mw = create_context_editing_middleware(construction_model)
-    trigger_at_construction = mw.edits[0].trigger
-    assert trigger_at_construction == 100_000
+    assert mw.edits[0].trigger == 100_000
 
-    # A "per-run override" to a much smaller-window model: the middleware
-    # instance is shared per graph, so its trigger stays frozen.
-    override_model = MagicMock()
-    override_model.profile = {"max_input_tokens": 32_768}
-    assert mw.edits[0].trigger == trigger_at_construction
-    assert compute_context_editing_trigger(override_model) == 16_384, (
-        "sanity: the override model WOULD compute a different trigger"
+    small_model = MagicMock()
+    small_model.profile = {"max_input_tokens": 32_768}
+
+    request = _fake_model_request(small_model)
+    handler = AsyncMock(return_value=MagicMock())
+    await mw.awrap_model_call(request, handler)
+    handler.assert_awaited_once()
+    assert mw.edits[0].trigger == 16_384
+
+    # Switching back to the construction model restores its trigger.
+    request = _fake_model_request(construction_model)
+    await mw.awrap_model_call(request, AsyncMock(return_value=MagicMock()))
+    assert mw.edits[0].trigger == 100_000
+
+
+async def test_trigger_recompute_is_cached_per_model():
+    """Each distinct run model computes its trigger once, not per call."""
+    from EvoScientist.middleware.context_editing import (
+        create_context_editing_middleware,
     )
+
+    construction_model = MagicMock()
+    construction_model.profile = {"max_input_tokens": 200_000}
+    mw = create_context_editing_middleware(construction_model)
+
+    small_model = MagicMock()
+    small_model.profile = {"max_input_tokens": 32_768}
+
+    calls = []
+    real = compute_context_editing_trigger
+
+    def _counting(model, *a, **kw):
+        calls.append(model)
+        return real(model, *a, **kw)
+
+    with patch(
+        "EvoScientist.middleware.context_editing.compute_context_editing_trigger",
+        side_effect=_counting,
+    ):
+        for _ in range(3):
+            await mw.awrap_model_call(
+                _fake_model_request(small_model), AsyncMock(return_value=MagicMock())
+            )
+    assert calls == [small_model]  # computed once, then cached
+    assert mw.edits[0].trigger == 16_384
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +208,8 @@ def test_inject_subagent_includes_context_editing(mock_model):
     subs = [{"name": "test-agent"}]
     _inject_subagent_middleware(subs)
 
-    middleware_types = [type(m) for m in subs[0]["middleware"]]
-    assert ContextEditingMiddleware in middleware_types
+    # Subclass of langchain's ContextEditingMiddleware (per-run trigger).
+    assert any(isinstance(m, ContextEditingMiddleware) for m in subs[0]["middleware"])
 
 
 @patch(
@@ -189,7 +232,7 @@ def test_context_editing_before_overflow_mapper(mock_config, mock_model, mock_ts
     mw = _get_default_middleware()
     type_names = [type(m).__name__ for m in mw]
 
-    ce_idx = type_names.index("ContextEditingMiddleware")
+    ce_idx = type_names.index("_PerRunTriggerContextEditingMiddleware")
     co_idx = type_names.index("ContextOverflowMapperMiddleware")
     assert ce_idx < co_idx, (
         "ContextEditingMiddleware should come before ContextOverflowMapperMiddleware"
