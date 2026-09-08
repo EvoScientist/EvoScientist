@@ -14,7 +14,6 @@ Usage::
 from __future__ import annotations
 
 from typing import Any
-from weakref import WeakKeyDictionary
 
 from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
 from langchain_core.language_models import BaseChatModel
@@ -48,9 +47,10 @@ class _PerRunTriggerContextEditingMiddleware(ContextEditingMiddleware):
     (``ConfigurableModelMiddleware`` sits earlier in the stack and swaps it).
     This subclass resizes the first edit's trigger there, whenever the model
     differs from the one the current trigger was computed for. Triggers are
-    cached per model object (``ConfigurableModelMiddleware`` returns the same
-    instance per ``(model, provider)`` pair, so steady-state model calls cost
-    one dict lookup).
+    cached per resolved context window — the trigger is a pure function of
+    it, real chat models are unhashable pydantic objects and cannot key a
+    cache, and distinct models sharing a window share a trigger value
+    anyway — so steady-state model calls cost one dict lookup.
 
     The trigger mutation happens right before the synchronous edit pass with
     no ``await`` in between, so async runs on one event loop cannot interleave
@@ -67,18 +67,19 @@ class _PerRunTriggerContextEditingMiddleware(ContextEditingMiddleware):
     ) -> None:
         super().__init__(edits=edits)
         self._trigger_model: Any = construction_model
-        self._trigger_cache: WeakKeyDictionary = WeakKeyDictionary()
+        self._trigger_cache: dict[int | None, int] = {}
 
     def _sync_trigger(self, model: Any) -> None:
         if model is self._trigger_model:
             return
-        trigger = self._trigger_cache.get(model)
+        # Keyed by the resolved context window, not the model object: real
+        # chat models are unhashable pydantic objects, and the trigger is a
+        # pure function of the window.
+        context_window = get_context_window(model)
+        trigger = self._trigger_cache.get(context_window)
         if trigger is None:
             trigger = compute_context_editing_trigger(model)
-            try:
-                self._trigger_cache[model] = trigger
-            except TypeError:  # unhashable model object - skip caching
-                pass
+            self._trigger_cache[context_window] = trigger
         self._trigger_model = model
         self.edits[0].trigger = trigger
 

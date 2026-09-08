@@ -139,18 +139,29 @@ async def test_trigger_resizes_per_run_model():
     assert mw.edits[0].trigger == 100_000
 
 
-async def test_trigger_recompute_is_cached_per_model():
-    """Each distinct run model computes its trigger once, not per call."""
+async def test_trigger_recompute_is_cached_for_unhashable_models():
+    """Real chat models are unhashable pydantic objects; the trigger cache
+    must key on the resolved context window, not the model object, and
+    alternating runs compute each window's trigger once."""
     from EvoScientist.middleware.context_editing import (
         create_context_editing_middleware,
     )
 
-    construction_model = MagicMock()
-    construction_model.profile = {"max_input_tokens": 200_000}
-    mw = create_context_editing_middleware(construction_model)
+    class _UnhashableModel:
+        """Stands in for real chat models: a profile dict and no hash."""
 
-    small_model = MagicMock()
-    small_model.profile = {"max_input_tokens": 32_768}
+        def __init__(self, window):
+            self.profile = {"max_input_tokens": window}
+
+        def __hash__(self):
+            raise TypeError("unhashable type (pydantic model)")
+
+    construction_model = _UnhashableModel(200_000)
+    mw = create_context_editing_middleware(construction_model)
+    assert mw.edits[0].trigger == 100_000
+
+    small_model = _UnhashableModel(32_768)
+    large_model = _UnhashableModel(200_000)
 
     calls = []
     real = compute_context_editing_trigger
@@ -163,12 +174,14 @@ async def test_trigger_recompute_is_cached_per_model():
         "EvoScientist.middleware.context_editing.compute_context_editing_trigger",
         side_effect=_counting,
     ):
-        for _ in range(3):
+        # Alternating models defeat the identity short-circuit, so only the
+        # per-window cache can keep the compute count at one per window.
+        for model in (small_model, large_model, small_model, large_model):
             await mw.awrap_model_call(
-                _fake_model_request(small_model), AsyncMock(return_value=MagicMock())
+                _fake_model_request(model), AsyncMock(return_value=MagicMock())
             )
-    assert calls == [small_model]  # computed once, then cached
-    assert mw.edits[0].trigger == 16_384
+    assert calls == [small_model, large_model]  # each window computed once
+    assert mw.edits[0].trigger == 100_000
 
 
 # ---------------------------------------------------------------------------
