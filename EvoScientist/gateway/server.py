@@ -863,10 +863,15 @@ class LangGraphServerGateway:
             for event in tracker.finish():
                 yield event
         except Exception as exc:
+            # Repair before the first yield: a consumer that stops iterating
+            # after the error event (aclose / abandon) triggers GeneratorExit
+            # at the yield, so any repair after it never runs and the thread
+            # keeps its non-empty ``next`` — the failed step would replay on
+            # the next request.
+            await self._repair_stuck_thread_state(request.thread_id)
             yield emitter.error(str(exc)).data
             for event in tracker.finish():
                 yield event
-            await self._repair_stuck_thread_state(request.thread_id)
             raise
         finally:
             if run_started and not run_completed and not emitted_interrupt:

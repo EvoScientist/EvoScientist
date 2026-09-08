@@ -1546,6 +1546,55 @@ async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     ]
 
 
+async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after_error_event():
+    """A consumer that stops iterating once it has the error event triggers
+    GeneratorExit at the yield - the repair must already have run."""
+
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            for event in self.events:
+                yield event
+            raise RuntimeError("provider connection lost")
+
+    failing_stream = _FailingStream(
+        "abc12345",
+        events=[],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={
+            "abc12345": {
+                "values": {},
+                "next": ("model",),
+            }
+        },
+        streams={"abc12345": failing_stream},
+    )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=client),
+    )
+
+    gen = gateway.stream_events(RunRequest(message="hi", thread_id="abc12345"))
+    async for event in gen:
+        assert event["type"] == "error"
+        break  # consumer abandons the generator after the error event
+    await gen.aclose()
+
+    assert threads.state_updates == [
+        ("abc12345", None, "__end__"),
+    ]
+
+
 async def test_langgraph_server_gateway_preserves_hitl_interrupt_after_run_failure():
     class _FailingStream(FakeLangGraphThreadStream):
         async def _iter_events(self):
