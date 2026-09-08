@@ -345,6 +345,11 @@ async def enqueue_completions_from_state_throttled(
 # via a tool (check/stop/list), so this idempotency set keeps one proactive exit →
 # one enqueue for the agent-didn't-check path, mirroring ``_reader_enqueued_task_ids``.
 _reader_enqueued_process_ids: set[str] = set()
+# Process ids a reader invocation is currently awaiting a status for. The
+# idle tick and a turn-boundary read can interleave at the status await;
+# without this reservation both would observe the same terminal status and
+# enqueue the completion twice.
+_bg_reader_in_flight: set[str] = set()
 _bg_idle_reader_last_poll: dict[str | None, float] = {}
 _bg_idle_reader_active_seen: dict[str | None, bool] = {}
 
@@ -381,31 +386,41 @@ async def enqueue_bg_process_completions_from_state(
     registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
     still_active = 0
     for process_id, record in registry.items():
-        if process_id in _reader_enqueued_process_ids:
+        if (
+            process_id in _reader_enqueued_process_ids
+            or process_id in _bg_reader_in_flight
+        ):
             continue
         if record.get("status") in TERMINAL_STATUSES:
             continue
+        # Reserve before the await so a concurrent reader invocation (idle
+        # tick racing a turn-boundary read) cannot double-enqueue this exit.
+        _bg_reader_in_flight.add(process_id)
         try:
-            status = await gateway.get_process_status(target, thread_id, process_id)
-        except Exception:
-            still_active += 1  # gateway unavailable / transient — retry next poll
-            continue
-        if status == "unknown":
-            # Process gone from the registry (e.g. a server restart cleared it) —
-            # its exit is unknowable, so stop polling it rather than spin forever.
+            try:
+                status = await gateway.get_process_status(target, thread_id, process_id)
+            except Exception:
+                still_active += 1  # gateway unavailable / transient — retry next poll
+                continue
+            if status == "unknown":
+                # Process gone from the registry (e.g. a server restart cleared
+                # it) — its exit is unknowable, so stop polling it rather than
+                # spin forever.
+                _reader_enqueued_process_ids.add(process_id)
+                continue
+            if status not in TERMINAL_STATUSES:
+                still_active += 1
+                continue
+            enqueue_bg_process_notification(
+                task_id=process_id,
+                agent_name=record.get("name", ""),
+                status=status,
+                prompt=record.get("command", ""),
+                origin_cli_thread_id=record.get("origin_thread_id") or thread_id,
+            )
             _reader_enqueued_process_ids.add(process_id)
-            continue
-        if status not in TERMINAL_STATUSES:
-            still_active += 1
-            continue
-        enqueue_bg_process_notification(
-            task_id=process_id,
-            agent_name=record.get("name", ""),
-            status=status,
-            prompt=record.get("command", ""),
-            origin_cli_thread_id=record.get("origin_thread_id") or thread_id,
-        )
-        _reader_enqueued_process_ids.add(process_id)
+        finally:
+            _bg_reader_in_flight.discard(process_id)
     _bg_idle_reader_active_seen[thread_id] = still_active > 0
     return still_active
 

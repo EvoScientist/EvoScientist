@@ -495,6 +495,7 @@ def _reset_notifier_state(an_mod):
     an_mod._idle_reader_last_poll.clear()
     an_mod._idle_reader_active_seen.clear()
     an_mod._reader_enqueued_process_ids.clear()
+    an_mod._bg_reader_in_flight.clear()
     an_mod._bg_idle_reader_last_poll.clear()
     an_mod._bg_idle_reader_active_seen.clear()
 
@@ -1164,4 +1165,43 @@ async def test_bg_reader_throttle_rate_limits(monkeypatch):
         gateway, target, "cli-tid", min_interval_s=3.0
     )
     assert gateway.process_status_calls == ["proc-1", "proc-1"]
->>>>>>> 20c25be (feat: detect background-process exits from thread state via the gateway)
+
+
+async def test_bg_reader_reserves_process_id_across_concurrent_polls():
+    """An idle tick racing a turn-boundary read cannot double-enqueue one
+    exit: the second invocation skips the in-flight reservation and its
+    enqueue is short-circuited by the seen set."""
+    import asyncio
+
+    class _SlowStatusGateway(FakeGraphGateway):
+        async def get_process_status(self, target, thread_id, process_id):
+            await asyncio.sleep(0.05)
+            return "success"
+
+    gateway = _SlowStatusGateway(
+        state_values={
+            "bg_processes": {
+                "proc-1": {
+                    "process_id": "proc-1",
+                    "name": "demo",
+                    "command": "sleep 5",
+                    "status": "running",
+                    "origin_thread_id": "cli-tid",
+                }
+            }
+        },
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    await asyncio.gather(
+        async_notifier.enqueue_bg_process_completions_from_state(
+            gateway, target, "cli-tid"
+        ),
+        async_notifier.enqueue_bg_process_completions_from_state(
+            gateway, target, "cli-tid"
+        ),
+    )
+
+    assert len(drain_notifications("cli-tid")) == 1
+    assert async_notifier._bg_reader_in_flight == set()
+>>>>>>> 64d4fb6 (chore: reserve process ids across the concurrent status await)
