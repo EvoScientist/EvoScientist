@@ -171,11 +171,15 @@ class TestExpertToggle:
         assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
 
     async def test_invite_hint_states_the_dispatch_boundary(self):
-        """The invite hint must state the exact boundary: background
-        dispatch resolves immediately, in-turn ``task`` needs a rebuilt
-        agent. Pins the reworded text against both the old wording
-        ("run /new to activate it", which oversold the rebuild) and its
-        full removal."""
+        """The invite hint must state the exact boundary, scoped to the
+        case where it holds: an expert installed after this session's
+        agent was constructed dispatches in the background immediately,
+        but its in-turn ``task`` reach needs a rebuilt agent. An expert
+        installed before the session started is already in the frozen
+        in-turn set, so the hint must NOT state the /new clause
+        unconditionally. Pins the scoped wording against the old
+        unconditional phrasing and the original "run /new to activate
+        it"."""
         ctx, ui = _make_ctx()
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -184,7 +188,8 @@ class TestExpertToggle:
             await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
         texts = [text for text, _ in ui.lines]
         assert any(
-            "Background dispatch is available immediately" in text
+            "Newly installed experts" in text
+            and "background dispatch is available immediately" in text
             and "in-turn task dispatch needs /new" in text
             for text in texts
         )

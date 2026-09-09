@@ -229,15 +229,17 @@ class ExpertCommand(Command):
         else:
             runtime.active_teams = [*runtime.active_teams, canonical]
             ctx.ui.append_system(f"Invited expert: {canonical}", style="green")
-            # An expert invited mid-session: the background reach
+            # An expert installed mid-session: the background reach
             # (``start_async_task``) resolves it on first dispatch, but the
             # in-turn ``task`` reach is frozen into the running agent, so it
-            # needs a rebuilt agent. State the boundary explicitly rather
-            # than the old unconditional "run /new to activate it", which
-            # oversold the rebuild's necessity.
+            # needs a rebuilt agent. An expert installed before this session
+            # started is already inside that frozen set — its in-turn reach
+            # works without a rebuild — so the hint scopes the /new boundary
+            # to newly installed experts instead of stating it
+            # unconditionally.
             ctx.ui.append_system(
-                "Background dispatch is available immediately; "
-                "in-turn task dispatch needs /new.",
+                "Newly installed experts: background dispatch is available "
+                "immediately; in-turn task dispatch needs /new.",
                 style="dim",
             )
         if runtime.active_teams:
