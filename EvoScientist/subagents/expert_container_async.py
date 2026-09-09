@@ -256,7 +256,7 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
     if not is_async_subagents_available():
         return []
 
-    from ..tools.skills_manager import list_expert_skills
+    from ..tools.skills_manager import _warn_once, list_expert_skills
     from .expert_container import _reserved_subagent_names, expert_prompt_body
 
     port = int(getattr(cfg, "langgraph_dev_port", 6174))
@@ -277,8 +277,15 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
         # a body-less expert in ``start_async_task``'s tool schema, then
         # rejecting it at loader time, wastes a launch round-trip; filter
         # upstream so ``start_async_task`` never sees the broken skill.
+        # The warnings go through ``_warn_once``: the sync fold-in runs
+        # once per agent build, but the resolve-on-miss path in
+        # ``middleware/expert_async_subagent.py`` re-runs this walk on
+        # every ``start_async_task`` miss — hallucinated names included —
+        # so a per-walk warning would fire once per miss for the rest
+        # of the session while the broken skill stays broken.
         if not expert_prompt_body(skill).strip():
-            _logger.warning(
+            _warn_once(
+                f"expert-async-empty-body:{skill.name}",
                 "Expert skill %r: %s body is empty; skipping "
                 "async-dispatch registration.",
                 skill.name,
@@ -286,7 +293,8 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
             )
             continue
         if skill.name in taken:
-            _logger.warning(
+            _warn_once(
+                f"expert-async-name-collision:{skill.name}",
                 "Expert skill %r collides with an existing async sub-agent "
                 "name; skipping async-dispatch registration.",
                 skill.name,

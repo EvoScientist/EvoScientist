@@ -338,3 +338,84 @@ class TestWrapModelCall:
             _PERSONA_SENTINEL in r.message and "not found" in r.message
             for r in caplog.records
         )
+
+
+class TestSpecWalkSkipsWarnOnce:
+    """The resolve-on-miss path re-runs ``build_expert_async_subagent_specs``
+    on every ``start_async_task`` miss — hallucinated names included — so the
+    two skip-path warnings must fire once per skill per process, not once per
+    walk (``skills_manager._warn_once``). Per-walk warnings would fire on
+    every miss for the rest of the session while the broken skill stays
+    broken."""
+
+    def _walk(self, skills):
+        from EvoScientist.subagents.expert_container_async import (
+            build_expert_async_subagent_specs,
+        )
+
+        cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=skills,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
+            ),
+        ):
+            return build_expert_async_subagent_specs(cfg=cfg)
+
+    def test_empty_body_warns_once_across_walks(self, tmp_path, caplog):
+        """Two walks over a body-less expert register nothing and warn
+        exactly once. Without ``_warn_once`` the second walk re-warns and
+        the count assertion fails."""
+        import logging
+
+        broken = SkillInfo(
+            name="warn-once-empty-body-expert",
+            description="d",
+            path=tmp_path,
+            source="builtin",
+            type="expert",
+            expert_source="expert_md",
+            expert_body="",
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            first = self._walk([broken])
+            second = self._walk([broken])
+
+        assert first == []
+        assert second == []
+        warnings_ = [r for r in caplog.records if "body is empty" in r.getMessage()]
+        assert len(warnings_) == 1
+
+    def test_name_collision_warns_once_across_walks(self, tmp_path, caplog):
+        """Two walks over an expert named after a reserved async sub-agent
+        register nothing and warn exactly once. Without ``_warn_once`` the
+        second walk re-warns and the count assertion fails."""
+        import logging
+
+        colliding = SkillInfo(
+            name="writing-agent",
+            description="d",
+            path=tmp_path,
+            source="builtin",
+            type="expert",
+            expert_source="expert_md",
+            expert_body="Solid persona.\n",
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            first = self._walk([colliding])
+            second = self._walk([colliding])
+
+        assert first == []
+        assert second == []
+        warnings_ = [r for r in caplog.records if "collides with" in r.getMessage()]
+        assert len(warnings_) == 1
