@@ -170,6 +170,13 @@ def _resolve_merge_validate(
     names at build time, so an overwrite here could only smuggle in a spec
     the running agent was not validated against.
 
+    Known limitation — installs only, never uninstalls: the merge adds
+    names, nothing removes them, so an expert uninstalled mid-session
+    stays in the dispatch tables until the next agent rebuild (``/new``).
+    Its runs fail late — the container graph reads the persona from disk
+    at dispatch time and reports the unknown skill — rather than at this
+    start-tool boundary.
+
     *cfg* is the config the agent was constructed with, threaded through
     the middleware. The specs must point at the same ``langgraph_dev_port``
     the construction-time specs used — re-deriving config from disk here
