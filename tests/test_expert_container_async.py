@@ -396,11 +396,17 @@ class TestSpecWalkSkipsWarnOnce:
     def test_name_collision_warns_once_across_walks(self, tmp_path, caplog):
         """Two walks over an expert named after a reserved async sub-agent
         register nothing and warn exactly once. Without ``_warn_once`` the
-        second walk re-warns and the count assertion fails."""
+        second walk re-warns and the count assertion fails.
+
+        The collision name is deliberately NOT one of the real reserved
+        names (patched in via ``_reserved_subagent_names``, mirroring
+        ``test_route_async_specs.py``): ``_warn_once`` keys are
+        process-global, so a real reserved name here would consume the
+        key that suite's own collision test asserts on."""
         import logging
 
         colliding = SkillInfo(
-            name="writing-agent",
+            name="warn-once-collision-expert",
             description="d",
             path=tmp_path,
             source="builtin",
@@ -409,8 +415,14 @@ class TestSpecWalkSkipsWarnOnce:
             expert_body="Solid persona.\n",
         )
 
-        with caplog.at_level(
-            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container._reserved_subagent_names",
+                return_value=frozenset({"warn-once-collision-expert"}),
+            ),
+            caplog.at_level(
+                logging.WARNING, logger="EvoScientist.tools.skills_manager"
+            ),
         ):
             first = self._walk([colliding])
             second = self._walk([colliding])
