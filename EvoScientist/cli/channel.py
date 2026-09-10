@@ -794,8 +794,10 @@ def channel_hitl_prompt(
     and return shape are unchanged (callers are untouched).  Safe to call
     from a background thread (CLI channel processing / TUI ``to_thread``).
 
-    Returns the approval decisions list on approve/auto, or None on
-    reject / unrecognized / timeout / stop.
+    Returns the decisions list on approve/auto — including REJECT decisions
+    with a reason for dangerous commands under ``auto_approve`` (fed back to
+    the model, not escalated to the user) — or None on decline /
+    unrecognized / timeout / stop.
     """
     session_key = _channel_message_session_key(msg)
     decisions = _approval_policy.auto_decision(session_key, action_requests)

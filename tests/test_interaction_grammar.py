@@ -170,12 +170,19 @@ class TestApprovalPolicy:
             assert p.auto_decision("tg:c1", reqs) is None
 
 
-class TestConfigAutoApprove:
+class TestAutoDecisionConfigPolicy:
+    """``auto_decision`` through the config policy: approve / reject / prompt."""
+
+    def _p(self):
+        return I.ApprovalPolicy()
+
     def test_empty(self):
-        assert I.config_auto_approve([]) is True
+        assert self._p().auto_decision("tg:c1", []) == []
 
     def test_non_execute(self):
-        assert I.config_auto_approve([{"name": "write_file", "args": {}}]) is True
+        assert self._p().auto_decision(
+            "tg:c1", [{"name": "write_file", "args": {}}]
+        ) == [{"type": "approve"}]
 
     def test_execute_no_allowlist(self):
         cfg = MagicMock()
@@ -184,10 +191,10 @@ class TestConfigAutoApprove:
         cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
-                I.config_auto_approve(
-                    [{"name": "execute", "args": {"command": "rm -rf /"}}]
+                self._p().auto_decision(
+                    "tg:c1", [{"name": "execute", "args": {"command": "rm -rf /"}}]
                 )
-                is False
+                is None
             )
 
     def test_execute_allowlist_match(self):
@@ -196,12 +203,9 @@ class TestConfigAutoApprove:
         cfg.shell_allow_list = "ls,python"
         cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
-            assert (
-                I.config_auto_approve(
-                    [{"name": "execute", "args": {"command": "ls -la"}}]
-                )
-                is True
-            )
+            assert self._p().auto_decision(
+                "tg:c1", [{"name": "execute", "args": {"command": "ls -la"}}]
+            ) == [{"type": "approve"}]
 
     def test_run_in_background_not_allowlisted(self):
         cfg = MagicMock()
@@ -210,10 +214,11 @@ class TestConfigAutoApprove:
         cfg.dangerous_mode = False
         with patch("EvoScientist.config.settings.load_config", return_value=cfg):
             assert (
-                I.config_auto_approve(
-                    [{"name": "run_in_background", "args": {"command": "rm -rf /"}}]
+                self._p().auto_decision(
+                    "tg:c1",
+                    [{"name": "run_in_background", "args": {"command": "rm -rf /"}}],
                 )
-                is False
+                is None
             )
 
     def test_fail_closed_on_config_error(self):
@@ -221,8 +226,10 @@ class TestConfigAutoApprove:
             "EvoScientist.config.settings.load_config", side_effect=RuntimeError("boom")
         ):
             assert (
-                I.config_auto_approve([{"name": "execute", "args": {"command": "ls"}}])
-                is False
+                self._p().auto_decision(
+                    "tg:c1", [{"name": "execute", "args": {"command": "ls"}}]
+                )
+                is None
             )
 
 

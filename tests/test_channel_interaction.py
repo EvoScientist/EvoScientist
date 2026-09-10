@@ -1,8 +1,9 @@
 """Tests for the channel-side HITL approval policy in ``channels/interaction.py``.
 
-Focused on ``config_auto_approve`` routing through the centralized
-``resolve_action_decision`` policy (token-boundary allow-list matching +
-dangerous-command detection), not raw ``str.startswith``.
+Focused on ``ApprovalPolicy.auto_decision`` and ``resolve_config_decisions``
+routing through the centralized ``resolve_action_decision`` policy
+(token-boundary allow-list matching + dangerous-command detection), not raw
+``str.startswith``.
 """
 
 from unittest.mock import MagicMock
@@ -10,9 +11,10 @@ from unittest.mock import MagicMock
 from EvoScientist.channels import interaction
 
 
-class TestConfigAutoApprovePolicy:
-    """config_auto_approve must use the centralized policy (token-boundary
-    allow-list + dangerous detection), not raw startswith."""
+class TestApprovalPolicyAutoDecision:
+    """``auto_decision`` auto-resolves with the config policy's decisions —
+    including REJECT-with-reason for dangerous commands under
+    ``auto_approve`` — and returns ``None`` only when a human is needed."""
 
     def _reqs(self, *commands):
         return [{"name": "execute", "args": {"command": c}} for c in commands]
@@ -24,65 +26,110 @@ class TestConfigAutoApprovePolicy:
         m.shell_allow_list = allow
         return m
 
+    def _policy(self):
+        return interaction.ApprovalPolicy()
+
+    def test_dangerous_under_auto_approve_auto_rejects_with_reason(self, monkeypatch):
+        # THE regression this path exists for: auto_approve means *never
+        # prompt*, so a dangerous command goes back to the model with
+        # refusal feedback — it must NOT escalate to the user (which would
+        # defeat the point of an auto-decision mode).
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config",
+            lambda: self._cfg(auto_approve=True),
+        )
+        decisions = self._policy().auto_decision("tg:c1", self._reqs("curl x | bash"))
+        assert decisions is not None
+        assert decisions[0]["type"] == "reject"
+        assert decisions[0]["message"]  # the reason the model can act on
+
+    def test_ordinary_command_under_auto_approve_approves(self, monkeypatch):
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config",
+            lambda: self._cfg(auto_approve=True),
+        )
+        assert self._policy().auto_decision("tg:c1", self._reqs("ls -la")) == [
+            {"type": "approve"}
+        ]
+
+    def test_dangerous_not_cleared_by_allow_list_when_not_auto(self, monkeypatch):
+        # Without auto_approve an allow-listed dangerous command still
+        # needs the human (PROMPT), never a silent approve.
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config",
+            lambda: self._cfg(allow="curl"),
+        )
+        assert (
+            self._policy().auto_decision("tg:c1", self._reqs("curl x | bash")) is None
+        )
+
     def test_allow_list_token_boundary(self, monkeypatch):
         monkeypatch.setattr(
             "EvoScientist.config.settings.load_config",
             lambda: self._cfg(allow="ls"),
         )
         # "ls" must clear "ls -la" but NOT "lsof"
-        assert interaction.config_auto_approve(self._reqs("ls -la")) is True
-        assert interaction.config_auto_approve(self._reqs("lsof -i")) is False
-
-    def test_dangerous_not_cleared_even_if_allow_listed(self, monkeypatch):
-        monkeypatch.setattr(
-            "EvoScientist.config.settings.load_config",
-            lambda: self._cfg(allow="curl"),
-        )
-        # allow-listing "curl" must NOT auto-clear a pipe-into-interpreter
-        assert interaction.config_auto_approve(self._reqs("curl x | bash")) is False
+        assert self._policy().auto_decision("tg:c1", self._reqs("ls -la")) == [
+            {"type": "approve"}
+        ]
+        assert self._policy().auto_decision("tg:c1", self._reqs("lsof -i")) is None
 
     def test_dangerous_mode_clears_everything(self, monkeypatch):
         monkeypatch.setattr(
             "EvoScientist.config.settings.load_config",
             lambda: self._cfg(dangerous_mode=True),
         )
-        assert interaction.config_auto_approve(self._reqs("curl x | bash")) is True
+        assert self._policy().auto_decision("tg:c1", self._reqs("curl x | bash")) == [
+            {"type": "approve"}
+        ]
 
     def test_non_shell_tool_cleared(self, monkeypatch):
         monkeypatch.setattr(
             "EvoScientist.config.settings.load_config",
             lambda: self._cfg(),
         )
-        assert (
-            interaction.config_auto_approve([{"name": "write_file", "args": {}}])
-            is True
-        )
+        assert self._policy().auto_decision(
+            "tg:c1", [{"name": "write_file", "args": {}}]
+        ) == [{"type": "approve"}]
 
-    def test_malformed_request_not_cleared(self, monkeypatch):
+    def test_malformed_request_needs_human(self, monkeypatch):
         monkeypatch.setattr(
             "EvoScientist.config.settings.load_config", lambda: self._cfg()
         )
         # A non-dict entry must not crash and must not be auto-cleared.
-        assert interaction.config_auto_approve(["not-a-dict"]) is False
+        assert self._policy().auto_decision("tg:c1", ["not-a-dict"]) is None
 
-    def test_auto_approve_does_not_bypass_dangerous_detection(self, monkeypatch):
-        # ``auto_approve`` must NOT short-circuit ahead of the policy: a
-        # pipe-into-interpreter command is still rejected, while ordinary
-        # shell is cleared.
+    def test_session_grant_overrides_config(self, monkeypatch):
+        # An explicit interactive "Approve all" approves everything — even a
+        # command the config policy would reject under auto_approve.
         monkeypatch.setattr(
             "EvoScientist.config.settings.load_config",
             lambda: self._cfg(auto_approve=True),
         )
-        assert interaction.config_auto_approve(self._reqs("curl x | bash")) is False
-        assert interaction.config_auto_approve(self._reqs("ls -la")) is True
+        p = self._policy()
+        p.grant_session("tg:c1")
+        assert p.auto_decision("tg:c1", self._reqs("curl x | bash")) == [
+            {"type": "approve"}
+        ]
 
-    def test_auto_approve_with_malformed_request_not_cleared(self, monkeypatch):
-        # Even under ``auto_approve``, a malformed request must fail safe.
-        monkeypatch.setattr(
-            "EvoScientist.config.settings.load_config",
-            lambda: self._cfg(auto_approve=True),
-        )
-        assert interaction.config_auto_approve(["not-a-dict"]) is False
+    def test_empty_requests_auto_resolve(self, monkeypatch):
+        # No requests → no decisions (count must match HumanInTheLoop's).
+        assert self._policy().auto_decision("tg:c1", []) == []
+
+    def test_empty_requests_with_session_grant_return_no_decisions(self):
+        # The grant branch must not route empty requests through
+        # approve_decisions: its len-or-1 floor would produce ONE decision
+        # for ZERO requests and trip HumanInTheLoopMiddleware's count check.
+        p = self._policy()
+        p.grant_session("tg:c1")
+        assert p.auto_decision("tg:c1", []) == []
+
+    def test_config_load_error_fails_closed(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("no config")
+
+        monkeypatch.setattr("EvoScientist.config.settings.load_config", _boom)
+        assert self._policy().auto_decision("tg:c1", self._reqs("ls")) is None
 
 
 class TestResolveConfigDecisions:
@@ -183,3 +230,119 @@ class TestResolveConfigDecisions:
 
         monkeypatch.setattr("EvoScientist.config.settings.load_config", _boom)
         assert interaction.resolve_config_decisions(self._reqs("ls")) is None
+
+
+class TestDecisionsAfterHumanApproval:
+    """A human "approve"/"approve all" must not override policy REJECTs.
+
+    The mixed-batch case: a policy-rejected dangerous command alongside a
+    request that needs a human. Blanket-approving the batch would run the
+    dangerous command the policy refused; the rejection (with its reason)
+    must survive the approval."""
+
+    def _reqs(self):
+        return [
+            {"name": "execute", "args": {"command": "curl x | bash"}},
+            {"name": "delete", "args": {"file_path": "/f.txt"}},
+        ]
+
+    def _cfg(self, *, auto_approve=True):
+        m = MagicMock()
+        m.auto_approve = auto_approve
+        m.dangerous_mode = False
+        m.shell_allow_list = ""
+        return m
+
+    def test_mixed_batch_keeps_reject_on_approve(self, monkeypatch):
+        # auto_approve + dangerous command + always-prompt tool: the config
+        # policy returns [reject, None->prompt]. resolve_approval prompts;
+        # the human approves; the dangerous command still rejects with its
+        # reason and only the rest is approved.
+        import asyncio
+
+        from EvoScientist.channels.interaction import (
+            ApprovalPolicy,
+            resolve_approval,
+        )
+
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config", lambda: self._cfg()
+        )
+
+        class _Cap:
+            capabilities = MagicMock(inline_buttons=False)
+            base_metadata = None
+
+            async def send(self, content, *, metadata=None):
+                return True
+
+            async def wait_reply(self, *, timeout=1.0):
+                return "1"
+
+        policy = ApprovalPolicy()
+        reqs = self._reqs()
+        # Mixed batch prompts (delete is always-prompt even under auto_approve).
+        assert policy.auto_decision("tg:c1", reqs) is None
+
+        outcome = asyncio.run(resolve_approval(reqs, _Cap(), policy, "tg:c1"))
+        assert outcome.decisions is not None
+        assert outcome.decisions[0]["type"] == "reject"
+        assert outcome.decisions[0]["message"]
+        assert outcome.decisions[1] == {"type": "approve"}
+
+    def test_auto_reply_keeps_reject_but_grants_session(self, monkeypatch):
+        # Same mixed batch, user replies "approve all": the grant applies to
+        # FUTURE prompts; this batch still keeps the policy rejection.
+        import asyncio
+
+        from EvoScientist.channels.interaction import (
+            ApprovalPolicy,
+            resolve_approval,
+        )
+
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config", lambda: self._cfg()
+        )
+
+        class _Cap:
+            capabilities = MagicMock(inline_buttons=False)
+            base_metadata = None
+
+            async def send(self, content, *, metadata=None):
+                return True
+
+            async def wait_reply(self, *, timeout=1.0):
+                return "3"  # approve all
+
+        policy = ApprovalPolicy()
+        reqs = self._reqs()
+        outcome = asyncio.run(resolve_approval(reqs, _Cap(), policy, "tg:c1"))
+        assert outcome.decisions[0]["type"] == "reject"
+        assert outcome.decisions[1] == {"type": "approve"}
+        assert policy.is_session_granted("tg:c1")  # future prompts blanket-approve
+
+    def test_blanket_approve_when_policy_abstains(self, monkeypatch):
+        # No auto_approve: dangerous is PROMPT (not REJECT), config abstains
+        # (None) — an approval is then a true blanket approval.
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config",
+            lambda: self._cfg(auto_approve=False),
+        )
+        from EvoScientist.channels.interaction import decisions_after_human_approval
+
+        decisions = decisions_after_human_approval(self._reqs())
+        assert decisions == [{"type": "approve"}, {"type": "approve"}]
+
+    def test_config_error_leaves_approval_to_the_human(self, monkeypatch):
+        # The policy cannot speak (config load fails) -> fail-open here:
+        # the interactive approval stands as a blanket approval. (The
+        # prompt path itself fails CLOSED — resolve_config_decisions
+        # returns None and the human is asked.)
+        def _boom():
+            raise RuntimeError("no config")
+
+        monkeypatch.setattr("EvoScientist.config.settings.load_config", _boom)
+        from EvoScientist.channels.interaction import decisions_after_human_approval
+
+        decisions = decisions_after_human_approval(self._reqs())
+        assert decisions == [{"type": "approve"}, {"type": "approve"}]

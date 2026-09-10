@@ -222,7 +222,9 @@ def _feed_reply_when_ready(loop, session_key, reply, *, tries=200):
 
 class TestHitlPromptBridge:
     def test_no_bus_loop_rejects(self, monkeypatch):
-        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(
+            interaction_mod, "resolve_config_decisions", lambda reqs: None
+        )
         monkeypatch.setattr(channel_mod, "_bus_loop", None)
         msg = ChannelMessage(
             msg_id="m1",
@@ -235,7 +237,9 @@ class TestHitlPromptBridge:
         assert channel_mod.channel_hitl_prompt([{"name": "execute"}], msg) is None
 
     def test_session_grant_approves_when_bus_loop_down(self, monkeypatch):
-        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(
+            interaction_mod, "resolve_config_decisions", lambda reqs: None
+        )
         monkeypatch.setattr(channel_mod, "_bus_loop", None)
         msg = ChannelMessage(
             msg_id="m1",
@@ -254,7 +258,9 @@ class TestHitlPromptBridge:
 
     def test_approve_round_trip(self, monkeypatch):
         # Force the manual-prompt path (no config auto-approve).
-        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(
+            interaction_mod, "resolve_config_decisions", lambda reqs: None
+        )
         with _BusLoopThread() as loop:
             monkeypatch.setattr(channel_mod, "_bus_loop", loop)
             monkeypatch.setattr(channel_mod, "_manager", None)  # default caps
@@ -275,7 +281,9 @@ class TestHitlPromptBridge:
         assert result == [{"type": "approve"}]
 
     def test_reject_round_trip(self, monkeypatch):
-        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(
+            interaction_mod, "resolve_config_decisions", lambda reqs: None
+        )
         with _BusLoopThread() as loop:
             monkeypatch.setattr(channel_mod, "_bus_loop", loop)
             monkeypatch.setattr(channel_mod, "_manager", None)
@@ -303,7 +311,9 @@ class TestHitlPromptBridge:
         the serve-mode consumer refeeds; see
         TestConsumerUnrecognizedRefeed in tests/test_interaction_engine.py.
         """
-        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(
+            interaction_mod, "resolve_config_decisions", lambda reqs: None
+        )
         with _BusLoopThread() as loop:
             monkeypatch.setattr(channel_mod, "_bus_loop", loop)
             monkeypatch.setattr(channel_mod, "_manager", None)
@@ -341,7 +351,9 @@ class TestHitlPromptBridge:
         assert channel_mod._message_queue.empty()
 
     def test_approve_all_grants_channel_session(self, monkeypatch):
-        monkeypatch.setattr(interaction_mod, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(
+            interaction_mod, "resolve_config_decisions", lambda reqs: None
+        )
         with _BusLoopThread() as loop:
             monkeypatch.setattr(channel_mod, "_bus_loop", loop)
             monkeypatch.setattr(channel_mod, "_manager", None)
