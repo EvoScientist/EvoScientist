@@ -29,6 +29,19 @@ Design
   marker so the middleware knows when to add ``skill_name`` to the run
   input. Standard specs (``writing-agent`` / ``data-analysis-agent`` /
   ``scheduler``) reach ``client.runs.create`` with the upstream shape.
+- Resolve-on-miss: when ``start_async_task`` is asked for a
+  ``subagent_type`` absent from ``agent_map`` — typically an expert
+  installed after the agent was built — the tool runs one
+  ``build_expert_async_subagent_specs`` walk and merges every unknown
+  expert into ``agent_map`` and the watcher's agent dict before
+  re-validating (see ``_resolve_merge_validate``). New experts become
+  background-dispatchable the first time they are named, with no agent
+  rebuild, no registry watcher, and no restart; in-turn ``task`` reach
+  for a new expert still requires a rebuilt agent (``/new``). The merge
+  and the map-iterating validation serialize on one per-instance lock
+  (``self._resolve_lock``); the event loop never touches it — the async
+  variant miss-checks by keyed lookup and does all lock work on the
+  ``asyncio.to_thread`` worker.
 
 If deepagents ever lands a skill-name-passthrough of its own, delete this
 file and rebind ``EvoAsyncSubAgentMiddleware`` → ``AsyncSubAgentMiddleware``
@@ -43,7 +56,9 @@ check, and gets stripped from tool_input at parse time — the coroutine is
 then called without ``runtime`` and raises ``TypeError``.
 """
 
+import asyncio
 import logging
+import threading
 from datetime import UTC, datetime
 from typing import Any, NotRequired
 
@@ -125,10 +140,111 @@ def _build_task_envelope(
     )
 
 
+def _resolve_merge_validate(
+    agent_map: dict[str, AsyncSubAgent],
+    watcher_agents: dict[str, AsyncSubAgent] | None,
+    cfg: Any | None,
+    subagent_type: str,
+    lock: Any = None,
+) -> str | None:
+    """Resolve a start-tool miss, merge the walk's specs, re-validate.
+
+    Called from ``start_async_task`` only when ``subagent_type`` missed
+    ``agent_map`` — the resolve-on-miss path that makes an expert installed
+    mid-session dispatchable without an agent rebuild. Returns the
+    refreshed ``_validate_agent_type`` error for *subagent_type*: ``None``
+    when the walk resolved it, upstream's unknown-type message (with the
+    now-updated allowed-type list) for a genuine miss. Both dicts are
+    mutated in place; the middleware and its tools hold them by reference,
+    so the update is visible to every tool that resolves a name at call
+    time (start / check / update / cancel all reach ``agent_map`` or
+    ``_ClientCache._agents``, which share the object).
+
+    One walk, every unknown expert: ``build_expert_async_subagent_specs``
+    already walks the whole skills tree, so merging every not-yet-known
+    spec costs nothing extra and N newly installed experts resolve on the
+    first miss rather than one walk each.
+
+    ``setdefault`` semantics on both dicts — an existing entry is never
+    overwritten. The middleware's constructor already raised on duplicate
+    names at build time, so an overwrite here could only smuggle in a spec
+    the running agent was not validated against.
+
+    Known limitation — installs only, never uninstalls: the merge adds
+    names, nothing removes them, so an expert uninstalled mid-session
+    stays in the dispatch tables until the next agent rebuild (``/new``).
+    Its runs fail late — the container graph reads the persona from disk
+    at dispatch time and reports the unknown skill — rather than at this
+    start-tool boundary.
+
+    *cfg* is the config the agent was constructed with, threaded through
+    the middleware. The specs must point at the same ``langgraph_dev_port``
+    the construction-time specs used — re-deriving config from disk here
+    (the builder's ``get_effective_config()`` fallback) would let a
+    mid-session port change spec a newly resolved expert onto a port the
+    running dev subprocess is not on: dispatch accepts the name and only
+    ``runs.create`` fails, an advertise/provide split.
+
+    *lock* serializes the merge AND the re-validation — both run under one
+    acquisition — against every other ``_validate_agent_type`` reader of
+    ``agent_map`` (the sync start tool's initial validation), which
+    iterates the map to build its error string: an unsynchronized insert
+    under that reader raises ``RuntimeError: dictionary changed size
+    during iteration``. The skills-tree walk runs OUTSIDE the lock; only
+    the ``setdefault`` loop and the validation — microseconds of pure
+    dict operations — hold it. Keyed lookups (``_ClientCache.get_sync`` /
+    ``get_async``, the update tool) are single GIL-protected operations
+    and need no lock.
+
+    ``watcher_agents`` is ``AsyncWatcherMiddleware._clients._agents`` —
+    a *separate* dict from ``agent_map`` (the watcher's cache was built
+    from its own spec list). Without updating it, dispatch succeeds but
+    the watcher's ``get_async(agent_name)`` raises KeyError inside its
+    ``try/except``, and the completion notification silently never fires.
+    ``None`` means no watcher is wired (yaml-async-less setup, or the
+    upstream ``_agents`` drift guard tripped): dispatch still resolves,
+    just without completion nudges — matching the pre-existing degradation.
+
+    Blocking (a skills-tree walk under ``list_expert_skills``); callers on
+    an event loop must run it via ``asyncio.to_thread``.
+    """
+    from ..subagents.expert_container_async import build_expert_async_subagent_specs
+
+    # The walk is the blocking part — never hold the lock over I/O.
+    specs = build_expert_async_subagent_specs(cfg=cfg)
+    if lock is not None:
+        with lock:
+            _merge_expert_specs(agent_map, watcher_agents, specs)
+            return _validate_agent_type(agent_map, subagent_type)
+    _merge_expert_specs(agent_map, watcher_agents, specs)
+    return _validate_agent_type(agent_map, subagent_type)
+
+
+def _merge_expert_specs(
+    agent_map: dict[str, AsyncSubAgent],
+    watcher_agents: dict[str, AsyncSubAgent] | None,
+    specs: list,
+) -> None:
+    """Merge built expert specs into both dispatch tables.
+
+    Split out of ``_resolve_merge_validate`` so the lock guards exactly
+    this — microseconds of ``setdefault`` — and not the skills-tree walk
+    that produced *specs*.
+    """
+    for spec in specs:
+        name = spec["name"]
+        agent_map.setdefault(name, spec)
+        if watcher_agents is not None:
+            watcher_agents.setdefault(name, spec)
+
+
 def _build_expert_start_tool(
     agent_map: dict[str, AsyncSubAgent],
     clients: _ClientCache,
     tool_description: str,
+    watcher_agents: dict[str, AsyncSubAgent] | None = None,
+    cfg: Any | None = None,
+    map_lock: Any = None,
 ) -> StructuredTool:
     """Build the skill-name-injecting ``start_async_task`` tool.
 
@@ -137,16 +253,55 @@ def _build_expert_start_tool(
     injects ``skill_name=subagent_type`` into the run input before
     dispatch, so the container graph resolves the right persona without
     the model contributing (or being able to corrupt) that value.
+
+    An unknown ``subagent_type`` triggers one resolve-on-miss pass before
+    the error is returned (see ``_resolve_merge_validate``); a name that
+    is still unknown after it is a genuine miss and gets upstream's error
+    message, now with the refreshed allowed-type list.
+
+    ``map_lock`` serializes every ``agent_map`` *iteration* against the
+    resolver's merge: ``_validate_agent_type`` builds its error string by
+    joining over the map, so an unsynchronized insert from the async
+    resolver's worker thread (or a concurrent sync miss on another
+    tool-executor thread) can raise ``RuntimeError: dictionary changed
+    size during iteration`` under the reader. The two variants divide the
+    work differently:
+
+    - the sync variant validates under the lock up front and delegates
+      the miss to ``_resolve_merge_validate`` (merge and re-validation
+      share one lock acquisition, on this tool-executor thread);
+    - the async variant only does a keyed ``subagent_type not in
+      agent_map`` check on the event loop — no iteration, and the loop
+      never touches the lock; the miss path runs merge + re-validation
+      inside one ``asyncio.to_thread`` acquisition on the worker thread
+      and returns the refreshed error.
     """
+
+    def _locked_validate(agent_type: str) -> str | None:
+        """``_validate_agent_type`` under ``map_lock`` when provided.
+
+        The validation error message iterates ``agent_map``; the resolver
+        merges into it under the same lock. Used by the sync variant's
+        initial validation only. ``None`` lock degrades to the unguarded
+        read, matching pre-lock behavior.
+        """
+        if map_lock is not None:
+            with map_lock:
+                return _validate_agent_type(agent_map, agent_type)
+        return _validate_agent_type(agent_map, agent_type)
 
     def start_async_task(
         description: str,
         subagent_type: str,
         runtime: ToolRuntime,
     ) -> str | Command:
-        error = _validate_agent_type(agent_map, subagent_type)
+        error = _locked_validate(subagent_type)
         if error:
-            return error
+            error = _resolve_merge_validate(
+                agent_map, watcher_agents, cfg, subagent_type, map_lock
+            )
+            if error:
+                return error
         spec = agent_map[subagent_type]
         input_dict = _build_run_input(spec, subagent_type, description)
         try:
@@ -171,9 +326,24 @@ def _build_expert_start_tool(
         subagent_type: str,
         runtime: ToolRuntime,
     ) -> str | Command:
-        error = _validate_agent_type(agent_map, subagent_type)
-        if error:
-            return error
+        # Keyed miss check — no map iteration, and the event loop never
+        # touches the lock: all lock work runs on the to_thread worker.
+        # (The validation error message joins over ``agent_map``, so it
+        # cannot run unlocked here; it runs inside the worker instead.)
+        if subagent_type not in agent_map:
+            # to_thread: the resolver walks the skills tree synchronously,
+            # and this coroutine runs on the event loop where langgraph-dev's
+            # blockbuster guard raises BlockingError on filesystem calls.
+            error = await asyncio.to_thread(
+                _resolve_merge_validate,
+                agent_map,
+                watcher_agents,
+                cfg,
+                subagent_type,
+                map_lock,
+            )
+            if error:
+                return error
         spec = agent_map[subagent_type]
         input_dict = _build_run_input(spec, subagent_type, description)
         try:
@@ -223,6 +393,8 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         *,
         async_subagents: list[AsyncSubAgent],
         system_prompt: str | None = None,
+        watcher_agents: dict[str, AsyncSubAgent] | None = None,
+        cfg: Any | None = None,
     ) -> None:
         # Install the model-passthrough patch BEFORE ``super().__init__(...)``
         # so upstream's ``_build_async_subagent_tools`` sees the patched
@@ -263,8 +435,24 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
             f"- {a['name']}: {a['description']}" for a in async_subagents
         )
         launch_desc = ASYNC_TASK_TOOL_DESCRIPTION.format(available_agents=agents_desc)
+        # Serializes ``agent_map`` iteration (the sync start tool's
+        # validation and the resolver's merge + re-validation, whose error
+        # message joins over the map) against the resolve-on-miss merge,
+        # which can run on a worker thread (``asyncio.to_thread`` in the
+        # async variant) while the event loop keeps reading. Instance-
+        # scoped: the map is per-middleware, so the lock is too. The async
+        # variant's event loop never acquires it — the miss check there is
+        # a keyed lookup and all lock work happens on the worker thread.
+        self._resolve_lock = threading.Lock()
         self.tools = [
-            _build_expert_start_tool(agent_map, clients, launch_desc),
+            _build_expert_start_tool(
+                agent_map,
+                clients,
+                launch_desc,
+                watcher_agents,
+                cfg,
+                self._resolve_lock,
+            ),
             _build_check_tool(clients),
             _build_update_tool(agent_map, clients),
             _build_cancel_tool(clients),

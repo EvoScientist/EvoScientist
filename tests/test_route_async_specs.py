@@ -120,19 +120,19 @@ class TestBuildExpertAsyncSubagentSpecs:
             specs = build_expert_async_subagent_specs(cfg=cfg)
         assert [s["name"] for s in specs] == ["literature-review"]
 
-    def test_agents_md_expert_registered_and_gated_on_its_own_file(self):
-        """AGENTS.md experts reach async dispatch, and their gate is AGENTS.md.
+    def test_expert_md_expert_registered_and_gated_on_its_own_file(self):
+        """EXPERT.md experts reach async dispatch, and their gate is EXPERT.md.
 
         The empty-persona gate has to follow the skill's contract: a healthy
         SKILL.md must not vouch for a skill whose actor definition is blank.
         """
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         healthy = _skill("paper-review")
-        healthy.expert_source = "agents_md"
-        healthy.agents_body = "## Persona\n\nYou are an adversarial reviewer.\n"
+        healthy.expert_source = "expert_md"
+        healthy.expert_body = "## Persona\n\nYou are an adversarial reviewer.\n"
         blank_actor = _skill("blank-actor")
-        blank_actor.expert_source = "agents_md"
-        blank_actor.agents_body = "   \n"  # SKILL.md body is fine; actor isn't
+        blank_actor.expert_source = "expert_md"
+        blank_actor.expert_body = "   \n"  # SKILL.md body is fine; actor isn't
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -428,3 +428,86 @@ class TestRouteAsyncSpecs:
         # The pre-existing watcher was extended in place — both names route.
         assert "writing-agent" in watcher_mw._clients._agents
         assert "literature-review" in watcher_mw._clients._agents
+
+    def test_watcher_dict_wired_into_resolve_on_miss(self):
+        """The middleware constructed by the routing helper must hold the
+        watcher's agent dict BY REFERENCE, so an expert installed after the
+        agent was built lands in the watcher when ``start_async_task``
+        resolve-on-miss fires. Without the wiring, dispatch succeeds but the
+        completion notification for the new expert silently never fires."""
+        from unittest.mock import MagicMock
+
+        from EvoScientist.cli import async_notifier
+        from EvoScientist.EvoScientist import _route_async_specs_through_evo_middleware
+        from EvoScientist.middleware.async_watcher import AsyncWatcherMiddleware
+        from EvoScientist.middleware.expert_async_subagent import (
+            EvoAsyncSubAgentMiddleware,
+        )
+
+        yaml_async_spec = {
+            "name": "writing-agent",
+            "description": "std",
+            "graph_id": "writing_agent",
+            "url": "http://localhost:6174",
+        }
+        subs = [{"name": "sync-a", "system_prompt": ""}, yaml_async_spec]
+        middleware: list = [
+            AsyncWatcherMiddleware(
+                {"writing-agent": yaml_async_spec}, notifier=async_notifier
+            )
+        ]
+        cfg = self._cfg(enable_async=True)
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=[_skill("literature-review")],
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
+            ),
+            patch(
+                "EvoScientist.subagents.expert_container._reserved_subagent_names",
+                return_value=frozenset({"general-purpose"}),
+            ),
+        ):
+            _route_async_specs_through_evo_middleware(subs, middleware, cfg=cfg)
+
+        evo_mw = next(
+            m for m in middleware if isinstance(m, EvoAsyncSubAgentMiddleware)
+        )
+        watcher_mw = next(
+            m for m in middleware if isinstance(m, AsyncWatcherMiddleware)
+        )
+        start = next(t for t in evo_mw.tools if t.name == "start_async_task")
+
+        # An expert installed after the build: the first miss-walk returns
+        # it, the dispatch goes through, and the watcher's dict gains it.
+        late_expert = {
+            "name": "late-expert",
+            "description": "installed mid-session",
+            "graph_id": "expert-container-async",
+            "is_expert": True,
+        }
+        client = MagicMock()
+        client.threads.create.return_value = {"thread_id": "t1"}
+        client.runs.create.return_value = {"run_id": "r1"}
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container_async"
+                ".build_expert_async_subagent_specs",
+                return_value=[late_expert],
+            ),
+            patch(
+                "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+                return_value=client,
+            ),
+        ):
+            result = start.func(
+                description="hi",
+                subagent_type="late-expert",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+
+        assert "async_tasks" in result.update
+        assert "late-expert" in watcher_mw._clients._agents

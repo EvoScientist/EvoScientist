@@ -207,9 +207,9 @@ def skill_manager(
         if info.tags:
             lines.append(f"Tags: {', '.join(info.tags)}")
         # Expert surface: shown when the skill can also act as an expert —
-        # declared by a sibling AGENTS.md, or by legacy `type: expert`
+        # declared by a sibling EXPERT.md, or by legacy `type: expert`
         # frontmatter. The decoration lines below exist only on the legacy
-        # path, so an AGENTS.md expert renders the type line and stops.
+        # path, so an EXPERT.md expert renders the type line and stops.
         if info.type == "expert":
             lines.append("Type: expert")
             if info.role:
