@@ -19,6 +19,13 @@ class SlackConfig(BaseChannelConfig):
     text_chunk_limit: int = 4096
 
 
+def _slack_response_types() -> tuple[type, ...]:
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+    from slack_sdk.web.slack_response import SlackResponse
+
+    return (SlackResponse, AsyncSlackResponse)
+
+
 class SlackChannel(Channel):
     """Slack channel using slack-sdk Socket Mode."""
 
@@ -194,6 +201,45 @@ class SlackChannel(Channel):
 
     def _get_bot_identifier(self) -> str | None:
         return getattr(self, "_bot_user_id", None)
+
+    # ── Retry error code extraction (override base) ─────────────────
+
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status code from SlackApiError or fallback to base."""
+        from slack_sdk.errors import SlackApiError
+
+        if isinstance(exc, SlackApiError) and isinstance(
+            exc.response, _slack_response_types()
+        ):
+            return exc.response.status_code
+        return super()._extract_status_code(exc)
+
+    def _extract_sdk_error_code(self, exc: Exception) -> str | None:
+        """Extract structured error code string from SlackApiError."""
+        from slack_sdk.errors import SlackApiError
+
+        if isinstance(exc, SlackApiError) and isinstance(
+            exc.response, _slack_response_types()
+        ):
+            error = exc.response.get("error")
+            return error.lower() if isinstance(error, str) else None
+        return super()._extract_sdk_error_code(exc)
+
+    def _extract_retry_delay(self, exc: Exception) -> float | None:
+        """Read Slack's ``Retry-After`` header from a SlackApiError.
+
+        ``SlackResponse.headers`` is a plain ``dict`` whose key casing depends
+        on the HTTP client, so match the key case-insensitively (the same
+        approach slack_sdk's own ``RateLimitErrorRetryHandler`` takes).
+        """
+        from slack_sdk.errors import SlackApiError
+
+        if isinstance(exc, SlackApiError):
+            for key, raw in exc.response.headers.items():
+                if key.lower() == "retry-after":
+                    return self._parse_retry_after(raw)
+            return None
+        return super()._extract_retry_delay(exc)
 
     # ── ACK Reactions ───────────────────────────────────────────────
 

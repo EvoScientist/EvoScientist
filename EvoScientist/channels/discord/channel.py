@@ -208,6 +208,25 @@ class DiscordChannel(Channel):
             return str(self._client.user.id)
         return None
 
+    # ── Retry error code extraction (override base) ─────────────────
+
+    def _extract_status_code(self, exc: Exception) -> int | None:
+        """Extract HTTP status code from discord.HTTPException or fallback to base."""
+        import discord
+
+        if isinstance(exc, discord.HTTPException):
+            return exc.status
+        return super()._extract_status_code(exc)
+
+    def _extract_retry_delay(self, exc: Exception) -> float | None:
+        """Honor ``discord.RateLimited``, raised when a 429 exceeds
+        ``max_ratelimit_timeout`` and discord.py stops retrying internally."""
+        import discord
+
+        if isinstance(exc, discord.RateLimited):
+            return exc.retry_after
+        return super()._extract_retry_delay(exc)
+
     # ── Inbound ─────────────────────────────────────────────────────
 
     async def _on_message(self, message) -> None:

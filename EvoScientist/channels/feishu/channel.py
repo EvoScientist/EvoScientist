@@ -257,6 +257,7 @@ class FeishuChannel(Channel, WebhookMixin, TokenMixin):
     name = "feishu"
     _ready_attrs = ("_http_client", "_access_token")
     _non_retryable_patterns = (
+        *Channel._non_retryable_patterns,
         "app_access_token is empty",  # invalid credentials
         "10003",  # invalid app_id
         "10014",  # invalid app_secret

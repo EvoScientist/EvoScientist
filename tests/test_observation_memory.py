@@ -3357,9 +3357,23 @@ class TestObservationCache:
         insert and recency update. The switch interval is shrunk so the GIL
         switches threads inside those windows often enough to make the race
         reproducible; it is restored before the test exits.
+
+        The hammer is deadline-bounded rather than iteration-bounded: a fixed
+        iteration count overran the 30s CI per-test timeout on Windows runners
+        (context switches and file I/O are much slower there), while on fast
+        runners a fixed count needlessly capped race coverage. A deadline
+        finishes within budget on every platform and still maximizes race
+        opportunities where threads are cheap.
+
+        All workers park at a ``threading.Barrier`` and the deadline is armed
+        in the barrier's action, so the clock starts only when every worker is
+        ready and thread startup cannot consume the window. Each worker counts
+        its iterations and the test asserts all of them made progress, so it
+        cannot pass vacuously if a worker never ran.
         """
         import sys
         import threading
+        import time
 
         from EvoScientist.memory.observations import store
 
@@ -3375,33 +3389,55 @@ class TestObservationCache:
         monkeypatch.setattr(store, "_max_cached_files", lambda: 1)
 
         errors: list[BaseException] = []
+        memory_dirs = [
+            memories_a,
+            memories_a,
+            memories_a,
+            memories_b,
+            memories_b,
+            memories_b,
+        ]
+        iterations = [0] * len(memory_dirs)
+        deadline = 0.0
 
-        def _hammer(memory_dir):
+        def _start_clock():
+            # The barrier runs this once, immediately before releasing every
+            # party, so the deadline begins only when all six workers are ready
+            # to hammer - thread startup cannot eat any worker's window.
+            nonlocal deadline
+            deadline = time.monotonic() + 8.0
+
+        gate = threading.Barrier(len(memory_dirs) + 1, action=_start_clock)
+
+        def _hammer(memory_dir, index):
+            gate.wait()
             try:
-                for _ in range(500):
+                while time.monotonic() < deadline and not errors:
                     docs = list_observation_documents(
                         memory_dir=memory_dir, project_id="P-test"
                     )
                     assert len(docs) == 8
+                    iterations[index] += 1
             except BaseException as exc:
                 errors.append(exc)
 
         threads = [
-            threading.Thread(target=_hammer, args=(memories_a,)),
-            threading.Thread(target=_hammer, args=(memories_a,)),
-            threading.Thread(target=_hammer, args=(memories_a,)),
-            threading.Thread(target=_hammer, args=(memories_b,)),
-            threading.Thread(target=_hammer, args=(memories_b,)),
-            threading.Thread(target=_hammer, args=(memories_b,)),
+            threading.Thread(target=_hammer, args=(memory_dir, index))
+            for index, memory_dir in enumerate(memory_dirs)
         ]
         old_interval = sys.getswitchinterval()
         sys.setswitchinterval(1e-6)
         try:
             for thread in threads:
                 thread.start()
+            # Wait for all workers to reach the gate, then release them together.
+            gate.wait()
             for thread in threads:
                 thread.join()
         finally:
             sys.setswitchinterval(old_interval)
 
         assert errors == [], f"racing cache transactions raised: {errors[:3]}"
+        assert all(count > 0 for count in iterations), (
+            f"every worker must make progress, got iterations={iterations}"
+        )

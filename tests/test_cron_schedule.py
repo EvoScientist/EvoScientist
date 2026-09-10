@@ -223,3 +223,45 @@ requirements = [
     assert manager._kill_owned_stale_process(6174) is False
     assert not runtime.pid_file.exists()
     assert not runtime.workspace_sidecar.exists()
+
+
+# ---------------------------------------------------------------------------
+# Optional rubric — acceptance criteria graded after each scheduler run
+# ---------------------------------------------------------------------------
+
+
+def test_create_schedule_with_rubric_sends_it_in_input_and_metadata(monkeypatch):
+    crons, fake = _patch_client(monkeypatch)
+    rubric = "- scheduled/digest.md exists\n- it contains today's date"
+    crons.create_schedule(
+        name="digest",
+        schedule="0 8 * * 1-5",
+        prompt="write scheduled/digest.md",
+        rubric=rubric,
+    )
+    kw = fake.crons.create.call_args.kwargs
+    assert kw["input"] == {
+        "messages": [{"role": "user", "content": "write scheduled/digest.md"}],
+        "rubric": rubric,
+    }
+    assert kw["metadata"]["rubric"] == rubric
+
+
+def test_create_schedule_blank_rubric_omits_the_key(monkeypatch):
+    crons, fake = _patch_client(monkeypatch)
+    crons.create_schedule(
+        name="weather", schedule="*/10 * * * *", prompt="search", rubric="  \n"
+    )
+    kw = fake.crons.create.call_args.kwargs
+    assert "rubric" not in kw["input"]
+    assert "rubric" not in kw["metadata"]
+
+
+def test_run_now_with_rubric_sends_it_in_input_and_metadata(monkeypatch):
+    crons, fake = _patch_client(monkeypatch)
+    fake.threads.create.return_value = {"thread_id": "t-1"}
+    fake.runs.create.return_value = {"run_id": "r-1"}
+    crons.run_now("do the thing", rubric="- output.md exists")
+    run_kw = fake.runs.create.call_args.kwargs
+    assert run_kw["input"]["rubric"] == "- output.md exists"
+    assert run_kw["metadata"]["rubric"] == "- output.md exists"

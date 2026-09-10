@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+# Imported before any patch is active: the module binds ``get_effective_config``
+# at import, and a first import under the patch would freeze the mock in place.
+import EvoScientist.EvoScientist  # noqa: F401
 from EvoScientist.config import MemoryObservationWriter
 from EvoScientist.memory import MemorySourceType
 
