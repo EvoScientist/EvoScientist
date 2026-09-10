@@ -221,12 +221,18 @@ async def read_async_tasks_from_gateway(
     return values.get("async_tasks", {})
 
 
-# Task ids the reader has already enqueued a completion for. The persisted
-# ``async_tasks[*].status`` lags the live run (it only advances when the agent
-# calls ``check_async_task``), so without this a fast reader would re-enqueue
-# the same completion every poll until the agent checks. Combined with the
-# terminal-in-state skip below, one completion yields exactly one enqueue.
-_reader_enqueued_task_ids: set[str] = set()
+# (task_id, run_id) pairs the reader has already enqueued a completion for.
+# The persisted ``async_tasks[*].status`` lags the live run (it only advances
+# when the agent calls ``check_async_task``), so without this a fast reader
+# would re-enqueue the same completion every poll until the agent checks.
+# Keyed on the run, not the task: ``update_async_task`` rotates ``run_id`` on
+# the same ``task_id`` (the revision re-dispatches with
+# ``multitask_strategy="interrupt"``), and the revision's completion must
+# surface even when the original run's completion already notified — one
+# enqueue per run, so poll re-enqueue noise stays deduped while a revision
+# still notifies exactly once. Combined with the terminal-in-state skip
+# below, one completion yields exactly one enqueue.
+_reader_enqueued_task_ids: set[tuple[str, str]] = set()
 
 
 async def enqueue_completions_from_state(
@@ -251,14 +257,15 @@ async def enqueue_completions_from_state(
     """
     registry = await read_async_tasks_from_gateway(gateway, target, thread_id)
     for task_id, task in registry.items():
-        if task_id in _reader_enqueued_task_ids:
-            continue
         if task.get("status") in TERMINAL_STATUSES:
             # Already terminal in state → the agent saw it via a check-tool
             # writeback; nothing for the reader to surface.
             continue
         run_id = task.get("run_id")
         if not run_id:
+            continue
+        run_key = (task_id, run_id)
+        if run_key in _reader_enqueued_task_ids:
             continue
         # task_id == the sub-agent thread_id (deepagents keys the registry by it).
         try:
@@ -276,7 +283,7 @@ async def enqueue_completions_from_state(
                 origin_cli_thread_id=thread_id,
             )
         )
-        _reader_enqueued_task_ids.add(task_id)
+        _reader_enqueued_task_ids.add(run_key)
 
 
 async def watch_run_and_notify(

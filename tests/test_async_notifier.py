@@ -1086,6 +1086,47 @@ async def test_reader_dedupes_completion_across_polls():
     assert gateway.run_status_calls == [("task-1", "run-1")]
 
 
+async def test_reader_surfaces_revision_completion_after_update():
+    """update_async_task rotates run_id on the same task_id (the revision
+    re-dispatches with multitask_strategy="interrupt"). The reader keys dedup
+    on (task_id, run_id), so the revision's completion surfaces even when the
+    original run's completion already notified — one notification per run."""
+    registry = {
+        "async_tasks": {
+            "task-1": {
+                "status": "running",
+                "run_id": "run-1",
+                "agent_name": "writing-agent",
+            }
+        }
+    }
+    gateway = FakeGraphGateway(
+        state_values=registry,
+        run_statuses={"run-1": "success", "run-2": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # run-1 completes and surfaces.
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    assert len(drain_notifications("cli-tid")) == 1
+
+    # update_async_task after run-1 completed: new run_id on the SAME task_id,
+    # registry entry back to running.
+    registry["async_tasks"]["task-1"]["run_id"] = "run-2"
+    registry["async_tasks"]["task-1"]["status"] = "running"
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+
+    # The revision's completion surfaces — not suppressed by run-1's notify.
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    assert drained[0].task_id == "task-1"
+    assert drained[0].status == "success"
+
+    # And it notifies exactly once: the next poll of the same run is deduped.
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    assert drain_notifications("cli-tid") == []
+
+
 async def test_reader_skips_task_already_terminal_in_state():
     gateway = FakeGraphGateway(
         state_values={
