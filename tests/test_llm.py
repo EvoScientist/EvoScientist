@@ -1388,6 +1388,115 @@ class TestThirdPartyRouting:
         assert "thinking" in call_kwargs
         assert "reasoning" not in call_kwargs
 
+    @patch("EvoScientist.llm.models._patch_openai_compat_content")
+    def test_minimax_skips_openai_compat_content_patch(self, mock_patch, monkeypatch):
+        """Anthropic-routed MiniMax must preserve replay content blocks."""
+        import json
+
+        import anthropic
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        httpx = _anthropic_httpx()
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
+
+        model = get_chat_model("MiniMax-M3", provider="minimax", output_version="v1")
+
+        captured: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "model": "MiniMax-M3",
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+
+        model._client = anthropic.Anthropic(
+            api_key="mm-key",
+            base_url="https://api.minimaxi.com/anthropic",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+
+        first = model.invoke([HumanMessage("hello")])
+        assert first.response_metadata["output_version"] == "v1"
+
+        result = model.invoke(
+            [
+                HumanMessage("hello"),
+                first,
+                HumanMessage("middle"),
+                AIMessage(
+                    content=[
+                        "visible answer",
+                        {"type": "thinking", "thinking": "hm", "signature": "sig"},
+                        {
+                            "type": "tool_use",
+                            "id": "tool_1",
+                            "name": "lookup",
+                            "input": {"x": 1},
+                        },
+                    ]
+                ),
+                HumanMessage(
+                    content=[
+                        {"type": "image", "base64": "AAA", "mime_type": "image/png"},
+                        {"type": "text", "text": "next"},
+                    ]
+                ),
+            ]
+        )
+
+        mock_patch.assert_not_called()
+        assert len(captured) == 2
+        assistant_messages = [
+            message
+            for message in captured[1]["messages"]
+            if message["role"] == "assistant"
+        ]
+        assert assistant_messages[0]["content"] == [{"type": "text", "text": "ok"}]
+        assert assistant_messages[1]["content"] == [
+            {"type": "text", "text": "visible answer"},
+            {"type": "thinking", "thinking": "hm", "signature": "sig"},
+            {
+                "type": "tool_use",
+                "id": "tool_1",
+                "name": "lookup",
+                "input": {"x": 1},
+            },
+        ]
+        image_messages = [
+            message
+            for message in captured[1]["messages"]
+            if message["role"] == "user"
+            and isinstance(message["content"], list)
+            and any(block.get("type") == "image" for block in message["content"])
+        ]
+        assert image_messages == [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "AAA",
+                        },
+                    },
+                    {"type": "text", "text": "next"},
+                ],
+            }
+        ]
+        assert result.content == [{"type": "text", "text": "ok"}]
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_short_name_resolution(self, mock_init, monkeypatch):
         """MiniMax short names should resolve to correct model IDs."""
@@ -2858,8 +2967,8 @@ class TestAnthropicStripForeignReasoning:
 
         assert _normalize_anthropic_replay_messages(messages) is messages
 
-    def test_kimi_k3_exempt_from_flatten_patch(self, monkeypatch):
-        """K3 on custom-anthropic gets no instance flatten closures; others do."""
+    def test_anthropic_routed_providers_skip_flatten_patch(self, monkeypatch):
+        """Anthropic-routed providers preserve native content block payloads."""
         monkeypatch.setenv("CUSTOM_ANTHROPIC_BASE_URL", "https://compat.example.com")
         monkeypatch.setenv("CUSTOM_ANTHROPIC_API_KEY", "test-key")
 
@@ -2869,7 +2978,7 @@ class TestAnthropicStripForeignReasoning:
         other = get_chat_model(
             "claude-sonnet-4-6", provider="custom-anthropic", max_tokens=1024
         )
-        assert "_generate" in vars(other)
+        assert "_generate" not in vars(other)
 
     def test_reasoning_content_stripped_on_the_wire(self, monkeypatch):
         """End-to-end: foreign reasoning blocks never reach the Anthropic wire."""
