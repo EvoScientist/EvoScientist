@@ -1,5 +1,6 @@
 """Tests for EvoScientist LLM module."""
 
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -863,6 +864,34 @@ class TestThirdPartyRouting:
         assert call_kwargs["app_title"] == "MyApp"
         # An explicit list is preserved verbatim, not re-split.
         assert call_kwargs["app_categories"] == ["only-this"]
+
+    @pytest.mark.parametrize("source", ["env", "kwarg"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_openrouter_title_override_without_referer_falls_back_silently(
+        self, mock_init, monkeypatch, source
+    ):
+        """OpenRouter keys app pages by HTTP-Referer, so a custom title on the
+        default referer would rename the shared EvoScientist page. It is
+        replaced by the default title, without any user-facing warning,
+        whether the title came from the env (config) or an explicit kwarg."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        for _env in self._APP_ATTR_ENV:
+            monkeypatch.delenv(_env, raising=False)
+        extra = {}
+        if source == "env":
+            monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_APP_TITLE", "Acme")
+        else:
+            extra["app_title"] = "Acme"
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            get_chat_model("x-ai/grok-4.3", provider="openrouter", **extra)
+
+        assert not [w for w in caught if "openrouter" in str(w.message).lower()]
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["app_url"] == "https://github.com/EvoScientist/EvoScientist"
+        assert call_kwargs["app_title"] == "EvoScientist"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_non_openrouter_providers_get_no_app_attribution(
