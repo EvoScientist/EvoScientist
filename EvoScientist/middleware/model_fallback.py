@@ -36,11 +36,13 @@ _fallback_chain: list[tuple[str, str]] = []
 _chain_initialized = False
 """Whether ``_fallback_chain`` has been seeded yet.
 
-The chain lazily initializes from ``get_effective_config().model_fallbacks``
-on first access (see ``_ensure_chain_initialized``). Graph builds must NOT
-re-seed it: at server import every registered graph runs through the
-middleware factory, and a build-time load would make the last-built graph
-clobber session edits made via ``/model-fallback`` (last-build-wins).
+The chain is seeded by ``_get_default_middleware`` — the factory every graph
+(main, sync/async subagent) is built through — via first-touch
+``seed_fallback_chain(cfg)`` (see ``_ensure_chain_initialized``). Once
+seeded, later graph builds never re-seed, so in-process edits via
+``/model-fallback`` survive every rebuild; an unconditional build-time LOAD
+would clobber them (last-build-wins) — that is why seeding is first-touch
+only, never an overwrite.
 """
 
 
@@ -138,11 +140,11 @@ def seed_fallback_chain(config: Any = None) -> None:
     ``get_effective_config()`` reloads config from disk on every call, and
     the langgraph dev server's run loop raises ``BlockingError`` (blockbuster)
     on sync file IO — so the seeding must happen in a sync context, not lazily
-    inside a run. Call this explicitly from graph registration
-    (``langgraph_dev/main_graph.py``) and agent construction
-    (``create_cli_agent``, which passes its already-resolved config so the
-    pure path performs no disk read); the first per-run chain read is then a
-    pure in-memory list read.
+    inside a run. Called from ``_get_default_middleware`` with the
+    factory-resolved config (a pure in-memory first touch — no disk read),
+    which covers every graph load path (main agent, sync/async subagents,
+    agent construction); the first per-run chain read is then a pure
+    in-memory list read.
     """
     with _fallback_chain_lock:
         _ensure_chain_initialized(config)

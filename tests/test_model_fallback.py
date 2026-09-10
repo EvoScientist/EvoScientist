@@ -855,9 +855,20 @@ class TestExplicitSeeding:
 
     def test_pure_path_agent_construction_seeds_from_caller_config(self, tmp_path):
         """create_cli_agent(config=..., chat_model=...) - the pure path -
-        seeds the chain from the caller's config, never from disk."""
+        seeds the chain from the caller's config via the middleware factory,
+        never from disk."""
         import EvoScientist.EvoScientist as es_mod
-        from EvoScientist.middleware.model_fallback import get_fallback_chain
+        from EvoScientist.middleware.model_fallback import (
+            get_fallback_chain,
+            seed_fallback_chain,
+        )
+
+        def factory_side_effect(**kwargs):
+            # Mirror the real factory's seeding contract: it seeds from the
+            # cfg it receives. The mock only removes the heavyweight
+            # middleware assembly, not the seeding.
+            seed_fallback_chain(kwargs.get("cfg"))
+            return []
 
         def fake_create_deep_agent(*_args, **_kwargs):
             agent = MagicMock()
@@ -873,7 +884,9 @@ class TestExplicitSeeding:
 
         with patch("deepagents.create_deep_agent", side_effect=fake_create_deep_agent):
             with patch.object(es_mod, "_apply_env_from_config"):
-                with patch.object(es_mod, "_get_default_middleware", return_value=[]):
+                with patch.object(
+                    es_mod, "_get_default_middleware", side_effect=factory_side_effect
+                ):
                     with patch.object(
                         es_mod,
                         "load_mcp_and_build_kwargs",
@@ -892,3 +905,61 @@ class TestExplicitSeeding:
                                 chat_model=MagicMock(),
                             )
         assert get_fallback_chain() == [("cfg-a", "prov-a")]
+
+    def test_factory_seeds_chain_from_its_cfg(self):
+        """_get_default_middleware seeds the chain from its resolved cfg —
+        the single seeding site that covers every graph load path (main,
+        sync/async subagents) regardless of how the graph is loaded."""
+        from EvoScientist.EvoScientist import _get_default_middleware
+        from EvoScientist.middleware.model_fallback import get_fallback_chain
+
+        cfg = MagicMock()
+        cfg.model_fallbacks = "factory-a:prov-a, factory-b:prov-b"
+        cfg.auxiliary_model = ""
+        cfg.auxiliary_provider = ""
+
+        with patch("EvoScientist.config.settings.get_effective_config") as never_disk:
+            _reset_chain_initialization()
+            with patch(
+                "EvoScientist.EvoScientist._ensure_chat_model",
+                return_value=MagicMock(profile={"max_input_tokens": 200_000}),
+            ):
+                _get_default_middleware(cfg=cfg)
+            never_disk.assert_not_called()
+        assert get_fallback_chain() == [
+            ("factory-a", "prov-a"),
+            ("factory-b", "prov-b"),
+        ]
+
+    def test_second_factory_call_does_not_reseed(self):
+        """A later graph build through the factory (different cfg) must not
+        re-seed: first-touch only, so /model-fallback session edits survive
+        every rebuild."""
+        from EvoScientist.EvoScientist import _get_default_middleware
+        from EvoScientist.middleware.model_fallback import (
+            add_fallback,
+            get_fallback_chain,
+        )
+
+        cfg_v1 = MagicMock()
+        cfg_v1.model_fallbacks = "cfg-a:prov-a"
+        cfg_v2 = MagicMock()
+        cfg_v2.model_fallbacks = "other:prov"
+
+        for cfg in (cfg_v1, cfg_v2):
+            cfg.auxiliary_model = ""
+            cfg.auxiliary_provider = ""
+        _reset_chain_initialization()
+        with patch(
+            "EvoScientist.EvoScientist._ensure_chat_model",
+            return_value=MagicMock(profile={"max_input_tokens": 200_000}),
+        ):
+            _get_default_middleware(cfg=cfg_v1)
+            # Session edit between builds.
+            assert add_fallback("session", "prov-s") is True
+            # Rebuild with a different config: first-touch guard must hold.
+            _get_default_middleware(cfg=cfg_v2)
+        assert get_fallback_chain() == [
+            ("cfg-a", "prov-a"),
+            ("session", "prov-s"),
+        ]
