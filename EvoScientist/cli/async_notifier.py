@@ -227,9 +227,10 @@ async def enqueue_completions_from_state(
     Called at every turn/stream-close boundary and, throttled, on the idle poll
     tick (via :func:`enqueue_completions_from_state_throttled`). Best-effort
     throughout: a failed status read leaves the task for the next poll (treated
-    as not-yet-terminal), and a failed *state* read returns the previous
-    armed/disarmed observation so the idle throttle keeps retrying instead of
-    mistaking the failure for "no active tasks".
+    as not-yet-terminal), and a failed *state* read re-arms the idle throttle
+    unconditionally — preserving a prior "disarmed" observation would silence
+    idle polling for a task launched after the last successful all-terminal
+    read, leaving its completion unsurfaced until the next turn boundary.
 
     Returns the number of still-active tasks (non-terminal, or not yet
     pollable / transiently unread) seen this pass — used to arm/disarm the idle
@@ -237,12 +238,15 @@ async def enqueue_completions_from_state(
     """
     registry = await read_async_tasks_from_gateway(gateway, target, thread_id)
     if registry is None:
-        # Failed read - NOT an empty registry. Leave the idle throttle's
-        # armed/disarmed observation untouched: disarming here would look
-        # identical to "no active tasks" and leave a completion unsurfaced
-        # until the next turn boundary re-arms the reader. Retry next
-        # interval.
-        return 1 if _idle_reader_active_seen.get(thread_id, True) else 0
+        # Failed read - NOT an empty registry. RE-ARM the idle throttle
+        # unconditionally: preserving a prior "disarmed" observation would
+        # silence idle polling for a task launched after the last successful
+        # read saw everything terminal - its completion would then sit
+        # unsurfaced until the next turn boundary. Arming costs one state
+        # read per idle interval and self-corrects on the first successful
+        # read (it re-disarms when the registry is genuinely all-terminal).
+        _idle_reader_active_seen[thread_id] = True
+        return 1
     still_active = 0
     for task_id, task in registry.items():
         if task.get("status") in TERMINAL_STATUSES:
