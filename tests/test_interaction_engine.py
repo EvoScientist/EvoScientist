@@ -193,7 +193,7 @@ REQS = [{"name": "execute", "args": {"command": "rm -rf /tmp/x"}}]
 
 class TestResolveApproval:
     async def test_session_granted_short_circuits(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         p = I.ApprovalPolicy()
         p.grant_session("tg:c1")
         io = FakeIO()
@@ -201,15 +201,17 @@ class TestResolveApproval:
         assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert io.sent == []  # no prompt, silent
 
-    async def test_config_auto_approve_short_circuits(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: True)
+    async def test_config_decisions_short_circuit(self, monkeypatch):
+        monkeypatch.setattr(
+            I, "resolve_config_decisions", lambda reqs: [{"type": "approve"}]
+        )
         io = FakeIO()
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert io.sent == []
 
     async def test_approve(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["1"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
@@ -217,14 +219,14 @@ class TestResolveApproval:
         assert io.contents[-1] == I.APPROVED_FEEDBACK
 
     async def test_reject(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["2"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome()
         assert io.contents[-1] == I.REJECTED_FEEDBACK
 
     async def test_approve_all_grants_session(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["3"])
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
@@ -233,7 +235,7 @@ class TestResolveApproval:
         assert p.is_session_granted("tg:c1")  # future prompts auto-approve
 
     async def test_multi_request_approve_length(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         reqs = [
             {"name": "execute", "args": {"command": "a"}},
             {"name": "execute", "args": {"command": "b"}},
@@ -246,7 +248,7 @@ class TestResolveApproval:
         # The engine declines but hands the raw text back — the *driver*
         # decides the feedback / refeed policy (consumer refeeds as a new
         # turn; CLI bridge sends the unrecognized notice).
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["huh?"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result.decisions is None
@@ -256,14 +258,14 @@ class TestResolveApproval:
         assert I.REJECTED_FEEDBACK not in io.contents
 
     async def test_timeout(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO([])  # times out
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome()
         assert io.contents[-1] == I.APPROVAL_TIMEOUT_FEEDBACK
 
     async def test_stop_command_silent_cancel(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["/stop"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome()
@@ -272,7 +274,7 @@ class TestResolveApproval:
         assert I.UNRECOGNIZED_FEEDBACK not in io.contents
 
     async def test_send_failure_declines(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["1"])
         io.send_ok = False
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
@@ -281,7 +283,7 @@ class TestResolveApproval:
     # ── R3: button-capability formatting + payload normalization ──
 
     async def test_buttons_attached_when_capable(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["1"], capabilities=QQ_CAPS, base_metadata={"chat": "x"})
         await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         prompt, metadata = io.sent[0]
@@ -295,7 +297,7 @@ class TestResolveApproval:
         assert metadata["chat"] == "x"  # base metadata preserved
 
     async def test_no_buttons_when_incapable(self, monkeypatch):
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["1"])  # default caps: no inline_buttons
         await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         prompt, metadata = io.sent[0]
@@ -305,7 +307,7 @@ class TestResolveApproval:
     async def test_button_press_payload_normalizes(self, monkeypatch):
         # A button click delivers its `value` ("3") through the same reply
         # path; the engine must treat it exactly like a typed "3".
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(["3"], capabilities=QQ_CAPS)
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
@@ -410,7 +412,7 @@ class TestConsumerUnrecognizedRefeed:
         from tests.fakes import FakeGraphGateway, StubChannel
 
         # Force the manual-prompt path (no config auto-approve).
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
 
         bus = MessageBus()
         mgr = ChannelManager(bus)
@@ -508,7 +510,7 @@ class TestConsumerUnrecognizedRefeed:
 class TestApprovalEmptyReply:
     async def test_empty_reply_is_unrecognized_not_timeout(self, monkeypatch):
         """A media-only/empty reply must reach the refeed path, not timeout."""
-        monkeypatch.setattr(I, "config_auto_approve", lambda reqs: False)
+        monkeypatch.setattr(I, "resolve_config_decisions", lambda reqs: None)
         io = FakeIO(replies=[""])
         policy = I.ApprovalPolicy()
         outcome = await I.resolve_approval(

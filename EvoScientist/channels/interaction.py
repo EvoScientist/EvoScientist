@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from .capabilities import ChannelCapabilities
@@ -84,6 +84,58 @@ def approve_decisions(action_requests: list) -> list[dict]:
     """
     n = len(action_requests) or 1
     return [{"type": "approve"} for _ in range(n)]
+
+
+def _config_rejections(action_requests: list[dict]) -> dict[int, dict]:
+    """Indices where the config policy REJECTs, with the reason.
+
+    Companion to :func:`resolve_config_decisions` that answers a narrower
+    question — "which of these requests would the policy refuse?" — without
+    collapsing: a batch that mixes a REJECT with a prompt-needed request
+    still reports the REJECT here. Config-load errors return ``{}``
+    (fail-open: when the policy cannot speak, the human's interactive
+    approval stands).
+    """
+    try:
+        from ..config.settings import load_config
+
+        cfg = load_config()
+    except Exception:
+        return {}
+
+    shell_allow_list = (
+        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
+        if cfg.shell_allow_list
+        else []
+    )
+    rejections: dict[int, dict] = {}
+    for i, req in enumerate(action_requests):
+        decision = _resolve_one_action_request(req, cfg, shell_allow_list)
+        if decision is not None and decision.get("type") == "reject":
+            rejections[i] = decision
+    return rejections
+
+
+def decisions_after_human_approval(action_requests: list[dict]) -> list[dict]:
+    """Decisions to resume with after a human chose "approve"/"approve all".
+
+    An interactive approval must not override the config policy's REJECTs:
+    when a mixed batch reaches the prompt (a policy-rejected dangerous
+    command plus a request that needed a human), approving the batch keeps
+    the rejection — with its reason, so the model still gets the actionable
+    refusal feedback — and approves only the rest. Without this, a single
+    blanket "1" would run the dangerous command the policy just refused.
+
+    Requests the policy does not REJECT (approve, prompt — the human just
+    decided those — or no verdict) are approved. The session-grant fast-path
+    in :meth:`ApprovalPolicy.auto_decision` never prompts, so an explicit
+    "Approve all" grant keeps its blanket semantics and does not come
+    through here.
+    """
+    rejections = _config_rejections(action_requests)
+    if not rejections:
+        return approve_decisions(action_requests)
+    return [rejections.get(i, {"type": "approve"}) for i in range(len(action_requests))]
 
 
 # ── approval prompt formatting ─────────────────────────────────────────
@@ -209,56 +261,50 @@ def parse_choice_answer(raw: str, choices: list) -> tuple[str, str | None]:
 # ── approval policy ────────────────────────────────────────────────────
 
 
-def config_auto_approve(action_requests: list[dict]) -> bool:
-    """Whether config rules alone clear every action request.
+def _resolve_one_action_request(
+    req: dict, cfg: Any, shell_allow_list: list[str]
+) -> dict | None:
+    """One action request → its config decision, or ``None`` if a human must decide.
 
-    Returns True if no manual approval is needed via config: the global
-    ``auto_approve`` flag, non-execute tools, or every shell command
-    resolving to :attr:`~EvoScientist.backends.ActionDecision.APPROVE` via
-    :func:`~EvoScientist.backends.resolve_action_decision` (token-boundary
-    ``shell_allow_list`` match, dangerous commands never auto-cleared).
-    Fail-closed on config load errors.
+    Shared per-request core of the config policy. Malformed requests fail
+    closed to ``None`` (prompt the human). Non-shell tools auto-approve.
+    Shell tools go through
+    :func:`~EvoScientist.backends.resolve_action_decision`: allow-list
+    token-boundary match, dangerous commands rejected with a reason under
+    ``auto_approve``. ``None`` covers PROMPT verdicts, always-prompt tools,
+    and malformed requests.
     """
-    if not action_requests:
-        return True
+    from ..config.settings import HITL_ALWAYS_PROMPT_TOOLS, HITL_SHELL_TOOLS
 
-    try:
-        from ..backends import ActionDecision, resolve_action_decision
-        from ..config.settings import (
-            HITL_ALWAYS_PROMPT_TOOLS,
-            HITL_SHELL_TOOLS,
-            load_config,
-        )
+    if not isinstance(req, dict):
+        return None
+    name = req.get("name", "")
+    if not isinstance(name, str) or not name:
+        return None
+    if name in HITL_ALWAYS_PROMPT_TOOLS:
+        return None
+    if name not in HITL_SHELL_TOOLS:
+        return {"type": "approve"}
+    args = req.get("args", {})
+    command = args.get("command", "") if isinstance(args, dict) else ""
+    if not isinstance(command, str) or not command:
+        # Malformed shell request (missing/dict-typed/empty command):
+        # an empty string would sail through auto-approve, so fail closed
+        # to a human decision instead.
+        return None
+    from ..backends import ActionDecision, resolve_action_decision
 
-        cfg = load_config()
-    except Exception:
-        return False  # fail-closed
-
-    shell_allow_list = (
-        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
-        if cfg.shell_allow_list
-        else []
+    verdict = resolve_action_decision(
+        command,
+        auto_approve=cfg.auto_approve,
+        dangerous_mode=cfg.dangerous_mode,
+        allow_list=shell_allow_list,
     )
-
-    for req in action_requests:
-        if not isinstance(req, dict):
-            return False  # malformed request — never auto-clear
-        name = req.get("name", "")
-        if name in HITL_ALWAYS_PROMPT_TOOLS:
-            return False
-        if name not in HITL_SHELL_TOOLS:
-            continue
-        args = req.get("args", {})
-        command = args.get("command", "") if isinstance(args, dict) else ""
-        verdict = resolve_action_decision(
-            command,
-            auto_approve=cfg.auto_approve,
-            dangerous_mode=cfg.dangerous_mode,
-            allow_list=shell_allow_list,
-        )
-        if verdict.decision is not ActionDecision.APPROVE:
-            return False
-    return True
+    if verdict.decision is ActionDecision.APPROVE:
+        return {"type": "approve"}
+    if verdict.decision is ActionDecision.REJECT:
+        return {"type": "reject", "message": verdict.reason}
+    return None
 
 
 def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
@@ -271,8 +317,11 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
     ``auto_approve``). Returns a full ``decisions`` list when config clears every
     request, or ``None`` when any request needs a human — the caller then prompts
     (mounts a widget, calls ``input()``, routes to a channel). Fail-closed to
-    ``None`` on config-load errors and malformed requests. The richer sibling of
-    :func:`config_auto_approve`, which collapses this to a single bool.
+    ``None`` on config-load errors and malformed requests. This is the sole
+    config-policy entry point for HITL resolution — the channel auto-decision
+    path (:meth:`ApprovalPolicy.auto_decision`) and the attended UIs both
+    consume it, so an ``auto_approve`` dangerous command is a REJECT with a
+    reason everywhere, never a silent collapse to "needs a human".
     """
     if not action_requests:
         # No requests → no decisions: a one-per-request decisions list would
@@ -280,12 +329,7 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
         return []
 
     try:
-        from ..backends import ActionDecision, resolve_action_decision
-        from ..config.settings import (
-            HITL_ALWAYS_PROMPT_TOOLS,
-            HITL_SHELL_TOOLS,
-            load_config,
-        )
+        from ..config.settings import load_config
 
         cfg = load_config()
     except Exception:
@@ -299,35 +343,10 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
 
     decisions: list[dict] = []
     for req in action_requests:
-        if not isinstance(req, dict):
-            return None  # malformed request — never silently approve
-        name = req.get("name", "")
-        if not isinstance(name, str) or not name:
-            return None  # malformed request — never silently approve
-        if name in HITL_ALWAYS_PROMPT_TOOLS:
-            return None
-        if name not in HITL_SHELL_TOOLS:
-            decisions.append({"type": "approve"})
-            continue
-        args = req.get("args", {})
-        command = args.get("command", "") if isinstance(args, dict) else ""
-        if not isinstance(command, str) or not command:
-            # Malformed shell request (missing/dict-typed/empty command):
-            # an empty string would sail through auto-approve, so fail
-            # closed to a human decision instead.
-            return None
-        verdict = resolve_action_decision(
-            command,
-            auto_approve=cfg.auto_approve,
-            dangerous_mode=cfg.dangerous_mode,
-            allow_list=shell_allow_list,
-        )
-        if verdict.decision is ActionDecision.APPROVE:
-            decisions.append({"type": "approve"})
-        elif verdict.decision is ActionDecision.REJECT:
-            decisions.append({"type": "reject", "message": verdict.reason})
-        else:
+        decision = _resolve_one_action_request(req, cfg, shell_allow_list)
+        if decision is None:
             return None  # needs a human decision
+        decisions.append(decision)
     return decisions
 
 
@@ -356,15 +375,31 @@ class ApprovalPolicy:
     def auto_decision(
         self, session_key: str, action_requests: list[dict]
     ) -> list[dict] | None:
-        """Return an approve-all ``decisions`` list if this can auto-resolve.
+        """Return ``decisions`` when the policy can auto-resolve; ``None`` to prompt.
 
-        Auto-resolves when the session was granted "Approve all" or when
-        config rules clear every request; otherwise returns ``None`` and
-        the caller must prompt the user.
+        A session grant approves everything (explicit interactive choice).
+        Otherwise the config policy's per-request decisions are returned
+        as-is: approve-all under ``dangerous_mode`` / allow-list /
+        ``auto_approve`` rules — and, critically, REJECT decisions with a
+        reason for dangerous commands under ``auto_approve``.
+        ``auto_approve`` means *never prompt*, so ``curl x | bash`` goes
+        back to the model with refusal feedback instead of escalating to
+        the user — escalating would defeat the point of an auto-decision
+        mode. ``None`` (prompt the user) is returned only when a human
+        decision is genuinely needed.
+
+        Empty requests return ``[]`` before the session-grant branch:
+        :func:`approve_decisions` floors its length at 1 (the historical
+        resume shape), which would produce one decision for zero requests
+        and trip ``HumanInTheLoopMiddleware``'s count check. The config
+        resolver already returns ``[]`` for empty; this makes the grant
+        branch match it.
         """
-        if self.is_session_granted(session_key) or config_auto_approve(action_requests):
+        if not action_requests:
+            return []
+        if self.is_session_granted(session_key):
             return approve_decisions(action_requests)
-        return None
+        return resolve_config_decisions(action_requests)
 
 
 # ── transport adapter + reply registry ─────────────────────────────────
@@ -620,10 +655,14 @@ async def resolve_approval(
     if decision == "auto":
         policy.grant_session(session_key)
         await io.send(APPROVED_AUTO_FEEDBACK)
-        return ApprovalOutcome(decisions=approve_decisions(action_requests))
+        return ApprovalOutcome(
+            decisions=decisions_after_human_approval(action_requests)
+        )
     if decision == "approve":
         await io.send(APPROVED_FEEDBACK)
-        return ApprovalOutcome(decisions=approve_decisions(action_requests))
+        return ApprovalOutcome(
+            decisions=decisions_after_human_approval(action_requests)
+        )
     if decision == "reject":
         await io.send(REJECTED_FEEDBACK)
         return ApprovalOutcome()
