@@ -22,13 +22,11 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import PregelTask, StateSnapshot
 
 from EvoScientist.EvoScientist import EvoScientist_agent as _agent
-from EvoScientist.middleware.model_fallback import seed_fallback_chain
 
-# Seed the model fallback chain at registration time. get_effective_config()
-# reads config from disk on every call, and inside the langgraph dev event
-# loop that IO raises blockbuster's BlockingError - so the chain must be
-# seeded here, in a sync import context, not lazily at the first model call.
-seed_fallback_chain()
+# The model fallback chain is seeded in _get_default_middleware (the
+# factory every graph — main, sync/async subagent — is built through), so
+# no registration-time seeding is needed here: importing the agent builds
+# its middleware and seeds the chain in the same sync import context.
 
 _PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
 

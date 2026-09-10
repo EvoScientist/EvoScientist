@@ -944,6 +944,7 @@ def _get_default_middleware(
         default_memory_scheduler,
     )
     from .middleware.events import NO_OP_SINK, RunScopedEventSink
+    from .middleware.model_fallback import seed_fallback_chain
 
     # Subagent stacks never drive the main-agent frontend widgets; force the
     # no-op sink there regardless of what the caller passed. Main stacks built
@@ -952,6 +953,13 @@ def _get_default_middleware(
     events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
 
     cfg = cfg if cfg is not None else _ensure_config()
+    # Seed the fallback chain from the factory-resolved config: every graph
+    # (main, sync/async subagent) is built through this factory, so this is
+    # the single seeding site that covers every load path. First-touch only
+    # (idempotent per process) and pure in-memory — the resolved ``cfg``
+    # performs no disk read here, so later calls cannot clobber session edits
+    # made via /model-fallback (see model_fallback._ensure_chain_initialized).
+    seed_fallback_chain(cfg)
     model = chat_model if chat_model is not None else _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     source_type = (
@@ -1208,7 +1216,6 @@ def create_cli_agent(
         MemoryFilesystemBackend,
         MergedSkillsBackend,
     )
-    from .middleware.model_fallback import seed_fallback_chain
 
     # Pure path only when BOTH config and chat_model are explicit: build from
     # locals and write no module globals. Otherwise keep the legacy
@@ -1221,12 +1228,11 @@ def create_cli_agent(
         cfg = _ensure_config(config)
         chat_model = None
 
-    # Seed the fallback chain from the resolved config so the first per-run
-    # chain read does no config IO (see seed_fallback_chain). This is the one
-    # module global the pure path seeds, and it seeds from locals — no disk
-    # read, and a caller-supplied config's model_fallbacks wins over the
-    # on-disk chain.
-    seed_fallback_chain(cfg)
+    # The fallback chain is seeded by _get_default_middleware below (the
+    # factory every graph is built through), which receives this same
+    # resolved ``cfg`` — first-touch seeding, so a caller-supplied config's
+    # model_fallbacks still wins over the on-disk chain, and no separate
+    # seeding is needed here.
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver
