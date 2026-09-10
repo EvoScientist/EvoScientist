@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from EvoScientist.channels.base import (
@@ -1221,28 +1222,244 @@ class TestChannelReconnect:
 
 
 class TestExtractRetryAfter:
-    def test_never_returns_none(self):
-        """[B-01] Base _extract_retry_after always returns float, never None."""
+    def test_generic_errors_use_default_retry_delay(self):
+        """Generic transient errors should use the base retry delay."""
         ch = StubChannel()
-        # Even for a generic exception, it returns 1.0 instead of None
         result = ch._extract_retry_after(ValueError("bad"))
-        # BUG: This should return None for non-retryable errors
-        # Current behavior: always returns 1.0
-        assert result is not None  # Documents the bug
+        assert result == 1.0
 
-    def test_extracts_retry_after_attribute(self):
+    def test_explicit_auth_errors_do_not_retry(self):
         ch = StubChannel()
+        result = ch._extract_retry_after(Exception("HTTP 401 Unauthorized"))
+        assert result is None
 
-        class RateLimitError(Exception):
-            retry_after = 5.0
-
-        result = ch._extract_retry_after(RateLimitError("rate limited"))
-        assert result == 5.0
+    def test_5xx_style_errors_still_retry(self):
+        ch = StubChannel()
+        result = ch._extract_retry_after(Exception("HTTP 500 Internal Server Error"))
+        assert result == 1.0
 
     def test_detects_429_in_message(self):
         ch = StubChannel()
         result = ch._extract_retry_after(RuntimeError("HTTP 429 Too Many Requests"))
         assert result == 1.0
+
+    # ── Real HTTP SDK status code tests (httpx / aiohttp) ────────────
+
+    def test_httpx_401_not_retryable(self):
+        """httpx.HTTPStatusError with status 401 should return None (no retry)."""
+        exc = httpx.HTTPStatusError(
+            "unauthorized",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(401),
+        )
+        assert StubChannel()._extract_retry_after(exc) is None
+
+    def test_httpx_403_not_retryable(self):
+        """httpx.HTTPStatusError with status 403 should return None (no retry)."""
+        exc = httpx.HTTPStatusError(
+            "forbidden",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(403),
+        )
+        assert StubChannel()._extract_retry_after(exc) is None
+
+    @pytest.mark.parametrize("status", [400, 404])
+    def test_httpx_permanent_4xx_not_retryable(self, status):
+        """400 and 404 are permanent for a given request and must not retry."""
+        exc = httpx.HTTPStatusError(
+            "client error",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(status),
+        )
+        assert StubChannel()._extract_retry_after(exc) is None
+
+    def test_httpx_408_still_retries(self):
+        """Not every 4xx is permanent: 408 Request Timeout keeps the default delay."""
+        exc = httpx.HTTPStatusError(
+            "request timeout",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(408),
+        )
+        assert StubChannel()._extract_retry_after(exc) == 1.0
+
+    def test_httpx_500_is_retryable(self):
+        """httpx.HTTPStatusError with status 500 should retry (default 1.0s)."""
+        exc = httpx.HTTPStatusError(
+            "server error",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(500),
+        )
+        assert StubChannel()._extract_retry_after(exc) == 1.0
+
+    def test_aiohttp_401_not_retryable(self):
+        """aiohttp.ClientResponseError with status 401 should return None (no retry)."""
+        import aiohttp
+        from yarl import URL
+
+        exc = aiohttp.ClientResponseError(
+            request_info=aiohttp.RequestInfo(
+                url=URL("https://example.invalid"),
+                method="POST",
+                headers={},
+                real_url=URL("https://example.invalid"),
+            ),
+            history=(),
+            status=401,
+            message="Unauthorized",
+        )
+        assert StubChannel()._extract_retry_after(exc) is None
+
+    def test_aiohttp_403_not_retryable(self):
+        """aiohttp.ClientResponseError with status 403 should return None (no retry)."""
+        import aiohttp
+        from yarl import URL
+
+        exc = aiohttp.ClientResponseError(
+            request_info=aiohttp.RequestInfo(
+                url=URL("https://example.invalid"),
+                method="POST",
+                headers={},
+                real_url=URL("https://example.invalid"),
+            ),
+            history=(),
+            status=403,
+            message="Forbidden",
+        )
+        assert StubChannel()._extract_retry_after(exc) is None
+
+    def test_aiohttp_500_is_retryable(self):
+        """aiohttp.ClientResponseError with status 500 should retry (default 1.0s)."""
+        import aiohttp
+        from yarl import URL
+
+        exc = aiohttp.ClientResponseError(
+            request_info=aiohttp.RequestInfo(
+                url=URL("https://example.invalid"),
+                method="POST",
+                headers={},
+                real_url=URL("https://example.invalid"),
+            ),
+            history=(),
+            status=500,
+            message="Server Error",
+        )
+        assert StubChannel()._extract_retry_after(exc) == 1.0
+
+    def test_httpx_401_with_retry_after_header_is_still_not_retryable(self):
+        """Non-retryable 401 takes precedence over Retry-After header."""
+        ch = StubChannel()
+        exc = httpx.HTTPStatusError(
+            "unauthorized",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(401, headers={"Retry-After": "10"}),
+        )
+        assert ch._extract_retry_after(exc) is None
+
+    # ── _extract_status_code tests ───────────────────────────────────
+
+    def test_extract_status_code_from_httpx(self):
+        """_extract_status_code extracts status_code from httpx.HTTPStatusError."""
+        ch = StubChannel()
+        exc = httpx.HTTPStatusError(
+            "unauthorized",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(401),
+        )
+        assert ch._extract_status_code(exc) == 401
+
+    def test_extract_status_code_non_http_returns_none(self):
+        """_extract_status_code returns None for non-HTTP exceptions."""
+        ch = StubChannel()
+        assert ch._extract_status_code(RuntimeError("plain error")) is None
+
+    # ── _extract_sdk_error_code tests ─────────────────────────────────
+
+    def test_base_extract_sdk_error_code_returns_none(self):
+        """Base Channel._extract_sdk_error_code returns None by default."""
+        ch = StubChannel()
+        assert ch._extract_sdk_error_code(RuntimeError("plain error")) is None
+        exc = httpx.HTTPStatusError(
+            "error",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=httpx.Response(401),
+        )
+        assert ch._extract_sdk_error_code(exc) is None
+
+    # ── _extract_retry_delay tests ───────────────────────────────
+
+    def test_extract_retry_delay_integer(self):
+        """_extract_retry_delay parses integer string from headers."""
+        ch = StubChannel()
+        resp = httpx.Response(429, headers={"Retry-After": "10"})
+        exc = httpx.HTTPStatusError(
+            "rate limited",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        assert ch._extract_retry_delay(exc) == 10.0
+
+    def test_extract_retry_delay_float(self):
+        """_extract_retry_delay parses float string from lowercase headers."""
+        ch = StubChannel()
+        resp = httpx.Response(429, headers={"retry-after": "2.5"})
+        exc = httpx.HTTPStatusError(
+            "rate limited",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        assert ch._extract_retry_delay(exc) == 2.5
+
+    def test_extract_retry_delay_invalid_value(self):
+        """_extract_retry_delay returns None for non-numeric header."""
+        ch = StubChannel()
+        resp = httpx.Response(429, headers={"Retry-After": "invalid-date"})
+        exc = httpx.HTTPStatusError(
+            "rate limited",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        assert ch._extract_retry_delay(exc) is None
+
+    def test_extract_retry_delay_missing(self):
+        """_extract_retry_delay returns None when no Retry-After header exists."""
+        ch = StubChannel()
+        resp = httpx.Response(429, headers={"Content-Type": "application/json"})
+        exc = httpx.HTTPStatusError(
+            "rate limited",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        assert ch._extract_retry_delay(exc) is None
+
+    def test_extract_retry_delay_http_date(self):
+        """An HTTP-date Retry-After is honored as seconds until that time."""
+        from datetime import datetime, timedelta
+        from email.utils import format_datetime
+
+        when = datetime.now(UTC) + timedelta(seconds=60)
+        resp = httpx.Response(
+            503, headers={"Retry-After": format_datetime(when, usegmt=True)}
+        )
+        exc = httpx.HTTPStatusError(
+            "unavailable",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        delay = StubChannel()._extract_retry_after(exc)
+        assert delay is not None
+        assert 55.0 <= delay <= 60.0
+
+    def test_extract_retry_delay_http_date_in_past_is_zero(self):
+        """A past HTTP-date yields 0.0 rather than a negative delay."""
+        resp = httpx.Response(
+            503, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        )
+        exc = httpx.HTTPStatusError(
+            "unavailable",
+            request=httpx.Request("POST", "https://example.invalid"),
+            response=resp,
+        )
+        assert StubChannel()._extract_retry_delay(exc) == 0.0
 
 
 class TestChannelAttachments:

@@ -28,6 +28,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache-dependency-glob: "**/pyproject.toml"
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --dev --extra all-channels
       - name: Run pytest
         run: uv run pytest -v --timeout=30

@@ -2,7 +2,7 @@
 
 One generic graph that reads ``skill_name`` from initial state and loads
 that expert skill's actor definition as the sub-agent's system prompt at
-invocation time — its ``AGENTS.md`` body under the current skill contract,
+invocation time — its ``EXPERT.md`` body under the current skill contract,
 or its ``SKILL.md`` body for legacy ``type: expert`` skills. Registered once
 in ``langgraph.json``; parameterised per run via the payload the main
 agent's ``start_async_task`` passes through
@@ -81,7 +81,7 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
 
     Reads ``state.skill_name``, resolves the corresponding installed expert
     skill via ``list_expert_skills()``, composes the system message from
-    ``role`` + the skill's prompt body (AGENTS.md under the current contract,
+    ``role`` + the skill's prompt body (EXPERT.md under the current contract,
     SKILL.md for legacy frontmatter experts — resolved by
     ``expert_container.expert_prompt_body``, mirroring the sync path in
     ``expert_container._compose_system_prompt``), and overrides
@@ -141,7 +141,7 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         # nonsense.
         #
         # Which file is checked follows the skill's contract:
-        # ``expert_prompt_body`` reads AGENTS.md for experts declared that
+        # ``expert_prompt_body`` reads EXPERT.md for experts declared that
         # way and SKILL.md for legacy frontmatter experts. Checking ``.body``
         # directly would clear a paper-review-shaped skill on the strength of
         # its knowledge file while its actor definition is empty.
@@ -150,7 +150,7 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         body = expert_prompt_body(match)
         if not body.strip():
             source_file = (
-                "AGENTS.md" if match.expert_source == "agents_md" else "SKILL.md"
+                "EXPERT.md" if match.expert_source == "expert_md" else "SKILL.md"
             )
             return (
                 f"ERROR: Expert skill '{skill_name}' has an empty {source_file} "
@@ -221,6 +221,13 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
 def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
     """Build ``AsyncSubAgent``-shaped specs for every installed expert skill.
 
+    Called from two places: agent construction (fold-in via
+    ``EvoScientist.py::_route_async_specs_through_evo_middleware``) and the
+    resolve-on-miss path in ``middleware/expert_async_subagent.py`` — an
+    expert installed mid-session is spec'd here the first time
+    ``start_async_task`` names it, which is what makes background dispatch
+    live without an agent rebuild.
+
     Every expert gets a background reach here, and
     ``build_expert_subagent_specs`` independently gives every expert an
     in-turn reach. Nothing classifies a skill into one or the other — the
@@ -249,7 +256,7 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
     if not is_async_subagents_available():
         return []
 
-    from ..tools.skills_manager import list_expert_skills
+    from ..tools.skills_manager import _warn_once, list_expert_skills
     from .expert_container import _reserved_subagent_names, expert_prompt_body
 
     port = int(getattr(cfg, "langgraph_dev_port", 6174))
@@ -270,16 +277,24 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
         # a body-less expert in ``start_async_task``'s tool schema, then
         # rejecting it at loader time, wastes a launch round-trip; filter
         # upstream so ``start_async_task`` never sees the broken skill.
+        # The warnings go through ``_warn_once``: the sync fold-in runs
+        # once per agent build, but the resolve-on-miss path in
+        # ``middleware/expert_async_subagent.py`` re-runs this walk on
+        # every ``start_async_task`` miss — hallucinated names included —
+        # so a per-walk warning would fire once per miss for the rest
+        # of the session while the broken skill stays broken.
         if not expert_prompt_body(skill).strip():
-            _logger.warning(
+            _warn_once(
+                f"expert-async-empty-body:{skill.name}",
                 "Expert skill %r: %s body is empty; skipping "
                 "async-dispatch registration.",
                 skill.name,
-                "AGENTS.md" if skill.expert_source == "agents_md" else "SKILL.md",
+                "EXPERT.md" if skill.expert_source == "expert_md" else "SKILL.md",
             )
             continue
         if skill.name in taken:
-            _logger.warning(
+            _warn_once(
+                f"expert-async-name-collision:{skill.name}",
                 "Expert skill %r collides with an existing async sub-agent "
                 "name; skipping async-dispatch registration.",
                 skill.name,

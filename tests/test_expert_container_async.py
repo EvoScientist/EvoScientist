@@ -133,8 +133,8 @@ class TestComposePrompt:
         assert composed.startswith("ERROR:")
         assert "empty SKILL.md body" in composed
 
-    def test_agents_md_expert_prompted_from_actor_definition(self):
-        """AGENTS.md experts are prompted from AGENTS.md, not SKILL.md.
+    def test_expert_md_expert_prompted_from_actor_definition(self):
+        """EXPERT.md experts are prompted from EXPERT.md, not SKILL.md.
 
         Both files exist for these skills, so composing from ``.body`` would
         silently work — and hand the expert a knowledge document written for
@@ -146,8 +146,8 @@ class TestComposePrompt:
             role="",
             body="# Knowledge\n\nThe 5-aspect checklist.\n",
         )
-        info.expert_source = "agents_md"
-        info.agents_body = "## Persona\n\nYou are an adversarial reviewer.\n"
+        info.expert_source = "expert_md"
+        info.expert_body = "## Persona\n\nYou are an adversarial reviewer.\n"
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[info],
@@ -156,10 +156,10 @@ class TestComposePrompt:
         assert "You are an adversarial reviewer." in composed
         assert "5-aspect checklist" not in composed
 
-    def test_empty_actor_definition_names_agents_md_in_error(self):
+    def test_empty_actor_definition_names_expert_md_in_error(self):
         """The error cue names the file the author has to fix.
 
-        An AGENTS.md expert with a healthy SKILL.md would otherwise be told
+        An EXPERT.md expert with a healthy SKILL.md would otherwise be told
         its SKILL.md body is empty, sending the author to the wrong file.
         """
         mw = ExpertSkillLoaderMiddleware()
@@ -168,15 +168,15 @@ class TestComposePrompt:
             role="",
             body="# Knowledge\n\nPlenty of content here.\n",
         )
-        info.expert_source = "agents_md"
-        info.agents_body = "  \n"
+        info.expert_source = "expert_md"
+        info.expert_body = "  \n"
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[info],
         ):
             composed = mw._compose_prompt({"skill_name": "paper-review"})
         assert composed.startswith("ERROR:")
-        assert "empty AGENTS.md body" in composed
+        assert "empty EXPERT.md body" in composed
         assert "paper-review" in composed
 
     def test_runtime_context_tail_surfaces_skill_name(self):
@@ -338,3 +338,96 @@ class TestWrapModelCall:
             _PERSONA_SENTINEL in r.message and "not found" in r.message
             for r in caplog.records
         )
+
+
+class TestSpecWalkSkipsWarnOnce:
+    """The resolve-on-miss path re-runs ``build_expert_async_subagent_specs``
+    on every ``start_async_task`` miss — hallucinated names included — so the
+    two skip-path warnings must fire once per skill per process, not once per
+    walk (``skills_manager._warn_once``). Per-walk warnings would fire on
+    every miss for the rest of the session while the broken skill stays
+    broken."""
+
+    def _walk(self, skills):
+        from EvoScientist.subagents.expert_container_async import (
+            build_expert_async_subagent_specs,
+        )
+
+        cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.list_expert_skills",
+                return_value=skills,
+            ),
+            patch(
+                "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
+                return_value=True,
+            ),
+        ):
+            return build_expert_async_subagent_specs(cfg=cfg)
+
+    def test_empty_body_warns_once_across_walks(self, tmp_path, caplog):
+        """Two walks over a body-less expert register nothing and warn
+        exactly once. Without ``_warn_once`` the second walk re-warns and
+        the count assertion fails."""
+        import logging
+
+        broken = SkillInfo(
+            name="warn-once-empty-body-expert",
+            description="d",
+            path=tmp_path,
+            source="builtin",
+            type="expert",
+            expert_source="expert_md",
+            expert_body="",
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="EvoScientist.tools.skills_manager"
+        ):
+            first = self._walk([broken])
+            second = self._walk([broken])
+
+        assert first == []
+        assert second == []
+        warnings_ = [r for r in caplog.records if "body is empty" in r.getMessage()]
+        assert len(warnings_) == 1
+
+    def test_name_collision_warns_once_across_walks(self, tmp_path, caplog):
+        """Two walks over an expert named after a reserved async sub-agent
+        register nothing and warn exactly once. Without ``_warn_once`` the
+        second walk re-warns and the count assertion fails.
+
+        The collision name is deliberately NOT one of the real reserved
+        names (patched in via ``_reserved_subagent_names``, mirroring
+        ``test_route_async_specs.py``): ``_warn_once`` keys are
+        process-global, so a real reserved name here would consume the
+        key that suite's own collision test asserts on."""
+        import logging
+
+        colliding = SkillInfo(
+            name="warn-once-collision-expert",
+            description="d",
+            path=tmp_path,
+            source="builtin",
+            type="expert",
+            expert_source="expert_md",
+            expert_body="Solid persona.\n",
+        )
+
+        with (
+            patch(
+                "EvoScientist.subagents.expert_container._reserved_subagent_names",
+                return_value=frozenset({"warn-once-collision-expert"}),
+            ),
+            caplog.at_level(
+                logging.WARNING, logger="EvoScientist.tools.skills_manager"
+            ),
+        ):
+            first = self._walk([colliding])
+            second = self._walk([colliding])
+
+        assert first == []
+        assert second == []
+        warnings_ = [r for r in caplog.records if "collides with" in r.getMessage()]
+        assert len(warnings_) == 1

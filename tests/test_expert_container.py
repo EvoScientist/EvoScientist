@@ -129,8 +129,8 @@ class TestExpertPromptBody:
         body = expert_prompt_body(info)
         assert body == "Cached body content from SkillInfo."
 
-    def test_agents_md_expert_reads_actor_definition_not_skill_md(self, tmp_path):
-        """An AGENTS.md expert is prompted from its actor definition.
+    def test_expert_md_expert_reads_actor_definition_not_skill_md(self, tmp_path):
+        """An EXPERT.md expert is prompted from its actor definition.
 
         SKILL.md stays pure knowledge under the current contract — it is
         reachable in-turn via ``load_skill`` — so leaking it into the system
@@ -143,35 +143,35 @@ class TestExpertPromptBody:
             path=tmp_path / "paper-review",
             source="builtin",
             type="expert",
-            expert_source="agents_md",
+            expert_source="expert_md",
             body="# Knowledge\n\nThe 5-aspect checklist.\n",
-            agents_body="## Persona\n\nYou are an adversarial reviewer.\n",
+            expert_body="## Persona\n\nYou are an adversarial reviewer.\n",
         )
         body = expert_prompt_body(info)
         assert body == "## Persona\n\nYou are an adversarial reviewer.\n"
         assert "5-aspect checklist" not in body
 
-    def test_agents_md_expert_falls_back_to_disk(self, tmp_path):
-        """A hand-built SkillInfo without ``agents_body`` still resolves.
+    def test_expert_md_expert_falls_back_to_disk(self, tmp_path):
+        """A hand-built SkillInfo without ``expert_body`` still resolves.
 
         Mirrors the SKILL.md fallback below it — external callers construct
         SkillInfo objects without going through ``_parse_skill_md``.
         """
         skill_dir = tmp_path / "on-disk"
         skill_dir.mkdir()
-        (skill_dir / "AGENTS.md").write_text("## Persona\n\nFrom disk.\n")
+        (skill_dir / "EXPERT.md").write_text("## Persona\n\nFrom disk.\n")
         info = SkillInfo(
             name="on-disk",
             description="d",
             path=skill_dir,
             source="workspace",
             type="expert",
-            expert_source="agents_md",
+            expert_source="expert_md",
             body="SKILL.md body that must not be used.",
         )
         assert expert_prompt_body(info) == "## Persona\n\nFrom disk.\n"
 
-    def test_agents_md_expert_returns_empty_when_file_missing(self, tmp_path):
+    def test_expert_md_expert_returns_empty_when_file_missing(self, tmp_path):
         """Declared expert, no resolvable actor definition -> empty.
 
         Empty is the signal every registration path checks; falling back to
@@ -184,7 +184,7 @@ class TestExpertPromptBody:
             path=tmp_path / "gone",
             source="workspace",
             type="expert",
-            expert_source="agents_md",
+            expert_source="expert_md",
             body="SKILL.md body that must not be used.",
         )
         assert expert_prompt_body(info) == ""
@@ -374,10 +374,10 @@ role: blank
             for r in caplog.records
         )
 
-    def test_agents_md_expert_included_in_sync_registry(self, tmp_path):
-        """Both contracts land in the in-turn registry, and its prompt is AGENTS.md.
+    def test_expert_md_expert_included_in_sync_registry(self, tmp_path):
+        """Both contracts land in the in-turn registry, and its prompt is EXPERT.md.
 
-        Every expert gets both reaches, so an AGENTS.md skill appears here
+        Every expert gets both reaches, so an EXPERT.md skill appears here
         as well as in the async specs. Sharing the name across the two is
         safe: they land on different tools with separate schemas.
         """
@@ -395,7 +395,7 @@ description: Knowledge only
 The workflow.
 """
         )
-        (actor / "AGENTS.md").write_text("## Persona\n\nYou are the new expert.\n")
+        (actor / "EXPERT.md").write_text("## Persona\n\nYou are the new expert.\n")
 
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
