@@ -19,6 +19,13 @@ class SlackConfig(BaseChannelConfig):
     text_chunk_limit: int = 4096
 
 
+def _slack_response_types() -> tuple[type, ...]:
+    from slack_sdk.web.async_slack_response import AsyncSlackResponse
+    from slack_sdk.web.slack_response import SlackResponse
+
+    return (SlackResponse, AsyncSlackResponse)
+
+
 class SlackChannel(Channel):
     """Slack channel using slack-sdk Socket Mode."""
 
@@ -201,7 +208,9 @@ class SlackChannel(Channel):
         """Extract HTTP status code from SlackApiError or fallback to base."""
         from slack_sdk.errors import SlackApiError
 
-        if isinstance(exc, SlackApiError):
+        if isinstance(exc, SlackApiError) and isinstance(
+            exc.response, _slack_response_types()
+        ):
             return exc.response.status_code
         return super()._extract_status_code(exc)
 
@@ -209,7 +218,9 @@ class SlackChannel(Channel):
         """Extract structured error code string from SlackApiError."""
         from slack_sdk.errors import SlackApiError
 
-        if isinstance(exc, SlackApiError):
+        if isinstance(exc, SlackApiError) and isinstance(
+            exc.response, _slack_response_types()
+        ):
             error = exc.response.get("error")
             return error.lower() if isinstance(error, str) else None
         return super()._extract_sdk_error_code(exc)

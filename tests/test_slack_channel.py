@@ -205,3 +205,60 @@ class TestSlackRetryErrorExtraction:
         exc = SlackApiError("ratelimited", response=resp)
         assert ch._extract_retry_delay(exc) is None
         assert ch._extract_retry_after(exc) == ch._rate_limit_delay
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("slack_sdk") is None
+    or importlib.util.find_spec("aiohttp") is None,
+    reason="slack_sdk or aiohttp not installed",
+)
+class TestSlackRetryWithRawClientResponse:
+    """slack_sdk wraps the raw aiohttp response in SlackApiError when a
+    JSON-declared body fails to parse; the retry path must survive that."""
+
+    async def test_malformed_json_body_is_retried_and_surfaces_sdk_error(
+        self, monkeypatch
+    ):
+        import aiohttp
+        from aiohttp import web
+        from slack_sdk.errors import SlackApiError
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        from EvoScientist.channels.retry import RetryConfig
+
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            monkeypatch.delenv(var, raising=False)
+
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            return web.Response(
+                status=200, text="<<not json>>", content_type="application/json"
+            )
+
+        app = web.Application()
+        app.router.add_post("/api/chat.postMessage", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, "127.0.0.1", 0).start()
+            port = runner.addresses[0][1]
+            client = AsyncWebClient(
+                token="xoxb-test",
+                base_url=f"http://127.0.0.1:{port}/api/",
+                retry_handlers=[],
+            )
+            ch = SlackChannel(SlackConfig(bot_token="xoxb-test", app_token="xapp-test"))
+            ch._retry_config = RetryConfig(
+                attempts=3, min_delay_s=0.01, max_delay_s=0.02, jitter=0.0
+            )
+            with pytest.raises(SlackApiError) as excinfo:
+                await ch._send_with_retry(
+                    lambda: client.chat_postMessage(channel="C1", text="hi")
+                )
+            assert isinstance(excinfo.value.response, aiohttp.ClientResponse)
+            assert calls == 3
+        finally:
+            await runner.cleanup()
