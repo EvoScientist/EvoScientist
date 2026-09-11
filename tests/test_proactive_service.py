@@ -369,18 +369,70 @@ def test_make_read_source_builds_from_get_state():
     assert src.messages == [{"content": "hi", "type": "human"}]
     assert src.has_origin is True
     assert src.in_flight is False
-    assert src.read_current_head() == "ck-1"
+    assert asyncio.run(src.read_current_head()) == "ck-1"
 
 
-def test_read_current_head_returns_captured_head_without_io():
-    # read_current_head is a sync callable on the event loop, so it does NO I/O:
-    # it returns the head captured at read time and never re-fetches.
-    client = _FakeStateClient({"checkpoint_id": "ck-1", "values": {"messages": []}})
+def test_read_current_head_refetches_the_head():
+    """The pre-commit stale check must see a head that moved while the shadow ran
+    (a user turn or a concurrent tick's push), so it re-fetches instead of
+    returning the captured value."""
+    heads = iter(["ck-1", "ck-1", "ck-2"])
+    client = _FakeStateClient(
+        lambda: {"checkpoint_id": next(heads), "values": {"messages": []}}
+    )
     src = asyncio.run(make_read_source(client)("t1"))
-    before = len(client.threads.calls)
-    assert src.read_current_head() == "ck-1"
-    assert src.read_current_head() == "ck-1"
-    assert len(client.threads.calls) == before  # no extra get_state calls
+    assert src.pre_head == "ck-1"
+    assert asyncio.run(src.read_current_head()) == "ck-1"
+    assert asyncio.run(src.read_current_head()) == "ck-2"
+    assert len(client.threads.calls) == 3
+
+
+def test_check_discards_push_when_head_moved_during_shadow():
+    """Server path end-to-end: the head moves between the read and the commit →
+    stale, nothing delivered (covers a user turn or an overlapping tick)."""
+    from EvoScientist.proactive.gate import ProactiveGateSettings
+
+    heads = iter(["ck-1", "ck-2", "ck-2", "ck-2"])
+    client = _FakeStateClient(
+        lambda: {"checkpoint_id": next(heads), "values": {"messages": []}}
+    )
+    src = asyncio.run(make_read_source(client)("t1"))
+
+    class _Deliverer:
+        calls = 0
+
+        async def deliver(self, *a, **k):
+            self.calls += 1
+            return True
+
+    deliverer = _Deliverer()
+
+    async def _shadow(messages, trigger):
+        return "push text"
+
+    result = asyncio.run(
+        run_proactive_check(
+            settings=ProactiveGateSettings(
+                enabled=True, idle_minutes=0, quiet_hours=None, timezone="UTC"
+            ),
+            source_thread_id="t1",
+            now=datetime.now(UTC),
+            last_activity=datetime.now(UTC) - timedelta(hours=1),
+            pre_head=src.pre_head,
+            has_origin=True,
+            in_flight=False,
+            source_messages=src.messages,
+            shadow_runner=_shadow,
+            read_current_head=src.read_current_head,
+            deliverer=deliverer,
+            trigger="t",
+            workspace_dir=None,
+            model=None,
+            proactive_id="p1",
+        )
+    )
+    assert result.stage == "stale"
+    assert deliverer.calls == 0
 
 
 def test_read_source_checkpoint_id_falls_back_to_nested():

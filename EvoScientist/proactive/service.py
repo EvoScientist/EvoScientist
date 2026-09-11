@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
-from .commit import commit_with_conflict_retry, decide_commit
+from .commit import commit_with_conflict_retry, decide_commit, resolve_head
 from .eligibility import list_channel_thread_candidates
 from .gate import ProactiveGateSettings, evaluate_gate
 
@@ -105,7 +105,7 @@ async def run_proactive_check(
     in_flight: bool,
     source_messages: list,
     shadow_runner: Callable[[list, str], Awaitable[str | None]],
-    read_current_head: Callable[[], str | None],
+    read_current_head: Callable[[], str | Awaitable[str | None] | None],
     deliverer: Deliverer,
     trigger: str,
     workspace_dir: str | None,
@@ -143,7 +143,7 @@ async def run_proactive_check(
         workspace_dir=workspace_dir,
         model=model,
         pre_head=pre_head,
-        current_head=read_current_head(),
+        current_head=await resolve_head(read_current_head),
         proactive_id=proactive_id,
     )
     if decision.action == "skip":
@@ -205,7 +205,7 @@ class SourceRead:
     pre_head: str | None
     has_origin: bool
     in_flight: bool
-    read_current_head: Callable[[], str | None]
+    read_current_head: Callable[[], str | Awaitable[str | None] | None]
 
 
 async def run_proactive_scan(
@@ -282,24 +282,28 @@ def make_read_source(client: Any) -> Callable[[str], Awaitable[SourceRead]]:
     (``status="idle"`` + the channel marker), so ``has_origin=True`` and
     ``in_flight=False`` by construction.
 
-    ``read_current_head`` returns the head captured at read time — it does NO I/O,
-    because it is a SYNC callable invoked on the event loop and cannot block there.
-    Consequently the head-comparison stale check is a no-op on this path; staleness
-    is instead guarded by the ``status="idle"`` enumeration filter + the commit's
-    ``ConflictError`` defer-and-retry. (A fully-async ``read_current_head`` is a
-    possible later hardening if the completed-turn-during-shadow window matters.)
+    ``read_current_head`` re-fetches the thread's head (``get_state`` →
+    ``checkpoint_id``) each time it is called, so the pre-commit stale check sees a
+    user turn or another tick's push that landed while the shadow was running and
+    discards the now-stale reply instead of appending after it.
     """
 
-    async def _read(thread_id: str) -> SourceRead:
+    async def _fetch_state(thread_id: str) -> Any:
         result = client.threads.get_state(thread_id)
-        state = await result if isinstance(result, Awaitable) else result
-        head = _state_checkpoint_id(state)
+        return await result if isinstance(result, Awaitable) else result
+
+    async def _read(thread_id: str) -> SourceRead:
+        state = await _fetch_state(thread_id)
+
+        async def _current_head() -> str | None:
+            return _state_checkpoint_id(await _fetch_state(thread_id))
+
         return SourceRead(
             messages=_state_messages(state),
-            pre_head=head,
+            pre_head=_state_checkpoint_id(state),
             has_origin=True,
             in_flight=False,
-            read_current_head=lambda: head,
+            read_current_head=_current_head,
         )
 
     return _read

@@ -258,7 +258,12 @@ def _patch_cron_client(monkeypatch, existing):
 
     fake = MagicMock()
     fake.crons.search.return_value = existing
-    fake.crons.create.return_value = {"cron_id": "p-new", "schedule": "*/10 * * * *"}
+    fake.crons.create_for_thread.return_value = {
+        "cron_id": "p-new",
+        "schedule": "*/10 * * * *",
+    }
+    fake.threads.search.return_value = []
+    fake.threads.create.return_value = {"thread_id": "pt-1"}
     monkeypatch.setattr(cron, "_client", lambda: fake)
     monkeypatch.setattr(cron, "_default_timezone", lambda: "UTC")
     return fake
@@ -269,8 +274,8 @@ def test_ensure_proactive_cron_creates_when_absent(monkeypatch):
 
     fake = _patch_cron_client(monkeypatch, existing=[])
     _serve_ensure_proactive_cron(_proactive_cfg())
-    fake.crons.create.assert_called_once()
-    assert fake.crons.create.call_args.kwargs["assistant_id"] == "proactive"
+    fake.crons.create_for_thread.assert_called_once()
+    assert fake.crons.create_for_thread.call_args.args == ("pt-1", "proactive")
 
 
 def test_ensure_proactive_cron_reuses_existing(monkeypatch):
@@ -278,7 +283,7 @@ def test_ensure_proactive_cron_reuses_existing(monkeypatch):
 
     fake = _patch_cron_client(monkeypatch, existing=[{"cron_id": "p-1"}])
     _serve_ensure_proactive_cron(_proactive_cfg())
-    fake.crons.create.assert_not_called()
+    fake.crons.create_for_thread.assert_not_called()
 
 
 def test_ensure_proactive_cron_noop_when_disabled_or_local(monkeypatch):
@@ -288,7 +293,7 @@ def test_ensure_proactive_cron_noop_when_disabled_or_local(monkeypatch):
     _serve_ensure_proactive_cron(_proactive_cfg(proactive_enabled=False))
     _serve_ensure_proactive_cron(_proactive_cfg(gateway_backend="local"))
     fake.crons.search.assert_not_called()
-    fake.crons.create.assert_not_called()
+    fake.crons.create_for_thread.assert_not_called()
 
 
 def test_ensure_proactive_cron_failure_is_logged_not_raised(monkeypatch, caplog):

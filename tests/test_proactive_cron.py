@@ -10,7 +10,12 @@ def _patch_client(monkeypatch):
     from EvoScientist.proactive import cron
 
     fake = MagicMock()
-    fake.crons.create.return_value = {"cron_id": "p-1", "schedule": "*/10 * * * *"}
+    fake.crons.create_for_thread.return_value = {
+        "cron_id": "p-1",
+        "schedule": "*/10 * * * *",
+    }
+    fake.threads.search.return_value = []
+    fake.threads.create.return_value = {"thread_id": "pt-1"}
     fake.crons.search.return_value = [
         {
             "cron_id": "p-1",
@@ -23,22 +28,32 @@ def _patch_client(monkeypatch):
     return cron, fake
 
 
-def test_create_targets_proactive_graph_with_empty_input(monkeypatch):
+def test_create_pins_cron_to_the_tick_thread_and_rejects_overlap(monkeypatch):
     cron, fake = _patch_client(monkeypatch)
     rec = cron.create_proactive_schedule()
     assert rec["cron_id"] == "p-1"
-    kw = fake.crons.create.call_args.kwargs
-    assert kw["assistant_id"] == cron.PROACTIVE_GRAPH_ID
+    args, kw = fake.crons.create_for_thread.call_args
+    assert args == ("pt-1", cron.PROACTIVE_GRAPH_ID)
     assert kw["schedule"] == cron.DEFAULT_PROACTIVE_SCHEDULE
     assert kw["input"] == {}  # non-null (EmptyInputError); graph enumerates itself
     assert kw["metadata"] == {"run_kind": cron.PROACTIVE_RUN_KIND}
+    assert kw["multitask_strategy"] == "reject"  # overlapping ticks are serialized
     assert kw["timezone"] == "Europe/London"
+    fake.threads.create.assert_called_once_with(metadata=cron.PROACTIVE_THREAD_METADATA)
+
+
+def test_create_reuses_an_existing_tick_thread(monkeypatch):
+    cron, fake = _patch_client(monkeypatch)
+    fake.threads.search.return_value = [{"thread_id": "pt-existing"}]
+    cron.create_proactive_schedule()
+    fake.threads.create.assert_not_called()
+    assert fake.crons.create_for_thread.call_args.args[0] == "pt-existing"
 
 
 def test_create_accepts_custom_schedule_and_timezone(monkeypatch):
     cron, fake = _patch_client(monkeypatch)
     cron.create_proactive_schedule(schedule="*/5 * * * *", timezone="UTC")
-    kw = fake.crons.create.call_args.kwargs
+    kw = fake.crons.create_for_thread.call_args.kwargs
     assert kw["schedule"] == "*/5 * * * *"
     assert kw["timezone"] == "UTC"
 

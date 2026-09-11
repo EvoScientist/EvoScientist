@@ -11,6 +11,7 @@ node, then clear the pending ``next`` with ``as_node=END``.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -205,7 +206,7 @@ async def commit_with_conflict_retry(
     commit_fn: Callable[
         [AIMessage, dict[str, Any] | None, str | None], Awaitable[None]
     ],
-    read_current_head: Callable[[], str | None],
+    read_current_head: Callable[[], str | Awaitable[str | None] | None],
     pre_head: str | None,
     max_retries: int = 3,
     backoff: Callable[[int], Awaitable[None]] | None = None,
@@ -217,9 +218,10 @@ async def commit_with_conflict_retry(
     langgraph_sdk) raises :class:`ConflictError` (409) when a user run is in flight;
     a ``commit_fn`` that never conflicts simply takes the clean path.
 
-    On every attempt the source head is re-read first: if it moved past ``pre_head``
-    a user turn has landed, so the shadow reply is stale → discard (never overwrite a
-    fresh user turn with an older draft). On :class:`ConflictError` a user run is
+    On every attempt the source head is re-read first (``read_current_head`` may
+    return an awaitable, e.g. a server ``get_state`` fetch): if it moved past
+    ``pre_head`` a user turn (or another proactive tick) has landed, so the shadow
+    reply is stale → discard (never overwrite a fresh turn with an older draft). On :class:`ConflictError` a user run is
     still executing: defer (``backoff``) and retry — the next iteration's head check
     discards the push once that run commits. Runs out of retries → drop.
 
@@ -234,7 +236,7 @@ async def commit_with_conflict_retry(
     assert decision.message is not None  # would_commit always carries a message
 
     for attempt in range(max_retries + 1):
-        if read_current_head() != pre_head:
+        if await resolve_head(read_current_head) != pre_head:
             logger.info(
                 "[proactive commit] skip: thread %s changed before commit "
                 "(head moved from %s) — discarding stale push",
@@ -269,6 +271,16 @@ async def commit_with_conflict_retry(
         max_retries + 1,
     )
     return CommitOutcome("conflict_exhausted", "retries_exhausted", max_retries + 1)
+
+
+async def resolve_head(
+    read_current_head: Callable[[], str | Awaitable[str | None] | None],
+) -> str | None:
+    """Call ``read_current_head`` and await it if it returned an awaitable."""
+    head = read_current_head()
+    if inspect.isawaitable(head):
+        head = await head
+    return head
 
 
 class _StateGateway(Protocol):
