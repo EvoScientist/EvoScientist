@@ -214,6 +214,14 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
+    # Which graph gateway serve executes through. "local" = in-process
+    # LocalGraphGateway (default, byte-identical to today); "langgraph_server" =
+    # route runs through the langgraph-dev server via the SDK, making serve's
+    # threads server-born so the proactive cron can enumerate + commit into them
+    # and serve can read them back for channel delivery. Required for
+    # proactive_enabled to take effect.
+    gateway_backend: str = "local"
+
     # Network interface the langgraph dev subprocess binds to. Loopback by
     # default — this is the unauthenticated agent API (the agent can run
     # shell), so "0.0.0.0" is opt-in and every launcher prints a PUBLIC BIND
@@ -873,6 +881,7 @@ _ENV_MAPPINGS = {
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "gateway_backend": "EVOSCIENTIST_GATEWAY_BACKEND",
     "langgraph_dev_host": "EVOSCIENTIST_LANGGRAPH_DEV_HOST",
     "webui_port": "EVOSCIENTIST_WEBUI_PORT",
     "webui_host": "EVOSCIENTIST_WEBUI_HOST",
