@@ -98,6 +98,19 @@ Required memory preflight:
   no relevant observation was found. Keep this preflight short.
 """
 
+# Read-only profile guidance for model calls that carry no tools: the profile
+# context still shapes the reply, but there is nothing to edit it with.
+PROFILE_MEMORY_INSTRUCTIONS_NO_TOOLS = """
+These profile notes live under `/memories/profile/`:
+- `/memories/profile/SOUL.md`: how this copy should usually behave; voice and boundaries.
+- `/memories/profile/USER_PROFILE.md`: facts and preferences about the user.
+- `/memories/profile/RESEARCH_TASTE.md`: research interests, standards, methods that fit, and things to avoid.
+- `/memories/profile/projects/{project_id}/PROJECT_PROFILE.md`: conventions, commands, and pitfalls for this workspace.
+
+No file tools are available on this turn. Use the profile context below to shape
+the reply; profile files are not updated on this turn.
+"""
+
 # Variant for model calls that carry no tools (e.g. a proactive shadow turn):
 # the preflight above would tell the model to call tools it does not have, which
 # it then acts out as text instead of answering.
@@ -532,7 +545,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
                     on_observation_recorded=self._record_observation_created,
                 )
             )
-        self._observation_index_context = ""
+        # Error-fallback cache, keyed by the search-hints variant so a tool-less
+        # request never receives the tool-usage footer on a refresh failure.
+        self._observation_index_contexts: dict[bool, str] = {}
         if not enable_observation_memory:
             return
 
@@ -798,11 +813,11 @@ class EvoMemoryMiddleware(AgentMiddleware):
             )
         except OSError as e:
             logger.warning("Failed to refresh observation memory index: %s", e)
-            return self._observation_index_context
+            return self._observation_index_contexts.get(include_search_hints, "")
         except Exception as e:
             logger.debug("Failed to refresh observation memory index: %s", e)
-            return self._observation_index_context
-        self._observation_index_context = context
+            return self._observation_index_contexts.get(include_search_hints, "")
+        self._observation_index_contexts[include_search_hints] = context
         return context
 
     def _observation_memory_instructions(self, *, tools_available: bool = True) -> str:
@@ -825,8 +840,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
         """Return static memory instructions for enabled memory features."""
         instructions = []
         if self._enable_profile_memory:
+            profile_instructions = (
+                PROFILE_MEMORY_INSTRUCTIONS
+                if tools_available
+                else PROFILE_MEMORY_INSTRUCTIONS_NO_TOOLS
+            )
             instructions.append(
-                PROFILE_MEMORY_INSTRUCTIONS.format(project_id=self._project_id)
+                profile_instructions.format(project_id=self._project_id)
             )
         if observation_instructions := self._observation_memory_instructions(
             tools_available=tools_available

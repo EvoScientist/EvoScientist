@@ -304,3 +304,24 @@ def test_ensure_proactive_cron_failure_is_logged_not_raised(monkeypatch, caplog)
     with caplog.at_level("WARNING", logger="EvoScientist.cli.commands"):
         _serve_ensure_proactive_cron(_proactive_cfg())
     assert any("registration failed" in r.message for r in caplog.records)
+
+
+def test_ensure_proactive_cron_reenables_a_disabled_one(monkeypatch):
+    from EvoScientist.cli.commands import _serve_ensure_proactive_cron
+
+    fake = _patch_cron_client(
+        monkeypatch, existing=[{"cron_id": "p-1", "enabled": False}]
+    )
+    _serve_ensure_proactive_cron(_proactive_cfg())
+    fake.crons.update.assert_called_once_with("p-1", enabled=True)
+    fake.crons.create_for_thread.assert_not_called()
+
+
+def test_ensure_proactive_cron_leaves_an_enabled_one_alone(monkeypatch):
+    from EvoScientist.cli.commands import _serve_ensure_proactive_cron
+
+    fake = _patch_cron_client(
+        monkeypatch, existing=[{"cron_id": "p-1", "enabled": True}]
+    )
+    _serve_ensure_proactive_cron(_proactive_cfg())
+    fake.crons.update.assert_not_called()

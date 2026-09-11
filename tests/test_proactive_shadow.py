@@ -60,6 +60,7 @@ def test_shadow_cfg_flips_side_effect_flags_and_keeps_reasoning():
     assert shadow.enable_scheduler is False
     assert shadow.memory_workers_enabled is False
     assert shadow.enable_ask_user is False
+    assert shadow.auto_mode is True
     assert shadow.auto_approve is True
     assert shadow.model_fallbacks == ""
     # reasoning axis intact
@@ -89,6 +90,10 @@ def test_shadow_cfg_gates_out_the_writer_middleware():
     controls = MemoryControls.from_config(shadow)
     assert controls.worker_needed(MemoryObservationTarget.TURN_WORKER) is False
     assert controls.worker_needed(MemoryObservationTarget.SUBAGENT_WORKER) is False
+    # first-contact profile bootstrap gate (EvoScientist.py
+    # `enable_profile_bootstrap=not for_async_subagent and not bool(cfg.auto_mode)`):
+    # a shadow turn must never ask the consent survey or write intro bookkeeping.
+    assert (not False and not bool(shadow.auto_mode)) is False
 
 
 # ---- tool-strip spy ---------------------------------------------------------

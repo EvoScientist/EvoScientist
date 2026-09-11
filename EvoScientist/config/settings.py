@@ -547,6 +547,13 @@ class EvoScientistConfig:
             )
             self.memory_observation_cache_max_files = 2048
 
+        idle = self.proactive_idle_minutes
+        if not isinstance(idle, int) or isinstance(idle, bool) or idle < 0:
+            logging.getLogger(__name__).warning(
+                "Invalid proactive_idle_minutes %r; falling back to 120.", idle
+            )
+            self.proactive_idle_minutes = 120
+
         # auto_mode and dangerous_mode both imply auto_approve regardless of
         # source (CLI, env, config file, direct construction) — done here so the
         # "unattended → zero prompts" contract holds even when either is set via

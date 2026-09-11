@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 from langgraph_sdk.errors import ConflictError
 
 from EvoScientist.proactive.commit import NO_PUSH_SENTINEL
@@ -173,17 +174,32 @@ class _ConflictDeliverer:
         return True
 
 
-def test_conflict_then_succeeds_delivers():
+@pytest.fixture
+def no_conflict_backoff(monkeypatch):
+    """Keep the conflict tests fast; the real backoff sleeps 1s/2s/4s."""
+    import EvoScientist.proactive.service as service_mod
+
+    async def _instant(attempt):
+        _instant.calls.append(attempt)
+
+    _instant.calls = []
+    monkeypatch.setattr(service_mod, "_conflict_backoff", _instant)
+    return _instant
+
+
+def test_conflict_then_succeeds_delivers(no_conflict_backoff):
     d = _ConflictDeliverer(fail=1)
     result, _, _ = _run(_deliverer=d)
+    assert no_conflict_backoff.calls == [0]  # one deferred retry
     assert result.stage == "delivered"
     assert result.delivered is True
     assert d.calls == 2
 
 
-def test_conflict_exhausted_recorded():
+def test_conflict_exhausted_recorded(no_conflict_backoff):
     d = _ConflictDeliverer(fail=99)
     result, _, _ = _run(_deliverer=d)
+    assert no_conflict_backoff.calls == [0, 1, 2, 3]
     assert result.stage == "conflict_exhausted"
     assert result.reason == "retries_exhausted"
     assert d.calls == 4  # max_retries + 1
@@ -445,3 +461,17 @@ def test_read_source_missing_values_yields_empty_messages():
     src = asyncio.run(make_read_source(_FakeStateClient({"checkpoint_id": "c"}))("t1"))
     assert src.messages == []
     assert src.pre_head == "c"
+
+
+def test_conflict_backoff_grows_and_caps(monkeypatch):
+    import EvoScientist.proactive.service as service_mod
+
+    slept = []
+
+    async def _fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(service_mod.asyncio, "sleep", _fake_sleep)
+    for attempt in range(5):
+        asyncio.run(service_mod._conflict_backoff(attempt))
+    assert slept == [1, 2, 4, 8, 8]

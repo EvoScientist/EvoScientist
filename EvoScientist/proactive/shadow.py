@@ -99,13 +99,16 @@ def _install_tool_strip_spy(model: Any) -> Any:
 
 # The side-effect axis: every flag here gates a writer identified by the
 # middleware audit. The reasoning axis (prompt, memory injection, model, context) is left
-# untouched. ``auto_approve=True`` is belt-and-braces (ask_user is already off);
-# note ``__post_init__`` also forces it true under auto/dangerous mode, which is
-# harmless because we want it true here anyway.
+# untouched. ``auto_mode=True`` declares "no human in the loop": it disables the
+# first-contact profile bootstrap (which would ask a consent question AND write
+# session/intro bookkeeping into the real profile file from every shadow turn)
+# and ask_user. ``auto_approve=True`` is belt-and-braces (``__post_init__`` forces
+# it under auto mode anyway).
 _SHADOW_FLAGS: dict[str, Any] = {
     "enable_scheduler": False,
     "memory_workers_enabled": False,
     "enable_ask_user": False,
+    "auto_mode": True,
     "auto_approve": True,
     "model_fallbacks": "",
 }

@@ -371,7 +371,7 @@ def test_construction_defers_observation_index_read_to_first_request(
 
     # Construction must not read the observation store ...
     assert calls == []
-    assert middleware._observation_index_context == ""
+    assert middleware._observation_index_contexts == {}
     # ... but must still create the cross-project search dir it prompts agents
     # to look in.
     assert (memories / "observations" / "global").is_dir()
@@ -1458,6 +1458,39 @@ def test_tool_less_request_gets_no_memory_tool_directives(tmp_path, monkeypatch)
     assert "No memory tools are available on this turn" in without
     # the observation memory location + index still reach the tool-less turn
     assert "/memories/observations/" in without
+    # profile guidance is read-only on a tool-less call (no "edit the file" directives)
+    assert "Read the relevant file before editing it" in with_tools
+    assert "Read the relevant file before editing it" not in without
+    assert "edit the relevant" not in without
+    assert "/memories/profile/USER_PROFILE.md" in without
+
+
+def test_index_fallback_cache_is_per_variant(tmp_path, monkeypatch):
+    """A refresh failure must not hand a tool-less request the cached
+    search-hints footer from an earlier request that had tools."""
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    middleware = memory_module.create_memory_middleware(str(memories))
+
+    with_hints = middleware._refresh_observation_index_context(
+        include_search_hints=True
+    )
+    assert "Search hints:" in with_hints
+
+    def _boom(**_kw):
+        raise OSError("store unreadable")
+
+    monkeypatch.setattr(memory_module, "build_observation_index_context", _boom)
+    fallback_no_hints = middleware._refresh_observation_index_context(
+        include_search_hints=False
+    )
+    fallback_hints = middleware._refresh_observation_index_context(
+        include_search_hints=True
+    )
+    assert "Search hints:" not in fallback_no_hints
+    assert fallback_hints == with_hints
 
 
 def test_request_without_tools_attribute_keeps_directives(tmp_path, monkeypatch):

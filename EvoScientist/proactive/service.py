@@ -13,6 +13,7 @@ Delivery is abstracted behind the ``Deliverer`` protocol; in production the
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections import deque
@@ -48,6 +49,15 @@ PROACTIVE_TRIGGER = (
 
 # In-memory log of recent check outcomes (observability; bounded).
 _LEDGER: deque[ProactiveCheckResult] = deque(maxlen=200)
+
+
+async def _conflict_backoff(attempt: int) -> None:
+    """Wait before re-trying a commit that hit a 409: 1s, 2s, 4s, capped at 8s.
+
+    A user run in flight on the source thread needs real time to finish; without
+    a delay the retries collapse into consecutive HTTP round trips.
+    """
+    await asyncio.sleep(min(2**attempt, 8))
 
 
 class _DeliveryFailed(Exception):
@@ -173,6 +183,7 @@ async def run_proactive_check(
             commit_fn=_commit,
             read_current_head=read_current_head,
             pre_head=pre_head,
+            backoff=_conflict_backoff,
         )
     except _DeliveryFailed:
         return finish("delivery_failed", "deliver_returned_false", reply=reply)

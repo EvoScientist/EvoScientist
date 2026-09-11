@@ -1396,6 +1396,12 @@ def _serve_ensure_proactive_cron(config: "EvoScientistConfig | None") -> None:
     try:
         existing = proactive_cron.list_proactive_schedules()
         if existing:
+            # A persisted cron may have been disabled (set_proactive_enabled);
+            # config says enabled, so reconcile rather than leave it inert.
+            for cron in existing:
+                if isinstance(cron, dict) and cron.get("enabled") is False:
+                    proactive_cron.set_proactive_enabled(cron["cron_id"], True)
+                    _serve_logger.info("Re-enabled proactive cron %s", cron["cron_id"])
             _serve_logger.info(
                 "Proactive cron already registered (%d); not creating another",
                 len(existing),

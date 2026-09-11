@@ -294,3 +294,15 @@ def test_build_deps_memoizes_until_config_changes(monkeypatch):
     )
     assert graph._build_deps().settings.idle_minutes == 5
     assert len(builds) == 3
+
+
+def test_invalid_idle_minutes_fall_back_to_default(caplog):
+    with caplog.at_level("WARNING", logger="EvoScientist.config.settings"):
+        assert _cfg(proactive_idle_minutes=-5).proactive_idle_minutes == 120
+        assert _cfg(proactive_idle_minutes="abc").proactive_idle_minutes == 120
+        assert _cfg(proactive_idle_minutes=True).proactive_idle_minutes == 120
+    assert (
+        len([r for r in caplog.records if "proactive_idle_minutes" in r.message]) == 3
+    )
+    # zero is valid: no idle requirement (the live-test knob)
+    assert _cfg(proactive_idle_minutes=0).proactive_idle_minutes == 0
