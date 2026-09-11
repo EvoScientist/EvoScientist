@@ -38,6 +38,7 @@ from .types import (
     RunRequest,
     ThreadResolution,
     ThreadStore,
+    resolve_per_run_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -564,16 +565,49 @@ class LangGraphServerGateway:
             metadata=metadata,
         )
 
+    def _resolve_run_config(
+        self,
+        thread_id: str,
+        configurable_extra: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Assemble this run's config, reading the live session config here.
+
+        ``_ensure_config`` returns the cached, in-place-mutated session
+        config — NOT a fresh disk read — so mid-session ``/model`` edits that
+        have not been ``--save``d still reach the server per run. The
+        ``configurable.model`` / ``model_provider`` overrides are picked up
+        server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
+        overrides the server's construction-time ``.with_config`` binding.
+        """
+        from ..EvoScientist import _ensure_config
+
+        cfg = _ensure_config()
+        overrides: dict[str, Any] = {}
+        model = getattr(cfg, "model", None)
+        provider = getattr(cfg, "provider", None)
+        if model:
+            overrides["model"] = model
+        if provider:
+            overrides["model_provider"] = provider
+        limit = getattr(cfg, "recursion_limit", None)
+        recursion_limit = (
+            limit
+            if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
+            else None
+        )
+        return resolve_per_run_config(
+            thread_id,
+            configurable_extra,
+            per_run_overrides=overrides,
+            recursion_limit=recursion_limit,
+        )
+
     async def _start_or_resume(
         self,
         stream: AsyncThreadStream,
         request: RunRequest,
     ) -> None:
-        configurable: dict[str, Any] = {
-            **(request.configurable_extra or {}),
-            "thread_id": request.thread_id,
-        }
-        config: dict[str, Any] = {"configurable": configurable}
+        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
@@ -597,6 +631,14 @@ class LangGraphServerGateway:
         )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
+                # Known divergence: the resume goes through run.respond,
+                # which takes no config, so the per-run overrides above
+                # (model / recursion_limit) are NOT applied to a resumed
+                # turn - it runs with the thread's construction-time
+                # binding until the next fresh run re-applies them. The
+                # primitive that would carry config on a resume is
+                # run.start with Command(resume=...); switching to it needs
+                # live-server verification first.
                 await self._respond_to_interrupt(
                     stream, request.thread_id, request.message.resume
                 )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
@@ -17,6 +17,44 @@ GraphEvent: TypeAlias = dict[str, Any]
 GraphRunInput: TypeAlias = "str | Command"
 GraphStateValues: TypeAlias = dict[str, Any]
 DEFAULT_GRAPH_ID = "EvoScientist"
+
+
+def resolve_per_run_config(
+    thread_id: str,
+    configurable_extra: Mapping[str, Any] | None,
+    *,
+    per_run_overrides: Mapping[str, Any] | None = None,
+    recursion_limit: int | None = None,
+) -> dict[str, Any]:
+    """Assemble the per-run LangGraph config for a gateway stream call.
+
+    Pure assembly - this module reads no config. The server gateway extracts
+    the per-run overrides (``configurable.model`` /
+    ``configurable.model_provider`` from the live session config,
+    ``recursion_limit`` as a first-class ``RunnableConfig`` key) and passes
+    them in; a per-call ``recursion_limit`` overrides the server's
+    construction-time ``.with_config`` binding, so a keepalive server picks
+    up the client's live limit per run instead of at restart. The local
+    backend passes neither: its agent is rebuilt on model switches and
+    already binds ``recursion_limit`` at construction from the same live
+    config, so per-run injection there is redundant.
+
+    Merges, in precedence order (lowest to highest):
+
+    1. ``per_run_overrides`` (server backend session defaults),
+    2. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
+       explicit per-run injection is more specific than the session default,
+    3. ``thread_id`` - structural key, always set last.
+    """
+    configurable: dict[str, Any] = dict(per_run_overrides or {})
+    if configurable_extra:
+        configurable.update(configurable_extra)
+    configurable["thread_id"] = thread_id
+
+    run_config: dict[str, Any] = {"configurable": configurable}
+    if recursion_limit is not None:
+        run_config["recursion_limit"] = recursion_limit
+    return run_config
 
 
 @dataclass(frozen=True, slots=True)

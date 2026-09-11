@@ -474,13 +474,16 @@ def test_for_async_subagent_omits_ask_user_middleware(
     assert "AskUserMiddleware" in default_names
 
     # With for_async_subagent=True, ask_user is suppressed.
-    async_names = [
-        type(m).__name__ for m in _get_default_middleware(for_async_subagent=True)
-    ]
+    async_mw = _get_default_middleware(for_async_subagent=True)
+    async_names = [type(m).__name__ for m in async_mw]
     assert "AskUserMiddleware" not in async_names
     # Other middleware must remain — only ask_user is filtered.
     assert "ConfigurableModelMiddleware" in async_names
-    assert "ContextEditingMiddleware" in async_names
+    # By isinstance, not name: the list carries the per-run trigger subclass
+    # of ContextEditingMiddleware.
+    from langchain.agents.middleware import ContextEditingMiddleware
+
+    assert any(isinstance(m, ContextEditingMiddleware) for m in async_mw)
     assert "ModelFallbackMiddleware" in async_names
 
 
