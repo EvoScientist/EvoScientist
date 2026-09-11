@@ -942,9 +942,9 @@ def _get_default_middleware(
         create_scheduler_middleware,
         create_tool_selector_middleware,
         default_memory_scheduler,
-        load_fallback_chain,
     )
     from .middleware.events import NO_OP_SINK, RunScopedEventSink
+    from .middleware.model_fallback import seed_fallback_chain
 
     # Subagent stacks never drive the main-agent frontend widgets; force the
     # no-op sink there regardless of what the caller passed. Main stacks built
@@ -953,8 +953,13 @@ def _get_default_middleware(
     events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
 
     cfg = cfg if cfg is not None else _ensure_config()
-    if cfg.model_fallbacks:
-        load_fallback_chain(cfg.model_fallbacks)
+    # Seed the fallback chain from the factory-resolved config: every graph
+    # (main, sync/async subagent) is built through this factory, so this is
+    # the single seeding site that covers every load path. First-touch only
+    # (idempotent per process) and pure in-memory — the resolved ``cfg``
+    # performs no disk read here, so later calls cannot clobber session edits
+    # made via /model-fallback (see model_fallback._ensure_chain_initialized).
+    seed_fallback_chain(cfg)
     model = chat_model if chat_model is not None else _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     source_type = (
@@ -1222,6 +1227,12 @@ def create_cli_agent(
     else:
         cfg = _ensure_config(config)
         chat_model = None
+
+    # The fallback chain is seeded by _get_default_middleware below (the
+    # factory every graph is built through), which receives this same
+    # resolved ``cfg`` — first-touch seeding, so a caller-supplied config's
+    # model_fallbacks still wins over the on-disk chain, and no separate
+    # seeding is needed here.
 
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver

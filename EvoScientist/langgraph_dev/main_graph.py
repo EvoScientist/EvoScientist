@@ -23,6 +23,11 @@ from langgraph.types import PregelTask, StateSnapshot
 
 from EvoScientist.EvoScientist import EvoScientist_agent as _agent
 
+# The model fallback chain is seeded in _get_default_middleware (the
+# factory every graph — main, sync/async subagent — is built through), so
+# no registration-time seeding is needed here: importing the agent builds
+# its middleware and seeds the chain in the same sync import context.
+
 _PRIVATE_STATE_FIELDS = frozenset({"_quickjs_snapshot_payload"})
 
 # Sanity check on the LangGraph internals ``_strip_private`` scrubs. If any
