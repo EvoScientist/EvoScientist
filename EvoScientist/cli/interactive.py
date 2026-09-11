@@ -1130,6 +1130,19 @@ def cmd_interactive(
                             gateway=runtime_gateways.graph_gateway,
                             runtime=async_runtime,
                         )
+                        # Channel turns run on the same thread as local prompts
+                        # and can launch async tasks; without this read their
+                        # completions surface only on the next local prompt.
+                        # Same call + args as the local-path post-stream read;
+                        # best-effort, never blocks the reply.
+                        await async_notifier.enqueue_completions_from_state(
+                            runtime_gateways.graph_gateway,
+                            GraphTarget(
+                                local_graph=ready_agent,
+                                workspace_dir=state["workspace_dir"],
+                            ),
+                            state["thread_id"],
+                        )
                     except Exception as e:
                         response = f"Error: {e}"
                         console.print(f"[red]Channel error: {e}[/red]")
@@ -1508,6 +1521,19 @@ def cmd_interactive(
                                     runtime=async_runtime,
                                 )
                             ),
+                        )
+                        # On stream close, read async_tasks off thread state and
+                        # enqueue any completions not yet surfaced (state-based
+                        # path, additive to the in-process watcher; the poller
+                        # above drains + injects). Best-effort — never blocks the
+                        # prompt on a status-read failure.
+                        await async_notifier.enqueue_completions_from_state(
+                            runtime_gateways.graph_gateway,
+                            GraphTarget(
+                                local_graph=ready_agent,
+                                workspace_dir=state["workspace_dir"],
+                            ),
+                            state["thread_id"],
                         )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
