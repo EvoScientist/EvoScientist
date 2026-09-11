@@ -1426,3 +1426,47 @@ def test_sync_subagent_site_does_not_pass_profile_bootstrap(tmp_path, monkeypatc
         m for m in sub["middleware"] if isinstance(m, memory_module.EvoMemoryMiddleware)
     )
     assert instance._enable_profile_bootstrap is False
+
+
+# ---- tool-less requests get no memory tool directives ------------------------
+
+
+def _request_with_tools(tools):
+    request = _request()
+    request.tools = tools
+    return request
+
+
+def test_tool_less_request_gets_no_memory_tool_directives(tmp_path, monkeypatch):
+    """A request with an empty tool list (a proactive shadow turn) must not be
+    told to run the memory preflight or record observations: with no tools the
+    model acts those directives out as text instead of answering."""
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    middleware = memory_module.create_memory_middleware(str(memories))
+
+    with_tools = _system(middleware.modify_request(_request_with_tools([object()])))
+    without = _system(middleware.modify_request(_request_with_tools([])))
+
+    assert "Required memory preflight" in with_tools
+    assert "search_observations" in with_tools
+    assert "Required memory preflight" not in without
+    assert "search_observations" not in without
+    assert "record_observation" not in without
+    assert "No memory tools are available on this turn" in without
+    # the observation memory location + index still reach the tool-less turn
+    assert "/memories/observations/" in without
+
+
+def test_request_without_tools_attribute_keeps_directives(tmp_path, monkeypatch):
+    """Only an explicit empty tool list selects the tool-less variant."""
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    middleware = memory_module.create_memory_middleware(str(memories))
+
+    system = _system(middleware.modify_request(_request()))
+    assert "Required memory preflight" in system
