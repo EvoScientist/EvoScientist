@@ -61,12 +61,12 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
     earlier "conditional snapshot" gate that skipped ``after_agent`` on turns
     where ``code_interpreter`` wasn't called saved ~50 ms/turn of
     ``create_snapshot()`` work, but also skipped the slot eviction upstream
-    performs in the same hook (``finally: self._registry.evict(thread_id)``
+    performs in the same hook (``finally: self._registry.evict(slot_id)``
     in ``langchain_quickjs.middleware.CodeInterpreterMiddleware.after_agent``).
     ``before_agent`` restores the REPL on every turn that follows a touched
-    one via ``self._registry.get(thread_id)`` (get-or-create), so skipping
+    one via ``self._registry.get(slot_id)`` (get-or-create), so skipping
     eviction leaked one ``ThreadWorker`` + QuickJS Runtime per persistent
-    ``thread_id`` that ever went touched → quiet. The regression test
+    slot that ever went touched → quiet. The regression test
     ``test_after_agent_evicts_slot_on_untouched_turn`` guards against
     reintroducing the gate.
     """
@@ -78,11 +78,11 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         """Evict active REPLs on their worker loops before event-loop shutdown."""
         registry = self._registry
         with registry._lock:
-            thread_ids = tuple(registry._slots)
-        for thread_id in thread_ids:
+            slot_ids = tuple(registry._slots)
+        for slot_id in slot_ids:
             with contextlib.suppress(Exception):
-                await registry.aevict(thread_id)
-        self._ptc_tools_by_thread.clear()
+                await registry.aevict(slot_id)
+        self._ptc_tools_by_slot.clear()
 
 
 _live_interpreters = weakref.WeakSet()
