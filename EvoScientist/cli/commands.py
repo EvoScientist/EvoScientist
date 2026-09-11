@@ -1203,10 +1203,6 @@ def _serve_process_message(
         return
 
     remember_channel_origin(runtime_state.thread_id, msg)
-    # Companion to the in-process origin: stamp the server-side channel marker so the
-    # proactive cron's eligibility search can discover this thread. No-op unless serve
-    # runs on the server backend. Single chokepoint — every inbound message passes here.
-    _serve_stamp_channel_marker(runtime_state)
 
     runtime_workspace = runtime_state.workspace_dir or workspace_dir
 
@@ -1324,7 +1320,7 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(runtime_workspace, model)
+        meta = _serve_turn_metadata(runtime_state, runtime_workspace, model)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1415,26 +1411,24 @@ def _serve_ensure_proactive_cron(config: "EvoScientistConfig | None") -> None:
         _serve_logger.warning("Proactive cron registration failed: %s", exc)
 
 
-def _serve_stamp_channel_marker(runtime_state: ServeRuntimeState) -> None:
-    """Stamp the channel-origin marker on the active thread (server backend only).
+def _serve_turn_metadata(
+    runtime_state: ServeRuntimeState, workspace_dir: str | None, model: str | None
+) -> dict[str, Any]:
+    """Run metadata for a channel turn.
 
-    Skipped when proactive pushes are disabled, so a serve session with the
-    feature off never marks threads as cron candidates.
+    The usual ``build_metadata`` payload, plus the channel-origin marker when
+    proactive pushes are enabled on the server backend. Sent as the run's
+    metadata, the marker reaches both the server thread registry (so the
+    proactive cron can enumerate the thread now) and the checkpoint rows (so
+    the registry restore carries it across a langgraph-dev restart). Companion
+    to ``remember_channel_origin``, which only records the origin in-process.
     """
-    if not _serve_proactive_enabled(runtime_state.config):
-        return
-    client = _serve_server_client(runtime_state)
-    thread_id = runtime_state.thread_id
-    if client is None or not thread_id:
-        return
-    from ..proactive.eligibility import stamp_channel_marker
+    meta = build_metadata(workspace_dir, model)
+    if _serve_proactive_enabled(runtime_state.config):
+        from ..proactive.eligibility import CHANNEL_ORIGIN_MARKER
 
-    try:
-        runtime_state.async_runtime.run_sync(
-            lambda: stamp_channel_marker(client, thread_id)
-        )
-    except Exception as exc:
-        _serve_logger.warning("Proactive channel-marker stamp failed: %s", exc)
+        meta = {**meta, **CHANNEL_ORIGIN_MARKER}
+    return meta
 
 
 def _serve_deliver_proactive_pushes(

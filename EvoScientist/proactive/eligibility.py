@@ -8,10 +8,13 @@ has no channel origin). So the cron only ever sees server-born channel threads.
 
 Serve-side companion: ``remember_channel_origin`` records the origin only in the
 in-process ``_thread_channel_origins`` dict, invisible to the server/cron
-process. Serve therefore also stamps ``CHANNEL_ORIGIN_MARKER`` into the thread's
-server metadata (``stamp_channel_marker``) when it registers an origin. Without
-the stamp the search returns nothing — fail-closed, which is the safe direction
-(no thread gets a proactive push rather than the wrong one).
+process. Serve therefore also sends ``CHANNEL_ORIGIN_MARKER`` as the run
+metadata of every channel turn: the server gateway merges run metadata into the
+thread's registry metadata (live visibility) and the checkpointer persists it
+on the checkpoint rows, from which ``sessions.py`` restores the registry after a
+langgraph-dev restart (restart survival). Without the marker the search returns
+nothing — fail-closed, which is the safe direction (no thread gets a proactive
+push rather than the wrong one).
 
 This function returns coarse *candidates* with their last-activity time; the
 authoritative per-thread decision (quiet hours, precise idle, in-flight, origin
@@ -27,12 +30,13 @@ from collections.abc import Awaitable
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from ..sessions import CHANNEL_ORIGIN_METADATA_KEY
+
 logger = logging.getLogger(__name__)
 
-# Server-metadata marker serve stamps on a thread when it registers a channel
-# origin (companion change). Threads.search matches metadata by containment, so a
-# value-equality marker is the queryable shape.
-CHANNEL_ORIGIN_MARKER: dict[str, Any] = {"has_channel_origin": True}
+# Metadata marker serve sends with every channel turn. Threads.search matches
+# metadata by containment, so a value-equality marker is the queryable shape.
+CHANNEL_ORIGIN_MARKER: dict[str, Any] = {CHANNEL_ORIGIN_METADATA_KEY: True}
 
 
 class _ThreadsSearchClient(Protocol):
@@ -103,25 +107,3 @@ def _parse_iso_utc(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
-
-
-async def stamp_channel_marker(
-    client: Any,
-    thread_id: str,
-    *,
-    marker: dict[str, Any] | None = None,
-) -> None:
-    """Stamp the channel-origin marker into ``thread_id``'s server metadata.
-
-    Write-side companion to :func:`list_channel_thread_candidates`:
-    ``remember_channel_origin`` records the origin only in serve's in-process dict,
-    invisible to the cron/server process. Serve calls this (when it holds a server
-    client) so the thread becomes discoverable by the eligibility search.
-    ``client.threads.update`` merges metadata server-side, so the marker does not
-    clobber ``agent_name``/``graph_id``/etc.
-    """
-    update = client.threads.update(
-        thread_id, metadata=marker if marker is not None else CHANNEL_ORIGIN_MARKER
-    )
-    if isinstance(update, Awaitable):
-        await update

@@ -15,7 +15,6 @@ from datetime import UTC, datetime
 from EvoScientist.proactive.eligibility import (
     CHANNEL_ORIGIN_MARKER,
     list_channel_thread_candidates,
-    stamp_channel_marker,
 )
 
 
@@ -116,24 +115,3 @@ def test_datetime_updated_at_passthrough():
     dt = datetime(2026, 9, 4, 8, 0, tzinfo=UTC)
     out, _ = _run([{"thread_id": "t1", "updated_at": dt}])
     assert out == [("t1", dt)]
-
-
-# ---- stamp_channel_marker (write-side companion) ----
-
-
-def test_stamp_channel_marker_updates_server_metadata():
-    client = _FakeClient([])
-    asyncio.run(stamp_channel_marker(client, "t1"))
-    assert client.threads.update_calls == [("t1", {"metadata": CHANNEL_ORIGIN_MARKER})]
-
-
-def test_stamp_channel_marker_custom_marker():
-    client = _FakeClient([])
-    asyncio.run(stamp_channel_marker(client, "t1", marker={"k": "v"}))
-    assert client.threads.update_calls == [("t1", {"metadata": {"k": "v"}})]
-
-
-def test_stamp_channel_marker_sync_client():
-    client = _FakeClient([], is_async=False)
-    asyncio.run(stamp_channel_marker(client, "t1"))
-    assert client.threads.update_calls == [("t1", {"metadata": CHANNEL_ORIGIN_MARKER})]

@@ -1,8 +1,8 @@
 """Tests for the serve-side proactive wiring.
 
 Covers the seams added to wire ``proactive.delivery_watcher`` into serve: the
-channel-origins accessor, the server-backend gate, the marker stamp, the
-delivery poll composition, and the cron auto-registration. The watcher's own
+channel-origins accessor, the server-backend gate, the turn metadata marker,
+the delivery poll composition, and the cron auto-registration. The watcher's own
 logic is tested in
 test_proactive_delivery_watcher.py; here we test the serve glue with fakes (no
 server, no model, no bus).
@@ -127,18 +127,28 @@ def test_server_client_present_on_server_backend():
     assert commands._serve_server_client(_runtime_state(client=client)) is client
 
 
-# ---- marker stamp -------------------------------------------------------------
+# ---- turn metadata marker -----------------------------------------------------
 
 
-def test_stamp_marker_noop_on_local():
-    # No client → no crash, no call.
-    commands._serve_stamp_channel_marker(_runtime_state(client=None))
+def test_turn_metadata_carries_marker_when_proactive_on_server():
+    meta = commands._serve_turn_metadata(
+        _runtime_state(client=_FakeClient()), "/ws", "m"
+    )
+    assert meta["has_channel_origin"] is True
+    assert meta["workspace_dir"] == "/ws"
+    assert meta["model"] == "m"
 
 
-def test_stamp_marker_calls_update_on_server():
-    client = _FakeClient()
-    commands._serve_stamp_channel_marker(_runtime_state(client=client, thread_id="t1"))
-    assert client.threads.updated == [("t1", {"has_channel_origin": True})]
+def test_turn_metadata_plain_when_proactive_disabled_or_local():
+    for cfg in (
+        _proactive_cfg(proactive_enabled=False),
+        _proactive_cfg(gateway_backend="local"),
+    ):
+        meta = commands._serve_turn_metadata(
+            _runtime_state(client=_FakeClient(), config=cfg), "/ws", "m"
+        )
+        assert "has_channel_origin" not in meta
+        assert meta["workspace_dir"] == "/ws"
 
 
 # ---- delivery poll ------------------------------------------------------------
@@ -241,17 +251,6 @@ def test_serve_proactive_enabled_requires_both_flag_and_server_backend():
     assert _serve_proactive_enabled(_proactive_cfg(proactive_enabled=False)) is False
     assert _serve_proactive_enabled(_proactive_cfg(gateway_backend="local")) is False
     assert _serve_proactive_enabled(None) is False
-
-
-def test_stamp_marker_skipped_when_proactive_disabled():
-    from EvoScientist.cli.commands import _serve_stamp_channel_marker
-
-    client = _FakeClient()
-    state = _runtime_state(
-        client=client, config=_proactive_cfg(proactive_enabled=False)
-    )
-    _serve_stamp_channel_marker(state)
-    assert client.threads.updated == []
 
 
 def _patch_cron_client(monkeypatch, existing):
