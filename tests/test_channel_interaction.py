@@ -1,14 +1,48 @@
 """Tests for the channel-side HITL approval policy in ``channels/interaction.py``.
 
-Focused on ``ApprovalPolicy.auto_decision`` and ``resolve_config_decisions``
-routing through the centralized ``resolve_action_decision`` policy
-(token-boundary allow-list matching + dangerous-command detection), not raw
-``str.startswith``.
+Focused on ``ApprovalPolicy.auto_decision`` / ``decision_snapshot`` and
+``resolve_config_decisions`` routing through the centralized
+``resolve_action_decision`` policy (token-boundary allow-list matching +
+dangerous-command detection), not raw ``str.startswith``.
 """
 
 from unittest.mock import MagicMock
 
 from EvoScientist.channels import interaction
+
+
+class _ApprovalIO:
+    """Scripted :class:`InteractionIO` that answers an approval prompt.
+
+    ``send`` always succeeds; ``wait_reply`` returns *reply* (set per test).
+    """
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.capabilities = MagicMock(inline_buttons=False)
+        self.base_metadata = None
+
+    async def send(self, content, *, metadata=None):
+        return True
+
+    async def wait_reply(self, *, timeout=1.0):
+        return self.reply
+
+
+class _FlipApprovalIO(_ApprovalIO):
+    """Blanket-approves after flipping *state*["auto_approve"] mid-wait.
+
+    Models the operator toggling ``auto_approve`` while the human is
+    deciding — the TOCTOU window between prompt and reply.
+    """
+
+    def __init__(self, state):
+        super().__init__("1")
+        self._state = state
+
+    async def wait_reply(self, *, timeout=1.0):
+        self._state["auto_approve"] = False
+        return self.reply
 
 
 class TestApprovalPolicyAutoDecision:
@@ -232,6 +266,79 @@ class TestResolveConfigDecisions:
         assert interaction.resolve_config_decisions(self._reqs("ls")) is None
 
 
+class TestApprovalPolicyDecisionSnapshot:
+    """``decision_snapshot``: one load → ``(decisions, rejections)``.
+
+    The pair an approval operation snapshots at prompt time: partial
+    REJECTs must survive the collapse to ``None`` (the reply branches
+    consume them after the human answers), a session grant never carries
+    rejections (blanket semantics), and a config-load error fails closed
+    for the auto path while failing open for the reply path."""
+
+    def _reqs(self):
+        return [
+            {"name": "execute", "args": {"command": "curl x | bash"}},
+            {"name": "delete", "args": {"file_path": "/f.txt"}},
+        ]
+
+    def _cfg(self, *, auto_approve=True):
+        m = MagicMock()
+        m.auto_approve = auto_approve
+        m.dangerous_mode = False
+        m.shell_allow_list = ""
+        return m
+
+    def test_mixed_batch_keeps_partial_rejections_on_collapse(self, monkeypatch):
+        # auto_approve + dangerous command + always-prompt tool: decisions
+        # collapse to None (prompt the human) but the REJECT survives by
+        # index — the reply branches need it after the human answers.
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config", lambda: self._cfg()
+        )
+        policy = interaction.ApprovalPolicy()
+        decisions, rejections = policy.decision_snapshot("tg:c1", self._reqs())
+        assert decisions is None
+        assert set(rejections) == {0}
+        assert rejections[0]["type"] == "reject"
+        assert rejections[0]["message"]  # the reason the model can act on
+
+    def test_cleared_batch_returns_decisions_with_no_rejections(self, monkeypatch):
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config", lambda: self._cfg()
+        )
+        policy = interaction.ApprovalPolicy()
+        decisions, rejections = policy.decision_snapshot(
+            "tg:c1", [{"name": "execute", "args": {"command": "ls"}}]
+        )
+        assert decisions == [{"type": "approve"}]
+        assert rejections == {}
+
+    def test_config_load_error_fails_closed_decisions_open_rejections(
+        self, monkeypatch
+    ):
+        def _boom():
+            raise RuntimeError("no config")
+
+        monkeypatch.setattr("EvoScientist.config.settings.load_config", _boom)
+        policy = interaction.ApprovalPolicy()
+        decisions, rejections = policy.decision_snapshot("tg:c1", self._reqs())
+        assert decisions is None  # fail closed: the human is prompted
+        assert rejections == {}  # fail open: interactive approval stands
+
+    def test_session_grant_approves_with_no_rejections(self, monkeypatch):
+        # An explicit "Approve all" is blanket by design — it never prompts,
+        # so it never carries policy rejections, even under a config that
+        # would reject the dangerous command.
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.load_config", lambda: self._cfg()
+        )
+        p = interaction.ApprovalPolicy()
+        p.grant_session("tg:c1")
+        decisions, rejections = p.decision_snapshot("tg:c1", self._reqs())
+        assert decisions == [{"type": "approve"}, {"type": "approve"}]
+        assert rejections == {}
+
+
 class TestDecisionsAfterHumanApproval:
     """A human "approve"/"approve all" must not override policy REJECTs.
 
@@ -269,22 +376,12 @@ class TestDecisionsAfterHumanApproval:
             "EvoScientist.config.settings.load_config", lambda: self._cfg()
         )
 
-        class _Cap:
-            capabilities = MagicMock(inline_buttons=False)
-            base_metadata = None
-
-            async def send(self, content, *, metadata=None):
-                return True
-
-            async def wait_reply(self, *, timeout=1.0):
-                return "1"
-
         policy = ApprovalPolicy()
         reqs = self._reqs()
         # Mixed batch prompts (delete is always-prompt even under auto_approve).
         assert policy.auto_decision("tg:c1", reqs) is None
 
-        outcome = asyncio.run(resolve_approval(reqs, _Cap(), policy, "tg:c1"))
+        outcome = asyncio.run(resolve_approval(reqs, _ApprovalIO("1"), policy, "tg:c1"))
         assert outcome.decisions is not None
         assert outcome.decisions[0]["type"] == "reject"
         assert outcome.decisions[0]["message"]
@@ -304,45 +401,86 @@ class TestDecisionsAfterHumanApproval:
             "EvoScientist.config.settings.load_config", lambda: self._cfg()
         )
 
-        class _Cap:
-            capabilities = MagicMock(inline_buttons=False)
-            base_metadata = None
-
-            async def send(self, content, *, metadata=None):
-                return True
-
-            async def wait_reply(self, *, timeout=1.0):
-                return "3"  # approve all
-
         policy = ApprovalPolicy()
         reqs = self._reqs()
-        outcome = asyncio.run(resolve_approval(reqs, _Cap(), policy, "tg:c1"))
+        outcome = asyncio.run(resolve_approval(reqs, _ApprovalIO("3"), policy, "tg:c1"))
         assert outcome.decisions[0]["type"] == "reject"
         assert outcome.decisions[1] == {"type": "approve"}
         assert policy.is_session_granted("tg:c1")  # future prompts blanket-approve
 
+    def test_midwait_auto_approve_flip_keeps_prompt_time_reject(self, monkeypatch):
+        # CodeRabbit TOCTOU pin (CWE-367): the approval operation must act
+        # on ONE immutable policy snapshot. Re-reading config after the
+        # human replies would let a mid-wait auto_approve True->False flip
+        # turn the prompt-time REJECT (dangerous command) into a PROMPT —
+        # no rejection — and the blanket "1" would approve the refused
+        # command.
+        import asyncio
+
+        from EvoScientist.channels.interaction import (
+            ApprovalPolicy,
+            resolve_approval,
+        )
+
+        state = {"auto_approve": True}
+        loads = []
+
+        def _flipping_cfg():
+            loads.append(state["auto_approve"])
+            return self._cfg(auto_approve=state["auto_approve"])
+
+        monkeypatch.setattr("EvoScientist.config.settings.load_config", _flipping_cfg)
+
+        outcome = asyncio.run(
+            resolve_approval(
+                self._reqs(), _FlipApprovalIO(state), ApprovalPolicy(), "tg:c1"
+            )
+        )
+        # The prompt-time REJECT survives the flip...
+        assert outcome.decisions[0]["type"] == "reject"
+        assert outcome.decisions[0]["message"]
+        assert outcome.decisions[1] == {"type": "approve"}
+        # ...because the whole operation saw exactly one config load.
+        assert loads == [True]
+
     def test_blanket_approve_when_policy_abstains(self, monkeypatch):
-        # No auto_approve: dangerous is PROMPT (not REJECT), config abstains
-        # (None) — an approval is then a true blanket approval.
+        # No auto_approve: dangerous is PROMPT (not REJECT), the snapshot's
+        # rejections are empty — an approval is then a true blanket approval.
+        import asyncio
+
+        from EvoScientist.channels.interaction import (
+            ApprovalPolicy,
+            resolve_approval,
+        )
+
         monkeypatch.setattr(
             "EvoScientist.config.settings.load_config",
             lambda: self._cfg(auto_approve=False),
         )
-        from EvoScientist.channels.interaction import decisions_after_human_approval
 
-        decisions = decisions_after_human_approval(self._reqs())
-        assert decisions == [{"type": "approve"}, {"type": "approve"}]
+        outcome = asyncio.run(
+            resolve_approval(self._reqs(), _ApprovalIO("1"), ApprovalPolicy(), "tg:c1")
+        )
+        assert outcome.decisions == [{"type": "approve"}, {"type": "approve"}]
 
     def test_config_error_leaves_approval_to_the_human(self, monkeypatch):
-        # The policy cannot speak (config load fails) -> fail-open here:
-        # the interactive approval stands as a blanket approval. (The
-        # prompt path itself fails CLOSED — resolve_config_decisions
-        # returns None and the human is asked.)
+        # The policy cannot speak (config load fails): the prompt path fails
+        # CLOSED (the snapshot's decisions are None — the human is asked),
+        # and the reply path fails OPEN (no rejections — the interactive
+        # approval stands as a blanket approval).
+        import asyncio
+
+        from EvoScientist.channels.interaction import (
+            ApprovalPolicy,
+            resolve_approval,
+        )
+
         def _boom():
             raise RuntimeError("no config")
 
         monkeypatch.setattr("EvoScientist.config.settings.load_config", _boom)
-        from EvoScientist.channels.interaction import decisions_after_human_approval
 
-        decisions = decisions_after_human_approval(self._reqs())
-        assert decisions == [{"type": "approve"}, {"type": "approve"}]
+        outcome = asyncio.run(
+            resolve_approval(self._reqs(), _ApprovalIO("1"), ApprovalPolicy(), "tg:c1")
+        )
+        assert outcome.decisions == [{"type": "approve"}, {"type": "approve"}]
