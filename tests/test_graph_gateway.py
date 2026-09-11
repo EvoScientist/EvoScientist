@@ -188,6 +188,40 @@ async def test_local_gateway_get_run_status_reads_dev_server_run(monkeypatch):
     client.runs.get.assert_awaited_once_with("task-thread", "run-1")
 
 
+# get_process_status seam (Slice 2.6) — the bg-process reader polls background
+# process status through the gateway (custom http route server-side, in-process
+# registry locally).
+# ---------------------------------------------------------------------------
+
+
+async def test_server_gateway_get_process_status_reads_http_route():
+    client = MagicMock()
+    client.http.get = AsyncMock(return_value={"status": "success"})
+    thread_store = MagicMock()
+    thread_store.client = client
+    gateway = LangGraphServerGateway(thread_store=thread_store)
+
+    status = await gateway.get_process_status(GraphTarget(), "cli-thread", "proc-1")
+
+    assert status == "success"
+    client.http.get.assert_awaited_once_with(
+        "/api/bg_process_status", params={"process_id": "proc-1"}
+    )
+
+
+async def test_local_gateway_get_process_status_reads_registry(monkeypatch):
+    # Background processes launched by the in-process main graph live in this
+    # process's registry, so get_process_status reads it directly.
+    monkeypatch.setattr(
+        "EvoScientist.background.poll_status", lambda process_id: "interrupted"
+    )
+    gateway = LocalGraphGateway()
+
+    status = await gateway.get_process_status(GraphTarget(), "cli-thread", "proc-9")
+
+    assert status == "interrupted"
+
+
 async def test_local_graph_gateway_updates_state_values():
     agent = MagicMock()
     agent.aupdate_state = AsyncMock()

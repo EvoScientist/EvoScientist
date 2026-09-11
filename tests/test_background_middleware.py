@@ -2,6 +2,7 @@
 
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,11 +17,34 @@ from EvoScientist.middleware.background import (
 )
 
 
-def _run_bg(
-    *, dangerous: bool = False, guard_dangerous: bool = False, notifier=async_notifier
-):
-    """Build the injected ``run_in_background`` tool for direct-invoke tests."""
-    return _make_run_in_background(notifier, dangerous, guard_dangerous)
+def _msg_text(result) -> str:
+    """ToolMessage content of a ``_bg_command`` result (or the plain string
+    for responses that carry no state update)."""
+    if isinstance(result, str):
+        return result
+    (msg,) = result.update["messages"]
+    return msg.content
+
+
+_STUB_RUNTIME = SimpleNamespace(
+    tool_call_id="call-test", config={"configurable": {"thread_id": "T-test"}}
+)
+"""ToolRuntime stand-in for success-path calls exercised via ``.func(...)``.
+
+The framework always provides a tool_call_id in a real graph call; tests use
+``.func`` with this stub so they reflect that contract instead of the removed
+no-runtime fallback.
+"""
+
+
+def _run_bg(*, dangerous: bool = False, guard_dangerous: bool = False):
+    """Build the ``run_in_background`` tool for direct tests.
+
+    Error paths (blocked / refused commands) return plain strings and work via
+    ``.invoke({...})``; success paths mirror state and need a ``tool_call_id``,
+    so they are exercised via ``.func(..., runtime=_STUB_RUNTIME)``.
+    """
+    return _make_run_in_background(dangerous, guard_dangerous)
 
 
 def _sleep_cmd(seconds: int) -> str:
@@ -49,8 +73,6 @@ def _wait_until(predicate, timeout=4.0, interval=0.05):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    from EvoScientist.cli import async_notifier
-
     bg._PROCESSES.clear()
     async_notifier.drain_notifications(None)
     yield
@@ -64,7 +86,7 @@ def _clean_registry():
 
 
 def test_middleware_registers_four_tools():
-    mw = BackgroundExecutionMiddleware(async_notifier)
+    mw = BackgroundExecutionMiddleware()
     names = {t.name for t in mw.tools}
     assert names == {
         "run_in_background",
@@ -76,8 +98,50 @@ def test_middleware_registers_four_tools():
 
 def test_no_job_in_tool_names():
     """Naming ADR: the word 'job' must not appear in the tool surface."""
-    mw = BackgroundExecutionMiddleware(async_notifier)
+    mw = BackgroundExecutionMiddleware()
     assert not any("job" in t.name.lower() for t in mw.tools)
+
+
+def test_middleware_declares_bg_processes_state_channel():
+    """The middleware registers the ``bg_processes`` channel + merge reducer."""
+    from EvoScientist.middleware.background import (
+        BackgroundState,
+        _bg_processes_reducer,
+    )
+
+    assert BackgroundExecutionMiddleware.state_schema is BackgroundState
+    # dict-merge reducer: last write per key wins, existing keys preserved.
+    merged = _bg_processes_reducer({"a": {"status": "running"}}, {"b": {"status": "x"}})
+    assert set(merged) == {"a", "b"}
+    assert _bg_processes_reducer(None, {"a": {"status": "running"}}) == {
+        "a": {"status": "running"}
+    }
+
+
+def test_bg_command_builds_state_update_with_runtime():
+    """With a tool_call_id, the tool returns a Command carrying the message + records."""
+    from types import SimpleNamespace
+
+    from langgraph.types import Command
+
+    from EvoScientist.middleware.background import _bg_command
+
+    runtime = SimpleNamespace(tool_call_id="call-1")
+    rec = {"process_id": "p1", "name": "demo", "status": "running"}
+    result = _bg_command("started p1", [rec], runtime)
+    assert isinstance(result, Command)
+    assert result.update["bg_processes"] == {"p1": rec}
+    assert result.update["messages"][0].content == "started p1"
+
+
+def test_bg_command_falls_back_only_without_records():
+    """No records -> plain string (an untracked process id); a missing
+    tool_call_id with records to mirror is a caller bug and raises."""
+    from EvoScientist.middleware.background import _bg_command
+
+    assert _bg_command("hi", [None], object()) == "hi"
+    with pytest.raises(RuntimeError, match="tool_call_id"):
+        _bg_command("hi", [{"process_id": "p1"}], None)
 
 
 def test_run_rejects_dangerous_command_without_launching(monkeypatch):
@@ -96,10 +160,14 @@ def test_run_rejects_dangerous_command_without_launching(monkeypatch):
 def test_run_launches_valid_command(tmp_path, monkeypatch):
     # Pin the workspace cwd to a temp dir so the launch is isolated.
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    out = _run_bg().invoke({"command": "echo ok", "name": "demo"})
-    assert "Started background process" in out
-    assert "check_process" in out
+    result = _run_bg().func(command="echo ok", name="demo", runtime=_STUB_RUNTIME)
+    text = _msg_text(result)
+    assert "Started background process" in text
+    assert "check_process" in text
     assert len(bg._PROCESSES) == 1
+    # The state mirror rides along on the same Command.
+    (rec,) = result.update["bg_processes"].values()
+    assert rec["process_id"] in bg._PROCESSES
 
 
 def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
@@ -107,7 +175,7 @@ def test_run_applies_virtual_path_rewriting(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
     captured = {}
 
-    def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
+    def _spy(command, cwd, name=None, *, origin_thread_id=None):
         captured["command"] = command
         return "pidX"
 
@@ -122,7 +190,7 @@ def test_run_dangerous_allows_real_path_no_rewrite(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
     captured = {}
 
-    def _spy(command, cwd, name=None, *, origin_thread_id=None, on_exit=None):
+    def _spy(command, cwd, name=None, *, origin_thread_id=None):
         captured["command"] = command
         return "pidX"
 
@@ -171,23 +239,6 @@ def test_run_dangerous_still_blocks_privileged_command(tmp_path, monkeypatch):
     assert "blocked" in out.lower()
 
 
-def test_run_enqueues_completion_notification(tmp_path, monkeypatch):
-    """A finished background process enqueues a shell completion notification."""
-    from EvoScientist.cli import async_notifier
-
-    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _run_bg().invoke({"command": _true_cmd(), "name": "quick"})
-    # drain consumes, so accumulate across polls until the watcher's on_exit enqueues.
-    notifs = []
-    deadline = time.time() + 4.0
-    while time.time() < deadline:
-        notifs.extend(async_notifier.drain_notifications(None))
-        if any(n.kind == "bg-process" for n in notifs):
-            break
-        time.sleep(0.05)
-    assert any(n.kind == "bg-process" and n.status == "success" for n in notifs)
-
-
 def test_origin_thread_id_reads_runtime_config():
     """thread_id is read from runtime.config['configurable'] (graph-injected)."""
     from types import SimpleNamespace
@@ -197,33 +248,6 @@ def test_origin_thread_id_reads_runtime_config():
     runtime = SimpleNamespace(config={"configurable": {"thread_id": "T-7"}})
     assert _origin_thread_id(runtime) == "T-7"
     assert _origin_thread_id(None) is None  # direct .invoke() / no runtime
-
-
-def test_notify_done_routes_to_origin_thread(tmp_path):
-    """_notify_done enqueues the completion notification to the launching thread."""
-    from EvoScientist.cli import async_notifier
-    from EvoScientist.middleware.background import _notify_done
-
-    pid = bg.launch(_true_cmd(), str(tmp_path))  # no on_exit -> no auto-notify here
-    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
-    _notify_done(bg._PROCESSES[pid], "T-123", async_notifier)
-    routed = async_notifier.drain_notifications("T-123")
-    assert any(n.task_id == pid and n.origin_cli_thread_id == "T-123" for n in routed)
-
-
-def test_stopped_process_suppresses_notification(tmp_path, monkeypatch):
-    """A user-stopped process must NOT emit a completion notification."""
-    from EvoScientist.cli import async_notifier
-
-    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _run_bg().invoke({"command": _sleep_cmd(600)})
-    (pid,) = list(bg._PROCESSES.keys())
-    stop_process.invoke({"process_id": pid})
-    # Wait until the watcher observed the exit — it would have enqueued here if the
-    # process weren't user-stopped. _notify_done is a no-op for stopped processes.
-    assert _wait_until(lambda: bg._PROCESSES[pid].finished_ts is not None)
-    notifs = async_notifier.drain_notifications(None)
-    assert not any(n.task_id == pid for n in notifs)
 
 
 def test_checked_after_exit_dedups_notification(tmp_path):
@@ -327,13 +351,12 @@ def test_shell_notification_hints_check_process():
 
 def test_check_and_list_route_to_manager(tmp_path, monkeypatch):
     monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    _run_bg().invoke({"command": _sleep_cmd(1)})
+    _run_bg().func(command=_sleep_cmd(1), runtime=_STUB_RUNTIME)
     (pid,) = bg._PROCESSES.keys()
-    assert pid in check_process.invoke({"process_id": pid})
-    assert pid in list_processes.invoke({})
-    assert "Stopped" in stop_process.invoke(
-        {"process_id": pid}
-    ) or "finished" in stop_process.invoke({"process_id": pid})
+    assert pid in _msg_text(check_process.func(process_id=pid, runtime=_STUB_RUNTIME))
+    assert pid in _msg_text(list_processes.func(runtime=_STUB_RUNTIME))
+    stop_out = _msg_text(stop_process.func(process_id=pid, runtime=_STUB_RUNTIME))
+    assert "Stopped" in stop_out or "finished" in stop_out
 
 
 def test_list_processes_forwards_all_threads(monkeypatch):
@@ -349,3 +372,69 @@ def test_list_processes_forwards_all_threads(monkeypatch):
     assert captured["include_all"] is True
     list_processes.invoke({})
     assert captured["include_all"] is False
+
+
+def test_stop_process_is_scoped_to_the_launching_thread(tmp_path, monkeypatch):
+    """A session's agent cannot stop another session's process (shared
+    keepalive server); the launching session can."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    owner = SimpleNamespace(
+        tool_call_id="call-owner", config={"configurable": {"thread_id": "T-owner"}}
+    )
+    stranger = SimpleNamespace(
+        tool_call_id="call-stranger",
+        config={"configurable": {"thread_id": "T-stranger"}},
+    )
+    _run_bg().func(command=_sleep_cmd(30), runtime=owner)
+    (pid,) = bg._PROCESSES.keys()
+
+    refusal = stop_process.func(process_id=pid, runtime=stranger)
+    assert "belongs to another session" in _msg_text(refusal)
+    assert bg._PROCESSES[pid].popen.poll() is None  # not killed
+
+    stopped = stop_process.func(process_id=pid, runtime=owner)
+    assert "Stopped" in _msg_text(stopped) or "finished" in _msg_text(stopped)
+
+
+def test_stop_process_allows_legacy_records_without_origin(tmp_path, monkeypatch):
+    """Processes without an origin thread (pre-tracking records) stay
+    stoppable by any caller - refusing would brick them."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    _run_bg().func(command=_sleep_cmd(30), runtime=_STUB_RUNTIME)
+    (pid,) = bg._PROCESSES.keys()
+    bg._PROCESSES[pid].origin_thread_id = None
+
+    caller = SimpleNamespace(
+        tool_call_id="call-x", config={"configurable": {"thread_id": "T-other"}}
+    )
+    out = stop_process.func(process_id=pid, runtime=caller)
+    assert "belongs to another session" not in _msg_text(out)
+
+
+def test_run_reports_immediate_exit(tmp_path, monkeypatch):
+    """A process that exits before the state mirror (e.g. an invalid command
+    the shell rejects at spawn) is reported as an immediate exit, not
+    'Started' - the mirrored terminal record means the client reader will
+    never surface a notification for it (terminal-in-state = observed), so
+    the tool response is the agent's only chance to learn the launch did
+    not stick. Pinned with a stubbed record: real spawn timing races the
+    mirror, and when the exit is NOT yet visible the record says 'running'
+    and the reader notifies normally - both branches stay honest."""
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    terminal_record = {
+        "process_id": "p1",
+        "name": "instant",
+        "command": "exit 7",
+        "pid": 4242,
+        "status": "error",
+        "returncode": 7,
+        "started_at": "t",
+        "origin_thread_id": "T-test",
+    }
+    monkeypatch.setattr(bg, "state_record", lambda _pid: terminal_record)
+    result = _run_bg().func(command="exit 7", name="instant", runtime=_STUB_RUNTIME)
+    text = _msg_text(result)
+    assert "exited immediately" in text
+    assert "code 7" in text
+    assert "Started background process" not in text
+    assert result.update["bg_processes"]["p1"] is terminal_record

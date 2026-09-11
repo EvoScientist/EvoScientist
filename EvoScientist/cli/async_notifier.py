@@ -97,11 +97,10 @@ def _enqueue(notification: AsyncTaskNotification) -> None:
 
 
 def enqueue_task_notification(notification: AsyncTaskNotification) -> None:
-    """Public :class:`~EvoScientist.middleware.notifier.NotifierPort` entry point.
+    """Route a completed-task notification onto the consumer queue.
 
-    Route a completed-task notification onto the consumer queue. Thin wrapper
-    over :func:`_enqueue` so middleware can enqueue without reaching into the
-    module's private symbols.
+    Thin wrapper over :func:`_enqueue` so the state reader can enqueue without
+    reaching into the module's private symbols.
     """
     _enqueue(notification)
 
@@ -116,10 +115,10 @@ def enqueue_bg_process_notification(
 ) -> None:
     """Build and enqueue a background-process completion notification.
 
-    :class:`~EvoScientist.middleware.notifier.NotifierPort` entry point used by
-    the background middleware so it never constructs the CLI-owned
-    :class:`AsyncTaskNotification` itself — the ``kind="bg-process"`` tag and the
-    UTC ``received_at`` timestamp are filled in here.
+    Called by the ``bg_processes`` state reader
+    (:func:`enqueue_bg_process_completions_from_state`) so it never constructs the
+    ``AsyncTaskNotification`` itself — the ``kind="bg-process"`` tag and the UTC
+    ``received_at`` timestamp are filled in here.
     """
     _enqueue(
         AsyncTaskNotification(
@@ -291,6 +290,36 @@ async def enqueue_completions_from_state(
     return still_active
 
 
+async def _run_throttled_reader(
+    reader,
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+    *,
+    min_interval_s: float,
+    last_poll: dict[str | None, float],
+    active_seen: dict[str | None, bool],
+) -> None:
+    """Idle-tick throttle shared by the async-task and bg-process readers.
+
+    Runs ``reader`` at most once per ``min_interval_s`` per thread, and skips
+    entirely once the last poll saw nothing active — a turn-boundary reader call
+    re-arms it. ``reader`` sets ``active_seen[thread_id]`` itself. This bounds the
+    idle state read (an HTTP round-trip on the server backend) to zero when
+    nothing is pending, and to one poll per interval while work is in flight.
+    Default-arm (``active_seen.get(..., True)``) so a thread with no prior
+    observation still polls once, then disarms itself.
+    """
+    now = time.monotonic()
+    last = last_poll.get(thread_id)
+    if last is not None and (now - last) < min_interval_s:
+        return
+    if not active_seen.get(thread_id, True):
+        return
+    last_poll[thread_id] = now
+    await reader(gateway, target, thread_id)
+
+
 async def enqueue_completions_from_state_throttled(
     gateway: GraphGateway,
     target: GraphTarget,
@@ -298,26 +327,140 @@ async def enqueue_completions_from_state_throttled(
     *,
     min_interval_s: float = IDLE_READER_MIN_INTERVAL_SECONDS,
 ) -> None:
-    """Idle-poll counterpart to :func:`enqueue_completions_from_state`.
+    """Idle-poll counterpart to :func:`enqueue_completions_from_state`."""
+    await _run_throttled_reader(
+        enqueue_completions_from_state,
+        gateway,
+        target,
+        thread_id,
+        min_interval_s=min_interval_s,
+        last_poll=_idle_reader_last_poll,
+        active_seen=_idle_reader_active_seen,
+    )
 
-    Preserves idle auto-notification (a completion surfacing while the user sits
-    idle) without issuing a state read on every fast poll tick. It runs the
-    reader at most once per ``min_interval_s`` per thread, and skips entirely
-    once the last poll saw no active task — a turn-boundary reader call re-arms
-    it when a new task launches. This bounds the (HTTP, on the server backend)
-    idle state read to zero when nothing is pending, and to one poll per
-    interval while a task is in flight.
+
+# --- Background-process reader (mirror of the async-task reader above) --------
+# Process ids the bg-process reader has already surfaced an exit for. The mirrored
+# ``bg_processes[*].status`` only goes terminal once the agent observes the exit
+# via a tool (check/stop/list), so this idempotency set keeps one proactive exit →
+# one enqueue for the agent-didn't-check path, mirroring ``_reader_enqueued_task_ids``.
+_reader_enqueued_process_ids: set[str] = set()
+# Process ids a reader invocation is currently awaiting a status for. The
+# idle tick and a turn-boundary read can interleave at the status await;
+# without this reservation both would observe the same terminal status and
+# enqueue the completion twice.
+_bg_reader_in_flight: set[str] = set()
+_bg_idle_reader_last_poll: dict[str | None, float] = {}
+_bg_idle_reader_active_seen: dict[str | None, bool] = {}
+
+
+async def read_bg_processes_from_gateway(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+) -> dict[str, dict] | None:
+    """Read the ``bg_processes`` state channel through the active graph gateway.
+
+    Returns ``None`` when the read fails, so the reader can distinguish a
+    transient failure from a genuinely empty registry (``{}``) — mirroring
+    :func:`read_async_tasks_from_gateway`. Also normalizes a successful
+    ``None`` values read (a thread with no checkpoint yet) to ``{}`` before
+    the channel access.
     """
-    now = time.monotonic()
-    last = _idle_reader_last_poll.get(thread_id)
-    if last is not None and (now - last) < min_interval_s:
-        return
-    # Skip the read once the last observation saw nothing active. Default True so
-    # a thread with no prior observation still polls once, then disarms itself.
-    if not _idle_reader_active_seen.get(thread_id, True):
-        return
-    _idle_reader_last_poll[thread_id] = now
-    await enqueue_completions_from_state(gateway, target, thread_id)
+    try:
+        values = await gateway.get_state_values(target, thread_id)
+    except Exception:
+        return None
+    values = values or {}
+    return values.get("bg_processes", {})
+
+
+async def enqueue_bg_process_completions_from_state(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+) -> int:
+    """Detect background-process exits from thread state and enqueue them.
+
+    Mirror of :func:`enqueue_completions_from_state` for OS background processes.
+    Reads the ``bg_processes`` registry the middleware mirrors into state and, for
+    each process not already surfaced and not terminal-in-state (a terminal state
+    means the agent already observed the exit via check/stop/list — nothing to
+    proactively surface, which is the state-based dedup), polls
+    ``gateway.get_process_status``. Newly-terminal processes are enqueued as
+    ``kind="bg-process"`` notifications via the shared queue. Returns the
+    still-active count for the idle throttle.
+    """
+    registry = await read_bg_processes_from_gateway(gateway, target, thread_id)
+    if registry is None:
+        # Failed read - NOT an empty registry. RE-ARM the idle throttle
+        # unconditionally, mirroring the async-task reader: preserving a
+        # prior "disarmed" observation would silence idle polling for a
+        # process launched after the last successful read saw everything
+        # terminal - its exit would then sit unsurfaced until the next turn
+        # boundary. Arming costs one state read per idle interval and
+        # self-corrects on the first successful read (it re-disarms when the
+        # registry is genuinely all-terminal).
+        _bg_idle_reader_active_seen[thread_id] = True
+        return 1
+    still_active = 0
+    for process_id, record in registry.items():
+        if (
+            process_id in _reader_enqueued_process_ids
+            or process_id in _bg_reader_in_flight
+        ):
+            continue
+        if record.get("status") in TERMINAL_STATUSES:
+            continue
+        # Reserve before the await so a concurrent reader invocation (idle
+        # tick racing a turn-boundary read) cannot double-enqueue this exit.
+        _bg_reader_in_flight.add(process_id)
+        try:
+            try:
+                status = await gateway.get_process_status(target, thread_id, process_id)
+            except Exception:
+                still_active += 1  # gateway unavailable / transient — retry next poll
+                continue
+            if status == "unknown":
+                # Process gone from the registry (e.g. a server restart cleared
+                # it) — its exit is unknowable, so stop polling it rather than
+                # spin forever.
+                _reader_enqueued_process_ids.add(process_id)
+                continue
+            if status not in TERMINAL_STATUSES:
+                still_active += 1
+                continue
+            enqueue_bg_process_notification(
+                task_id=process_id,
+                agent_name=record.get("name", ""),
+                status=status,
+                prompt=record.get("command", ""),
+                origin_cli_thread_id=record.get("origin_thread_id") or thread_id,
+            )
+            _reader_enqueued_process_ids.add(process_id)
+        finally:
+            _bg_reader_in_flight.discard(process_id)
+    _bg_idle_reader_active_seen[thread_id] = still_active > 0
+    return still_active
+
+
+async def enqueue_bg_process_completions_from_state_throttled(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+    *,
+    min_interval_s: float = IDLE_READER_MIN_INTERVAL_SECONDS,
+) -> None:
+    """Idle-poll counterpart to :func:`enqueue_bg_process_completions_from_state`."""
+    await _run_throttled_reader(
+        enqueue_bg_process_completions_from_state,
+        gateway,
+        target,
+        thread_id,
+        min_interval_s=min_interval_s,
+        last_poll=_bg_idle_reader_last_poll,
+        active_seen=_bg_idle_reader_active_seen,
+    )
 
 
 def _drain_one_queue(q: queue.Queue) -> list[AsyncTaskNotification]:
