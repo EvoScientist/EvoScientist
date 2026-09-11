@@ -70,3 +70,29 @@ def test_is_available_gates_on_langgraph_dev(monkeypatch):
     assert cron.is_available() is True
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_: False)
     assert cron.is_available() is False
+
+
+def test_langgraph_json_registers_proactive_graph():
+    """langgraph.json must map PROACTIVE_GRAPH_ID to the graph module the cron fires."""
+    import json
+    from pathlib import Path
+
+    import EvoScientist
+    from EvoScientist.proactive import cron
+
+    root = Path(EvoScientist.__file__).parent
+    manifest = json.loads(
+        (root / "langgraph_dev" / "langgraph.json").read_text(encoding="utf-8")
+    )
+    assert manifest["graphs"][cron.PROACTIVE_GRAPH_ID] == (
+        "EvoScientist.proactive.graph:proactive_graph"
+    )
+
+
+def test_proactive_graph_imports_and_compiles_without_building_deps():
+    """The registered graph must import + compile cheaply (langgraph-dev does this
+    at startup); heavy deps must stay lazy so a bad-config env can't break startup."""
+    from EvoScientist.proactive import graph
+
+    assert graph.proactive_graph is not None
+    assert graph._DEPS is None  # deps are built on first tick, never at import
