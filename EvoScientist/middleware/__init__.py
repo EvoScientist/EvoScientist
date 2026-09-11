@@ -30,6 +30,10 @@ from .memory_lifecycle import (
     default_memory_scheduler,
 )
 from .model_fallback import ModelFallbackMiddleware, load_fallback_chain
+from .proactive_mode import (
+    ProactiveModeMiddleware,
+    create_proactive_mode_middleware,
+)
 from .runtime_context import RuntimeContextMiddleware, create_runtime_context_middleware
 from .scheduler import (
     SchedulerMiddleware,
@@ -52,6 +56,7 @@ __all__ = [
     "EvoMemoryLifecycleMiddleware",
     "EvoMemoryMiddleware",
     "ModelFallbackMiddleware",
+    "ProactiveModeMiddleware",
     "Question",
     "RuntimeContextMiddleware",
     "SchedulerMiddleware",
@@ -63,6 +68,7 @@ __all__ = [
     "create_context_editing_middleware",
     "create_memory_lifecycle_middleware",
     "create_memory_middleware",
+    "create_proactive_mode_middleware",
     "create_runtime_context_middleware",
     "create_scheduler_middleware",
     "create_tool_selector_middleware",
