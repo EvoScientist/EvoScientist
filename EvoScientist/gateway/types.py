@@ -195,13 +195,14 @@ class GraphGateway(Protocol):
         channel. ``END`` is only valid with ``values=None`` (clears pending
         tasks; ``next`` becomes empty).
 
-        ``metadata`` is merged into the LangGraph checkpoint metadata via
-        the config (``config["metadata"]``) — the same mechanism normal
+        ``metadata`` is best-effort checkpoint metadata. The local gateway
+        merges it via ``config["metadata"]`` — the same mechanism normal
         turns use (``stream_agent_events`` sets ``config["metadata"]``
-        from ``build_metadata``). The checkpoint saver's
-        ``get_checkpoint_metadata`` merges string scalars from
-        ``config["metadata"]`` into the stored checkpoint metadata, so
-        keys like ``agent_name`` and ``workspace_dir`` land on the
-        checkpoint row. When ``None``, behavior is byte-identical to the
+        from ``build_metadata``), so keys like ``agent_name`` and
+        ``workspace_dir`` land on the checkpoint row. The server gateway
+        cannot forward it (the SDK's ``update_state`` has no metadata
+        parameter); there the server-side checkpointer stamps ownership
+        itself, so implementations must not rely on caller-supplied keys
+        surviving. When ``None``, behavior is byte-identical to the
         pre-existing default (no metadata key on the config).
         """

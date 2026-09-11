@@ -236,38 +236,34 @@ def _finished_cleanly(message: Any | None) -> bool:
     reason = _finish_reason(message)
     if reason is None or reason in _CLEAN_FINISH_REASONS:
         return True
+    metadata = getattr(message, "response_metadata", None) or {}
     logger.warning(
         "proactive shadow turn discarded: model finish_reason=%r (not a clean "
-        "stop); response_metadata=%s",
+        "stop); model=%s",
         reason,
-        {
-            k: str(v)[:200]
-            for k, v in (getattr(message, "response_metadata", None) or {}).items()
-        },
+        metadata.get("model_name") if isinstance(metadata, dict) else None,
     )
     return False
 
 
 def _log_empty_reply(last: Any | None) -> None:
-    """INFO-log the raw last message when the shadow produced no text.
+    """INFO-log shape diagnostics when the shadow produced no text.
 
     The shadow thread is deleted right after the turn, so this is the only place
     a reasoning-only response, a refusal, or a provider quirk can be told apart
-    from a genuine NO_PUSH.
+    from a genuine NO_PUSH. Only non-sensitive shape is logged: message type,
+    content length, which ``additional_kwargs`` keys are present (e.g. a
+    reasoning field), and the provider's finish reason. Never the text itself.
     """
+    metadata = getattr(last, "response_metadata", None) or {}
     logger.info(
-        "proactive shadow turn returned no text; last message=%s content=%r "
-        "additional_kwargs=%s response_metadata=%s",
+        "proactive shadow turn returned no text; last message=%s content_chars=%d "
+        "additional_kwargs_keys=%s finish_reason=%s model=%s",
         type(last).__name__,
-        str(getattr(last, "content", ""))[:300],
-        {
-            k: str(v)[:200]
-            for k, v in (getattr(last, "additional_kwargs", None) or {}).items()
-        },
-        {
-            k: str(v)[:200]
-            for k, v in (getattr(last, "response_metadata", None) or {}).items()
-        },
+        len(str(getattr(last, "content", "") or "")),
+        sorted((getattr(last, "additional_kwargs", None) or {}).keys()),
+        metadata.get("finish_reason") if isinstance(metadata, dict) else None,
+        metadata.get("model_name") if isinstance(metadata, dict) else None,
     )
 
 

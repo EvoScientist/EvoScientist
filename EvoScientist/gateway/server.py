@@ -616,12 +616,12 @@ class LangGraphServerGateway:
         as_node: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        # The server-side checkpointer (_ApiPruningCheckpointer) stamps
-        # ``agent_name`` from ``graph_id`` during normal runs. The SDK's
-        # ``update_state`` has no metadata parameter, so ``metadata`` is
-        # accepted for protocol compliance with the local gateway but not
-        # forwarded. The server path's checkpoint stamping is handled
-        # server-side.
+        # Best-effort contract: the SDK's ``update_state`` has no metadata
+        # parameter, so ``metadata`` cannot be forwarded on this path. The
+        # server-side checkpointer (_ApiPruningCheckpointer) stamps ownership
+        # (``agent_name`` from ``graph_id``, ``workspace_dir``, ``updated_at``)
+        # itself, so restart recovery does not depend on the caller's metadata.
+        # A caller-supplied key that is not one of those is dropped here.
         await self.thread_store.client.threads.update_state(
             thread_id,
             values,

@@ -267,8 +267,11 @@ def test_run_shadow_turn_logs_raw_message_when_reply_is_empty(caplog):
     assert result == ""
     hits = [r.message for r in caplog.records if "returned no text" in r.message]
     assert len(hits) == 1
-    assert "thought about it" in hits[0]
-    assert "finish_reason" in hits[0]
+    # shape only: no raw content or reasoning text reaches the log
+    assert "thought about it" not in hits[0]
+    assert "reasoning_content" in hits[0]  # key name is fine, value is not
+    assert "finish_reason=stop" in hits[0]
+    assert "content_chars=0" in hits[0]
     graph.checkpointer.adelete_thread.assert_awaited_once()
 
 
