@@ -2276,6 +2276,37 @@ def run_textual_interactive(
                                     )
                                 continue
 
+                            # Config-rule fast path (shared with CLI display):
+                            # an allow-listed / auto-approvable command resolves
+                            # without mounting the widget, closing the
+                            # shell_allow_list gap on the attended TUI. Returns
+                            # None when a human decision is genuinely needed.
+                            from ..channels.interaction import (
+                                resolve_config_decisions,
+                            )
+
+                            _cfg_decisions = resolve_config_decisions(action_reqs)
+                            if _cfg_decisions is not None:
+                                # A config-level rejection (e.g. auto_approve
+                                # refusing a dangerous command) must be visible
+                                # before the silent resume - otherwise the
+                                # spinner just turns into a rejection with no
+                                # indication of who rejected it or why.
+                                for _d in _cfg_decisions:
+                                    if _d.get("type") == "reject":
+                                        self._append_system(
+                                            f"Auto-rejected: {_d.get('message', '')}",
+                                            style="yellow",
+                                        )
+                                        break
+                                from ..backends import build_hitl_resume
+
+                                _stream_input = build_hitl_resume(
+                                    interrupt_id, _cfg_decisions
+                                )
+                                _hitl_resuming = True
+                                break  # re-enter outer HITL loop with resume
+
                             # Interactive TUI: mount approval widget
                             # Disable main prompt so it can't steal focus
                             _prompt = self.query_one("#prompt", ChatTextArea)

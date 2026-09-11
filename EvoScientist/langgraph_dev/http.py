@@ -153,10 +153,52 @@ async def get_bg_process_status(request: Request) -> JSONResponse:
     return JSONResponse({"status": status})
 
 
+async def post_policy(request: Request) -> JSONResponse:
+    """Resolve HITL decisions for action requests, for non-Python clients.
+
+    The one source of truth is ``channels.interaction.resolve_config_decisions``
+    (the same chokepoint Python clients call in-process), evaluated against THIS
+    server's own config — the caller never mirrors auto_approve / dangerous_mode
+    / allow_list, which is exactly the part that drifted in client-side ports.
+
+    Pure policy — no agent, no graph, no side effects.
+
+    Body: ``{"action_requests": list[dict]}`` (the same action request objects
+    the interrupt delivers). Response: ``{"decisions": list[dict] | null}`` —
+    a full per-request decisions list when config clears every request, or
+    ``null`` when a human decision is needed (the client then prompts and
+    hands its own decisions to the resume payload). The decisions shape is
+    what ``build_hitl_resume`` consumes, so the non-null response can be
+    forwarded verbatim.
+    """
+    from EvoScientist.channels.interaction import resolve_config_decisions
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    action_requests = None
+    if isinstance(body, dict):
+        candidate = body.get("action_requests")
+        if isinstance(candidate, list) and all(isinstance(r, dict) for r in candidate):
+            action_requests = candidate
+    if action_requests is None:
+        return JSONResponse(
+            {"error": "'action_requests' (list of objects) is required"},
+            status_code=400,
+        )
+    # resolve_config_decisions reads config from disk (load_config), which
+    # blockbuster refuses on the dev-server event loop - offload like every
+    # other blocking read this file serves.
+    decisions = await asyncio.to_thread(resolve_config_decisions, action_requests)
+    return JSONResponse({"decisions": decisions})
+
+
 app = Starlette(
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),
         Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
+        Route("/api/policy", post_policy, methods=["POST"]),
     ]
 )
