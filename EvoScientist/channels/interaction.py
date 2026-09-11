@@ -86,37 +86,71 @@ def approve_decisions(action_requests: list) -> list[dict]:
     return [{"type": "approve"} for _ in range(n)]
 
 
-def _config_rejections(action_requests: list[dict]) -> dict[int, dict]:
-    """Indices where the config policy REJECTs, with the reason.
+def _config_policy_snapshot(
+    action_requests: list[dict],
+) -> tuple[list[dict] | None, dict[int, dict]]:
+    """One config load → ``(decisions, rejections)`` for an approval operation.
 
-    Companion to :func:`resolve_config_decisions` that answers a narrower
-    question — "which of these requests would the policy refuse?" — without
-    collapsing: a batch that mixes a REJECT with a prompt-needed request
-    still reports the REJECT here. Config-load errors return ``{}``
-    (fail-open: when the policy cannot speak, the human's interactive
-    approval stands).
+    The single evaluation point of the config policy: one ``load_config()``
+    produces both views an approval operation needs, so the policy verdicts
+    the operation acts on are immutable for its whole duration — prompt,
+    human wait, and reply. Re-loading config after the human replies would
+    let a mid-wait ``auto_approve`` toggle flip a prompt-time REJECT into a
+    PROMPT (no rejection), so a blanket approval would run the refused
+    command (CWE-367 time-of-check/time-of-use).
+
+    Returns ``(decisions, rejections)``:
+
+    * ``decisions`` — the full per-request list when config clears every
+      request, ``None`` when any request needs a human (the caller prompts).
+      Same contract as :func:`resolve_config_decisions`, which is this
+      snapshot's collapsed view. Empty requests yield ``([], {})``: a
+      one-per-request decisions list would break ``HumanInTheLoopMiddleware``,
+      which requires the counts to match.
+    * ``rejections`` — per-index REJECT decisions (with their reasons),
+      preserved even when the list collapses to ``None``: a batch that
+      mixes a REJECT with a prompt-needed request still reports the REJECT
+      here. The reply branches after a human approval consume these — see
+      :func:`decisions_after_human_approval`.
+
+    Config-load errors return ``(None, {})``: the auto path fails closed
+    (the human is prompted), and the reply path fails open (when the policy
+    cannot speak, the human's interactive approval stands).
     """
     try:
         from ..config.settings import load_config
 
         cfg = load_config()
     except Exception:
-        return {}
+        return None, {}
 
     shell_allow_list = (
         [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
         if cfg.shell_allow_list
         else []
     )
+
+    decisions: list[dict] = []
     rejections: dict[int, dict] = {}
+    needs_human = False
     for i, req in enumerate(action_requests):
         decision = _resolve_one_action_request(req, cfg, shell_allow_list)
-        if decision is not None and decision.get("type") == "reject":
+        if decision is None:
+            # Keep scanning: REJECTs later in a mixed batch must survive the
+            # collapse to None (the reply branches consume them).
+            needs_human = True
+            continue
+        decisions.append(decision)
+        if decision.get("type") == "reject":
             rejections[i] = decision
-    return rejections
+    if needs_human:
+        return None, rejections
+    return decisions, rejections
 
 
-def decisions_after_human_approval(action_requests: list[dict]) -> list[dict]:
+def decisions_after_human_approval(
+    action_requests: list[dict], policy_rejections: dict[int, dict]
+) -> list[dict]:
     """Decisions to resume with after a human chose "approve"/"approve all".
 
     An interactive approval must not override the config policy's REJECTs:
@@ -126,16 +160,24 @@ def decisions_after_human_approval(action_requests: list[dict]) -> list[dict]:
     refusal feedback — and approves only the rest. Without this, a single
     blanket "1" would run the dangerous command the policy just refused.
 
+    *policy_rejections* are the per-index REJECT decisions from the
+    prompt-time :func:`_config_policy_snapshot` — the same single config
+    load that decided to prompt. The function is pure (no config IO), so a
+    config toggle while the human was deciding cannot change what the
+    approval operation does with the reply.
+
     Requests the policy does not REJECT (approve, prompt — the human just
     decided those — or no verdict) are approved. The session-grant fast-path
-    in :meth:`ApprovalPolicy.auto_decision` never prompts, so an explicit
-    "Approve all" grant keeps its blanket semantics and does not come
-    through here.
+    in :meth:`ApprovalPolicy.decision_snapshot` never prompts, so an
+    explicit "Approve all" grant keeps its blanket semantics and does not
+    come through here.
     """
-    rejections = _config_rejections(action_requests)
-    if not rejections:
+    if not policy_rejections:
         return approve_decisions(action_requests)
-    return [rejections.get(i, {"type": "approve"}) for i in range(len(action_requests))]
+    return [
+        policy_rejections.get(i, {"type": "approve"})
+        for i in range(len(action_requests))
+    ]
 
 
 # ── approval prompt formatting ─────────────────────────────────────────
@@ -317,37 +359,14 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
     ``auto_approve``). Returns a full ``decisions`` list when config clears every
     request, or ``None`` when any request needs a human — the caller then prompts
     (mounts a widget, calls ``input()``, routes to a channel). Fail-closed to
-    ``None`` on config-load errors and malformed requests. This is the sole
-    config-policy entry point for HITL resolution — the channel auto-decision
-    path (:meth:`ApprovalPolicy.auto_decision`) and the attended UIs both
-    consume it, so an ``auto_approve`` dangerous command is a REJECT with a
-    reason everywhere, never a silent collapse to "needs a human".
+    ``None`` on config-load errors and malformed requests. The evaluation is
+    :func:`_config_policy_snapshot` (one config load); this collapsed view is
+    what the attended UIs and the channel auto-decision path
+    (:meth:`ApprovalPolicy.auto_decision`) consume, so an ``auto_approve``
+    dangerous command is a REJECT with a reason everywhere, never a silent
+    collapse to "needs a human".
     """
-    if not action_requests:
-        # No requests → no decisions: a one-per-request decisions list would
-        # break HumanInTheLoopMiddleware, which requires the counts to match.
-        return []
-
-    try:
-        from ..config.settings import load_config
-
-        cfg = load_config()
-    except Exception:
-        return None  # fail-closed: prompt the human
-
-    shell_allow_list = (
-        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
-        if cfg.shell_allow_list
-        else []
-    )
-
-    decisions: list[dict] = []
-    for req in action_requests:
-        decision = _resolve_one_action_request(req, cfg, shell_allow_list)
-        if decision is None:
-            return None  # needs a human decision
-        decisions.append(decision)
-    return decisions
+    return _config_policy_snapshot(action_requests)[0]
 
 
 class ApprovalPolicy:
@@ -372,6 +391,34 @@ class ApprovalPolicy:
         """Forget all session grants (test hygiene / session reset)."""
         self._granted_sessions.clear()
 
+    def decision_snapshot(
+        self, session_key: str, action_requests: list[dict]
+    ) -> tuple[list[dict] | None, dict[int, dict]]:
+        """One policy evaluation for a complete approval operation.
+
+        Returns ``(decisions, rejections)`` from a single
+        :func:`_config_policy_snapshot` load: ``decisions`` auto-resolves the
+        interrupt when the policy can (session grant or config rules) and is
+        ``None`` when a human must be prompted; ``rejections`` are the same
+        load's per-request REJECT decisions, consumed by the reply branches
+        after the human answers (:func:`decisions_after_human_approval`).
+        One snapshot covers the whole operation — prompt, wait, reply — so a
+        config toggle while the human is deciding cannot flip a prompt-time
+        REJECT into a blanket approve.
+
+        A session grant approves everything with no rejections (an explicit
+        interactive choice that never prompts, so its blanket semantics are
+        preserved). Empty requests return ``([], {})`` before the grant
+        branch: :func:`approve_decisions` floors its length at 1, which
+        would produce one decision for zero requests and trip
+        ``HumanInTheLoopMiddleware``'s count check.
+        """
+        if not action_requests:
+            return [], {}
+        if self.is_session_granted(session_key):
+            return approve_decisions(action_requests), {}
+        return _config_policy_snapshot(action_requests)
+
     def auto_decision(
         self, session_key: str, action_requests: list[dict]
     ) -> list[dict] | None:
@@ -388,18 +435,12 @@ class ApprovalPolicy:
         mode. ``None`` (prompt the user) is returned only when a human
         decision is genuinely needed.
 
-        Empty requests return ``[]`` before the session-grant branch:
-        :func:`approve_decisions` floors its length at 1 (the historical
-        resume shape), which would produce one decision for zero requests
-        and trip ``HumanInTheLoopMiddleware``'s count check. The config
-        resolver already returns ``[]`` for empty; this makes the grant
-        branch match it.
+        The pair-valued single-load evaluation this delegates to is
+        :meth:`decision_snapshot` — callers that also need the per-request
+        REJECTs for the reply branches (``resolve_approval``) snapshot once
+        there instead of evaluating twice.
         """
-        if not action_requests:
-            return []
-        if self.is_session_granted(session_key):
-            return approve_decisions(action_requests)
-        return resolve_config_decisions(action_requests)
+        return self.decision_snapshot(session_key, action_requests)[0]
 
 
 # ── transport adapter + reply registry ─────────────────────────────────
@@ -627,13 +668,17 @@ async def resolve_approval(
 
     Auto-resolves via *policy* (session grant or config rule) without
     prompting.  Otherwise sends the approval prompt (with capability-driven
-    buttons), waits for a reply, and parses it.  ``/stop`` cancels silently
-    (it already got its own ack from the transport's stop fast-path).  An
-    unrecognized reply declines *without feedback* and hands the raw text
-    back to the driver via ``unrecognized_reply`` (see
+    buttons), waits for a reply, and parses it.  The policy is evaluated
+    exactly once, at prompt time (:meth:`ApprovalPolicy.decision_snapshot`);
+    the reply branches consume that snapshot's REJECTs, so config changes
+    while the human is deciding cannot alter what the approval operation
+    does with the reply.  ``/stop`` cancels silently (it already got its own
+    ack from the transport's stop fast-path).  An unrecognized reply declines
+    *without feedback* and hands the raw text back to the driver via
+    ``unrecognized_reply`` (see
     :class:`ApprovalOutcome` for the per-driver policy).
     """
-    auto = policy.auto_decision(session_key, action_requests)
+    auto, policy_rejections = policy.decision_snapshot(session_key, action_requests)
     if auto is not None:
         return ApprovalOutcome(decisions=auto)
 
@@ -656,12 +701,12 @@ async def resolve_approval(
         policy.grant_session(session_key)
         await io.send(APPROVED_AUTO_FEEDBACK)
         return ApprovalOutcome(
-            decisions=decisions_after_human_approval(action_requests)
+            decisions=decisions_after_human_approval(action_requests, policy_rejections)
         )
     if decision == "approve":
         await io.send(APPROVED_FEEDBACK)
         return ApprovalOutcome(
-            decisions=decisions_after_human_approval(action_requests)
+            decisions=decisions_after_human_approval(action_requests, policy_rejections)
         )
     if decision == "reject":
         await io.send(REJECTED_FEEDBACK)
