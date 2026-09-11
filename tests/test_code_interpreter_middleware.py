@@ -104,11 +104,11 @@ def test_after_agent_evicts_slot_on_untouched_turn():
 
     Upstream ``after_agent`` in ``langchain_quickjs/middleware.py`` performs
     two things: snapshot the REPL AND evict the slot (``finally:
-    self._registry.evict(thread_id)``). ``before_agent`` restores the REPL
+    self._registry.evict(slot_id)``). ``before_agent`` restores the REPL
     on any turn that follows a touched one via ``self._registry.get`` —
     which is get-or-create. So if ``after_agent`` returns early without
     evicting, one ``ThreadWorker`` + QuickJS Runtime leaks per persistent
-    ``thread_id`` that ever went touched → quiet.
+    slot that ever went touched → quiet.
 
     Fix: don't override ``after_agent`` / ``aafter_agent`` at all — inherit
     upstream's unconditional snapshot+evict behavior. This test creates a
@@ -116,17 +116,18 @@ def test_after_agent_evicts_slot_on_untouched_turn():
     untouched-state input, and asserts the slot was evicted.
     """
     mw = create_code_interpreter_middleware()
-    tid = mw._fallback_thread_id
+    slot_id = mw._slot_update_for_runtime()["_quickjs_slot_id"]
 
     # Simulate the slot creation that ``before_agent`` performs when it sees
     # a prior turn's snapshot payload in state.
-    mw._registry.get(tid)
+    mw._registry.get(slot_id)
     assert len(mw._registry._slots) == 1
 
     # Untouched-turn state: no ``code_interpreter`` tool call between the
     # last ``HumanMessage`` and end. Under the earlier buggy gate this
     # returned ``{}`` without evicting — leaking the slot created above.
     untouched_state = {
+        "_quickjs_slot_id": slot_id,
         "_quickjs_snapshot_payload": b"payload-from-prior-turn",
         "messages": [
             HumanMessage(content="thanks"),
