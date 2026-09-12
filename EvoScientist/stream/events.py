@@ -76,39 +76,59 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
     return False
 
 
-async def _clear_interrupted_graph_state(
+_INTERRUPTED_TOOL_RESULT = (
+    "Tool execution was interrupted before the run completed. Side effects may "
+    "already have been partially applied; check the current state instead of "
+    "re-running this call unless the user asks."
+)
+
+
+async def _recover_interrupted_graph_state(
     agent: Any,
     config: dict[str, Any],
+    snapshot: Any | None = None,
 ) -> None:
-    """Force the graph back to a clean (non-interrupted) state after an error.
+    """Close out a run that ended mid-step so the next turn starts fresh.
 
-    When an exception occurs mid-run the LangGraph checkpoint can be left with a
-    non-empty ``next`` tuple — the graph is stuck waiting to resume at a specific
-    node. On the next invocation with a fresh user message LangGraph tries to
-    **resume** that interrupted step rather than starting a new turn: it ignores
-    the new human message and replays the broken step, which typically produces
-    no output and leaves the messages channel unchanged. From the user's side the
-    conversation looks like it lost all history because the agent stops responding.
+    A cancelled (Ctrl+C / ``/stop``), crashed, or hard-killed run can leave the
+    LangGraph checkpoint in two kinds of trouble:
 
-    The fix: ``aupdate_state(config, None, as_node=END)`` clears all pending tasks
-    and writes a checkpoint whose ``next`` is the empty tuple, without touching
-    any channel values (message history is preserved).
+    1. Pending tasks: ``next`` stays parked on the interrupted node, so on the
+       next invocation LangGraph tries to **resume** that broken step rather
+       than starting a new turn — it ignores the new human message and replays
+       the interrupted step (older runtimes even re-execute a pending tools
+       node outright).
+    2. Dangling tool calls: the assistant message that dispatched the tools was
+       committed, but its results never were. deepagents'
+       ``PatchToolCallsMiddleware`` then closes each dangling call with "was
+       cancelled - another message came in before it could be completed" and
+       rewrites the whole messages channel — which re-broadcasts every
+       historical tool call to the UI and actively invites the model to
+       re-issue the entire interrupted batch, re-applying real side effects.
+
+    Recovery synthesizes an honest ``ToolMessage`` for every dangling call
+    (telling the model the run was interrupted and side effects may already
+    have partially applied) and then commits the turn as finished via
+    ``aupdate_state(config, None, as_node=END)``, leaving ``next`` empty and a
+    self-consistent history the next turn can build on normally. Channel
+    values (message history) are otherwise preserved.
 
     Critically, this only runs when the stuck state is *not* a legitimate
     human-in-the-loop interrupt. The agent pauses via ``interrupt()`` /
     ``Command(resume=...)`` for ask-user flows, which also leaves ``next``
-    non-empty; clearing those would silently discard a pending question the user
-    still needs to answer. ``_snapshot_has_pending_interrupt`` distinguishes the
+    non-empty; clearing those would silently discard a pending question the
+    user still needs to answer. ``_snapshot_has_pending_interrupt`` distinguishes the
     two.
 
     Best-effort: any failure is logged at DEBUG and swallowed so it never shadows
-    the original exception that triggered recovery.
+    the original exception or cancellation that triggered recovery.
     """
     import logging
 
     _log = logging.getLogger(__name__)
     try:
-        snapshot = await agent.aget_state(config)
+        if snapshot is None:
+            snapshot = await agent.aget_state(config)
         # Only act when the graph is genuinely stuck (non-empty next tuple)...
         if not snapshot or not getattr(snapshot, "next", None):
             return
@@ -123,15 +143,39 @@ async def _clear_interrupted_graph_state(
             return
 
         stuck_at = snapshot.next
+        values = getattr(snapshot, "values", None) or {}
+        messages = values.get("messages") or []
+        answered_ids = {m.tool_call_id for m in messages if m.type == "tool"}
+        patch = [
+            ToolMessage(
+                content=_INTERRUPTED_TOOL_RESULT,
+                tool_call_id=call["id"],
+                name=call.get("name") or "unknown",
+            )
+            for m in messages
+            if isinstance(m, AIMessage)
+            for call in (
+                *m.tool_calls,
+                *(getattr(m, "invalid_tool_calls", None) or ()),
+            )
+            if call.get("id") and call["id"] not in answered_ids
+        ]
+        if patch:
+            # Attribute the synthetic results to the stuck execution node so
+            # they land in history exactly where the real results would have.
+            write_node = "tools" if "tools" in stuck_at else stuck_at[0]
+            await agent.aupdate_state(config, {"messages": patch}, as_node=write_node)
         await agent.aupdate_state(config, None, as_node=END)
         _log.debug(
-            "Cleared interrupted graph state for thread %s (was stuck at: %s)",
+            "Recovered interrupted graph state for thread %s (was stuck at: "
+            "%s; closed %d dangling tool call(s))",
             config.get("configurable", {}).get("thread_id", "?"),
             stuck_at,
+            len(patch),
         )
     except Exception as exc:  # pragma: no cover — best-effort recovery
         _log.debug(
-            "Could not clear interrupted graph state: %s",
+            "Could not recover interrupted graph state: %s",
             exc,
             exc_info=True,
         )
@@ -902,6 +946,7 @@ async def stream_agent_events(
         config["metadata"] = metadata
     emitter = StreamEventEmitter()
     existing_summarization_event: Mapping[str, object] | None = None
+    snapshot: Any = None
     try:
         snapshot = await agent.aget_state(config)
         existing_summarization_event = _find_summarization_event_payload(
@@ -910,12 +955,22 @@ async def stream_agent_events(
     except Exception:
         pass
 
+    # A previous run cancelled (Ctrl+C), crashed, or was hard-killed mid-step
+    # can leave the checkpoint parked with pending tasks and dangling tool
+    # calls. Recover before this run's input is applied, or the interrupted
+    # step interferes with the new turn — worst case replaying the entire
+    # interrupted tool batch. A hard process kill runs no cleanup at all, so
+    # this start-of-run pass is the only chance to repair those threads.
+    if getattr(snapshot, "next", None):
+        await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
+
     clear_completed_memory_activity_counts()
     astream_input = await build_agent_stream_input(message, media=media)
 
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
     _run_raised: bool = False
+    _run_cancelled: bool = False
     event_sink_token = None
     try:
         from langgraph.stream.transformers import CustomTransformer, UpdatesTransformer
@@ -1041,6 +1096,15 @@ async def stream_agent_events(
         _run_raised = True
         yield emitter.error(str(e)).data
         raise
+    except BaseException:
+        # Cancellation (Ctrl+C / ``/stop``) and GeneratorExit arrive as
+        # BaseException — ``except Exception`` above never sees them, so the
+        # interrupted super-step would otherwise leave the checkpoint stuck
+        # mid-node with dangling tool calls. Flag it so the finally-block
+        # recovery closes the turn out; otherwise the next user message
+        # replays the interrupted tool batch.
+        _run_cancelled = True
+        raise
     finally:
         if stream is not None:
             try:
@@ -1056,11 +1120,20 @@ async def stream_agent_events(
             await asyncio.gather(*producers, return_exceptions=True)
         if event_sink_token is not None:
             reset_run_event_sink(event_sink_token)
-        # When the run ended with an exception the LangGraph checkpoint may be
-        # left interrupted (``next`` non-empty). Clear it — unless it's a real
-        # human-in-the-loop pause — so the next user message starts a fresh turn
-        # instead of replaying the broken step (which would look like lost history).
-        if _run_raised:
-            await _clear_interrupted_graph_state(agent, config)
+        # When the run ended with an exception or was cancelled the LangGraph
+        # checkpoint may be left interrupted (``next`` non-empty, dangling tool
+        # calls). Recover — unless it's a real human-in-the-loop pause — so the
+        # next user message starts a fresh turn instead of replaying the broken
+        # step (which would look like lost history, or worse, re-execute the
+        # interrupted tool batch). Shielded: a second cancel mid-recovery must
+        # not tear the checkpoint writes down half-done.
+        if _run_raised or _run_cancelled:
+            recovery = asyncio.ensure_future(
+                _recover_interrupted_graph_state(agent, config)
+            )
+            try:
+                await asyncio.shield(recovery)
+            except asyncio.CancelledError:
+                pass
 
     yield emitter.done(processor.full_response).data
