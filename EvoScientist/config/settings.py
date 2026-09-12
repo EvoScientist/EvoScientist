@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, get_type_hints
+from typing import Any, Literal, get_args, get_origin, get_type_hints
 
 import yaml
 from dotenv import dotenv_values, find_dotenv
@@ -266,6 +266,18 @@ class EvoScientistConfig:
     # limitation: changing langgraph_dev_port/host while a keepalive server
     # runs orphans its records — run `EvoSci server stop` before switching.
     langgraph_dev_keepalive: bool = False
+
+    # Which backend serves the CLI/TUI's graph runs: the in-process local
+    # gateway (default) or the langgraph dev server via LangGraphServerGateway.
+    # Server-gateway-migration rollback flag: flipping back to "local" restores
+    # the in-process path without code changes. While "langgraph_server" is
+    # set, the auto-started langgraph dev spawns in full deploy mode (MCP +
+    # async sub-agents loaded server-side); reusing a stripped-mode leftover
+    # is refused rather than silently degraded. This flag routes spawn mode
+    # only: the CLI keeps building its in-process agent (and its MCP
+    # sessions) until a surface actually cuts over to the server gateway -
+    # skipping that init lands with the surface cutover, not here.
+    gateway_backend: Literal["local", "langgraph_server"] = "local"
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -531,6 +543,7 @@ class EvoScientistConfig:
             self.auto_approve = True
 
         _normalize_str_enum_fields(self)
+        _normalize_literal_fields(self)
 
         # Bind hosts reach socket.bind() / the langgraph CLI verbatim, where a
         # stray-whitespace or empty value surfaces as an opaque gaierror at
@@ -686,6 +699,12 @@ def _coerce_value(value: Any, field_type: Any) -> Any:
     """
     if _is_str_enum_type(field_type):
         return field_type(str(value).strip().lower())
+    if get_origin(field_type) is Literal:
+        allowed = get_args(field_type)
+        text = str(value).strip()
+        if text in allowed:
+            return text
+        raise ValueError(f"expected one of {allowed}, got {text!r}")
     if field_type == "bool" or field_type is bool:
         if isinstance(value, str):
             return value.lower() in ("true", "1", "yes", "on")
@@ -737,6 +756,32 @@ def _normalize_str_enum_fields(config: EvoScientistConfig) -> None:
             )
             value = default
         setattr(config, field.name, value)
+
+
+def _normalize_literal_fields(config: EvoScientistConfig) -> None:
+    """Validate Literal fields, falling back to defaults on malformed values.
+
+    ``load_config`` does not coerce file values, so a typo'd Literal in the
+    config file (or in direct construction) would otherwise flow verbatim
+    into mode selection — e.g. ``gateway_backend: langgraph-server`` (hyphen)
+    silently selecting the local path in the manager.
+    """
+    for field in fields(config):
+        field_type = _config_field_type(field.name, field.type)
+        if get_origin(field_type) is not Literal:
+            continue
+
+        raw_value = getattr(config, field.name)
+        if raw_value in get_args(field_type):
+            continue
+        default = field.default
+        logging.getLogger(__name__).warning(
+            "Invalid %s %r; falling back to %s.",
+            field.name,
+            raw_value,
+            _plain_config_value(default),
+        )
+        setattr(config, field.name, default)
 
 
 def get_config_value(key: str) -> Any:
@@ -840,6 +885,7 @@ _ENV_MAPPINGS = {
     "default_workdir": "EVOSCIENTIST_WORKSPACE_DIR",
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
+    "gateway_backend": "EVOSCIENTIST_GATEWAY_BACKEND",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
