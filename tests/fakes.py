@@ -304,6 +304,8 @@ class FakeGraphGateway(GraphGateway):
         thread_store: ThreadStore | None = None,
         run_statuses: dict[str, str] | None = None,
         run_status_error: BaseException | None = None,
+        process_statuses: dict[str, str] | None = None,
+        process_status_error: BaseException | None = None,
     ) -> None:
         self.events = list(events or [])
         self.stream = stream
@@ -316,6 +318,11 @@ class FakeGraphGateway(GraphGateway):
         self.run_statuses = run_statuses or {}
         self.run_status_error = run_status_error
         self.run_status_calls: list[tuple[str, str]] = []
+        # process_id -> status, consulted by get_process_status; unknown ids read
+        # as "running" so the reader leaves them for a later poll.
+        self.process_statuses = process_statuses or {}
+        self.process_status_error = process_status_error
+        self.process_status_calls: list[str] = []
         self.requests: list[RunRequest] = []
         self.clone_calls: list[
             tuple[str, dict[str, Any] | None, GraphTarget | None]
@@ -434,6 +441,17 @@ class FakeGraphGateway(GraphGateway):
         if self.run_status_error is not None:
             raise self.run_status_error
         return self.run_statuses.get(run_id, "running")
+
+    async def get_process_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        process_id: str,
+    ) -> str:
+        self.process_status_calls.append(process_id)
+        if self.process_status_error is not None:
+            raise self.process_status_error
+        return self.process_statuses.get(process_id, "running")
 
 
 class FakeLangGraphRunModule:

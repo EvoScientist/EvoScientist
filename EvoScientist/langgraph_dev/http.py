@@ -132,9 +132,31 @@ async def get_teams(_request: Request) -> JSONResponse:
     return JSONResponse({"teams": teams})
 
 
+async def get_bg_process_status(request: Request) -> JSONResponse:
+    """Return a background process's live status for the client-side reader.
+
+    Background processes launched by ``run_in_background`` live in THIS server
+    process's registry (the served main graph runs here), so their exit is only
+    observable here. The CLI's ``bg_processes`` state reader polls this route to
+    detect completion across the process boundary, mirroring how the async-task
+    reader polls run status. ``process_id`` is a query param; ``status`` is one of
+    ``running`` / ``success`` / ``error`` / ``interrupted`` / ``unknown`` (untracked id).
+
+    Offloaded to a thread: reading the registry takes a ``threading.Lock`` and does
+    a ``Popen.poll()`` syscall, which langgraph-dev's ``blockbuster`` middleware
+    refuses on the async event loop.
+    """
+    from EvoScientist import background
+
+    process_id = request.query_params.get("process_id", "")
+    status = await asyncio.to_thread(background.poll_status, process_id)
+    return JSONResponse({"status": status})
+
+
 app = Starlette(
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),
+        Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
     ]
 )
