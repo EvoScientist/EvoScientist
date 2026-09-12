@@ -525,7 +525,88 @@ class TestApplyModelIntegration:
         assert "openrouter" in msg
 
 
-class TestApplyModelPreservesConfigByReference:
+class TestApplyModelServerBackend:
+    """On the langgraph-server backend, /model must NOT rebuild the local
+    agent: runs execute server-side and resolve the model per run from
+    ``configurable.model``. The switch mutates the live config (the per-run
+    channel's source) and validates the model, nothing more."""
+
+    def _server_gateway(self):
+        from EvoScientist.gateway.server import (
+            LangGraphServerGateway,
+            LangGraphServerThreadStore,
+        )
+        from tests.fakes import FakeLangGraphClient, FakeLangGraphThreadsClient
+
+        return LangGraphServerGateway(
+            LangGraphServerThreadStore(
+                client=FakeLangGraphClient(FakeLangGraphThreadsClient())
+            )
+        )
+
+    async def test_server_backend_skips_agent_rebuild(self):
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        cmd = ModelCommand()
+        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+
+        ctx = MagicMock()
+        ctx.ui = MagicMock()
+        ctx.ui.supports_interactive = True
+        ctx.workspace_dir = "/tmp/test"
+        ctx.checkpointer = None
+        ctx.graph_gateway = self._server_gateway()
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch("EvoScientist.EvoScientist._build_chat_model") as build,
+            patch("EvoScientist.EvoScientist.set_active_config"),
+            patch("EvoScientist.EvoScientist.set_chat_model_instance"),
+            patch("EvoScientist.cli.agent._load_agent") as load_agent,
+        ):
+            await cmd._apply_model(ctx, "minimax-m2.7", "openrouter")
+
+        # Model still validated (fail-early on a bad pick)...
+        assert build.call_count == 1
+        # ...but no local agent rebuild — the server resolves per run.
+        load_agent.assert_not_called()
+        # Live config mutated in place: the per-run channel picks it up.
+        assert cfg.model == "minimax-m2.7"
+        assert cfg.provider == "openrouter"
+        # Message names the apply semantics for the server backend.
+        msg = ctx.ui.append_system.call_args[0][0]
+        assert "minimax-m2.7" in msg
+        assert "next run" in msg
+
+    async def test_server_backend_failed_validation_leaves_session_untouched(self):
+        from EvoScientist.commands.implementation.model import ModelCommand
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        cmd = ModelCommand()
+        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+
+        ctx = MagicMock()
+        ctx.ui = MagicMock()
+        ctx.ui.supports_interactive = True
+        ctx.graph_gateway = self._server_gateway()
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch(
+                "EvoScientist.EvoScientist._build_chat_model",
+                side_effect=ValueError("no such model"),
+            ),
+            patch("EvoScientist.EvoScientist.set_active_config") as set_cfg,
+            patch("EvoScientist.cli.agent._load_agent") as load_agent,
+        ):
+            await cmd._apply_model(ctx, "broken-model", "openrouter")
+
+        assert cfg.model == "claude-sonnet-4-6"
+        set_cfg.assert_not_called()
+        load_agent.assert_not_called()
+        assert "Failed to switch model" in ctx.ui.append_system.call_args[0][0]
+
     """Regression for the din0s review on #267: serve mode (and any long-lived
     caller) holds the active config object by reference via
     ``agent_holder["config"]``.  The pure-path commit must apply the switch to
