@@ -2268,6 +2268,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         model: str | None = "test-model",
         agent_name: str | None = "EvoScientist",
         ckpt_prefix: str = "ckpt",
+        has_channel_origin: bool = False,
     ) -> None:
         """Insert minimal checkpoint rows for the given thread_ids into a fresh DB."""
         import json
@@ -2291,6 +2292,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
                 meta_dict["workspace_dir"] = workspace_dir
             if model is not None:
                 meta_dict["model"] = model
+            if has_channel_origin:
+                meta_dict["has_channel_origin"] = True
             meta = json.dumps(meta_dict)
             con.execute(
                 "INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?)",
@@ -2303,6 +2306,47 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         from unittest.mock import patch
 
         return patch("EvoScientist.sessions._api_workspace_dir", return_value=self._WS)
+
+    async def test_restore_carries_channel_origin_marker(self):
+        """A thread whose checkpoint rows carry ``has_channel_origin`` is restored
+        with the marker in its registry metadata (so the proactive cron's
+        ``threads.search(metadata={"has_channel_origin": True})`` finds it after a
+        restart); a thread without it gets no marker."""
+        import sys
+        from unittest.mock import MagicMock, patch
+
+        from EvoScientist.sessions import _restore_webui_threads_to_global_store
+
+        marked = "12345678-1234-1234-1234-123456789abc"
+        plain = "22345678-1234-1234-1234-123456789abc"
+
+        mock_store: dict = {"threads": []}
+        mock_global_store = MagicMock()
+        mock_global_store.get.side_effect = mock_store.get
+        mock_global_store.__getitem__ = lambda self, k: mock_store[k]
+        mock_global_store.__setitem__ = lambda self, k, v: mock_store.__setitem__(k, v)
+        fake_module = MagicMock()
+        fake_module.GLOBAL_STORE = mock_global_store
+
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "sessions.db")
+            self._make_db_with_threads(db, [marked], has_channel_origin=True)
+            self._make_db_with_threads(db, [plain], ckpt_prefix="plain")
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(db),
+                ),
+                patch.dict(
+                    sys.modules, {"langgraph_runtime_inmem.database": fake_module}
+                ),
+                self._patch_workspace(),
+            ):
+                await _restore_webui_threads_to_global_store()
+
+        by_id = {str(t["thread_id"]): t for t in mock_store["threads"]}
+        assert by_id[marked]["metadata"]["has_channel_origin"] is True
+        assert "has_channel_origin" not in by_id[plain]["metadata"]
 
     async def test_restores_uuid_threads_into_global_store(self):
         """UUID-format thread IDs from SQLite are injected into GlobalStore."""

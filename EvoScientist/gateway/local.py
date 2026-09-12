@@ -190,11 +190,16 @@ class LocalGraphGateway:
         target: GraphTarget,
         thread_id: str,
         values: GraphStateValues,
+        *,
+        as_node: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         local_graph = self._require_local_graph(target)
-        as_node = "model" if "_summarization_event" in values else None
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        if metadata:
+            config["metadata"] = metadata
         await local_graph.aupdate_state(
-            {"configurable": {"thread_id": thread_id}},
+            config,
             values,
             as_node=as_node,
         )

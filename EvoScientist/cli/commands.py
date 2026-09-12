@@ -57,6 +57,7 @@ from .channel import (
     dispatch_channel_slash_command,
     forget_channel_origin,
     get_channel_origin,
+    list_channel_origin_thread_ids,
     publish_to_channel_origin,
     remember_channel_origin,
 )
@@ -911,6 +912,7 @@ async def compact_conversation(
         target,
         thread_id,
         {"_summarization_event": new_event, "_summarization_session_id": session_id},
+        as_node="model",
     )
 
     return CompactResult(
@@ -1318,7 +1320,7 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(runtime_workspace, model)
+        meta = _serve_turn_metadata(runtime_state, runtime_workspace, model)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1352,6 +1354,131 @@ def _serve_process_message(
 # =============================================================================
 # Serve command (headless mode)
 # =============================================================================
+
+
+# Throttle for the serve-side proactive delivery poll. The cron fires every ~10 min,
+# so re-reading channel threads on every ~0.5s idle tick would be wasteful.
+_PROACTIVE_POLL_INTERVAL_S = 20.0
+
+
+def _serve_server_client(runtime_state: ServeRuntimeState) -> Any | None:
+    """The langgraph SDK client backing serve, or None on the local backend.
+
+    The server ThreadStore carries a ``.client`` (async SDK); the local store does
+    not. Gates the proactive marker-stamp + delivery poll to the server backend,
+    where serve's threads are server-born and visible to the cron.
+    """
+    thread_store = getattr(runtime_state.runtime_gateways, "thread_store", None)
+    return getattr(thread_store, "client", None)
+
+
+def _serve_proactive_enabled(config: "EvoScientistConfig | None") -> bool:
+    """True when proactive pushes are on AND serve runs on the server backend."""
+    return (
+        config is not None
+        and bool(config.proactive_enabled)
+        and config.gateway_backend == "langgraph_server"
+    )
+
+
+def _serve_ensure_proactive_cron(config: "EvoScientistConfig | None") -> None:
+    """Register the periodic proactive-check cron once (idempotent, best-effort).
+
+    Only when proactive pushes are enabled on the server backend. An existing
+    proactive cron (from a previous serve session — crons persist in the
+    langgraph-dev store) is reused rather than duplicated. Registration failure
+    is logged, never fatal: serve keeps working, just without proactive ticks.
+    """
+    if not _serve_proactive_enabled(config):
+        return
+    from ..proactive import cron as proactive_cron
+
+    try:
+        existing = proactive_cron.list_proactive_schedules()
+        if existing:
+            # A persisted cron may have been disabled (set_proactive_enabled);
+            # config says enabled, so reconcile rather than leave it inert.
+            for cron in existing:
+                if isinstance(cron, dict) and cron.get("enabled") is False:
+                    proactive_cron.set_proactive_enabled(cron["cron_id"], True)
+                    _serve_logger.info("Re-enabled proactive cron %s", cron["cron_id"])
+            _serve_logger.info(
+                "Proactive cron already registered (%d); not creating another",
+                len(existing),
+            )
+            return
+        created = proactive_cron.create_proactive_schedule()
+        _serve_logger.info(
+            "Registered proactive cron %s (schedule %s)",
+            created.get("cron_id"),
+            created.get("schedule"),
+        )
+    except Exception as exc:
+        _serve_logger.warning("Proactive cron registration failed: %s", exc)
+
+
+def _serve_turn_metadata(
+    runtime_state: ServeRuntimeState, workspace_dir: str | None, model: str | None
+) -> dict[str, Any]:
+    """Run metadata for a channel turn.
+
+    The usual ``build_metadata`` payload, plus the channel-origin marker when
+    proactive pushes are enabled on the server backend. Sent as the run's
+    metadata, the marker reaches both the server thread registry (so the
+    proactive cron can enumerate the thread now) and the checkpoint rows (so
+    the registry restore carries it across a langgraph-dev restart). Companion
+    to ``remember_channel_origin``, which only records the origin in-process.
+    """
+    meta = build_metadata(workspace_dir, model)
+    if _serve_proactive_enabled(runtime_state.config):
+        from ..proactive.eligibility import CHANNEL_ORIGIN_MARKER
+
+        meta = {**meta, **CHANNEL_ORIGIN_MARKER}
+    return meta
+
+
+def _serve_deliver_proactive_pushes(
+    *, runtime_state: ServeRuntimeState, seen: set[str]
+) -> None:
+    """Publish any pending proactive pushes committed into channel threads.
+
+    One poll: read each channel-origin thread's state via the server SDK client,
+    extract a proactive-push-tagged message, and publish it to the thread's
+    channel. Idempotent across polls via the caller-owned ``seen`` set (a push id is
+    recorded only on a successful publish, so a failed publish retries next poll).
+    No-op on the local backend (no server client to read server-born threads).
+    """
+    client = _serve_server_client(runtime_state)
+    if client is None:
+        return
+    thread_ids = list_channel_origin_thread_ids()
+    if not thread_ids:
+        return
+
+    from ..proactive.delivery_watcher import deliver_pending_pushes
+    from ..proactive.service import _state_messages
+
+    async def _read_messages(thread_id: str) -> list:
+        state = await client.threads.get_state(thread_id)
+        return _state_messages(state)
+
+    async def _deliver() -> list[str]:
+        return await deliver_pending_pushes(
+            thread_ids,
+            read_messages=_read_messages,
+            publish=publish_to_channel_origin,
+            seen=seen,
+        )
+
+    try:
+        delivered = runtime_state.async_runtime.run_sync(_deliver)
+    except Exception as exc:
+        _serve_logger.warning("Proactive delivery poll failed: %s", exc)
+        return
+    if delivered:
+        _serve_logger.info(
+            "Delivered %d proactive push(es): %s", len(delivered), delivered
+        )
 
 
 def _serve_drain_notifications(
@@ -1560,7 +1687,21 @@ def serve(
 
     from ..gateway import create_runtime_gateways
 
-    runtime_gateways = create_runtime_gateways()
+    if config.gateway_backend == "langgraph_server":
+        # serve already started langgraph-dev above (_ensure_async_subagent_server),
+        # so this URL is live. Runs execute server-side and threads are server-born,
+        # which is what lets the proactive cron enumerate + commit into them and the
+        # serve-side delivery poll read them back. Interactive turns run against the
+        # stripped server (no MCP tools) while this backend is selected.
+        from ..langgraph_dev.sdk import configured_langgraph_dev_url
+
+        runtime_gateways = create_runtime_gateways(
+            backend="langgraph_server",
+            base_url=configured_langgraph_dev_url(),
+        )
+    else:
+        runtime_gateways = create_runtime_gateways()
+    _serve_ensure_proactive_cron(config)
     tid = async_runtime.run_sync(
         lambda: runtime_gateways.graph_gateway.create_thread(
             GraphTarget(workspace_dir=ws)
@@ -1615,6 +1756,7 @@ def serve(
     # second gate that the poll loop always observes.
     import signal
     import threading
+    import time
 
     shutdown_event = threading.Event()
     no_active_cancel_scope = object()
@@ -1642,6 +1784,13 @@ def serve(
 
     _orig_sigint = signal.signal(signal.SIGINT, _handle_shutdown)
     _orig_sigterm = signal.signal(signal.SIGTERM, _handle_shutdown)
+
+    # Serve-side proactive delivery state: cross-poll idempotency set + throttle
+    # clock. Only exercised when proactive pushes are enabled on the server backend
+    # (the server-born threads the proactive cron commits into).
+    proactive_delivery_on = _serve_proactive_enabled(config)
+    proactive_seen: set[str] = set()
+    last_proactive_poll = 0.0
 
     try:
         while not shutdown_event.is_set():
@@ -1685,6 +1834,16 @@ def serve(
                     )
                 finally:
                     active_cancel_scope = no_active_cancel_scope
+
+            # Publish any proactive pushes the cron committed into channel threads
+            # (server backend only), throttled so we don't re-read every idle tick.
+            if proactive_delivery_on:
+                now = time.monotonic()
+                if now - last_proactive_poll >= _PROACTIVE_POLL_INTERVAL_S:
+                    last_proactive_poll = now
+                    _serve_deliver_proactive_pushes(
+                        runtime_state=runtime_state, seen=proactive_seen
+                    )
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:

@@ -214,6 +214,14 @@ class EvoScientistConfig:
     # 2024. Override if it conflicts with another local service.
     langgraph_dev_port: int = 6174
 
+    # Which graph gateway serve executes through. "local" = in-process
+    # LocalGraphGateway (default, byte-identical to today); "langgraph_server" =
+    # route runs through the langgraph-dev server via the SDK, making serve's
+    # threads server-born so the proactive cron can enumerate + commit into them
+    # and serve can read them back for channel delivery. Required for
+    # proactive_enabled to take effect.
+    gateway_backend: str = "local"
+
     # Network interface the langgraph dev subprocess binds to. Loopback by
     # default — this is the unauthenticated agent API (the agent can run
     # shell), so "0.0.0.0" is opt-in and every launcher prints a PUBLIC BIND
@@ -241,6 +249,22 @@ class EvoScientistConfig:
     # Empty string => the host's local IANA zone (resolved via tzlocal), falling
     # back to UTC if it can't be determined; set e.g. "Europe/London" to pin one.
     scheduler_default_timezone: str = ""
+
+    # --- Proactive pushes (issue #263) ---
+    # When enabled, a langgraph cron runs a tool-stripped shadow turn over idle
+    # channel threads every 10 minutes and may append ONE unprompted assistant
+    # message, which serve then delivers to the thread's channel. Requires serve
+    # to run on the langgraph-server gateway backend (the cron only sees
+    # server-born threads). Off by default.
+    proactive_enabled: bool = False
+    # Minimum minutes since the thread's last activity before a push is considered.
+    proactive_idle_minutes: int = 120
+    # Local-time window "HH:MM-HH:MM" (may wrap midnight) during which no push is
+    # generated. Empty string disables quiet hours.
+    proactive_quiet_hours: str = "22:00-08:00"
+    # IANA timezone the quiet-hours window is evaluated in. Empty string => the
+    # host's local zone (via tzlocal), falling back to UTC.
+    proactive_timezone: str = ""
 
     # Whether langgraph dev persists its runtime state to .langgraph_api/ next
     # to the subprocess cwd. True (default) keeps async-task, scheduler, and
@@ -522,6 +546,13 @@ class EvoScientistConfig:
                 cap,
             )
             self.memory_observation_cache_max_files = 2048
+
+        idle = self.proactive_idle_minutes
+        if not isinstance(idle, int) or isinstance(idle, bool) or idle < 0:
+            logging.getLogger(__name__).warning(
+                "Invalid proactive_idle_minutes %r; falling back to 120.", idle
+            )
+            self.proactive_idle_minutes = 120
 
         # auto_mode and dangerous_mode both imply auto_approve regardless of
         # source (CLI, env, config file, direct construction) — done here so the
@@ -857,11 +888,16 @@ _ENV_MAPPINGS = {
     "checkpoint_keep_per_thread": "EVOSCIENTIST_CHECKPOINT_KEEP_PER_THREAD",
     "enable_async_subagents": "EVOSCIENTIST_ENABLE_ASYNC_SUBAGENTS",
     "langgraph_dev_port": "EVOSCIENTIST_LANGGRAPH_DEV_PORT",
+    "gateway_backend": "EVOSCIENTIST_GATEWAY_BACKEND",
     "langgraph_dev_host": "EVOSCIENTIST_LANGGRAPH_DEV_HOST",
     "webui_port": "EVOSCIENTIST_WEBUI_PORT",
     "webui_host": "EVOSCIENTIST_WEBUI_HOST",
     "enable_scheduler": "EVOSCIENTIST_ENABLE_SCHEDULER",
     "scheduler_default_timezone": "EVOSCIENTIST_SCHEDULER_DEFAULT_TIMEZONE",
+    "proactive_enabled": "EVOSCIENTIST_PROACTIVE_ENABLED",
+    "proactive_idle_minutes": "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+    "proactive_quiet_hours": "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+    "proactive_timezone": "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
     "code_interpreter_max_result_chars": "EVOSCIENTIST_CODE_INTERPRETER_MAX_RESULT_CHARS",
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",

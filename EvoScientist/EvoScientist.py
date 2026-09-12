@@ -938,6 +938,7 @@ def _get_default_middleware(
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
+        create_proactive_mode_middleware,
         create_runtime_context_middleware,
         create_scheduler_middleware,
         create_tool_selector_middleware,
@@ -1044,6 +1045,14 @@ def _get_default_middleware(
                 memory_scheduler=memory_scheduler,
             )
         )
+
+    # Proactive shadow turns (#263) strip all tools so the model emits a
+    # text-only push/no-push decision. Inserted ahead of tool_selector (outer
+    # in the wrap stack) so the selector skips its LLM call when tools are
+    # already empty. Main agent only — the shadow runs the main graph, and the
+    # proactive_mode flag is never set on async sub-agent runs.
+    if not for_async_subagent:
+        mw.insert(0, create_proactive_mode_middleware())
 
     if cfg.enable_ask_user and not cfg.auto_mode and not for_async_subagent:
         from .middleware.ask_user import AskUserMiddleware
