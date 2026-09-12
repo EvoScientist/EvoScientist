@@ -224,6 +224,35 @@ async def _cancel_mid_tools(agent, thread_id: str) -> None:
         pass
 
 
+async def _hard_kill_mid_tools(agent, thread_id: str) -> None:
+    """Leave a stuck checkpoint behind, as a hard-killed process would.
+
+    Cancels mid-tools with the recovery suppressed: nothing "runs at kill
+    time", so the thread keeps its pending ``next`` and dangling tool calls.
+    """
+
+    async def _no_recovery(agent, config, snapshot=None):
+        return None
+
+    with mock_patch.object(
+        events_module, "_recover_interrupted_graph_state", _no_recovery
+    ):
+        await _cancel_mid_tools(agent, thread_id)
+
+
+async def _collect_refused_turn(agent, thread_id: str) -> list[dict[str, Any]]:
+    """Stream a turn expected to be refused; return events collected so far."""
+    events: list[dict[str, Any]] = []
+
+    async def _collect() -> None:
+        async for ev in stream_agent_events(agent, "hello", thread_id):
+            events.append(ev)
+
+    with pytest.raises(RuntimeError, match="Could not repair the interrupted state"):
+        await _collect()
+    return events
+
+
 def _tool_messages(messages: Any) -> list[ToolMessage]:
     """Extract the ToolMessages from a message sequence."""
     return [m for m in messages if isinstance(m, ToolMessage)]
@@ -265,13 +294,7 @@ async def test_hard_killed_thread_recovered_at_start_of_next_run():
     agent = _build_agent()
     cfg = {"configurable": {"thread_id": "t-kill"}}
 
-    async def _no_recovery(agent, config, snapshot=None):
-        return None
-
-    with mock_patch.object(
-        events_module, "_recover_interrupted_graph_state", _no_recovery
-    ):
-        await _cancel_mid_tools(agent, "t-kill")
+    await _hard_kill_mid_tools(agent, "t-kill")
 
     snap = await agent.aget_state(cfg)
     assert snap.next  # still stuck — the "killed" process never cleaned up
@@ -304,13 +327,7 @@ async def test_start_of_run_recovery_failure_refuses_the_run(monkeypatch):
     agent = _build_agent()
     cfg = {"configurable": {"thread_id": "t-fail"}}
 
-    async def _no_recovery(agent, config, snapshot=None):
-        return None
-
-    with mock_patch.object(
-        events_module, "_recover_interrupted_graph_state", _no_recovery
-    ):
-        await _cancel_mid_tools(agent, "t-fail")
+    await _hard_kill_mid_tools(agent, "t-fail")
     snap = await agent.aget_state(cfg)
     assert snap.next  # still stuck — recovery has not run yet
 
@@ -320,14 +337,7 @@ async def test_start_of_run_recovery_failure_refuses_the_run(monkeypatch):
     monkeypatch.setattr(agent, "aupdate_state", _failing_aupdate_state)
 
     before = len(_TOOL_SIDE_EFFECTS)
-    events: list[dict[str, Any]] = []
-
-    async def _collect_until_refused() -> None:
-        async for ev in stream_agent_events(agent, "hello", "t-fail"):
-            events.append(ev)
-
-    with pytest.raises(RuntimeError, match="Could not repair the interrupted state"):
-        await _collect_until_refused()
+    events = await _collect_refused_turn(agent, "t-fail")
 
     # The turn was refused before any streaming: an error event for the UI,
     # no tool side effects, and the stuck checkpoint untouched (still stuck,
@@ -338,3 +348,34 @@ async def test_start_of_run_recovery_failure_refuses_the_run(monkeypatch):
     assert len(_TOOL_SIDE_EFFECTS) == before
     snap = await agent.aget_state(cfg)
     assert snap.next
+
+
+async def test_unverified_recovery_refuses_the_run(monkeypatch):
+    """Repair writes that leave ``next`` non-empty must refuse the new run.
+
+    Covers the post-write verification branch of recovery: the checkpoint
+    writes "succeed" (no exception) yet the checkpoint still reports a stuck
+    ``next`` — the re-read must catch it and refuse the run.
+    """
+    _script_tool_batch_then_ack()
+    agent = _build_agent()
+    cfg = {"configurable": {"thread_id": "t-verify"}}
+
+    await _hard_kill_mid_tools(agent, "t-verify")
+    snap = await agent.aget_state(cfg)
+    assert snap.next  # stuck thread handed to the next run
+
+    async def _no_op_aupdate_state(_config, _values=None, as_node=None):
+        return None  # accept the write without actually clearing the checkpoint
+
+    monkeypatch.setattr(agent, "aupdate_state", _no_op_aupdate_state)
+
+    before = len(_TOOL_SIDE_EFFECTS)
+    events = await _collect_refused_turn(agent, "t-verify")
+
+    assert events
+    assert events[0]["type"] == "error"
+    assert "Could not repair the interrupted state" in events[0]["message"]
+    assert len(_TOOL_SIDE_EFFECTS) == before  # nothing re-executed
+    snap = await agent.aget_state(cfg)
+    assert snap.next  # still stuck — the writes never really landed
