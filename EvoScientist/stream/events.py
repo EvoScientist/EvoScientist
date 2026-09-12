@@ -87,7 +87,7 @@ async def _recover_interrupted_graph_state(
     agent: Any,
     config: dict[str, Any],
     snapshot: Any | None = None,
-) -> None:
+) -> bool:
     """Close out a run that ended mid-step so the next turn starts fresh.
 
     A cancelled (Ctrl+C / ``/stop``), crashed, or hard-killed run can leave the
@@ -120,8 +120,18 @@ async def _recover_interrupted_graph_state(
     user still needs to answer. ``_snapshot_has_pending_interrupt`` distinguishes the
     two.
 
-    Best-effort: any failure is logged at DEBUG and swallowed so it never shadows
-    the original exception or cancellation that triggered recovery.
+    Returns:
+        ``True`` when the thread is safe to run: it was already clean, it is
+        parked at a genuine human-in-the-loop interrupt (left untouched), or
+        recovery completed and the checkpoint verified clean. ``False`` when
+        the checkpoint may still be stuck — recovery failed or could not be
+        verified. Callers starting a new run must refuse to proceed in that
+        case, or LangGraph could resume the interrupted node and replay its
+        tool side effects.
+
+    Best-effort: any failure is logged and swallowed so it never shadows the
+    original exception or cancellation that triggered recovery — the return
+    value is how callers learn the outcome.
     """
     import logging
 
@@ -131,7 +141,7 @@ async def _recover_interrupted_graph_state(
             snapshot = await agent.aget_state(config)
         # Only act when the graph is genuinely stuck (non-empty next tuple)...
         if not snapshot or not getattr(snapshot, "next", None):
-            return
+            return True
         # ...and not parked at a real human-in-the-loop interrupt.
         if _snapshot_has_pending_interrupt(snapshot):
             _log.debug(
@@ -140,7 +150,7 @@ async def _recover_interrupted_graph_state(
                 config.get("configurable", {}).get("thread_id", "?"),
                 snapshot.next,
             )
-            return
+            return True
 
         stuck_at = snapshot.next
         values = getattr(snapshot, "values", None) or {}
@@ -166,6 +176,18 @@ async def _recover_interrupted_graph_state(
             write_node = "tools" if "tools" in stuck_at else stuck_at[0]
             await agent.aupdate_state(config, {"messages": patch}, as_node=write_node)
         await agent.aupdate_state(config, None, as_node=END)
+        # Verify the checkpoint actually cleared before declaring the thread
+        # safe: a transient checkpoint failure must not let a new run resume
+        # the interrupted node and replay its tool side effects.
+        verify = await agent.aget_state(config)
+        if getattr(verify, "next", None):
+            _log.warning(
+                "Interrupted graph state for thread %s is still stuck at %s "
+                "after recovery",
+                config.get("configurable", {}).get("thread_id", "?"),
+                verify.next,
+            )
+            return False
         _log.debug(
             "Recovered interrupted graph state for thread %s (was stuck at: "
             "%s; closed %d dangling tool call(s))",
@@ -173,12 +195,15 @@ async def _recover_interrupted_graph_state(
             stuck_at,
             len(patch),
         )
-    except Exception as exc:  # pragma: no cover — best-effort recovery
-        _log.debug(
-            "Could not recover interrupted graph state: %s",
+        return True
+    except Exception as exc:
+        _log.warning(
+            "Could not recover interrupted graph state for thread %s: %s",
+            config.get("configurable", {}).get("thread_id", "?"),
             exc,
             exc_info=True,
         )
+        return False
 
 
 @dataclass(frozen=True)
@@ -962,7 +987,18 @@ async def stream_agent_events(
     # interrupted tool batch. A hard process kill runs no cleanup at all, so
     # this start-of-run pass is the only chance to repair those threads.
     if getattr(snapshot, "next", None):
-        await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
+        if not await _recover_interrupted_graph_state(agent, config, snapshot=snapshot):
+            # The checkpoint may still be stuck (e.g. transient checkpoint
+            # failure). Refuse to start the run: proceeding could make
+            # LangGraph resume the interrupted node and replay its tool side
+            # effects — the exact bug this recovery exists to prevent.
+            error_msg = (
+                "Could not repair the interrupted state of this session "
+                "thread; starting a new run on it risks re-executing its "
+                "previous tool calls. Please retry, or start a new thread."
+            )
+            yield emitter.error(error_msg).data
+            raise RuntimeError(error_msg)
 
     clear_completed_memory_activity_counts()
     astream_input = await build_agent_stream_input(message, media=media)
