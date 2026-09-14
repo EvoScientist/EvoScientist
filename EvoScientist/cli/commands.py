@@ -2467,13 +2467,13 @@ def _main_callback(
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
 
-        from ..gateway import create_runtime_gateways
+        from ..gateway import create_runtime_gateways_for_config
         from ..sessions import get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import _wait_for_memory_workers_before_exit, cmd_run
         from .resume_hint import print_resume_hint
 
-        runtime_gateways = create_runtime_gateways()
+        runtime_gateways = create_runtime_gateways_for_config(config)
         graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
