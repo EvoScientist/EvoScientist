@@ -871,6 +871,7 @@ def _get_default_middleware(
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
+        create_proactive_mode_middleware,
         create_runtime_context_middleware,
         create_scheduler_middleware,
         create_tool_selector_middleware,
@@ -1000,6 +1001,16 @@ def _get_default_middleware(
     # into its own baked-in persona.
     if not for_async_subagent:
         mw.insert(0, create_active_team_middleware())
+
+    # Proactive shadow turns (#263) strip all tools so the model emits a
+    # text-only push/no-push decision. Inserted ahead of tool_selector (outer in
+    # the wrap stack) so the selector skips its LLM call when tools are already
+    # empty. Main agent only, and only when proactive pushes are enabled: a
+    # defaults-off stack is then byte-identical and pays no per-call get_config,
+    # while the shadow's config keeps proactive_enabled set. proactive_mode is
+    # never set on async sub-agent runs.
+    if cfg.proactive_enabled and not for_async_subagent:
+        mw.insert(0, create_proactive_mode_middleware())
 
     # Background-process tools (run_in_background / check_process / stop_process /
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and

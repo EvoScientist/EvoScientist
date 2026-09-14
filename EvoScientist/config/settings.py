@@ -279,6 +279,20 @@ class EvoScientistConfig:
     # skipping that init lands with the surface cutover, not here.
     gateway_backend: Literal["local", "langgraph_server"] = "local"
 
+    # Proactive research pushes (#263): when enabled and serve runs on the
+    # langgraph-server gateway backend, serve periodically checks idle channel
+    # threads and may append ONE unprompted assistant message, delivered to the
+    # thread's channel. Off by default.
+    proactive_enabled: bool = False
+    # Minimum minutes since the thread's last activity before a push is considered.
+    proactive_idle_minutes: int = 120
+    # Local-time window "HH:MM-HH:MM" (may wrap midnight) during which no push is
+    # generated. Empty string disables quiet hours.
+    proactive_quiet_hours: str = "22:00-08:00"
+    # IANA timezone the quiet-hours window is evaluated in. Empty string => the
+    # host's local zone (via tzlocal), falling back to UTC.
+    proactive_timezone: str = ""
+
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
     # ``agent.invoke()`` — i.e., this is per-turn, NOT per-conversation. For
@@ -541,6 +555,41 @@ class EvoScientistConfig:
         # the source rather than guarding every consumer.
         if isinstance(self.shell_allow_list, list | tuple):
             self.shell_allow_list = ",".join(str(s) for s in self.shell_allow_list)
+
+        idle = self.proactive_idle_minutes
+        if not isinstance(idle, int) or isinstance(idle, bool) or idle < 0:
+            logging.getLogger(__name__).warning(
+                "Invalid proactive_idle_minutes %r; falling back to 120.", idle
+            )
+            self.proactive_idle_minutes = 120
+
+        quiet_hours = self.proactive_quiet_hours
+        if quiet_hours:
+            parts = quiet_hours.split("-")
+            if (
+                len(parts) != 2
+                or _normalize_hhmm(parts[0]) is None
+                or _normalize_hhmm(parts[1]) is None
+            ):
+                logging.getLogger(__name__).warning(
+                    "Invalid proactive_quiet_hours %r (expected 'HH:MM-HH:MM'); "
+                    "quiet hours disabled.",
+                    quiet_hours,
+                )
+                self.proactive_quiet_hours = ""
+
+        timezone = self.proactive_timezone
+        if timezone:
+            from zoneinfo import ZoneInfo
+
+            try:
+                ZoneInfo(timezone)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Invalid proactive_timezone %r; falling back to the host zone.",
+                    timezone,
+                )
+                self.proactive_timezone = ""
 
         # auto_mode and dangerous_mode both imply auto_approve regardless of
         # source (CLI, env, config file, direct construction) — done here so the
@@ -908,6 +957,10 @@ _ENV_MAPPINGS = {
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
     "gateway_backend": "EVOSCIENTIST_GATEWAY_BACKEND",
+    "proactive_enabled": "EVOSCIENTIST_PROACTIVE_ENABLED",
+    "proactive_idle_minutes": "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+    "proactive_quiet_hours": "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+    "proactive_timezone": "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",

@@ -1215,3 +1215,45 @@ class TestDotenvIsolation:
 
         assert config.langgraph_dev_port == 6606
         assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+
+
+class TestProactiveConfigValidation:
+    """__post_init__ validates the proactive gate's string knobs (#263 review)."""
+
+    def test_malformed_quiet_hours_disabled(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        # missing colons -> _normalize_hhmm rejects -> cleared to "" (disabled)
+        assert (
+            EvoScientistConfig(proactive_quiet_hours="2200-0800").proactive_quiet_hours
+            == ""
+        )
+
+    def test_out_of_range_quiet_hours_disabled(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        # 24:00 is out of range (_normalize_hhmm caps at 23:59)
+        assert (
+            EvoScientistConfig(
+                proactive_quiet_hours="22:00-24:00"
+            ).proactive_quiet_hours
+            == ""
+        )
+
+    def test_valid_quiet_hours_kept(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        cfg = EvoScientistConfig(proactive_quiet_hours="22:00-08:00")
+        assert cfg.proactive_quiet_hours == "22:00-08:00"
+
+    def test_invalid_timezone_cleared(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        assert (
+            EvoScientistConfig(proactive_timezone="Not/AZone").proactive_timezone == ""
+        )
+
+    def test_valid_timezone_kept(self):
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        assert EvoScientistConfig(proactive_timezone="UTC").proactive_timezone == "UTC"
