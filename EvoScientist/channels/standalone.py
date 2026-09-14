@@ -92,6 +92,7 @@ async def _async_main(
     bus: MessageBus,
     use_agent: bool,
     send_thinking: bool,
+    config: object = None,
 ) -> None:
     """Async entry point — gather channel, dispatcher and optional consumer."""
     from .channel_manager import ChannelManager
@@ -114,13 +115,13 @@ async def _async_main(
     consumer: InboundConsumer | None = None
     if use_agent:
         logger.info("Loading EvoScientist agent...")
-        from ..gateway import create_runtime_gateways
+        from ..gateway import create_runtime_gateways_for_config
 
         # Agent construction performs synchronous MCP discovery through the
         # owned-runtime bridge.  Keep it off this already-running channel loop
         # (and avoid blocking channel health/startup work while it loads).
         agent = await _create_standalone_agent()
-        runtime_gateways = create_runtime_gateways()
+        runtime_gateways = create_runtime_gateways_for_config(config)
         logger.info("Agent loaded")
 
         consumer = InboundConsumer(
@@ -170,7 +171,7 @@ async def _async_main(
     await asyncio.gather(*tasks)
 
 
-def _ensure_standalone_dev_server() -> None:
+def _ensure_standalone_dev_server(config: object) -> None:
     """Spawn the langgraph dev server for a server-backed standalone runner.
 
     Spawns the same dev server serve uses so a headless channel running on the
@@ -189,9 +190,6 @@ def _ensure_standalone_dev_server() -> None:
     autoskill-schedule reconciliation and config-drift hint are intentionally not
     mirrored here (no console, and channels do not reconcile schedules).
     """
-    from ..config import get_effective_config
-
-    config = get_effective_config()
     if getattr(config, "gateway_backend", "local") != "langgraph_server":
         return
 
@@ -238,6 +236,10 @@ def run_standalone(
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
     """
+    config = None
     if use_agent:
-        _ensure_standalone_dev_server()
-    asyncio.run(_async_main(channel, bus, use_agent, send_thinking))
+        from ..config import get_effective_config
+
+        config = get_effective_config()
+        _ensure_standalone_dev_server(config)
+    asyncio.run(_async_main(channel, bus, use_agent, send_thinking, config))
