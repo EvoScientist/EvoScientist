@@ -641,6 +641,16 @@ def forget_channel_origin(thread_id: str | None) -> None:
         _thread_channel_origins.pop(thread_id, None)
 
 
+def list_channel_origin_thread_ids() -> list[str]:
+    """Return the thread ids that currently have a remembered channel origin.
+
+    The candidate source for serve's proactive check: every thread that has had
+    a channel-triggered turn this serve session, and so can receive a push back
+    on its channel. In-process only (per MVP scope: no restart recovery)."""
+    with _thread_channel_origins_lock:
+        return list(_thread_channel_origins.keys())
+
+
 def publish_to_channel_origin(thread_id: str | None, content: str) -> bool:
     """Schedule pushing ``content`` to the channel remembered for ``thread_id``.
 

@@ -61,6 +61,9 @@ class ProactiveDecision:
     message: AIMessage | None = None
     proactive_id: str | None = None
     source_thread_id: str | None = None
+    # For a ``decided`` push: the source head the decision is valid against, so
+    # serve can re-check at apply time that no user turn has landed since.
+    head: str | None = None
 
 
 async def _resolve_head(
@@ -111,6 +114,7 @@ async def decide_proactive_push(
         )
 
     reply = await shadow_runner(source_messages, trigger)
+    current_head = await _resolve_head(read_current_head)
 
     decision = decide_commit(
         reply,
@@ -118,7 +122,7 @@ async def decide_proactive_push(
         workspace_dir=workspace_dir,
         model=model,
         pre_head=pre_head,
-        current_head=await _resolve_head(read_current_head),
+        current_head=current_head,
         proactive_id=proactive_id,
     )
     if decision.action == "skip":
@@ -142,4 +146,5 @@ async def decide_proactive_push(
         message=decision.message,
         proactive_id=proactive_id,
         source_thread_id=source_thread_id,
+        head=current_head,
     )

@@ -4,6 +4,7 @@ import logging
 import os
 import queue
 import re
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -566,6 +567,175 @@ def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
         logging.getLogger(__name__).warning(
             "Failed to reconcile EvoMemory AutoSkills schedule", exc_info=True
         )
+
+
+# Seconds between proactive checks. The gate (idle threshold / quiet hours) is
+# the real throttle; this only sets how often serve looks — a check interval is
+# not a notification interval. Ten minutes is a conservative default.
+_PROACTIVE_CHECK_INTERVAL_SECONDS = 600
+
+
+def _serve_proactive_enabled(config: Any) -> bool:
+    """Proactive pushes run only when enabled AND serve is on the server backend.
+
+    The check reads and executes against the langgraph server (in-process shadow
+    + server-side apply), so the local backend has nothing to drive it."""
+    if config is None:
+        return False
+    return bool(getattr(config, "proactive_enabled", False)) and (
+        str(getattr(config, "gateway_backend", "local") or "local")
+        == "langgraph_server"
+    )
+
+
+def _serve_server_client(runtime_state: Any) -> Any | None:
+    """The langgraph async client serve executes with, or None on local backend."""
+    gateway = getattr(
+        getattr(runtime_state, "runtime_gateways", None), "graph_gateway", None
+    )
+    execute = getattr(gateway, "execute_gateway", None)
+    thread_store = getattr(execute, "thread_store", None)
+    return getattr(thread_store, "client", None)
+
+
+class _ProactiveProducer(threading.Thread):
+    """Background thread that decides proactive pushes and enqueues them.
+
+    Runs one persistent asyncio loop (its own langgraph client + shadow graph,
+    both bound to that loop) so the slow shadow never blocks serve's poll loop.
+    Each tick enumerates the channel-origin threads, decides a push for each
+    (gate -> shadow -> decision), and puts every ``decided`` result on
+    ``decision_queue``; serve's poll loop applies them serialized with user turns.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: Any,
+        workspace_dir: str,
+        decision_queue: Any,
+        shutdown_event: Any,
+        interval: float = _PROACTIVE_CHECK_INTERVAL_SECONDS,
+    ) -> None:
+        super().__init__(daemon=True, name="proactive-producer")
+        self._config = config
+        self._workspace_dir = workspace_dir
+        self._decision_queue = decision_queue
+        self._shutdown_event = shutdown_event
+        self._interval = interval
+
+    def run(self) -> None:  # thread target
+        import asyncio
+
+        try:
+            asyncio.run(self._amain())
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "proactive producer crashed", exc_info=True
+            )
+
+    async def _amain(self) -> None:
+        import uuid
+        from datetime import UTC, datetime
+
+        from langgraph_sdk import get_client
+
+        from ..EvoScientist import _build_chat_model
+        from ..langgraph_dev.sdk import (
+            configured_langgraph_dev_url,
+            langgraph_dev_headers,
+        )
+        from ..proactive.serve_runner import (
+            gate_settings_from_config,
+            run_serve_proactive_tick,
+        )
+        from ..proactive.service import PROACTIVE_TRIGGER
+        from ..proactive.shadow import build_shadow_graph, run_shadow_turn
+        from .channel import get_channel_origin, list_channel_origin_thread_ids
+
+        # Client + shadow graph created on THIS loop (a fresh, non-cached client,
+        # since the cached one would be bound to serve's loop). Carries the
+        # dev-server auth header like every other dev-server client in the repo.
+        client = get_client(
+            url=configured_langgraph_dev_url(), headers=langgraph_dev_headers()
+        )
+        graph = build_shadow_graph(
+            self._config, _build_chat_model(self._config), self._workspace_dir
+        )
+
+        async def shadow_runner(messages: list, trigger: str) -> str | None:
+            return await run_shadow_turn(graph, messages, trigger)
+
+        while not self._shutdown_event.is_set():
+            await self._sleep_interruptible(self._interval)
+            if self._shutdown_event.is_set():
+                break
+            candidate_ids = list_channel_origin_thread_ids()
+            if not candidate_ids:
+                continue
+            try:
+                decisions = await run_serve_proactive_tick(
+                    client,
+                    candidate_ids=candidate_ids,
+                    now=datetime.now(UTC),
+                    settings=gate_settings_from_config(self._config),
+                    shadow_runner=shadow_runner,
+                    trigger=PROACTIVE_TRIGGER,
+                    workspace_dir=self._workspace_dir,
+                    model=self._config.model,
+                    gen_id=lambda: uuid.uuid4().hex,
+                    origin_present=lambda tid: get_channel_origin(tid) is not None,
+                )
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "proactive tick failed", exc_info=True
+                )
+                continue
+            for decision in decisions:
+                if decision.stage == "decided":
+                    self._decision_queue.put(decision)
+
+    async def _sleep_interruptible(self, seconds: float) -> None:
+        """Sleep in ~1s steps so a shutdown is observed promptly."""
+        import asyncio
+
+        waited = 0.0
+        while waited < seconds and not self._shutdown_event.is_set():
+            await asyncio.sleep(min(1.0, seconds - waited))
+            waited += 1.0
+
+
+def _serve_drain_proactive(runtime_state: Any, decision_queue: Any) -> None:
+    """Apply queued proactive pushes in serve's serialized consumer.
+
+    Called from the poll loop between user turns, so the append never races a
+    user run on the same thread. Each decision is applied at most once (it is
+    dequeued here); the apply re-checks the source head and drops a push the
+    thread outgrew."""
+    import queue as _queue
+
+    client = _serve_server_client(runtime_state)
+    if client is None:
+        return
+    from ..proactive.serve_runner import apply_proactive_decision
+    from .channel import get_channel_origin, publish_to_channel_origin
+
+    while True:
+        try:
+            decision = decision_queue.get_nowait()
+        except _queue.Empty:
+            break
+        try:
+            runtime_state.async_runtime.run_sync(
+                lambda d=decision: apply_proactive_decision(
+                    client,
+                    d,
+                    publish=publish_to_channel_origin,
+                    origin_present=lambda tid: get_channel_origin(tid) is not None,
+                )
+            )
+        except Exception:
+            logging.getLogger(__name__).warning("proactive apply failed", exc_info=True)
 
 
 def _pending_skill_proposals_message(
@@ -1683,6 +1853,21 @@ def serve(
             gateway, target, thread_id
         )
 
+    _proactive_decision_queue: queue.Queue = queue.Queue()
+    _proactive_producer: _ProactiveProducer | None = None
+    if (
+        _serve_proactive_enabled(config)
+        and _serve_server_client(runtime_state) is not None
+    ):
+        _proactive_producer = _ProactiveProducer(
+            config=config,
+            workspace_dir=ws,
+            decision_queue=_proactive_decision_queue,
+            shutdown_event=shutdown_event,
+        )
+        _proactive_producer.start()
+        console.print("[dim]Proactive checks enabled.[/dim]")
+
     try:
         while not shutdown_event.is_set():
             try:
@@ -1733,11 +1918,17 @@ def serve(
                 # finished -> start writing) that would otherwise sit in state
                 # with the reader disarmed until an inbound channel message.
                 runtime_state.async_runtime.run_sync(_serve_enqueue_completions)
+
+            # Apply any proactive pushes the producer decided, serialized here
+            # with user turns so the append never races a user run.
+            _serve_drain_proactive(runtime_state, _proactive_decision_queue)
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
+        if _proactive_producer is not None:
+            _proactive_producer.join(timeout=5)
         console.print("\n[dim]Shutting down...[/dim]")
         _channels_stop(runtime=channel_runtime)
         console.print("[dim]Stopped.[/dim]")
