@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_sdk import get_client
 from langgraph_sdk.client import LangGraphClient
@@ -110,3 +110,38 @@ def create_runtime_gateways(
         thread_store=local_thread_store,
         graph_gateway=LocalGraphGateway(thread_store=local_thread_store, events=events),
     )
+
+
+def create_runtime_gateways_for_config(
+    config: Any,
+    *,
+    events: SessionEvents | None = None,
+) -> RuntimeGateways:
+    """Build runtime gateways honoring ``config.gateway_backend``.
+
+    ``local`` (the default) returns the in-process gateway unchanged.
+    ``langgraph_server`` keeps reads on the local SQLite store while routing
+    execution to the running langgraph dev server, via
+    :class:`CompositeGraphGateway` (the Stage 4 read-path strategy of #432). The
+    dev server must already be ensured — surfaces call ``ensure_langgraph_dev``
+    before this. Shared by every surface's cutover so the flag wiring lives in
+    one place; the base URL and auth headers come from the effective config via
+    ``configured_langgraph_dev_url`` / ``langgraph_dev_headers``, matching every
+    other dev-server client in the repo (``gateway/local.py``,
+    ``gateway/background_runs.py``).
+    """
+    backend = getattr(config, "gateway_backend", "local")
+    if backend == "langgraph_server":
+        from ..langgraph_dev.sdk import (
+            configured_langgraph_dev_url,
+            langgraph_dev_headers,
+        )
+
+        return create_runtime_gateways(
+            backend="langgraph_server",
+            read_backend="local",
+            base_url=configured_langgraph_dev_url(),
+            headers=langgraph_dev_headers(),
+            events=events,
+        )
+    return create_runtime_gateways(events=events)

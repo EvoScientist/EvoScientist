@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ from EvoScientist.gateway import (
     LocalThreadStore,
     RunRequest,
     create_runtime_gateways,
+    create_runtime_gateways_for_config,
 )
 from EvoScientist.gateway.composite import (
     CompositeGraphGateway,
@@ -365,3 +367,26 @@ def test_create_runtime_gateways_passthrough_unchanged():
 def test_create_runtime_gateways_rejects_unsupported_split():
     with pytest.raises(ValueError, match="Unsupported read/execute backend split"):
         create_runtime_gateways(backend="local", read_backend="langgraph_server")
+
+
+def test_gateways_for_config_local_backend():
+    gws = create_runtime_gateways_for_config(SimpleNamespace(gateway_backend="local"))
+    assert isinstance(gws.graph_gateway, LocalGraphGateway)
+
+
+def test_gateways_for_config_defaults_to_local_when_field_absent():
+    gws = create_runtime_gateways_for_config(SimpleNamespace())
+    assert isinstance(gws.graph_gateway, LocalGraphGateway)
+
+
+def test_gateways_for_config_server_backend_builds_composite(monkeypatch):
+    import EvoScientist.langgraph_dev.sdk as sdk
+
+    monkeypatch.setattr(
+        sdk, "configured_langgraph_dev_url", lambda: "http://localhost:2024"
+    )
+    gws = create_runtime_gateways_for_config(
+        SimpleNamespace(gateway_backend="langgraph_server")
+    )
+    assert isinstance(gws.graph_gateway, CompositeGraphGateway)
+    assert isinstance(gws.thread_store, LocalThreadStore)
