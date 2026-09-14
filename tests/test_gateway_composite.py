@@ -336,6 +336,12 @@ async def test_delete_server_error_is_non_fatal():
     assert await _composite(read, execute).delete_thread(UUID) is True
 
 
+def test_execute_gateway_exposes_execution_side():
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e")
+    assert _composite(read, execute).execute_gateway is execute
+
+
 async def test_events_property_reflects_execution_side():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
