@@ -170,6 +170,52 @@ async def _async_main(
     await asyncio.gather(*tasks)
 
 
+def _ensure_standalone_dev_server() -> None:
+    """Spawn the langgraph dev server for a server-backed standalone runner.
+
+    Spawns the same dev server serve uses so a headless channel running on the
+    ``langgraph_server`` gateway backend has a live dev server for execution,
+    async sub-agents, and memory workers — the one production surface that never
+    spawned it before. On the default ``local`` backend this is a no-op, keeping
+    headless channels byte-identical to prior behavior. Runs headless: no
+    console/typer UI, progress goes to the log.
+
+    Called synchronously before the asyncio loop starts (like serve), so the
+    cold-start poll never blocks the channel event loop. Unlike serve, there is
+    no console to render serve's red mismatch banner + ``typer.Exit``: a
+    workspace/deploy-mode mismatch from :func:`ensure_langgraph_dev` is logged as
+    a single error line and re-raised to abort startup; a generic start failure
+    degrades to in-process fallback inside the manager without raising. serve's
+    autoskill-schedule reconciliation and config-drift hint are intentionally not
+    mirrored here (no console, and channels do not reconcile schedules).
+    """
+    from ..config import get_effective_config
+
+    config = get_effective_config()
+    if getattr(config, "gateway_backend", "local") != "langgraph_server":
+        return
+
+    import os
+
+    from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
+    from ..paths import ensure_dirs, set_workspace_root
+
+    ws = (
+        os.path.abspath(os.path.expanduser(config.default_workdir))
+        if config.default_workdir
+        else os.getcwd()
+    )
+    os.makedirs(ws, exist_ok=True)
+    set_workspace_root(ws)
+    ensure_dirs()
+    logger.info("Starting background agent server (langgraph dev)...")
+    try:
+        ensure_langgraph_dev(config, workspace_dir=ws)
+    except WorkspaceMismatchError as exc:
+        logger.error("Cannot start server-backed standalone channel: %s", exc)
+        raise
+
+
 def run_standalone(
     channel: Channel,
     bus: MessageBus,
@@ -192,4 +238,6 @@ def run_standalone(
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
     """
+    if use_agent:
+        _ensure_standalone_dev_server()
     asyncio.run(_async_main(channel, bus, use_agent, send_thinking))
