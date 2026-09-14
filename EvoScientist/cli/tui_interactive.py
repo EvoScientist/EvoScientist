@@ -30,7 +30,7 @@ from ..gateway import (
     GraphTarget,
     RunRequest,
     RuntimeGateways,
-    create_runtime_gateways,
+    create_runtime_gateways_for_config,
 )
 from ..paths import DATA_DIR
 from ..sessions import get_checkpointer
@@ -512,7 +512,7 @@ def run_textual_interactive(
     from ..stream.sink import SessionEventSink
 
     event_sink = SessionEventSink()
-    runtime_gateways = create_runtime_gateways(events=event_sink)
+    runtime_gateways = create_runtime_gateways_for_config(config, events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
 
     try:
