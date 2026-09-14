@@ -82,6 +82,11 @@ class CompositeGraphGateway:
         self._read = read
         self._execute = execute
 
+    @property
+    def execute_gateway(self) -> GraphGateway:
+        """The execution-side gateway (server), e.g. for boot-time parked-thread repair."""
+        return self._execute
+
     # ``events`` is the streaming event sink; it belongs to the execution side.
     @property
     def events(self) -> SessionEvents | None:

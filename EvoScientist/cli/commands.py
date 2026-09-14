@@ -1559,9 +1559,9 @@ def serve(
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
 
-    from ..gateway import create_runtime_gateways
+    from ..gateway import create_runtime_gateways_for_config
 
-    runtime_gateways = create_runtime_gateways()
+    runtime_gateways = create_runtime_gateways_for_config(config)
     tid = async_runtime.run_sync(
         lambda: runtime_gateways.graph_gateway.create_thread(
             GraphTarget(workspace_dir=ws)
