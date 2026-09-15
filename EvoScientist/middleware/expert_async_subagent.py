@@ -186,7 +186,11 @@ def _build_run_input(
 
 
 def _build_task_envelope(
-    subagent_type: str, thread_id: str, run_id: str, tool_call_id: str
+    subagent_type: str,
+    thread_id: str,
+    run_id: str,
+    tool_call_id: str,
+    description: str,
 ) -> Command:
     """Wrap a successful launch in the ``Command`` shape the router expects."""
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -199,6 +203,9 @@ def _build_task_envelope(
         "created_at": now,
         "last_checked_at": now,
         "last_updated_at": now,
+        # Carried so a completion notification can name which task finished
+        # when several are in flight (read back in ``cli/async_notifier``).
+        "description": description[:200],
     }
     msg = f"Launched async subagent. task_id: {thread_id}"
     return Command(
@@ -388,7 +395,11 @@ def _build_expert_start_tool(
             )
             return f"Failed to launch async subagent '{subagent_type}': {e}"
         return _build_task_envelope(
-            subagent_type, thread["thread_id"], run["run_id"], runtime.tool_call_id
+            subagent_type,
+            thread["thread_id"],
+            run["run_id"],
+            runtime.tool_call_id,
+            description,
         )
 
     async def astart_async_task(
@@ -431,7 +442,11 @@ def _build_expert_start_tool(
             )
             return f"Failed to launch async subagent '{subagent_type}': {e}"
         return _build_task_envelope(
-            subagent_type, thread["thread_id"], run["run_id"], runtime.tool_call_id
+            subagent_type,
+            thread["thread_id"],
+            run["run_id"],
+            runtime.tool_call_id,
+            description,
         )
 
     return StructuredTool.from_function(

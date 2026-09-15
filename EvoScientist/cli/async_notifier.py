@@ -21,7 +21,9 @@ from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict
 if TYPE_CHECKING:
     from ..gateway import GraphGateway, GraphTarget
 
-TERMINAL_STATUSES: Final = frozenset({"success", "error", "timeout", "interrupted"})
+TERMINAL_STATUSES: Final = frozenset(
+    {"cancelled", "success", "error", "timeout", "interrupted"}
+)
 """Aligned with langgraph_sdk.schema.RunStatus terminal values.
 
 Cancel operations transition runs into ``interrupted`` (not ``cancelled``).
@@ -42,6 +44,10 @@ class AsyncTaskState(TypedDict, total=False):
     # state-based reader needs these to look up and label a task's live run.
     agent_name: str
     run_id: str
+    # Task description captured at launch (``_build_task_envelope``) so the
+    # completion notification can name which task finished when several are in
+    # flight; the removed watcher carried this from the launch call directly.
+    description: str
 
 
 AsyncTasksState: TypeAlias = dict[str, AsyncTaskState]
@@ -235,6 +241,26 @@ async def read_async_tasks_from_gateway(
 _reader_enqueued_task_ids: set[tuple[str, str]] = set()
 
 
+async def _run_was_rotated(
+    gateway: GraphGateway,
+    target: GraphTarget,
+    thread_id: str,
+    task_id: str,
+    run_id: str,
+) -> bool:
+    """True when the task's current ``run_id`` in state no longer matches ``run_id``.
+
+    ``update_async_task`` interrupts the old run before it commits the record
+    with the new ``run_id``. A poll that lands in that window reads the old
+    ``run_id``, polls it, and gets ``interrupted`` for a task the user asked to
+    keep going. A changed ``run_id`` on a fresh read means a rotation, not a
+    completion, so the ``interrupted`` should be dropped.
+    """
+    registry = await read_async_tasks_from_gateway(gateway, target, thread_id)
+    current = (registry or {}).get(task_id, {}).get("run_id")
+    return bool(current) and current != run_id
+
+
 async def enqueue_completions_from_state(
     gateway: GraphGateway,
     target: GraphTarget,
@@ -274,12 +300,20 @@ async def enqueue_completions_from_state(
             continue  # server unavailable / transient — retry next poll
         if status not in TERMINAL_STATUSES:
             continue
+        if status == "interrupted" and await _run_was_rotated(
+            gateway, target, thread_id, task_id, run_id
+        ):
+            # A revision rotated the run mid-poll; the interrupt is the old run
+            # being replaced, not a completion. The new run's completion
+            # surfaces under its own run_key on a later poll.
+            continue
         enqueue_task_notification(
             AsyncTaskNotification(
                 task_id=task_id,
                 agent_name=task.get("agent_name", ""),
                 status=status,
                 received_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                prompt=str(task.get("description", "")),
                 origin_cli_thread_id=thread_id,
             )
         )
