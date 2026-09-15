@@ -607,6 +607,8 @@ class TestApplyModelServerBackend:
         load_agent.assert_not_called()
         assert "Failed to switch model" in ctx.ui.append_system.call_args[0][0]
 
+
+class TestApplyModelPreservesConfigByReference:
     """Regression for the din0s review on #267: serve mode (and any long-lived
     caller) holds the active config object by reference via
     ``agent_holder["config"]``.  The pure-path commit must apply the switch to
