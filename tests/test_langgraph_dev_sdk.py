@@ -21,9 +21,9 @@ def _clean_client_cache():
 def _patched_builder(monkeypatch):
     built = []
 
-    def _fake_builder(*, url, headers):
+    def _fake_builder(*, url, headers, timeout=None):
         client = object()
-        built.append((client, url, dict(headers)))
+        built.append((client, url, dict(headers), timeout))
         return client
 
     monkeypatch.setattr(sdk, "get_langgraph_async_client", _fake_builder)
@@ -51,6 +51,16 @@ def test_none_and_explicit_default_headers_share_one_client(monkeypatch):
 
     assert via_none is via_explicit
     assert len(built) == 1
+
+
+def test_cached_read_client_capped_with_read_timeout(monkeypatch):
+    """The cached read-only client is built with the 10s cap so a jammed dev
+    server cannot block channel/serve dispatch for the SDK-default read=300s."""
+    built = _patched_builder(monkeypatch)
+
+    cached_langgraph_async_client("http://127.0.0.1:8123")
+
+    assert built[0][3] == sdk._READ_CLIENT_TIMEOUT_SECONDS
 
 
 def test_different_headers_get_separate_clients(monkeypatch):
