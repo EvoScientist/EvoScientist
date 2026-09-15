@@ -351,12 +351,12 @@ def test_post_policy_approves_non_shell_tool():
 def test_post_policy_rejects_dangerous_under_server_auto_approve(monkeypatch):
     from types import SimpleNamespace
 
-    import EvoScientist.config.settings as settings_mod
+    import EvoScientist.EvoScientist as evo_mod
 
     monkeypatch.setattr(
-        settings_mod,
-        "load_config",
-        lambda: SimpleNamespace(
+        evo_mod,
+        "_ensure_config",
+        lambda config=None: SimpleNamespace(
             auto_approve=True, dangerous_mode=False, shell_allow_list=""
         ),
     )

@@ -118,9 +118,13 @@ def _config_policy_snapshot(
     cannot speak, the human's interactive approval stands).
     """
     try:
-        from ..config.settings import load_config
+        from ..EvoScientist import _ensure_config
 
-        cfg = load_config()
+        # Session-effective config, not the file: --auto-approve / --dangerous
+        # and EVOSCIENTIST_* overrides live here (the same object
+        # ``hitl_suppressed_for_run`` reads), and the graph is always armed, so
+        # this snapshot is the only gate for every attended surface.
+        cfg = _ensure_config()
     except Exception:
         return None, {}
 

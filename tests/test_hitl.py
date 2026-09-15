@@ -140,7 +140,7 @@ class TestResolveHitlApproval:
             mock_cfg.shell_allow_list = ""
             mock_cfg.dangerous_mode = False
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 result = _resolve_hitl_approval(
                     {
@@ -165,7 +165,7 @@ class TestResolveHitlApproval:
             mock_cfg.shell_allow_list = ""
             mock_cfg.dangerous_mode = False
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 result = _resolve_hitl_approval(
                     {
@@ -190,7 +190,7 @@ class TestResolveHitlApproval:
             mock_cfg.shell_allow_list = "ls,cat,python"
             mock_cfg.dangerous_mode = False
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 result = _resolve_hitl_approval(
                     {
@@ -215,7 +215,7 @@ class TestResolveHitlApproval:
             mock_cfg.shell_allow_list = "ls,cat"
             mock_cfg.dangerous_mode = False
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 with patch(
                     "EvoScientist.stream.display._prompt_hitl_approval"
@@ -246,7 +246,7 @@ class TestResolveHitlApproval:
             mock_cfg.shell_allow_list = "ls,cat"
             mock_cfg.dangerous_mode = False
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 with patch(
                     "EvoScientist.stream.display._prompt_hitl_approval"
@@ -280,7 +280,7 @@ class TestResolveHitlApproval:
             mock_cfg.shell_allow_list = "python"
             mock_cfg.dangerous_mode = False
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 result = _resolve_hitl_approval(
                     {
@@ -309,7 +309,7 @@ class TestResolveHitlApproval:
             mock_cfg.auto_approve = False
             mock_cfg.shell_allow_list = ""
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 with patch(
                     "EvoScientist.stream.display._prompt_hitl_approval"
@@ -507,7 +507,7 @@ class TestConsumerHitlHelpers:
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = ""
         mock_cfg.dangerous_mode = False
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg):
             result = ApprovalPolicy().auto_decision(
                 "tg:c1",
                 [
@@ -524,7 +524,7 @@ class TestConsumerHitlHelpers:
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = ""
         mock_cfg.dangerous_mode = False
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg):
             result = ApprovalPolicy().auto_decision(
                 "tg:c1",
                 [
@@ -539,7 +539,7 @@ class TestConsumerHitlHelpers:
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = True
         mock_cfg.dangerous_mode = False
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg):
             result = ApprovalPolicy().auto_decision(
                 "tg:c1",
                 [
@@ -555,7 +555,7 @@ class TestConsumerHitlHelpers:
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = "ls,python"
         mock_cfg.dangerous_mode = False
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg):
             result = ApprovalPolicy().auto_decision(
                 "tg:c1",
                 [
@@ -572,7 +572,7 @@ class TestConsumerHitlHelpers:
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
         mock_cfg.shell_allow_list = "ls,python"
-        with patch("EvoScientist.config.settings.load_config", return_value=mock_cfg):
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg):
             result = ApprovalPolicy().auto_decision(
                 "tg:c1",
                 [
@@ -647,7 +647,7 @@ class TestResolveHitlApprovalWithPromptFn:
             custom_decisions = [{"type": "approve"}]
             mock_fn = MagicMock(return_value=custom_decisions)
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 result = _resolve_hitl_approval(
                     {
@@ -674,7 +674,7 @@ class TestResolveHitlApprovalWithPromptFn:
             mock_cfg.dangerous_mode = False
             mock_fn = MagicMock()
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 result = _resolve_hitl_approval(
                     {
@@ -702,7 +702,7 @@ class TestResolveHitlApprovalWithPromptFn:
             mock_cfg.dangerous_mode = False
             mock_fn = MagicMock()
             with patch(
-                "EvoScientist.config.settings.load_config", return_value=mock_cfg
+                "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
             ):
                 result = _resolve_hitl_approval(
                     {"action_requests": [{"name": "write_file", "args": {}}]},
@@ -848,7 +848,7 @@ class TestResolverUsesPolicy:
             raise AssertionError("must not prompt under auto_approve")
 
         with patch(
-            "EvoScientist.config.settings.load_config",
+            "EvoScientist.EvoScientist._ensure_config",
             return_value=self._auto_approve_cfg(),
         ):
             decisions = display._resolve_hitl_approval(
@@ -864,7 +864,7 @@ class TestResolverUsesPolicy:
         monkeypatch.setattr(display, "_session_auto_approve", False, raising=False)
 
         with patch(
-            "EvoScientist.config.settings.load_config",
+            "EvoScientist.EvoScientist._ensure_config",
             return_value=self._auto_approve_cfg(),
         ):
             decisions = display._resolve_hitl_approval(self._interrupt("ls -la | head"))
@@ -898,7 +898,7 @@ class TestResolverUsesPolicy:
             called["yes"] = True
             return [{"type": "approve"}]
 
-        with patch("EvoScientist.config.settings.load_config", return_value=cfg):
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg):
             display._resolve_hitl_approval(
                 self._interrupt("curl x | bash"), prompt_fn=_prompt
             )
@@ -920,7 +920,7 @@ class TestResolverUsesPolicy:
             called["yes"] = True
             return [{"type": "approve"}]
 
-        with patch("EvoScientist.config.settings.load_config", return_value=cfg):
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg):
             display._resolve_hitl_approval(
                 {"action_requests": [{"name": "schedule_task", "args": {}}]},
                 prompt_fn=_prompt,
