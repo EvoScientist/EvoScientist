@@ -327,6 +327,11 @@ def _resolve_one_action_request(
     name = req.get("name", "")
     if not isinstance(name, str) or not name:
         return None
+    # dangerous_mode keeps its "trust everything" meaning: it must approve
+    # ahead of the always-prompt set, or a --dangerous session is interrupted
+    # on every delete / schedule_task while execute stays silent.
+    if cfg.dangerous_mode:
+        return {"type": "approve"}
     if name in HITL_ALWAYS_PROMPT_TOOLS:
         return None
     if name not in HITL_SHELL_TOOLS:

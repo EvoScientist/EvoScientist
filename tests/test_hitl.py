@@ -307,6 +307,7 @@ class TestResolveHitlApproval:
             disp._session_auto_approve = False
             mock_cfg = MagicMock()
             mock_cfg.auto_approve = False
+            mock_cfg.dangerous_mode = False
             mock_cfg.shell_allow_list = ""
             with patch(
                 "EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg
@@ -571,6 +572,7 @@ class TestConsumerHitlHelpers:
 
         mock_cfg = MagicMock()
         mock_cfg.auto_approve = False
+        mock_cfg.dangerous_mode = False
         mock_cfg.shell_allow_list = "ls,python"
         with patch("EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg):
             result = ApprovalPolicy().auto_decision(
@@ -580,6 +582,25 @@ class TestConsumerHitlHelpers:
                 ],
             )
         assert result is None
+
+    def test_dangerous_mode_approves_always_prompt_tools(self):
+        """dangerous_mode keeps its trust-everything meaning ahead of the
+        always-prompt set: delete (and a dangerous execute) approve instead of
+        interrupting the session on every guarded call."""
+        from EvoScientist.channels.interaction import resolve_config_decisions
+
+        mock_cfg = MagicMock()
+        mock_cfg.auto_approve = False
+        mock_cfg.dangerous_mode = True
+        mock_cfg.shell_allow_list = ""
+        with patch("EvoScientist.EvoScientist._ensure_config", return_value=mock_cfg):
+            result = resolve_config_decisions(
+                [
+                    {"name": "delete", "args": {"file_path": "/f.txt"}},
+                    {"name": "execute", "args": {"command": "curl x | bash"}},
+                ]
+            )
+        assert result == [{"type": "approve"}, {"type": "approve"}]
 
 
 # =============================================================================
