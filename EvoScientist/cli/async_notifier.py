@@ -24,9 +24,13 @@ if TYPE_CHECKING:
 TERMINAL_STATUSES: Final = frozenset(
     {"cancelled", "success", "error", "timeout", "interrupted"}
 )
-"""Aligned with langgraph_sdk.schema.RunStatus terminal values.
+"""Terminal statuses that need no further polling.
 
-Cancel operations transition runs into ``interrupted`` (not ``cancelled``).
+Checked against both a langgraph run status and a deepagents task status. A
+langgraph run cancel surfaces as ``interrupted``, but deepagents'
+``cancel_async_task`` writes ``cancelled`` into the task's own
+``async_tasks[*].status`` — so both must count as terminal, or a cancelled task
+gets polled and reported as a spurious ``interrupted``.
 """
 
 # How many times the watcher will re-join the SSE stream when it closes
