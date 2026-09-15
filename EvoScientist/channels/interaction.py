@@ -86,12 +86,12 @@ def approve_decisions(action_requests: list) -> list[dict]:
     return [{"type": "approve"} for _ in range(n)]
 
 
-def _config_policy_snapshot(
+def config_policy_snapshot(
     action_requests: list[dict],
 ) -> tuple[list[dict] | None, dict[int, dict]]:
     """One config load → ``(decisions, rejections)`` for an approval operation.
 
-    The single evaluation point of the config policy: one ``load_config()``
+    The single evaluation point of the config policy: one ``_ensure_config()``
     produces both views an approval operation needs, so the policy verdicts
     the operation acts on are immutable for its whole duration — prompt,
     human wait, and reply. Re-loading config after the human replies would
@@ -165,7 +165,7 @@ def decisions_after_human_approval(
     blanket "1" would run the dangerous command the policy just refused.
 
     *policy_rejections* are the per-index REJECT decisions from the
-    prompt-time :func:`_config_policy_snapshot` — the same single config
+    prompt-time :func:`config_policy_snapshot` — the same single config
     load that decided to prompt. The function is pure (no config IO), so a
     config toggle while the human was deciding cannot change what the
     approval operation does with the reply.
@@ -369,13 +369,13 @@ def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
     request, or ``None`` when any request needs a human — the caller then prompts
     (mounts a widget, calls ``input()``, routes to a channel). Fail-closed to
     ``None`` on config-load errors and malformed requests. The evaluation is
-    :func:`_config_policy_snapshot` (one config load); this collapsed view is
+    :func:`config_policy_snapshot` (one config load); this collapsed view is
     what the attended UIs and the channel auto-decision path
     (:meth:`ApprovalPolicy.auto_decision`) consume, so an ``auto_approve``
     dangerous command is a REJECT with a reason everywhere, never a silent
     collapse to "needs a human".
     """
-    return _config_policy_snapshot(action_requests)[0]
+    return config_policy_snapshot(action_requests)[0]
 
 
 class ApprovalPolicy:
@@ -406,7 +406,7 @@ class ApprovalPolicy:
         """One policy evaluation for a complete approval operation.
 
         Returns ``(decisions, rejections)`` from a single
-        :func:`_config_policy_snapshot` load: ``decisions`` auto-resolves the
+        :func:`config_policy_snapshot` load: ``decisions`` auto-resolves the
         interrupt when the policy can (session grant or config rules) and is
         ``None`` when a human must be prompted; ``rejections`` are the same
         load's per-request REJECT decisions, consumed by the reply branches
@@ -426,7 +426,7 @@ class ApprovalPolicy:
             return [], {}
         if self.is_session_granted(session_key):
             return approve_decisions(action_requests), {}
-        return _config_policy_snapshot(action_requests)
+        return config_policy_snapshot(action_requests)
 
     def auto_decision(
         self, session_key: str, action_requests: list[dict]

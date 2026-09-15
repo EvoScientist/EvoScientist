@@ -2282,10 +2282,15 @@ def run_textual_interactive(
                             # shell_allow_list gap on the attended TUI. Returns
                             # None when a human decision is genuinely needed.
                             from ..channels.interaction import (
-                                resolve_config_decisions,
+                                config_policy_snapshot,
                             )
 
-                            _cfg_decisions = resolve_config_decisions(action_reqs)
+                            # Keep the rejections so a human "approve all" on the
+                            # widget cannot override a policy REJECT in a mixed
+                            # batch (parity with the Rich CLI resolver).
+                            _cfg_decisions, _cfg_rejections = config_policy_snapshot(
+                                action_reqs
+                            )
                             if _cfg_decisions is not None:
                                 # A config-level rejection (e.g. auto_approve
                                 # refusing a dangerous command) must be visible
@@ -2322,10 +2327,17 @@ def run_textual_interactive(
                                 if decided_event.auto_approve_session:
                                     self._hitl_auto_approve = True
                                 from ..backends import build_hitl_resume
-
-                                _stream_input = build_hitl_resume(
-                                    interrupt_id, decided_event.decisions
+                                from ..channels.interaction import (
+                                    decisions_after_human_approval,
                                 )
+
+                                _human = decided_event.decisions
+                                if all(_d.get("type") == "approve" for _d in _human):
+                                    # An approve-all keeps the policy's REJECTs.
+                                    _human = decisions_after_human_approval(
+                                        action_reqs, _cfg_rejections
+                                    )
+                                _stream_input = build_hitl_resume(interrupt_id, _human)
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop with resume
                             else:

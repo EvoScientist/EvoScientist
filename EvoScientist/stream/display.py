@@ -1170,7 +1170,10 @@ def _resolve_hitl_approval(
     """
     global _session_auto_approve
 
-    from ..channels.interaction import resolve_config_decisions
+    from ..channels.interaction import (
+        config_policy_snapshot,
+        decisions_after_human_approval,
+    )
 
     action_requests = interrupt_data.get("action_requests", [])
     if not action_requests:
@@ -1182,14 +1185,21 @@ def _resolve_hitl_approval(
         return [{"type": "approve"} for _ in action_requests]
 
     # Config-rule fast path (shared with the TUI). Returns full decisions when
-    # config clears every request, or None when a human decision is needed.
-    decisions = resolve_config_decisions(action_requests)
+    # config clears every request, or None when a human decision is needed;
+    # the rejections are kept so a human "approve all" cannot override a policy
+    # REJECT in a mixed batch.
+    decisions, rejections = config_policy_snapshot(action_requests)
     if decisions is not None:
         return decisions
 
-    if prompt_fn is not None:
-        return prompt_fn(action_requests)
-    return _prompt_hitl_approval(action_requests, question_runner=question_runner)
+    human = (
+        prompt_fn(action_requests)
+        if prompt_fn is not None
+        else _prompt_hitl_approval(action_requests, question_runner=question_runner)
+    )
+    if human is None or any(d.get("type") != "approve" for d in human):
+        return human
+    return decisions_after_human_approval(action_requests, rejections)
 
 
 def _prompt_hitl_approval(
