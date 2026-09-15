@@ -682,6 +682,21 @@ def _config_to_dict(config: EvoScientistConfig) -> dict[str, Any]:
 # Config value operations
 # =============================================================================
 
+_LITERAL_ALIASES = {"rich": "cli", "textual": "tui"}
+"""Legacy ``ui_backend`` spellings written by earlier onboarding versions.
+
+Kept in step with ``_LEGACY_BACKEND_MAP`` in ``cli/tui_runtime.py``; config is a
+foundational module, so the map is duplicated here rather than importing across
+the config -> cli boundary.
+"""
+
+
+def _match_literal(value: Any, allowed: tuple[Any, ...]) -> str | None:
+    """Case-insensitive Literal match that also accepts legacy aliases."""
+    text = str(value).strip().lower()
+    text = _LITERAL_ALIASES.get(text, text)
+    return text if text in allowed else None
+
 
 def _coerce_value(value: Any, field_type: Any) -> Any:
     """Coerce a value to the expected field type.
@@ -701,10 +716,10 @@ def _coerce_value(value: Any, field_type: Any) -> Any:
         return field_type(str(value).strip().lower())
     if get_origin(field_type) is Literal:
         allowed = get_args(field_type)
-        text = str(value).strip()
-        if text in allowed:
-            return text
-        raise ValueError(f"expected one of {allowed}, got {text!r}")
+        text = _match_literal(value, allowed)
+        if text is None:
+            raise ValueError(f"expected one of {allowed}, got {value!r}")
+        return text
     if field_type == "bool" or field_type is bool:
         if isinstance(value, str):
             return value.lower() in ("true", "1", "yes", "on")
@@ -772,16 +787,16 @@ def _normalize_literal_fields(config: EvoScientistConfig) -> None:
             continue
 
         raw_value = getattr(config, field.name)
-        if raw_value in get_args(field_type):
-            continue
-        default = field.default
-        logging.getLogger(__name__).warning(
-            "Invalid %s %r; falling back to %s.",
-            field.name,
-            raw_value,
-            _plain_config_value(default),
-        )
-        setattr(config, field.name, default)
+        value = _match_literal(raw_value, get_args(field_type))
+        if value is None:
+            value = field.default
+            logging.getLogger(__name__).warning(
+                "Invalid %s %r; falling back to %s.",
+                field.name,
+                raw_value,
+                _plain_config_value(value),
+            )
+        setattr(config, field.name, value)
 
 
 def get_config_value(key: str) -> Any:
