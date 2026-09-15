@@ -2083,11 +2083,32 @@ class TestIsHitlSuppressed:
 
         assert is_hitl_suppressed({"configurable": {"hitl_suppressed": True}}) is True
 
-    def test_explicit_config_absent_key_is_false(self):
+    def test_absent_key_falls_back_to_serving_auto_approve(self, monkeypatch):
+        """A run that reached langgraph dev directly (WebUI / deploy / Studio)
+        never carries the key; it falls back to the serving process's
+        auto_approve so those clients honour it, while gateway-driven runs
+        (key always present) are unaffected and an explicit key still wins."""
+        from types import SimpleNamespace
+
+        import EvoScientist.EvoScientist as evo_mod
         from EvoScientist.backends import is_hitl_suppressed
 
+        monkeypatch.setattr(
+            evo_mod,
+            "_ensure_config",
+            lambda config=None: SimpleNamespace(auto_approve=True),
+        )
+        assert is_hitl_suppressed({"configurable": {}}) is True
+        assert is_hitl_suppressed({}) is True
+        # An explicit key still wins over the serving-config fallback.
+        assert is_hitl_suppressed({"configurable": {"hitl_suppressed": False}}) is False
+
+        monkeypatch.setattr(
+            evo_mod,
+            "_ensure_config",
+            lambda config=None: SimpleNamespace(auto_approve=False),
+        )
         assert is_hitl_suppressed({"configurable": {}}) is False
-        assert is_hitl_suppressed({}) is False
 
     def test_malformed_configurable_is_false(self):
         from EvoScientist.backends import is_hitl_suppressed

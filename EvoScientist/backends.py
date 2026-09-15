@@ -373,9 +373,15 @@ def is_hitl_suppressed(config=None) -> bool:
 
     Reads :data:`HITL_SUPPRESSED_KEY` off an explicit *config* (the run's
     ``RunnableConfig`` dict) or, when omitted, the ambient
-    ``langgraph.config.get_config()``. Returns ``False`` outside a runnable
-    context (direct calls, tests) — the safe floor: armed graph, no backend
-    guard. Mirrors ``middleware.active_team._read_active_teams``.
+    ``langgraph.config.get_config()``. The key is written only by the two
+    Python gateways; a run that reached langgraph dev directly (WebUI,
+    ``EvoSci deploy`` SDK clients, LangSmith Studio) never carries it, so when
+    it is absent we fall back to the serving process's ``auto_approve`` — this
+    restores the base behaviour for those clients (a file/env ``auto_approve``
+    deployment runs unattended instead of parking on an interrupt nothing
+    answers), while gateway-driven runs, which always set the key, are
+    unaffected. Returns ``False`` outside a runnable context (direct calls
+    without a config, tests) — the safe floor: armed graph, no backend guard.
     """
     if config is None:
         try:
@@ -389,7 +395,11 @@ def is_hitl_suppressed(config=None) -> bool:
     configurable = config.get("configurable") or {}
     if not isinstance(configurable, dict):
         return False
-    return bool(configurable.get(HITL_SUPPRESSED_KEY))
+    if HITL_SUPPRESSED_KEY not in configurable:
+        from .EvoScientist import _ensure_config
+
+        return bool(_ensure_config().auto_approve)
+    return bool(configurable[HITL_SUPPRESSED_KEY])
 
 
 def hitl_suppressed_for_run(config=None) -> bool:
