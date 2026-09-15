@@ -331,7 +331,18 @@ def _shell_req(command: str) -> dict:
     return {"name": "execute", "args": {"command": command}, "id": "tool-1"}
 
 
-def test_post_policy_prompts_ordinary_command_when_attended():
+def test_post_policy_prompts_ordinary_command_when_attended(monkeypatch):
+    # Pin the session-effective config so the route does not answer against
+    # whatever the running machine happens to have (e.g. auto_approve: true).
+    import EvoScientist.EvoScientist as evo_mod
+
+    monkeypatch.setattr(
+        evo_mod,
+        "_ensure_config",
+        lambda config=None: EvoScientistConfig(
+            auto_approve=False, dangerous_mode=False, shell_allow_list=""
+        ),
+    )
     resp = client.post(
         "/api/policy", json={"action_requests": [_shell_req("rm -rf build")]}
     )
