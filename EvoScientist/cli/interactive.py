@@ -1131,16 +1131,23 @@ def cmd_interactive(
                             runtime=async_runtime,
                         )
                         # Channel turns run on the same thread as local prompts
-                        # and can launch async tasks; without this read their
-                        # completions surface only on the next local prompt.
-                        # Same call + args as the local-path post-stream read;
-                        # best-effort, never blocks the reply.
+                        # and can launch async tasks and background processes;
+                        # without these reads their completions surface only on
+                        # the next local prompt. Same calls + args as the
+                        # local-path post-stream reads; best-effort, never
+                        # blocks the reply.
+                        _channel_target = GraphTarget(
+                            local_graph=ready_agent,
+                            workspace_dir=state["workspace_dir"],
+                        )
                         await async_notifier.enqueue_completions_from_state(
                             runtime_gateways.graph_gateway,
-                            GraphTarget(
-                                local_graph=ready_agent,
-                                workspace_dir=state["workspace_dir"],
-                            ),
+                            _channel_target,
+                            state["thread_id"],
+                        )
+                        await async_notifier.enqueue_bg_process_completions_from_state(
+                            runtime_gateways.graph_gateway,
+                            _channel_target,
                             state["thread_id"],
                         )
                     except Exception as e:
