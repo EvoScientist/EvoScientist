@@ -636,9 +636,22 @@ class LangGraphServerGateway:
         interrupts = list(stream.interrupts)
 
         if len(interrupts) > 1:
+            # run.respond can target one of several outstanding interrupts by
+            # id, so an id-keyed build_hitl_resume payload whose key matches a
+            # replayed interrupt resumes that one (parallel sub-agent approvals
+            # arrive this way once #444 arms HITL on every run). An unmatched
+            # key is a client bug and still raises.
+            if _is_id_keyed_hitl_resume(response):
+                (key,) = response
+                ids = {
+                    str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
+                }
+                if str(key) in ids:
+                    await stream.run.respond(response[key], interrupt_id=str(key))
+                    return
             raise RuntimeError(
                 f"Thread {thread_id} has {len(interrupts)} pending interrupts; "
-                "only single-interrupt resume is supported"
+                "resume requires an id-keyed payload matching one of them"
             )
         if not interrupts:
             raise RuntimeError(
