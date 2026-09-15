@@ -23,6 +23,12 @@ from langgraph.types import PregelTask, StateSnapshot
 
 from EvoScientist.EvoScientist import EvoScientist_agent as _agent
 
+# Re-exported so langgraph-api finds the ``stream_transformers`` symbol on this
+# graph's source module and opts the served graph into the ``custom`` stream
+# mode; the logic lives in the sibling module so it stays unit-testable without
+# building the agent this import triggers.
+from .stream_transformers import stream_transformers
+
 # The model fallback chain is seeded in _get_default_middleware (the
 # factory every graph — main, sync/async subagent — is built through), so
 # no registration-time seeding is needed here: importing the agent builds
@@ -250,4 +256,4 @@ def _apply_filter_to_all_registered_graphs() -> None:
 _apply_filter_to_all_registered_graphs()
 
 
-__all__ = ["EvoScientist_agent"]
+__all__ = ["EvoScientist_agent", "stream_transformers"]
