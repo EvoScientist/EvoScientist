@@ -1719,6 +1719,11 @@ def serve(
                     )
                 finally:
                     active_cancel_scope = no_active_cancel_scope
+                # Re-arm the idle reader unconditionally after a notification
+                # turn too: it may have launched a chained task (analysis
+                # finished -> start writing) that would otherwise sit in state
+                # with the reader disarmed until an inbound channel message.
+                runtime_state.async_runtime.run_sync(_serve_enqueue_completions)
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:

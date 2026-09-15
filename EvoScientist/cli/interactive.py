@@ -1215,6 +1215,18 @@ def cmd_interactive(
                         tx.append(_origin.sender or _origin.chat_id, style="cyan")
                         tx.append("]", style="dim")
                         console.print(tx)
+                # Re-arm the completion reader after the notification turn: it
+                # may have launched a chained task (e.g. analysis finished ->
+                # start writing) that would otherwise sit in state with the idle
+                # reader disarmed until the next local prompt. Best-effort.
+                await async_notifier.enqueue_completions_from_state(
+                    runtime_gateways.graph_gateway,
+                    GraphTarget(
+                        local_graph=ready_agent,
+                        workspace_dir=state["workspace_dir"],
+                    ),
+                    _notif_tid,
+                )
                 await _refresh_status_snapshot(reset_streaming_text=True)
                 console.print()
                 _print_separator()
@@ -1522,40 +1534,42 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
-                        await _run_serialized_turn(
-                            turn_lock,
-                            lambda _agent=ready_agent, _message=message_to_send, _thread_id=state["thread_id"], _meta=meta: (
-                                _run_rich_cli_streaming_turn(
-                                    ui_backend=state["ui_backend"],
-                                    agent=_agent,
-                                    message=_message,
-                                    thread_id=_thread_id,
-                                    show_thinking=show_thinking,
-                                    interactive=True,
-                                    metadata=_meta,
-                                    configurable_extra=active_teams_configurable_extra(
-                                        channel_runtime
-                                    ),
-                                    on_stream_event=_handle_stream_status_event,
-                                    status_footer_builder=_stream_status_footer,
-                                    gateway=runtime_gateways.graph_gateway,
-                                    runtime=async_runtime,
-                                )
-                            ),
-                        )
-                        # On stream close, read async_tasks off thread state and
-                        # enqueue any completions not yet surfaced (state-based
-                        # path, additive to the in-process watcher; the poller
-                        # above drains + injects). Best-effort — never blocks the
-                        # prompt on a status-read failure.
-                        await async_notifier.enqueue_completions_from_state(
-                            runtime_gateways.graph_gateway,
-                            GraphTarget(
-                                local_graph=ready_agent,
-                                workspace_dir=state["workspace_dir"],
-                            ),
-                            state["thread_id"],
-                        )
+                        try:
+                            await _run_serialized_turn(
+                                turn_lock,
+                                lambda _agent=ready_agent, _message=message_to_send, _thread_id=state["thread_id"], _meta=meta: (
+                                    _run_rich_cli_streaming_turn(
+                                        ui_backend=state["ui_backend"],
+                                        agent=_agent,
+                                        message=_message,
+                                        thread_id=_thread_id,
+                                        show_thinking=show_thinking,
+                                        interactive=True,
+                                        metadata=_meta,
+                                        configurable_extra=active_teams_configurable_extra(
+                                            channel_runtime
+                                        ),
+                                        on_stream_event=_handle_stream_status_event,
+                                        status_footer_builder=_stream_status_footer,
+                                        gateway=runtime_gateways.graph_gateway,
+                                        runtime=async_runtime,
+                                    )
+                                ),
+                            )
+                        finally:
+                            # On stream close — or a raised turn — read async_tasks
+                            # off thread state and enqueue any completions not yet
+                            # surfaced, so a task launched mid-turn still surfaces
+                            # and keeps idle polling armed. Best-effort — never
+                            # blocks the prompt on a status-read failure.
+                            await async_notifier.enqueue_completions_from_state(
+                                runtime_gateways.graph_gateway,
+                                GraphTarget(
+                                    local_graph=ready_agent,
+                                    workspace_dir=state["workspace_dir"],
+                                ),
+                                state["thread_id"],
+                            )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
                         _print_separator()
