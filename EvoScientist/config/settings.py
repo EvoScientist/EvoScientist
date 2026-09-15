@@ -535,6 +535,13 @@ class EvoScientistConfig:
             )
             self.memory_observation_cache_max_files = 2048
 
+        # shell_allow_list is typed as a comma-separated string, but a YAML list
+        # spelling (``shell_allow_list: [ls, cat]``) survives here as a list.
+        # The policy resolver calls ``.split`` on it, so normalise to CSV once at
+        # the source rather than guarding every consumer.
+        if isinstance(self.shell_allow_list, list | tuple):
+            self.shell_allow_list = ",".join(str(s) for s in self.shell_allow_list)
+
         # auto_mode and dangerous_mode both imply auto_approve regardless of
         # source (CLI, env, config file, direct construction) — done here so the
         # "unattended → zero prompts" contract holds even when either is set via

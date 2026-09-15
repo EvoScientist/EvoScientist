@@ -725,6 +725,18 @@ class TestPriorityChain:
             EvoScientistConfig(sandbox_execute_timeout="abc").sandbox_execute_timeout
             == 300
         )
+
+    def test_shell_allow_list_yaml_list_normalized_to_csv(self):
+        """A YAML list spelling survives ``__post_init__`` as a list; normalize
+        to CSV so the policy resolver's ``.split`` never raises AttributeError."""
+        assert EvoScientistConfig(shell_allow_list=["ls", "cat"]).shell_allow_list == (
+            "ls,cat"
+        )
+        assert EvoScientistConfig(shell_allow_list=("ls",)).shell_allow_list == "ls"
+        # The normal comma-separated string is left untouched.
+        assert EvoScientistConfig(shell_allow_list="ls,cat").shell_allow_list == (
+            "ls,cat"
+        )
         assert (
             EvoScientistConfig(sandbox_execute_timeout=True).sandbox_execute_timeout
             == 300
