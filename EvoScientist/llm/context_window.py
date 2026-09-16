@@ -44,7 +44,7 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "hy4-preview": 1_048_576,
     "hy3": 262_000,
     # DeepSeek rolling Flash tier (native ``deepseek-flash``, V4.1-Flash today).
-    "deepseek-flash": 1_050_000,
+    "deepseek-flash": 1_000_000,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.
