@@ -43,6 +43,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Tencent Hunyuan — HY4 preview 1M, HY3 262K (OpenRouter ``tencent/hy*``).
     "hy4-preview": 1_048_576,
     "hy3": 262_000,
+    # DeepSeek rolling Flash tier (native ``deepseek-flash``, V4.1-Flash today).
+    "deepseek-flash": 1_050_000,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.
