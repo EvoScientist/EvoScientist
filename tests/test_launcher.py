@@ -1,0 +1,265 @@
+"""Tests for the shell-agnostic launcher core (``EvoScientist.deploy.launcher``).
+
+These pin the pieces that moved out of ``run_webui`` so they can be reused by a
+desktop shell: the backend reuse/start decision and its error-code taxonomy,
+the secret-scrubbing env, the front-end runners' preflight, readiness polling,
+and the JSON ready/error signal from the standalone entrypoint.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from EvoScientist.deploy import launcher as lm
+from EvoScientist.langgraph_dev import manager as lgm
+
+
+def _cfg(workspace_dir: str = "/tmp/wsA", **kw):
+    base = {
+        "workspace_dir": workspace_dir,
+        "backend_host": "127.0.0.1",
+        "backend_port": 6174,
+        "webui_host": "127.0.0.1",
+        "webui_port": 4716,
+        **kw,
+    }
+    return lm.LauncherConfig(**base)
+
+
+# --------------------------------------------------------------------------- #
+# _resolve_backend — decision + error-code taxonomy
+# --------------------------------------------------------------------------- #
+def _patch_backend_probes(
+    monkeypatch, *, occupied: bool, running: bool, sidecar=None, fingerprint="fp-now"
+):
+    monkeypatch.setattr(lgm, "_is_port_occupied", lambda *_a, **_k: occupied)
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: running)
+    monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: sidecar)
+    monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: fingerprint)
+
+
+def test_resolve_backend_free_port_starts(monkeypatch):
+    _patch_backend_probes(monkeypatch, occupied=False, running=False)
+    decision = lm._resolve_backend(_cfg(), object())
+    assert decision.action == "start"
+    assert decision.warnings == []
+
+
+def test_resolve_backend_foreign_occupant_is_port_conflict(monkeypatch):
+    _patch_backend_probes(monkeypatch, occupied=True, running=False)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(), object())
+    assert ei.value.code == "port_conflict"
+
+
+def test_resolve_backend_other_workspace_is_mismatch(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsB", "deploy_mode": True},
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.code == "workspace_mismatch"
+
+
+def test_resolve_backend_stripped_server_is_refused(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsA", "deploy_mode": False},
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.code == "stripped_backend"
+
+
+def test_resolve_backend_same_workspace_reuses(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "deploy_mode": True,
+            "config_fingerprint": "fp-now",
+        },
+    )
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert decision.action == "reuse"
+    assert decision.warnings == []
+
+
+def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "deploy_mode": True,
+            "config_fingerprint": "fp-old",
+        },
+        fingerprint="fp-now",
+    )
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert decision.action == "reuse"
+    assert any("Config changed" in w for w in decision.warnings)
+
+
+def test_resolve_backend_no_sidecar_reuses(monkeypatch):
+    """An older subprocess with no sidecar is reused, as before."""
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    decision = lm._resolve_backend(_cfg(), object())
+    assert decision.action == "reuse"
+
+
+# --------------------------------------------------------------------------- #
+# _scrubbed_env
+# --------------------------------------------------------------------------- #
+def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-secret")
+    monkeypatch.setenv("SOME_TOKEN", "t")
+    monkeypatch.setenv("DB_PASSWORD", "p")
+    monkeypatch.setenv("ANTHROPIC_KEY", "k")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=4096")
+
+    env = lm._scrubbed_env({"PORT": "4716"})
+
+    assert "OPENROUTER_API_KEY" not in env
+    assert "SOME_TOKEN" not in env
+    assert "DB_PASSWORD" not in env
+    assert "ANTHROPIC_KEY" not in env  # matched by the *_KEY suffix rule
+    assert env["PATH"] == "/usr/bin"
+    assert env["NODE_OPTIONS"] == "--max-old-space-size=4096"
+    assert env["PORT"] == "4716"
+
+
+# --------------------------------------------------------------------------- #
+# Runner preflight
+# --------------------------------------------------------------------------- #
+def test_npx_runner_preflight_reports_node_missing(monkeypatch):
+    monkeypatch.setattr(lm.shutil, "which", lambda _n: None)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm.NpxWebUIRunner().preflight(_cfg())
+    assert ei.value.code == "node_missing"
+
+
+def test_bundled_runner_preflight_missing_node(tmp_path):
+    runner = lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=tmp_path / "node")
+    with pytest.raises(lm.LauncherError) as ei:
+        runner.preflight(_cfg())
+    assert ei.value.code == "node_missing"
+
+
+def test_bundled_runner_preflight_missing_server(tmp_path):
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\n")
+    runner = lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node)
+    with pytest.raises(lm.LauncherError) as ei:
+        runner.preflight(_cfg())
+    assert ei.value.code == "node_missing"
+    assert "server" in ei.value.message.lower()
+
+
+def test_bundled_runner_preflight_ok(tmp_path):
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\n")
+    server = tmp_path / "dist" / "server.js"
+    server.parent.mkdir(parents=True)
+    server.write_text("// server")
+    lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).preflight(_cfg())
+
+
+# --------------------------------------------------------------------------- #
+# Readiness polling
+# --------------------------------------------------------------------------- #
+def test_poll_ready_times_out(monkeypatch):
+    def _boom(*_a, **_k):
+        raise ConnectionRefusedError("nope")
+
+    monkeypatch.setattr(lm.urllib.request, "urlopen", _boom)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._poll_ready("http://127.0.0.1:4716", timeout=0.05, interval=0.01)
+    assert ei.value.code == "not_ready"
+
+
+def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: False)
+    launcher = lm.WebUILauncher(object(), _cfg(), lm.NpxWebUIRunner())
+    with pytest.raises(lm.LauncherError) as ei:
+        launcher.wait_ready(timeout=0.05)
+    assert ei.value.code == "not_ready"
+
+
+# --------------------------------------------------------------------------- #
+# Standalone JSON entrypoint
+# --------------------------------------------------------------------------- #
+def test_main_emits_error_json_on_launcher_error(monkeypatch, capsys):
+    import EvoScientist.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod, "get_effective_config", lambda: SimpleNamespace(default_workdir="")
+    )
+    monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _c: None)
+    monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
+
+    class _FailingLauncher:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def start(self):
+            raise lm.LauncherError("stripped_backend", "boom", "do X")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(lm, "WebUILauncher", _FailingLauncher)
+
+    rc = lm.main(["--workspace", "/tmp/ws"])
+    assert rc == 1
+
+    out = capsys.readouterr()
+    payload = json.loads(out.out.strip())
+    assert payload["status"] == "error"
+    assert payload["code"] == "stripped_backend"
+    assert payload["message"] == "boom"
+    assert payload["detail"] == "do X"
+    # stderr carries the error for logs; stdout stays machine-parseable.
+    assert "stripped_backend" in out.err
+
+
+# --------------------------------------------------------------------------- #
+# build_launcher_config resolution
+# --------------------------------------------------------------------------- #
+def test_build_launcher_config_resolves_ports_and_workspace(monkeypatch, tmp_path):
+    monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
+    config = SimpleNamespace(
+        default_workdir=str(tmp_path),
+        langgraph_dev_port=6000,
+        langgraph_dev_host="127.0.0.1",
+        webui_port=4000,
+        webui_host="0.0.0.0",
+        langgraph_dev_keepalive=True,
+    )
+    cfg = lm.build_launcher_config(config, workspace_dir=None)
+    assert cfg.workspace_dir == str(Path(tmp_path).resolve())
+    assert cfg.backend_port == 6000
+    assert cfg.webui_port == 4000
+    assert cfg.webui_host == "0.0.0.0"
+    assert cfg.keepalive is True
+    assert cfg.open_browser is False
+
+
+def test_build_launcher_config_blank_host_falls_back_to_loopback(monkeypatch):
+    monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
+    config = SimpleNamespace(default_workdir="/tmp/x", webui_host="   ")
+    cfg = lm.build_launcher_config(config, workspace_dir=None)
+    assert cfg.webui_host == "127.0.0.1"
