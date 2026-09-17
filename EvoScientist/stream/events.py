@@ -893,11 +893,13 @@ async def stream_agent_events(
 
         events = SessionEventSink()
 
-    configurable: dict[str, Any] = {
-        **(configurable_extra or {}),
-        "thread_id": thread_id,
-    }
-    config: dict[str, Any] = {"configurable": configurable}
+    # Single assembly point for the run config (see gateway.types). No
+    # per-run overrides on the local path: the local agent is rebuilt on
+    # model switches and binds recursion_limit at construction from the
+    # same live config, so injecting them per run would be redundant.
+    from ..gateway.types import resolve_per_run_config
+
+    config = resolve_per_run_config(thread_id, configurable_extra)
     if metadata:
         config["metadata"] = metadata
     emitter = StreamEventEmitter()

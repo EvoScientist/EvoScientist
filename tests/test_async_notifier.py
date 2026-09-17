@@ -1,9 +1,7 @@
 """Tests for async sub-agent auto-notification."""
 
-import asyncio
 import queue
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -63,99 +61,6 @@ async def test_read_async_tasks_from_gateway_reads_state_values():
     )
 
     assert tasks == {"task-1": {"status": "success"}}
-
-
-async def test_watcher_pushes_notification_on_stream_end():
-    # Stream yields one "values" chunk with the final state, then closes
-    final_state = {
-        "messages": [{"type": "ai", "content": "Quantum superposition is..."}]
-    }
-    chunks = [SimpleNamespace(event="values", data=final_state)]
-
-    async def fake_stream(thread_id, run_id, stream_mode):
-        for c in chunks:
-            yield c
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    # runs.get is used to fetch terminal status when stream ends
-    client.runs.get = AsyncMock(return_value={"status": "success"})
-
-    await async_notifier.watch_run_and_notify(client, "thr-1", "run-1", "writing-agent")
-
-    notifs = _drain_queue(async_notifier._notification_queue)
-    assert len(notifs) == 1
-    assert notifs[0].task_id == "thr-1"
-    assert notifs[0].agent_name == "writing-agent"
-    assert notifs[0].status == "success"
-
-
-async def test_watcher_pushes_error_status_on_stream_exception():
-    async def fake_stream(*a, **kw):
-        raise RuntimeError("network broken")
-        yield  # unreachable; makes this an async generator
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    # On stream failure, watcher falls back to runs.get for terminal status
-    client.runs.get = AsyncMock(
-        return_value={"status": "error", "error": "network broken"}
-    )
-
-    await async_notifier.watch_run_and_notify(client, "thr-4", "run-4", "agentZ")
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert notif.status == "error"
-
-
-async def test_spawn_watcher_replaces_existing_for_same_thread():
-    """A second spawn_watcher with the same thread_id cancels the old watcher
-    and registers the new one — supports update_async_task creating a new
-    run_id on the same thread_id."""
-    spawn_starts = []
-
-    async def fake_stream_long(*a, **kw):
-        spawn_starts.append("started")
-        # Simulate a long-running stream that gets cancelled
-        try:
-            while True:
-                await asyncio.sleep(0.01)
-                yield SimpleNamespace(event="values", data={"messages": []})
-        except asyncio.CancelledError:
-            raise
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream_long
-    client.runs.get = AsyncMock(return_value={"status": "success"})
-
-    # First spawn for thread X, run R1
-    t1 = async_notifier.spawn_watcher(client, "thr-X", "R1", "agent")
-    assert t1 is not None
-    assert async_notifier._watcher_by_thread["thr-X"] is t1
-    await asyncio.sleep(0.02)  # let it start streaming
-
-    # Second spawn for SAME thread X, NEW run R2
-    t2 = async_notifier.spawn_watcher(client, "thr-X", "R2", "agent")
-    assert t2 is not None
-    assert t2 is not t1
-    assert async_notifier._watcher_by_thread["thr-X"] is t2
-
-    # Old watcher should be cancelled
-    await asyncio.sleep(0.02)
-    assert t1.cancelled() or t1.done()
-
-    # Cleanup the new task too
-    t2.cancel()
-    try:
-        await t2
-    except asyncio.CancelledError:
-        pass
-
-    # Cancelled watchers don't push notifications
-    assert _drain_one_queue_helper(async_notifier._notification_queue) == []
-    assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
-    for q in async_notifier._notifications_by_thread.values():
-        assert _drain_one_queue_helper(q) == []
 
 
 # ============================================================================
@@ -586,8 +491,13 @@ def _drain_all(an_mod):
 
 def _reset_notifier_state(an_mod):
     _drain_all(an_mod)
-    an_mod._active_watchers.clear()
-    an_mod._watcher_by_thread.clear()
+    an_mod._reader_enqueued_task_ids.clear()
+    an_mod._idle_reader_last_poll.clear()
+    an_mod._idle_reader_active_seen.clear()
+    an_mod._reader_enqueued_process_ids.clear()
+    an_mod._bg_reader_in_flight.clear()
+    an_mod._bg_idle_reader_last_poll.clear()
+    an_mod._bg_idle_reader_active_seen.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -709,221 +619,6 @@ def test_has_pending_notifications_respects_routing():
 # ============================================================================
 
 
-async def test_watcher_reports_error_on_in_band_error_event():
-    """SSE error event in the stream → notification.status == 'error'."""
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(
-            event="values", data={"messages": [{"type": "ai", "content": "partial"}]}
-        )
-        yield SimpleNamespace(event="error", data={"message": "subagent crashed"})
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(
-        return_value={"status": "success"}
-    )  # would mislead — should NOT be consulted
-
-    await async_notifier.watch_run_and_notify(client, "thrE", "rE", "agentE")
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert notif.status == "error"
-    # We must NOT have polled runs.get — the in-band signal is authoritative.
-    client.runs.get.assert_not_awaited()
-
-
-async def test_watcher_clean_exit_with_runs_get_success_is_success():
-    """Clean stream exit + runs.get reports success → status=success."""
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(
-            event="values", data={"messages": [{"type": "ai", "content": "ok"}]}
-        )
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(return_value={"status": "success"})
-
-    await async_notifier.watch_run_and_notify(client, "thrS", "rS", "agentS")
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert notif.status == "success"
-    client.runs.get.assert_awaited_once()
-
-
-async def test_watcher_clean_exit_with_runs_get_error_is_race_safe():
-    """Clean stream exit + no in-band error event + runs.get returns 'error'
-    → status=success (race-safe).
-
-    Server-side state writeback can transiently report 'error' for an
-    actually-successful run between SSE close and final-state finalization.
-    The absence of an in-band error event is authoritative — the run did
-    not actually error. This test guards against re-introducing the race
-    we hit when an earlier 'always-poll runs.get' attempt blindly trusted
-    the runs.get value.
-    """
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(
-            event="values", data={"messages": [{"type": "ai", "content": "ok"}]}
-        )
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(return_value={"status": "error"})
-
-    await async_notifier.watch_run_and_notify(client, "thrS", "rS", "agentS")
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert notif.status == "success"
-
-
-async def test_watcher_clean_exit_with_runs_get_running_drops_notification():
-    """Reproduces the production bug: clean SSE close while run is still
-    actually running (HTTP keep-alive timeout under concurrency).
-
-    Pre-fix: watcher trusted clean stream exit as 'success' and enqueued a
-    false-positive notification for a still-running task.
-
-    Post-fix: watcher verifies via runs.get and re-joins the stream until
-    either a terminal status arrives or the reconnect budget is exhausted.
-    With a mock that perpetually closes cleanly + reports 'running', the
-    watcher exhausts retries and enqueues nothing.
-    """
-
-    async def fake_stream(*a, **kw):
-        # SSE closes cleanly after one chunk — simulates HTTP keep-alive
-        # timeout where the server drops the long-poll without an error.
-        yield SimpleNamespace(event="values", data={"messages": []})
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(return_value={"status": "running"})
-
-    await async_notifier.watch_run_and_notify(
-        client, "thr-bug", "rB", "data-analysis-agent"
-    )
-
-    # No notification should have been enqueued anywhere.
-    assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
-    assert _drain_one_queue_helper(async_notifier._notification_queue) == []
-    for q in async_notifier._notifications_by_thread.values():
-        assert _drain_one_queue_helper(q) == []
-    # runs.get must have been polled at least once (the verify step).
-    assert client.runs.get.await_count >= 1
-
-
-async def test_watcher_unknown_status_treated_as_non_terminal():
-    """Future / unrecognized status values should trigger a re-join, not a
-    false-positive notification.
-
-    If the SDK introduces a new non-terminal status (e.g. ``queued``,
-    ``scheduled``) the watcher must NOT silently default to ``success`` —
-    that would re-introduce the same class of bug we just fixed. The
-    safe-default policy: anything outside ``TERMINAL_STATUSES`` is treated
-    as ``running``-equivalent and triggers re-join.
-    """
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(event="values", data={"messages": []})
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    # First call: hypothetical future status. Second call: actual completion.
-    client.runs.get = AsyncMock(
-        side_effect=[{"status": "queued"}, {"status": "success"}]
-    )
-
-    await async_notifier.watch_run_and_notify(client, "thrU", "rU", "agentU")
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert notif.status == "success"
-    # Re-joined because the unknown status was not terminal.
-    assert client.runs.get.await_count == 2
-
-
-async def test_watcher_runs_get_persistent_failure_drops_notification(monkeypatch):
-    """If ``runs.get`` keeps raising, the watcher cannot verify terminal
-    state and MUST drop the notification rather than default to
-    ``"success"`` — otherwise a transient server outage reintroduces the
-    same false-positive class this watcher exists to prevent."""
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(event="values", data={"messages": []})
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(side_effect=RuntimeError("server unreachable"))
-
-    # Skip the backoff sleeps to keep this test fast.
-    async def _no_sleep(*a, **kw):
-        return None
-
-    monkeypatch.setattr(async_notifier.asyncio, "sleep", _no_sleep)
-
-    await async_notifier.watch_run_and_notify(client, "thrG", "rG", "agentG")
-
-    # No notification — watcher exhausted the reconnect budget. Check every
-    # queue routing could send to so a future routing change can't make this
-    # test silently false-pass.
-    assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
-    assert _drain_one_queue_helper(async_notifier._notification_queue) == []
-    for q in async_notifier._notifications_by_thread.values():
-        assert _drain_one_queue_helper(q) == []
-    # 1 initial + _MAX_RECONNECT_ATTEMPTS retries = 11 calls total.
-    assert client.runs.get.await_count == async_notifier._MAX_RECONNECT_ATTEMPTS + 1
-
-
-async def test_watcher_runs_get_transient_failure_recovers(monkeypatch):
-    """A single ``runs.get`` failure followed by a successful response on
-    retry must produce a correct notification — verifies the bounded
-    retry path actually recovers from transient outages instead of just
-    eating notifications."""
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(event="values", data={"messages": []})
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    # First call raises (transient), second call returns terminal status.
-    client.runs.get = AsyncMock(
-        side_effect=[RuntimeError("blip"), {"status": "success"}]
-    )
-
-    async def _no_sleep(*a, **kw):
-        return None
-
-    monkeypatch.setattr(async_notifier.asyncio, "sleep", _no_sleep)
-
-    await async_notifier.watch_run_and_notify(client, "thrT", "rT", "agentT")
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert notif.status == "success"
-    assert client.runs.get.await_count == 2
-
-
-async def test_watcher_re_joins_stream_until_terminal_status():
-    """When runs.get returns 'running' on attempt N but a terminal status
-    on attempt N+1, the watcher re-joins, observes the terminal status,
-    and enqueues the notification correctly."""
-
-    async def fake_stream(*a, **kw):
-        yield SimpleNamespace(event="values", data={"messages": []})
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    # First call: still running. Second call: success.
-    client.runs.get = AsyncMock(
-        side_effect=[{"status": "running"}, {"status": "success"}]
-    )
-
-    await async_notifier.watch_run_and_notify(client, "thrR", "rR", "agentR")
-
-    notif = async_notifier._notification_queue.get_nowait()
-    assert notif.status == "success"
-    assert client.runs.get.await_count == 2
-
-
 # ============================================================================
 # Tests for Fix #4 — consume_notifications surfaces exceptions to caller
 # (callers wrap the await in try/except — verify the inner contract is to
@@ -951,31 +646,6 @@ async def test_consume_notifications_propagates_inject_exception():
         await an.consume_notifications(boom_runner, state_reader)
 
 
-async def test_watcher_skips_notification_on_stream_fail_with_nonterminal_status():
-    """When the SSE stream errors AND runs.get returns a non-terminal status
-    (e.g. ``pending`` because the run is still alive), the watcher must
-    NOT enqueue a notification — otherwise the user sees a confusing
-    ``⚠ pending`` line for a task that's still working. This is the early-
-    return guard added alongside the Fix #2 revert."""
-
-    async def fake_stream(*a, **kw):
-        # Simulate transient transport error mid-stream.
-        raise RuntimeError("connection reset")
-        yield  # unreachable; makes this an async generator
-
-    client = MagicMock()
-    client.runs.join_stream = fake_stream
-    client.runs.get = AsyncMock(return_value={"status": "pending"})
-
-    await async_notifier.watch_run_and_notify(client, "thrP", "rP", "agentP")
-
-    # No notification should have been enqueued in any queue.
-    assert _drain_one_queue_helper(async_notifier._unrouted_queue) == []
-    assert _drain_one_queue_helper(async_notifier._notification_queue) == []
-    for q in async_notifier._notifications_by_thread.values():
-        assert _drain_one_queue_helper(q) == []
-
-
 def _drain_one_queue_helper(q):
     items = []
     while True:
@@ -985,32 +655,768 @@ def _drain_one_queue_helper(q):
             return items
 
 
-def test_active_watchers_grace_filters_by_thread():
-    """Verifies _has_relevant_active_watchers ignores sibling-thread watchers
-    (otherwise consume_notifications grace period would block thread A by up
-    to 3s waiting for thread B's unrelated watchers to finish)."""
+# ============================================================================
+# Slice 2.4a — state-based client reader (enqueue_completions_from_state)
+#
+# Backend-agnostic: the reader touches only the GraphGateway protocol
+# (get_state_values + get_run_status), so FakeGraphGateway exercises the same
+# path both real backends implement. The concrete per-backend get_run_status
+# reads are pinned in test_graph_gateway.py.
+# ============================================================================
 
-    # Sentinel handles — only their identity matters here, not their type
-    handle_a = object()
-    handle_b = object()
-    handle_unrouted = object()
 
-    async_notifier._active_watchers[handle_a] = "threadA"
-    async_notifier._active_watchers[handle_b] = "threadB"
-    async_notifier._active_watchers[handle_unrouted] = None
+def _running_registry(agent_name: str = "writing-agent"):
+    return {
+        "async_tasks": {
+            "task-1": {
+                "status": "running",
+                "run_id": "run-1",
+                "agent_name": agent_name,
+            }
+        }
+    }
 
-    # Current thread A → A's own watcher + unrouted are relevant
-    assert async_notifier._has_relevant_active_watchers("threadA") is True
-    # Current thread C (no active watcher of its own) → only unrouted matters
-    assert async_notifier._has_relevant_active_watchers("threadC") is True
-    # Drop the unrouted handle → C now has nothing relevant
-    del async_notifier._active_watchers[handle_unrouted]
-    assert async_notifier._has_relevant_active_watchers("threadC") is False
-    # A still has its own watcher
-    assert async_notifier._has_relevant_active_watchers("threadA") is True
-    # Legacy: None argument falls back to "any active watcher counts"
-    assert async_notifier._has_relevant_active_watchers(None) is True
 
-    async_notifier._active_watchers.clear()
-    assert async_notifier._has_relevant_active_watchers("threadA") is False
-    assert async_notifier._has_relevant_active_watchers(None) is False
+async def test_reader_enqueues_completion_from_state():
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "success"},
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    n = drained[0]
+    assert n.task_id == "task-1"
+    assert n.agent_name == "writing-agent"
+    assert n.status == "success"
+    assert n.origin_cli_thread_id == "cli-tid"
+
+
+async def test_reader_no_op_while_task_running():
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "running"},
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+
+
+async def test_reader_dedupes_completion_across_polls():
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+
+    # One enqueue total; the seen-set short-circuits the second poll before it
+    # even issues a live status read.
+    assert len(drain_notifications("cli-tid")) == 1
+    assert gateway.run_status_calls == [("task-1", "run-1")]
+
+
+async def test_reader_surfaces_revision_completion_after_update():
+    """update_async_task rotates run_id on the same task_id (the revision
+    re-dispatches with multitask_strategy="interrupt"). The reader keys dedup
+    on (task_id, run_id), so the revision's completion surfaces even when the
+    original run's completion already notified — one notification per run."""
+    registry = {
+        "async_tasks": {
+            "task-1": {
+                "status": "running",
+                "run_id": "run-1",
+                "agent_name": "writing-agent",
+            }
+        }
+    }
+    gateway = FakeGraphGateway(
+        state_values=registry,
+        run_statuses={"run-1": "success", "run-2": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # run-1 completes and surfaces.
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    assert len(drain_notifications("cli-tid")) == 1
+
+    # update_async_task after run-1 completed: new run_id on the SAME task_id,
+    # registry entry back to running.
+    registry["async_tasks"]["task-1"]["run_id"] = "run-2"
+    registry["async_tasks"]["task-1"]["status"] = "running"
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+
+    # The revision's completion surfaces — not suppressed by run-1's notify.
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    assert drained[0].task_id == "task-1"
+    assert drained[0].status == "success"
+
+    # And it notifies exactly once: the next poll of the same run is deduped.
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    assert drain_notifications("cli-tid") == []
+
+
+async def test_reader_skips_task_already_terminal_in_state():
+    gateway = FakeGraphGateway(
+        state_values={
+            "async_tasks": {
+                "task-1": {
+                    "status": "success",
+                    "run_id": "run-1",
+                    "agent_name": "x",
+                }
+            }
+        },
+        run_statuses={"run-1": "success"},
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+    # Terminal-in-state means the agent already saw it — no live read at all.
+    assert gateway.run_status_calls == []
+
+
+async def test_reader_skips_cancelled_task_in_state():
+    """An agent-initiated cancel writes ``cancelled`` into state; that is a
+    terminal writeback like any other, so the reader must not poll the run and
+    surface a spurious ``interrupted`` for something the agent cancelled on
+    purpose."""
+    gateway = FakeGraphGateway(
+        state_values={
+            "async_tasks": {
+                "task-1": {
+                    "status": "cancelled",
+                    "run_id": "run-1",
+                    "agent_name": "x",
+                }
+            }
+        },
+        run_statuses={"run-1": "interrupted"},  # would notify if polled
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+    assert gateway.run_status_calls == []
+
+
+async def test_reader_drops_interrupted_when_run_rotated_mid_poll():
+    """A poll landing in the rotation window reads the old ``run_id`` and gets
+    ``interrupted``. A fresh state read then shows the new ``run_id``, marking a
+    rotation, not a completion — the ``interrupted`` is dropped."""
+
+    class _RotatingGateway(FakeGraphGateway):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._reads = 0
+
+        async def get_state_values(self, target, thread_id):
+            self._reads += 1
+            values = await super().get_state_values(target, thread_id)
+            # The re-read inside _run_was_rotated (second call) sees the new
+            # run_id that update_async_task committed after interrupting run-1.
+            if self._reads >= 2:
+                values["async_tasks"]["task-1"]["run_id"] = "run-2"
+            return values
+
+    gateway = _RotatingGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "interrupted"},
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+    assert gateway.run_status_calls == [("task-1", "run-1")]
+
+
+async def test_reader_notifies_genuine_interrupt():
+    """A genuine interrupt (same ``run_id`` on the confirming re-read) still
+    surfaces — the rotation guard must not suppress real interruptions."""
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "interrupted"},
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    assert drained[0].status == "interrupted"
+
+
+async def test_reader_notification_carries_task_description():
+    """The launch-time description rides in state so a completion notification
+    can name which task finished when several are in flight."""
+    registry = {
+        "async_tasks": {
+            "task-1": {
+                "status": "running",
+                "run_id": "run-1",
+                "agent_name": "writing-agent",
+                "description": "Draft the related-work section",
+            }
+        }
+    }
+    gateway = FakeGraphGateway(
+        state_values=registry,
+        run_statuses={"run-1": "success"},
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    assert drained[0].prompt == "Draft the related-work section"
+
+
+async def test_reader_best_effort_on_status_read_error():
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_status_error=RuntimeError("server down"),
+    )
+
+    # Must not raise, and nothing is enqueued — the task is retried next poll.
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+
+
+async def test_reader_skips_task_without_run_id():
+    gateway = FakeGraphGateway(
+        state_values={"async_tasks": {"task-1": {"status": "running"}}},
+    )
+
+    await async_notifier.enqueue_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+    assert gateway.run_status_calls == []
+
+
+async def test_reader_returns_active_task_count():
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "running"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # One still-running task → active count 1.
+    assert (
+        await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+        == 1
+    )
+    # It completes → surfaced once and no longer active.
+    gateway.run_statuses["run-1"] = "success"
+    assert (
+        await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+        == 0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+async def test_reader_surfaces_only_the_rerun_across_live_update():
+    """update_async_task while the first run is still live: the interrupt
+    kills it server-side and the registry rotates to the new run in the same
+    turn, so the reader never sees the killed run terminal — it polls only
+    the current run, and the re-run's completion is the one that surfaces.
+    This replaced the watcher's pre_cancel for the still-live case; the
+    completed-first case is pinned in test_reader_surfaces_revision_completion_after_update."""
+    registry = {
+        "async_tasks": {
+            "task-1": {
+                "status": "running",
+                "run_id": "run-1",
+                "agent_name": "writing-agent",
+            }
+        }
+    }
+    gateway = FakeGraphGateway(
+        state_values=registry,
+        # run-1 is still live when the update lands; the interrupt kills it
+        # server-side ("interrupted"), but the reader must never observe
+        # that: the registry rotates to run-2 in the same tool turn.
+        run_statuses={"run-1": "running", "run-2": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # Pre-update pass: run-1 still live, nothing surfaces, polling stays armed.
+    assert (
+        await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+        == 1
+    )
+    assert drain_notifications("cli-tid") == []
+
+    # update_async_task while run-1 is live: registry rotates to run-2.
+    registry["async_tasks"]["task-1"]["run_id"] = "run-2"
+    registry["async_tasks"]["task-1"]["status"] = "running"
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+
+    # The killed run-1 never surfaces (not polled, so no "interrupted"
+    # notification); the re-run's completion surfaces exactly once.
+    assert gateway.run_status_calls == [("task-1", "run-1"), ("task-1", "run-2")]
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    assert drained[0].status == "success"
+
+
+async def test_concurrent_readers_enqueue_a_completion_once():
+    """Two reader invocations racing the same terminal task (idle tick vs
+    turn-boundary read) must surface the completion exactly once: the
+    (task_id, run_id) pair is claimed in-flight before the status await, so
+    the second reader skips it while the first is still reading."""
+    import asyncio
+
+    registry = {
+        "async_tasks": {
+            "task-1": {
+                "status": "running",
+                "run_id": "run-1",
+                "agent_name": "writing-agent",
+            }
+        }
+    }
+
+    release = asyncio.Event()
+
+    class _SlowStatusGateway(FakeGraphGateway):
+        """Blocks the status read until the test releases it."""
+
+        async def get_run_status(self, target, thread_id, run_id):
+            await release.wait()
+            return "success"
+
+    gateway = _SlowStatusGateway(state_values=registry)
+    target = GraphTarget(local_graph=MagicMock())
+
+    reader1 = asyncio.create_task(
+        async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    )
+    # Give reader1 time to reach (and block inside) its status read.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    reader2 = asyncio.create_task(
+        async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    release.set()
+    await asyncio.gather(reader1, reader2)
+
+    # Exactly one completion surfaced despite two concurrent readers.
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+async def test_throttled_reader_rate_limits_within_interval(monkeypatch):
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "running"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    # First idle tick runs the reader (no prior observation → armed by default).
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.run_status_calls == [("task-1", "run-1")]
+
+    # Second tick within the interval is throttled — no new state read.
+    clock["t"] += 1.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.run_status_calls == [("task-1", "run-1")]
+
+    # After the interval elapses, the reader runs again.
+    clock["t"] += 3.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.run_status_calls == [("task-1", "run-1"), ("task-1", "run-1")]
+
+
+async def test_throttled_reader_disarms_after_task_terminal(monkeypatch):
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "running"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    # Running task keeps idle polling armed.
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert async_notifier._idle_reader_active_seen["cli-tid"] is True
+
+    # It completes; after the interval the idle tick surfaces it, then disarms.
+    gateway.run_statuses["run-1"] = "success"
+    clock["t"] += 5.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+    assert async_notifier._idle_reader_active_seen["cli-tid"] is False
+    last_poll = async_notifier._idle_reader_last_poll["cli-tid"]
+
+    # Nothing active now → further idle ticks short-circuit (no state read,
+    # last_poll unchanged) even after the interval elapses.
+    clock["t"] += 10.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert async_notifier._idle_reader_last_poll["cli-tid"] == last_poll
+
+
+async def test_idle_polling_stays_armed_after_failed_state_read(monkeypatch):
+    """A failed state read must not disarm idle polling - it is not the same
+    as an empty registry. Recovery: once the failure clears, the next
+    interval's poll surfaces the completion."""
+    gateway = FakeGraphGateway(
+        state_values=_running_registry(),
+        run_statuses={"run-1": "success"},
+        state_error=RuntimeError("transient gateway failure"),
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    # First idle poll: the state read fails - nothing enqueued, and the
+    # reader must stay armed (default/previous observation) rather than
+    # record "nothing active".
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert drain_notifications("cli-tid") == []
+    assert async_notifier._idle_reader_active_seen.get("cli-tid", True) is True
+
+    # Failure clears; after the interval the next poll surfaces the completion.
+    gateway.state_error = None
+    clock["t"] += 5.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+async def test_failed_read_rearms_disarmed_idle_polling(monkeypatch):
+    """A prior all-terminal read disarms the idle throttle; if the
+    turn-boundary read for a newly launched task then FAILS, the failed read
+    must re-arm rather than preserve the stale disarmed observation -
+    otherwise the completion sits unsurfaced until the next turn boundary."""
+    gateway = FakeGraphGateway(
+        state_values={"async_tasks": {}},
+        run_statuses={"run-1": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    # Successful read with an all-terminal registry: idle polling disarms.
+    async_notifier._idle_reader_active_seen["cli-tid"] = False
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+    assert async_notifier._idle_reader_active_seen["cli-tid"] is False
+
+    # A task launches; the turn-boundary read for it fails.
+    gateway.state_values = _running_registry()
+    gateway.state_error = RuntimeError("transient gateway failure")
+    await async_notifier.enqueue_completions_from_state(gateway, target, "cli-tid")
+
+    # The failed read must RE-ARM the disarmed thread, not preserve False.
+    assert async_notifier._idle_reader_active_seen["cli-tid"] is True
+
+    # Failure clears; the idle tick (throttled path) surfaces the completion.
+    gateway.state_error = None
+    clock["t"] += 5.0
+    await async_notifier.enqueue_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+# ============================================================================
+# Background-process reader (mirror of the async-task reader; polls process
+# status via the gateway and enqueues kind="bg-process" completions).
+# ============================================================================
+
+
+def _bg_running_registry(process_id="proc-1", name="demo", command="sleep 5"):
+    return {
+        "bg_processes": {
+            process_id: {
+                "process_id": process_id,
+                "name": name,
+                "command": command,
+                "status": "running",
+                "origin_thread_id": "cli-tid",
+            }
+        }
+    }
+
+
+async def test_bg_reader_enqueues_completion_from_state():
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "success"},
+    )
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert active == 0
+    drained = drain_notifications("cli-tid")
+    assert len(drained) == 1
+    n = drained[0]
+    assert n.kind == "bg-process"
+    assert n.task_id == "proc-1"
+    assert n.agent_name == "demo"
+    assert n.status == "success"
+    assert n.prompt == "sleep 5"
+
+
+async def test_bg_reader_skips_terminal_in_state():
+    # Agent already observed the exit (a tool wrote the terminal status into the
+    # record) → nothing to proactively surface, and no live poll.
+    registry = {
+        "bg_processes": {
+            "proc-1": {"process_id": "proc-1", "name": "demo", "status": "success"}
+        }
+    }
+    gateway = FakeGraphGateway(
+        state_values=registry, process_statuses={"proc-1": "success"}
+    )
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert drain_notifications("cli-tid") == []
+    assert gateway.process_status_calls == []
+
+
+async def test_bg_reader_no_op_while_running():
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "running"},
+    )
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, GraphTarget(local_graph=MagicMock()), "cli-tid"
+    )
+
+    assert active == 1  # still running → keeps idle polling armed
+    assert drain_notifications("cli-tid") == []
+
+
+async def test_bg_reader_idempotent_across_polls():
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "error"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+
+    # One enqueue; the seen-set short-circuits the second poll before it re-polls.
+    assert len(drain_notifications("cli-tid")) == 1
+    assert gateway.process_status_calls == ["proc-1"]
+
+
+async def test_bg_idle_polling_stays_armed_after_failed_state_read():
+    """A failed bg_processes state read must not disarm idle polling - not the
+    same as an empty registry. Recovery: once the failure clears, the next
+    poll surfaces the exit. Mirrors the async-task reader's contract."""
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "success"},
+        state_error=RuntimeError("transient gateway failure"),
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # First poll: the state read fails - nothing enqueued, the reader stays
+    # armed rather than recording "nothing active".
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert drain_notifications("cli-tid") == []
+    assert async_notifier._bg_idle_reader_active_seen.get("cli-tid", True) is True
+
+    # Failure clears; the next poll surfaces the exit.
+    gateway.state_error = None
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+async def test_bg_failed_read_rearms_disarmed_idle_polling():
+    """A prior all-terminal read disarms the bg idle throttle; if the
+    turn-boundary read for a newly launched process then FAILS, the failed
+    read must re-arm rather than preserve the stale disarmed observation -
+    otherwise the exit sits unsurfaced until the next turn boundary.
+    Mirrors the async-task reader's pin."""
+    gateway = FakeGraphGateway(
+        state_values={"bg_processes": {}},
+        process_statuses={"proc-1": "success"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    # Successful read with an all-terminal registry: idle polling disarms.
+    async_notifier._bg_idle_reader_active_seen["cli-tid"] = False
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert async_notifier._bg_idle_reader_active_seen["cli-tid"] is False
+
+    # A process launches; the turn-boundary read for it fails.
+    gateway.state_values = _bg_running_registry()
+    gateway.state_error = RuntimeError("transient gateway failure")
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+
+    # The failed read must RE-ARM the disarmed thread, not preserve False.
+    assert async_notifier._bg_idle_reader_active_seen["cli-tid"] is True
+
+    # Failure clears; the idle tick surfaces the exit.
+    gateway.state_error = None
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=0.0
+    )
+    assert len(drain_notifications("cli-tid")) == 1
+
+
+async def test_bg_reader_normalizes_state_values_none():
+    """A thread with no checkpoint yet yields values=None; the channel access
+    must not raise."""
+    gateway = FakeGraphGateway()
+    gateway.state_values = None  # bypass the constructor's `or {}` default
+    target = GraphTarget(local_graph=MagicMock())
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+
+    assert active == 0
+    assert drain_notifications("cli-tid") == []
+
+
+async def test_bg_reader_unknown_process_stops_polling():
+    # Registry cleared server-side (e.g. restart) → status unknown; give up rather
+    # than spin, and never enqueue.
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "unknown"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    active = await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert active == 0
+    assert drain_notifications("cli-tid") == []
+
+    await async_notifier.enqueue_bg_process_completions_from_state(
+        gateway, target, "cli-tid"
+    )
+    assert gateway.process_status_calls == ["proc-1"]  # not re-polled
+
+
+async def test_bg_reader_throttle_rate_limits(monkeypatch):
+    gateway = FakeGraphGateway(
+        state_values=_bg_running_registry(),
+        process_statuses={"proc-1": "running"},
+    )
+    target = GraphTarget(local_graph=MagicMock())
+    clock = {"t": 500.0}
+    monkeypatch.setattr(async_notifier.time, "monotonic", lambda: clock["t"])
+
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.process_status_calls == ["proc-1"]
+
+    clock["t"] += 1.0
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.process_status_calls == ["proc-1"]  # throttled
+
+    clock["t"] += 3.0
+    await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+        gateway, target, "cli-tid", min_interval_s=3.0
+    )
+    assert gateway.process_status_calls == ["proc-1", "proc-1"]
+
+
+async def test_bg_reader_reserves_process_id_across_concurrent_polls():
+    """An idle tick racing a turn-boundary read cannot double-enqueue one
+    exit: the second invocation skips the in-flight reservation and its
+    enqueue is short-circuited by the seen set."""
+    import asyncio
+
+    class _SlowStatusGateway(FakeGraphGateway):
+        async def get_process_status(self, target, thread_id, process_id):
+            await asyncio.sleep(0.05)
+            return "success"
+
+    gateway = _SlowStatusGateway(
+        state_values={
+            "bg_processes": {
+                "proc-1": {
+                    "process_id": "proc-1",
+                    "name": "demo",
+                    "command": "sleep 5",
+                    "status": "running",
+                    "origin_thread_id": "cli-tid",
+                }
+            }
+        },
+    )
+    target = GraphTarget(local_graph=MagicMock())
+
+    await asyncio.gather(
+        async_notifier.enqueue_bg_process_completions_from_state(
+            gateway, target, "cli-tid"
+        ),
+        async_notifier.enqueue_bg_process_completions_from_state(
+            gateway, target, "cli-tid"
+        ),
+    )
+
+    assert len(drain_notifications("cli-tid")) == 1
+    assert async_notifier._bg_reader_in_flight == set()

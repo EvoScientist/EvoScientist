@@ -33,8 +33,9 @@ Design
   ``subagent_type`` absent from ``agent_map`` — typically an expert
   installed after the agent was built — the tool runs one
   ``build_expert_async_subagent_specs`` walk and merges every unknown
-  expert into ``agent_map`` and the watcher's agent dict before
-  re-validating (see ``_resolve_merge_validate``). New experts become
+  expert into ``agent_map`` — and into the optional second dispatch
+  table, when one is supplied — before re-validating (see
+  ``_resolve_merge_validate``). New experts become
   background-dispatchable the first time they are named, with no agent
   rebuild, no registry watcher, and no restart; in-turn ``task`` reach
   for a new expert still requires a rebuilt agent (``/new``). The merge
@@ -186,7 +187,11 @@ def _build_run_input(
 
 
 def _build_task_envelope(
-    subagent_type: str, thread_id: str, run_id: str, tool_call_id: str
+    subagent_type: str,
+    thread_id: str,
+    run_id: str,
+    tool_call_id: str,
+    description: str,
 ) -> Command:
     """Wrap a successful launch in the ``Command`` shape the router expects."""
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -199,6 +204,9 @@ def _build_task_envelope(
         "created_at": now,
         "last_checked_at": now,
         "last_updated_at": now,
+        # Carried so a completion notification can name which task finished
+        # when several are in flight (read back in ``cli/async_notifier``).
+        "description": description[:200],
     }
     msg = f"Launched async subagent. task_id: {thread_id}"
     return Command(
@@ -265,14 +273,15 @@ def _resolve_merge_validate(
     ``get_async``, the update tool) are single GIL-protected operations
     and need no lock.
 
-    ``watcher_agents`` is ``AsyncWatcherMiddleware._clients._agents`` —
-    a *separate* dict from ``agent_map`` (the watcher's cache was built
-    from its own spec list). Without updating it, dispatch succeeds but
-    the watcher's ``get_async(agent_name)`` raises KeyError inside its
-    ``try/except``, and the completion notification silently never fires.
-    ``None`` means no watcher is wired (yaml-async-less setup, or the
-    upstream ``_agents`` drift guard tripped): dispatch still resolves,
-    just without completion nudges — matching the pre-existing degradation.
+    ``watcher_agents`` is an optional second dispatch table, separate
+    from ``agent_map``: when supplied, every merged expert is also
+    ``setdefault``-ed into it so a caller-side consumer keyed by agent
+    name sees the new expert. No in-tree caller supplies one today —
+    the async-watcher middleware that did was removed in favor of the
+    client-side state reader (completions are detected from thread
+    state); the parameter stays for tests and external wiring.
+    ``None`` (the default) skips the second merge; dispatch resolves
+    through ``agent_map`` alone.
 
     Blocking (a skills-tree walk under ``list_expert_skills``); callers on
     an event loop must run it via ``asyncio.to_thread``.
@@ -388,7 +397,11 @@ def _build_expert_start_tool(
             )
             return f"Failed to launch async subagent '{subagent_type}': {e}"
         return _build_task_envelope(
-            subagent_type, thread["thread_id"], run["run_id"], runtime.tool_call_id
+            subagent_type,
+            thread["thread_id"],
+            run["run_id"],
+            runtime.tool_call_id,
+            description,
         )
 
     async def astart_async_task(
@@ -431,7 +444,11 @@ def _build_expert_start_tool(
             )
             return f"Failed to launch async subagent '{subagent_type}': {e}"
         return _build_task_envelope(
-            subagent_type, thread["thread_id"], run["run_id"], runtime.tool_call_id
+            subagent_type,
+            thread["thread_id"],
+            run["run_id"],
+            runtime.tool_call_id,
+            description,
         )
 
     return StructuredTool.from_function(

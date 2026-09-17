@@ -296,3 +296,24 @@ def test_get_teams_calls_loader_with_include_system_true():
     ):
         client.get("/api/teams")
     assert calls == [True]
+
+
+# ---- /api/bg_process_status -----------------------------------------------
+# The bg-process reader polls this route (server backend) to detect a process
+# exit from the server process's registry.
+
+
+def test_get_bg_process_status_returns_registry_status(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.background.poll_status", lambda process_id: "success"
+    )
+    resp = client.get("/api/bg_process_status", params={"process_id": "p1"})
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "success"}
+
+
+def test_get_bg_process_status_unknown_for_missing_process():
+    # Real registry, no such process launched in this test process → unknown.
+    resp = client.get("/api/bg_process_status", params={"process_id": "nope"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "unknown"

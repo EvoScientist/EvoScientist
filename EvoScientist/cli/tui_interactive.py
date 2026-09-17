@@ -47,6 +47,10 @@ from ._constants import (
 from .async_notifier import (
     AsyncTasksState,
     consume_notifications,
+    enqueue_bg_process_completions_from_state,
+    enqueue_bg_process_completions_from_state_throttled,
+    enqueue_completions_from_state,
+    enqueue_completions_from_state_throttled,
     has_pending_notifications,
     read_async_tasks_from_gateway,
 )
@@ -656,6 +660,9 @@ def run_textual_interactive(
             self._notification_consuming: bool = (
                 False  # prevent overlapping consume coroutines
             )
+            self._idle_reader_inflight: bool = (
+                False  # prevent overlapping throttled idle state reads
+            )
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
@@ -1164,6 +1171,15 @@ def run_textual_interactive(
                 )
                 return
 
+            # Throttled idle state read so a completion surfaces while the user
+            # sits idle; the next tick's has_pending check drains what it
+            # enqueues. Guarded so overlapping ticks don't stack reads.
+            if not self._busy and not self._idle_reader_inflight:
+                self._idle_reader_inflight = True
+                self.call_later(
+                    lambda: asyncio.ensure_future(self._idle_reader_tick_tui())
+                )
+
             # Notification path (only when idle and NOT already consuming).
             # _notification_consuming is set synchronously at the schedule point
             # so that the next poll tick cannot schedule a second consumer before
@@ -1208,6 +1224,36 @@ def run_textual_interactive(
                 # Clear the guard flag regardless of success or exception so
                 # future notifications can schedule a new consume coroutine.
                 self._notification_consuming = False
+
+        async def _idle_reader_tick_tui(self) -> None:
+            """Throttled idle-tick state reader (preserves idle auto-notify).
+
+            Best-effort: an exception here must not bubble out of the
+            ``asyncio.ensure_future(...)`` scheduled by ``_poll_channel_queue``
+            or it would silently kill the poller.
+            """
+            try:
+                agent = self._agent_loader.agent
+                tid = self._conversation_tid
+                if agent is not None and tid:
+                    target = GraphTarget(
+                        local_graph=agent,
+                        workspace_dir=self._workspace_dir,
+                    )
+                    await enqueue_completions_from_state_throttled(
+                        self._graph_gateway(), target, tid
+                    )
+                    await enqueue_bg_process_completions_from_state_throttled(
+                        self._graph_gateway(), target, tid
+                    )
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "async-notifier idle reader failed (TUI)", exc_info=True
+                )
+            finally:
+                self._idle_reader_inflight = False
 
         async def _inject_notification_tui(
             self,
@@ -1273,7 +1319,7 @@ def run_textual_interactive(
             if agent is None:
                 return {}
             try:
-                return await read_async_tasks_from_gateway(
+                registry = await read_async_tasks_from_gateway(
                     self._graph_gateway(),
                     GraphTarget(
                         local_graph=agent,
@@ -1281,6 +1327,7 @@ def run_textual_interactive(
                     ),
                     target_thread_id,
                 )
+                return registry or {}
             except Exception:
                 return {}
 
@@ -2400,6 +2447,19 @@ def run_textual_interactive(
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
 
+            # On stream close, enqueue any async-task + bg-process completions from
+            # thread state; the notification poller drains + injects. Best-effort —
+            # never blocks turn return on a read failure.
+            _close_target = GraphTarget(
+                local_graph=agent, workspace_dir=self._workspace_dir
+            )
+            _close_tid = thread_id_override or self._conversation_tid
+            await enqueue_completions_from_state(
+                graph_gateway, _close_target, _close_tid
+            )
+            await enqueue_bg_process_completions_from_state(
+                graph_gateway, _close_target, _close_tid
+            )
             return response
 
         async def _run_turn(
