@@ -524,11 +524,16 @@ def _poll_ready(url: str, timeout: float, interval: float = 0.5) -> None:
     A served-but-erroring page (< 500) counts as ready — the Next server is up;
     per-route errors are the app's concern, not the launcher's.
     """
+    # No-proxy opener: this is a loopback probe of our own front-end. The
+    # default opener honours the environment/OS proxy — and on Windows that
+    # includes the system (registry/IE) proxy even with no *_PROXY env vars —
+    # which routes the 127.0.0.1 request off-box so the poll never succeeds.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + timeout
     last_err: str | None = None
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=2) as resp:
+            with opener.open(url, timeout=2) as resp:
                 if getattr(resp, "status", 200) < 500:
                     return
                 last_err = f"HTTP {resp.status}"

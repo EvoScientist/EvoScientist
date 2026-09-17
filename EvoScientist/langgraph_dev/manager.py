@@ -430,7 +430,12 @@ def is_langgraph_dev_running(
     """
     url = base_url or _base_url(port, host)
     try:
-        return httpx.get(f"{url}/ok", timeout=1.0).status_code == 200
+        # trust_env=False: this is a loopback probe of our own server. httpx
+        # otherwise routes it through the environment/OS proxy — and on Windows
+        # getproxies() reads the system (registry/IE) proxy even with no *_PROXY
+        # env vars set, so a corporate proxy silently swallows the 127.0.0.1
+        # request and the health check never sees the healthy server.
+        return httpx.get(f"{url}/ok", timeout=1.0, trust_env=False).status_code == 200
     except (httpx.TransportError, OSError):
         return False
 

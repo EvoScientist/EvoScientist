@@ -228,6 +228,15 @@ class TestIsLanggraphDevRunning:
         assert called_url == "http://127.0.0.1:6174/ok"
 
     @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_probe_bypasses_proxy(self, mock_get):
+        # The loopback probe must set trust_env=False: on Windows httpx otherwise
+        # routes 127.0.0.1 through the system (registry) proxy and never reaches
+        # the local server, so a healthy backend reads as unhealthy.
+        mock_get.return_value = MagicMock(status_code=200)
+        manager.is_langgraph_dev_running(port=6174)
+        assert mock_get.call_args.kwargs.get("trust_env") is False
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
     def test_returns_false_on_non_200(self, mock_get):
         mock_get.return_value = MagicMock(status_code=503)
         assert manager.is_langgraph_dev_running(port=6174) is False

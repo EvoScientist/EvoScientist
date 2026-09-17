@@ -182,13 +182,44 @@ def test_bundled_runner_preflight_ok(tmp_path):
 # Readiness polling
 # --------------------------------------------------------------------------- #
 def test_poll_ready_times_out(monkeypatch):
-    def _boom(*_a, **_k):
-        raise ConnectionRefusedError("nope")
+    class _DeadOpener:
+        def open(self, *_a, **_k):
+            raise ConnectionRefusedError("nope")
 
-    monkeypatch.setattr(lm.urllib.request, "urlopen", _boom)
+    monkeypatch.setattr(lm.urllib.request, "build_opener", lambda *_h: _DeadOpener())
     with pytest.raises(lm.LauncherError) as ei:
         lm._poll_ready("http://127.0.0.1:4716", timeout=0.05, interval=0.01)
     assert ei.value.code == "not_ready"
+
+
+def test_poll_ready_bypasses_proxy(monkeypatch):
+    # Must probe loopback with proxies disabled — on Windows the default opener
+    # honours the system (registry) proxy and never reaches 127.0.0.1.
+    captured = {}
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Opener:
+        def open(self, *_a, **_k):
+            return _Resp()
+
+    def _fake_build_opener(*handlers):
+        captured["handlers"] = handlers
+        return _Opener()
+
+    monkeypatch.setattr(lm.urllib.request, "build_opener", _fake_build_opener)
+    lm._poll_ready("http://127.0.0.1:4716", timeout=1)
+    assert any(
+        isinstance(h, lm.urllib.request.ProxyHandler) and h.proxies == {}
+        for h in captured["handlers"]
+    )
 
 
 def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
