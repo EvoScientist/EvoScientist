@@ -21,7 +21,18 @@
 # extend COLLECT_PACKAGES / HIDDEN below as the first build surfaces missing
 # modules. Keep additions here, not scattered across --hidden-import flags.
 
+import os
+
 from PyInstaller.utils.hooks import collect_all
+
+# The entry scripts live in packaging/windows/, but the EvoScientist package
+# lives at the repo root (and is installed editable, which PyInstaller's module
+# graph does not resolve on its own). Put the repo root on pathex so the
+# analyzer can *find and analyze* EvoScientist's code and follow its imports —
+# without this, EvoScientist modules are copied as data but their third-party
+# deps (typer, rich, httpx, langchain, …) are never collected. SPECPATH is the
+# directory of this spec, injected by PyInstaller.
+_REPO_ROOT = os.path.abspath(os.path.join(SPECPATH, "..", ".."))
 
 # Packages with dynamic imports and/or data files PyInstaller cannot infer from
 # the entry scripts alone. collect_all pulls submodules + data + binaries.
@@ -78,7 +89,7 @@ for pkg in COLLECT_PACKAGES:
 
 a_desktop = Analysis(
     ["desktop_entry.py"],
-    pathex=[],
+    pathex=[_REPO_ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -89,7 +100,7 @@ a_desktop = Analysis(
 )
 a_langgraph = Analysis(
     ["langgraph_entry.py"],
-    pathex=[],
+    pathex=[_REPO_ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
