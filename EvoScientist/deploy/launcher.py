@@ -194,11 +194,19 @@ class BundledWebUIRunner:
         # The standalone server reads PORT / HOSTNAME / NODE_ENV; the base env
         # already carries PORT + HOSTNAME, we add production mode here.
         run_env = {**env, "NODE_ENV": "production"}
+        kwargs = _popen_group_kwargs()
+        if os.name == "nt":
+            # Desktop shell: keep the node process off any console so no window
+            # flashes. OR it into the process-group flag so tree-kill still
+            # works. (CREATE_NO_WINDOW exists only on Windows.)
+            kwargs["creationflags"] = (
+                kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+            )
         try:
             return subprocess.Popen(
                 [str(self.node_exe), str(self.server_entry)],
                 env=run_env,
-                **_popen_group_kwargs(),
+                **kwargs,
             )
         except Exception as exc:  # pragma: no cover - OS-level failure
             raise LauncherError(
