@@ -1032,6 +1032,16 @@ def start_langgraph_dev(
     # or async sub-agent launches would target whatever the config file says.
     sub_env["EVOSCIENTIST_LANGGRAPH_DEV_HOST"] = host
 
+    # POSIX: own session so the child can be group-signalled on cleanup.
+    # Windows: suppress the console window — this is a background server whose
+    # stdout/stderr already go to the log file, so an allocated console is just
+    # a stray empty terminal next to the desktop shell's window.
+    if os.name == "nt":
+        # getattr keeps this import-safe off Windows (the flag is Windows-only).
+        _spawn_kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    else:
+        _spawn_kwargs = {"start_new_session": True}
+
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
         proc = subprocess.Popen(
@@ -1054,7 +1064,7 @@ def start_langgraph_dev(
             stdout=log_handle,
             stderr=log_handle,
             env=sub_env,
-            start_new_session=True,
+            **_spawn_kwargs,
         )
     finally:
         # The child has its own copy of the fd; closing ours prevents an
