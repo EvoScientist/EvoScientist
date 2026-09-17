@@ -82,6 +82,13 @@ def _script_runs(segment: str) -> list[tuple[str, bool]]:
     return runs
 
 
+def _separate_symbol(match: re.Match[str]) -> str:
+    """Keep word characters while separating symbols before compatibility folding."""
+    char = match.group()
+    category = _character_properties(char)[0]
+    return char if category[0] in "LM" or category in ("Nd", "Nl") else " "
+
+
 def _tokens(text: str) -> list[str]:
     """Keep baseline ASCII words and bigrams for unsegmented scripts."""
     if text.isascii():
@@ -90,7 +97,9 @@ def _tokens(text: str) -> list[str]:
             for token in _ASCII_TOKEN_RE.findall(text.casefold())
             if len(token) >= MIN_WORD_TOKEN_CHARS
         ]
-    normalized = unicodedata.normalize("NFKC", text).casefold()
+    # Symbols such as ™ and ¹ must not expand into adjacent word tokens.
+    separated = _NON_ASCII_RE.sub(_separate_symbol, text)
+    normalized = unicodedata.normalize("NFKC", separated).casefold()
     # Non-ASCII punctuation still separates the same ASCII words.
     if not any(
         _character_properties(char)[0][0] in "LMN"

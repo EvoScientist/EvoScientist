@@ -1184,6 +1184,7 @@ def test_search_tokens_preserve_ascii_baseline_and_non_ascii_runs():
         "resolver",
     ]
     assert _tokens("señor résumé") == ["señor", "résumé"]
+    assert _tokens("\uff27\uff30\uff35\uff11\uff12\uff13") == ["gpu123"]
     assert _tokens("GraphQL字段别名") == ["graphql", "字段", "段别", "别名"]
     assert _tokens("__init__ _cache señor") == ["__init__", "_cache", "señor"]
     assert _tokens("原始来源") == ["原始", "始来", "来源"]
@@ -1275,6 +1276,32 @@ def test_search_observation_files_ignores_variation_selectors(tmp_path, summary,
     )
 
     assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+
+
+@pytest.mark.parametrize(
+    ("summary", "query", "joined_token"),
+    [
+        ("TensorFlow™ install", "tensorflow", "tensorflowtm"),
+        ("①install pytest", "install", "1install"),
+        ("accuracy¹", "accuracy", "accuracy1"),
+    ],
+)
+def test_search_observation_files_separates_symbols_before_normalizing(
+    tmp_path, summary, query, joined_token
+):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary=summary)
+    _record_test_observation(memories, summary=joined_token)
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query=query,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert query in _tokens(summary)
+    assert joined_token not in _tokens(summary)
 
 
 def test_search_observation_files_ranks_mixed_chinese_and_cyrillic_query(tmp_path):
