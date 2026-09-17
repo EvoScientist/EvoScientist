@@ -87,6 +87,21 @@ for pkg in COLLECT_PACKAGES:
     binaries += b
     hiddenimports += h
 
+# langgraph_api reads these data files via ``Path(__file__).parent.parent`` — the
+# directory ABOVE the package (site-packages), so they ship at the site-packages
+# root, not inside langgraph_api/, and collect_all misses them. Ship them at the
+# bundle root so the frozen ``__file__.parent.parent`` (_internal) resolves them.
+# (validation.py -> openapi.json; queue_entrypoint.py -> logging.json)
+import importlib.util
+
+_lg_spec = importlib.util.find_spec("langgraph_api")
+if _lg_spec and _lg_spec.origin:
+    _site = os.path.dirname(os.path.dirname(_lg_spec.origin))
+    for _fname in ("openapi.json", "logging.json"):
+        _fp = os.path.join(_site, _fname)
+        if os.path.exists(_fp):
+            datas.append((_fp, "."))
+
 a_desktop = Analysis(
     ["desktop_entry.py"],
     pathex=[_REPO_ROOT],
