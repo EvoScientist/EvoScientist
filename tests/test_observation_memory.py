@@ -1183,7 +1183,9 @@ def test_search_tokens_preserve_ascii_baseline_and_non_ascii_runs():
         "graphql",
         "resolver",
     ]
-    assert _tokens("señor résumé") == ["sum"]
+    assert _tokens("señor résumé") == ["señor", "résumé"]
+    assert _tokens("GraphQL字段别名") == ["graphql", "字段", "段别", "别名"]
+    assert _tokens("__init__ _cache señor") == ["__init__", "_cache", "señor"]
     assert _tokens("原始来源") == ["原始", "始来", "来源"]
     assert _tokens("中文，日文") == ["中文", "日文"]
     assert _tokens("𠮷野家") == ["𠮷野", "野家"]
@@ -1303,6 +1305,31 @@ def test_search_observation_files_matches_whole_cyrillic_words(tmp_path):
         memory_dir=memories,
         project_id="P-project",
         query="протокол",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert hits[0]["score"] > 0
+
+
+@pytest.mark.parametrize(
+    ("query", "summary", "distractor"),
+    [
+        ("señor", "Consultar al señor García", "Senior project notes"),
+        ("résumé", "Review the résumé", "Calculate the sum"),
+        ("resume", "Resume the task", "Review the résumé"),
+    ],
+)
+def test_search_observation_files_matches_whole_accented_words(
+    tmp_path, query, summary, distractor
+):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary=summary)
+    _record_test_observation(memories, summary=distractor)
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query=query,
     )
 
     assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]

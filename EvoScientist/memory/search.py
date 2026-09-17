@@ -27,7 +27,6 @@ DEFAULT_MATCH_CHARS = 240
 
 _ASCII_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
-_TOKEN_RE = re.compile(r"[a-z0-9_]+|[^\x00-\x7f\s]+")
 _BIGRAM_NAME_PREFIXES = (
     "CJK UNIFIED IDEOGRAPH",
     "CJK COMPATIBILITY IDEOGRAPH",
@@ -108,7 +107,7 @@ def _tokens(text: str) -> list[str]:
         if not _is_variation_selector(char)
     )
     tokens: list[str] = []
-    for segment in _TOKEN_RE.findall(searchable):
+    for segment in searchable.split():
         if segment.isascii():
             if len(segment) >= MIN_WORD_TOKEN_CHARS:
                 tokens.append(segment)
