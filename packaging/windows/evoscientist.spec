@@ -102,6 +102,21 @@ if _lg_spec and _lg_spec.origin:
         if os.path.exists(_fp):
             datas.append((_fp, "."))
 
+# wasmtime (via quickjs_rs → langchain_quickjs, the code-interpreter middleware)
+# loads its native lib through ctypes at runtime from wasmtime/<platform>/, which
+# PyInstaller's static analysis and collect_all both miss (non-standard name in a
+# platform subdir). Collect whatever native lib the installed package ships and
+# place it at the same package-relative path the frozen wasmtime/_ffi.py expects.
+_wt_spec = importlib.util.find_spec("wasmtime")
+if _wt_spec and _wt_spec.origin:
+    _wt_dir = os.path.dirname(_wt_spec.origin)
+    for _plat in os.listdir(_wt_dir):
+        _pdir = os.path.join(_wt_dir, _plat)
+        if os.path.isdir(_pdir):
+            for _f in os.listdir(_pdir):
+                if _f.endswith((".dll", ".so", ".dylib")):
+                    datas.append((os.path.join(_pdir, _f), f"wasmtime/{_plat}"))
+
 a_desktop = Analysis(
     ["desktop_entry.py"],
     pathex=[_REPO_ROOT],
