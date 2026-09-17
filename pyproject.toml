@@ -85,6 +85,9 @@ oauth = ["ccproxy-api>=0.2.7"]
 # Windows desktop shell (bundled installer): thin pywebview window that hosts
 # the existing WebUI via the shell-agnostic launcher. See EvoScientist/desktop/.
 desktop = ["pywebview>=5.0"]
+# Build-time only: freeze the desktop app + langgraph CLI into a Windows onedir.
+# See packaging/windows/evoscientist.spec.
+winbuild = ["pyinstaller>=6.0"]
 all-channels = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.3",

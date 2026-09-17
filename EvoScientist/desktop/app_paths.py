@@ -5,9 +5,10 @@ the single place that knows its shape, so the shell and the packaging scripts
 agree. Expected installed layout::
 
     <app_root>/
-      EvoScientist.exe            # windowed launcher -> python -m EvoScientist.desktop
+      EvoScientist.exe            # windowed desktop shell (PyInstaller onedir)
+      langgraph.exe              # bundled langgraph CLI, found by manager._langgraph_exe
+      _internal/...              # bundled Python + all deps (PyInstaller)
       runtime/
-        python/...               # bundled Python + the EvoScientist package
         node/node.exe            # bundled Node runtime (bare binary)
       webui/
         dist/server.js           # pinned prebuilt @evoscientist/webui standalone
