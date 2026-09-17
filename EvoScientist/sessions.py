@@ -70,6 +70,12 @@ if not hasattr(aiosqlite.Connection, "is_alive"):
 # ---------------------------------------------------------------------------
 
 AGENT_NAME = "EvoScientist"
+
+# Checkpoint-metadata key serve stamps (via the run's metadata) on threads that
+# have a channel origin. The server thread registry is rebuilt from checkpoint
+# rows on restart, so the marker is restored from here — it is what lets the
+# proactive cron enumerate channel threads after a langgraph-dev restart.
+CHANNEL_ORIGIN_METADATA_KEY = "has_channel_origin"
 MAIN_THREAD_FILTER_SQL = (
     "json_extract(metadata, '$.agent_name') = ? "
     "AND (json_extract(metadata, '$.graph_id') IS NULL "
@@ -1575,6 +1581,7 @@ class _RestoredThreadInfo:
     graph_id: str
     workspace_dir: str
     model: str | None
+    has_channel_origin: bool = False
 
 
 async def _restore_webui_threads_to_global_store() -> bool:
@@ -1649,7 +1656,8 @@ async def _restore_webui_threads_to_global_store() -> bool:
                            MAX(json_extract(metadata, '$.graph_id')) as graph_id,
                            MAX(json_extract(metadata, '$.workspace_dir')) as workspace_dir,
                            MAX(json_extract(metadata, '$.model')) as model,
-                           MAX(json_extract(metadata, '$.agent_name')) as agent_name
+                           MAX(json_extract(metadata, '$.agent_name')) as agent_name,
+                           MAX(json_extract(metadata, '$.has_channel_origin')) as has_channel_origin
                     FROM checkpoints
                     WHERE thread_id LIKE '________-____-____-____-____________'
                       AND (
@@ -1671,6 +1679,7 @@ async def _restore_webui_threads_to_global_store() -> bool:
                     workspace_dir,
                     model,
                     agent_name,
+                    has_channel_origin,
                 ) = row
                 thread_uuid = _to_uuid_safe(thread_id_str)
                 if thread_uuid is None:
@@ -1688,6 +1697,7 @@ async def _restore_webui_threads_to_global_store() -> bool:
                     graph_id=restored_graph_id,
                     workspace_dir=workspace_dir,
                     model=model,
+                    has_channel_origin=bool(has_channel_origin),
                 )
 
             # Derive a sidebar title from each scoped thread's first human
@@ -1756,6 +1766,11 @@ async def _restore_webui_threads_to_global_store() -> bool:
                 if info.model and meta.get("model") != info.model:
                     meta["model"] = info.model
                     changed = True
+                if info.has_channel_origin and not meta.get(
+                    CHANNEL_ORIGIN_METADATA_KEY
+                ):
+                    meta[CHANNEL_ORIGIN_METADATA_KEY] = True
+                    changed = True
                 if "title" not in meta and tid_uuid in titles:
                     meta["title"] = titles[tid_uuid]
                     changed = True
@@ -1785,6 +1800,8 @@ async def _restore_webui_threads_to_global_store() -> bool:
                 stub_metadata["assistant_id"] = str(info.assistant_id)
             if info.model:
                 stub_metadata["model"] = info.model
+            if info.has_channel_origin:
+                stub_metadata[CHANNEL_ORIGIN_METADATA_KEY] = True
             if thread_uuid in titles:
                 stub_metadata["title"] = titles[thread_uuid]
             ts = _parse_dt(info.updated_at)

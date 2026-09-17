@@ -16,13 +16,18 @@ def build_observation_index_context(
     memory_dir: str | Path,
     project_id: str,
     max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
+    include_search_hints: bool = True,
 ) -> str:
-    """Build a compact observation-memory index for prompts."""
+    """Build a compact observation-memory index for prompts.
+
+    ``include_search_hints=False`` omits the tool-usage footer, for model calls
+    that carry no memory tools (the index is then the whole memory in context).
+    """
     return _format_observation_index_context(
         _observation_documents(memory_dir=memory_dir, project_id=project_id),
         include_counts=True,
         include_paths=True,
-        include_search_hints=True,
+        include_search_hints=include_search_hints,
         empty_context=True,
         intro="Indexed observations:",
         max_inline_chars=max_inline_chars,

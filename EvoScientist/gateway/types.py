@@ -182,5 +182,27 @@ class GraphGateway(Protocol):
         target: GraphTarget,
         thread_id: str,
         values: GraphStateValues,
+        *,
+        as_node: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Update graph state values for a thread."""
+        """Update graph state values for a thread.
+
+        ``as_node`` controls which graph node's writers apply the update.
+        ``None`` lets LangGraph infer the node from checkpoint history (the
+        pre-existing default). A real node name (e.g. ``"model"``) runs that
+        node's channel writers — required for appending to the ``messages``
+        channel. ``END`` is only valid with ``values=None`` (clears pending
+        tasks; ``next`` becomes empty).
+
+        ``metadata`` is best-effort checkpoint metadata. The local gateway
+        merges it via ``config["metadata"]`` — the same mechanism normal
+        turns use (``stream_agent_events`` sets ``config["metadata"]``
+        from ``build_metadata``), so keys like ``agent_name`` and
+        ``workspace_dir`` land on the checkpoint row. The server gateway
+        cannot forward it (the SDK's ``update_state`` has no metadata
+        parameter); there the server-side checkpointer stamps ownership
+        itself, so implementations must not rely on caller-supplied keys
+        surviving. When ``None``, behavior is byte-identical to the
+        pre-existing default (no metadata key on the config).
+        """

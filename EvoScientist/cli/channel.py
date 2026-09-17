@@ -633,6 +633,19 @@ def get_channel_origin(thread_id: str | None) -> _ChannelOrigin | None:
         return _thread_channel_origins.get(thread_id)
 
 
+def list_channel_origin_thread_ids() -> list[str]:
+    """Return a snapshot of every thread id with a remembered channel origin.
+
+    The proactive delivery poll (serve) uses this as its candidate set: a thread
+    can only be published back to if its origin is registered here, so iterating
+    these keys is exactly the set of threads a pending proactive push could be
+    delivered on. Snapshot under the lock so a concurrent register/forget can't
+    mutate the returned list.
+    """
+    with _thread_channel_origins_lock:
+        return list(_thread_channel_origins.keys())
+
+
 def forget_channel_origin(thread_id: str | None) -> None:
     """Drop the registry entry for ``thread_id`` (e.g. on ``/new`` rotation)."""
     if not thread_id:

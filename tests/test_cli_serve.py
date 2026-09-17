@@ -32,6 +32,8 @@ def _make_config(
         auto_mode=auto_mode,
         enable_ask_user=enable_ask_user,
         dangerous_mode=dangerous_mode,
+        gateway_backend="local",
+        proactive_enabled=False,
         enable_async_subagents=False,
         enable_scheduler=False,
         memory_profile_enabled=True,

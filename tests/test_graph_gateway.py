@@ -156,6 +156,7 @@ async def test_local_graph_gateway_updates_state_values():
         GraphTarget(local_graph=agent),
         "abc12345",
         {"_summarization_event": {"cutoff_index": 2}},
+        as_node="model",
     )
 
     agent.aupdate_state.assert_awaited_once_with(
@@ -163,6 +164,63 @@ async def test_local_graph_gateway_updates_state_values():
         {"_summarization_event": {"cutoff_index": 2}},
         as_node="model",
     )
+
+
+async def test_local_graph_gateway_updates_state_values_defaults_as_node_none():
+    agent = MagicMock()
+    agent.aupdate_state = AsyncMock()
+    gateway = LocalGraphGateway()
+
+    await gateway.update_state_values(
+        GraphTarget(local_graph=agent),
+        "abc12345",
+        {"async_tasks": {"task-1": {}}},
+    )
+
+    agent.aupdate_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "abc12345"}},
+        {"async_tasks": {"task-1": {}}},
+        as_node=None,
+    )
+
+
+async def test_local_graph_gateway_update_state_values_forwards_metadata():
+    agent = MagicMock()
+    agent.aupdate_state = AsyncMock()
+    gateway = LocalGraphGateway()
+
+    await gateway.update_state_values(
+        GraphTarget(local_graph=agent),
+        "abc12345",
+        {"messages": []},
+        as_node="model",
+        metadata={"agent_name": "EvoScientist", "workspace_dir": "/tmp/ws"},
+    )
+
+    agent.aupdate_state.assert_awaited_once_with(
+        {
+            "configurable": {"thread_id": "abc12345"},
+            "metadata": {"agent_name": "EvoScientist", "workspace_dir": "/tmp/ws"},
+        },
+        {"messages": []},
+        as_node="model",
+    )
+
+
+async def test_local_graph_gateway_update_state_values_omits_metadata_when_none():
+    agent = MagicMock()
+    agent.aupdate_state = AsyncMock()
+    gateway = LocalGraphGateway()
+
+    await gateway.update_state_values(
+        GraphTarget(local_graph=agent),
+        "abc12345",
+        {"messages": []},
+        as_node="model",
+    )
+
+    config = agent.aupdate_state.await_args.args[0]
+    assert "metadata" not in config
 
 
 async def test_local_stream_events_delegates_aclose_to_inner():
@@ -702,10 +760,32 @@ async def test_langgraph_server_gateway_updates_state_values():
         GraphTarget(),
         "abc12345",
         {"_summarization_event": {"cutoff_index": 2}},
+        as_node="model",
     )
 
     assert threads.state_updates == [
         ("abc12345", {"_summarization_event": {"cutoff_index": 2}}, "model")
+    ]
+
+
+async def test_langgraph_server_gateway_updates_state_values_defaults_as_node_none():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    await gateway.update_state_values(
+        GraphTarget(),
+        "abc12345",
+        {"async_tasks": {"task-1": {}}},
+    )
+
+    assert threads.state_updates == [
+        ("abc12345", {"async_tasks": {"task-1": {}}}, None)
     ]
 
 
