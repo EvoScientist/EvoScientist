@@ -124,6 +124,11 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         html=_status_html("Starting EvoScientist…"),
         width=1280,
         height=860,
+        # pywebview defaults text_select=False, which injects
+        # ``body { user-select: none }`` into every page — that makes the
+        # error/status panels (and the WebUI) impossible to select or copy.
+        # Enable selection so a user can copy an error message.
+        text_select=True,
     )
     controller = DesktopController(launcher, _WebviewWindow(window))
     # Confirm-before-interrupt on close is a later reliability task; for now the
