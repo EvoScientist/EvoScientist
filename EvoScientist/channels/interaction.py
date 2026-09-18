@@ -122,8 +122,8 @@ def config_policy_snapshot(
 
         # Session-effective config, not the file: --auto-approve / --dangerous
         # and EVOSCIENTIST_* overrides live here (the same object
-        # ``hitl_suppressed_for_run`` reads), and the graph is always armed, so
-        # this snapshot is the only gate for every attended surface.
+        # ``hitl_suppressed_for_run`` reads); the graph is armed on the runs that
+        # reach this resolver, so this snapshot is the only gate for them.
         cfg = _ensure_config()
     except Exception:
         return None, {}

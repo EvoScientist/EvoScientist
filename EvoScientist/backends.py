@@ -362,9 +362,10 @@ class ActionVerdict:
 
 # Per-run ``configurable`` key that disarms HITL and hands the dangerous-command
 # gate to the backend. Set client-side by ``resolve_per_run_config`` from
-# ``config.auto_mode`` (unattended runs); read by the HITL ``when`` predicate and
-# the backend/background guards. A per-run channel (not a construction flag) so a
-# keepalive server can disarm one run without disarming the armed graph.
+# ``hitl_suppressed_for_run`` (``auto_mode`` or ``auto_approve``) and written on
+# every gateway run; read by the HITL ``when`` predicate and the backend/background
+# guards. A per-run channel (not a construction flag) so a keepalive server can
+# disarm one run without disarming the armed graph.
 HITL_SUPPRESSED_KEY = "hitl_suppressed"
 
 
@@ -403,22 +404,25 @@ def is_hitl_suppressed(config=None) -> bool:
 
 
 def hitl_suppressed_for_run(config=None) -> bool:
-    """Whether THIS run is unattended (``auto_mode``) and must disarm HITL.
+    """Whether THIS run must disarm HITL and fall back to the backend guard.
 
     The pre-run derivation of the suppression flag: both gateway backends
     call it when assembling a run's config and feed the result into
-    ``gateway.types.resolve_per_run_config(hitl_suppressed=...)``. Keyed on
-    ``auto_mode`` (the "run unattended" flag), NOT ``auto_approve`` — an
-    attended ``auto_approve`` session stays armed and auto-resolves the
-    interrupt client-side. *config* defaults to the live session config
-    (``_ensure_config`` — cached, in-place-mutated), so unsaved mid-session
-    toggles still apply.
+    ``gateway.types.resolve_per_run_config(hitl_suppressed=...)``. True for
+    ``auto_mode`` (unattended) OR ``auto_approve`` (attended, prompts opted
+    out): both run against the always-armed graph with the interrupt disarmed
+    and the backend guarding the dangerous set — what those users get on main
+    today, and it keeps the always-armed auto-resume off the recursion limit
+    (#469). *config* defaults to the live session config (``_ensure_config`` —
+    cached, in-place-mutated), so unsaved mid-session toggles still apply.
     """
     if config is None:
         from .EvoScientist import _ensure_config
 
         config = _ensure_config()
-    return bool(getattr(config, "auto_mode", False))
+    return bool(
+        getattr(config, "auto_mode", False) or getattr(config, "auto_approve", False)
+    )
 
 
 def resolve_action_decision(
@@ -1700,11 +1704,12 @@ class CustomSandboxBackend(LocalShellBackend):
 
         The construction flag stays a floor (``True`` for guarded async
         sub-agents, which have no approval path at all). On top of it, a run
-        with HITL suppressed (unattended ``auto_mode``) is guarded per call:
-        the interrupt is disarmed there, so the backend is the only gate. An
-        armed run (attended, incl. config ``auto_approve``) is NOT guarded here
-        — the HITL interrupt plus the client policy decide, so the flag is not
-        baked at construction and a mid-session flip can never leave it stale.
+        with HITL suppressed (``auto_mode`` or attended ``auto_approve``) is
+        guarded per call: the interrupt is disarmed there, so the backend is
+        the only gate. A plain attended run (no auto_mode/auto_approve) is NOT
+        guarded here — the HITL interrupt plus the client policy decide, so the
+        flag is not baked at construction and a mid-session flip can never
+        leave it stale.
         """
         return self._guard_dangerous or is_hitl_suppressed()
 

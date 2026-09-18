@@ -111,9 +111,10 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
     ``dangerous`` is captured from ``cfg.dangerous_mode`` at assembly (the agent is
     rebuilt when config changes, so the captured value never goes stale).
     ``guard_dangerous`` mirrors ``execute``'s backstop and is a construction-time
-    floor; on top of it, a run with HITL suppressed (unattended ``auto_mode``) is
-    guarded per call, since the spawn interrupt is disarmed there and the backend
-    is the only gate. An armed run relies on the interrupt + client policy instead.
+    floor; on top of it, a run with HITL suppressed (``auto_mode`` or attended
+    ``auto_approve``) is guarded per call, since the spawn interrupt is disarmed
+    there and the backend is the only gate. A plain attended run relies on the
+    interrupt + client policy instead.
     """
 
     @tool(parse_docstring=True)

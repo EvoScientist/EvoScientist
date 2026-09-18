@@ -2145,16 +2145,17 @@ class TestHitlSuppressedForRun:
 
         assert hitl_suppressed_for_run(SimpleNamespace(auto_mode=True)) is True
 
-    def test_attended_run_stays_armed(self):
+    def test_attended_auto_approve_suppresses(self):
         from types import SimpleNamespace
 
         from EvoScientist.backends import hitl_suppressed_for_run
 
-        # auto_approve alone must NOT suppress: the graph stays armed and the
-        # client auto-resolves the interrupt.
+        # auto_approve suppresses too: the interrupt is disarmed and the backend
+        # guards the dangerous set (matches main; keeps the always-armed
+        # auto-resume off the recursion limit, #469).
         assert (
             hitl_suppressed_for_run(SimpleNamespace(auto_mode=False, auto_approve=True))
-            is False
+            is True
         )
 
     def test_missing_attr_is_false(self):

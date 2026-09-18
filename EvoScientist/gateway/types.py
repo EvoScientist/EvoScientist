@@ -37,11 +37,13 @@ def resolve_per_run_config(
       ``recursion_limit`` overrides the server's construction-time
       ``.with_config`` binding, so a keepalive server picks up the client's
       live limit per run instead of at restart);
-    - both backends pass ``hitl_suppressed`` from ``config.auto_mode`` (see
-      ``backends.hitl_suppressed_for_run``): an unattended run must disarm
-      the always-armed interrupt itself. Keyed on ``auto_mode``, NOT
-      ``auto_approve`` - an attended ``auto_approve`` session stays armed
-      and auto-resolves the interrupt client-side;
+    - both backends pass ``hitl_suppressed`` from
+      ``backends.hitl_suppressed_for_run`` (``config.auto_mode`` or
+      ``config.auto_approve``): a run that disarms the always-armed interrupt
+      is then backend-guarded. The key is written on every gateway run (``True``
+      and ``False``), so a gateway run's arming is fixed by its own session
+      config and never falls back to the serving process's ``auto_approve`` on
+      an absent key;
     - the local backend passes no model/limit overrides: its agent is
       rebuilt on model switches and already binds ``recursion_limit`` at
       construction from the same live config.
@@ -49,16 +51,15 @@ def resolve_per_run_config(
     Merges, in precedence order (lowest to highest):
 
     1. ``per_run_overrides`` (server backend session defaults),
-    2. the suppression key (when ``hitl_suppressed``),
+    2. the suppression key (always written, ``True`` or ``False``),
     3. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
        explicit per-run injection is more specific than the session default,
     4. ``thread_id`` - structural key, always set last.
     """
     configurable: dict[str, Any] = dict(per_run_overrides or {})
-    if hitl_suppressed:
-        from ..backends import HITL_SUPPRESSED_KEY
+    from ..backends import HITL_SUPPRESSED_KEY
 
-        configurable[HITL_SUPPRESSED_KEY] = True
+    configurable[HITL_SUPPRESSED_KEY] = bool(hitl_suppressed)
     if configurable_extra:
         configurable.update(configurable_extra)
     configurable["thread_id"] = thread_id
