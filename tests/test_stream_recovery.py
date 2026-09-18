@@ -131,6 +131,11 @@ _TOOL_SIDE_EFFECTS: list[str] = []
 _MODEL_REQUESTS: list[list[BaseMessage]] = []
 _SCRIPT: list[AIMessage] = []
 _script_idx = {"i": 0}
+_slow_tool_gate: asyncio.Event | None = None
+"""Unset event tests may install so matching tool calls park (deterministically
+cancellable mid-batch) instead of finishing on fixed delays."""
+_slow_tool_gate_paths: frozenset[str] | None = None
+"""Paths the gate applies to; ``None`` gates every call."""
 
 
 class _ScriptedModel(BaseChatModel):
@@ -158,11 +163,18 @@ class _ScriptedModel(BaseChatModel):
 async def _slow_edit(path: str, content: str = "data") -> str:
     """Edit a file; the side effect lands immediately, like edit_file.
 
-    ``a.py`` finishes fast so tests can exercise a partially-finished batch
-    (one real result pending, the rest still running) before cancelling.
+    Tests may install ``_slow_tool_gate`` (an unset ``asyncio.Event``) to park
+    matching calls after their side effect lands — cancellation then always
+    lands mid-batch instead of racing fixed delays. Ungated calls finish on
+    staggered delays (``a.py`` fast, the rest slow).
     """
     _TOOL_SIDE_EFFECTS.append(path)
-    await asyncio.sleep(0.3 if path == "a.py" else 2.0)
+    if _slow_tool_gate is not None and (
+        _slow_tool_gate_paths is None or path in _slow_tool_gate_paths
+    ):
+        await _slow_tool_gate.wait()
+    else:
+        await asyncio.sleep(0.3 if path == "a.py" else 2.0)
     return f"edited {path}"
 
 
@@ -186,12 +198,54 @@ def _build_agent():
     )
 
 
+def _gate_slow_tools(paths: frozenset[str] | None = None) -> None:
+    """Hold matching tool calls (all of them when ``paths`` is None) in place.
+
+    Gated calls park on an unset event after landing their side effect, so
+    they can never complete before the test cancels the turn.
+    """
+    global _slow_tool_gate, _slow_tool_gate_paths
+    _slow_tool_gate = asyncio.Event()
+    _slow_tool_gate_paths = paths
+
+
+def _ungate_slow_tools() -> None:
+    """Clear the test gate installed by ``_gate_slow_tools``."""
+    global _slow_tool_gate, _slow_tool_gate_paths
+    _slow_tool_gate = None
+    _slow_tool_gate_paths = None
+
+
+async def _await_tool_result(
+    agent: Any, cfg: dict[str, Any], tool_call_id: str, timeout: float = 10.0
+) -> None:
+    """Wait until a finished call's result is visible on the stuck checkpoint.
+
+    ``aget_state`` folds pending writes into ``values``, so the ToolMessage of
+    a finished call appears in the snapshot's messages before its super-step
+    commits. That visibility is the deterministic signal that a
+    partially-finished batch is actually in place — no fixed sleeps.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        snap = await agent.aget_state(cfg)
+        values = (getattr(snap, "values", None) or {}).get("messages") or []
+        if any(
+            isinstance(m, ToolMessage) and m.tool_call_id == tool_call_id
+            for m in values
+        ):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"result for {tool_call_id} never reached the checkpoint")
+
+
 def _script_tool_batch_then_ack() -> None:
     """Reset shared script/log state: 3-call tool batch, then an ack."""
     _TOOL_SIDE_EFFECTS.clear()
     _MODEL_REQUESTS.clear()
     _SCRIPT.clear()
     _script_idx["i"] = 0
+    _ungate_slow_tools()
     _SCRIPT.extend(
         [
             AIMessage(
@@ -255,7 +309,11 @@ async def test_cancel_mid_tools_closes_dangling_calls_and_next_turn_is_clean():
     agent = _build_agent()
     cfg = {"configurable": {"thread_id": "t-cancel"}}
 
-    await _cancel_mid_tools(agent, "t-cancel")
+    _gate_slow_tools()  # park every call: the cancel always lands mid-batch
+    try:
+        await _cancel_mid_tools(agent, "t-cancel")
+    finally:
+        _ungate_slow_tools()
 
     # Cancellation leaves the checkpoint parked; the next run repairs it.
     assert (await agent.aget_state(cfg)).next
@@ -280,7 +338,11 @@ async def test_hard_killed_thread_recovered_at_start_of_next_run():
     agent = _build_agent()
     cfg = {"configurable": {"thread_id": "t-kill"}}
 
-    await _hard_kill_mid_tools(agent, "t-kill")
+    _gate_slow_tools()  # park every call: the "kill" always lands mid-batch
+    try:
+        await _hard_kill_mid_tools(agent, "t-kill")
+    finally:
+        _ungate_slow_tools()
 
     snap = await agent.aget_state(cfg)
     assert snap.next  # still stuck — the "killed" process never cleaned up
@@ -316,13 +378,19 @@ async def test_partially_finished_batch_keeps_real_result_and_closes_the_rest():
     agent = _build_agent()
     cfg = {"configurable": {"thread_id": "t-partial"}}
 
-    task = asyncio.create_task(_run_turn(agent, "apply the edits", "t-partial"))
-    while len(_TOOL_SIDE_EFFECTS) < 3:
-        await asyncio.sleep(0.05)
-    await asyncio.sleep(0.5)  # let a.py finish while b.py / c.py are running
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    _gate_slow_tools(frozenset({"b.py", "c.py"}))  # a.py finishes; the rest hold
+    try:
+        task = asyncio.create_task(_run_turn(agent, "apply the edits", "t-partial"))
+        while len(_TOOL_SIDE_EFFECTS) < 3:
+            await asyncio.sleep(0.05)
+        # Deterministic partial batch: a.py's real result has reached the
+        # stuck checkpoint as a pending write, and b.py / c.py are parked.
+        await _await_tool_result(agent, cfg, "call_1")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        _ungate_slow_tools()
 
     events = await _run_turn(agent, "hello, new instruction", "t-partial")
 
