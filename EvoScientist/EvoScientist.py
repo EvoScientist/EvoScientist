@@ -763,6 +763,32 @@ def load_mcp_and_build_kwargs(
 # =============================================================================
 
 
+def _agent_shell_env() -> dict[str, str] | None:
+    """Env overrides so the agent's ``execute`` shell uses the bundled Python.
+
+    In the packaged Windows app a standalone CPython ships under
+    ``runtime/python/``; point ``python``/``python3``/``pip`` at it (via PATH)
+    so agent code never depends on whatever interpreter is on the end-user's
+    PATH, and route on-demand ``pip install``s to a writable per-user dir
+    (the install dir is read-only for a non-admin user). Returns ``None`` when
+    no bundled Python is present (dev checkouts, Linux), leaving PATH untouched.
+    """
+    from .desktop import app_paths
+
+    py = app_paths.python_exe()
+    if not py.exists():
+        return None
+    userbase = app_paths.user_pypackages_dir()
+    userbase.mkdir(parents=True, exist_ok=True)
+    existing_path = os.environ.get("PATH", "")
+    py_dir = str(py.parent)
+    return {
+        "PATH": f"{py_dir}{os.pathsep}{existing_path}" if existing_path else py_dir,
+        "PYTHONUSERBASE": str(userbase),
+        "PIP_USER": "1",
+    }
+
+
 def _get_default_backend(
     *, guard_dangerous: bool | None = None, refuse_delete: bool = False
 ):
@@ -807,6 +833,7 @@ def _get_default_backend(
         dangerous=cfg.dangerous_mode,
         guard_dangerous=guard_dangerous,
         refuse_delete=refuse_delete,
+        env=_agent_shell_env(),
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
@@ -1231,6 +1258,7 @@ def create_cli_agent(
         # Guard derived per call from the run's HITL-suppression state (see
         # CustomSandboxBackend._effective_guard_dangerous), not baked here.
         guard_dangerous=False,
+        env=_agent_shell_env(),
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,

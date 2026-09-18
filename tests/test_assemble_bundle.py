@@ -69,3 +69,10 @@ def test_node_arch_mapping_known_and_unknown(tmp_path):
     # Unknown target fails fast, before any network access.
     with pytest.raises(RuntimeError, match="no Node archive mapping"):
         ab.fetch_node("22.11.0", "linux-x64", tmp_path)
+
+
+def test_python_arch_mapping_known_and_unknown(tmp_path):
+    assert "win32-x64" in ab._PYTHON_ARCH
+    # Unknown target fails fast, before any network access.
+    with pytest.raises(RuntimeError, match="no Python archive mapping"):
+        ab.fetch_python("3.12.7", "20241016", "linux-x64", tmp_path)

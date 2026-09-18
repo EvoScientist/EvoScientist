@@ -14,22 +14,36 @@ The installed app directory (what `EvoScientist/desktop/app_paths.py` resolves):
   langgraph.exe             bundled langgraph CLI (found by manager._langgraph_exe) (evoscientist.spec)
   _internal/...             bundled Python + all deps                             (evoscientist.spec)
   runtime/node/node.exe     pinned Node runtime                                   (assemble_bundle.py)
+  runtime/python/python.exe standalone CPython for the agent's code execution     (assemble_bundle.py)
   webui/dist/server.js      pinned prebuilt @evoscientist/webui standalone        (assemble_bundle.py)
   webui/dist/.next, node_modules, public
   manifest.json             pinned versions + sha256 of the fetched inputs
 ```
 
+`runtime/python/` is a bare python-build-standalone CPython (with pip, no
+third-party packages) that the agent's `execute` shell runs code with — so it
+never depends on whatever python is on the end-user's PATH. On-demand
+`pip install`s are routed to a writable per-user dir (`~/.evoscientist/pypackages`)
+via `PYTHONUSERBASE`, since the install dir is read-only for a non-admin user.
+
 ## assemble_bundle.py
 
-Produces the `webui/` and `runtime/node/` halves. Runs on any host OS (Linux CI
-included) — everything is fetched for the *target* platform, not the build host.
+Produces the `webui/`, `runtime/node/` and `runtime/python/` halves. Runs on any
+host OS (Linux CI included) — everything is fetched for the *target* platform,
+not the build host.
 
 ```
 uv run python packaging/windows/assemble_bundle.py --out dist/win-bundle
 # pin explicitly:
 uv run python packaging/windows/assemble_bundle.py --out dist/win-bundle \
-    --webui-version 0.2.7 --node-version 22.11.0 --target win32-x64
+    --webui-version 0.2.7 --node-version 22.11.0 \
+    --python-version 3.12.7 --python-tag 20241016 --target win32-x64
 ```
+
+The Python half is a python-build-standalone `install_only` CPython (pin via
+`--python-version` + `--python-tag`; if the default 404s, pick a release from
+github.com/astral-sh/python-build-standalone/releases). It ships `python3.exe`
+alongside `python.exe` so both names resolve on Windows.
 
 Why it is not just "extract the tarball": the published `@evoscientist/webui`
 tarball bundles the sharp native binary of whatever machine published it

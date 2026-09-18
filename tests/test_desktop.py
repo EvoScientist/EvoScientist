@@ -133,6 +133,25 @@ def test_app_root_prefers_env_over_cwd(monkeypatch, tmp_path):
     assert app_paths.app_root() == Path(tmp_path)
 
 
+def test_python_exe_env_override(monkeypatch, tmp_path):
+    monkeypatch.setenv(app_paths.ENV_PYTHON_EXE, str(tmp_path / "py" / "python.exe"))
+    assert app_paths.python_exe() == tmp_path / "py" / "python.exe"
+
+
+def test_python_exe_default_from_app_root(monkeypatch, tmp_path):
+    monkeypatch.delenv(app_paths.ENV_PYTHON_EXE, raising=False)
+    monkeypatch.setenv(app_paths.ENV_APP_ROOT, str(tmp_path))
+    name = "python.exe" if os.name == "nt" else "python3"
+    assert app_paths.python_exe() == tmp_path / "runtime" / "python" / name
+
+
+def test_user_pypackages_dir_under_data_dir(monkeypatch, tmp_path):
+    from EvoScientist import paths as epaths
+
+    monkeypatch.setattr(epaths, "DATA_DIR", tmp_path / ".evoscientist")
+    assert app_paths.user_pypackages_dir() == tmp_path / ".evoscientist" / "pypackages"
+
+
 # --------------------------------------------------------------------------- #
 # HTML rendering
 # --------------------------------------------------------------------------- #
@@ -257,3 +276,32 @@ def test_render_setup_html_prefills_escapes_and_hides_key():
     assert "type=password" in out  # key field present
     assert "sk-" not in out  # key never prefilled
     assert "pywebview.api.submit" in out  # wired to the js_api
+
+
+# --------------------------------------------------------------------------- #
+# Bundled-python env for the agent's shell (EvoScientist._agent_shell_env)
+# --------------------------------------------------------------------------- #
+def test_agent_shell_env_none_without_bundled_python(monkeypatch, tmp_path):
+    from EvoScientist import EvoScientist as ev
+    from EvoScientist.desktop import app_paths as ap
+
+    monkeypatch.setattr(ap, "python_exe", lambda: tmp_path / "absent" / "python.exe")
+    assert ev._agent_shell_env() is None
+
+
+def test_agent_shell_env_injects_bundled_python(monkeypatch, tmp_path):
+    from EvoScientist import EvoScientist as ev
+    from EvoScientist.desktop import app_paths as ap
+
+    py = tmp_path / "py" / "python.exe"
+    py.parent.mkdir(parents=True)
+    py.write_text("x")
+    monkeypatch.setattr(ap, "python_exe", lambda: py)
+    monkeypatch.setattr(ap, "user_pypackages_dir", lambda: tmp_path / "pp")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    env = ev._agent_shell_env()
+    assert env["PIP_USER"] == "1"
+    assert env["PYTHONUSERBASE"] == str(tmp_path / "pp")
+    assert env["PATH"].startswith(str(py.parent) + os.pathsep)
+    assert (tmp_path / "pp").is_dir()  # created for the pip target

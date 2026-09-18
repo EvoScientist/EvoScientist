@@ -87,6 +87,13 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; WorkingDir: "{userdocs}"; Flags: nowait postinstall skipifsilent
 
+[UninstallDelete]
+; Sweep runtime-created files Inno didn't install itself: bytecode caches under
+; the bundled Python/WebUI in {app}, and the per-user pip cache the agent's
+; on-demand installs write under ~/.evoscientist (PYTHONUSERBASE).
+Type: filesandordirs; Name: "{app}"
+Type: filesandordirs; Name: "{%USERPROFILE}\.evoscientist\pypackages"
+
 [Code]
 const
   { WebView2 Runtime application GUID (constant across versions). }

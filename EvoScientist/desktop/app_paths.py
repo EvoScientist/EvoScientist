@@ -29,6 +29,7 @@ from pathlib import Path
 ENV_APP_ROOT = "EVOSCIENTIST_DESKTOP_APP_ROOT"
 ENV_WEBUI_DIR = "EVOSCIENTIST_DESKTOP_WEBUI_DIR"
 ENV_NODE_EXE = "EVOSCIENTIST_DESKTOP_NODE_EXE"
+ENV_PYTHON_EXE = "EVOSCIENTIST_DESKTOP_PYTHON_EXE"
 
 
 def is_frozen() -> bool:
@@ -63,3 +64,29 @@ def node_exe() -> Path:
         return Path(override)
     name = "node.exe" if os.name == "nt" else "node"
     return app_root() / "runtime" / "node" / name
+
+
+def python_exe() -> Path:
+    """Path to the bundled Python interpreter the agent's shell runs code with.
+
+    This is a standalone CPython shipped under ``runtime/python/`` (see
+    ``packaging/windows/assemble_bundle.py``), used so the agent never depends
+    on whatever python happens to be on the end-user's PATH.
+    """
+    override = os.environ.get(ENV_PYTHON_EXE)
+    if override:
+        return Path(override)
+    name = "python.exe" if os.name == "nt" else "python3"
+    return app_root() / "runtime" / "python" / name
+
+
+def user_pypackages_dir() -> Path:
+    """Writable per-user dir for on-demand ``pip install``s by the agent.
+
+    The bundled interpreter lives under the (read-only for non-admin) install
+    dir, so runtime installs are routed here via ``PYTHONUSERBASE`` instead.
+    Lives under the existing per-user data root (``~/.evoscientist``).
+    """
+    from .. import paths
+
+    return paths.DATA_DIR / "pypackages"
