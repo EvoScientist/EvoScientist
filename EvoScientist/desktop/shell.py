@@ -9,8 +9,10 @@ rest of the package imports without the optional ``desktop`` extra installed.
 from __future__ import annotations
 
 import html
+import threading
 
 from .controller import DesktopController
+from .setup import apply_setup, render_setup_html, setup_needed, validate_setup
 
 _PAGE_STYLE = """
   :root { color-scheme: light dark; }
@@ -93,6 +95,38 @@ class _WebviewWindow:
     def show_error(self, code: str, message: str, detail: str | None) -> None:
         self._load_html(_error_html(code, message, detail))
 
+    def show_setup(self, markup: str) -> None:
+        self._load_html(markup)
+
+
+class _SetupApi:
+    """pywebview ``js_api`` for the first-run setup form.
+
+    Only ``submit`` is called from the page. It validates the answers, writes
+    them to config via :func:`apply_setup`, and sets ``done`` so the boot
+    thread (blocked in :func:`run_desktop`) can proceed. On invalid input it
+    returns an error for the page to show inline, leaving ``done`` unset.
+    """
+
+    def __init__(self, config, done: threading.Event) -> None:
+        self._config = config
+        self._done = done
+
+    def submit(self, payload: dict) -> dict:
+        provider = str((payload or {}).get("provider", ""))
+        model = str((payload or {}).get("model", ""))
+        api_key = str((payload or {}).get("api_key", ""))
+        workspace = str((payload or {}).get("workspace", ""))
+        error = validate_setup(provider, model, api_key)
+        if error:
+            return {"ok": False, "error": error}
+        try:
+            apply_setup(provider, model, api_key, workspace, config=self._config)
+        except Exception as exc:  # pragma: no cover - filesystem/permission failure
+            return {"ok": False, "error": f"Could not save settings: {exc}"}
+        self._done.set()
+        return {"ok": True}
+
 
 def run_desktop(workspace_dir: str | None = None) -> None:
     """Launch the desktop shell and block until the window closes.
@@ -113,13 +147,14 @@ def run_desktop(workspace_dir: str | None = None) -> None:
 
     config = get_effective_config()
     apply_config_to_env(config)
-    # Desktop shell: no terminal to act on a port conflict, so fall back to a
-    # free port instead of dead-ending at the error panel.
-    cfg = build_launcher_config(config, workspace_dir, auto_port=True)
-    runner = BundledWebUIRunner(
-        app_dir=app_paths.webui_dir(), node_exe=app_paths.node_exe()
-    )
-    launcher = WebUILauncher(config, cfg, runner)
+
+    # First-run setup runs in the boot thread (below), so the launcher is built
+    # only after config is final. ``done`` unblocks the boot thread when the
+    # form is submitted; the close handler cancels it so closing the window
+    # mid-setup exits cleanly instead of hanging.
+    setup_done = threading.Event()
+    cancelled = threading.Event()
+    setup_api = _SetupApi(config, setup_done)
 
     window = webview.create_window(
         "EvoScientist",
@@ -131,13 +166,50 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         # error/status panels (and the WebUI) impossible to select or copy.
         # Enable selection so a user can copy an error message.
         text_select=True,
+        js_api=setup_api,
     )
-    controller = DesktopController(launcher, _WebviewWindow(window))
+    win = _WebviewWindow(window)
+    state: dict = {"launcher": None}
+
+    def _shutdown() -> None:
+        cancelled.set()
+        setup_done.set()  # release a boot thread blocked waiting on setup
+        launcher = state["launcher"]
+        if launcher is not None:
+            launcher.stop()
+
     # Confirm-before-interrupt on close is a later reliability task; for now the
     # close handler tears down only the processes we started.
-    window.events.closed += controller.shutdown
+    window.events.closed += _shutdown
+
+    def boot() -> bool:
+        nonlocal config
+        if setup_needed(config):
+            win.show_setup(
+                render_setup_html(
+                    provider=config.provider,
+                    model=config.model,
+                    workspace=config.default_workdir,
+                )
+            )
+            setup_done.wait()
+            if cancelled.is_set():
+                return False
+            # Re-resolve so the saved provider/model/key/workspace take effect.
+            config = get_effective_config()
+            apply_config_to_env(config)
+
+        # Desktop shell: no terminal to act on a port conflict, so fall back to
+        # a free port instead of dead-ending at the error panel.
+        cfg = build_launcher_config(config, workspace_dir, auto_port=True)
+        runner = BundledWebUIRunner(
+            app_dir=app_paths.webui_dir(), node_exe=app_paths.node_exe()
+        )
+        launcher = WebUILauncher(config, cfg, runner)
+        state["launcher"] = launcher
+        return DesktopController(launcher, win).boot()
 
     try:
-        webview.start(controller.boot)
+        webview.start(boot)
     finally:
-        controller.shutdown()
+        _shutdown()

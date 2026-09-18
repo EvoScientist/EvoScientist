@@ -12,8 +12,10 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.deploy.launcher import LauncherError
 from EvoScientist.desktop import app_paths, shell
+from EvoScientist.desktop import setup as dsetup
 from EvoScientist.desktop.controller import DesktopController
 
 
@@ -198,3 +200,60 @@ def test_webview_window_load_url_awaits_initial_load():
     win = _RecordingPywebviewWindow()
     shell._WebviewWindow(win).load_url("http://127.0.0.1:4716")
     assert win.calls == ["wait", "load_url"]
+
+
+# --------------------------------------------------------------------------- #
+# First-run setup (EvoScientist.desktop.setup)
+# --------------------------------------------------------------------------- #
+def test_setup_needed_true_without_key():
+    # Default config: provider=anthropic, no key → setup required.
+    assert dsetup.setup_needed(EvoScientistConfig()) is True
+
+
+def test_setup_needed_false_with_key():
+    # A key set in the config (env keys reach here the same way, folded into
+    # the config fields by get_effective_config) → setup skipped.
+    cfg = EvoScientistConfig()
+    cfg.provider = "anthropic"
+    cfg.anthropic_api_key = "sk-ant-x"
+    assert dsetup.setup_needed(cfg) is False
+
+
+def test_apply_setup_writes_openrouter_fields(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(
+        "EvoScientist.config.save_config", lambda c: saved.setdefault("cfg", c)
+    )
+    cfg = EvoScientistConfig()
+    dsetup.apply_setup(
+        "openrouter", " deepseek/deepseek-chat ", " sk-or-1 ", "/tmp/ws", config=cfg
+    )
+    assert cfg.provider == "openrouter"
+    assert cfg.model == "deepseek/deepseek-chat"  # trimmed
+    assert cfg.openrouter_api_key == "sk-or-1"  # trimmed, correct field
+    assert cfg.default_workdir == "/tmp/ws"
+    assert saved["cfg"] is cfg
+
+
+def test_apply_setup_maps_anthropic_key_field(monkeypatch):
+    monkeypatch.setattr("EvoScientist.config.save_config", lambda c: None)
+    cfg = EvoScientistConfig()
+    dsetup.apply_setup("anthropic", "claude-sonnet-4-6", "sk-ant", "", config=cfg)
+    assert cfg.anthropic_api_key == "sk-ant"
+
+
+def test_validate_setup_flags_missing_and_unknown():
+    assert dsetup.validate_setup("anthropic", "m", "") is not None  # no key
+    assert dsetup.validate_setup("anthropic", "", "k") is not None  # no model
+    assert dsetup.validate_setup("mystery", "m", "k") is not None  # unknown provider
+    assert dsetup.validate_setup("anthropic", "m", "k") is None
+
+
+def test_render_setup_html_prefills_escapes_and_hides_key():
+    out = dsetup.render_setup_html(provider="openrouter", model="<m>", workspace="/w")
+    assert 'value="openrouter" selected' in out  # provider preselected
+    assert 'value="&lt;m&gt;"' in out  # model prefilled + escaped
+    assert "/w" in out  # workspace prefilled
+    assert "type=password" in out  # key field present
+    assert "sk-" not in out  # key never prefilled
+    assert "pywebview.api.submit" in out  # wired to the js_api
