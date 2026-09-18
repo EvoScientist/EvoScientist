@@ -56,10 +56,38 @@ is authored on Linux and must be shaken out on a real Windows build — extend
 `COLLECT_PACKAGES` / `HIDDEN` in the spec as the first build surfaces missing
 modules.
 
-The installer (Task 6) copies `assemble_bundle.py`'s `webui/` + `runtime/node/`
-into `dist/EvoScientist/` next to the exes.
+The installer (`evoscientist.iss`) copies `assemble_bundle.py`'s `webui/` +
+`runtime/node/` into `dist/EvoScientist/` next to the exes before packaging.
 
-## Remaining phase-1 steps (not yet built)
+## evoscientist.iss (Inno Setup installer)
 
-- WebView2 Evergreen runtime detect/install.
-- Inno Setup (or NSIS) installer wrapping the app_root + shortcut. Windows-only to build/verify.
+Wraps the merged app directory into `EvoScientist-Setup.exe`. It ensures the
+Edge WebView2 Evergreen runtime is present (registry detect; download +
+silent-install the Microsoft bootstrapper only if missing), lays the app tree
+down under `Program Files`, and creates a Start-menu shortcut (desktop shortcut
+optional). Needs Inno Setup 6.1+ (for `DownloadTemporaryFile`).
+
+Its input is a single directory holding BOTH halves of the bundle — the
+PyInstaller onedir with the `assemble_bundle.py` output copied in next to the
+exes. Full build (on Windows):
+
+```
+# 1. runtime half (webui/ + runtime/node/)
+uv run python packaging\windows\assemble_bundle.py --out build\bundle
+# 2. Python half (EvoScientist.exe, langgraph.exe, _internal\)
+uv run --extra winbuild pyinstaller packaging\windows\evoscientist.spec --noconfirm
+# 3. merge the runtime half into the onedir
+xcopy /E /I build\bundle\webui   dist\EvoScientist\webui
+xcopy /E /I build\bundle\runtime dist\EvoScientist\runtime
+copy       build\bundle\manifest.json dist\EvoScientist\
+# 4. compile the installer -> dist\EvoScientist-Setup.exe
+iscc packaging\windows\evoscientist.iss
+```
+
+`iscc` defines override the pins: `iscc /DAppVersion=0.3.0 /DSourceDir=..\..\dist\EvoScientist packaging\windows\evoscientist.iss`.
+
+Shortcut `WorkingDir` is `{userdocs}`, not `{app}`: Program Files is read-only,
+and the launcher defaults its workspace (`runs/`, `skills/`, `media/`) to the
+working directory (see `build_launcher_config`).
+
+Authorable on Linux; compile/verify only on Windows.
