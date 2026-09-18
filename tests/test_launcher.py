@@ -121,6 +121,81 @@ def test_resolve_backend_no_sidecar_reuses(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Auto-port — collision recovery for GUI shells (no terminal to act on it)
+# --------------------------------------------------------------------------- #
+def test_find_free_port_scans_upward(monkeypatch):
+    occupied = {6174, 6175}
+    monkeypatch.setattr(
+        lgm, "_is_port_occupied", lambda port, *a, **k: port in occupied
+    )
+    assert lm._find_free_port(6174, "127.0.0.1") == 6176
+
+
+def test_find_free_port_exhausted_raises(monkeypatch):
+    monkeypatch.setattr(lgm, "_is_port_occupied", lambda *a, **k: True)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._find_free_port(6174, "127.0.0.1", limit=3)
+    assert ei.value.code == "port_conflict"
+
+
+class _FakeProc:
+    def poll(self):
+        return None
+
+
+class _FakeRunner:
+    handles_browser_open = False
+
+    def preflight(self, cfg):
+        pass
+
+    def start(self, cfg, env):
+        return _FakeProc()
+
+    def stop(self, proc):
+        pass
+
+
+def _patch_for_start(monkeypatch, occupied_ports):
+    """Foreign occupant on ``occupied_ports``; every other port free."""
+    occ = set(occupied_ports)
+    monkeypatch.setattr(lgm, "_is_port_occupied", lambda port, *a, **k: port in occ)
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: False)
+    monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: None)
+    monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: "fp")
+    monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
+
+
+def test_start_auto_ports_off_occupied_backend(monkeypatch):
+    _patch_for_start(monkeypatch, {6174})  # default backend port taken (foreign)
+    launcher = lm.WebUILauncher(object(), _cfg(auto_port=True), _FakeRunner())
+    result = launcher.start()
+    assert launcher._cfg.backend_port == 6175  # moved to next free
+    assert launcher._cfg.webui_port == 4716  # webui untouched (was free)
+    assert result.backend_started is True
+    assert "6175" in result.backend_url
+    assert any("6174 was occupied" in w for w in result.warnings)
+
+
+def test_start_without_auto_port_raises_on_conflict(monkeypatch):
+    """CLI (auto_port off) still gets the explicit conflict error."""
+    _patch_for_start(monkeypatch, {6174})
+    launcher = lm.WebUILauncher(object(), _cfg(auto_port=False), _FakeRunner())
+    with pytest.raises(lm.LauncherError) as ei:
+        launcher.start()
+    assert ei.value.code == "port_conflict"
+
+
+def test_start_auto_ports_occupied_webui(monkeypatch):
+    _patch_for_start(monkeypatch, {4716})  # webui port taken, backend free
+    launcher = lm.WebUILauncher(object(), _cfg(auto_port=True), _FakeRunner())
+    result = launcher.start()
+    assert launcher._cfg.backend_port == 6174  # backend untouched
+    assert launcher._cfg.webui_port == 4717  # moved to next free
+    assert any("WebUI" in w for w in result.warnings)
+
+
+# --------------------------------------------------------------------------- #
 # _scrubbed_env
 # --------------------------------------------------------------------------- #
 def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):

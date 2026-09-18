@@ -113,7 +113,9 @@ def run_desktop(workspace_dir: str | None = None) -> None:
 
     config = get_effective_config()
     apply_config_to_env(config)
-    cfg = build_launcher_config(config, workspace_dir)
+    # Desktop shell: no terminal to act on a port conflict, so fall back to a
+    # free port instead of dead-ending at the error panel.
+    cfg = build_launcher_config(config, workspace_dir, auto_port=True)
     runner = BundledWebUIRunner(
         app_dir=app_paths.webui_dir(), node_exe=app_paths.node_exe()
     )

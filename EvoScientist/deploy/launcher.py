@@ -36,7 +36,7 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -64,6 +64,10 @@ class LauncherConfig:
     # Honoured only by front-ends whose ``handles_browser_open`` is False
     # (e.g. the bundled runner). The npx runner opens the browser itself.
     open_browser: bool = False
+    # Desktop shells set this: when the configured port is occupied by a
+    # foreign process, fall back to the next free port instead of raising.
+    # The CLI leaves it False so a terminal user gets the explicit conflict.
+    auto_port: bool = False
 
 
 @dataclass(frozen=True)
@@ -270,19 +274,28 @@ class WebUILauncher:
 
         self._runner.preflight(self._cfg)
 
-        decision = _resolve_backend(self._cfg, self._config)
+        decision = self._resolve_backend_with_auto_port()
         self._warnings.extend(decision.warnings)
         if decision.action == "start":
             self._start_backend()
 
-        # Non-fatal: warn if the front-end port looks taken (npx/node will
-        # surface the hard failure if it actually can't bind).
+        # Front-end port: auto-port shells move off an occupied port too;
+        # otherwise it's a non-fatal warning (node will surface a hard bind
+        # failure if it actually can't listen).
         if _is_port_occupied(self._cfg.webui_port, self._cfg.webui_host):
-            self._warnings.append(
-                f"Port {self._cfg.webui_port} is already in use; the WebUI "
-                f"server may fail to start. Change it with "
-                f"'EvoSci config set webui_port <port>'."
-            )
+            if self._cfg.auto_port:
+                free = _find_free_port(self._cfg.webui_port, self._cfg.webui_host)
+                self._warnings.append(
+                    f"Port {self._cfg.webui_port} was occupied; using {free} "
+                    f"for the WebUI instead."
+                )
+                self._cfg = replace(self._cfg, webui_port=free)
+            else:
+                self._warnings.append(
+                    f"Port {self._cfg.webui_port} is already in use; the WebUI "
+                    f"server may fail to start. Change it with "
+                    f"'EvoSci config set webui_port <port>'."
+                )
 
         env = self._build_frontend_env()
         self._webui_proc = self._runner.start(self._cfg, env)
@@ -346,6 +359,29 @@ class WebUILauncher:
             stop_langgraph_dev(self._backend_proc)
 
     # -- internals -------------------------------------------------------- #
+    def _resolve_backend_with_auto_port(self) -> _BackendDecision:
+        """Resolve the backend, retrying on a free port for auto-port shells.
+
+        Only a ``port_conflict`` (a foreign process on the configured port) is
+        retried: the desktop always wants its own backend, so a busy port
+        should fall back rather than dead-end. ``workspace_mismatch`` /
+        ``stripped_backend`` (a reusable EvoSci server is there) are left to
+        raise — sharing/second-instance behaviour is a separate concern.
+        """
+        try:
+            return _resolve_backend(self._cfg, self._config)
+        except LauncherError as exc:
+            if exc.code != "port_conflict" or not self._cfg.auto_port:
+                raise
+            free = _find_free_port(self._cfg.backend_port, self._cfg.backend_host)
+            self._warnings.append(
+                f"Port {self._cfg.backend_port} was occupied; using {free} "
+                f"for the backend instead."
+            )
+            self._cfg = replace(self._cfg, backend_port=free)
+            # The new port is free, so this resolves to ``start``.
+            return _resolve_backend(self._cfg, self._config)
+
     def _start_backend(self) -> None:
         from ..langgraph_dev.manager import (
             _server_config_fingerprint,
@@ -455,6 +491,25 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     return _BackendDecision(action="reuse", warnings=warnings)
 
 
+def _find_free_port(start_port: int, host: str, *, limit: int = 100) -> int:
+    """Return the first free TCP port at or above ``start_port`` on ``host``.
+
+    Scans upward (predictable ports near the default, so the shown backend URL
+    stays close to the configured one). Raises ``port_conflict`` if the window
+    up to ``limit`` ports is fully occupied.
+    """
+    from ..langgraph_dev.manager import _is_port_occupied
+
+    for port in range(start_port, min(start_port + limit, 65536)):
+        if not _is_port_occupied(port, host):
+            return port
+    raise LauncherError(
+        "port_conflict",
+        f"No free port found in {start_port}–{start_port + limit - 1}.",
+        "Free a port in that range, or set an explicit port in config.",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Process / env / readiness helpers (shared; imported back by webui.py)
 # --------------------------------------------------------------------------- #
@@ -550,9 +605,15 @@ def _poll_ready(url: str, timeout: float, interval: float = 0.5) -> None:
 # --------------------------------------------------------------------------- #
 # Standalone JSON entrypoint (for an out-of-process shell, e.g. Electron)
 # --------------------------------------------------------------------------- #
-def build_launcher_config(config: Any, workspace_dir: str | None) -> LauncherConfig:
+def build_launcher_config(
+    config: Any, workspace_dir: str | None, *, auto_port: bool = False
+) -> LauncherConfig:
     """Resolve a :class:`LauncherConfig` from an ``EvoScientistConfig`` the
-    same way ``run_webui`` does, so both entrypoints agree."""
+    same way ``run_webui`` does, so both entrypoints agree.
+
+    ``auto_port`` is set by GUI shells (no terminal to act on a conflict); the
+    CLI leaves it False so a busy port surfaces as an explicit error.
+    """
     from ..langgraph_dev.manager import _DEFAULT_HOST, _DEFAULT_PORT
 
     if workspace_dir:
@@ -580,6 +641,7 @@ def build_launcher_config(config: Any, workspace_dir: str | None) -> LauncherCon
         deploy_mode=True,
         keepalive=bool(getattr(config, "langgraph_dev_keepalive", False)),
         open_browser=False,
+        auto_port=auto_port,
     )
 
 
@@ -609,7 +671,9 @@ def main(argv: list[str] | None = None) -> int:
 
     config = get_effective_config()
     apply_config_to_env(config)
-    cfg = build_launcher_config(config, args.workspace)
+    # Standalone entrypoint is an out-of-process GUI shell (e.g. Electron):
+    # auto-port like the in-process desktop shell.
+    cfg = build_launcher_config(config, args.workspace, auto_port=True)
 
     launcher = WebUILauncher(config, cfg, NpxWebUIRunner())
     try:
