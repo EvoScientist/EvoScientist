@@ -92,6 +92,14 @@ RUNTIME: LanggraphRuntimePaths = LanggraphRuntimePaths.for_directory(DEFAULT_PID
 
 def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
     """Return whether this config needs the background langgraph dev server."""
+    if (
+        str(getattr(config, "gateway_backend", "local") or "local")
+        == "langgraph_server"
+    ):
+        # On the server backend, execution itself is routed to the dev server,
+        # so it must exist even when no async sub-agent / scheduler / memory
+        # worker independently asks for it.
+        return True
     if config.enable_async_subagents:
         return True
     if config.enable_scheduler:

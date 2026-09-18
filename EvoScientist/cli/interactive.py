@@ -40,7 +40,7 @@ from ..gateway import (
     GraphGateway,
     GraphTarget,
     RuntimeGateways,
-    create_runtime_gateways,
+    create_runtime_gateways_for_config,
 )
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
@@ -520,7 +520,7 @@ def cmd_interactive(
         fallback_display=lambda text, style: console.print(text, style=style)
     )
 
-    runtime_gateways = create_runtime_gateways(events=event_sink)
+    runtime_gateways = create_runtime_gateways_for_config(config, events=event_sink)
     graph_gateway = runtime_gateways.graph_gateway
     requested_thread_id = thread_id
 

@@ -480,6 +480,18 @@ class TestEnsureLanggraphDev:
         cfg.enable_scheduler = False
         assert manager.needs_langgraph_dev(cfg) is False
 
+    def test_needs_langgraph_dev_for_server_backend_only(self):
+        """gateway_backend=langgraph_server needs the server even with every
+        other trigger off (execution itself is server-routed)."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.memory_skill_synthesis_enabled = False
+        cfg.enable_scheduler = False
+        assert manager.needs_langgraph_dev(cfg) is False
+        cfg.gateway_backend = "langgraph_server"
+        assert manager.needs_langgraph_dev(cfg) is True
+
     def test_reuses_existing_healthy_subprocess(self, tmp_path, runtime_paths):
         """When the subprocess is already running, no new Popen call."""
         cfg = EvoScientistConfig()
