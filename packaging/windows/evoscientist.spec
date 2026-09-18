@@ -117,6 +117,20 @@ if _wt_spec and _wt_spec.origin:
                 if _f.endswith((".dll", ".so", ".dylib")):
                     datas.append((os.path.join(_pdir, _f), f"wasmtime/{_plat}"))
 
+# quickjs_rs ships the code-interpreter guest + transform modules as .wasm data
+# files (quickjs_rs/_guest.wasm, quickjs_rs/_transform.wasm) and reads them via
+# ``importlib.resources.files("quickjs_rs") / "<name>.wasm"`` at runtime. The
+# package is only reached through langchain_quickjs's imports, so its code lands
+# in the PYZ but these data files are never collected — the guest run then fails
+# with "guest wasm not found". Ship every .wasm at the package-relative path the
+# resource lookup expects (quickjs_rs/).
+_qjs_spec = importlib.util.find_spec("quickjs_rs")
+if _qjs_spec and _qjs_spec.origin:
+    _qjs_dir = os.path.dirname(_qjs_spec.origin)
+    for _f in os.listdir(_qjs_dir):
+        if _f.endswith(".wasm"):
+            datas.append((os.path.join(_qjs_dir, _f), "quickjs_rs"))
+
 a_desktop = Analysis(
     ["desktop_entry.py"],
     pathex=[_REPO_ROOT],
