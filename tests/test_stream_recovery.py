@@ -10,8 +10,8 @@ so they actually verify the claims the recovery rests on:
 3. A run cancelled mid-tools leaves dangling tool calls; recovery closes them
    with honest synthetic results so the next turn neither replays the tool
    batch nor floods the UI with historical tool calls.
-4. If recovery itself fails (e.g. a transient checkpoint error), the next run
-   is refused instead of risking a replay of the interrupted tool batch.
+4. A call that finished before the cancel keeps its real result; only the
+   unfinished calls get the synthetic one.
 """
 
 import asyncio
@@ -156,9 +156,13 @@ class _ScriptedModel(BaseChatModel):
 
 
 async def _slow_edit(path: str, content: str = "data") -> str:
-    """Edit a file; the side effect lands immediately, like edit_file."""
+    """Edit a file; the side effect lands immediately, like edit_file.
+
+    ``a.py`` finishes fast so tests can exercise a partially-finished batch
+    (one real result pending, the rest still running) before cancelling.
+    """
     _TOOL_SIDE_EFFECTS.append(path)
-    await asyncio.sleep(2.0)
+    await asyncio.sleep(0.3 if path == "a.py" else 2.0)
     return f"edited {path}"
 
 
@@ -240,19 +244,6 @@ async def _hard_kill_mid_tools(agent, thread_id: str) -> None:
         await _cancel_mid_tools(agent, thread_id)
 
 
-async def _collect_refused_turn(agent, thread_id: str) -> list[dict[str, Any]]:
-    """Stream a turn expected to be refused; return events collected so far."""
-    events: list[dict[str, Any]] = []
-
-    async def _collect() -> None:
-        async for ev in stream_agent_events(agent, "hello", thread_id):
-            events.append(ev)
-
-    with pytest.raises(RuntimeError, match="Could not repair the interrupted state"):
-        await _collect()
-    return events
-
-
 def _tool_messages(messages: Any) -> list[ToolMessage]:
     """Extract the ToolMessages from a message sequence."""
     return [m for m in messages if isinstance(m, ToolMessage)]
@@ -266,13 +257,8 @@ async def test_cancel_mid_tools_closes_dangling_calls_and_next_turn_is_clean():
 
     await _cancel_mid_tools(agent, "t-cancel")
 
-    # The cancel-path recovery closed the turn out in the generator's finally:
-    # no pending tasks, and every dangling call got an honest synthetic result.
-    snap = await agent.aget_state(cfg)
-    assert snap.next == ()
-    synth = _tool_messages(snap.values["messages"])
-    assert len(synth) == 3
-    assert all(m.content == _INTERRUPTED_TOOL_RESULT for m in synth)
+    # Cancellation leaves the checkpoint parked; the next run repairs it.
+    assert (await agent.aget_state(cfg)).next
 
     # The next user message must NOT replay the interrupted tool batch...
     before = len(_TOOL_SIDE_EFFECTS)
@@ -316,66 +302,35 @@ async def test_hard_killed_thread_recovered_at_start_of_next_run():
     assert snap.next == ()
 
 
-async def test_start_of_run_recovery_failure_refuses_the_run(monkeypatch):
-    """If start-of-run recovery fails, the new run is refused, not replayed.
+async def test_partially_finished_batch_keeps_real_result_and_closes_the_rest():
+    """A finished call keeps its real result; only the rest get synthetic.
 
-    A transient checkpoint failure (e.g. sqlite error) during recovery must
-    not fall through to ``astream_events`` on a still-stuck thread — LangGraph
-    could resume the interrupted tools node and replay its side effects.
+    Regression for the patch-before-clear ordering: ``aupdate_state(...,
+    as_node="tools")`` reuses a finished task's id, and the checkpointer keeps
+    the first write per ``(task_id, idx)``, so the synthetic patch was silently
+    dropped and the dangling calls came back as "was cancelled" on the next
+    turn. Clearing first commits the finished call's pending write; the patch
+    then only covers the unfinished calls.
     """
     _script_tool_batch_then_ack()
     agent = _build_agent()
-    cfg = {"configurable": {"thread_id": "t-fail"}}
+    cfg = {"configurable": {"thread_id": "t-partial"}}
 
-    await _hard_kill_mid_tools(agent, "t-fail")
-    snap = await agent.aget_state(cfg)
-    assert snap.next  # still stuck — recovery has not run yet
+    task = asyncio.create_task(_run_turn(agent, "apply the edits", "t-partial"))
+    while len(_TOOL_SIDE_EFFECTS) < 3:
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.5)  # let a.py finish while b.py / c.py are running
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
-    async def _failing_aupdate_state(_config, _values=None, as_node=None):
-        raise RuntimeError("sqlite: disk I/O error")
+    events = await _run_turn(agent, "hello, new instruction", "t-partial")
 
-    monkeypatch.setattr(agent, "aupdate_state", _failing_aupdate_state)
-
-    before = len(_TOOL_SIDE_EFFECTS)
-    events = await _collect_refused_turn(agent, "t-fail")
-
-    # The turn was refused before any streaming: an error event for the UI,
-    # no tool side effects, and the stuck checkpoint untouched (still stuck,
-    # so a later retry can attempt recovery again).
-    assert events
-    assert events[0]["type"] == "error"
-    assert "Could not repair the interrupted state" in events[0]["message"]
-    assert len(_TOOL_SIDE_EFFECTS) == before
-    snap = await agent.aget_state(cfg)
-    assert snap.next
-
-
-async def test_unverified_recovery_refuses_the_run(monkeypatch):
-    """Repair writes that leave ``next`` non-empty must refuse the new run.
-
-    Covers the post-write verification branch of recovery: the checkpoint
-    writes "succeed" (no exception) yet the checkpoint still reports a stuck
-    ``next`` — the re-read must catch it and refuse the run.
-    """
-    _script_tool_batch_then_ack()
-    agent = _build_agent()
-    cfg = {"configurable": {"thread_id": "t-verify"}}
-
-    await _hard_kill_mid_tools(agent, "t-verify")
-    snap = await agent.aget_state(cfg)
-    assert snap.next  # stuck thread handed to the next run
-
-    async def _no_op_aupdate_state(_config, _values=None, as_node=None):
-        return None  # accept the write without actually clearing the checkpoint
-
-    monkeypatch.setattr(agent, "aupdate_state", _no_op_aupdate_state)
-
-    before = len(_TOOL_SIDE_EFFECTS)
-    events = await _collect_refused_turn(agent, "t-verify")
-
-    assert events
-    assert events[0]["type"] == "error"
-    assert "Could not repair the interrupted state" in events[0]["message"]
-    assert len(_TOOL_SIDE_EFFECTS) == before  # nothing re-executed
-    snap = await agent.aget_state(cfg)
-    assert snap.next  # still stuck — the writes never really landed
+    assert all(ev.get("type") != "tool_call" for ev in events)
+    seen = {m.tool_call_id: m.content for m in _tool_messages(_MODEL_REQUESTS[-1])}
+    assert seen == {
+        "call_1": "edited a.py",
+        "call_2": _INTERRUPTED_TOOL_RESULT,
+        "call_3": _INTERRUPTED_TOOL_RESULT,
+    }
+    assert (await agent.aget_state(cfg)).next == ()

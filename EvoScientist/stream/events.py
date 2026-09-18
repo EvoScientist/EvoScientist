@@ -93,11 +93,9 @@ async def _recover_interrupted_graph_state(
     A cancelled (Ctrl+C / ``/stop``), crashed, or hard-killed run can leave the
     LangGraph checkpoint in two kinds of trouble:
 
-    1. Pending tasks: ``next`` stays parked on the interrupted node, so on the
-       next invocation LangGraph tries to **resume** that broken step rather
-       than starting a new turn — it ignores the new human message and replays
-       the interrupted step (older runtimes even re-execute a pending tools
-       node outright).
+    1. Pending tasks: ``next`` stays parked on the interrupted node. New
+       input makes LangGraph discard those tasks, along with the results of
+       any tool call in the batch that had already finished.
     2. Dangling tool calls: the assistant message that dispatched the tools was
        committed, but its results never were. deepagents'
        ``PatchToolCallsMiddleware`` then closes each dangling call with "was
@@ -106,12 +104,14 @@ async def _recover_interrupted_graph_state(
        historical tool call to the UI and actively invites the model to
        re-issue the entire interrupted batch, re-applying real side effects.
 
-    Recovery synthesizes an honest ``ToolMessage`` for every dangling call
-    (telling the model the run was interrupted and side effects may already
-    have partially applied) and then commits the turn as finished via
-    ``aupdate_state(config, None, as_node=END)``, leaving ``next`` empty and a
-    self-consistent history the next turn can build on normally. Channel
-    values (message history) are otherwise preserved.
+    Recovery commits the turn as finished via ``aupdate_state(config, None,
+    as_node=END)`` — which also lands the pending writes of tool calls that
+    did finish, so they keep their real results — and synthesizes an honest
+    ``ToolMessage`` for every still-dangling call (telling the model the run
+    was interrupted and side effects may already have partially applied),
+    leaving ``next`` empty and a self-consistent history the next turn can
+    build on normally. Channel values (message history) are otherwise
+    preserved.
 
     Critically, this only runs when the stuck state is *not* a legitimate
     human-in-the-loop interrupt. The agent pauses via ``interrupt()`` /
@@ -125,9 +125,9 @@ async def _recover_interrupted_graph_state(
         parked at a genuine human-in-the-loop interrupt (left untouched), or
         recovery completed and the checkpoint verified clean. ``False`` when
         the checkpoint may still be stuck — recovery failed or could not be
-        verified. Callers starting a new run must refuse to proceed in that
-        case, or LangGraph could resume the interrupted node and replay its
-        tool side effects.
+        verified. The next run is still safe to start: LangGraph discards the
+        stale tasks and deepagents closes the dangling calls, with the
+        "was cancelled" wording this recovery exists to avoid.
 
     Best-effort: any failure is logged and swallowed so it never shadows the
     original exception or cancellation that triggered recovery — the return
@@ -170,15 +170,18 @@ async def _recover_interrupted_graph_state(
             )
             if call.get("id") and call["id"] not in answered_ids
         ]
+        # Clear first: it commits the pending writes of calls that did finish.
+        # Patching first would reuse a finished task's id and lose the patch.
+        await agent.aupdate_state(config, None, as_node=END)
         if patch:
             # Attribute the synthetic results to the stuck execution node so
             # they land in history exactly where the real results would have.
             write_node = "tools" if "tools" in stuck_at else stuck_at[0]
             await agent.aupdate_state(config, {"messages": patch}, as_node=write_node)
-        await agent.aupdate_state(config, None, as_node=END)
-        # Verify the checkpoint actually cleared before declaring the thread
-        # safe: a transient checkpoint failure must not let a new run resume
-        # the interrupted node and replay its tool side effects.
+            await agent.aupdate_state(config, None, as_node=END)
+        # Verify the checkpoint actually cleared, so a failed repair is
+        # observable (logged + reported via the return value) rather than
+        # silently reverting to the dangling-calls state.
         verify = await agent.aget_state(config)
         if getattr(verify, "next", None):
             _log.warning(
@@ -980,25 +983,13 @@ async def stream_agent_events(
     except Exception:
         pass
 
-    # A previous run cancelled (Ctrl+C), crashed, or was hard-killed mid-step
-    # can leave the checkpoint parked with pending tasks and dangling tool
-    # calls. Recover before this run's input is applied, or the interrupted
-    # step interferes with the new turn — worst case replaying the entire
-    # interrupted tool batch. A hard process kill runs no cleanup at all, so
-    # this start-of-run pass is the only chance to repair those threads.
+    # A previous run cancelled (Ctrl+C), crashed, or hard-killed mid-step leaves
+    # the checkpoint parked with pending tasks and dangling tool calls. Close
+    # it out before this run's input is applied, or deepagents patches the
+    # calls as "was cancelled", re-broadcasts the history to the UI and invites
+    # the model to re-issue the batch. A failed repair is logged, not fatal.
     if getattr(snapshot, "next", None):
-        if not await _recover_interrupted_graph_state(agent, config, snapshot=snapshot):
-            # The checkpoint may still be stuck (e.g. transient checkpoint
-            # failure). Refuse to start the run: proceeding could make
-            # LangGraph resume the interrupted node and replay its tool side
-            # effects — the exact bug this recovery exists to prevent.
-            error_msg = (
-                "Could not repair the interrupted state of this session "
-                "thread; starting a new run on it risks re-executing its "
-                "previous tool calls. Please retry, or start a new thread."
-            )
-            yield emitter.error(error_msg).data
-            raise RuntimeError(error_msg)
+        await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
     clear_completed_memory_activity_counts()
     astream_input = await build_agent_stream_input(message, media=media)
@@ -1006,7 +997,6 @@ async def stream_agent_events(
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
     _run_raised: bool = False
-    _run_cancelled: bool = False
     event_sink_token = None
     try:
         from langgraph.stream.transformers import CustomTransformer, UpdatesTransformer
@@ -1132,15 +1122,6 @@ async def stream_agent_events(
         _run_raised = True
         yield emitter.error(str(e)).data
         raise
-    except BaseException:
-        # Cancellation (Ctrl+C / ``/stop``) and GeneratorExit arrive as
-        # BaseException — ``except Exception`` above never sees them, so the
-        # interrupted super-step would otherwise leave the checkpoint stuck
-        # mid-node with dangling tool calls. Flag it so the finally-block
-        # recovery closes the turn out; otherwise the next user message
-        # replays the interrupted tool batch.
-        _run_cancelled = True
-        raise
     finally:
         if stream is not None:
             try:
@@ -1156,20 +1137,11 @@ async def stream_agent_events(
             await asyncio.gather(*producers, return_exceptions=True)
         if event_sink_token is not None:
             reset_run_event_sink(event_sink_token)
-        # When the run ended with an exception or was cancelled the LangGraph
-        # checkpoint may be left interrupted (``next`` non-empty, dangling tool
-        # calls). Recover — unless it's a real human-in-the-loop pause — so the
-        # next user message starts a fresh turn instead of replaying the broken
-        # step (which would look like lost history, or worse, re-execute the
-        # interrupted tool batch). Shielded: a second cancel mid-recovery must
-        # not tear the checkpoint writes down half-done.
-        if _run_raised or _run_cancelled:
-            recovery = asyncio.ensure_future(
-                _recover_interrupted_graph_state(agent, config)
-            )
-            try:
-                await asyncio.shield(recovery)
-            except asyncio.CancelledError:
-                pass
+        # When the run ended with an exception the LangGraph checkpoint may be
+        # left interrupted (``next`` non-empty). Recover — unless it's a real
+        # human-in-the-loop pause. Cancelled and hard-killed runs are recovered
+        # at the start of the next run instead.
+        if _run_raised:
+            await _recover_interrupted_graph_state(agent, config)
 
     yield emitter.done(processor.full_response).data
