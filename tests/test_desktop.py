@@ -150,3 +150,51 @@ def test_error_html_includes_code_and_escapes():
 def test_error_html_omits_detail_block_when_none():
     out = shell._error_html("node_missing", "no node", None)
     assert "class=detail" not in out
+
+
+class _RecordingLoaded:
+    """Stand-in for pywebview's ``events.loaded`` that logs every ``wait``."""
+
+    def __init__(self, log):
+        self._log = log
+
+    def wait(self, timeout=None):
+        self._log.append("wait")
+        return True
+
+
+class _RecordingPywebviewWindow:
+    """Fake pywebview window recording the order of navigations and loaded-waits."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        self.events = SimpleNamespace(loaded=_RecordingLoaded(self.calls))
+
+    def load_html(self, markup, *args, **kwargs):
+        self.calls.append("load_html")
+
+    def load_url(self, url):
+        self.calls.append("load_url")
+
+
+def test_webview_window_waits_for_loaded_around_html_swap():
+    # A swap must wait for the initial content to load, then wait again after
+    # issuing it — so it never races the previous (async) navigation.
+    win = _RecordingPywebviewWindow()
+    shell._WebviewWindow(win).show_status("starting")
+    assert win.calls == ["wait", "load_html", "wait"]
+
+
+def test_webview_window_awaits_initial_load_only_once():
+    # The initial-load gate fires once; later swaps only post-wait.
+    win = _RecordingPywebviewWindow()
+    w = shell._WebviewWindow(win)
+    w.show_status("starting")
+    w.show_error("node_missing", "no node", None)
+    assert win.calls == ["wait", "load_html", "wait", "load_html", "wait"]
+
+
+def test_webview_window_load_url_awaits_initial_load():
+    win = _RecordingPywebviewWindow()
+    shell._WebviewWindow(win).load_url("http://127.0.0.1:4716")
+    assert win.calls == ["wait", "load_url"]

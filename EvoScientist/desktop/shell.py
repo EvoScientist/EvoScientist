@@ -49,19 +49,49 @@ def _error_html(code: str, message: str, detail: str | None) -> str:
 
 
 class _WebviewWindow:
-    """Adapts a pywebview window to the controller's ``DesktopWindow`` surface."""
+    """Adapts a pywebview window to the controller's ``DesktopWindow`` surface.
+
+    Serializes navigations against pywebview's ``loaded`` event. ``load_html`` /
+    ``load_url`` only block on the ``shown`` event, not on content readiness:
+    each starts an async navigation and clears ``loaded``, which re-fires when
+    that content finishes. Issuing the next swap before the previous navigation
+    completes lets WebView2 drop the losing one — which is what silently
+    dropped very-early error pages (a preflight failure whose error page raced
+    the window's initial status page). Waiting for ``loaded`` before the first
+    swap and after each one keeps navigations from overlapping.
+    """
+
+    # Bounded so a webview backend that never signals ``loaded`` can't hang the
+    # boot thread; mirrors pywebview's own 20s ``shown``/``loaded`` waits.
+    _SETTLE_TIMEOUT = 20.0
 
     def __init__(self, window) -> None:
         self._window = window
+        self._initial_loaded = False
+
+    def _await_initial_load(self) -> None:
+        """Block until the window's initial (create-time) content has loaded, so
+        the first swap does not race it. No-op after the first call."""
+        if not self._initial_loaded:
+            self._window.events.loaded.wait(self._SETTLE_TIMEOUT)
+            self._initial_loaded = True
+
+    def _load_html(self, markup: str) -> None:
+        self._await_initial_load()
+        self._window.load_html(markup)
+        # load_html cleared ``loaded`` synchronously; wait for the new content
+        # to settle before any subsequent swap can be issued.
+        self._window.events.loaded.wait(self._SETTLE_TIMEOUT)
 
     def show_status(self, message: str) -> None:
-        self._window.load_html(_status_html(message))
+        self._load_html(_status_html(message))
 
     def load_url(self, url: str) -> None:
+        self._await_initial_load()
         self._window.load_url(url)
 
     def show_error(self, code: str, message: str, detail: str | None) -> None:
-        self._window.load_html(_error_html(code, message, detail))
+        self._load_html(_error_html(code, message, detail))
 
 
 def run_desktop(workspace_dir: str | None = None) -> None:
