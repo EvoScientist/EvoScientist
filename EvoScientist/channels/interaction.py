@@ -444,6 +444,15 @@ class ApprovalPolicy:
         mode. ``None`` (prompt the user) is returned only when a human
         decision is genuinely needed.
 
+        A normal attended ``auto_approve`` run no longer reaches this path:
+        it suppresses HITL per run (``hitl_suppressed_for_run``) and the
+        backend guard refuses dangerous commands, so the interrupt never
+        fires. This client-side REJECT branch therefore applies only to a
+        run that still resolves interrupts — one whose per-run suppression
+        was not applied (a direct caller, tests, or an explicit override) —
+        for which it keeps returning a reason-carrying REJECT rather than
+        escalating.
+
         The pair-valued single-load evaluation this delegates to is
         :meth:`decision_snapshot` — callers that also need the per-request
         REJECTs for the reply branches (``resolve_approval``) snapshot once
