@@ -192,6 +192,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5.3", "z-ai/glm-5.3", "openrouter"),
     ("glm-5.3-flash", "z-ai/glm-5.3-flash", "openrouter"),
+    ("glm-5.3-flashx", "z-ai/glm-5.3-flashx", "openrouter"),
     ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
@@ -229,6 +230,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Zhipu (智谱 — general endpoint, default for simple lookups)
     ("glm-5.3", "glm-5.3", "zhipu"),
     ("glm-5.3-flash", "glm-5.3-flash", "zhipu"),
+    ("glm-5.3-flashx", "glm-5.3-flashx", "zhipu"),
     ("glm-5.2", "glm-5.2", "zhipu"),
     ("glm-5.1", "glm-5.1", "zhipu"),
     ("glm-5", "glm-5", "zhipu"),
