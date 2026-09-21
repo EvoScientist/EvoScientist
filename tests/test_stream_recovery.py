@@ -12,11 +12,12 @@ so they actually verify the claims the recovery rests on:
    batch nor floods the UI with historical tool calls.
 4. A call that finished before the cancel keeps its real result; only the
    unfinished calls get the synthetic one.
+5. A SIGKILL after every tool wrote, before the super-step checkpoint, still
+   recovers (``next`` empty, ``tasks`` present, empty patch).
 """
 
 import asyncio
 from typing import Any, TypedDict
-from unittest.mock import patch as mock_patch
 
 import pytest
 from deepagents import create_deep_agent
@@ -28,7 +29,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from EvoScientist.middleware.tool_history_repair import ToolHistoryRepairMiddleware
-from EvoScientist.stream import events as events_module
 from EvoScientist.stream.events import (
     _INTERRUPTED_TOOL_RESULT,
     _recover_interrupted_graph_state,
@@ -102,6 +102,9 @@ async def test_recovery_clears_stuck_state_after_crash():
     # And the graph is genuinely unstuck: a fresh run completes (a: +1, b: +100)
     # instead of replaying the dead node.
     assert app.invoke({"x": 41}, cfg)["x"] == 142
+    done = app.get_state(cfg)
+    assert done.next == ()
+    assert done.tasks == ()
 
 
 async def test_recovery_preserves_pending_hitl_interrupt():
@@ -188,13 +191,13 @@ def _tool_call(id_: str, path: str) -> dict[str, Any]:
     }
 
 
-def _build_agent():
+def _build_agent(checkpointer: Any | None = None):
     """Build a deep agent mirroring the real EvoScientist middleware stack."""
     return create_deep_agent(
         model=_ScriptedModel(),
         tools=[_slow_edit],
         middleware=[ToolHistoryRepairMiddleware()],
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer if checkpointer is not None else InMemorySaver(),
     )
 
 
@@ -282,20 +285,53 @@ async def _cancel_mid_tools(agent, thread_id: str) -> None:
         pass
 
 
-async def _hard_kill_mid_tools(agent, thread_id: str) -> None:
-    """Leave a stuck checkpoint behind, as a hard-killed process would.
+class _KillAfterToolWrites(InMemorySaver):
+    """SIGKILL between ``put_writes`` and ``put_checkpoint``.
 
-    Cancels mid-tools with the recovery suppressed: nothing "runs at kill
-    time", so the thread keeps its pending ``next`` and dangling tool calls.
+    Drops the super-step commit once three tool-task writes are pending, then
+    freezes further durable writes so the dying process cannot store a later
+    checkpoint. ``thaw()`` re-enables writes for the next process's recovery.
     """
 
-    async def _no_recovery(agent, config, snapshot=None):
-        return None
+    def __init__(self) -> None:
+        super().__init__()
+        self._phase = "live"
+        self.killed = asyncio.Event()
 
-    with mock_patch.object(
-        events_module, "_recover_interrupted_graph_state", _no_recovery
-    ):
-        await _cancel_mid_tools(agent, thread_id)
+    def thaw(self) -> None:
+        """Allow the next process to persist recovery writes."""
+        self._phase = "thawed"
+
+    def _frozen_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "configurable": {
+                "thread_id": config["configurable"]["thread_id"],
+                "checkpoint_ns": config["configurable"].get("checkpoint_ns", ""),
+                "checkpoint_id": config["configurable"].get("checkpoint_id"),
+            }
+        }
+
+    def put(self, config, checkpoint, metadata, new_versions):
+        """Drop the tools super-step commit, then freeze until ``thaw()``."""
+        if self._phase == "frozen":
+            return self._frozen_config(config)
+        if self._phase == "live":
+            parent_id = config["configurable"].get("checkpoint_id")
+            if parent_id:
+                thread_id = config["configurable"]["thread_id"]
+                checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+                pending = self.writes.get((thread_id, checkpoint_ns, parent_id)) or {}
+                if len({entry[0] for entry in pending.values()}) >= 3:
+                    self._phase = "frozen"
+                    self.killed.set()
+                    return self._frozen_config(config)
+        return super().put(config, checkpoint, metadata, new_versions)
+
+    def put_writes(self, config, writes, task_id, task_path=""):
+        """Ignore writes from the dying process after the dropped commit."""
+        if self._phase == "frozen":
+            return None
+        return super().put_writes(config, writes, task_id, task_path)
 
 
 def _tool_messages(messages: Any) -> list[ToolMessage]:
@@ -333,23 +369,30 @@ async def test_cancel_mid_tools_closes_dangling_calls_and_next_turn_is_clean():
 
 
 async def test_hard_killed_thread_recovered_at_start_of_next_run():
-    """A hard-killed thread (no cleanup ran) is repaired on the next run."""
+    """A hard-killed process is repaired when a new agent resumes the thread.
+
+    Models a process restart: cancel with agent A, then build agent B over the
+    same saver and run the next turn through B. Recovery is not invoked at
+    cancel time; start-of-run on B's first ``stream_agent_events`` does it.
+    """
     _script_tool_batch_then_ack()
-    agent = _build_agent()
+    saver = InMemorySaver()
+    killed = _build_agent(checkpointer=saver)
     cfg = {"configurable": {"thread_id": "t-kill"}}
 
     _gate_slow_tools()  # park every call: the "kill" always lands mid-batch
     try:
-        await _hard_kill_mid_tools(agent, "t-kill")
+        await _cancel_mid_tools(killed, "t-kill")
     finally:
         _ungate_slow_tools()
 
-    snap = await agent.aget_state(cfg)
+    snap = await killed.aget_state(cfg)
     assert snap.next  # still stuck — the "killed" process never cleaned up
     assert not _tool_messages(snap.values["messages"])  # calls left dangling
 
+    resumed = _build_agent(checkpointer=saver)
     before = len(_TOOL_SIDE_EFFECTS)
-    events = await _run_turn(agent, "hello, new instruction", "t-kill")
+    events = await _run_turn(resumed, "hello, new instruction", "t-kill")
 
     # Start-of-run recovery kicked in: no replay, no UI flood, honest results.
     assert len(_TOOL_SIDE_EFFECTS) == before
@@ -360,7 +403,7 @@ async def test_hard_killed_thread_recovered_at_start_of_next_run():
     assert all(m.content == _INTERRUPTED_TOOL_RESULT for m in closed)
     assert not any("another message came in" in str(m.content) for m in closed)
 
-    snap = await agent.aget_state(cfg)
+    snap = await resumed.aget_state(cfg)
     assert snap.next == ()
 
 
@@ -400,5 +443,52 @@ async def test_partially_finished_batch_keeps_real_result_and_closes_the_rest():
         "call_1": "edited a.py",
         "call_2": _INTERRUPTED_TOOL_RESULT,
         "call_3": _INTERRUPTED_TOOL_RESULT,
+    }
+    assert (await agent.aget_state(cfg)).next == ()
+
+
+async def test_uncommitted_finished_batch_is_recovered():
+    """SIGKILL after every tool wrote, before the super-step checkpoint.
+
+    ``next`` is empty (every task has a write) while ``tasks`` still holds
+    the tools. Recovery must still commit those writes — and must not
+    warn-fail just because the first END schedules ``model``.
+    """
+    _script_tool_batch_then_ack()
+    saver = _KillAfterToolWrites()
+    agent = _build_agent(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t-uncommitted"}}
+
+    # Let every call finish immediately so all three pending writes land.
+    _gate_slow_tools()
+    assert _slow_tool_gate is not None
+    _slow_tool_gate.set()
+    try:
+        task = asyncio.create_task(_run_turn(agent, "apply the edits", "t-uncommitted"))
+        await asyncio.wait_for(saver.killed.wait(), timeout=10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        _ungate_slow_tools()
+
+    saver.thaw()
+    snap = await agent.aget_state(cfg)
+    assert snap.next == ()
+    assert snap.tasks
+    assert await _recover_interrupted_graph_state(agent, cfg, snapshot=snap) is True
+    recovered = await agent.aget_state(cfg)
+    assert recovered.next == ()
+    assert recovered.tasks == ()
+
+    before = len(_TOOL_SIDE_EFFECTS)
+    events = await _run_turn(agent, "hello, new instruction", "t-uncommitted")
+    assert len(_TOOL_SIDE_EFFECTS) == before
+    assert all(ev.get("type") != "tool_call" for ev in events)
+    seen = {m.tool_call_id: m.content for m in _tool_messages(_MODEL_REQUESTS[-1])}
+    assert seen == {
+        "call_1": "edited a.py",
+        "call_2": "edited b.py",
+        "call_3": "edited c.py",
     }
     assert (await agent.aget_state(cfg)).next == ()

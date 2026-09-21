@@ -17,6 +17,9 @@ from langgraph.graph import END
 from langgraph.types import Command, Interrupt
 
 from ..memory.worker_activity import clear_completed_memory_activity_counts
+from ..middleware.tool_history_repair import (
+    _INTERRUPTED_RESULT as _INTERRUPTED_TOOL_RESULT,
+)
 from .emitter import StreamEventEmitter
 from .summarization import (
     _extract_summary_message_text,
@@ -76,11 +79,18 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
     return False
 
 
-_INTERRUPTED_TOOL_RESULT = (
-    "Tool execution was interrupted before the run completed. Side effects may "
-    "already have been partially applied; check the current state instead of "
-    "re-running this call unless the user asks."
-)
+def _snapshot_needs_recovery(snapshot: Any) -> bool:
+    """True if the checkpoint has unfinished work or uncommitted task writes.
+
+    LangGraph computes ``next`` as the tasks that have not yet produced
+    writes. A SIGKILL between ``put_writes`` and ``put_checkpoint`` can
+    leave every tool call finished (so ``next`` is empty) while
+    ``snapshot.tasks`` still holds those tools with their pending results.
+    A completed turn has both ``next`` and ``tasks`` empty.
+    """
+    if snapshot is None:
+        return False
+    return bool(getattr(snapshot, "next", None) or getattr(snapshot, "tasks", None))
 
 
 async def _recover_interrupted_graph_state(
@@ -95,7 +105,11 @@ async def _recover_interrupted_graph_state(
 
     1. Pending tasks: ``next`` stays parked on the interrupted node. New
        input makes LangGraph discard those tasks, along with the results of
-       any tool call in the batch that had already finished.
+       any tool call in the batch that had already finished. ``next`` is
+       computed as the tasks without writes, so a SIGKILL between
+       ``put_writes`` and ``put_checkpoint`` can leave ``next`` empty while
+       ``snapshot.tasks`` still holds the finished tools; recovery has to
+       look at both.
     2. Dangling tool calls: the assistant message that dispatched the tools was
        committed, but its results never were. deepagents'
        ``PatchToolCallsMiddleware`` then closes each dangling call with "was
@@ -139,8 +153,9 @@ async def _recover_interrupted_graph_state(
     try:
         if snapshot is None:
             snapshot = await agent.aget_state(config)
-        # Only act when the graph is genuinely stuck (non-empty next tuple)...
-        if not snapshot or not getattr(snapshot, "next", None):
+        # Only act when the graph is genuinely stuck: non-empty next, or
+        # tasks whose writes never made it into a checkpoint.
+        if not snapshot or not _snapshot_needs_recovery(snapshot):
             return True
         # ...and not parked at a real human-in-the-loop interrupt.
         if _snapshot_has_pending_interrupt(snapshot):
@@ -152,7 +167,9 @@ async def _recover_interrupted_graph_state(
             )
             return True
 
-        stuck_at = snapshot.next
+        stuck_at = snapshot.next or tuple(
+            t.name for t in (getattr(snapshot, "tasks", None) or ())
+        )
         values = getattr(snapshot, "values", None) or {}
         messages = values.get("messages") or []
         answered_ids = {m.tool_call_id for m in messages if m.type == "tool"}
@@ -161,6 +178,7 @@ async def _recover_interrupted_graph_state(
                 content=_INTERRUPTED_TOOL_RESULT,
                 tool_call_id=call["id"],
                 name=call.get("name") or "unknown",
+                status="error",
             )
             for m in messages
             if isinstance(m, AIMessage)
@@ -176,9 +194,17 @@ async def _recover_interrupted_graph_state(
         if patch:
             # Attribute the synthetic results to the stuck execution node so
             # they land in history exactly where the real results would have.
-            write_node = "tools" if "tools" in stuck_at else stuck_at[0]
+            write_node = (
+                "tools"
+                if "tools" in stuck_at
+                else (stuck_at[0] if stuck_at else "tools")
+            )
             await agent.aupdate_state(config, {"messages": patch}, as_node=write_node)
-            await agent.aupdate_state(config, None, as_node=END)
+        # Unconditional: with pending writes and an empty patch, the first
+        # END commits those writes and leaves next == ('model',). Nesting the
+        # trailing clear under ``if patch`` would then warn-fail a thread
+        # that is actually fine.
+        await agent.aupdate_state(config, None, as_node=END)
         # Verify the checkpoint actually cleared, so a failed repair is
         # observable (logged + reported via the return value) rather than
         # silently reverting to the dangling-calls state.
@@ -988,7 +1014,8 @@ async def stream_agent_events(
     # it out before this run's input is applied, or deepagents patches the
     # calls as "was cancelled", re-broadcasts the history to the UI and invites
     # the model to re-issue the batch. A failed repair is logged, not fatal.
-    if getattr(snapshot, "next", None):
+    # Also covers the all-writes-uncommitted case (next empty, tasks present).
+    if _snapshot_needs_recovery(snapshot):
         await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
     clear_completed_memory_activity_counts()
