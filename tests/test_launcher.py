@@ -174,7 +174,7 @@ def test_start_auto_ports_off_occupied_backend(monkeypatch):
     assert launcher._cfg.webui_port == 4716  # webui untouched (was free)
     assert result.backend_started is True
     assert "6175" in result.backend_url
-    assert any("6174 was occupied" in w for w in result.warnings)
+    assert any("port_conflict" in w and "6175" in w for w in result.warnings)
 
 
 def test_start_without_auto_port_raises_on_conflict(monkeypatch):
@@ -184,6 +184,59 @@ def test_start_without_auto_port_raises_on_conflict(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         launcher.start()
     assert ei.value.code == "port_conflict"
+
+
+def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
+    """An EvoSci langgraph dev occupies ``occupied`` with ``sidecar``.
+
+    Any other port is free, so an auto-port fallback resolves to ``start``.
+    """
+    occ = set(occupied)
+    monkeypatch.setattr(lgm, "_is_port_occupied", lambda port, *a, **k: port in occ)
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: True)
+    monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: sidecar)
+    monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: "fp")
+    monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
+
+
+def test_start_auto_ports_off_workspace_mismatch(monkeypatch):
+    """A GUI shell starts its own backend when the port serves another workspace."""
+    _patch_for_evosci_occupant(
+        monkeypatch, sidecar={"workspace": "/tmp/wsB", "deploy_mode": True}
+    )
+    launcher = lm.WebUILauncher(
+        object(), _cfg(workspace_dir="/tmp/wsA", auto_port=True), _FakeRunner()
+    )
+    result = launcher.start()
+    assert launcher._cfg.backend_port == 6175  # own backend on a free port
+    assert result.backend_started is True
+    assert any("workspace_mismatch" in w for w in result.warnings)
+
+
+def test_start_auto_ports_off_stripped_backend(monkeypatch):
+    """A GUI shell starts its own deploy-mode backend past a stripped server."""
+    _patch_for_evosci_occupant(
+        monkeypatch, sidecar={"workspace": "/tmp/wsA", "deploy_mode": False}
+    )
+    launcher = lm.WebUILauncher(
+        object(), _cfg(workspace_dir="/tmp/wsA", auto_port=True), _FakeRunner()
+    )
+    result = launcher.start()
+    assert launcher._cfg.backend_port == 6175
+    assert any("stripped_backend" in w for w in result.warnings)
+
+
+def test_start_without_auto_port_raises_on_workspace_mismatch(monkeypatch):
+    """CLI (auto_port off) still refuses a different-workspace server."""
+    _patch_for_evosci_occupant(
+        monkeypatch, sidecar={"workspace": "/tmp/wsB", "deploy_mode": True}
+    )
+    launcher = lm.WebUILauncher(
+        object(), _cfg(workspace_dir="/tmp/wsA", auto_port=False), _FakeRunner()
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        launcher.start()
+    assert ei.value.code == "workspace_mismatch"
 
 
 def test_start_auto_ports_occupied_webui(monkeypatch):

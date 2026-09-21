@@ -231,6 +231,15 @@ class _BackendDecision:
     warnings: list[str] = field(default_factory=list)
 
 
+# Backend-resolution errors an auto-port (GUI) shell recovers from by starting
+# its own backend on a free port instead of raising. A busy port, a server for
+# a different workspace, and a stripped CLI-mode server are all unusable for the
+# desktop's own workspace, and there is no terminal to act on the message.
+_AUTO_PORT_FALLBACK_CODES = frozenset(
+    {"port_conflict", "workspace_mismatch", "stripped_backend"}
+)
+
+
 class WebUILauncher:
     """Orchestrates the backend (langgraph dev) + a pluggable front-end.
 
@@ -362,21 +371,25 @@ class WebUILauncher:
     def _resolve_backend_with_auto_port(self) -> _BackendDecision:
         """Resolve the backend, retrying on a free port for auto-port shells.
 
-        Only a ``port_conflict`` (a foreign process on the configured port) is
-        retried: the desktop always wants its own backend, so a busy port
-        should fall back rather than dead-end. ``workspace_mismatch`` /
-        ``stripped_backend`` (a reusable EvoSci server is there) are left to
-        raise — sharing/second-instance behaviour is a separate concern.
+        In auto-port (GUI) mode the desktop always wants its OWN backend for
+        its OWN workspace, and there is no terminal to act on a conflict
+        message. So a busy port (``port_conflict``), a reusable server pinned
+        to a different workspace (``workspace_mismatch``), and a stripped
+        CLI-mode server (``stripped_backend``) all fall back to starting a
+        fresh backend on a free port rather than dead-ending. A reusable
+        server for THIS workspace is still reused: ``_resolve_backend``
+        returns ``reuse`` before it would raise. The CLI (auto_port=False)
+        keeps the explicit conflict errors so a terminal user can act on them.
         """
         try:
             return _resolve_backend(self._cfg, self._config)
         except LauncherError as exc:
-            if exc.code != "port_conflict" or not self._cfg.auto_port:
+            if not self._cfg.auto_port or exc.code not in _AUTO_PORT_FALLBACK_CODES:
                 raise
             free = _find_free_port(self._cfg.backend_port, self._cfg.backend_host)
             self._warnings.append(
-                f"Port {self._cfg.backend_port} was occupied; using {free} "
-                f"for the backend instead."
+                f"Port {self._cfg.backend_port} was unavailable ({exc.code}); "
+                f"started a new backend on {free} instead."
             )
             self._cfg = replace(self._cfg, backend_port=free)
             # The new port is free, so this resolves to ``start``.
