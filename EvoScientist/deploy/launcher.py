@@ -298,6 +298,13 @@ class WebUILauncher:
 
         return f"http://{_format_hostport(self._cfg.webui_host, self._cfg.webui_port)}"
 
+    @property
+    def backend_started(self) -> bool:
+        """True when this launcher started (and thus owns teardown of) the
+        backend; False when it reused an already-running one. Closing the
+        desktop only kills the backend's runs when this is True."""
+        return self._backend_started
+
     # -- lifecycle -------------------------------------------------------- #
     def start(self) -> LaunchResult:
         """Resolve/start the backend and start the front-end. Non-blocking:

@@ -219,8 +219,39 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         if launcher is not None:
             launcher.stop()
 
-    # Confirm-before-interrupt on close is a later reliability task; for now the
-    # close handler tears down only the processes we started.
+    def _on_closing() -> bool:
+        """pywebview ``closing`` handler (fires before close; returning False
+        vetoes it). Confirm before tearing down a backend WE own that is still
+        busy — closing then kills its in-flight runs and background sub-agents.
+        Returns True (allow close) in every other case, including any probe
+        error, so a flaky check never traps the user in an unclosable window.
+        """
+        launcher = state["launcher"]
+        if launcher is None:
+            return True
+        try:
+            from .shutdown import backend_has_active_runs, should_confirm_close
+
+            active = backend_has_active_runs(launcher.backend_url)
+            if not should_confirm_close(launcher.backend_started, active):
+                return True
+            ok = bool(
+                window.create_confirmation_dialog(
+                    "Quit EvoScientist?",
+                    "Research tasks are still running. Quit and stop them?",
+                )
+            )
+            logger.info(
+                "close with active tasks: user chose %s", "quit" if ok else "stay"
+            )
+            return ok
+        except Exception as exc:  # never trap the user in an unclosable window
+            logger.warning("close-confirm check failed: %s", exc)
+            return True
+
+    # ``closing`` gates the close (confirm on active tasks); ``closed`` does the
+    # actual idempotent teardown once the close is allowed to proceed.
+    window.events.closing += _on_closing
     window.events.closed += _shutdown
 
     def boot() -> bool:
