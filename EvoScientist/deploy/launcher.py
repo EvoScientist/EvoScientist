@@ -546,11 +546,15 @@ def _stop_process_tree(proc: subprocess.Popen) -> None:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         elif os.name == "nt":
             # taskkill /T terminates the whole child tree (node + next server).
+            # CREATE_NO_WINDOW: the windowed EvoScientist.exe has no console, so
+            # spawning the console app taskkill would otherwise flash a blank
+            # terminal window on shutdown.
             subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         else:  # pragma: no cover - exotic platform
             proc.terminate()

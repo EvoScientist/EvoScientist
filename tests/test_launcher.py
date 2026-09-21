@@ -248,6 +248,34 @@ def test_start_auto_ports_occupied_webui(monkeypatch):
     assert any("WebUI" in w for w in result.warnings)
 
 
+def test_stop_process_tree_taskkill_no_console_window(monkeypatch):
+    """taskkill runs with CREATE_NO_WINDOW so exit doesn't flash a console."""
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(lm.os, "name", "nt")
+    monkeypatch.setattr(lm.subprocess, "run", _fake_run)
+    # CREATE_NO_WINDOW is Windows-only; provide it on the (Linux) test host.
+    monkeypatch.setattr(lm.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+
+    class _Proc:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    lm._stop_process_tree(_Proc())
+
+    assert captured["cmd"][0] == "taskkill"
+    assert captured["kwargs"]["creationflags"] == lm.subprocess.CREATE_NO_WINDOW
+
+
 # --------------------------------------------------------------------------- #
 # _scrubbed_env
 # --------------------------------------------------------------------------- #
