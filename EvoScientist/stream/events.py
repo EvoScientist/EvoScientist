@@ -209,12 +209,12 @@ async def _recover_interrupted_graph_state(
         # observable (logged + reported via the return value) rather than
         # silently reverting to the dangling-calls state.
         verify = await agent.aget_state(config)
-        if getattr(verify, "next", None):
+        if _snapshot_needs_recovery(verify):
             _log.warning(
                 "Interrupted graph state for thread %s is still stuck at %s "
                 "after recovery",
                 config.get("configurable", {}).get("thread_id", "?"),
-                verify.next,
+                getattr(verify, "next", None) or getattr(verify, "tasks", None),
             )
             return False
         _log.debug(
