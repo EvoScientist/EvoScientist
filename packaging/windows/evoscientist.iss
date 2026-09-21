@@ -20,14 +20,17 @@
 ;     manifest.json
 ;
 ; Build (on Windows, with Inno Setup 6.1+ installed for DownloadTemporaryFile):
+;   One command does all of the below with a sanity gate:
+;     powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+;   Or by hand:
 ;   1. uv run python packaging\windows\assemble_bundle.py --out build\bundle
 ;   2. uv run --extra winbuild pyinstaller packaging\windows\evoscientist.spec --noconfirm
 ;   3. xcopy /E /I build\bundle\webui   dist\EvoScientist\webui
-;      xcopy /E /I build\bundle\runtime dist\EvoScientist\runtime
+;      xcopy /E /I build\bundle\runtime dist\EvoScientist\runtime   (node/ AND python/)
 ;      copy    build\bundle\manifest.json dist\EvoScientist\
 ;   4. iscc packaging\windows\evoscientist.iss
 ;      (override defaults: iscc /DAppVersion=0.3.0 /DSourceDir=..\..\dist\EvoScientist ...)
-;   -> dist\EvoScientist-Setup.exe
+;   -> packaging\windows\dist\EvoScientist-Setup.exe  (OutputDir=dist is relative to this .iss)
 ;
 ; This script is authored on Linux and can only be compiled/verified on Windows.
 

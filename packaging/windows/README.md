@@ -4,6 +4,23 @@ Build tooling for the terminal-free Windows installer (issue #484, phase 1). The
 installed app is a thin pywebview shell (`EvoScientist/desktop/`) that hosts the
 existing WebUI through the shell-agnostic launcher (`EvoScientist/deploy/launcher.py`).
 
+## Quick build (on Windows)
+
+`build.ps1` runs all four steps below with consistent paths and a sanity gate
+that aborts if the merged app tree is missing any half (the manual xcopy merge
+could silently drop `runtime\python`):
+
+```
+powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+# -> packaging\windows\dist\EvoScientist-Setup.exe
+```
+
+Useful switches: `-SkipAssemble` (reuse the fetched bundle when only the Python
+side changed), `-SkipInstaller` (stop after the merged tree), `-Iscc <path>`
+(non-default ISCC.exe), `-AppVersion <v>`. It kills a running
+`EvoScientist.exe`/`langgraph.exe` first so PyInstaller can overwrite `_internal`.
+The sections below document each step for when you need to run them by hand.
+
 ## Bundle layout
 
 The installed app directory (what `EvoScientist/desktop/app_paths.py` resolves):
@@ -33,9 +50,9 @@ host OS (Linux CI included) — everything is fetched for the *target* platform,
 not the build host.
 
 ```
-uv run python packaging/windows/assemble_bundle.py --out dist/win-bundle
+uv run python packaging/windows/assemble_bundle.py --out build/bundle
 # pin explicitly:
-uv run python packaging/windows/assemble_bundle.py --out dist/win-bundle \
+uv run python packaging/windows/assemble_bundle.py --out build/bundle \
     --webui-version 0.2.7 --node-version 22.11.0 \
     --python-version 3.12.7 --python-tag 20241016 --target win32-x64
 ```
@@ -70,8 +87,9 @@ is authored on Linux and must be shaken out on a real Windows build — extend
 `COLLECT_PACKAGES` / `HIDDEN` in the spec as the first build surfaces missing
 modules.
 
-The installer (`evoscientist.iss`) copies `assemble_bundle.py`'s `webui/` +
-`runtime/node/` into `dist/EvoScientist/` next to the exes before packaging.
+`build.ps1` (or the manual step below) copies `assemble_bundle.py`'s `webui/` +
+`runtime/` (both `node/` and `python/`) into `dist/EvoScientist/` next to the exes
+before the installer packages it.
 
 ## evoscientist.iss (Inno Setup installer)
 
@@ -94,9 +112,12 @@ uv run --extra winbuild pyinstaller packaging\windows\evoscientist.spec --noconf
 xcopy /E /I build\bundle\webui   dist\EvoScientist\webui
 xcopy /E /I build\bundle\runtime dist\EvoScientist\runtime
 copy       build\bundle\manifest.json dist\EvoScientist\
-# 4. compile the installer -> dist\EvoScientist-Setup.exe
+# 4. compile the installer -> packaging\windows\dist\EvoScientist-Setup.exe
 iscc packaging\windows\evoscientist.iss
 ```
+
+The installer lands in `packaging\windows\dist\` (`OutputDir=dist` is relative to
+the `.iss`), not the repo-root `dist\`.
 
 `iscc` defines override the pins: `iscc /DAppVersion=0.3.0 /DSourceDir=..\..\dist\EvoScientist packaging\windows\evoscientist.iss`.
 
