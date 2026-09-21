@@ -113,14 +113,14 @@ try {
     )
     $missing = $required | Where-Object { -not (Test-Path (Join-Path $DistFull $_)) }
     if ($missing) {
-        throw "merged app tree is incomplete — missing:`n  " + ($missing -join "`n  ")
+        throw "merged app tree is incomplete - missing:`n  " + ($missing -join "`n  ")
     }
     Write-Host "    all required files present in $DistDir" -ForegroundColor Green
 
     # --- 4. compile the installer ---
     if (-not $SkipInstaller) {
         if (-not (Test-Path $Iscc)) {
-            throw "ISCC.exe not found at '$Iscc' — install Inno Setup 6.1+ or pass -Iscc <path>."
+            throw "ISCC.exe not found at '$Iscc' - install Inno Setup 6.1+ or pass -Iscc <path>."
         }
         Invoke-Checked "iscc -> EvoScientist-Setup.exe" {
             & $Iscc "/DAppVersion=$AppVersion" "/DSourceDir=$DistFull" (Join-Path $PkgDir "evoscientist.iss")
