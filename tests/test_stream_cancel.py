@@ -191,7 +191,7 @@ def test_cancel_unwinds_hitl_prompt_and_renderer(monkeypatch):
         SimpleNamespace(select=lambda *_args, **_kwargs: _BlockingQuestion()),
     )
     monkeypatch.setattr(
-        "EvoScientist.config.settings.load_config",
+        "EvoScientist.EvoScientist._ensure_config",
         lambda: SimpleNamespace(
             auto_approve=False, dangerous_mode=False, shell_allow_list=""
         ),

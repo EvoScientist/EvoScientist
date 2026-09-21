@@ -42,6 +42,7 @@ from .prompts import get_system_prompt
 logging.getLogger("deepagents.middleware.skills").setLevel(logging.ERROR)
 
 if TYPE_CHECKING:
+    from langchain.agents.middleware import InterruptOnConfig
     from langgraph.graph.state import CompiledStateGraph
 
     from .middleware.events import MiddlewareEventSink
@@ -327,6 +328,7 @@ def _inject_subagent_middleware(
     path doesn't fall back to the global-writing ``_ensure_chat_model()``.
     """
     from .middleware import (
+        ConfigurableModelMiddleware,
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
         ToolErrorHandlerMiddleware,
@@ -365,6 +367,13 @@ def _inject_subagent_middleware(
             ErrorNormalizationMiddleware(),
             # Sync subagents replay their own history to strict providers too.
             ToolHistoryRepairMiddleware(),
+            # Per-run model channel: mirrors the main agent's stack so a
+            # ``configurable.model`` override (server backend, propagated
+            # into subgraph runs) also swaps the subagent's model. First in
+            # the injected list so the swapped model reaches the
+            # context-editing trigger sync below; a no-op when no override
+            # is set (local backend passes none).
+            ConfigurableModelMiddleware(),
             # Subagents share the main agent's model: use the threaded
             # ``chat_model`` on the pure path, else defer to the factory's
             # ``_ensure_chat_model()`` fallback (when ``chat_model=None``).
@@ -443,7 +452,6 @@ def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
 
 def _maybe_swap_async_subagents(
     subs: list,
-    middleware: list | None = None,
     *,
     tool_registry: dict | None = None,
     cfg=None,
@@ -467,10 +475,6 @@ def _maybe_swap_async_subagents(
     swapped remote specs discard them because their graph factory resolves
     tools in its own process. All return paths strip internal fields before
     handoff, since deepagents may schema-validate the kwargs.
-
-    When async subagents are actually swapped in and ``middleware`` is provided,
-    appends ``AsyncWatcherMiddleware`` so launches spawn an
-    ``async_notifier`` watcher.
     """
     from .utils import resolve_subagent_tools
 
@@ -520,7 +524,6 @@ def _maybe_swap_async_subagents(
     # maps back to loopback, a pinned interface is honored verbatim.
     dev_url = langgraph_dev_url(cfg)
     out = []
-    agent_specs: dict[str, AsyncSubAgent] = {}
     # MCP tools routed to async sub-agents (via ``expose_to: <name>`` in
     # mcp.yaml) ARE delivered — the deployed factory
     # ``subagents/_factory.py:build_async_subagent_graph`` loads its own MCP
@@ -529,35 +532,28 @@ def _maybe_swap_async_subagents(
     for s in subs:
         name = s.get("name")
         if name in async_specs:
-            spec = AsyncSubAgent(
-                name=name,
-                description=async_specs[name],
-                graph_id=name,
-                url=dev_url,
+            out.append(
+                AsyncSubAgent(
+                    name=name,
+                    description=async_specs[name],
+                    graph_id=name,
+                    url=dev_url,
+                )
             )
-            agent_specs[name] = spec
-            out.append(spec)
         else:
             resolve_subagent_tools(s, tool_registry)
             s.pop("_async", None)
             out.append(s)
 
-    if agent_specs and middleware is not None:
-        from .cli import async_notifier
-        from .middleware.async_watcher import AsyncWatcherMiddleware
-
-        # Composition root wires the concrete notifier port into the middleware;
-        # the middleware itself never imports the CLI layer.
-        middleware.append(AsyncWatcherMiddleware(agent_specs, notifier=async_notifier))
-
     # Forward the CLI's live (model, provider) into deepagents'
     # start/update_async_task tool calls so the deployed graph can
     # re-resolve its chat model per run via ConfigurableModelMiddleware.
-    # Idempotent — safe to call on every CLI startup.
-    if agent_specs:
-        from .llm.patches import _patch_deepagents_model_passthrough
+    # Idempotent — safe to call on every CLI startup. ``async_specs`` is
+    # non-empty here (early-returned above otherwise), so at least one spec
+    # was swapped in.
+    from .llm.patches import _patch_deepagents_model_passthrough
 
-        _patch_deepagents_model_passthrough()
+    _patch_deepagents_model_passthrough()
 
     return out
 
@@ -580,16 +576,11 @@ def _route_async_specs_through_evo_middleware(
     ``is_expert=True`` so the middleware requires a payload with
     ``skill_name``.
 
-    The completion watcher (``AsyncWatcherMiddleware``) is found or created
-    before the middleware so the middleware's resolve-on-miss start tool can
-    hold the watcher's agent dict by reference — see the wiring block below.
-
     Returns:
         ``subs`` with ``graph_id``-carrying entries removed. Safe to pass
         as ``create_deep_agent(subagents=...)`` — the async-auto-compose
         branch is skipped for empty async lists.
     """
-    from .middleware.async_watcher import AsyncWatcherMiddleware
     from .middleware.expert_async_subagent import EvoAsyncSubAgentMiddleware
     from .subagents.expert_container_async import build_expert_async_subagent_specs
 
@@ -599,71 +590,6 @@ def _route_async_specs_through_evo_middleware(
     sync_subs = [s for s in subs if "graph_id" not in s]
     expert_specs = build_expert_async_subagent_specs(cfg=cfg)
     async_specs.extend(expert_specs)
-
-    # Find or create the completion watcher BEFORE constructing
-    # ``EvoAsyncSubAgentMiddleware``: the middleware's resolve-on-miss start
-    # tool must hold the watcher's agent dict by reference, so an expert
-    # discovered mid-session lands in the dispatch table and the watcher in
-    # one step. Without the watcher update, dispatch succeeds but the
-    # watcher's ``get_async(agent_name)`` raises KeyError inside its
-    # ``try/except`` and the completion notification silently never fires.
-    watcher_agents: dict | None = None
-    watcher = next(
-        (m for m in base_middleware if isinstance(m, AsyncWatcherMiddleware)),
-        None,
-    )
-    if watcher is None:
-        # No YAML async subagents were registered, so ``_maybe_swap`` did
-        # not install the watcher. Install it now so experts still get
-        # completion notifications. Appended before the middleware's
-        # index-0 insert below, which yields the same final order as
-        # append-after-insert: ``[EvoAsync..., ..., watcher]``.
-        if expert_specs:
-            from .cli import async_notifier
-
-            watcher = AsyncWatcherMiddleware(
-                {s["name"]: s for s in expert_specs},
-                notifier=async_notifier,
-            )
-            base_middleware.append(watcher)
-    elif expert_specs:
-        # Extend AsyncWatcherMiddleware's client cache with expert specs so
-        # start_async_task launches for experts spawn a completion watcher —
-        # otherwise the watcher's ``get_async(agent_name)`` KeyErrors on the
-        # expert name, no notification is enqueued, and the main agent never
-        # learns the task finished. ``_maybe_swap_async_subagents`` above only
-        # populates the watcher with YAML-defined async subagents
-        # (writing-agent, data-analysis-agent, scheduler); this hook folds in
-        # the experts too.
-        #
-        # The mutation reaches through two layers of private state:
-        # ``AsyncWatcherMiddleware._clients`` (our own) and
-        # ``_ClientCache._agents`` (upstream deepagents). If upstream ever
-        # renames ``_agents`` or wraps it in an immutable snapshot, the
-        # ``.update(...)`` below silently lands on nothing — expert
-        # completion nudges then stop firing without a diagnostic surface.
-        # Convert that silent-drop into a grep-able error line and leave
-        # ``watcher_agents`` unset; expert dispatches still work (without
-        # completion notifications and without mid-session resolution into
-        # the watcher) until upstream drift is fixed.
-        if not hasattr(watcher._clients, "_agents"):
-            logging.getLogger(__name__).error(
-                "AsyncWatcherMiddleware._clients has no `_agents` slot — "
-                "deepagents internal renamed; expert completion "
-                "notifications will not fire until the extension hook is "
-                "updated to the new attribute name."
-            )
-            watcher = None
-        else:
-            watcher._clients._agents.update({s["name"]: s for s in expert_specs})
-    # The second ``hasattr`` is not redundant with the one in the ``elif``
-    # above: that check only runs when ``expert_specs`` is non-empty. When a
-    # pre-existing watcher has an empty expert set, this is the only guard
-    # standing between an upstream rename of ``_ClientCache._agents`` and an
-    # AttributeError that would kill agent construction — without it, the
-    # drift degrades to "no completion nudges" instead of crashing.
-    if watcher is not None and hasattr(watcher._clients, "_agents"):
-        watcher_agents = watcher._clients._agents
 
     if async_specs:
         # ``_maybe_swap_async_subagents`` installs the model-passthrough patch
@@ -684,13 +610,17 @@ def _route_async_specs_through_evo_middleware(
             0,
             EvoAsyncSubAgentMiddleware(
                 async_subagents=async_specs,
-                watcher_agents=watcher_agents,
                 # The construction cfg, so resolve-on-miss specs the same
                 # langgraph_dev_port the construction-time specs used instead
                 # of re-reading config from disk at dispatch time.
                 cfg=cfg,
             ),
         )
+
+    # Expert completions (like all async-task completions) are detected from
+    # thread state by the client-side reader, so no per-agent watcher client
+    # cache is needed here — the expert specs are already routed through
+    # ``EvoAsyncSubAgentMiddleware`` above.
     return sync_subs
 
 
@@ -717,7 +647,6 @@ def _build_base_kwargs(
     )
     subs = _maybe_swap_async_subagents(
         subs,
-        base_middleware,
         tool_registry=tool_registry,
         cfg=cfg,
     )
@@ -809,7 +738,6 @@ def load_mcp_and_build_kwargs(
     # since async sub-agents are remote graphs that load their own tools).
     subs = _maybe_swap_async_subagents(
         subs,
-        base_middleware,
         tool_registry=registry,
         cfg=cfg,
     )
@@ -840,10 +768,13 @@ def _get_default_backend(
 ):
     """Build the default composite backend from current paths.
 
-    ``guard_dangerous`` — when ``None`` (default) follows ``cfg.auto_approve``;
-    the two research async sub-agent graphs (``writing-agent`` /
+    ``guard_dangerous`` — when ``None`` (default) the backend derives the guard
+    per call from the run's HITL-suppression state (``is_hitl_suppressed``): an
+    unattended run is guarded, an armed run relies on the interrupt + client
+    policy. The two research async sub-agent graphs (``writing-agent`` /
     ``data-analysis-agent``) pass ``True`` because their remote thread has no
-    approval path at all (see ``subagents/_factory._GUARDED_ASYNC_SUBAGENTS``).
+    approval path at all (see ``subagents/_factory._GUARDED_ASYNC_SUBAGENTS``);
+    that becomes an always-on floor.
     ``refuse_delete`` — the same two async graphs pass ``True`` so the recursive
     ``delete`` FS tool is refused and relayed to the orchestrator for approval,
     rather than deleting unattended.
@@ -858,7 +789,9 @@ def _get_default_backend(
 
     cfg = _ensure_config()
     if guard_dangerous is None:
-        guard_dangerous = cfg.auto_approve
+        # Not baked from cfg.auto_approve: the backend derives it per call from
+        # the run's HITL-suppression state so a mid-session flip can't go stale.
+        guard_dangerous = False
     workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
     set_active_workspace(workspace_dir)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
@@ -942,19 +875,28 @@ def _get_default_middleware(
         create_scheduler_middleware,
         create_tool_selector_middleware,
         default_memory_scheduler,
-        load_fallback_chain,
     )
-    from .middleware.events import NO_OP_SINK, RunScopedEventSink
 
-    # Subagent stacks never drive the main-agent frontend widgets; force the
-    # no-op sink there regardless of what the caller passed. Main stacks built
-    # without an explicit frontend/session sink report into the active stream
-    # run's sink, preserving selector suppression for headless local runs.
-    events = NO_OP_SINK if for_async_subagent else (events or RunScopedEventSink())
+    # Sink selection policy lives in middleware/events.py (single home):
+    # subagent stacks get the no-op sink; main stacks get the caller-supplied
+    # or run-scoped sink; main stacks in a langgraph dev subprocess
+    # additionally mirror events onto the run's `custom` stream channel so
+    # the server gateway can render them client-side.
+    from .middleware.events import resolve_middleware_event_sink
+    from .middleware.model_fallback import seed_fallback_chain
+
+    events = resolve_middleware_event_sink(
+        events, for_async_subagent=for_async_subagent
+    )
 
     cfg = cfg if cfg is not None else _ensure_config()
-    if cfg.model_fallbacks:
-        load_fallback_chain(cfg.model_fallbacks)
+    # Seed the fallback chain from the factory-resolved config: every graph
+    # (main, sync/async subagent) is built through this factory, so this is
+    # the single seeding site that covers every load path. First-touch only
+    # (idempotent per process) and pure in-memory — the resolved ``cfg``
+    # performs no disk read here, so later calls cannot clobber session edits
+    # made via /model-fallback (see model_fallback._ensure_chain_initialized).
+    seed_fallback_chain(cfg)
     model = chat_model if chat_model is not None else _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     source_type = (
@@ -1063,34 +1005,62 @@ def _get_default_middleware(
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
     # must not spawn local OS processes.
     if not for_async_subagent:
-        from .cli import async_notifier
         from .middleware.background import BackgroundExecutionMiddleware
 
-        # Inject the notifier port + the assembly-time dangerous-mode policy
-        # (agents rebuild on config change, so the captured flag never staler
-        # than the agent it lives on).
+        # Capture the assembly-time dangerous-mode policy (agents rebuild on config
+        # change, so the flag is never staler than the agent it lives on). Process-exit
+        # notifications are delivered client-side from the ``bg_processes`` thread-state
+        # mirror, not pushed from here. The dangerous-command guard is NOT baked from
+        # auto_approve: run_in_background derives it per call from the run's
+        # HITL-suppression state, mirroring execute().
         mw.append(
             BackgroundExecutionMiddleware(
-                async_notifier,
                 dangerous=cfg.dangerous_mode,
-                guard_dangerous=cfg.auto_approve,
+                guard_dangerous=False,
             )
         )
 
     return mw
 
 
-def _build_hitl_interrupt_on(*, auto_approve: bool) -> dict[str, bool] | None:
-    """Return :data:`HITL_INTERRUPT_ON` for ``create_deep_agent``, or ``None``
-    when the user opted out (``auto_approve`` / ``auto_mode`` /
-    ``dangerous_mode``) so nothing is armed and unattended runs never pause.
-    Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``) lets
-    declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not — so
-    async agents can't hang on an approval nobody can deliver.
+def _hitl_when(request) -> bool:
+    """HITL ``when`` predicate: interrupt unless the run is suppressed.
+
+    Reads ``configurable.hitl_suppressed`` off the run's own config, carried
+    on ``request.runtime.config`` — langchain builds the runtime for both its
+    batch (``tool=None``) and per-call request shapes, so the request always
+    carries it (batch mode falls back to an empty config when langgraph has
+    none, which arms — same as before). Falls back to the ambient
+    ``get_config()`` when there is no runtime, and arms (``True``) when there
+    is no config at all: outside a run there is nothing to suppress.
     """
-    if auto_approve:
-        return None
-    return dict(HITL_INTERRUPT_ON)
+    from .backends import is_hitl_suppressed
+
+    runtime = getattr(request, "runtime", None)
+    config = getattr(runtime, "config", None)
+    return not is_hitl_suppressed(config)
+
+
+def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
+    """Return the always-armed HITL config for ``create_deep_agent``.
+
+    The main graph is *always* armed; per-run suppression is delegated to the
+    :func:`_hitl_when` predicate rather than keyed on ``auto_approve`` at
+    construction — otherwise a graph built once for an unattended session would
+    silently disable HITL for a later attended session on the same keepalive
+    server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
+    lets declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not —
+    so async agents can't hang on an approval nobody can deliver.
+    """
+    from langchain.agents.middleware import InterruptOnConfig
+
+    return {
+        tool: InterruptOnConfig(
+            allowed_decisions=["approve", "edit", "reject", "respond"],
+            when=_hitl_when,
+        )
+        for tool in HITL_INTERRUPT_ON
+    }
 
 
 def _get_default_agent():
@@ -1139,7 +1109,7 @@ def _get_default_agent():
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
-            interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
+            interrupt_on=_build_hitl_interrupt_on(),
         ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
@@ -1223,6 +1193,12 @@ def create_cli_agent(
         cfg = _ensure_config(config)
         chat_model = None
 
+    # The fallback chain is seeded by _get_default_middleware below (the
+    # factory every graph is built through), which receives this same
+    # resolved ``cfg`` — first-touch seeding, so a caller-supplied config's
+    # model_fallbacks still wins over the on-disk chain, and no separate
+    # seeding is needed here.
+
     if checkpointer is None:
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -1252,7 +1228,9 @@ def create_cli_agent(
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
-        guard_dangerous=cfg.auto_approve,
+        # Guard derived per call from the run's HITL-suppression state (see
+        # CustomSandboxBackend._effective_guard_dangerous), not baked here.
+        guard_dangerous=False,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,
@@ -1291,5 +1269,5 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
-        interrupt_on=_build_hitl_interrupt_on(auto_approve=cfg.auto_approve),
+        interrupt_on=_build_hitl_interrupt_on(),
     ).with_config({"recursion_limit": cfg.recursion_limit})

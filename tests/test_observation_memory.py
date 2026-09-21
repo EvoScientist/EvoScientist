@@ -49,6 +49,7 @@ from EvoScientist.memory.observations import (
     record_observation_file,
     search_observation_files,
 )
+from EvoScientist.memory.search import _tokens
 from EvoScientist.memory.types import ObservationRelation
 from EvoScientist.middleware import memory_lifecycle
 
@@ -1126,6 +1127,254 @@ def test_search_observation_files_returns_ranked_keyword_hits(tmp_path):
     payload = json.loads(tool.run({"query": "GraphQL userName frontend", "limit": 5}))
     assert list(payload) == ["results"]
     assert payload["results"][0]["observation_id"] == first["observation_id"]
+
+
+def test_search_observation_files_ranks_unsegmented_chinese_text(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(
+        memories,
+        summary="引用数字前核验原始来源",
+        observation="二手资料存在冲突时，应读取原始数据集。",
+    )
+    _record_test_observation(
+        memories,
+        summary="整理数据集的目录结构",
+        observation="记录文件名和版本以便复查。",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="原始来源核验",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert hits[0]["score"] > 0
+    assert any("原始数据集" in line for line in hits[0]["matches"])
+
+
+def test_search_observation_files_handles_mixed_chinese_and_latin_query(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(
+        memories,
+        summary="GraphQL 字段映射需要核验",
+        observation="修改客户端前，检查 GraphQL 解析器的字段别名。",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="\uff27\uff52\uff41\uff50\uff48\uff31\uff2c 字段别名",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert any("字段别名" in line for line in hits[0]["matches"])
+
+
+def test_search_tokens_preserve_ascii_baseline_and_non_ascii_runs():
+    assert _tokens("GraphQL AI DB go __init__ _cache foo__bar") == [
+        "graphql",
+        "__init__",
+        "_cache",
+        "foo__bar",
+    ]
+    assert _tokens("GraphQL—resolver “schema”") == ["graphql", "resolver", "schema"]
+    assert _tokens("\uff27\uff52\uff41\uff50\uff48\uff31\uff2c — resolver") == [
+        "graphql",
+        "resolver",
+    ]
+    assert _tokens("señor résumé") == ["señor", "résumé"]
+    assert _tokens("\uff27\uff30\uff35\uff11\uff12\uff13") == ["gpu123"]
+    assert _tokens("GraphQL字段别名") == ["graphql", "字段", "段别", "别名"]
+    assert _tokens("__init__ _cache señor") == ["__init__", "_cache", "señor"]
+    assert _tokens("原始来源") == ["原始", "始来", "来源"]
+    assert _tokens("中文，日文") == ["中文", "日文"]
+    assert _tokens("𠮷野家") == ["𠮷野", "野家"]
+    assert _tokens("人々") == ["人々"]
+    assert _tokens("様々な方法") == ["様々", "々な", "な方", "方法"]
+    assert _tokens("葛\U000e0100城") == ["葛城"]
+    assert _tokens("葛\ufe0f城") == ["葛城"]
+    assert _tokens("〇円") == ["〇円"]
+    assert _tokens("ㄅㄆ") == ["ㄅㄆ"]
+    assert _tokens("中文протокол日文") == ["中文", "протокол", "日文"]
+    assert _tokens("中文 протокол") == ["中文", "протокол"]
+    assert _tokens("ភាសាខ្មែរ test") == ["ភាសាខ្មែរ", "test"]
+    assert _tokens("протокол") == ["протокол"]
+    assert _tokens("foo\u200bbar") == ["foo", "bar"]
+    assert _tokens("น้ำดื่ม")[:3] == ["น้", "้ํ", "ํา"]
+
+
+def test_search_observation_files_keeps_english_minimum(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(
+        memories,
+        summary="API resolver behavior",
+        observation="Inspect the GraphQL resolver.",
+    )
+    _record_test_observation(memories, summary="How to proceed")
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="GraphQL to",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+
+
+def test_search_observation_files_matches_kana_and_marked_thai_runs(tmp_path):
+    memories = tmp_path / "memories"
+    japanese = _record_test_observation(memories, summary="テストケースを確認する")
+    thai = _record_test_observation(memories, summary="น้ำดื่ม ที่นี่")
+
+    for query, expected in (("テスト", japanese), ("น้ำดื่ม", thai)):
+        hits = search_observation_files(
+            memory_dir=memories,
+            project_id="P-project",
+            query=query,
+        )
+        assert [hit["observation_id"] for hit in hits] == [expected["observation_id"]]
+
+
+def test_search_observation_files_uses_iteration_mark_in_mixed_query(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(
+        memories,
+        summary="人々の行動",
+        observation="The survey covers the study population.",
+    )
+    _record_test_observation(
+        memories,
+        summary="survey schedule",
+        observation="Arrange the interview dates.",
+    )
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="人々 survey",
+    )
+
+    assert hits[0]["observation_id"] == relevant["observation_id"]
+
+
+@pytest.mark.parametrize(
+    ("summary", "query"),
+    [
+        ("葛\U000e0100城", "葛城"),
+        ("葛城", "葛\U000e0100城"),
+        ("葛\ufe0f城", "葛城"),
+    ],
+)
+def test_search_observation_files_ignores_variation_selectors(tmp_path, summary, query):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary=summary)
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query=query,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+
+
+@pytest.mark.parametrize(
+    ("summary", "query", "joined_token"),
+    [
+        ("TensorFlow™ install", "tensorflow", "tensorflowtm"),
+        ("①install pytest", "install", "1install"),
+        ("accuracy¹", "accuracy", "accuracy1"),
+    ],
+)
+def test_search_observation_files_separates_symbols_before_normalizing(
+    tmp_path, summary, query, joined_token
+):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary=summary)
+    _record_test_observation(memories, summary=joined_token)
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query=query,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert query in _tokens(summary)
+    assert joined_token not in _tokens(summary)
+
+
+def test_search_observation_files_ranks_mixed_chinese_and_cyrillic_query(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary="中文 протокол")
+    partial = _record_test_observation(memories, summary="中文")
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="中文 протокол",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [
+        relevant["observation_id"],
+        partial["observation_id"],
+    ]
+    assert hits[0]["score"] > hits[1]["score"]
+
+
+def test_search_observation_files_matches_whole_cyrillic_words(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary="протокол обновления")
+    _record_test_observation(memories, summary="контроль доступа")
+    _record_test_observation(memories, summary="протокола нет")
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="протокол",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert hits[0]["score"] > 0
+
+
+@pytest.mark.parametrize(
+    ("query", "summary", "distractor"),
+    [
+        ("señor", "Consultar al señor García", "Senior project notes"),
+        ("résumé", "Review the résumé", "Calculate the sum"),
+        ("resume", "Resume the task", "Review the résumé"),
+    ],
+)
+def test_search_observation_files_matches_whole_accented_words(
+    tmp_path, query, summary, distractor
+):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary=summary)
+    _record_test_observation(memories, summary=distractor)
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query=query,
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
+    assert hits[0]["score"] > 0
+
+
+def test_search_observation_files_preserves_identifier_precision(tmp_path):
+    memories = tmp_path / "memories"
+    relevant = _record_test_observation(memories, summary="Inspect __init__")
+    _record_test_observation(memories, summary="Inspect init")
+
+    hits = search_observation_files(
+        memory_dir=memories,
+        project_id="P-project",
+        query="__init__",
+    )
+
+    assert [hit["observation_id"] for hit in hits] == [relevant["observation_id"]]
 
 
 def test_read_memory_returns_full_observation_by_id(tmp_path):

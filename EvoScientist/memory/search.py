@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections import Counter
+from functools import lru_cache
 
 from .types import (
     ObservationSearchDocument,
@@ -12,7 +14,8 @@ from .types import (
     ObservationSearchMode,
 )
 
-MIN_TOKEN_CHARS = 3
+MIN_WORD_TOKEN_CHARS = 3
+UNSEGMENTED_BIGRAM_CHARS = 2
 ID_MATCH_WEIGHT = 5.0
 SUMMARY_MATCH_WEIGHT = 3.0
 BODY_MATCH_WEIGHT = 1.0
@@ -22,7 +25,33 @@ IDF_OFFSET = 1.0
 DEFAULT_MATCH_LINES = 3
 DEFAULT_MATCH_CHARS = 240
 
-_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_ASCII_TOKEN_RE = re.compile(r"[a-z0-9_]+")
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]")
+_BIGRAM_NAME_PREFIXES = (
+    "CJK UNIFIED IDEOGRAPH",
+    "CJK COMPATIBILITY IDEOGRAPH",
+    "IDEOGRAPHIC ITERATION MARK",
+    "IDEOGRAPHIC NUMBER ZERO",
+    "BOPOMOFO",
+    "HIRAGANA",
+    "KATAKANA",
+    "HANGUL",
+    "THAI",
+)
+
+
+@lru_cache(maxsize=65536)
+def _character_properties(char: str) -> tuple[str, bool]:
+    """Cache Unicode category and bigram eligibility for repeated characters."""
+    return unicodedata.category(char), unicodedata.name(char, "").startswith(
+        _BIGRAM_NAME_PREFIXES
+    )
+
+
+def _is_variation_selector(char: str) -> bool:
+    """Return whether a character only selects a Unicode glyph variant."""
+    codepoint = ord(char)
+    return 0xFE00 <= codepoint <= 0xFE0F or 0xE0100 <= codepoint <= 0xE01EF
 
 
 def _compile_query_pattern(query: str) -> re.Pattern[str]:
@@ -33,13 +62,75 @@ def _compile_query_pattern(query: str) -> re.Pattern[str]:
         return re.compile(re.escape(query), flags=re.IGNORECASE)
 
 
+def _script_runs(segment: str) -> list[tuple[str, bool]]:
+    """Split supported bigram scripts from other words, keeping marks attached."""
+    runs: list[tuple[str, bool]] = []
+    current: list[str] = []
+    current_is_bigram = False
+    for char in segment:
+        category, is_bigram = _character_properties(char)
+        if current and category.startswith("M"):
+            current.append(char)
+            continue
+        if current and is_bigram != current_is_bigram:
+            runs.append(("".join(current), current_is_bigram))
+            current = []
+        current.append(char)
+        current_is_bigram = is_bigram
+    if current:
+        runs.append(("".join(current), current_is_bigram))
+    return runs
+
+
+def _separate_symbol(match: re.Match[str]) -> str:
+    """Keep word characters while separating symbols before compatibility folding."""
+    char = match.group()
+    category = _character_properties(char)[0]
+    return char if category[0] in "LM" or category in ("Nd", "Nl") else " "
+
+
 def _tokens(text: str) -> list[str]:
-    """Return simple lowercase search tokens."""
-    return [
-        token
-        for token in _TOKEN_RE.findall(text.casefold())
-        if len(token) >= MIN_TOKEN_CHARS
-    ]
+    """Keep baseline ASCII words and bigrams for unsegmented scripts."""
+    if text.isascii():
+        return [
+            token
+            for token in _ASCII_TOKEN_RE.findall(text.casefold())
+            if len(token) >= MIN_WORD_TOKEN_CHARS
+        ]
+    # Symbols such as ™ and ¹ must not expand into adjacent word tokens.
+    separated = _NON_ASCII_RE.sub(_separate_symbol, text)
+    normalized = unicodedata.normalize("NFKC", separated).casefold()
+    # Non-ASCII punctuation still separates the same ASCII words.
+    if not any(
+        _character_properties(char)[0][0] in "LMN"
+        for char in _NON_ASCII_RE.findall(normalized)
+    ):
+        return [
+            token
+            for token in _ASCII_TOKEN_RE.findall(normalized)
+            if len(token) >= MIN_WORD_TOKEN_CHARS
+        ]
+    searchable = "".join(
+        char if char == "_" or _character_properties(char)[0][0] in "LMN" else " "
+        for char in normalized
+        if not _is_variation_selector(char)
+    )
+    tokens: list[str] = []
+    for segment in searchable.split():
+        if segment.isascii():
+            if len(segment) >= MIN_WORD_TOKEN_CHARS:
+                tokens.append(segment)
+        else:
+            for run, is_bigram in _script_runs(segment):
+                if is_bigram:
+                    # Single-character runs intentionally avoid broad ranked matches.
+                    tokens.extend(
+                        run[index : index + UNSEGMENTED_BIGRAM_CHARS]
+                        for index in range(len(run) - UNSEGMENTED_BIGRAM_CHARS + 1)
+                    )
+                elif len(run) >= MIN_WORD_TOKEN_CHARS:
+                    tokens.append(run)
+    return tokens
 
 
 def _document_tokens(document: ObservationSearchDocument) -> set[str]:

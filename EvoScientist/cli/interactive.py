@@ -1130,6 +1130,26 @@ def cmd_interactive(
                             gateway=runtime_gateways.graph_gateway,
                             runtime=async_runtime,
                         )
+                        # Channel turns run on the same thread as local prompts
+                        # and can launch async tasks and background processes;
+                        # without these reads their completions surface only on
+                        # the next local prompt. Same calls + args as the
+                        # local-path post-stream reads; best-effort, never
+                        # blocks the reply.
+                        _channel_target = GraphTarget(
+                            local_graph=ready_agent,
+                            workspace_dir=state["workspace_dir"],
+                        )
+                        await async_notifier.enqueue_completions_from_state(
+                            runtime_gateways.graph_gateway,
+                            _channel_target,
+                            state["thread_id"],
+                        )
+                        await async_notifier.enqueue_bg_process_completions_from_state(
+                            runtime_gateways.graph_gateway,
+                            _channel_target,
+                            state["thread_id"],
+                        )
                     except Exception as e:
                         response = f"Error: {e}"
                         console.print(f"[red]Channel error: {e}[/red]")
@@ -1202,6 +1222,18 @@ def cmd_interactive(
                         tx.append(_origin.sender or _origin.chat_id, style="cyan")
                         tx.append("]", style="dim")
                         console.print(tx)
+                # Re-arm the completion reader after the notification turn: it
+                # may have launched a chained task (e.g. analysis finished ->
+                # start writing) that would otherwise sit in state with the idle
+                # reader disarmed until the next local prompt. Best-effort.
+                await async_notifier.enqueue_completions_from_state(
+                    runtime_gateways.graph_gateway,
+                    GraphTarget(
+                        local_graph=ready_agent,
+                        workspace_dir=state["workspace_dir"],
+                    ),
+                    _notif_tid,
+                )
                 await _refresh_status_snapshot(reset_streaming_text=True)
                 console.print()
                 _print_separator()
@@ -1225,7 +1257,7 @@ def cmd_interactive(
                 if agent is None:
                     return {}
                 try:
-                    return await async_notifier.read_async_tasks_from_gateway(
+                    registry = await async_notifier.read_async_tasks_from_gateway(
                         runtime_gateways.graph_gateway,
                         GraphTarget(
                             local_graph=agent,
@@ -1233,6 +1265,7 @@ def cmd_interactive(
                         ),
                         target_thread_id,
                     )
+                    return registry or {}
                 except Exception:
                     return {}
 
@@ -1255,6 +1288,33 @@ def cmd_interactive(
                     # kill the poller task — channel + notification dispatch
                     # would silently die otherwise (Fix #4).
                     current_tid = state.get("thread_id")
+                    # Detect async-task + bg-process completions from state
+                    # (throttled) so a completion surfaces while the prompt sits
+                    # idle; the drain below injects it. Best-effort — never kill the
+                    # poller task.
+                    _reader_agent = agent_loader.agent
+                    if current_tid and _reader_agent is not None:
+                        _reader_target = GraphTarget(
+                            local_graph=_reader_agent,
+                            workspace_dir=state["workspace_dir"],
+                        )
+                        try:
+                            await (
+                                async_notifier.enqueue_completions_from_state_throttled(
+                                    runtime_gateways.graph_gateway,
+                                    _reader_target,
+                                    current_tid,
+                                )
+                            )
+                            await async_notifier.enqueue_bg_process_completions_from_state_throttled(
+                                runtime_gateways.graph_gateway,
+                                _reader_target,
+                                current_tid,
+                            )
+                        except Exception:
+                            _channel_logger.warning(
+                                "async-notifier idle reader failed", exc_info=True
+                            )
                     if async_notifier.has_pending_notifications(current_tid):
                         read_async_tasks_state = (
                             (lambda _tid=current_tid: _read_current_async_tasks(_tid))
@@ -1488,27 +1548,49 @@ def cmd_interactive(
                         await _refresh_status_snapshot(
                             message_to_send, reset_streaming_text=True
                         )
-                        await _run_serialized_turn(
-                            turn_lock,
-                            lambda _agent=ready_agent, _message=message_to_send, _thread_id=state["thread_id"], _meta=meta: (
-                                _run_rich_cli_streaming_turn(
-                                    ui_backend=state["ui_backend"],
-                                    agent=_agent,
-                                    message=_message,
-                                    thread_id=_thread_id,
-                                    show_thinking=show_thinking,
-                                    interactive=True,
-                                    metadata=_meta,
-                                    configurable_extra=active_teams_configurable_extra(
-                                        channel_runtime
-                                    ),
-                                    on_stream_event=_handle_stream_status_event,
-                                    status_footer_builder=_stream_status_footer,
-                                    gateway=runtime_gateways.graph_gateway,
-                                    runtime=async_runtime,
-                                )
-                            ),
-                        )
+                        try:
+                            await _run_serialized_turn(
+                                turn_lock,
+                                lambda _agent=ready_agent, _message=message_to_send, _thread_id=state["thread_id"], _meta=meta: (
+                                    _run_rich_cli_streaming_turn(
+                                        ui_backend=state["ui_backend"],
+                                        agent=_agent,
+                                        message=_message,
+                                        thread_id=_thread_id,
+                                        show_thinking=show_thinking,
+                                        interactive=True,
+                                        metadata=_meta,
+                                        configurable_extra=active_teams_configurable_extra(
+                                            channel_runtime
+                                        ),
+                                        on_stream_event=_handle_stream_status_event,
+                                        status_footer_builder=_stream_status_footer,
+                                        gateway=runtime_gateways.graph_gateway,
+                                        runtime=async_runtime,
+                                    )
+                                ),
+                            )
+                        finally:
+                            # On stream close — or a raised turn — read async_tasks
+                            # + bg_processes off thread state and enqueue any
+                            # completions not yet surfaced, so a task launched
+                            # mid-turn still surfaces and keeps idle polling armed.
+                            # Best-effort — never blocks the prompt on a read
+                            # failure.
+                            _close_target = GraphTarget(
+                                local_graph=ready_agent,
+                                workspace_dir=state["workspace_dir"],
+                            )
+                            await async_notifier.enqueue_completions_from_state(
+                                runtime_gateways.graph_gateway,
+                                _close_target,
+                                state["thread_id"],
+                            )
+                            await async_notifier.enqueue_bg_process_completions_from_state(
+                                runtime_gateways.graph_gateway,
+                                _close_target,
+                                state["thread_id"],
+                            )
                         await _refresh_status_snapshot(reset_streaming_text=True)
                         console.print()
                         _print_separator()

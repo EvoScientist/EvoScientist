@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
@@ -17,6 +17,57 @@ GraphEvent: TypeAlias = dict[str, Any]
 GraphRunInput: TypeAlias = "str | Command"
 GraphStateValues: TypeAlias = dict[str, Any]
 DEFAULT_GRAPH_ID = "EvoScientist"
+
+
+def resolve_per_run_config(
+    thread_id: str,
+    configurable_extra: Mapping[str, Any] | None,
+    *,
+    per_run_overrides: Mapping[str, Any] | None = None,
+    recursion_limit: int | None = None,
+    hitl_suppressed: bool = False,
+) -> dict[str, Any]:
+    """Assemble the per-run LangGraph config for a gateway stream call.
+
+    Pure assembly - this module reads no config. Each backend resolves the
+    per-run values and passes them in:
+
+    - the server gateway extracts ``model`` / ``model_provider`` /
+      ``recursion_limit`` from the live session config (a per-call
+      ``recursion_limit`` overrides the server's construction-time
+      ``.with_config`` binding, so a keepalive server picks up the client's
+      live limit per run instead of at restart);
+    - both backends pass ``hitl_suppressed`` from
+      ``backends.hitl_suppressed_for_run`` (``config.auto_mode`` or
+      ``config.auto_approve``): a run that disarms the always-armed interrupt
+      is then backend-guarded. The key is written on every gateway run (``True``
+      and ``False``), so a gateway run's arming is fixed by its own session
+      config and never falls back to the serving process's ``auto_approve`` on
+      an absent key;
+    - the local backend passes no model/limit overrides: its agent is
+      rebuilt on model switches and already binds ``recursion_limit`` at
+      construction from the same live config.
+
+    Merges, in precedence order (lowest to highest):
+
+    1. ``per_run_overrides`` (server backend session defaults),
+    2. the suppression key (always written, ``True`` or ``False``),
+    3. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
+       explicit per-run injection is more specific than the session default,
+    4. ``thread_id`` - structural key, always set last.
+    """
+    configurable: dict[str, Any] = dict(per_run_overrides or {})
+    from ..backends import HITL_SUPPRESSED_KEY
+
+    configurable[HITL_SUPPRESSED_KEY] = bool(hitl_suppressed)
+    if configurable_extra:
+        configurable.update(configurable_extra)
+    configurable["thread_id"] = thread_id
+
+    run_config: dict[str, Any] = {"configurable": configurable}
+    if recursion_limit is not None:
+        run_config["recursion_limit"] = recursion_limit
+    return run_config
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,3 +235,36 @@ class GraphGateway(Protocol):
         values: GraphStateValues,
     ) -> None:
         """Update graph state values for a thread."""
+
+    async def get_run_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        run_id: str,
+    ) -> str:
+        """Return the task run's status from the server it runs on.
+
+        Async sub-agent tasks run on the langgraph dev server under both
+        backends, so this reads the run's status there. The client-side
+        async-task read path uses it to detect completion without the
+        in-process notifier. Propagates read errors (server unavailable, run
+        not found) like the other state reads; the reader treats a failed read
+        as "not yet terminal".
+        """
+
+    async def get_process_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        process_id: str,
+    ) -> str:
+        """Return a background process's live status from the graph process.
+
+        Background processes launched via ``run_in_background`` run in the graph
+        process (in-process on the local backend, the langgraph dev server on the
+        server backend), so their status lives in that process's registry. The
+        client-side ``bg_processes`` read path polls this to detect exit without
+        the in-process notifier, mirroring :meth:`get_run_status`. Returns one of
+        ``running`` / ``success`` / ``error`` / ``interrupted`` / ``unknown``;
+        a failed read is treated as "not yet terminal" by the reader.
+        """

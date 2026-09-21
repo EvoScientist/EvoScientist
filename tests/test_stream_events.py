@@ -172,11 +172,15 @@ class TestV3ProtocolStreaming:
         assert configurable["active_teams"] == ["idea-brainstorm"]
 
     async def test_configurable_extra_none_leaves_thread_id_only(self):
-        """When no extras are passed, only ``thread_id`` sits under configurable."""
+        """When no extras are passed, configurable carries the always-written
+        suppression key plus ``thread_id``."""
         agent = FakeV3Agent([message_delta("hi")])
         await collect_events(agent, thread_id="t1")
         _, kwargs = agent.astream_events.call_args
-        assert kwargs["config"]["configurable"] == {"thread_id": "t1"}
+        assert kwargs["config"]["configurable"] == {
+            "hitl_suppressed": False,
+            "thread_id": "t1",
+        }
 
     async def test_streamed_non_selector_json_is_replayed(self):
         """Normal JSON answers are not swallowed by selector JSON buffering."""

@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.1" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[19 Sep 2026]** **[v0.3.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.1)** — New models: GLM-5.3-FlashX (Zhipu + OpenRouter), DeepSeek-V4.1-Flash (DeepSeek + OpenRouter); memory search handles Chinese and other languages written without word spaces; opt-in LangGraph server gateway backend (`gateway_backend`, off by default); HITL approval routed through one shared policy; model fallback chain fix; deepagents 0.7.15.
 - **[11 Sep 2026]** **[v0.3.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.0)** — Async sub-agents follow the caller's model; mid-session expert install without `/new`; MiniMax multi-turn fix; channel retry and OpenRouter attribution fixes.
 - **[05 Sep 2026]** **[v0.2.10](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.10)** — New models: Claude Fable 5.1, GPT-6 Astra, Gemini 3.8 Flash, and Meta Muse Spark 1.3; proactivity phase 1: a first-contact profile bootstrap that eases cold start; optional acceptance checklists for scheduled tasks; tool selection only kicks in above 42 tools; deepagents 0.7.13.
 - **[29 Aug 2026]** **[v0.2.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.9)** — New models: GLM-5.3-Flash (Zhipu + OpenRouter), Qwen3.8-Flash (DashScope + OpenRouter), and Tencent HY4 preview (OpenRouter), all with 1M context; deepagents 0.7.11.
@@ -719,12 +720,12 @@ Stay tuned — more features are on the way!
         </a>
       </td>
       <td align="center">
-        <a href="https://go0day.github.io/">
-          <img src="https://go0day.github.io/authors/admin/avatar_hu_ee1051aceae96124.png"
+        <a href="https://www.linkedin.com/in/qianru-meng-410311100/">
+          <img src="https://media.licdn.com/dms/image/v2/D5603AQG1mEbWDSoUbw/profile-displayphoto-shrink_400_400/B56ZsFaQWsHIAo-/0/1765322328104?e=1791417600&v=beta&t=SaQs5BM3h0WtCorTO1JXcR8xHb4GQCXrbBG1Unj__wg"
                width="100" height="100"
-               style="object-fit: cover; border-radius: 20%;" alt="Yuyue Zhao"/>
+               style="object-fit: cover; border-radius: 20%;" alt="Qianru Meng"/>
           <br />
-          <sub><b>Yuyue Zhao</b></sub>
+          <sub><b>Qianru Meng</b></sub>
         </a>
       </td>
       <td align="center">
@@ -751,7 +752,7 @@ Stay tuned — more features are on the way!
 
 #### Contributors
 
-Jan Piotrowski, Wiktor Cupiał, Jakub Kaliski, Jakub Filipiuk, Xinhao Yi, Shuyu Guo, Andreas Sauter, Wenxiang Hu, Jacopo Urbani, Zaiqiao Meng, Jun Luo, Lun Zhou
+Jakub Kaliski, Jakub Filipiuk, Yuyue Zhao, Jan Piotrowski, Wiktor Cupiał, Xinhao Yi, Shuyu Guo, Andreas Sauter, Wenxiang Hu, Jacopo Urbani, Zaiqiao Meng, Jun Luo, Lun Zhou
 
 > <a href="https://xiaoyi.huawei.com/chat/research"><img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/xiaoyi-deepresearch.webp" height="16" alt="Xiaoyi DeepResearch" align="center" /></a> [*Xiaoyi DeepResearch*](https://xiaoyi.huawei.com/chat/research) *Team* and the wider open-source community contribute to this project.
 

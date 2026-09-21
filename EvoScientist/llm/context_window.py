@@ -8,8 +8,8 @@ from typing import Any
 DEFAULT_CONTEXT_WINDOW_FALLBACK = 200_000
 
 # Patch table for new models that providers haven't registered profile data
-# for yet. Remove an entry once langchain/provider exposes max_input_tokens
-# via ``model.profile`` — the attribute-reading layer always wins.
+# for yet. Real ``model.profile`` data always wins, so entries only fill gaps;
+# remove one only once the provider ships it at its pyproject floor, not just the lock.
 # Keys are matched against ``model.model_name`` (or ``model.model`` /
 # ``model.name``); lookup tries exact match first, then ``split('/')[-1]``
 # to also accept OpenRouter-style ``vendor/model`` IDs.
@@ -33,16 +33,14 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Covers OpenRouter ``minimax/minimax-m3`` (via split('/')[-1]) and direct
     # ``MiniMax-M3`` (via lowercased exact match).
     "minimax-m3": 1_000_000,
-    # Zhipu GLM-5.3/5.2 — 1M context, exceptions to the ``glm-5`` family (203K).
-    # Matches OpenRouter ``z-ai/glm-5.x`` via split('/')[-1].
-    "glm-5.3": 1_000_000,
-    "glm-5.3-flash": 1_000_000,
-    "glm-5.2": 1_000_000,
-    # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2.
+    # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2 (1M); the
+    # dashed id misses the ``glm-5.2`` family pattern below.
     "glm-5-2": 1_000_000,
     # Tencent Hunyuan — HY4 preview 1M, HY3 262K (OpenRouter ``tencent/hy*``).
     "hy4-preview": 1_048_576,
     "hy3": 262_000,
+    # DeepSeek rolling Flash tier (native ``deepseek-flash``, V4.1-Flash today).
+    "deepseek-flash": 1_000_000,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.
@@ -64,6 +62,9 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("kimi-k3", 1_048_576),
     # Moonshot Kimi K2 family — k2.5, k2.6, k2-thinking, k2-thinking-turbo
     ("kimi-k2", 262_000),
+    # Zhipu GLM-5.3 / 5.2 — 1M context; covers flash, flashx, future variants.
+    ("glm-5.3", 1_000_000),
+    ("glm-5.2", 1_000_000),
     # Zhipu GLM-5 family — base, 5.1, 5-turbo, 5v-turbo, etc.
     ("glm-5", 203_000),
     # DeepSeek V4 family — pro, flash, future variants

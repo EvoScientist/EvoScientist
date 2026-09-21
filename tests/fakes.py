@@ -302,6 +302,10 @@ class FakeGraphGateway(GraphGateway):
         state_error: BaseException | None = None,
         generated_thread_ids: Iterable[str] | None = None,
         thread_store: ThreadStore | None = None,
+        run_statuses: dict[str, str] | None = None,
+        run_status_error: BaseException | None = None,
+        process_statuses: dict[str, str] | None = None,
+        process_status_error: BaseException | None = None,
     ) -> None:
         self.events = list(events or [])
         self.stream = stream
@@ -309,6 +313,16 @@ class FakeGraphGateway(GraphGateway):
         self.state_error = state_error
         self.generated_thread_ids = list(generated_thread_ids or [])
         self.thread_store = thread_store or FakeThreadStore()
+        # run_id -> status, consulted by get_run_status; unknown ids read as
+        # the non-terminal "running" so the reader leaves them for a later poll.
+        self.run_statuses = run_statuses or {}
+        self.run_status_error = run_status_error
+        self.run_status_calls: list[tuple[str, str]] = []
+        # process_id -> status, consulted by get_process_status; unknown ids read
+        # as "running" so the reader leaves them for a later poll.
+        self.process_statuses = process_statuses or {}
+        self.process_status_error = process_status_error
+        self.process_status_calls: list[str] = []
         self.requests: list[RunRequest] = []
         self.clone_calls: list[
             tuple[str, dict[str, Any] | None, GraphTarget | None]
@@ -417,6 +431,28 @@ class FakeGraphGateway(GraphGateway):
     ) -> None:
         self.updated_states.append((target, thread_id, values))
 
+    async def get_run_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        run_id: str,
+    ) -> str:
+        self.run_status_calls.append((thread_id, run_id))
+        if self.run_status_error is not None:
+            raise self.run_status_error
+        return self.run_statuses.get(run_id, "running")
+
+    async def get_process_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        process_id: str,
+    ) -> str:
+        self.process_status_calls.append(process_id)
+        if self.process_status_error is not None:
+            raise self.process_status_error
+        return self.process_statuses.get(process_id, "running")
+
 
 class FakeLangGraphRunModule:
     """Fake thread-stream run controller for server gateway tests."""
@@ -512,6 +548,7 @@ class FakeLangGraphThreadsClient:
         self.metadata_updates: list[tuple[str, dict[str, Any]]] = []
         self.deleted: list[str] = []
         self.gets: list[str] = []
+        self.state_gets: list[str] = []
         self.searches: list[dict[str, Any]] = []
         self.stream_calls: list[tuple[str, str]] = []
         self.state_updates: list[tuple[str, GraphStateValues, str | None]] = []
@@ -609,6 +646,7 @@ class FakeLangGraphThreadsClient:
     async def get_state(self, thread_id: str) -> dict[str, Any]:
         from langgraph_sdk.errors import NotFoundError
 
+        self.state_gets.append(thread_id)
         if thread_id in self.states:
             return self.states[thread_id]
         raise NotFoundError("not found", response=_not_found_response(), body=None)

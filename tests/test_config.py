@@ -241,6 +241,38 @@ class TestEvoScientistConfig:
         assert config.dangerous_mode is True
         assert config.auto_approve is True
 
+    def test_literal_field_invalid_value_falls_back_with_warning(self, caplog):
+        """A typo'd Literal (config file / direct construction) never lands.
+
+        ``load_config`` does not coerce file values, so without this
+        normalization an out-of-set value like ``langgraph-server`` (hyphen)
+        would flow verbatim into mode selection and silently select the
+        local gateway path in the manager.
+        """
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="EvoScientist.config.settings"):
+            config = EvoScientistConfig(gateway_backend="langgraph-server")
+        assert config.gateway_backend == "local"
+        assert "Invalid gateway_backend" in caplog.text
+
+    def test_literal_field_valid_value_passes_through(self):
+        config = EvoScientistConfig(gateway_backend="langgraph_server")
+        assert config.gateway_backend == "langgraph_server"
+
+    def test_ui_backend_legacy_aliases_and_case_fold(self):
+        """Legacy ``ui_backend`` spellings survive Literal normalization.
+
+        Earlier onboarding wrote ``rich``/``textual`` into ``config.yaml``;
+        ``normalize_ui_backend`` still maps those to ``cli``/``tui``. The
+        Literal check must fold case and honour the same aliases, or a stored
+        ``rich`` is dropped and the user silently comes back in the TUI.
+        """
+        assert EvoScientistConfig(ui_backend="rich").ui_backend == "cli"
+        assert EvoScientistConfig(ui_backend="textual").ui_backend == "tui"
+        assert EvoScientistConfig(ui_backend="CLI").ui_backend == "cli"
+        assert EvoScientistConfig(ui_backend="Rich").ui_backend == "cli"
+
 
 # =============================================================================
 # Test config path functions
@@ -599,6 +631,32 @@ class TestPriorityChain:
         config = get_effective_config()
         assert config.ui_backend == "tui"
 
+    def test_env_ui_backend_legacy_alias_override(self, temp_config_dir, monkeypatch):
+        """A legacy env spelling resolves through the same alias map.
+
+        Without case-folding and alias support in ``_coerce_value`` the
+        override raises and is swallowed by ``get_effective_config``, so
+        ``EVOSCIENTIST_UI_BACKEND=rich`` is silently ignored.
+        """
+        save_config(EvoScientistConfig(ui_backend="tui"))
+        monkeypatch.setenv("EVOSCIENTIST_UI_BACKEND", "rich")
+        config = get_effective_config()
+        assert config.ui_backend == "cli"
+
+    def test_env_gateway_backend_invalid_value_falls_back_to_local(
+        self, temp_config_dir, monkeypatch
+    ):
+        """An out-of-set env value is skipped, leaving the default in place.
+
+        ``_coerce_value`` rejects values outside the Literal's allowed set,
+        so the env-override loop skips the malformed entry instead of
+        storing it verbatim — consistent with how malformed env values for
+        other field types already degrade to defaults.
+        """
+        monkeypatch.setenv("EVOSCIENTIST_GATEWAY_BACKEND", "langgraph-server")
+        config = get_effective_config()
+        assert config.gateway_backend == "local"
+
     def test_env_log_level_override(self, temp_config_dir, monkeypatch):
         """Log level can be selected via environment variable."""
         save_config(EvoScientistConfig(log_level="warning"))
@@ -666,6 +724,18 @@ class TestPriorityChain:
         assert (
             EvoScientistConfig(sandbox_execute_timeout="abc").sandbox_execute_timeout
             == 300
+        )
+
+    def test_shell_allow_list_yaml_list_normalized_to_csv(self):
+        """A YAML list spelling survives ``__post_init__`` as a list; normalize
+        to CSV so the policy resolver's ``.split`` never raises AttributeError."""
+        assert EvoScientistConfig(shell_allow_list=["ls", "cat"]).shell_allow_list == (
+            "ls,cat"
+        )
+        assert EvoScientistConfig(shell_allow_list=("ls",)).shell_allow_list == "ls"
+        # The normal comma-separated string is left untouched.
+        assert EvoScientistConfig(shell_allow_list="ls,cat").shell_allow_list == (
+            "ls,cat"
         )
         assert (
             EvoScientistConfig(sandbox_execute_timeout=True).sandbox_execute_timeout

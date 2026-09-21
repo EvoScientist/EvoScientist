@@ -62,11 +62,57 @@ def get_langgraph_sync_client(*, url: str, headers: Mapping[str, str] | None = N
     return get_sync_client(url=url, headers=langgraph_dev_headers(headers))
 
 
-def get_langgraph_async_client(*, url: str, headers: Mapping[str, str] | None = None):
-    """Build an async LangGraph SDK client with EvoScientist's default headers."""
+def get_langgraph_async_client(
+    *,
+    url: str,
+    headers: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+):
+    """Build an async LangGraph SDK client with EvoScientist's default headers.
+
+    ``timeout`` (seconds) caps the underlying ``httpx.AsyncClient``; ``None``
+    leaves the SDK default (``read=300s``) in place.
+    """
     from langgraph_sdk import get_client
 
-    return get_client(url=url, headers=langgraph_dev_headers(headers))
+    return get_client(url=url, headers=langgraph_dev_headers(headers), timeout=timeout)
+
+
+_ASYNC_CLIENT_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], object] = {}
+
+# The cached client backs the read-only completion poll, which is awaited
+# inline on the channel/serve dispatch path. Without a cap it inherits the SDK
+# default ``read=300s``, so a jammed dev server (the known stuck-queue
+# condition) would block dispatch for up to five minutes per poll. A timed-out
+# poll takes the caller's ``except Exception`` branch and retries next tick.
+_READ_CLIENT_TIMEOUT_SECONDS = 10.0
+
+
+def cached_langgraph_async_client(
+    url: str, *, headers: Mapping[str, str] | None = None
+):
+    """Return a cached async SDK client, keyed on URL and normalized headers.
+
+    The async client wraps an ``httpx.AsyncClient`` bound to the event loop it
+    is first used on; caching avoids leaking a new connection pool on every
+    call. The key includes the *normalized* headers, so ``headers=None``
+    (defaults) and an explicit copy of the default headers share one client,
+    while genuinely different header sets get their own — a caller passing
+    different headers must never silently receive a client built for
+    someone else's. The CLI drives its whole session from a single
+    ``asyncio.run`` loop, so one cached client per key is safe. Callers that
+    only read (e.g. the async-task completion poll) reuse this rather than
+    constructing per poll.
+    """
+    normalized = langgraph_dev_headers(headers)
+    key = (url, tuple(sorted(normalized.items())))
+    client = _ASYNC_CLIENT_CACHE.get(key)
+    if client is None:
+        client = get_langgraph_async_client(
+            url=url, headers=normalized, timeout=_READ_CLIENT_TIMEOUT_SECONDS
+        )
+        _ASYNC_CLIENT_CACHE[key] = client
+    return client
 
 
 def default_scheduler_timezone(config: object | None = None) -> str | None:

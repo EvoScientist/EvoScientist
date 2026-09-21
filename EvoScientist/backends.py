@@ -360,6 +360,71 @@ class ActionVerdict:
     reason: str = ""
 
 
+# Per-run ``configurable`` key that disarms HITL and hands the dangerous-command
+# gate to the backend. Set client-side by ``resolve_per_run_config`` from
+# ``hitl_suppressed_for_run`` (``auto_mode`` or ``auto_approve``) and written on
+# every gateway run; read by the HITL ``when`` predicate and the backend/background
+# guards. A per-run channel (not a construction flag) so a keepalive server can
+# disarm one run without disarming the armed graph.
+HITL_SUPPRESSED_KEY = "hitl_suppressed"
+
+
+def is_hitl_suppressed(config=None) -> bool:
+    """Whether the current run has HITL suppressed via ``configurable``.
+
+    Reads :data:`HITL_SUPPRESSED_KEY` off an explicit *config* (the run's
+    ``RunnableConfig`` dict) or, when omitted, the ambient
+    ``langgraph.config.get_config()``. The key is written only by the two
+    Python gateways; a run that reached langgraph dev directly (WebUI,
+    ``EvoSci deploy`` SDK clients, LangSmith Studio) never carries it, so when
+    it is absent we fall back to the serving process's ``auto_approve`` — this
+    restores the base behaviour for those clients (a file/env ``auto_approve``
+    deployment runs unattended instead of parking on an interrupt nothing
+    answers), while gateway-driven runs, which always set the key, are
+    unaffected. Returns ``False`` outside a runnable context (direct calls
+    without a config, tests) — the safe floor: armed graph, no backend guard.
+    """
+    if config is None:
+        try:
+            from langgraph.config import get_config
+
+            config = get_config()
+        except Exception:
+            return False
+    if not isinstance(config, dict):
+        return False
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return False
+    if HITL_SUPPRESSED_KEY not in configurable:
+        from .EvoScientist import _ensure_config
+
+        return bool(_ensure_config().auto_approve)
+    return bool(configurable[HITL_SUPPRESSED_KEY])
+
+
+def hitl_suppressed_for_run(config=None) -> bool:
+    """Whether THIS run must disarm HITL and fall back to the backend guard.
+
+    The pre-run derivation of the suppression flag: both gateway backends
+    call it when assembling a run's config and feed the result into
+    ``gateway.types.resolve_per_run_config(hitl_suppressed=...)``. True for
+    ``auto_mode`` (unattended) OR ``auto_approve`` (attended, prompts opted
+    out): both run against the always-armed graph with the interrupt disarmed
+    and the backend guarding the dangerous set — what those users get on main
+    today, and it keeps the always-armed auto-resume off the recursion limit
+    (#469). *config* defaults to the live session config (``_ensure_config`` —
+    cached, in-place-mutated), so unsaved mid-session toggles still apply.
+    """
+    if config is None:
+        from .EvoScientist import _ensure_config
+
+        config = _ensure_config()
+    return bool(
+        getattr(config, "auto_mode", False) or getattr(config, "auto_approve", False)
+    )
+
+
 def resolve_action_decision(
     command: str,
     *,
@@ -1627,12 +1692,26 @@ class CustomSandboxBackend(LocalShellBackend):
             self.cwd,
             virtual_mode=self.virtual_mode,
             dangerous=self._dangerous,
-            guard_dangerous=self._guard_dangerous,
+            guard_dangerous=self._effective_guard_dangerous(),
         )
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)
 
         return self._execute_prepared_command(command, timeout=timeout)
+
+    def _effective_guard_dangerous(self) -> bool:
+        """Guard the dangerous-command set for this call.
+
+        The construction flag stays a floor (``True`` for guarded async
+        sub-agents, which have no approval path at all). On top of it, a run
+        with HITL suppressed (``auto_mode`` or attended ``auto_approve``) is
+        guarded per call: the interrupt is disarmed there, so the backend is
+        the only gate. A plain attended run (no auto_mode/auto_approve) is NOT
+        guarded here — the HITL interrupt plus the client policy decide, so the
+        flag is not baked at construction and a mid-session flip can never
+        leave it stale.
+        """
+        return self._guard_dangerous or is_hitl_suppressed()
 
     def _execute_prepared_command(
         self,

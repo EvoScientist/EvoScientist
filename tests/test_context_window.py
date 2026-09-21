@@ -69,11 +69,11 @@ def test_patch_table_resolves_known_model_name():
 
 
 def test_patch_table_strips_provider_prefix():
-    full = SimpleNamespace(model_name="openai/gpt-5.5", profile=None)
-    short = SimpleNamespace(model_name="gpt-5.5", profile=None)
+    full = SimpleNamespace(model_name="minimax/minimax-m3", profile=None)
+    short = SimpleNamespace(model_name="minimax-m3", profile=None)
 
-    assert get_context_window(full) == 1_050_000
-    assert get_context_window(short) == 1_050_000
+    assert get_context_window(full) == 1_000_000
+    assert get_context_window(short) == 1_000_000
 
 
 def test_real_attribute_beats_patch_table():

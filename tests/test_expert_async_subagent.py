@@ -183,6 +183,35 @@ class TestStartToolInvocation:
         assert "async_tasks" in result.update
         assert "task-abc" in result.update["async_tasks"]
 
+    def test_start_records_description_in_task_envelope(self):
+        """The launch-time description is stamped into ``async_tasks`` state so
+        a completion notification can name which task finished (read back in
+        ``cli/async_notifier``); bounded to 200 chars to cap state size."""
+        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        start = next(t for t in mw.tools if t.name == "start_async_task")
+
+        client = _fake_sync_client()
+        with patch(
+            "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
+            return_value=client,
+        ):
+            result = start.func(
+                description="Draft the related-work section",
+                subagent_type="literature-review",
+                runtime=SimpleNamespace(tool_call_id="tc1"),
+            )
+            long = start.func(
+                description="x" * 500,
+                subagent_type="literature-review",
+                runtime=SimpleNamespace(tool_call_id="tc2"),
+            )
+
+        assert (
+            result.update["async_tasks"]["task-abc"]["description"]
+            == "Draft the related-work section"
+        )
+        assert long.update["async_tasks"]["task-abc"]["description"] == "x" * 200
+
     def test_start_injects_cfg_model_into_configurable(self):
         """cfg.model / cfg.provider land in ``config.configurable`` on every
         ``runs.create`` so the deployed graph re-resolves its chat model per

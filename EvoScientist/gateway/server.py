@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
 from ..stream.events import (
@@ -37,7 +39,10 @@ from .types import (
     RunRequest,
     ThreadResolution,
     ThreadStore,
+    resolve_per_run_config,
 )
+
+logger = logging.getLogger(__name__)
 
 _THREAD_SEARCH_LIMIT = 1000
 _RUN_SUBSCRIBE_CHANNELS = [
@@ -48,6 +53,7 @@ _RUN_SUBSCRIBE_CHANNELS = [
     "tasks",
     "lifecycle",
     "input",
+    "custom",
 ]
 
 
@@ -67,7 +73,7 @@ def _build_thread_metadata(
     if graph_id == DEFAULT_GRAPH_ID:
         merged["agent_name"] = DEFAULT_GRAPH_ID
     else:
-        merged.pop("agent_name", None)
+        merged["agent_name"] = None
     if workspace_dir is not None:
         merged["workspace_dir"] = workspace_dir
     merged.setdefault("updated_at", datetime.now(UTC).isoformat())
@@ -123,6 +129,20 @@ def _state_interrupts(state: ThreadState) -> list[Mapping[str, object]]:
     if not isinstance(interrupts, list):
         return []
     return [interrupt for interrupt in interrupts if isinstance(interrupt, Mapping)]
+
+
+def _is_id_keyed_hitl_resume(response: object) -> bool:
+    """True for a HITL resume payload keyed by interrupt id.
+
+    ``build_hitl_resume`` produces ``{interrupt_id: {"decisions": [...]}}``.
+    ask_user resumes (``{"status": "cancelled"}``,
+    ``{"answers": [...], "status": "answered"}``) are single-key too but key
+    by their own schema, not the interrupt id.
+    """
+    if not isinstance(response, Mapping) or len(response) != 1:
+        return False
+    (value,) = response.values()
+    return isinstance(value, Mapping) and "decisions" in value
 
 
 def _is_interrupt_event(event: Mapping[str, object]) -> bool:
@@ -457,6 +477,17 @@ class LangGraphServerGateway:
     graph_id: str = DEFAULT_GRAPH_ID
     interrupt_wait_seconds: float = 5.0
     events: SessionEvents | None = None
+    """Frontend event sink — delivery point for middleware custom events.
+
+    Consumers read ``gateway.events`` via the ``GraphGateway`` protocol
+    (``tui_interactive.py``, ``commands/implementation/model.py``). On the
+    server backend this sink additionally receives middleware events
+    (tool-selection lifecycle, fallback narration) mirrored by the server
+    process onto the run's ``custom`` stream channel
+    (``StreamBroadcastSink``): each tagged payload consumed from the stream
+    is dispatched onto this sink during ``stream_events`` iteration.
+    ``None`` (headless single-shot runs) drops those events.
+    """
 
     def _target_graph_id(self, target: GraphTarget | None = None) -> str:
         return target.graph_id if target is not None else self.graph_id
@@ -539,12 +570,51 @@ class LangGraphServerGateway:
             metadata=metadata,
         )
 
+    def _resolve_run_config(
+        self,
+        thread_id: str,
+        configurable_extra: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Assemble this run's config, reading the live session config here.
+
+        ``_ensure_config`` returns the cached, in-place-mutated session
+        config — NOT a fresh disk read — so mid-session ``/model`` edits that
+        have not been ``--save``d still reach the server per run. The
+        ``configurable.model`` / ``model_provider`` overrides are picked up
+        server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
+        overrides the server's construction-time ``.with_config`` binding.
+        """
+        from ..backends import hitl_suppressed_for_run
+        from ..EvoScientist import _ensure_config
+
+        cfg = _ensure_config()
+        overrides: dict[str, Any] = {}
+        model = getattr(cfg, "model", None)
+        provider = getattr(cfg, "provider", None)
+        if model:
+            overrides["model"] = model
+        if provider:
+            overrides["model_provider"] = provider
+        limit = getattr(cfg, "recursion_limit", None)
+        recursion_limit = (
+            limit
+            if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
+            else None
+        )
+        return resolve_per_run_config(
+            thread_id,
+            configurable_extra,
+            per_run_overrides=overrides,
+            recursion_limit=recursion_limit,
+            hitl_suppressed=hitl_suppressed_for_run(cfg),
+        )
+
     async def _start_or_resume(
         self,
         stream: AsyncThreadStream,
         request: RunRequest,
     ) -> None:
-        config: dict[str, Any] = {"configurable": {"thread_id": request.thread_id}}
+        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
@@ -553,21 +623,32 @@ class LangGraphServerGateway:
                 request.target.workspace_dir if request.target is not None else None
             ),
         )
-        request_workspace = (
-            request.target.workspace_dir if request.target is not None else None
-        )
-        if request.metadata or request_workspace is not None:
-            await self.thread_store.client.threads.update(
-                request.thread_id,
-                metadata=_build_thread_metadata(
-                    graph_id=self._target_graph_id(request.target),
-                    workspace_dir=request_workspace,
-                    metadata=request.metadata,
+        # Refresh metadata on every run: ensure_thread_exists is a no-op on
+        # existing threads (if_exists="do_nothing"), so without this update
+        # fields like updated_at and model would go stale after the first run.
+        await self.thread_store.client.threads.update(
+            request.thread_id,
+            metadata=_build_thread_metadata(
+                graph_id=self._target_graph_id(request.target),
+                workspace_dir=(
+                    request.target.workspace_dir if request.target is not None else None
                 ),
-            )
+                metadata=request.metadata,
+            ),
+        )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
-                await self._respond_to_interrupt(stream, request.message.resume)
+                # Known divergence: the resume goes through run.respond,
+                # which takes no config, so the per-run overrides above
+                # (model / recursion_limit) are NOT applied to a resumed
+                # turn - it runs with the thread's construction-time
+                # binding until the next fresh run re-applies them. The
+                # primitive that would carry config on a resume is
+                # run.start with Command(resume=...); switching to it needs
+                # live-server verification first.
+                await self._respond_to_interrupt(
+                    stream, request.thread_id, request.message.resume
+                )
                 return
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
@@ -586,16 +667,138 @@ class LangGraphServerGateway:
     async def _respond_to_interrupt(
         self,
         stream: AsyncThreadStream,
+        thread_id: str,
         response: object,
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
         while not stream.interrupts and loop.time() < deadline:
             await asyncio.sleep(0.05)
-        interrupt_id = None
-        if len(stream.interrupts) == 1:
-            interrupt_id = str(stream.interrupts[0].get("interrupt_id") or "")
-        await stream.run.respond(response, interrupt_id=interrupt_id or None)
+
+        # The server replays a parked thread's pending interrupts to a fresh
+        # stream within ~1s (verified against a live langgraph dev server),
+        # which is the only source for stream.interrupts. run.respond
+        # validates an explicit interrupt_id against stream.interrupts, so an
+        # id recovered from thread state would always be rejected - do not
+        # re-add a state lookup here. The one resume primitive that does not
+        # gate on stream.interrupts is run.start with Command(resume=...).
+        interrupts = list(stream.interrupts)
+
+        if len(interrupts) > 1:
+            # run.respond can target one of several outstanding interrupts by
+            # id, so an id-keyed build_hitl_resume payload whose key matches a
+            # replayed interrupt resumes that one (parallel sub-agent approvals
+            # arrive this way once #444 arms HITL on every run). An unmatched
+            # key is a client bug and still raises.
+            if _is_id_keyed_hitl_resume(response):
+                (key,) = response
+                ids = {
+                    str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
+                }
+                if str(key) in ids:
+                    await stream.run.respond(response[key], interrupt_id=str(key))
+                    return
+            raise RuntimeError(
+                f"Thread {thread_id} has {len(interrupts)} pending interrupts; "
+                "resume requires an id-keyed payload matching one of them"
+            )
+        if not interrupts:
+            raise RuntimeError(
+                f"No interrupt replayed to the stream on thread {thread_id} "
+                f"within {self.interrupt_wait_seconds}s; the thread may not "
+                "be in an interrupted state"
+            )
+
+        interrupt_id = str(
+            interrupts[0].get("interrupt_id") or interrupts[0].get("id") or ""
+        )
+        # build_hitl_resume produces Command(resume={interrupt_id: {decisions}}),
+        # keyed by id so the graph can route multi-interrupt resumes. The server's
+        # run.respond takes interrupt_id separately, so the id-keyed wrapper must
+        # be unwrapped to avoid double-wrapping the payload server-side (the
+        # input.respond handler re-wraps response into {interrupt_id: response}).
+        # A wrong-keyed id-keyed HITL resume is always a client bug (stale or
+        # hand-built interrupt id) and raises. Other single-key payloads are
+        # legitimate non-HITL resumes keyed by their own schema (ask_user's
+        # {"status": "cancelled"}), not the interrupt id - they forward unchanged.
+        resolved = response
+        if (
+            isinstance(response, Mapping)
+            and len(response) == 1
+            and interrupt_id
+            and interrupt_id in response
+        ):
+            resolved = response[interrupt_id]
+        elif _is_id_keyed_hitl_resume(response) and interrupt_id:
+            raise RuntimeError(
+                f"Resume payload key {next(iter(response))} does not match the "
+                f"pending interrupt {interrupt_id} on thread {thread_id}"
+            )
+        elif isinstance(response, Mapping) and len(response) == 1 and interrupt_id:
+            logger.warning(
+                "Resume payload key %s does not match pending interrupt %s on "
+                "thread %s; forwarding payload unchanged",
+                next(iter(response)),
+                interrupt_id,
+                thread_id,
+            )
+        await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
+
+    async def _repair_stuck_thread_state(self, thread_id: str) -> None:
+        """Clear a non-empty ``next`` left by a failed run, preserving HITL pauses.
+
+        When an exception occurs mid-run the LangGraph checkpoint can be left
+        with a non-empty ``next`` tuple — the graph is stuck waiting to resume
+        at a specific node. On the next invocation the server replays the
+        broken step instead of starting a fresh turn. This mirrors the local
+        path's ``_clear_interrupted_graph_state`` (``stream/events.py``): it
+        fetches thread state, clears ``next`` via ``update_state(values=None,
+        as_node="__end__")`` — but only when the state is *not* a genuine
+        human-in-the-loop interrupt (those also leave ``next`` non-empty and
+        must be preserved). Best-effort: failures are logged at DEBUG.
+        """
+        try:
+            state = await self.thread_store.client.threads.get_state(thread_id)
+        except NotFoundError:
+            return
+        except Exception:
+            logger.debug(
+                "Could not read thread state for repair on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+            return
+
+        next_nodes = state.get("next")
+        if not next_nodes:
+            return
+
+        if _state_interrupts(state):
+            logger.debug(
+                "Leaving interrupted thread state intact for thread %s "
+                "(pending human-in-the-loop interrupt)",
+                thread_id,
+            )
+            return
+
+        try:
+            await self.thread_store.client.threads.update_state(
+                thread_id,
+                values=None,
+                as_node="__end__",
+            )
+        except Exception:
+            logger.debug(
+                "Could not clear interrupted thread state for thread %s",
+                thread_id,
+                exc_info=True,
+            )
+            return
+        logger.debug(
+            "Cleared interrupted thread state for thread %s (was stuck at: %s)",
+            thread_id,
+            next_nodes,
+        )
 
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         return self._stream_events(request)
@@ -627,6 +830,29 @@ class LangGraphServerGateway:
             return {}
         return {str(key): value for key, value in values.items()}
 
+    async def get_run_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        run_id: str,
+    ) -> str:
+        run = await self.thread_store.client.runs.get(thread_id, run_id)
+        return run["status"]
+
+    async def get_process_status(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+        process_id: str,
+    ) -> str:
+        # Background processes run in the langgraph dev server process; read their
+        # status from the custom route on the server's http sub-app (there is no
+        # SDK resource for OS processes, unlike runs).
+        data = await self.thread_store.client.http.get(
+            "/api/bg_process_status", params={"process_id": process_id}
+        )
+        return data["status"]
+
     async def _pending_interrupt_events(
         self,
         stream: AsyncThreadStream,
@@ -657,6 +883,71 @@ class LangGraphServerGateway:
             )
         return events
 
+    def _deliver_custom_middleware_events(
+        self, raw_event: Mapping[str, Any]
+    ) -> list[GraphEvent]:
+        """Dispatch tagged middleware payloads from the ``custom`` channel.
+
+        Wire shape (v3 protocol): ``{"method": "custom", "params": {"data":
+        {MIDDLEWARE_EVENT_TAG: {"kind": ..., ...}}}}``, written server-side by
+        ``StreamBroadcastSink``. Payloads without the tag — any other
+        custom-channel traffic — are ignored, as are malformed ones: this is
+        display narration, so a bad payload must degrade to silence rather
+        than fail the run. Headless runs (``events is None``) drop everything.
+
+        Fallback notices render directly through the sink's display callback,
+        but tool-selection state is only *recorded* by the sink — its read
+        side (``consume_tool_selection``, the dedup + render decision) is
+        polled by the local stream suppressor, which does not exist on this
+        path. So after dispatching writes, this method polls the read side
+        and returns ``tool_selection`` events (same shape the local path
+        yields) for the caller to emit — frontends render both identically.
+        The poll runs only on custom events: pending is set only by the
+        dispatched ``tool_selection`` write above, and consume-once in the
+        sink guarantees it is drained by the poll on this very event.
+        """
+        if self.events is None:
+            return []
+        if raw_event.get("method") != "custom":
+            return []
+        params = _as_raw_map(raw_event.get("params"))
+        payload = _as_raw_map(params.get("data")) if params is not None else None
+        if payload is not None:
+            payload = _as_raw_map(payload.get(MIDDLEWARE_EVENT_TAG))
+        if payload is not None:
+            # Kind dispatch lives on the event dataclasses (middleware.events):
+            # unknown kinds are None (silence), malformed payloads raise and
+            # degrade to the DEBUG log below rather than fail the run.
+            try:
+                event = MiddlewareEvent.from_wire(payload)
+                if event is not None:
+                    event.dispatch(self.events)
+            except Exception:
+                logger.debug(
+                    "malformed middleware custom event %r", dict(payload), exc_info=True
+                )
+        return self._poll_tool_selection()
+
+    def _poll_tool_selection(self) -> list[GraphEvent]:
+        """Consume any pending selection and shape it as a stream event.
+
+        Consume-once/dedup semantics live in the sink; polling returns at
+        most one event per pending selection. Outside the stream loop, the
+        ``GraphGateway`` protocol's sink is a ``SessionEvents`` (write+read
+        sides); guard with getattr for sinks missing the read side.
+        """
+        consume = getattr(self.events, "consume_tool_selection", None)
+        if consume is None:
+            return []
+        try:
+            had_pending, render = consume()
+        except Exception:
+            logger.debug("tool-selection poll failed", exc_info=True)
+            return []
+        if had_pending and render is not None:
+            return [StreamEventEmitter.tool_selection(render).data]
+        return []
+
     async def _stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         emitter = StreamEventEmitter()
         state_values: GraphStateValues = {}
@@ -671,6 +962,12 @@ class LangGraphServerGateway:
             pass
         except Exception:
             process_value_messages = False
+            logger.warning(
+                "Pre-run state fetch failed for thread %s; "
+                "value-message processing disabled for this run",
+                request.thread_id,
+                exc_info=True,
+            )
 
         subagents = _SubagentRegistry()
         processor = _V3EventProcessor(
@@ -686,14 +983,21 @@ class LangGraphServerGateway:
             assistant_id=self._target_graph_id(request.target),
         )
 
+        run_started = False
+        run_completed = False
+        emitted_interrupt = False
         try:
             async with stream:
                 await self._start_or_resume(stream, request)
-                emitted_interrupt = False
+                run_started = True
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
                         continue
+                    for selection_event in self._deliver_custom_middleware_events(
+                        raw_event
+                    ):
+                        yield selection_event
                     event_map: dict[str, Any] = dict(raw_event)
                     for subagent_event in tracker.process(event_map):
                         yield subagent_event
@@ -702,6 +1006,7 @@ class LangGraphServerGateway:
                             normalized
                         )
                         yield normalized
+                run_completed = True
                 if not emitted_interrupt:
                     for event in await self._pending_interrupt_events(
                         stream,
@@ -709,10 +1014,24 @@ class LangGraphServerGateway:
                         processor,
                     ):
                         yield event
-        except Exception as exc:
-            yield emitter.error(str(exc)).data
-            raise
-        finally:
             for event in tracker.finish():
                 yield event
+        except Exception as exc:
+            # Repair before the first yield: a consumer that stops iterating
+            # after the error event (aclose / abandon) triggers GeneratorExit
+            # at the yield, so any repair after it never runs and the thread
+            # keeps its non-empty ``next`` — the failed step would replay on
+            # the next request.
+            await self._repair_stuck_thread_state(request.thread_id)
+            yield emitter.error(str(exc)).data
+            for event in tracker.finish():
+                yield event
+            raise
+        finally:
+            if run_started and not run_completed and not emitted_interrupt:
+                await _acancel_thread_runs(
+                    self.thread_store.client,
+                    request.thread_id,
+                    name="incomplete run",
+                )
         yield emitter.done(processor.full_response).data

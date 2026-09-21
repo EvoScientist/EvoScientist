@@ -192,6 +192,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5.3", "z-ai/glm-5.3", "openrouter"),
     ("glm-5.3-flash", "z-ai/glm-5.3-flash", "openrouter"),
+    ("glm-5.3-flashx", "z-ai/glm-5.3-flashx", "openrouter"),
     ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
@@ -210,6 +211,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro-0813", "openrouter"),
     ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
+    ("deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash", "openrouter"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
     ("muse-spark-1.3", "meta/muse-spark-1.3", "openrouter"),
     # Volcengine Coding Plan (火山引擎代码计划 — coding-only endpoint)
@@ -228,6 +230,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Zhipu (智谱 — general endpoint, default for simple lookups)
     ("glm-5.3", "glm-5.3", "zhipu"),
     ("glm-5.3-flash", "glm-5.3-flash", "zhipu"),
+    ("glm-5.3-flashx", "glm-5.3-flashx", "zhipu"),
     ("glm-5.2", "glm-5.2", "zhipu"),
     ("glm-5.1", "glm-5.1", "zhipu"),
     ("glm-5", "glm-5", "zhipu"),
@@ -266,12 +269,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("qwen3-235b", "qwen3-235b-a22b", "dashscope"),
     ("qwen-max", "qwen-max", "dashscope"),
     ("qwq-plus", "qwq-plus", "dashscope"),
-    # DeepSeek
+    # DeepSeek — ``deepseek-flash`` is the rolling Flash tier (V4.1-Flash today).
+    ("deepseek-flash", "deepseek-flash", "deepseek"),
     ("deepseek-v4-pro", "deepseek-v4-pro", "deepseek"),
+    # Legacy alias kept so existing configs resolve here instead of falling
+    # through to the same-named OpenRouter id (server redirects to deepseek-flash).
     ("deepseek-v4-flash", "deepseek-v4-flash", "deepseek"),
-    # Legacy aliases (deprecated 2026-07-24; route to v4-flash thinking/non-thinking)
-    ("deepseek-r1", "deepseek-reasoner", "deepseek"),
-    ("deepseek-v3", "deepseek-chat", "deepseek"),
     # Moonshot (OpenAI-compatible)
     ("kimi-k3", "kimi-k3", "moonshot"),
     ("kimi-k2.6", "kimi-k2.6", "moonshot"),
