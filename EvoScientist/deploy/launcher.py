@@ -171,14 +171,21 @@ class BundledWebUIRunner:
         app_dir: Directory containing the unpacked front-end (expects
             ``<app_dir>/dist/server.js``).
         node_exe: Path to the bundled ``node`` binary.
+        log_path: When set, the node process's stdout+stderr are appended here
+            (the windowed desktop app has no console, so otherwise the front-end
+            output is discarded). When None, output is left to inherit as before.
     """
 
     handles_browser_open = False
 
-    def __init__(self, app_dir: Path, node_exe: Path) -> None:
+    def __init__(
+        self, app_dir: Path, node_exe: Path, log_path: Path | None = None
+    ) -> None:
         self.app_dir = Path(app_dir)
         self.node_exe = Path(node_exe)
         self.server_entry = self.app_dir / "dist" / "server.js"
+        self.log_path = Path(log_path) if log_path else None
+        self._log_fh = None
 
     def preflight(self, cfg: LauncherConfig) -> None:
         if not self.node_exe.exists():
@@ -206,6 +213,13 @@ class BundledWebUIRunner:
             kwargs["creationflags"] = (
                 kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
             )
+        if self.log_path is not None:
+            # Persist front-end diagnostics: without a console the node output
+            # would be lost, leaving a WebUI failure with no trace to report.
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_fh = open(self.log_path, "ab")
+            kwargs["stdout"] = self._log_fh
+            kwargs["stderr"] = subprocess.STDOUT
         try:
             return subprocess.Popen(
                 [str(self.node_exe), str(self.server_entry)],
@@ -213,13 +227,22 @@ class BundledWebUIRunner:
                 **kwargs,
             )
         except Exception as exc:  # pragma: no cover - OS-level failure
+            self._close_log()
             raise LauncherError(
                 "webui_start_failed",
                 f"Failed to launch bundled WebUI (node {self.server_entry}): {exc}",
             ) from exc
 
+    def _close_log(self) -> None:
+        if self._log_fh is not None:
+            try:
+                self._log_fh.close()
+            finally:
+                self._log_fh = None
+
     def stop(self, proc: subprocess.Popen) -> None:
         _stop_process_tree(proc)
+        self._close_log()
 
 
 # --------------------------------------------------------------------------- #

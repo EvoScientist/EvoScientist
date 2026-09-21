@@ -173,6 +173,22 @@ def test_error_html_omits_detail_block_when_none():
     assert "class=detail" not in out
 
 
+def test_error_html_shows_log_location():
+    out = shell._error_html("node_missing", "no node", None)
+    assert "Logs:" in out
+
+
+# --------------------------------------------------------------------------- #
+# Diagnostic-log paths
+# --------------------------------------------------------------------------- #
+def test_log_paths_under_config_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "EvoScientist.config.settings.get_config_dir", lambda: tmp_path / "cfg"
+    )
+    assert app_paths.desktop_log_path() == tmp_path / "cfg" / "desktop.log"
+    assert app_paths.webui_log_path() == tmp_path / "cfg" / "webui.log"
+
+
 class _RecordingLoaded:
     """Stand-in for pywebview's ``events.loaded`` that logs every ``wait``."""
 

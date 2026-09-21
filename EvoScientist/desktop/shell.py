@@ -9,10 +9,38 @@ rest of the package imports without the optional ``desktop`` extra installed.
 from __future__ import annotations
 
 import html
+import logging
 import threading
 
 from .controller import DesktopController
 from .setup import apply_setup, render_setup_html, setup_needed, validate_setup
+
+logger = logging.getLogger("EvoScientist.desktop")
+
+
+def _configure_logging() -> None:
+    """Attach a file handler to the desktop logger (idempotent).
+
+    Persists boot/shutdown/error diagnostics next to the backend log, so a
+    failure on the windowed app leaves a trace a non-terminal user can report.
+    """
+    from . import app_paths
+
+    if any(getattr(h, "_evosci_desktop", False) for h in logger.handlers):
+        return
+    try:
+        path = app_paths.desktop_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(path, encoding="utf-8")
+    except OSError:  # pragma: no cover - unwritable config dir; log to nowhere
+        return
+    handler._evosci_desktop = True  # type: ignore[attr-defined]
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
 
 _PAGE_STYLE = """
   :root { color-scheme: light dark; }
@@ -41,12 +69,16 @@ def _status_html(message: str) -> str:
 
 
 def _error_html(code: str, message: str, detail: str | None) -> str:
+    from . import app_paths
+
     detail_block = f"<p class=detail>{html.escape(detail)}</p>" if detail else ""
+    log_dir = html.escape(str(app_paths.desktop_log_path().parent))
     return (
         f"<!doctype html><meta charset=utf-8><style>{_PAGE_STYLE}</style>"
         f"<div class=card><h1>EvoScientist could not start</h1>"
         f"<p>{html.escape(message)}</p>{detail_block}"
-        f"<p class=code>{html.escape(code)}</p></div>"
+        f"<p class=code>{html.escape(code)}</p>"
+        f"<p class=code>Logs: {log_dir}</p></div>"
     )
 
 
@@ -145,8 +177,17 @@ def run_desktop(workspace_dir: str | None = None) -> None:
     )
     from . import app_paths
 
+    _configure_logging()
+    logger.info("desktop shell starting")
+
     config = get_effective_config()
     apply_config_to_env(config)
+    logger.info(
+        "config resolved: provider=%s model=%s workspace=%s",
+        config.provider,
+        config.model,
+        config.default_workdir or workspace_dir or "(cwd)",
+    )
 
     # First-run setup runs in the boot thread (below), so the launcher is built
     # only after config is final. ``done`` unblocks the boot thread when the
@@ -203,7 +244,9 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         # a free port instead of dead-ending at the error panel.
         cfg = build_launcher_config(config, workspace_dir, auto_port=True)
         runner = BundledWebUIRunner(
-            app_dir=app_paths.webui_dir(), node_exe=app_paths.node_exe()
+            app_dir=app_paths.webui_dir(),
+            node_exe=app_paths.node_exe(),
+            log_path=app_paths.webui_log_path(),
         )
         launcher = WebUILauncher(config, cfg, runner)
         state["launcher"] = launcher

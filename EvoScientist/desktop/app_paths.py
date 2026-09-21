@@ -90,3 +90,25 @@ def user_pypackages_dir() -> Path:
     from .. import paths
 
     return paths.DATA_DIR / "pypackages"
+
+
+def desktop_log_path() -> Path:
+    """Diagnostic log for the desktop shell (boot/shutdown/errors).
+
+    Lives next to the backend's ``langgraph_dev.log`` in the config dir so the
+    three app logs (desktop / webui / backend) are discoverable together.
+    """
+    from ..config.settings import get_config_dir
+
+    return get_config_dir() / "desktop.log"
+
+
+def webui_log_path() -> Path:
+    """Captured stdout/stderr of the bundled WebUI (node) process.
+
+    Node output is otherwise discarded on the windowed desktop app (no console),
+    leaving a front-end failure with no diagnostic trace.
+    """
+    from ..config.settings import get_config_dir
+
+    return get_config_dir() / "webui.log"

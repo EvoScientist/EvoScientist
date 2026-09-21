@@ -8,9 +8,12 @@ a :class:`DesktopWindow` (any object with ``show_status`` / ``load_url`` /
 
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 
 from ..deploy.launcher import LauncherError
+
+logger = logging.getLogger("EvoScientist.desktop")
 
 
 class DesktopWindow(Protocol):
@@ -45,11 +48,14 @@ class DesktopController:
             self._window.show_status("Waiting for the WebUI to become ready…")
             result = self._launcher.wait_ready(self._ready_timeout)
             self._window.load_url(result.webui_url)
+            logger.info("boot ok: webui=%s", result.webui_url)
             return True
         except LauncherError as exc:
+            logger.error("boot failed [%s]: %s", exc.code, exc.message)
             self._window.show_error(exc.code, exc.message, exc.detail)
             return False
         except Exception as exc:  # never leave a blank window on an unexpected error
+            logger.exception("boot failed unexpectedly")
             self._window.show_error("unexpected", str(exc), None)
             return False
 

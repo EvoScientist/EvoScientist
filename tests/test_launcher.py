@@ -334,6 +334,57 @@ def test_bundled_runner_preflight_ok(tmp_path):
     lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).preflight(_cfg())
 
 
+def _bundled_runner_files(tmp_path):
+    node = tmp_path / "node"
+    node.write_text("#!/bin/sh\n")
+    server = tmp_path / "dist" / "server.js"
+    server.parent.mkdir(parents=True)
+    server.write_text("// server")
+    return node
+
+
+class _DoneProc:
+    """A process already exited, so ``_stop_process_tree`` returns early."""
+
+    def poll(self):
+        return 0
+
+
+def test_bundled_runner_redirects_node_output_to_log(monkeypatch, tmp_path):
+    node = _bundled_runner_files(tmp_path)
+    log = tmp_path / "logs" / "webui.log"
+    captured = {}
+
+    def _fake_popen(cmd, **kw):
+        captured["kw"] = kw
+        return _DoneProc()
+
+    monkeypatch.setattr(lm.subprocess, "Popen", _fake_popen)
+    runner = lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node, log_path=log)
+    proc = runner.start(_cfg(), {"PORT": "4716"})
+
+    assert captured["kw"]["stdout"] is runner._log_fh
+    assert captured["kw"]["stderr"] == lm.subprocess.STDOUT
+    assert log.exists()  # parent dir created + file opened for the node output
+
+    runner.stop(proc)
+    assert runner._log_fh is None  # handle closed on stop
+
+
+def test_bundled_runner_without_log_path_does_not_redirect(monkeypatch, tmp_path):
+    node = _bundled_runner_files(tmp_path)
+    captured = {}
+
+    def _fake_popen(cmd, **kw):
+        captured["kw"] = kw
+        return _DoneProc()
+
+    monkeypatch.setattr(lm.subprocess, "Popen", _fake_popen)
+    runner = lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node)
+    runner.start(_cfg(), {"PORT": "4716"})
+    assert "stdout" not in captured["kw"]  # output left to inherit, as before
+
+
 # --------------------------------------------------------------------------- #
 # Readiness polling
 # --------------------------------------------------------------------------- #
