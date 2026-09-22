@@ -126,26 +126,21 @@ def _composite(
     return CompositeGraphGateway(read=read, execute=execute)
 
 
-# --- Catalog / read routing ---------------------------------------------------
+# --- Catalog / read routing (local reader only) -------------------------------
+# Both backends write the same sessions.db, so the local reader already sees
+# server-executed threads; the composite never consults the server for a read.
 
 
-async def test_list_threads_unions_and_dedups_local_first():
+async def test_list_threads_reads_local_only():
     read = RecordingGateway("read", threads=[{"thread_id": "A"}, {"thread_id": "B"}])
-    execute = RecordingGateway("exec", threads=[{"thread_id": "B"}, {"thread_id": "C"}])
+    execute = RecordingGateway("exec", threads=[{"thread_id": "C"}])
     merged = await _composite(read, execute).list_threads(limit=0)
-    assert [e["thread_id"] for e in merged] == ["A", "B", "C"]
-    assert read.called("list_threads")
-    assert execute.called("list_threads")
-
-
-async def test_list_threads_truncates_to_limit():
-    read = RecordingGateway("read", threads=[{"thread_id": "A"}])
-    execute = RecordingGateway("exec", threads=[{"thread_id": "B"}, {"thread_id": "C"}])
-    merged = await _composite(read, execute).list_threads(limit=2)
     assert [e["thread_id"] for e in merged] == ["A", "B"]
+    assert read.called("list_threads")
+    assert not execute.called("list_threads")
 
 
-async def test_resolve_local_first_skips_server():
+async def test_resolve_uuid_reads_local_only():
     read = RecordingGateway("read", resolution=ThreadResolution(UUID, ()))
     execute = RecordingGateway("exec")
     res = await _composite(read, execute).resolve_thread(UUID)
@@ -153,12 +148,14 @@ async def test_resolve_local_first_skips_server():
     assert not execute.called("resolve_thread")
 
 
-async def test_resolve_uuid_falls_through_to_server_on_local_miss():
+async def test_resolve_uuid_miss_does_not_hit_server():
+    # A local miss is authoritative (shared db); the server is not a second
+    # place to look, even for a UUID it happens to know.
     read = RecordingGateway("read", resolution=ThreadResolution(None, ()))
     execute = RecordingGateway("exec", resolution=ThreadResolution(UUID, ()))
     res = await _composite(read, execute).resolve_thread(UUID)
-    assert res.thread_id == UUID
-    assert execute.called("resolve_thread")
+    assert res.thread_id is None
+    assert not execute.called("resolve_thread")
 
 
 async def test_resolve_legacy_miss_does_not_hit_server():
@@ -169,63 +166,27 @@ async def test_resolve_legacy_miss_does_not_hit_server():
     assert not execute.called("resolve_thread")
 
 
-async def test_resolve_local_ambiguous_not_overridden():
-    read = RecordingGateway("read", resolution=ThreadResolution(None, ("x", "y")))
-    execute = RecordingGateway("exec")
-    res = await _composite(read, execute).resolve_thread(UUID)
-    assert res.matches == ("x", "y")
-    assert not execute.called("resolve_thread")
-
-
-async def test_metadata_uuid_prefers_server():
+async def test_metadata_reads_local_only():
     read = RecordingGateway("read", metadata={"src": "local"})
     execute = RecordingGateway("exec", metadata={"src": "server"})
-    meta = await _composite(read, execute).get_thread_metadata(UUID)
-    assert meta == {"src": "server"}
-    assert not read.called("get_thread_metadata")
-
-
-async def test_metadata_uuid_falls_back_to_local_when_server_empty():
-    read = RecordingGateway("read", metadata={"src": "local"})
-    execute = RecordingGateway("exec", metadata=None)
-    meta = await _composite(read, execute).get_thread_metadata(UUID)
-    assert meta == {"src": "local"}
-    assert read.called("get_thread_metadata")
-
-
-async def test_metadata_legacy_reads_local_only():
-    read = RecordingGateway("read", metadata={"src": "local"})
-    execute = RecordingGateway("exec", metadata={"src": "server"})
-    meta = await _composite(read, execute).get_thread_metadata(LEGACY)
-    assert meta == {"src": "local"}
+    comp = _composite(read, execute)
+    assert (await comp.get_thread_metadata(UUID)) == {"src": "local"}
+    assert (await comp.get_thread_metadata(LEGACY)) == {"src": "local"}
     assert not execute.called("get_thread_metadata")
 
 
-async def test_messages_uuid_reads_server():
+async def test_messages_read_local_only():
     read = RecordingGateway("read", messages=["local"])
     execute = RecordingGateway("exec", messages=["server"])
-    msgs = await _composite(read, execute).get_thread_messages(UUID)
-    assert msgs == ["server"]
-    assert not read.called("get_thread_messages")
-
-
-async def test_messages_uuid_falls_back_to_local_when_server_empty():
-    read = RecordingGateway("read", messages=["local"])
-    execute = RecordingGateway("exec", messages=[])
-    msgs = await _composite(read, execute).get_thread_messages(UUID)
-    assert msgs == ["local"]
-    assert read.called("get_thread_messages")
-
-
-async def test_messages_legacy_reads_local():
-    read = RecordingGateway("read", messages=["local"])
-    execute = RecordingGateway("exec", messages=["server"])
-    msgs = await _composite(read, execute).get_thread_messages(LEGACY)
-    assert msgs == ["local"]
+    comp = _composite(read, execute)
+    assert (await comp.get_thread_messages(UUID)) == ["local"]
+    assert (await comp.get_thread_messages(LEGACY)) == ["local"]
     assert not execute.called("get_thread_messages")
 
 
 async def test_state_values_uuid_server_legacy_local():
+    # get_state_values is the one read kept on the server: it reflects the run's
+    # live next / interrupts, which only the executor holds.
     read = RecordingGateway("read", state={"src": "local"})
     execute = RecordingGateway("exec", state={"src": "server"})
     comp = _composite(read, execute)
@@ -233,20 +194,17 @@ async def test_state_values_uuid_server_legacy_local():
     assert (await comp.get_state_values(None, LEGACY)) == {"src": "local"}
 
 
-async def test_thread_exists_either_store():
-    # local hit short-circuits
+async def test_thread_exists_reads_local_only():
+    # local hit -> True, server never consulted
     comp = _composite(RecordingGateway("r", exists=True), RecordingGateway("e"))
     assert await comp.thread_exists(UUID) is True
-    # local miss + uuid -> server
+    # local miss -> False for both UUID and legacy, server never consulted
     read = RecordingGateway("r", exists=False)
     execute = RecordingGateway("e", exists=True)
-    assert await _composite(read, execute).thread_exists(UUID) is True
-    assert execute.called("thread_exists")
-    # local miss + legacy -> False, server untouched
-    read2 = RecordingGateway("r", exists=False)
-    execute2 = RecordingGateway("e", exists=True)
-    assert await _composite(read2, execute2).thread_exists(LEGACY) is False
-    assert not execute2.called("thread_exists")
+    comp2 = _composite(read, execute)
+    assert await comp2.thread_exists(UUID) is False
+    assert await comp2.thread_exists(LEGACY) is False
+    assert not execute.called("thread_exists")
 
 
 # --- Execution routing --------------------------------------------------------

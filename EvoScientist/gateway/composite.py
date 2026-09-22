@@ -1,8 +1,12 @@
-"""Composite gateway: read from one backend, execute on another.
+"""Composite gateway: read from the local store, execute on the langgraph server.
 
-Stage 4 of the gateway migration (issue #432) keeps thread listing, prefix
-resolution, and history reads on the local SQLite readers while routing graph
-execution to the langgraph server. Reads and execution are already separate
+Stage 4 of the gateway migration (issue #432) keeps every catalog/history read on
+the local SQLite readers while routing graph execution to the langgraph server.
+Both backends write the same checkpoint database — the local gateway and the
+server's ``create_checkpointer_for_langgraph_api`` resolve the same
+``sessions.py:get_db_path()`` — so a thread executed on the server is fully
+readable through the local route with no server round-trip; the local reader is
+never stale relative to the server. Reads and execution are already separate
 methods on the :class:`~EvoScientist.gateway.types.GraphGateway` protocol, but a
 single gateway instance serves both, so the split lives here: a wrapper holding
 one ``read`` gateway and one ``execute`` gateway and dispatching each protocol
@@ -10,18 +14,18 @@ method to the right one.
 
 Routing table (read = local, execute = langgraph server):
 
-- Catalog: ``list_threads`` unions both stores (local authoritative, deduped by
-  ``thread_id``); ``resolve_thread`` tries local first, then the server for a
-  UUID input the local store didn't know; ``get_thread_metadata`` prefers the
-  server for a UUID (falling back to local), local for a legacy id.
-- History/state: ``get_thread_messages`` follows the execution store for UUIDs
-  (server-executed turns write server checkpoints, so the local DB would be
-  stale), falling back to local when the server has no history yet (a UUID
-  thread created before the cutover). ``get_state_values`` routes UUIDs to the
-  server with NO local fallback (local ``get_state_values`` needs a local graph
-  the server-execute caller does not supply). Legacy ids read local for both.
-- Existence: ``thread_exists`` is true if either store has it (the server is
-  consulted only for a UUID id).
+- Catalog / history / existence: ``list_threads``, ``resolve_thread``,
+  ``get_thread_metadata``, ``get_thread_messages`` and ``thread_exists`` all go to
+  the local reader only. Because both backends share the one database this still
+  returns server-executed threads, matches the flag-off behavior exactly, and
+  keeps reads working with no live server. (The server registry additionally
+  knows UUID threads that were created but never run; those hold no checkpoint
+  state, so surfacing them — as empty sessions whose short ids the local resolver
+  cannot match — would cost a per-thread ``get_state`` for no user-visible gain.)
+- Live state: ``get_state_values`` routes UUIDs to the server with NO local
+  fallback (local ``get_state_values`` needs a local graph the server-execute
+  caller does not supply); it reflects the run's live ``next`` / interrupts, which
+  only the executor holds. Legacy ids read local.
 - Execution: ``create_thread`` goes to the server (it mints the id, so there is
   no id to guard); ``stream_events`` / ``update_state_values`` / ``clone_thread``
   go to the server guarded on a UUID id; ``get_run_status`` / ``get_process_status``
@@ -106,51 +110,28 @@ class CompositeGraphGateway:
         include_preview: bool = False,
         target: GraphTarget | None = None,
     ) -> list[dict[str, Any]]:
-        local = await self._read.list_threads(
+        # Local reader only: it already sees server-executed threads (shared
+        # sessions.db). Unioning the server registry would append never-run
+        # empty sessions after the local rows without re-sorting.
+        return await self._read.list_threads(
             limit=limit,
             include_message_count=include_message_count,
             include_preview=include_preview,
             target=target,
         )
-        server = await self._execute.list_threads(
-            limit=limit,
-            include_message_count=include_message_count,
-            include_preview=include_preview,
-            target=target,
-        )
-        seen: set[Any] = set()
-        merged: list[dict[str, Any]] = []
-        for entry in (*local, *server):  # local first → local wins on dedup
-            tid = entry.get("thread_id")
-            if tid in seen:
-                continue
-            seen.add(tid)
-            merged.append(entry)
-        if limit and limit > 0:
-            merged = merged[:limit]
-        return merged
 
     async def resolve_thread(
         self,
         thread_id_or_prefix: str,
         target: GraphTarget | None = None,
     ) -> ThreadResolution:
-        local = await self._read.resolve_thread(thread_id_or_prefix, target)
-        if local.found or local.matches:
-            return local
-        if _is_uuid(thread_id_or_prefix):
-            return await self._execute.resolve_thread(thread_id_or_prefix, target)
-        return local
+        return await self._read.resolve_thread(thread_id_or_prefix, target)
 
     async def get_thread_metadata(
         self,
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> dict[str, Any] | None:
-        if _is_uuid(thread_id):
-            meta = await self._execute.get_thread_metadata(thread_id, target)
-            if meta is not None:
-                return meta
         return await self._read.get_thread_metadata(thread_id, target)
 
     async def get_thread_messages(
@@ -158,13 +139,6 @@ class CompositeGraphGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> list[Any]:
-        if not _is_uuid(thread_id):
-            return await self._read.get_thread_messages(thread_id, target)
-        messages = await self._execute.get_thread_messages(thread_id, target)
-        if messages:
-            return messages
-        # A UUID thread with no server history yet (created before the cutover):
-        # fall back to the local store rather than report it empty.
         return await self._read.get_thread_messages(thread_id, target)
 
     async def get_state_values(
@@ -183,11 +157,7 @@ class CompositeGraphGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> bool:
-        if await self._read.thread_exists(thread_id, target):
-            return True
-        if _is_uuid(thread_id):
-            return await self._execute.thread_exists(thread_id, target)
-        return False
+        return await self._read.thread_exists(thread_id, target)
 
     async def delete_thread(
         self,
