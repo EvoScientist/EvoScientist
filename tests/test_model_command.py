@@ -247,6 +247,63 @@ class TestModelCommandSwitch:
         msg = ui.append_system.call_args[0][0]
         assert "saved to config" not in msg
 
+    async def _run_switch_no_rebuild(self, graph_gateway):
+        """Run /model against a server-executing gateway; return (ui, load_agent)."""
+        from EvoScientist.commands.implementation.model import ModelCommand
+
+        cmd = ModelCommand()
+        ui = MagicMock()
+        ui.supports_interactive = True
+        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+
+        ctx = MagicMock()
+        ctx.ui = ui
+        ctx.workspace_dir = "/tmp/test"
+        ctx.checkpointer = MagicMock()
+        ctx.graph_gateway = graph_gateway
+
+        with (
+            patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg),
+            patch("EvoScientist.EvoScientist._build_chat_model"),
+            patch("EvoScientist.EvoScientist.set_active_config") as set_cfg,
+            patch("EvoScientist.EvoScientist.set_chat_model_instance"),
+            patch("EvoScientist.cli.agent._load_agent") as load_agent,
+        ):
+            await cmd.execute(ctx, ["claude-opus-4-8"])
+
+        return ui, set_cfg, load_agent
+
+    async def test_switch_on_composite_backend_skips_rebuild(self):
+        """Composite backend (executor is the server): switch config, no rebuild.
+
+        Regression for testing ``isinstance(ctx.graph_gateway, ...)`` directly:
+        the composite is not a LangGraphServerGateway, so /model rebuilt the
+        unused in-process agent. It must reach through ``execute_gateway``.
+        """
+        from EvoScientist.gateway.composite import CompositeGraphGateway
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        composite = CompositeGraphGateway(
+            read=MagicMock(),
+            execute=LangGraphServerGateway(thread_store=MagicMock()),
+        )
+        ui, set_cfg, load_agent = await self._run_switch_no_rebuild(composite)
+
+        load_agent.assert_not_called()
+        set_cfg.assert_called_once()
+        assert set_cfg.call_args[0][0].model == "claude-opus-4-8"
+        assert "next run" in ui.append_system.call_args[0][0]
+
+    async def test_switch_on_plain_server_backend_skips_rebuild(self):
+        """A uniform server gateway is its own executor: still no rebuild."""
+        from EvoScientist.gateway.server import LangGraphServerGateway
+
+        server = LangGraphServerGateway(thread_store=MagicMock())
+        ui, _set_cfg, load_agent = await self._run_switch_no_rebuild(server)
+
+        load_agent.assert_not_called()
+        assert "next run" in ui.append_system.call_args[0][0]
+
 
 class TestModelCommandFailure:
     """Verify error handling when chat-model construction raises."""

@@ -150,9 +150,16 @@ class ModelCommand(Command):
         # expensive local agent rebuild is pointless there — mutate the live
         # config (the per-run channel's source) and validate the model, but
         # skip the rebuild. Local backend keeps the rebuild path unchanged.
+        # Test the *execution* side: on the composite backend ctx.graph_gateway
+        # is a CompositeGraphGateway whose executor is the server gateway, so
+        # reach through ``execute_gateway`` (a plain server/local gateway is its
+        # own executor).
         from ...gateway.server import LangGraphServerGateway
 
-        if isinstance(ctx.graph_gateway, LangGraphServerGateway):
+        execute_gateway = getattr(
+            ctx.graph_gateway, "execute_gateway", ctx.graph_gateway
+        )
+        if isinstance(execute_gateway, LangGraphServerGateway):
             temp_cfg = copy.copy(cfg)
             temp_cfg.model = model_name
             temp_cfg.provider = provider
