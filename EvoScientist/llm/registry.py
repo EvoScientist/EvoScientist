@@ -91,6 +91,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Anthropic (current generation)
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-fable-5", "claude-fable-5", "anthropic"),
+    ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),
     ("claude-opus-5", "claude-opus-5", "anthropic"),
     ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
     ("claude-sonnet-5", "claude-sonnet-5", "anthropic"),
@@ -171,6 +172,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # OpenRouter
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
+    ("claude-opus-5.5", "anthropic/claude-opus-5.5", "openrouter"),
     ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
     ("claude-opus-5-fast", "anthropic/claude-opus-5-fast", "openrouter"),
     ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),

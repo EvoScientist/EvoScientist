@@ -63,11 +63,11 @@ _OPENROUTER_GRADER_STRATEGY: dict[str, type[ProviderStrategy] | type[ToolStrateg
 _SCHEDULER_GRADER_MAX_CALLS = 12
 
 
-# OpenRouter ids for which neither strategy yields a verdict (probed 2026-09-04):
-# the route rejects forced ``tool_choice`` (reasoning on or off) and JSON mode
-# drops required fields. Exact ids, not families: ``anthropic/claude-fable-5``
-# and the native ``claude-fable-5-1`` grade fine.
-_OPENROUTER_UNGRADABLE_IDS = ("anthropic/claude-fable-5.1",)
+# OpenRouter ids for which neither strategy yields a verdict (re-probed 2026-09-22):
+# the model rejects forced ``tool_choice`` and JSON mode rejects the grader
+# schema's ``oneOf``. Exact ids, not families: ``anthropic/claude-fable-5`` and
+# the native ``claude-fable-5-1`` / ``claude-opus-5-5`` grade fine.
+_OPENROUTER_UNGRADABLE_IDS = ("anthropic/claude-fable-5.1", "anthropic/claude-opus-5.5")
 
 
 def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
