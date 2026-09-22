@@ -2685,29 +2685,33 @@ class TestXiaomiTokenPlanRegion:
 
 
 @pytest.mark.parametrize(
-    ("provider", "validator", "env", "default"),
+    ("provider", "validator", "field", "env", "default"),
     [
         (
             "minimax",
             "validate_minimax_key",
+            "minimax_base_url",
             "MINIMAX_BASE_URL",
             "https://api.minimaxi.com/anthropic",
         ),
         (
             "xiaomi-token-plan",
             "validate_xiaomi_key",
+            "mimo_token_plan_base_url",
             "MIMO_TOKEN_PLAN_BASE_URL",
             "https://token-plan-cn.xiaomimimo.com/anthropic",
         ),
     ],
 )
-def test_key_validator_ignores_blank_base_url_env(
-    monkeypatch, provider, validator, env, default
+def test_key_validator_ignores_blank_base_url(
+    monkeypatch, provider, validator, field, env, default
 ):
+    """Whitespace in either the saved config or the env var falls back to the default."""
     from EvoScientist.config.onboard.helpers import _provider_key_info
 
     monkeypatch.setenv(env, "  ")
+    config = EvoScientistConfig(**{field: "  "})
     with patch(f"EvoScientist.config.onboard.helpers.{validator}") as mock_validate:
-        _provider_key_info(EvoScientistConfig(), provider)[2]("key")
+        _provider_key_info(config, provider)[2]("key")
 
     assert mock_validate.call_args.kwargs["base_url"] == default

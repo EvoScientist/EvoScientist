@@ -48,7 +48,7 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             config.minimax_api_key or os.environ.get("MINIMAX_API_KEY", ""),
             lambda key: validate_minimax_key(
                 key,
-                base_url=config.minimax_base_url
+                base_url=config.minimax_base_url.strip()
                 or os.environ.get("MINIMAX_BASE_URL", "").strip()
                 or "https://api.minimaxi.com/anthropic",
             ),

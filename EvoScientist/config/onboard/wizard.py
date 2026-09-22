@@ -183,7 +183,7 @@ def _configure_provider_base_url(
     elif provider == "minimax":
         if strict:
             config.minimax_base_url = (
-                config.minimax_base_url or _MINIMAX_GLOBAL_BASE_URL
+                config.minimax_base_url.strip() or _MINIMAX_GLOBAL_BASE_URL
             )
         else:
             config.minimax_base_url = _step_minimax_region(config)
