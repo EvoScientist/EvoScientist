@@ -856,8 +856,10 @@ def _get_default_middleware(
             provided, the per-run-limits SummarizationMiddleware subclass is
             appended; deepagents' name-based merge then REPLACES its frozen
             built-in in place so the replacement offloads history to this
-            same backend. When None (tests, async sub-agent factories), the
-            stock frozen-limits built-in is left untouched.
+            same backend. Every graph built on a real backend — main, CLI,
+            async sub-agents, expert container — passes it; only backend-less
+            test assemblies omit it, leaving the stock frozen-limits built-in
+            untouched.
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
         events: Frontend/session-supplied event sink. Middleware report

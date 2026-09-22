@@ -293,11 +293,6 @@ def build_async_subagent_graph(name: str) -> Any:
     _ensure_general_purpose_subagent(subagents)
     _inject_subagent_middleware(subagents)
 
-    middleware = _get_default_middleware(
-        for_async_subagent=True,
-        memory_source_agent=name,
-    )
-
     # Scheduler is an unattended timer task → use the cheaper auxiliary model.
     model = (
         _ensure_auxiliary_chat_model() if name == "scheduler" else _ensure_chat_model()
@@ -305,6 +300,17 @@ def build_async_subagent_graph(name: str) -> Any:
 
     guarded = name in _GUARDED_ASYNC_SUBAGENTS
     backend = _get_default_backend(guard_dangerous=guarded, refuse_delete=guarded)
+
+    # ``backend=`` matters: without it the per-run SummarizationMiddleware
+    # subclass is not appended and the stock frozen-window built-in survives
+    # in these graphs even though they take ``configurable.model`` overrides
+    # (#466) — the replacement must also offload history to this backend.
+    middleware = _get_default_middleware(
+        for_async_subagent=True,
+        memory_source_agent=name,
+        backend=backend,
+    )
+
     if name == "scheduler":
         middleware = [
             *middleware,

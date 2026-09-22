@@ -358,6 +358,11 @@ def build_expert_container_async_graph() -> Any:
     _ensure_general_purpose_subagent(subagents)
     _inject_subagent_middleware(subagents)
 
+    # ``backend=`` matters: without it the per-run SummarizationMiddleware
+    # subclass is not appended and the stock frozen-window built-in survives
+    # in this graph even though it takes ``configurable.model`` overrides
+    # (#466) — the replacement must also offload history to this backend.
+    backend = _get_default_backend()
     middleware = [
         # Loader runs FIRST so downstream middleware sees the composed
         # system_message. Ordering matters — put ExpertSkillLoaderMiddleware
@@ -367,6 +372,7 @@ def build_expert_container_async_graph() -> Any:
         *_get_default_middleware(
             for_async_subagent=True,
             memory_source_agent="expert-container-async",
+            backend=backend,
         ),
     ]
 
@@ -376,7 +382,7 @@ def build_expert_container_async_graph() -> Any:
         system_prompt=_FALLBACK_SYSTEM_PROMPT,
         tools=[think_tool],
         skills=["/skills/"],
-        backend=_get_default_backend(),
+        backend=backend,
         middleware=middleware,
         subagents=subagents,
         state_schema=ExpertContainerState,

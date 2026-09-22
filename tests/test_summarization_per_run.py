@@ -10,13 +10,16 @@ patterns from ``tests/test_context_editing_middleware.py`` and
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 from EvoScientist.middleware.summarization import (
     _PerRunLimitsSummarizationMiddleware,
+    _ProfileWindowShim,
     create_per_run_summarization_middleware,
 )
 
@@ -150,16 +153,104 @@ def test_sync_wrap_path_syncs_limits_too():
     assert mw._get_profile_limits() == 32_768
 
 
+async def test_interleaved_tasks_keep_isolated_windows():
+    """Two interleaved asyncio tasks never cross-read each other's window.
+
+    The core regression test for review point 1: deepagents'
+    ``awrap_model_call`` re-reads the window AFTER awaits (model call,
+    offload, summary — its overflow fallback consults the limits again
+    mid-call), so per-INSTANCE state let a second task's ``_sync_limits``
+    corrupt the first task's in-flight thresholds and clip budgets. The
+    per-task ``ContextVar`` state keeps every task on its own window.
+    """
+    mw, construction = _make_mw()
+
+    small = MagicMock()
+    small.profile = {"max_input_tokens": 32_768}
+    large = MagicMock()
+    large.profile = {"max_input_tokens": 1_000_000}
+
+    entered = asyncio.Event()  # set once task A parks in its model handler
+    release_a = asyncio.Event()
+    reads: dict[str, Any] = {}
+
+    async def handler_a(request):
+        entered.set()
+        await release_a.wait()  # "model call in flight" while task B syncs
+        # Post-await reads — exactly where deepagents' overflow fallback
+        # consults the window mid-call.
+        reads["a_limits"] = mw._get_profile_limits()
+        reads["a_shim_window"] = mw._lc_helper.model.profile["max_input_tokens"]
+        return MagicMock()
+
+    async def task_a():
+        with (
+            _patched_config({"model": "small-model"}),
+            patch("EvoScientist.llm.get_chat_model", return_value=small),
+        ):
+            await mw.awrap_model_call(_fake_model_request(construction), handler_a)
+
+    async def task_b():
+        with (
+            _patched_config({"model": "large-model"}),
+            patch("EvoScientist.llm.get_chat_model", return_value=large),
+        ):
+            await mw.awrap_model_call(
+                _fake_model_request(construction),
+                AsyncMock(return_value=MagicMock()),
+            )
+        # Still inside task B's own context.
+        reads["b_limits"] = mw._get_profile_limits()
+        reads["b_shim_window"] = mw._lc_helper.model.profile["max_input_tokens"]
+
+    a = asyncio.create_task(task_a())
+    await entered.wait()
+    shim_after_a_sync = mw._lc_helper.model
+
+    b = asyncio.create_task(task_b())
+    await b
+    shim_after_b_sync = mw._lc_helper.model
+
+    release_a.set()
+    await a
+
+    # Each task kept its own window across the interleaving.
+    assert reads["a_limits"] == 32_768
+    assert reads["a_shim_window"] == 32_768
+    assert reads["b_limits"] == 1_000_000
+    assert reads["b_shim_window"] == 1_000_000
+    # The shim was installed exactly once: identity never changed between
+    # the two syncs (nor after them).
+    assert isinstance(shim_after_a_sync, _ProfileWindowShim)
+    assert shim_after_a_sync is shim_after_b_sync
+    assert mw._lc_helper.model is shim_after_a_sync
+    # The parent task — which never synced — still sees construction limits.
+    assert mw._get_profile_limits() == CONSTRUCTION_WINDOW
+
+
 def test_shim_delegates_non_profile_attributes():
-    """The profile shim falls through to the real model for everything else
-    (langchain provider-matches reported tokens via ``_get_ls_params``)."""
+    """The profile shim reports the per-task window and delegates every other
+    attribute to the per-task target model (langchain provider-matches
+    reported tokens via ``_get_ls_params``)."""
+    import contextvars
+
     from EvoScientist.middleware.summarization import _ProfileWindowShim
 
-    target = MagicMock()
-    shim = _ProfileWindowShim(target, 32_768)
+    state: contextvars.ContextVar[tuple[Any, int] | None] = contextvars.ContextVar(
+        "test_shim_state", default=None
+    )
+    construction = MagicMock()
+    shim = _ProfileWindowShim(state, construction, 32_768)
+    # Unsynchronized task: construction window + construction delegation.
     assert shim.profile == {"max_input_tokens": 32_768}
-    assert shim._get_ls_params() is target._get_ls_params()
-    assert shim.some_future_attr is target.some_future_attr
+    assert shim._get_ls_params() is construction._get_ls_params()
+    assert shim.some_future_attr is construction.some_future_attr
+
+    run_model = MagicMock()
+    state.set((run_model, 1_000_000))
+    assert shim.profile == {"max_input_tokens": 1_000_000}
+    assert shim._get_ls_params() is run_model._get_ls_params()
+    assert shim._get_ls_params() is not construction._get_ls_params()
 
 
 def test_no_override_outside_runnable_context():
@@ -313,6 +404,116 @@ def test_deepagents_name_merge_replaces_stock_instance(
     summ = [m for m in merged if m.name == "SummarizationMiddleware"]
     assert len(summ) == 1
     assert isinstance(summ[0], _PerRunLimitsSummarizationMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# Registration in the async sub-agent factories (review point 2)
+# ---------------------------------------------------------------------------
+
+
+def _factory_cfg_mock() -> MagicMock:
+    """Config stub covering both ``_get_default_middleware`` and the factory."""
+    cfg = MagicMock()
+    cfg.recursion_limit = 1_000_000
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    return cfg
+
+
+def _assert_per_run_summarization(middleware: list, backend: Any) -> None:
+    """The middleware list handed to ``create_deep_agent`` must contain
+    exactly one name=="SummarizationMiddleware" entry — our subclass, built
+    on the same backend the agent itself uses (history offload parity)."""
+    summ = [m for m in middleware if m.name == "SummarizationMiddleware"]
+    assert len(summ) == 1, "expected exactly one summarization middleware"
+    assert isinstance(summ[0], _PerRunLimitsSummarizationMiddleware)
+    assert summ[0]._backend is backend
+
+
+@patch("deepagents.create_deep_agent")
+@patch("EvoScientist.EvoScientist._load_mcp_tools_cached", return_value={})
+@patch("EvoScientist.EvoScientist._get_default_backend")
+@patch("EvoScientist.EvoScientist._ensure_config")
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.utils.load_subagents")
+@patch("EvoScientist.config.apply_config_to_env")
+@patch("EvoScientist.config.get_effective_config")
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+def test_async_subagent_factory_installs_per_run_summarization(
+    mock_ts,
+    mock_get_cfg,
+    mock_apply_env,
+    mock_load_subs,
+    mock_chat,
+    mock_config,
+    mock_backend,
+    mock_mcp,
+    mock_create,
+):
+    """``build_async_subagent_graph`` must pass its backend so the per-run
+    subclass replaces the frozen-window built-in (scheduler / writing-agent /
+    data-analysis graphs take ``configurable.model`` overrides too — #466)."""
+    cfg = _factory_cfg_mock()
+    mock_get_cfg.return_value = cfg
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+    mock_load_subs.return_value = [
+        {"name": "writing-agent", "system_prompt": "", "tools": [], "skills": None}
+    ]
+    mock_create.return_value.with_config.return_value = MagicMock()
+
+    from EvoScientist.subagents._factory import build_async_subagent_graph
+
+    build_async_subagent_graph("writing-agent")
+
+    kwargs = mock_create.call_args.kwargs
+    _assert_per_run_summarization(kwargs["middleware"], mock_backend.return_value)
+    assert kwargs["backend"] is mock_backend.return_value
+
+
+@patch("deepagents.create_deep_agent")
+@patch("EvoScientist.EvoScientist._get_default_backend")
+@patch("EvoScientist.EvoScientist._ensure_config")
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.config.apply_config_to_env")
+@patch("EvoScientist.config.get_effective_config")
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+def test_expert_container_factory_installs_per_run_summarization(
+    mock_ts,
+    mock_get_cfg,
+    mock_apply_env,
+    mock_chat,
+    mock_config,
+    mock_backend,
+    mock_create,
+):
+    """``build_expert_container_async_graph`` must pass its backend too —
+    the expert container graph is its own deployed graph with its own frozen
+    built-in that the name merge has to replace (#466)."""
+    cfg = _factory_cfg_mock()
+    mock_get_cfg.return_value = cfg
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+    mock_create.return_value.with_config.return_value = MagicMock()
+
+    from EvoScientist.subagents.expert_container_async import (
+        build_expert_container_async_graph,
+    )
+
+    build_expert_container_async_graph()
+
+    kwargs = mock_create.call_args.kwargs
+    _assert_per_run_summarization(kwargs["middleware"], mock_backend.return_value)
+    assert kwargs["backend"] is mock_backend.return_value
 
 
 # ---------------------------------------------------------------------------
