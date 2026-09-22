@@ -476,6 +476,14 @@ def resolve_action_decision(
     return ActionVerdict(ActionDecision.PROMPT)
 
 
+# Reject-decision message used by every HITL resume-loop surface (Rich CLI,
+# TUI, channel consumer) when the round budget runs out and the parked
+# interrupt is closed with a rejecting resume (issue #469). Lives here next
+# to ``build_hitl_resume`` — the shared home of HITL resume plumbing — so the
+# surfaces import one constant instead of duplicating the string.
+HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
+
+
 def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
     """Build a HITL resume Command keyed by interrupt_id.
 

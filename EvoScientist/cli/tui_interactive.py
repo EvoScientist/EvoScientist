@@ -1823,7 +1823,7 @@ def run_textual_interactive(
                     return w
                 return None
 
-            _MAX_HITL_ROUNDS = 200  # total resume rounds per turn (runaway guard)
+            _MAX_HITL_ROUNDS = 1000  # total resume rounds per turn (runaway guard)
             # Only rounds that prompt a human count toward the budget; a
             # session "approve all" / allow-listed turn with hundreds of
             # guarded tool calls must run to completion (issue #469).
@@ -1833,10 +1833,13 @@ def run_textual_interactive(
 
             _hitl_round = 0
             _human_rounds = 0
-            while (
-                _hitl_round < _MAX_HITL_ROUNDS
-                and _human_rounds < _MAX_HUMAN_HITL_ROUNDS
-            ):
+            # Set when the round budget is spent exactly where the next
+            # pending would prompt a human: the round stops BEFORE
+            # prompting — no decision is collected and then discarded —
+            # and the pending stays parked so the post-loop drain can
+            # close its checkpoint (parity with the Rich CLI, issue #469).
+            _hitl_budget_exhausted = False
+            while _hitl_round < _MAX_HITL_ROUNDS:
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
                     break
@@ -2201,6 +2204,15 @@ def run_textual_interactive(
                         elif event_type == "ask_user":
                             questions = event.get("questions", [])
                             if questions:
+                                # Budget refusal must precede the prompt:
+                                # the 50th answer was already resumed; this
+                                # pending is the one we refuse (issue #469).
+                                if (
+                                    _human_rounds >= _MAX_HUMAN_HITL_ROUNDS
+                                    or _hitl_round >= _MAX_HITL_ROUNDS
+                                ):
+                                    _hitl_budget_exhausted = True
+                                    break
                                 _human_rounds += 1  # ask_user always prompts a human
                                 # Channel messages: use channel-based text prompt
                                 if channel_ask_user_fn is not None:
@@ -2256,6 +2268,15 @@ def run_textual_interactive(
 
                             # Channel messages: use channel-based text approval
                             if channel_hitl_fn is not None:
+                                # Refuse BEFORE asking the channel user, so
+                                # their decision cannot be collected and
+                                # then discarded (issue #469).
+                                if (
+                                    _human_rounds >= _MAX_HUMAN_HITL_ROUNDS
+                                    or _hitl_round >= _MAX_HITL_ROUNDS
+                                ):
+                                    _hitl_budget_exhausted = True
+                                    break
                                 _human_rounds += 1  # a human answers the prompt
                                 self._append_system(
                                     "Waiting for channel user approval...",
@@ -2324,6 +2345,15 @@ def run_textual_interactive(
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop with resume
 
+                            # Refuse BEFORE mounting the approval widget, so
+                            # the user's choice cannot be collected and then
+                            # discarded (issue #469).
+                            if (
+                                _human_rounds >= _MAX_HUMAN_HITL_ROUNDS
+                                or _hitl_round >= _MAX_HITL_ROUNDS
+                            ):
+                                _hitl_budget_exhausted = True
+                                break
                             # Interactive TUI: mount approval widget
                             # Disable main prompt so it can't steal focus
                             _human_rounds += 1  # a human answers the widget
@@ -2498,19 +2528,83 @@ def run_textual_interactive(
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
                     break
+                if _hitl_budget_exhausted:
+                    # A pending was refused pre-prompt; leave it parked for
+                    # the post-loop drain below.
+                    break
                 if state.pending_interrupt is None and state.pending_ask_user is None:
                     break  # normal completion or rejection — exit HITL loop
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
 
-            # Round budget exhausted with a resume still pending: say so
-            # instead of stopping mid-work with no explanation (issue #469).
+            _close_target = GraphTarget(
+                local_graph=agent, workspace_dir=self._workspace_dir
+            )
+            _close_tid = thread_id_override or self._conversation_tid
+
+            # Round budget exhausted with a resume still pending: stop
+            # visibly and close the parked checkpoint with a rejecting
+            # resume, exactly like the Rich CLI's round-limit stop — the
+            # #464 recovery preserves genuine interrupt pauses, so an
+            # abandoned interrupt would poison the next turn (issue #469).
             # The last round ended expecting a resume, so its still-running
             # tool widgets were left unmarked — mark them like a rejection.
             if not is_stream_cancel_requested(cancel_scope) and (
                 state.pending_interrupt is not None
                 or state.pending_ask_user is not None
             ):
+                if state.pending_interrupt is not None:
+                    from ..backends import (
+                        HITL_ROUND_LIMIT_REJECT_MESSAGE,
+                        build_hitl_resume,
+                    )
+
+                    _drain_input: Any = build_hitl_resume(
+                        state.pending_interrupt.get("interrupt_id"),
+                        [
+                            {
+                                "type": "reject",
+                                "message": HITL_ROUND_LIMIT_REJECT_MESSAGE,
+                            }
+                            for _ in state.pending_interrupt.get("action_requests", [])
+                        ],
+                    )
+                else:
+                    from langgraph.types import (  # type: ignore[import-untyped]
+                        Command,
+                    )
+
+                    _drain_input = Command(resume={"status": "cancelled"})
+                # Best-effort: consume the drain through the same gateway
+                # the turn itself streams with (same RunRequest shape —
+                # thread, metadata, target, active teams); a gateway
+                # failure must not break the turn's return.
+                try:
+                    _drain_teams = list(self._channel_runtime.active_teams)
+                    _drain_stream = graph_gateway.stream_events(
+                        RunRequest(
+                            message=_drain_input,
+                            thread_id=_close_tid,
+                            metadata=metadata,
+                            target=_close_target,
+                            configurable_extra=(
+                                {"active_teams": _drain_teams} if _drain_teams else None
+                            ),
+                        )
+                    )
+                    try:
+                        async for _event in _drain_stream:
+                            pass  # drain output is discarded
+                    finally:
+                        _drain_aclose = getattr(_drain_stream, "aclose", None)
+                        if _drain_aclose is not None:
+                            await _drain_aclose()
+                except Exception:
+                    _channel_logger.warning(
+                        "Failed to drain parked HITL checkpoint on thread %s",
+                        _close_tid,
+                        exc_info=True,
+                    )
                 state.pending_interrupt = None
                 state.pending_ask_user = None
                 for tw in tool_widgets.values():
@@ -2524,10 +2618,6 @@ def run_textual_interactive(
             # On stream close, enqueue any async-task + bg-process completions from
             # thread state; the notification poller drains + injects. Best-effort —
             # never blocks turn return on a read failure.
-            _close_target = GraphTarget(
-                local_graph=agent, workspace_dir=self._workspace_dir
-            )
-            _close_tid = thread_id_override or self._conversation_tid
             await enqueue_completions_from_state(
                 graph_gateway, _close_target, _close_tid
             )

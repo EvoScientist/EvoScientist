@@ -42,7 +42,10 @@ _MAX_SESSIONS = 10_000
 # toward _MAX_HUMAN_HITL_ROUNDS; auto-resolved rounds (session grant / config
 # rules) are free so an unattended turn runs to completion (issue #469).
 _MAX_HUMAN_HITL_ROUNDS = 50
-_MAX_HITL_ROUNDS = 200  # total resume rounds per turn (runaway guard)
+# Runaway guard on the TOTAL number of resume rounds per turn (human or
+# auto), matching the Rich CLI: an unattended session-grant turn with
+# hundreds of guarded tool calls must not be truncated at 200 (issue #469).
+_MAX_HITL_ROUNDS = 1000
 
 
 @dataclass
@@ -444,10 +447,11 @@ class InboundConsumer:
 
             _hitl_round = 0
             _human_rounds = 0
-            while (
-                _hitl_round < _MAX_HITL_ROUNDS
-                and _human_rounds < _MAX_HUMAN_HITL_ROUNDS
-            ):
+            # Total cap only: the human budget is checked where the next
+            # pending is about to prompt a human, so the 50th decision is
+            # always resumed and only the 51st human-needing pending is
+            # refused (parity with the Rich CLI, issue #469).
+            while _hitl_round < _MAX_HITL_ROUNDS:
                 _hitl_round += 1
                 final_content = ""
                 thinking_buffer: list[str] = []
@@ -564,6 +568,17 @@ class InboundConsumer:
                             pass
                     return  # done
 
+                # Round budget spent: refuse BEFORE prompting the human for
+                # this pending. The 50th decision was already resumed; this
+                # pending is the one the turn stops on. Leave interrupt_data
+                # parked so the post-loop drain can close its checkpoint
+                # (issue #469).
+                if (
+                    _human_rounds >= _MAX_HUMAN_HITL_ROUNDS
+                    or _hitl_round >= _MAX_HITL_ROUNDS
+                ):
+                    break
+
                 # ask_user: send questions to channel user, collect answers
                 if interrupt_data.get("type") == "ask_user":
                     _human_rounds += 1  # ask_user always prompts a human
@@ -617,8 +632,50 @@ class InboundConsumer:
                 )
                 # continue to next HITL round
 
-            # Round budget exhausted with a resume still pending: tell the
-            # user instead of silently falling out mid-work (issue #469).
+            # Round budget exhausted with a resume still pending: close the
+            # parked checkpoint with a rejecting resume — mirroring the Rich
+            # CLI's round-limit stop — so the #464 recovery cannot replay it
+            # into the next turn, and tell the user instead of silently
+            # falling out mid-work (issue #469).
+            from ..backends import (
+                HITL_ROUND_LIMIT_REJECT_MESSAGE,
+                build_hitl_resume,
+            )
+
+            if interrupt_data.get("type") == "ask_user":
+                drain_input: GraphRunInput = Command(resume={"status": "cancelled"})
+            else:
+                drain_input = build_hitl_resume(
+                    interrupt_data.get("interrupt_id"),
+                    [
+                        {"type": "reject", "message": HITL_ROUND_LIMIT_REJECT_MESSAGE}
+                        for _ in interrupt_data.get("action_requests", [])
+                    ],
+                )
+            # Best-effort: consume the drain through the same gateway /
+            # RunRequest shape the turn itself streams with (media only
+            # applies to plain-str input, and the drain is always a
+            # Command); a gateway failure must not break the turn's return.
+            try:
+                async for _event in _timeout_aiter(
+                    self.graph_gateway.stream_events(
+                        RunRequest(
+                            message=drain_input,
+                            thread_id=thread_id,
+                            media=None,
+                            target=GraphTarget(local_graph=self.agent),
+                        )
+                    ),
+                    self._inference_timeout,
+                ):
+                    pass  # drain output is discarded
+            except Exception:
+                logger.warning(
+                    "Failed to drain parked HITL checkpoint for %s in %s",
+                    msg.sender_id,
+                    session_key,
+                    exc_info=True,
+                )
             logger.warning(
                 "HITL round limit reached for %s in %s", msg.sender_id, session_key
             )

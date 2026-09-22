@@ -24,6 +24,9 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
+from ..backends import (
+    HITL_ROUND_LIMIT_REJECT_MESSAGE as _HITL_ROUND_LIMIT_REJECT_MESSAGE,
+)
 from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
@@ -1158,8 +1161,6 @@ _MAX_HUMAN_HITL_ROUNDS = 50
 # auto) so a pathological stream cannot loop forever.
 _MAX_HITL_TOTAL_ROUNDS = 1000
 _session_auto_approve = False
-
-_HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
 
 
 @dataclass(frozen=True)
