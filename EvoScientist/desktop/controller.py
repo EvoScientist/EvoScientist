@@ -59,6 +59,17 @@ class DesktopController:
             self._window.show_error("unexpected", str(exc), None)
             return False
 
+    def switch_workspace(self) -> None:
+        """Switch the active workspace (stub).
+
+        Wired to the native "Workspace > Switch Workspace…" menu action so the
+        desktop surface and the trigger seam exist now. The real behavior
+        depends on the backend workspace contract (issue #488) and is not
+        implemented yet: this is the single choke point the switch logic will
+        land in, so the WebUI can later drive the same path.
+        """
+        logger.info("switch_workspace requested (not implemented yet)")
+
     def shutdown(self) -> None:
         """Tear down the services the launcher started (idempotent)."""
         self._launcher.stop()

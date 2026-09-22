@@ -210,7 +210,7 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         js_api=setup_api,
     )
     win = _WebviewWindow(window)
-    state: dict = {"launcher": None}
+    state: dict = {"launcher": None, "controller": None}
 
     def _shutdown() -> None:
         cancelled.set()
@@ -249,6 +249,18 @@ def run_desktop(workspace_dir: str | None = None) -> None:
             logger.warning("close-confirm check failed: %s", exc)
             return True
 
+    def _switch_workspace() -> None:
+        """Native "Workspace > Switch Workspace…" menu action. Delegates to the
+        controller, which owns the (still-stubbed) switch logic. The menu is
+        built before the boot thread creates the controller, so ignore clicks
+        that arrive before services are up.
+        """
+        controller = state["controller"]
+        if controller is None:
+            logger.info("switch_workspace requested before services ready; ignoring")
+            return
+        controller.switch_workspace()
+
     # ``closing`` gates the close (confirm on active tasks); ``closed`` does the
     # actual idempotent teardown once the close is allowed to proceed.
     window.events.closing += _on_closing
@@ -281,9 +293,16 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         )
         launcher = WebUILauncher(config, cfg, runner)
         state["launcher"] = launcher
-        return DesktopController(launcher, win).boot()
+        controller = DesktopController(launcher, win)
+        state["controller"] = controller
+        return controller.boot()
 
+    from webview.menu import Menu, MenuAction
+
+    app_menu = [
+        Menu("Workspace", [MenuAction("Switch Workspace…", _switch_workspace)]),
+    ]
     try:
-        webview.start(boot)
+        webview.start(boot, menu=app_menu)
     finally:
         _shutdown()

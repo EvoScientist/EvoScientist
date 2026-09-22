@@ -8,6 +8,7 @@ here.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,6 +108,15 @@ def test_shutdown_stops_launcher():
     launcher = _FakeLauncher()
     DesktopController(launcher, win).shutdown()
     assert launcher.stopped
+
+
+def test_switch_workspace_stub_does_not_raise(caplog):
+    win = _FakeWindow()
+    launcher = _FakeLauncher()
+    with caplog.at_level(logging.INFO, logger="EvoScientist.desktop"):
+        DesktopController(launcher, win).switch_workspace()
+    assert not launcher.stopped
+    assert any("switch_workspace" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- #
