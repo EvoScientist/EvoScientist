@@ -668,10 +668,15 @@ class ApprovalOutcome:
     pending action and refeeds the text as a new agent turn (a channel user
     who ignores the prompt and types a fresh instruction must not lose it);
     the CLI bridge sends :data:`UNRECOGNIZED_FEEDBACK` and declines.
+
+    ``prompted`` is False only when the policy auto-resolved the interrupt
+    without asking a human. The consumer's HITL loop counts only prompted
+    rounds against its round budget (issue #469).
     """
 
     decisions: list[dict] | None = None
     unrecognized_reply: str | None = None
+    prompted: bool = False
 
 
 async def resolve_approval(
@@ -704,32 +709,38 @@ async def resolve_approval(
     prompt = format_approval_prompt(action_requests, with_buttons=has_buttons)
     metadata = approval_prompt_metadata(io.base_metadata, with_buttons=has_buttons)
     if not await io.send(prompt, metadata=metadata):
-        return ApprovalOutcome()
+        return ApprovalOutcome(prompted=True)
 
     reply = await io.wait_reply(timeout=timeout)
     if reply is None:
         await io.send(APPROVAL_TIMEOUT_FEEDBACK)
-        return ApprovalOutcome()
+        return ApprovalOutcome(prompted=True)
 
     if is_stop_command(reply):
-        return ApprovalOutcome()
+        return ApprovalOutcome(prompted=True)
 
     decision = parse_approval_reply(reply)
     if decision == "auto":
         policy.grant_session(session_key)
         await io.send(APPROVED_AUTO_FEEDBACK)
         return ApprovalOutcome(
-            decisions=decisions_after_human_approval(action_requests, policy_rejections)
+            decisions=decisions_after_human_approval(
+                action_requests, policy_rejections
+            ),
+            prompted=True,
         )
     if decision == "approve":
         await io.send(APPROVED_FEEDBACK)
         return ApprovalOutcome(
-            decisions=decisions_after_human_approval(action_requests, policy_rejections)
+            decisions=decisions_after_human_approval(
+                action_requests, policy_rejections
+            ),
+            prompted=True,
         )
     if decision == "reject":
         await io.send(REJECTED_FEEDBACK)
-        return ApprovalOutcome()
+        return ApprovalOutcome(prompted=True)
 
     # Unrecognized — decline and report the raw text; the driver chooses
     # the feedback / refeed policy.
-    return ApprovalOutcome(unrecognized_reply=reply)
+    return ApprovalOutcome(unrecognized_reply=reply, prompted=True)

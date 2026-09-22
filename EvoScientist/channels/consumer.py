@@ -38,7 +38,11 @@ T = TypeVar("T")
 
 _MAX_CHAT_LOCKS = 10_000
 _MAX_SESSIONS = 10_000
-_MAX_HITL_ROUNDS = 50
+# HITL resume-round budgets per turn: only rounds that prompt a human count
+# toward _MAX_HUMAN_HITL_ROUNDS; auto-resolved rounds (session grant / config
+# rules) are free so an unattended turn runs to completion (issue #469).
+_MAX_HUMAN_HITL_ROUNDS = 50
+_MAX_HITL_ROUNDS = 200  # total resume rounds per turn (runaway guard)
 
 
 @dataclass
@@ -438,7 +442,13 @@ class InboundConsumer:
 
             _last_sent_thinking: str | None = None
 
-            for _hitl_round in range(_MAX_HITL_ROUNDS):
+            _hitl_round = 0
+            _human_rounds = 0
+            while (
+                _hitl_round < _MAX_HITL_ROUNDS
+                and _human_rounds < _MAX_HUMAN_HITL_ROUNDS
+            ):
+                _hitl_round += 1
                 final_content = ""
                 thinking_buffer: list[str] = []
                 todo_sent = False
@@ -556,6 +566,7 @@ class InboundConsumer:
 
                 # ask_user: send questions to channel user, collect answers
                 if interrupt_data.get("type") == "ask_user":
+                    _human_rounds += 1  # ask_user always prompts a human
                     result = await self._resolve_ask_user(
                         msg,
                         interrupt_data,
@@ -578,6 +589,8 @@ class InboundConsumer:
                     session_key,
                     timeout=HITL_APPROVAL_TIMEOUT,
                 )
+                if outcome.prompted:
+                    _human_rounds += 1
                 if outcome.unrecognized_reply is not None:
                     # Serve-mode policy: an unrecognized reply rejects the
                     # pending action, confirms with reject feedback, and is
@@ -603,6 +616,15 @@ class InboundConsumer:
                     interrupt_data.get("interrupt_id"), outcome.decisions
                 )
                 # continue to next HITL round
+
+            # Round budget exhausted with a resume still pending: tell the
+            # user instead of silently falling out mid-work (issue #469).
+            logger.warning(
+                "HITL round limit reached for %s in %s", msg.sender_id, session_key
+            )
+            await _ConsumerIO(self, msg, session_key).send(
+                "Approval round limit reached; stopping this turn."
+            )
 
         except TimeoutError:
             self._metrics.total_timeouts += 1

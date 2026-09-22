@@ -14,6 +14,7 @@ import re
 import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
@@ -1147,8 +1148,31 @@ def display_final_results(
 # ---------------------------------------------------------------------------
 
 _logger = logging.getLogger(__name__)
-_MAX_HITL_ITERATIONS = 50
+# Round budget for the HITL resume loop, counting ONLY rounds that prompted
+# a human (approval prompt or ask_user). Auto-resolved rounds (session
+# "approve all" grant, config allow-list / auto_approve rules) are free: an
+# unattended turn with hundreds of guarded tool calls must run to completion
+# instead of halting mid-work with no explanation (issue #469).
+_MAX_HUMAN_HITL_ROUNDS = 50
+# Runaway guard on the total number of resume rounds per turn (human or
+# auto) so a pathological stream cannot loop forever.
+_MAX_HITL_TOTAL_ROUNDS = 1000
 _session_auto_approve = False
+
+_HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
+
+
+@dataclass(frozen=True)
+class _HitlResolution:
+    """Result of :func:`_resolve_hitl_approval`.
+
+    ``decisions`` is the resume payload (``None`` when rejected).
+    ``human_prompted`` says whether a human was asked this round — the HITL
+    resume loop counts only those rounds against its budget (issue #469).
+    """
+
+    decisions: list[dict] | None
+    human_prompted: bool
 
 
 def _resolve_hitl_approval(
@@ -1156,11 +1180,12 @@ def _resolve_hitl_approval(
     prompt_fn: Callable[[list], list[dict] | None] | None = None,
     *,
     question_runner: _QuestionRunner | None = None,
-) -> list[dict] | None:
+) -> _HitlResolution:
     """Resolve HITL approval for an interrupt.
 
-    Returns list of decisions if approved, None if rejected.
-    Auto-approves based on config and session state.
+    Returns a :class:`_HitlResolution` carrying the decisions (``None`` if
+    rejected) and whether a human was prompted. Auto-approves based on
+    config and session state.
 
     Args:
         interrupt_data: The interrupt event data.
@@ -1177,12 +1202,14 @@ def _resolve_hitl_approval(
 
     action_requests = interrupt_data.get("action_requests", [])
     if not action_requests:
-        return [{"type": "approve"}]
+        return _HitlResolution([{"type": "approve"}], human_prompted=False)
 
     # Session "approve all" is an explicit human opt-in → blanket-approve
     # everything (dangerous set included), unlike unattended auto_approve below.
     if _session_auto_approve:
-        return [{"type": "approve"} for _ in action_requests]
+        return _HitlResolution(
+            [{"type": "approve"} for _ in action_requests], human_prompted=False
+        )
 
     # Config-rule fast path (shared with the TUI). Returns full decisions when
     # config clears every request, or None when a human decision is needed;
@@ -1190,7 +1217,7 @@ def _resolve_hitl_approval(
     # REJECT in a mixed batch.
     decisions, rejections = config_policy_snapshot(action_requests)
     if decisions is not None:
-        return decisions
+        return _HitlResolution(decisions, human_prompted=False)
 
     human = (
         prompt_fn(action_requests)
@@ -1198,8 +1225,11 @@ def _resolve_hitl_approval(
         else _prompt_hitl_approval(action_requests, question_runner=question_runner)
     )
     if human is None or any(d.get("type") != "approve" for d in human):
-        return human
-    return decisions_after_human_approval(action_requests, rejections)
+        return _HitlResolution(human, human_prompted=True)
+    return _HitlResolution(
+        decisions_after_human_approval(action_requests, rejections),
+        human_prompted=True,
+    )
 
 
 def _prompt_hitl_approval(
@@ -1414,7 +1444,6 @@ def _run_streaming(
     gateway: GraphGateway,
     runtime: AsyncRuntime | None = None,
     _state: StreamState | None = None,
-    _hitl_depth: int = 0,
     _media_sent: set[str] | None = None,
     _sent_thinking_text: str | None = None,
 ) -> str:
@@ -1465,7 +1494,6 @@ def _run_streaming(
                 gateway=gateway,
                 runtime=owned_runtime,
                 _state=_state,
-                _hitl_depth=_hitl_depth,
                 _media_sent=_media_sent,
                 _sent_thinking_text=_sent_thinking_text,
             )
@@ -1477,7 +1505,6 @@ def _run_streaming(
         clear_stream_cancel()
 
     state = _state if _state is not None else StreamState()
-    _todo_sent = False
     if _media_sent is None:
         _media_sent = set()
     _MIN_THINKING_LEN = 200
@@ -1599,219 +1626,271 @@ def _run_streaming(
             if aclose is not None:
                 await aclose()
 
-    try:
-        if is_stream_cancel_requested(cancel_scope):
-            return _stopped_response()
+    async def _drain_parked_resume(drain_input: GraphRunInput) -> None:
+        """Consume one resume without rendering.
 
-        with Live(
-            console=console,
-            auto_refresh=False,
-            transient=False,
-            vertical_overflow="visible",
-        ) as live:
-            live.update(
-                create_streaming_display(
-                    is_waiting=True,
-                    status_footer=(
-                        status_footer_builder() if status_footer_builder else None
-                    ),
-                )
+        Used to close a parked interrupt/ask_user checkpoint when the HITL
+        round budget runs out: the #464 recovery deliberately preserves
+        genuine interrupt pauses, so an abandoned interrupt would otherwise
+        poison the next turn (issue #469).
+        """
+        event_stream = gateway.stream_events(
+            RunRequest(
+                message=drain_input,
+                thread_id=thread_id,
+                metadata=metadata,
+                configurable_extra=configurable_extra,
+                target=_graph_target_for_local_agent(agent, metadata),
             )
+        )
+        try:
+            async for _event in event_stream:
+                pass
+        finally:
+            aclose = getattr(event_stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
-            async def _run_with_refresh() -> None:
-                async def _periodic_refresh() -> None:
-                    try:
-                        while True:
-                            await asyncio.sleep(0.05)
-                            live.refresh()
-                    except asyncio.CancelledError:
-                        pass
+    def _stop_on_hitl_round_limit(human_rounds: int) -> str:
+        """Stop an exhausted HITL resume loop visibly (issue #469).
 
-                refresh_task = asyncio.ensure_future(_periodic_refresh())
+        Prints a notice in addition to the WARNING log, closes the parked
+        interrupt (or ask_user) with a rejecting resume so the checkpoint
+        is not left pending, and returns the partial response gathered so
+        far.
+        """
+        limit = (
+            _MAX_HUMAN_HITL_ROUNDS
+            if human_rounds >= _MAX_HUMAN_HITL_ROUNDS
+            else _MAX_HITL_TOTAL_ROUNDS
+        )
+        console.print(
+            "[yellow]Approval round limit reached; stopping this turn.[/yellow]"
+        )
+        _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
+        if state.pending_interrupt is not None:
+            from ..backends import build_hitl_resume
+
+            drain_input = build_hitl_resume(
+                state.pending_interrupt.get("interrupt_id"),
+                [
+                    {"type": "reject", "message": _HITL_ROUND_LIMIT_REJECT_MESSAGE}
+                    for _ in state.pending_interrupt.get("action_requests", [])
+                ],
+            )
+            state.pending_interrupt = None
+        else:
+            from langgraph.types import Command  # type: ignore[import-untyped]
+
+            drain_input = Command(resume={"status": "cancelled"})
+            state.pending_ask_user = None
+
+        async def _run_drain() -> None:
+            with bind_stream_cancel(cancel_scope):
+                await _drain_parked_resume(drain_input)
+
+        try:
+            runtime.run_sync(_run_drain)
+        except concurrent.futures.CancelledError:
+            if not is_stream_cancel_requested(cancel_scope):
+                raise
+            _stopped_response()
+        return (state.response_text or "").strip()
+
+    try:
+        # Iterative HITL resume loop (converted from recursion so a long
+        # unattended turn cannot exhaust the frame stack). Only rounds that
+        # prompted a human count toward _MAX_HUMAN_HITL_ROUNDS; auto-resolved
+        # rounds are free (issue #469).
+        human_rounds = 0
+        total_rounds = 0
+
+        stream_handle: RuntimeHandle[None] | None = None
+
+        def _register(handle: RuntimeHandle[None]) -> None:
+            nonlocal stream_handle
+            stream_handle = handle
+            _register_stream_cancel_handle(cancel_scope, handle)
+
+        async def _run_with_refresh() -> None:
+            async def _periodic_refresh() -> None:
                 try:
-                    with bind_stream_cancel(cancel_scope):
-                        await _consume()
-                finally:
-                    refresh_task.cancel()
-                    try:
-                        await refresh_task
-                    except asyncio.CancelledError:
-                        pass
-                    # Render clean final frame before Live exits (no spinners, expanded tools)
-                    if (
-                        state.pending_interrupt is not None
-                        or state.pending_ask_user is not None
-                    ):
-                        # Interrupted: render current state (not final) so it
-                        # looks continuous when prompt appears.
-                        final_display = create_streaming_display(
-                            **state.get_display_args(),
-                            show_thinking=show_thinking,
-                            response_markdown=state.get_response_markdown(),
-                            status_footer=resolve_final_status_footer(
-                                interactive, status_footer_builder
-                            ),
-                        )
-                    elif interactive:
-                        final_display = create_streaming_display(
-                            **state.get_display_args(),
-                            show_thinking=show_thinking,
-                            is_final=True,
-                            final_show_thinking=False,
-                            response_markdown=state.get_response_markdown(),
-                            status_footer=resolve_final_status_footer(
-                                interactive, status_footer_builder
-                            ),
-                        )
-                    else:
-                        final_display = create_streaming_display(
-                            **state.get_display_args(),
-                            show_thinking=show_thinking,
-                            is_final=True,
-                            final_show_thinking=True,
-                            final_thinking_max_length=DisplayLimits.THINKING_FINAL,
-                            response_markdown=state.get_response_markdown(),
-                            status_footer=resolve_final_status_footer(
-                                interactive, status_footer_builder
-                            ),
-                        )
-                    _update_final_live_frame(live, final_display, stream_handle)
+                    while True:
+                        await asyncio.sleep(0.05)
+                        live.refresh()
+                except asyncio.CancelledError:
+                    pass
 
-            stream_handle: RuntimeHandle[None] | None = None
-
-            def _register(handle: RuntimeHandle[None]) -> None:
-                nonlocal stream_handle
-                stream_handle = handle
-                _register_stream_cancel_handle(cancel_scope, handle)
-
+            refresh_task = asyncio.ensure_future(_periodic_refresh())
             try:
-                runtime.run_sync(_run_with_refresh, on_submitted=_register)
-            except concurrent.futures.CancelledError:
-                if not is_stream_cancel_requested(cancel_scope):
-                    raise
-                _stopped_response()
+                with bind_stream_cancel(cancel_scope):
+                    await _consume()
             finally:
-                if stream_handle is not None:
-                    _unregister_stream_cancel_handle(cancel_scope, stream_handle)
+                refresh_task.cancel()
+                try:
+                    await refresh_task
+                except asyncio.CancelledError:
+                    pass
+                # Render clean final frame before Live exits (no spinners, expanded tools)
+                if (
+                    state.pending_interrupt is not None
+                    or state.pending_ask_user is not None
+                ):
+                    # Interrupted: render current state (not final) so it
+                    # looks continuous when prompt appears.
+                    final_display = create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
+                    )
+                elif interactive:
+                    final_display = create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        is_final=True,
+                        final_show_thinking=False,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
+                    )
+                else:
+                    final_display = create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        is_final=True,
+                        final_show_thinking=True,
+                        final_thinking_max_length=DisplayLimits.THINKING_FINAL,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
+                    )
+                _update_final_live_frame(live, final_display, stream_handle)
 
-        # Flush any remaining thinking that wasn't sent during streaming.
-        if on_thinking and state.thinking_text:
-            current = state.thinking_text.rstrip()
-            if len(current) >= _MIN_THINKING_LEN and current != _sent_thinking_text:
-                on_thinking(current)
-                _sent_thinking_text = current
-
-        # ask_user: check before HITL (ask_user uses the same resume loop)
-        if state.pending_ask_user is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
+        while True:
+            total_rounds += 1
+            _todo_sent = False
             if is_stream_cancel_requested(cancel_scope):
                 return _stopped_response()
-            if ask_user_prompt_fn is not None:
-                result = ask_user_prompt_fn(state.pending_ask_user)
-            else:
+
+            with Live(
+                console=console,
+                auto_refresh=False,
+                transient=False,
+                vertical_overflow="visible",
+            ) as live:
+                live.update(
+                    create_streaming_display(
+                        is_waiting=True,
+                        status_footer=(
+                            status_footer_builder() if status_footer_builder else None
+                        ),
+                    )
+                )
+
+                stream_handle = None
                 try:
-                    result = _resolve_ask_user_prompt(
-                        state.pending_ask_user,
-                        question_runner=lambda question: _run_owned_questionary_prompt(
-                            question,
-                            runtime=runtime,
-                            cancel_scope=cancel_scope,
+                    runtime.run_sync(_run_with_refresh, on_submitted=_register)
+                except concurrent.futures.CancelledError:
+                    if not is_stream_cancel_requested(cancel_scope):
+                        raise
+                    _stopped_response()
+                finally:
+                    if stream_handle is not None:
+                        _unregister_stream_cancel_handle(cancel_scope, stream_handle)
+
+            # Flush any remaining thinking that wasn't sent during streaming.
+            if on_thinking and state.thinking_text:
+                current = state.thinking_text.rstrip()
+                if len(current) >= _MIN_THINKING_LEN and current != _sent_thinking_text:
+                    on_thinking(current)
+                    _sent_thinking_text = current
+
+            # Round budget spent with a resume still pending: stop visibly and
+            # close the parked interrupt instead of halting mid-work with no
+            # explanation (issue #469).
+            if (
+                state.pending_ask_user is not None
+                or state.pending_interrupt is not None
+            ) and (
+                human_rounds >= _MAX_HUMAN_HITL_ROUNDS
+                or total_rounds >= _MAX_HITL_TOTAL_ROUNDS
+            ):
+                return _stop_on_hitl_round_limit(human_rounds)
+
+            # ask_user: check before HITL (ask_user uses the same resume loop)
+            if state.pending_ask_user is not None:
+                human_rounds += 1  # ask_user always prompts a human
+                if is_stream_cancel_requested(cancel_scope):
+                    return _stopped_response()
+                if ask_user_prompt_fn is not None:
+                    result = ask_user_prompt_fn(state.pending_ask_user)
+                else:
+                    try:
+                        result = _resolve_ask_user_prompt(
+                            state.pending_ask_user,
+                            question_runner=lambda question: (
+                                _run_owned_questionary_prompt(
+                                    question,
+                                    runtime=runtime,
+                                    cancel_scope=cancel_scope,
+                                )
+                            ),
+                        )
+                    except _StreamPromptCancelled:
+                        return _stopped_response()
+                from langgraph.types import Command  # type: ignore[import-untyped]
+
+                state.pending_ask_user = None
+                state.thinking_text = ""  # reset accumulation for fresh round
+                if is_stream_cancel_requested(cancel_scope):
+                    return _stopped_response()
+                message = Command(resume=result)
+                continue
+
+            # HITL: check for pending interrupt and handle approval
+            if state.pending_interrupt is not None:
+                if is_stream_cancel_requested(cancel_scope):
+                    return _stopped_response()
+                try:
+                    resolution = _resolve_hitl_approval(
+                        state.pending_interrupt,
+                        prompt_fn=hitl_prompt_fn,
+                        question_runner=(
+                            None
+                            if hitl_prompt_fn is not None
+                            else lambda question: _run_owned_questionary_prompt(
+                                question,
+                                runtime=runtime,
+                                cancel_scope=cancel_scope,
+                            )
                         ),
                     )
                 except _StreamPromptCancelled:
                     return _stopped_response()
-            from langgraph.types import Command  # type: ignore[import-untyped]
-
-            state.pending_ask_user = None
-            state.thinking_text = ""  # reset accumulation for fresh round
-            if is_stream_cancel_requested(cancel_scope):
-                return _stopped_response()
-            return _run_streaming(
-                agent=agent,
-                message=Command(resume=result),
-                thread_id=thread_id,
-                show_thinking=show_thinking,
-                interactive=interactive,
-                on_thinking=on_thinking,
-                on_todo=on_todo,
-                on_file_write=on_file_write,
-                on_stream_event=on_stream_event,
-                status_footer_builder=status_footer_builder,
-                metadata=metadata,
-                configurable_extra=configurable_extra,
-                hitl_prompt_fn=hitl_prompt_fn,
-                ask_user_prompt_fn=ask_user_prompt_fn,
-                cancel_scope=cancel_scope,
-                gateway=gateway,
-                runtime=runtime,
-                _state=state,
-                _hitl_depth=_hitl_depth + 1,
-                _media_sent=_media_sent,
-                _sent_thinking_text=_sent_thinking_text,
-            )
-
-        # HITL: check for pending interrupt and handle approval
-        if state.pending_interrupt is not None and _hitl_depth < _MAX_HITL_ITERATIONS:
-            if is_stream_cancel_requested(cancel_scope):
-                return _stopped_response()
-            try:
-                decisions = _resolve_hitl_approval(
-                    state.pending_interrupt,
-                    prompt_fn=hitl_prompt_fn,
-                    question_runner=(
-                        None
-                        if hitl_prompt_fn is not None
-                        else lambda question: _run_owned_questionary_prompt(
-                            question,
-                            runtime=runtime,
-                            cancel_scope=cancel_scope,
-                        )
-                    ),
-                )
-            except _StreamPromptCancelled:
-                return _stopped_response()
-            if is_stream_cancel_requested(cancel_scope):
-                return _stopped_response()
-            if decisions is not None:
-                from ..backends import build_hitl_resume
-
-                interrupt_id = state.pending_interrupt.get("interrupt_id")
-                state.pending_interrupt = None
-                state.thinking_text = ""  # reset accumulation for fresh round
+                if resolution.human_prompted:
+                    human_rounds += 1
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
-                return _run_streaming(
-                    agent=agent,
-                    message=build_hitl_resume(interrupt_id, decisions),
-                    thread_id=thread_id,
-                    show_thinking=show_thinking,
-                    interactive=interactive,
-                    on_thinking=on_thinking,
-                    on_todo=on_todo,
-                    on_file_write=on_file_write,
-                    on_stream_event=on_stream_event,
-                    status_footer_builder=status_footer_builder,
-                    metadata=metadata,
-                    configurable_extra=configurable_extra,
-                    hitl_prompt_fn=hitl_prompt_fn,
-                    ask_user_prompt_fn=ask_user_prompt_fn,
-                    cancel_scope=cancel_scope,
-                    gateway=gateway,
-                    runtime=runtime,
-                    _state=state,
-                    _hitl_depth=_hitl_depth + 1,
-                    _media_sent=_media_sent,
-                    _sent_thinking_text=_sent_thinking_text,
-                )
-        elif state.pending_interrupt is not None:
-            _logger.warning(
-                "HITL loop reached max iterations (%d), stopping",
-                _MAX_HITL_ITERATIONS,
-            )
+                if resolution.decisions is not None:
+                    from ..backends import build_hitl_resume
 
-        # Everything (tools, thinking, todos, response) is already on screen
-        # from Live's final frame (transient=False). No need to re-print.
+                    interrupt_id = state.pending_interrupt.get("interrupt_id")
+                    state.pending_interrupt = None
+                    state.thinking_text = ""  # reset accumulation for fresh round
+                    if is_stream_cancel_requested(cancel_scope):
+                        return _stopped_response()
+                    message = build_hitl_resume(interrupt_id, resolution.decisions)
+                    continue
 
-        return (state.response_text or "").strip()
+            # Everything (tools, thinking, todos, response) is already on screen
+            # from Live's final frame (transient=False). No need to re-print.
+
+            return (state.response_text or "").strip()
     finally:
         discard_stream_cancel(cancel_scope)
 

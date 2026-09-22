@@ -1823,11 +1823,20 @@ def run_textual_interactive(
                     return w
                 return None
 
-            _MAX_HITL_ROUNDS = 50
+            _MAX_HITL_ROUNDS = 200  # total resume rounds per turn (runaway guard)
+            # Only rounds that prompt a human count toward the budget; a
+            # session "approve all" / allow-listed turn with hundreds of
+            # guarded tool calls must run to completion (issue #469).
+            _MAX_HUMAN_HITL_ROUNDS = 50
             _stream_input: Any = user_text  # str or Command for HITL resume
             graph_gateway = self._graph_gateway()
 
-            for _hitl_round in range(_MAX_HITL_ROUNDS):
+            _hitl_round = 0
+            _human_rounds = 0
+            while (
+                _hitl_round < _MAX_HITL_ROUNDS
+                and _human_rounds < _MAX_HUMAN_HITL_ROUNDS
+            ):
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
                     break
@@ -1838,6 +1847,7 @@ def run_textual_interactive(
                 if _hitl_round > 0:
                     thinking_w = None
                     summarization_w = None
+                _hitl_round += 1
                 try:
                     _anchor_engaged = False
                     _active_teams = list(self._channel_runtime.active_teams)
@@ -2191,6 +2201,7 @@ def run_textual_interactive(
                         elif event_type == "ask_user":
                             questions = event.get("questions", [])
                             if questions:
+                                _human_rounds += 1  # ask_user always prompts a human
                                 # Channel messages: use channel-based text prompt
                                 if channel_ask_user_fn is not None:
                                     self._append_system(
@@ -2245,6 +2256,7 @@ def run_textual_interactive(
 
                             # Channel messages: use channel-based text approval
                             if channel_hitl_fn is not None:
+                                _human_rounds += 1  # a human answers the prompt
                                 self._append_system(
                                     "Waiting for channel user approval...",
                                     style="dim italic",
@@ -2314,6 +2326,7 @@ def run_textual_interactive(
 
                             # Interactive TUI: mount approval widget
                             # Disable main prompt so it can't steal focus
+                            _human_rounds += 1  # a human answers the widget
                             _prompt = self.query_one("#prompt", ChatTextArea)
                             _prompt.disabled = True
                             from .widgets.approval_widget import ApprovalWidget
@@ -2489,6 +2502,24 @@ def run_textual_interactive(
                     break  # normal completion or rejection — exit HITL loop
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
+
+            # Round budget exhausted with a resume still pending: say so
+            # instead of stopping mid-work with no explanation (issue #469).
+            # The last round ended expecting a resume, so its still-running
+            # tool widgets were left unmarked — mark them like a rejection.
+            if not is_stream_cancel_requested(cancel_scope) and (
+                state.pending_interrupt is not None
+                or state.pending_ask_user is not None
+            ):
+                state.pending_interrupt = None
+                state.pending_ask_user = None
+                for tw in tool_widgets.values():
+                    if tw._status == "running":
+                        tw.set_rejected()
+                self._append_system(
+                    "Approval round limit reached; stopping this turn.",
+                    style="yellow",
+                )
 
             # On stream close, enqueue any async-task + bg-process completions from
             # thread state; the notification poller drains + injects. Best-effort —
