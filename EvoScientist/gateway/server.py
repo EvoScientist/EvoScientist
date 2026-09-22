@@ -609,12 +609,7 @@ class LangGraphServerGateway:
             hitl_suppressed=hitl_suppressed_for_run(cfg),
         )
 
-    async def _start_or_resume(
-        self,
-        stream: AsyncThreadStream,
-        request: RunRequest,
-    ) -> None:
-        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
+    async def _ensure_thread(self, request: RunRequest) -> None:
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
@@ -623,6 +618,14 @@ class LangGraphServerGateway:
                 request.target.workspace_dir if request.target is not None else None
             ),
         )
+
+    async def _start_or_resume(
+        self,
+        stream: AsyncThreadStream,
+        request: RunRequest,
+    ) -> None:
+        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
+        await self._ensure_thread(request)
         # Refresh metadata on every run: ensure_thread_exists is a no-op on
         # existing threads (if_exists="do_nothing"), so without this update
         # fields like updated_at and model would go stale after the first run.
@@ -954,6 +957,14 @@ class LangGraphServerGateway:
         existing_summarization_event: Mapping[str, object] | None = None
         process_value_messages = True
         try:
+            # Register the thread before the pre-run state read: a thread
+            # whose checkpoints exist (shared checkpointer) but which is
+            # missing from the server registry would fail the read with
+            # NotFoundError, leaving the suppression baselines empty and
+            # replaying prior turns on the next values snapshot (#490).
+            # The extra no-op create round-trip for already-registered
+            # threads is accepted for correctness.
+            await self._ensure_thread(request)
             state_values = await self._get_state_values(request.thread_id)
             existing_summarization_event = _find_summarization_event_payload(
                 state_values
