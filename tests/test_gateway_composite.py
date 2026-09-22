@@ -343,17 +343,44 @@ def test_gateways_for_config_defaults_to_local_when_field_absent():
     assert isinstance(gws.graph_gateway, LocalGraphGateway)
 
 
-def test_gateways_for_config_server_backend_builds_composite(monkeypatch):
+def _stub_dev_server_up(monkeypatch, *, available: bool = True) -> None:
+    """Stub the dev-server URL and its availability flag for factory tests.
+
+    The factory only builds the composite when ``is_async_subagents_available()``
+    is True (the dev server actually came up); otherwise it falls back to local.
+    """
+    import EvoScientist.langgraph_dev.manager as manager
     import EvoScientist.langgraph_dev.sdk as sdk
 
     monkeypatch.setattr(
         sdk, "configured_langgraph_dev_url", lambda: "http://localhost:2024"
     )
+    monkeypatch.setattr(manager, "_ASYNC_SUBAGENTS_AVAILABLE", available)
+
+
+def test_gateways_for_config_server_backend_builds_composite(monkeypatch):
+    _stub_dev_server_up(monkeypatch)
     gws = create_runtime_gateways_for_config(
         SimpleNamespace(gateway_backend="langgraph_server")
     )
     assert isinstance(gws.graph_gateway, CompositeGraphGateway)
     assert isinstance(gws.thread_store, LocalThreadStore)
+
+
+def test_gateways_for_config_server_backend_falls_back_when_dev_unavailable(
+    monkeypatch,
+):
+    """Server backend + no live dev server -> in-process gateway, not a dead URL.
+
+    ``ensure_langgraph_dev`` soft-fails (leaves the availability flag False) when
+    the port is held or the subprocess dies; the factory must degrade to local
+    rather than build the composite against an unreachable server.
+    """
+    _stub_dev_server_up(monkeypatch, available=False)
+    gws = create_runtime_gateways_for_config(
+        SimpleNamespace(gateway_backend="langgraph_server")
+    )
+    assert isinstance(gws.graph_gateway, LocalGraphGateway)
 
 
 def test_gateways_for_config_explicit_backend_overrides_global(monkeypatch):
@@ -363,11 +390,7 @@ def test_gateways_for_config_explicit_backend_overrides_global(monkeypatch):
     a per-surface override), so the factory must build the composite from the
     explicit backend, not re-read the global and pick local.
     """
-    import EvoScientist.langgraph_dev.sdk as sdk
-
-    monkeypatch.setattr(
-        sdk, "configured_langgraph_dev_url", lambda: "http://localhost:2024"
-    )
+    _stub_dev_server_up(monkeypatch)
     gws = create_runtime_gateways_for_config(
         SimpleNamespace(gateway_backend="local"),
         backend="langgraph_server",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -17,6 +18,8 @@ from .types import GraphGateway, ThreadStore
 
 if TYPE_CHECKING:
     from ..middleware.events import SessionEvents
+
+logger = logging.getLogger(__name__)
 
 RuntimeGatewayBackend = Literal["local", "langgraph_server"]
 
@@ -141,10 +144,26 @@ def create_runtime_gateways_for_config(
     if backend is None:
         backend = getattr(config, "gateway_backend", "local")
     if backend == "langgraph_server":
+        from ..langgraph_dev.manager import is_async_subagents_available
         from ..langgraph_dev.sdk import (
             configured_langgraph_dev_url,
             langgraph_dev_headers,
         )
+
+        # The server backend has no server to execute against unless the dev
+        # server actually came up. Surfaces call ``ensure_langgraph_dev`` before
+        # this, which soft-fails (warns, leaves ``_ASYNC_SUBAGENTS_AVAILABLE``
+        # False) when the port is held or the subprocess dies. Without this
+        # guard the composite would be built against a dead URL and the first
+        # ``create_thread`` at startup would raise a raw traceback. Fall back to
+        # the in-process gateway instead — the same degraded-but-working mode
+        # the manager's own warning already promises.
+        if not is_async_subagents_available():
+            logger.warning(
+                "langgraph dev is not available; using the in-process gateway "
+                "for this session instead of the langgraph_server backend."
+            )
+            return create_runtime_gateways(events=events)
 
         return create_runtime_gateways(
             backend="langgraph_server",
