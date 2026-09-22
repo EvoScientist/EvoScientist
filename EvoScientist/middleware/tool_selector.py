@@ -185,12 +185,13 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         self._fallback_warning_lock = threading.Lock()
 
     def _build_selector(self, request: ModelRequest) -> AgentMiddleware:
-        if self._selector is None:
-            self._always_include_names = _available_always_include(
-                request.tools, self._always_include
-            )
-            self._selector = self._selector_factory(self._always_include_names)
-        return self._selector
+        with self._switch_lock:
+            if self._selector is None:
+                self._always_include_names = _available_always_include(
+                    request.tools, self._always_include
+                )
+                self._selector = self._selector_factory(self._always_include_names)
+            return self._selector
 
     def _switch_to_auto_tool_choice(self, exc: Exception) -> bool:
         """Install the auto-tool-choice selector when the model rejects forced use.
@@ -213,7 +214,7 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
                 self._auto_selector = self._auto_selector_factory(
                     self._always_include_names
                 )
-                self._selector = self._auto_selector
+            self._selector = self._auto_selector
         return True
 
     @staticmethod

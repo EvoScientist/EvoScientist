@@ -3294,6 +3294,25 @@ class TestAutoConfig:
         assert call_kwargs["effort"] == "max"
         assert call_kwargs.get("max_tokens") == max_tokens
 
+    @pytest.mark.parametrize(
+        ("kwargs", "base_url"),
+        [({"thinking": {"type": "adaptive"}}, None), ({}, "http://localhost:8000")],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opus_5_5_max_tokens_outside_thinking_branch(
+        self, mock_init, kwargs, base_url, monkeypatch
+    ):
+        """Explicit thinking or a local proxy (ccproxy) must still get 128000."""
+        mock_init.return_value = "mock_model"
+        if base_url:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        else:
+            monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        get_chat_model("claude-opus-5-5", provider="anthropic", **kwargs)
+
+        assert mock_init.call_args[1]["max_tokens"] == 128000
+
     @pytest.mark.parametrize("model", ["moonshotai/kimi-k3", "kimi-k3"])
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_custom_anthropic_kimi_k3_declares_thinking(

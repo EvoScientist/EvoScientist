@@ -963,6 +963,18 @@ def test_concurrent_rejection_retries_with_installed_auto_selector():
     assert cond._selector is auto_selector
 
 
+def test_rejection_restores_auto_selector_if_overwritten():
+    """A late primary-selector assignment must not pin the rejected selector."""
+    auto_selector = MagicMock()
+    cond, primary, _ = _switching_middleware(_FORCED_REJECTED, auto_selector)
+    cond._build_selector(_request([_tool(f"t{i}") for i in range(10)]))
+    cond._switch_to_auto_tool_choice(_FORCED_REJECTED)
+    cond._selector = primary  # simulate a racing first-time build
+
+    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED) is True
+    assert cond._selector is auto_selector
+
+
 def test_other_selector_errors_do_not_switch_to_auto():
     cond, _, auto_factory = _switching_middleware(
         RuntimeError("no structured output"), MagicMock()
