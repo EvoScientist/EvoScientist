@@ -64,6 +64,12 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
         "EVOSCIENTIST_UI_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+        "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+        "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
         "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
@@ -96,6 +102,12 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
         "EVOSCIENTIST_UI_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+        "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+        "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
         "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
@@ -262,11 +274,23 @@ class TestEvoScientistConfig:
         config = EvoScientistConfig(gateway_backend="langgraph_server")
         assert config.gateway_backend == "langgraph_server"
 
-    def test_gateway_backend_per_surface_inherits_global_by_default(self):
-        """With every override left at ``inherit``, all surfaces track global."""
+    def test_gateway_backend_per_surface_defaults_split(self):
+        """Global server flips the fixed-workspace surfaces, not CLI/TUI.
+
+        serve/single-shot/standalone default to ``inherit`` (so a global
+        ``langgraph_server`` moves them); the interactive CLI and TUI default to
+        ``local``, so the global flag can't move them (the server path is lossy
+        there until #413/#454 close).
+        """
         config = EvoScientistConfig(gateway_backend="langgraph_server")
-        for surface in GatewaySurface:
+        for surface in (
+            GatewaySurface.SERVE,
+            GatewaySurface.SINGLE_SHOT,
+            GatewaySurface.STANDALONE,
+        ):
             assert resolve_gateway_backend(config, surface) == "langgraph_server"
+        assert resolve_gateway_backend(config, GatewaySurface.INTERACTIVE) == "local"
+        assert resolve_gateway_backend(config, GatewaySurface.TUI) == "local"
 
     def test_gateway_backend_per_surface_override_wins(self):
         """A per-surface override resolves independently of the global flag."""
@@ -277,21 +301,27 @@ class TestEvoScientistConfig:
         assert (
             resolve_gateway_backend(config, GatewaySurface.SERVE) == "langgraph_server"
         )
-        # Untouched surfaces still inherit the (local) global.
+        # TUI/INTERACTIVE default to local, and the global is local too.
         assert resolve_gateway_backend(config, GatewaySurface.TUI) == "local"
         assert resolve_gateway_backend(config, GatewaySurface.INTERACTIVE) == "local"
 
-    def test_gateway_backend_per_surface_can_pin_local_against_server_global(self):
-        """The safe/unsafe split: global server, one surface pinned local."""
+    def test_gateway_backend_cli_tui_explicit_server_opt_in(self):
+        """CLI/TUI reach the server backend only via an explicit override.
+
+        Their default is ``local``, so opting in takes a per-surface
+        ``langgraph_server`` (not the global flag); ``inherit`` restores
+        following the global.
+        """
         config = EvoScientistConfig(
-            gateway_backend="langgraph_server",
-            gateway_backend_interactive="local",
-            gateway_backend_tui="local",
+            gateway_backend="local",
+            gateway_backend_interactive="langgraph_server",
+            gateway_backend_tui="inherit",
         )
         assert (
-            resolve_gateway_backend(config, GatewaySurface.SERVE) == "langgraph_server"
+            resolve_gateway_backend(config, GatewaySurface.INTERACTIVE)
+            == "langgraph_server"
         )
-        assert resolve_gateway_backend(config, GatewaySurface.INTERACTIVE) == "local"
+        # tui set back to inherit -> follows the (local) global.
         assert resolve_gateway_backend(config, GatewaySurface.TUI) == "local"
 
     def test_gateway_backend_per_surface_invalid_value_coerces_to_inherit(self, caplog):
@@ -639,6 +669,12 @@ class TestPriorityChain:
             "EVOSCIENTIST_DEFAULT_MODE",
             "EVOSCIENTIST_WORKSPACE_DIR",
             "EVOSCIENTIST_UI_BACKEND",
+            "EVOSCIENTIST_GATEWAY_BACKEND",
+            "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+            "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+            "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+            "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+            "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
         ]:
             monkeypatch.delenv(key, raising=False)
         config = get_effective_config()
@@ -714,7 +750,7 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_GATEWAY_BACKEND_SERVE", "langgraph_server")
         config = get_effective_config()
         assert config.gateway_backend_serve == "langgraph_server"
-        assert config.gateway_backend_tui == "inherit"
+        assert config.gateway_backend_tui == "local"  # CLI/TUI default
         assert (
             resolve_gateway_backend(config, GatewaySurface.SERVE) == "langgraph_server"
         )

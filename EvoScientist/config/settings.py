@@ -295,21 +295,23 @@ class EvoScientistConfig:
     gateway_backend: Literal["local", "langgraph_server"] = "local"
 
     # Per-surface overrides of ``gateway_backend``. Each production surface can
-    # pick its own backend; ``"inherit"`` (the default) defers to the global
-    # ``gateway_backend`` above. This lets the fixed-workspace surfaces (serve,
-    # single-shot, standalone) move to the server backend while the interactive
-    # CLI and TUI stay local until the per-session-workspace (#413) and
-    # per-run-config-on-resume (#454) gaps close — the two surfaces where the
-    # server path is still lossy. Resolve with :func:`resolve_gateway_backend`;
+    # pick its own backend; ``"inherit"`` defers to the global ``gateway_backend``
+    # above. The fixed-workspace surfaces (serve, single-shot, standalone) default
+    # to ``inherit``, so the global flag moves them. The interactive CLI and TUI
+    # default to ``local`` instead: the server path is still lossy there (the
+    # per-session workspace is not applied server-side, #413, and per-run config
+    # is dropped on resume, #454), so a global ``langgraph_server`` must not move
+    # them - reaching the server backend on those surfaces takes an explicit
+    # ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
     # never read these fields directly for a routing decision.
     gateway_backend_serve: Literal["inherit", "local", "langgraph_server"] = "inherit"
     gateway_backend_single_shot: Literal["inherit", "local", "langgraph_server"] = (
         "inherit"
     )
     gateway_backend_interactive: Literal["inherit", "local", "langgraph_server"] = (
-        "inherit"
+        "local"
     )
-    gateway_backend_tui: Literal["inherit", "local", "langgraph_server"] = "inherit"
+    gateway_backend_tui: Literal["inherit", "local", "langgraph_server"] = "local"
     gateway_backend_standalone: Literal["inherit", "local", "langgraph_server"] = (
         "inherit"
     )
