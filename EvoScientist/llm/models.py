@@ -3,9 +3,9 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and
-custom OpenAI/Anthropic-compatible endpoints) and convenient short names for
-common models.
+Novita, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine, DashScope,
+DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-compatible
+endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -553,6 +553,10 @@ def get_chat_model(
             base_url = base_url.rstrip("/")
         elif provider == "minimax":
             base_url = os.environ.get("MINIMAX_BASE_URL", base_url_default).rstrip("/")
+        elif provider == "xiaomi-token-plan":
+            base_url = os.environ.get(
+                "MIMO_TOKEN_PLAN_BASE_URL", base_url_default
+            ).rstrip("/")
         else:
             base_url = base_url_default
         if base_url:
@@ -563,6 +567,10 @@ def get_chat_model(
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
+        # MiMo ids have no langchain profile, so ChatAnthropic would fall back to
+        # 4096; match the server's own default (131072) instead.
+        if provider in ("xiaomi", "xiaomi-token-plan"):
+            kwargs.setdefault("max_tokens", 131072)
         provider = "anthropic"
 
     elif provider == "ollama":

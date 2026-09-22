@@ -50,6 +50,8 @@ class TestModelsRegistry:
         assert "kimi-coding" in providers
         assert "atlascloud" in providers
         assert "novita" in providers
+        assert "xiaomi" in providers
+        assert "xiaomi-token-plan" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -75,6 +77,8 @@ class TestModelsRegistry:
             "kimi-coding",
             "atlascloud",
             "novita",
+            "xiaomi",
+            "xiaomi-token-plan",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
@@ -1363,6 +1367,64 @@ class TestThirdPartyRouting:
         assert call_kwargs["model_provider"] == "anthropic"
         assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
         assert call_kwargs["api_key"] == "mm-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_xiaomi_routes_through_anthropic(self, mock_init, monkeypatch):
+        """Xiaomi MiMo routes through Anthropic with thinking and a 131072 output cap."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MIMO_API_KEY", "sk-mimo-123")
+
+        get_chat_model("mimo-v2.6-pro", provider="xiaomi")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "mimo-v2.6-pro"
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert call_kwargs["base_url"] == "https://api.xiaomimimo.com/anthropic"
+        assert call_kwargs["api_key"] == "sk-mimo-123"
+        assert call_kwargs["max_tokens"] == 131072
+        assert "thinking" in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_xiaomi_token_plan_routes_to_region(self, mock_init, monkeypatch):
+        """Token Plan uses its own key, defaults to the cn region, and honours the env override."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MIMO_TOKEN_PLAN_API_KEY", "tp-mimo-123")
+        monkeypatch.delenv("MIMO_TOKEN_PLAN_BASE_URL", raising=False)
+
+        get_chat_model("mimo-v2.6-pro", provider="xiaomi-token-plan")
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert (
+            call_kwargs["base_url"] == "https://token-plan-cn.xiaomimimo.com/anthropic"
+        )
+        assert call_kwargs["api_key"] == "tp-mimo-123"
+        assert call_kwargs["max_tokens"] == 131072
+        assert "thinking" in call_kwargs
+
+        monkeypatch.setenv(
+            "MIMO_TOKEN_PLAN_BASE_URL",
+            "https://token-plan-sgp.xiaomimimo.com/anthropic/",
+        )
+        get_chat_model("mimo-v2.6-pro", provider="xiaomi-token-plan")
+        assert (
+            mock_init.call_args[1]["base_url"]
+            == "https://token-plan-sgp.xiaomimimo.com/anthropic"
+        )
+
+    def test_xiaomi_host_maps_to_provider(self):
+        """Provider error envelopes should identify Xiaomi MiMo by host."""
+        from EvoScientist.llm.errors import _lookup_host_or_compat
+
+        assert (
+            _lookup_host_or_compat("https://api.xiaomimimo.com/anthropic", "anthropic")
+            == "xiaomi"
+        )
+        assert (
+            _lookup_host_or_compat(
+                "https://token-plan-ams.xiaomimimo.com/anthropic", "anthropic"
+            )
+            == "xiaomi"
+        )
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_base_url_env_override(self, mock_init, monkeypatch):

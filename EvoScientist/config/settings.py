@@ -173,6 +173,9 @@ class EvoScientistConfig:
     atlascloud_api_key: str = ""
     requesty_api_key: str = ""
     novita_api_key: str = ""
+    mimo_api_key: str = ""
+    mimo_token_plan_api_key: str = ""
+    mimo_token_plan_base_url: str = ""
     deepseek_api_key: str = ""
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
@@ -891,6 +894,9 @@ _ENV_MAPPINGS = {
     "atlascloud_api_key": "ATLASCLOUD_API_KEY",
     "requesty_api_key": "REQUESTY_API_KEY",
     "novita_api_key": "NOVITA_API_KEY",
+    "mimo_api_key": "MIMO_API_KEY",
+    "mimo_token_plan_api_key": "MIMO_TOKEN_PLAN_API_KEY",
+    "mimo_token_plan_base_url": "MIMO_TOKEN_PLAN_BASE_URL",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
@@ -1079,6 +1085,14 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["REQUESTY_API_KEY"] = config.requesty_api_key
     if config.novita_api_key and not os.environ.get("NOVITA_API_KEY"):
         os.environ["NOVITA_API_KEY"] = config.novita_api_key
+    if config.mimo_api_key and not os.environ.get("MIMO_API_KEY"):
+        os.environ["MIMO_API_KEY"] = config.mimo_api_key
+    if config.mimo_token_plan_api_key and not os.environ.get("MIMO_TOKEN_PLAN_API_KEY"):
+        os.environ["MIMO_TOKEN_PLAN_API_KEY"] = config.mimo_token_plan_api_key
+    if config.mimo_token_plan_base_url and not os.environ.get(
+        "MIMO_TOKEN_PLAN_BASE_URL"
+    ):
+        os.environ["MIMO_TOKEN_PLAN_BASE_URL"] = config.mimo_token_plan_base_url
     if config.deepseek_api_key and not os.environ.get("DEEPSEEK_API_KEY"):
         os.environ["DEEPSEEK_API_KEY"] = config.deepseek_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):
