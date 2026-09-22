@@ -4,9 +4,11 @@ Stage 4 of the gateway migration (issue #432) keeps every catalog/history read o
 the local SQLite readers while routing graph execution to the langgraph server.
 Both backends write the same checkpoint database — the local gateway and the
 server's ``create_checkpointer_for_langgraph_api`` resolve the same
-``sessions.py:get_db_path()`` — so a thread executed on the server is fully
-readable through the local route with no server round-trip; the local reader is
-never stale relative to the server. Reads and execution are already separate
+``sessions.py:get_db_path()`` — so once a thread has run on the server it is
+fully readable through the local route with no server round-trip, and for any
+thread that has executed the local reader is never stale relative to the server.
+(A server thread created but not yet run is the one gap — see the catalog note
+below.) Reads and execution are already separate
 methods on the :class:`~EvoScientist.gateway.types.GraphGateway` protocol, but a
 single gateway instance serves both, so the split lives here: a wrapper holding
 one ``read`` gateway and one ``execute`` gateway and dispatching each protocol
@@ -21,7 +23,11 @@ Routing table (read = local, execute = langgraph server):
   keeps reads working with no live server. (The server registry additionally
   knows UUID threads that were created but never run; those hold no checkpoint
   state, so surfacing them — as empty sessions whose short ids the local resolver
-  cannot match — would cost a per-thread ``get_state`` for no user-visible gain.)
+  cannot match — would cost a per-thread ``get_state`` for no user-visible gain.
+  For the same reason ``resolve_thread`` and ``thread_exists`` report a miss for a
+  server thread created but not yet run, until its first run writes a checkpoint;
+  the execution surfaces go create -> stream without resolving in between, so this
+  is unreachable on the current paths.)
 - Live state: ``get_state_values`` routes UUIDs to the server with NO local
   fallback (local ``get_state_values`` needs a local graph the server-execute
   caller does not supply); it reflects the run's live ``next`` / interrupts, which

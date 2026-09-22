@@ -189,9 +189,11 @@ def _ensure_standalone_dev_server(
     no console to render serve's red mismatch banner + ``typer.Exit``: a
     workspace/deploy-mode mismatch from :func:`ensure_langgraph_dev` is logged as
     a single error line and re-raised to abort startup; a generic start failure
-    degrades to in-process fallback inside the manager without raising. serve's
-    autoskill-schedule reconciliation and config-drift hint are intentionally not
-    mirrored here (no console, and channels do not reconcile schedules).
+    does not raise here — ``ensure_langgraph_dev`` leaves the dev server
+    unavailable, and ``create_runtime_gateways_for_config`` then falls back to the
+    in-process gateway for the run. serve's autoskill-schedule reconciliation and
+    config-drift hint are intentionally not mirrored here (no console, and
+    channels do not reconcile schedules).
     """
     if backend != "langgraph_server":
         return
