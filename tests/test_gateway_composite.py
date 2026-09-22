@@ -29,6 +29,12 @@ async def _empty_async_iter():
         yield
 
 
+async def _drain(agen, sink: list) -> None:
+    """Consume an async event stream into ``sink`` (keeps pytest.raises simple)."""
+    async for event in agen:
+        sink.append(event)
+
+
 class RecordingGateway:
     """Minimal GraphGateway that records which methods were called."""
 
@@ -213,18 +219,51 @@ async def test_thread_exists_reads_local_only():
 async def test_stream_events_uuid_routes_to_server():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
-    _composite(read, execute).stream_events(RunRequest(message="hi", thread_id=UUID))
+    # Async generator: delegation happens on iteration, not at call time.
+    async for _ in _composite(read, execute).stream_events(
+        RunRequest(message="hi", thread_id=UUID)
+    ):
+        pass
     assert execute.called("stream_events")
 
 
-async def test_stream_events_legacy_refused():
+async def test_stream_events_legacy_yields_error_then_raises():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
+    events: list = []
+    stream = _composite(read, execute).stream_events(
+        RunRequest(message="hi", thread_id=LEGACY)
+    )
     with pytest.raises(LegacyThreadServerExecutionError):
-        _composite(read, execute).stream_events(
-            RunRequest(message="hi", thread_id=LEGACY)
-        )
+        await _drain(stream, events)
+    # An error event reaches the consumer before the raise, so stream-json emits
+    # it instead of an empty stream; the server is never touched.
+    assert len(events) == 1
+    assert events[0]["type"] == "error"
+    assert LEGACY in events[0]["message"]
     assert not execute.called("stream_events")
+
+
+async def test_stream_json_sink_emits_error_line_for_legacy_thread():
+    """The stream-json sink writes an error line, not an empty stream.
+
+    Regression for the raise-at-call-time bug: with a plain method the guard
+    escaped before ``write_events_as_json`` iterated, leaving stdout empty.
+    """
+    import io
+    import json as _json
+
+    from EvoScientist.stream.json_sink import write_events_as_json
+
+    comp = _composite(RecordingGateway("r"), RecordingGateway("e"))
+    out = io.StringIO()
+    with pytest.raises(LegacyThreadServerExecutionError):
+        await write_events_as_json(
+            comp.stream_events(RunRequest(message="hi", thread_id=LEGACY)), out
+        )
+    lines = [line for line in out.getvalue().splitlines() if line]
+    assert len(lines) == 1
+    assert _json.loads(lines[0])["type"] == "error"
 
 
 async def test_update_state_values_legacy_refused():

@@ -200,10 +200,21 @@ class CompositeGraphGateway:
             source_thread_id, metadata=metadata, target=target
         )
 
-    def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
+    async def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
+        # Async generator, not a plain method returning the inner iterator: the
+        # legacy-thread guard must fire *inside* iteration, not at call time. If
+        # it raised at call time, a stream consumer that only guards its
+        # ``async for`` (``--output-format stream-json`` via ``write_events_as_json``)
+        # would get an empty stream — no ``error`` line, no ``done`` — because the
+        # raise escapes before the first ``__anext__``. Yielding a normalized
+        # error event first lets that consumer emit the failure; the raise still
+        # reaches surfaces that render the exception directly (the Rich CLI).
         if not _is_uuid(request.thread_id):
-            raise LegacyThreadServerExecutionError(request.thread_id)
-        return self._execute.stream_events(request)
+            exc = LegacyThreadServerExecutionError(request.thread_id)
+            yield {"type": "error", "message": str(exc)}
+            raise exc
+        async for event in self._execute.stream_events(request):
+            yield event
 
     async def update_state_values(
         self,
