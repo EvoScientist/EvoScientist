@@ -17,6 +17,7 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from collections.abc import Awaitable, Callable, Iterable
@@ -31,6 +32,8 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
+from langchain_core.output_parsers.openai_tools import JsonOutputKeyToolsParser
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.tools import BaseTool
 from langgraph.constants import TAG_NOSTREAM
 
@@ -99,6 +102,32 @@ class _SelectorFloodDetector(BaseCallbackHandler):
 _FLOOD_DETECTOR = _SelectorFloodDetector()
 
 
+def _coerce_stringified_tools(selection: Any) -> Any:
+    # Without forced tool use, some routes return the list as a JSON string.
+    if isinstance(selection, dict) and isinstance(selection.get("tools"), str):
+        try:
+            return {**selection, "tools": json.loads(selection["tools"])}
+        except ValueError:
+            pass
+    return selection
+
+
+class _AutoToolChoiceSelectorModel:
+    """Selection model for models that reject forced ``tool_choice`` (Claude
+    Fable 5.1 / Opus 5.5): binds the schema with ``tool_choice="auto"``."""
+
+    def __init__(self, model: BaseChatModel) -> None:
+        self._model = model
+
+    def with_structured_output(self, schema: dict[str, Any], **_: Any) -> Runnable:
+        name = schema.get("title", "ToolSelectionResponse")
+        return (
+            self._model.bind_tools([schema], tool_choice="auto")
+            | JsonOutputKeyToolsParser(key_name=name, first_tool_only=True)
+            | RunnableLambda(_coerce_stringified_tools)
+        )
+
+
 def _tool_name(tool: BaseTool | dict[str, Any]) -> str | None:
     if isinstance(tool, BaseTool):
         return tool.name or None
@@ -138,23 +167,54 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
         *,
         always_include: frozenset[str] | None = None,
         events: MiddlewareEventSink | None = None,
+        auto_selector_factory: Callable[[list[str]], AgentMiddleware] | None = None,
     ):
         super().__init__()
         self._selector_factory = selector_factory
+        self._auto_selector_factory = auto_selector_factory
+        self._always_include_names: list[str] = []
         self._threshold = threshold
         self._always_include = always_include or frozenset()
         self._events = events or NO_OP_SINK
         # Agent tools are fixed after graph construction, so the filtered
         # always-include set is stable for this middleware instance.
         self._selector: AgentMiddleware | None = None
+        self._auto_selector: AgentMiddleware | None = None
+        self._switch_lock = threading.Lock()
         self._fallback_warning_emitted = False
         self._fallback_warning_lock = threading.Lock()
 
     def _build_selector(self, request: ModelRequest) -> AgentMiddleware:
         if self._selector is None:
-            names = _available_always_include(request.tools, self._always_include)
-            self._selector = self._selector_factory(names)
+            self._always_include_names = _available_always_include(
+                request.tools, self._always_include
+            )
+            self._selector = self._selector_factory(self._always_include_names)
         return self._selector
+
+    def _switch_to_auto_tool_choice(self, exc: Exception) -> bool:
+        """Install the auto-tool-choice selector when the model rejects forced use.
+
+        Returns True when the failed request should retry with it.
+        """
+        # OpenRouter's str(exc) is generic; the provider message is in ``body``.
+        detail = f"{exc} {getattr(exc, 'body', '') or ''}"
+        if (
+            self._auto_selector_factory is None
+            or getattr(exc, "status_code", None) != 400
+            or "tool_choice" not in detail
+        ):
+            return False
+        with self._switch_lock:
+            if self._auto_selector is None:
+                logger.info(
+                    "tool_selector.auto_tool_choice: forced tool_choice rejected"
+                )
+                self._auto_selector = self._auto_selector_factory(
+                    self._always_include_names
+                )
+                self._selector = self._auto_selector
+        return True
 
     @staticmethod
     def _selected_names(request: ModelRequest) -> list[str]:
@@ -207,9 +267,16 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return handler(req)
 
         try:
-            return self._build_selector(request).wrap_model_call(
-                request, _handler_after_selection
-            )
+            try:
+                return self._build_selector(request).wrap_model_call(
+                    request, _handler_after_selection
+                )
+            except Exception as exc:
+                if _handler_called or not self._switch_to_auto_tool_choice(exc):
+                    raise
+                return self._build_selector(request).wrap_model_call(
+                    request, _handler_after_selection
+                )
         except Exception as exc:
             if _handler_called:
                 raise  # Error from downstream model — don't retry
@@ -256,9 +323,16 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return await handler(req)
 
         try:
-            return await self._build_selector(request).awrap_model_call(
-                request, _handler_after_selection
-            )
+            try:
+                return await self._build_selector(request).awrap_model_call(
+                    request, _handler_after_selection
+                )
+            except Exception as exc:
+                if _handler_called or not self._switch_to_auto_tool_choice(exc):
+                    raise
+                return await self._build_selector(request).awrap_model_call(
+                    request, _handler_after_selection
+                )
         except Exception as exc:
             if _handler_called:
                 raise
@@ -344,11 +418,24 @@ def create_tool_selector_middleware(
             always_include=always_include,
         )
 
+    # These models keep thinking on, so a low effort keeps selection fast.
+    auto_model = safe_model
+    if getattr(safe_model, "reasoning_effort", None):
+        auto_model = safe_model.model_copy(update={"reasoning_effort": "low"})
+
+    def auto_selector_factory(always_include: list[str]) -> AgentMiddleware:
+        selector = selector_factory(always_include)
+        # The constructor only accepts a BaseChatModel; selection only calls
+        # ``with_structured_output`` on it.
+        selector.model = _AutoToolChoiceSelectorModel(auto_model)
+        return selector
+
     return [
         _ConditionalToolSelectorMiddleware(
             selector_factory=selector_factory,
             threshold=threshold,
             always_include=DEFAULT_ALWAYS_INCLUDE_TOOLS,
             events=events,
+            auto_selector_factory=auto_selector_factory,
         ),
     ]

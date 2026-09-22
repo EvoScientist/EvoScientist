@@ -853,3 +853,202 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
     assert captured["thinking"] == {"type": "disabled"}
     assert captured["tool_choice"]["function"]["name"] == "ToolSelectionResponse"
     assert selected == ["tool_1"]
+
+
+# ---------------------------------------------------------------------------
+# Forced tool_choice rejected (Claude Fable 5.1 / Opus 5.5): retry with auto
+# ---------------------------------------------------------------------------
+
+
+class _BadRequest(Exception):
+    status_code = 400
+
+
+_FORCED_REJECTED = _BadRequest(
+    'tool_choice: type "tool" and "any" are not supported for this model.'
+)
+
+
+def _switching_middleware(primary_error, auto_selector):
+    primary = MagicMock()
+    primary.wrap_model_call.side_effect = primary_error
+    primary.awrap_model_call = AsyncMock(side_effect=primary_error)
+    auto_factory = MagicMock(return_value=auto_selector)
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=MagicMock(return_value=primary),
+        threshold=5,
+        auto_selector_factory=auto_factory,
+    )
+    return cond, primary, auto_factory
+
+
+def test_forced_tool_choice_rejection_switches_to_auto_selector():
+    auto_selector = MagicMock()
+    auto_selector.wrap_model_call.side_effect = lambda req, h: h(req)
+    cond, primary, auto_factory = _switching_middleware(_FORCED_REJECTED, auto_selector)
+    request = _request([_tool(f"t{i}") for i in range(10)])
+    handler = MagicMock(return_value="ok")
+
+    assert cond.wrap_model_call(request, handler) == "ok"
+    assert cond.wrap_model_call(request, handler) == "ok"
+
+    primary.wrap_model_call.assert_called_once()
+    auto_factory.assert_called_once()
+    assert auto_selector.wrap_model_call.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_forced_tool_choice_rejection_switches_to_auto_selector_async():
+    async def _select(req, h):
+        return await h(req)
+
+    auto_selector = MagicMock()
+    auto_selector.awrap_model_call = AsyncMock(side_effect=_select)
+    cond, primary, auto_factory = _switching_middleware(_FORCED_REJECTED, auto_selector)
+    request = _request([_tool(f"t{i}") for i in range(10)])
+    handler = AsyncMock(return_value="ok")
+
+    assert await cond.awrap_model_call(request, handler) == "ok"
+
+    primary.awrap_model_call.assert_awaited_once()
+    auto_factory.assert_called_once()
+    auto_selector.awrap_model_call.assert_awaited_once()
+
+
+def test_forced_tool_choice_rejection_in_error_body_switches_to_auto():
+    """OpenRouter keeps the provider message in ``body``, not ``str(exc)``."""
+
+    class _ProviderError(_BadRequest):
+        body = '{"error": {"message": "tool_choice: type \\"tool\\" not supported"}}'
+
+    auto_selector = MagicMock()
+    auto_selector.wrap_model_call.side_effect = lambda req, h: h(req)
+    cond, _, auto_factory = _switching_middleware(
+        _ProviderError("Provider returned error"), auto_selector
+    )
+
+    cond.wrap_model_call(_request([_tool(f"t{i}") for i in range(10)]), MagicMock())
+
+    auto_factory.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # langchain's own validation error, no HTTP status
+        ValueError("Model selected invalid tools: ['tool_choice']"),
+        # transient provider error that happens to mention tool_choice
+        type("_RateLimited", (Exception,), {"status_code": 429})("tool_choice busy"),
+    ],
+)
+def test_tool_choice_text_without_400_does_not_switch(error):
+    cond, _, auto_factory = _switching_middleware(error, MagicMock())
+
+    cond.wrap_model_call(_request([_tool(f"t{i}") for i in range(10)]), MagicMock())
+
+    auto_factory.assert_not_called()
+
+
+def test_concurrent_rejection_retries_with_installed_auto_selector():
+    """A request that failed on the forced selector after another request
+    already switched still retries with the auto selector."""
+    auto_selector = MagicMock()
+    cond, _, auto_factory = _switching_middleware(_FORCED_REJECTED, auto_selector)
+    cond._build_selector(_request([_tool(f"t{i}") for i in range(10)]))
+
+    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED) is True
+    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED) is True
+
+    auto_factory.assert_called_once()
+    assert cond._selector is auto_selector
+
+
+def test_other_selector_errors_do_not_switch_to_auto():
+    cond, _, auto_factory = _switching_middleware(
+        RuntimeError("no structured output"), MagicMock()
+    )
+    request = _request([_tool(f"t{i}") for i in range(10)])
+    handler = MagicMock()
+
+    cond.wrap_model_call(request, handler)
+
+    auto_factory.assert_not_called()
+    handler.assert_called_once_with(request)
+
+
+def test_auto_selector_failure_falls_back_to_all_tools():
+    auto_selector = MagicMock()
+    auto_selector.wrap_model_call.side_effect = RuntimeError("still malformed")
+    cond, _, _ = _switching_middleware(_FORCED_REJECTED, auto_selector)
+    request = _request([_tool(f"t{i}") for i in range(10)])
+    handler = MagicMock()
+
+    cond.wrap_model_call(request, handler)
+
+    handler.assert_called_once_with(request)
+
+
+def test_auto_selector_sends_auto_tool_choice_at_low_effort(monkeypatch):
+    """Wire-level: the auto selector binds tool_choice=auto, lowers effort, and
+    parses a stringified tool list."""
+    import json
+
+    import anthropic
+    from packaging.version import Version
+
+    from EvoScientist.llm.models import get_chat_model
+
+    if Version(anthropic.__version__) >= Version("1"):
+        import httpx2 as httpx
+    else:
+        import httpx
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    [cond] = create_tool_selector_middleware(
+        model=get_chat_model("claude-opus-5-5", provider="anthropic")
+    )
+    selector = cond._auto_selector_factory([])
+    model = selector.model._model
+    captured = {}
+
+    def respond(request):
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "ToolSelectionResponse",
+                        "input": {"tools": '["ls", "grep"]'},
+                    }
+                ],
+                "model": "claude-opus-5-5",
+                "stop_reason": "tool_use",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    model._client = anthropic.Anthropic(
+        api_key="sk-test",
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    schema = {
+        "title": "ToolSelectionResponse",
+        "type": "object",
+        "properties": {"tools": {"type": "array", "items": {"type": "string"}}},
+        "required": ["tools"],
+    }
+
+    result = selector.model.with_structured_output(schema).invoke("pick tools")
+
+    assert captured["tool_choice"] == {"type": "auto"}
+    assert captured["output_config"]["effort"] == "low"
+    assert result == {"tools": ["ls", "grep"]}
