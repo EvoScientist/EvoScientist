@@ -832,6 +832,7 @@ def _get_default_middleware(
     workspace_dir: str | Path | None = None,
     cfg=None,
     chat_model=None,
+    backend=None,
     memory_source_agent: str = "EvoScientist",
     events: "MiddlewareEventSink | None" = None,
 ):
@@ -851,6 +852,12 @@ def _get_default_middleware(
         cfg: Explicit config to use instead of the cached ``_config``.
         chat_model: Explicit model to bind instead of ``_ensure_chat_model()``
             (avoids writing module globals on the pure path).
+        backend: Agent backend (as passed to ``create_deep_agent``). When
+            provided, the per-run-limits SummarizationMiddleware subclass is
+            appended; deepagents' name-based merge then REPLACES its frozen
+            built-in in place so the replacement offloads history to this
+            same backend. When None (tests, async sub-agent factories), the
+            stock frozen-limits built-in is left untouched.
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
         events: Frontend/session-supplied event sink. Middleware report
@@ -871,6 +878,7 @@ def _get_default_middleware(
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
+        create_per_run_summarization_middleware,
         create_runtime_context_middleware,
         create_scheduler_middleware,
         create_tool_selector_middleware,
@@ -1020,6 +1028,18 @@ def _get_default_middleware(
             )
         )
 
+    # SummarizationMiddleware with per-run context limits (#466): deepagents
+    # installs its own (frozen on the construction model's window) inside the
+    # core stack. Appending this same-named subclass makes deepagents'
+    # name-based merge REPLACE the stock instance in place, so the per-run
+    # limits land in the identical stack slot — including the general-purpose
+    # subagent's inheritable stack. Requires the agent backend: the
+    # replacement must offload conversation history to the same backend the
+    # stock instance would have used. Without one, leave the stock built-in
+    # (tests and the async sub-agent factories, which keep frozen limits).
+    if backend is not None:
+        mw.append(create_per_run_summarization_middleware(model, backend))
+
     return mw
 
 
@@ -1092,7 +1112,7 @@ def _get_default_agent():
 
         cfg = _ensure_config()
         be = _get_default_backend()
-        mw = _get_default_middleware()
+        mw = _get_default_middleware(backend=be)
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(
@@ -1252,7 +1272,11 @@ def create_cli_agent(
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain.
     mw: list[AgentMiddleware] = _get_default_middleware(
-        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model, events=events
+        workspace_dir=workspace_dir,
+        cfg=cfg,
+        chat_model=chat_model,
+        backend=be,
+        events=events,
     )
 
     # Re-load MCP tools from current config (picks up /mcp add changes)
