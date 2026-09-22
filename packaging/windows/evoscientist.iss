@@ -4,7 +4,7 @@
 ;   (a) ensures the Microsoft Edge WebView2 Evergreen runtime is present
 ;       (detect via registry; download + silent-install the bootstrapper if not),
 ;   (b) lays down the merged app tree (PyInstaller onedir + assemble_bundle.py
-;       output) into one install dir under Program Files,
+;       output) into one per-user install dir under {localappdata}\Programs,
 ;   (c) creates a Start-menu shortcut (and an optional desktop shortcut).
 ;
 ; Input: a single directory that already contains BOTH halves of the bundle —
@@ -64,9 +64,16 @@ WizardStyle=modern
 ; The bundle is 64-bit (Node/Python/native libs); refuse to install on 32-bit.
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Per-machine install into Program Files; the WebView2 bootstrapper also
-; installs per-machine, so admin is required either way.
-PrivilegesRequired=admin
+; Per-user install (no elevation). With PrivilegesRequired=lowest the {auto*}
+; constants resolve to per-user locations: {autopf} -> {localappdata}\Programs,
+; {autodesktop} -> the user's desktop, {group} -> the user's Start menu. This
+; matters at RUNTIME, not just for permissions: the bundled Next.js WebUI writes
+; its image/ISR cache under {app}\webui\dist\.next\cache, which fails with EPERM
+; when {app} is read-only Program Files. A user-writable {app} lets those writes
+; succeed. The WebView2 Evergreen bootstrapper, run non-elevated, installs the
+; runtime per-user (registered under HKCU, which WebView2Installed already
+; checks), so admin is not required for it either.
+PrivilegesRequired=lowest
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -80,8 +87,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-; WorkingDir is a writable per-user location, not {app} (Program Files is
-; read-only): the launcher defaults its workspace to the working directory,
+; WorkingDir is {userdocs}, not {app}: even though {app} is now user-writable,
+; the app dir holds the app (and is wiped on uninstall), so user data does not
+; belong there. The launcher defaults its workspace to the working directory,
 ; and runs/skills/media are written under it. See build_launcher_config.
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{userdocs}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
