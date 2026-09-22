@@ -16,6 +16,7 @@ Usage from a channel's ``main()``::
 import asyncio
 import logging
 import signal
+from typing import Any
 
 from .base import Channel
 from .bus import MessageBus
@@ -92,7 +93,7 @@ async def _async_main(
     bus: MessageBus,
     use_agent: bool,
     send_thinking: bool,
-    config: object = None,
+    config: Any = None,
     backend: str | None = None,
 ) -> None:
     """Async entry point — gather channel, dispatcher and optional consumer."""
@@ -172,9 +173,7 @@ async def _async_main(
     await asyncio.gather(*tasks)
 
 
-def _ensure_standalone_dev_server(
-    config: object, *, backend: str | None = None
-) -> None:
+def _ensure_standalone_dev_server(config: Any, *, backend: str | None = None) -> None:
     """Spawn the langgraph dev server for a server-backed standalone runner.
 
     Spawns the same dev server serve uses so a headless channel running on the
