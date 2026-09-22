@@ -492,6 +492,24 @@ class TestEnsureLanggraphDev:
         cfg.gateway_backend = "langgraph_server"
         assert manager.needs_langgraph_dev(cfg) is True
 
+    def test_needs_langgraph_dev_explicit_backend_overrides_global(self):
+        """The explicit ``backend`` param wins over ``config.gateway_backend``.
+
+        A surface resolved to the server backend must force the dev server even
+        when the global flag is still ``local`` (per-surface override), and a
+        surface resolved to ``local`` must not be forced on by a server global
+        when it has no other trigger.
+        """
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.memory_skill_synthesis_enabled = False
+        cfg.enable_scheduler = False
+        cfg.gateway_backend = "local"
+        assert manager.needs_langgraph_dev(cfg, backend="langgraph_server") is True
+        cfg.gateway_backend = "langgraph_server"
+        assert manager.needs_langgraph_dev(cfg, backend="local") is False
+
     def test_reuses_existing_healthy_subprocess(self, tmp_path, runtime_paths):
         """When the subprocess is already running, no new Popen call."""
         cfg = EvoScientistConfig()

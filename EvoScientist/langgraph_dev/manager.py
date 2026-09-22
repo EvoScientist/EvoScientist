@@ -90,12 +90,24 @@ DEFAULT_PID_DIR = Path.home() / ".config" / "evoscientist"
 RUNTIME: LanggraphRuntimePaths = LanggraphRuntimePaths.for_directory(DEFAULT_PID_DIR)
 
 
-def needs_langgraph_dev(config: EvoScientistConfig) -> bool:
-    """Return whether this config needs the background langgraph dev server."""
-    if (
-        str(getattr(config, "gateway_backend", "local") or "local")
-        == "langgraph_server"
-    ):
+def needs_langgraph_dev(
+    config: EvoScientistConfig,
+    *,
+    backend: str | None = None,
+) -> bool:
+    """Return whether this config needs the background langgraph dev server.
+
+    ``backend`` is the calling surface's resolved gateway backend; when
+    ``None`` it falls back to the global ``config.gateway_backend`` (the
+    pre-per-surface behavior). Passing it lets one surface force the dev server
+    on its own backend without the global flag being set.
+    """
+    effective_backend = (
+        backend
+        if backend is not None
+        else str(getattr(config, "gateway_backend", "local") or "local")
+    )
+    if effective_backend == "langgraph_server":
         # On the server backend, execution itself is routed to the dev server,
         # so it must exist even when no async sub-agent / scheduler / memory
         # worker independently asks for it.
@@ -1232,6 +1244,8 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
 def ensure_langgraph_dev(
     config: EvoScientistConfig,
     workspace_dir: Path | str | None = None,
+    *,
+    backend: str | None = None,
 ) -> subprocess.Popen | None:
     """Start or reuse langgraph dev for async/background agent work.
 
@@ -1246,6 +1260,10 @@ def ensure_langgraph_dev(
             resolved workspace so deployed async sub-agents see the same files
             as the main in-process agent. If None, the subprocess uses its
             own ``Path.cwd()`` (the CLI's launch directory).
+        backend: The calling surface's resolved gateway backend. When ``None``,
+            falls back to the global ``config.gateway_backend``. Determines
+            both whether the server is needed at all and whether it spawns in
+            full deploy mode.
 
     Errors during startup are logged but don't abort the CLI — the user can
     still chat with sync sub-agents; only async sub-agent calls and EvoMemory
@@ -1254,7 +1272,7 @@ def ensure_langgraph_dev(
     global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
     CONFIG_DRIFT_SINCE_LAUNCH = False
 
-    if not needs_langgraph_dev(config):
+    if not needs_langgraph_dev(config, backend=backend):
         _ASYNC_SUBAGENTS_AVAILABLE = False
         return None
 
@@ -1273,7 +1291,7 @@ def ensure_langgraph_dev(
     try:
         with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
             with _LOCK:
-                return _ensure_langgraph_dev_locked(config, workspace_dir)
+                return _ensure_langgraph_dev_locked(config, workspace_dir, backend)
     except FileLockTimeout:
         logger.warning(
             "Timed out waiting %.0fs for cross-process langgraph dev lock at %s. "
@@ -1289,6 +1307,7 @@ def ensure_langgraph_dev(
 def _ensure_langgraph_dev_locked(
     config: EvoScientistConfig,
     workspace_dir: Path | str | None,
+    backend: str | None = None,
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
@@ -1304,10 +1323,12 @@ def _ensure_langgraph_dev_locked(
     # the subprocess must serve the full graph (MCP + async sub-agents
     # server-side), i.e. full deploy mode. The local default keeps the
     # historical stripped spawn (the CLI process loads its own MCP).
-    need_full = (
-        str(getattr(config, "gateway_backend", "local") or "local")
-        == "langgraph_server"
+    effective_backend = (
+        backend
+        if backend is not None
+        else str(getattr(config, "gateway_backend", "local") or "local")
     )
+    need_full = effective_backend == "langgraph_server"
 
     # If a subprocess we own is running with a *different* workspace than what
     # was just requested (typical trigger: user just /resumed a thread from a

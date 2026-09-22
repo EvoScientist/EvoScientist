@@ -115,9 +115,17 @@ def create_runtime_gateways(
 def create_runtime_gateways_for_config(
     config: Any,
     *,
+    backend: RuntimeGatewayBackend | None = None,
     events: SessionEvents | None = None,
 ) -> RuntimeGateways:
-    """Build runtime gateways honoring ``config.gateway_backend``.
+    """Build runtime gateways for a surface's resolved gateway backend.
+
+    ``backend`` is the surface's effective backend, resolved once at the
+    surface's entry point via
+    :func:`EvoScientist.config.resolve_gateway_backend` and threaded down (the
+    same value the surface passed to ``ensure_langgraph_dev``). When ``None``,
+    falls back to the global ``config.gateway_backend`` — the pre-per-surface
+    behavior, kept for callers that do not resolve a surface (and tests).
 
     ``local`` (the default) returns the in-process gateway unchanged.
     ``langgraph_server`` keeps reads on the local SQLite store while routing
@@ -130,7 +138,8 @@ def create_runtime_gateways_for_config(
     other dev-server client in the repo (``gateway/local.py``,
     ``gateway/background_runs.py``).
     """
-    backend = getattr(config, "gateway_backend", "local")
+    if backend is None:
+        backend = getattr(config, "gateway_backend", "local")
     if backend == "langgraph_server":
         from ..langgraph_dev.sdk import (
             configured_langgraph_dev_url,

@@ -396,3 +396,39 @@ def test_gateways_for_config_server_backend_builds_composite(monkeypatch):
     )
     assert isinstance(gws.graph_gateway, CompositeGraphGateway)
     assert isinstance(gws.thread_store, LocalThreadStore)
+
+
+def test_gateways_for_config_explicit_backend_overrides_global(monkeypatch):
+    """A surface's resolved ``backend`` wins over the config's global flag.
+
+    The global is ``local`` but the surface resolved ``langgraph_server`` (e.g.
+    a per-surface override), so the factory must build the composite from the
+    explicit backend, not re-read the global and pick local.
+    """
+    import EvoScientist.langgraph_dev.sdk as sdk
+
+    monkeypatch.setattr(
+        sdk, "configured_langgraph_dev_url", lambda: "http://localhost:2024"
+    )
+    gws = create_runtime_gateways_for_config(
+        SimpleNamespace(gateway_backend="local"),
+        backend="langgraph_server",
+    )
+    assert isinstance(gws.graph_gateway, CompositeGraphGateway)
+
+
+def test_gateways_for_config_explicit_local_backend_over_server_global():
+    """Explicit ``local`` builds the in-process gateway even if global is server."""
+    gws = create_runtime_gateways_for_config(
+        SimpleNamespace(gateway_backend="langgraph_server"),
+        backend="local",
+    )
+    assert isinstance(gws.graph_gateway, LocalGraphGateway)
+
+
+def test_gateways_for_config_backend_none_falls_back_to_global():
+    """``backend=None`` keeps the pre-per-surface behavior (read the global)."""
+    gws = create_runtime_gateways_for_config(
+        SimpleNamespace(gateway_backend="local"), backend=None
+    )
+    assert isinstance(gws.graph_gateway, LocalGraphGateway)

@@ -21,8 +21,8 @@ def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
     monkeypatch.setattr(
         manager_mod,
         "ensure_langgraph_dev",
-        lambda cfg, *, workspace_dir: ensure_calls.append(
-            {"config": cfg, "workspace_dir": workspace_dir}
+        lambda cfg, *, workspace_dir, backend=None: ensure_calls.append(
+            {"config": cfg, "workspace_dir": workspace_dir, "backend": backend}
         ),
     )
     # Avoid mutating the real process-global workspace / creating dirs.
@@ -40,10 +40,12 @@ def test_ensure_dev_server_spawns_on_server_backend(monkeypatch, tmp_path):
         monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
     )
 
-    standalone._ensure_standalone_dev_server(config)
+    standalone._ensure_standalone_dev_server(config, backend="langgraph_server")
 
     assert len(ensure_calls) == 1
     assert ensure_calls[0]["workspace_dir"] == os.path.abspath(str(tmp_path))
+    # The resolved backend is forwarded so the manager spawns in full mode.
+    assert ensure_calls[0]["backend"] == "langgraph_server"
 
 
 def test_ensure_dev_server_noop_on_local_backend(monkeypatch, tmp_path):
@@ -51,7 +53,7 @@ def test_ensure_dev_server_noop_on_local_backend(monkeypatch, tmp_path):
         monkeypatch, gateway_backend="local", default_workdir=str(tmp_path)
     )
 
-    standalone._ensure_standalone_dev_server(config)
+    standalone._ensure_standalone_dev_server(config, backend="local")
 
     assert ensure_calls == []
 
@@ -61,7 +63,7 @@ def test_ensure_dev_server_falls_back_to_cwd(monkeypatch):
         monkeypatch, gateway_backend="langgraph_server", default_workdir=""
     )
 
-    standalone._ensure_standalone_dev_server(config)
+    standalone._ensure_standalone_dev_server(config, backend="langgraph_server")
 
     assert len(ensure_calls) == 1
     assert ensure_calls[0]["workspace_dir"] == os.getcwd()
@@ -80,7 +82,7 @@ def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
     monkeypatch.setattr(
         standalone,
         "_ensure_standalone_dev_server",
-        lambda cfg: ensure_configs.append(cfg),
+        lambda cfg, *, backend=None: ensure_configs.append(cfg),
     )
     monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
 

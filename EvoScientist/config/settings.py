@@ -124,6 +124,21 @@ def get_config_path() -> Path:
     return get_config_dir() / "config.yaml"
 
 
+class GatewaySurface(StrEnum):
+    """A production surface that selects a gateway backend.
+
+    Each member maps to a per-surface ``gateway_backend_*`` config field; see
+    :func:`resolve_gateway_backend`. Only one surface runs per process, so a
+    surface resolves its backend once at startup and threads it explicitly.
+    """
+
+    SERVE = "serve"
+    SINGLE_SHOT = "single_shot"
+    INTERACTIVE = "interactive"
+    TUI = "tui"
+    STANDALONE = "standalone"
+
+
 # =============================================================================
 # Configuration dataclass
 # =============================================================================
@@ -278,6 +293,26 @@ class EvoScientistConfig:
     # sessions) until a surface actually cuts over to the server gateway -
     # skipping that init lands with the surface cutover, not here.
     gateway_backend: Literal["local", "langgraph_server"] = "local"
+
+    # Per-surface overrides of ``gateway_backend``. Each production surface can
+    # pick its own backend; ``"inherit"`` (the default) defers to the global
+    # ``gateway_backend`` above. This lets the fixed-workspace surfaces (serve,
+    # single-shot, standalone) move to the server backend while the interactive
+    # CLI and TUI stay local until the per-session-workspace (#413) and
+    # per-run-config-on-resume (#454) gaps close — the two surfaces where the
+    # server path is still lossy. Resolve with :func:`resolve_gateway_backend`;
+    # never read these fields directly for a routing decision.
+    gateway_backend_serve: Literal["inherit", "local", "langgraph_server"] = "inherit"
+    gateway_backend_single_shot: Literal["inherit", "local", "langgraph_server"] = (
+        "inherit"
+    )
+    gateway_backend_interactive: Literal["inherit", "local", "langgraph_server"] = (
+        "inherit"
+    )
+    gateway_backend_tui: Literal["inherit", "local", "langgraph_server"] = "inherit"
+    gateway_backend_standalone: Literal["inherit", "local", "langgraph_server"] = (
+        "inherit"
+    )
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -806,6 +841,33 @@ def _normalize_literal_fields(config: EvoScientistConfig) -> None:
         setattr(config, field.name, value)
 
 
+_GATEWAY_SURFACE_FIELDS: dict[GatewaySurface, str] = {
+    GatewaySurface.SERVE: "gateway_backend_serve",
+    GatewaySurface.SINGLE_SHOT: "gateway_backend_single_shot",
+    GatewaySurface.INTERACTIVE: "gateway_backend_interactive",
+    GatewaySurface.TUI: "gateway_backend_tui",
+    GatewaySurface.STANDALONE: "gateway_backend_standalone",
+}
+
+
+def resolve_gateway_backend(
+    config: Any,
+    surface: GatewaySurface,
+) -> Literal["local", "langgraph_server"]:
+    """Resolve the effective gateway backend for one surface.
+
+    Returns the surface's ``gateway_backend_*`` override when it is not
+    ``"inherit"``, else the global ``gateway_backend``. This is the single
+    place routing decisions read the flag from; callers thread the returned
+    value down (to the runtime factory and the dev-server spawn), so the
+    factory and manager never re-read the global and get a different answer.
+    """
+    override = getattr(config, _GATEWAY_SURFACE_FIELDS[surface], "inherit")
+    if override in ("local", "langgraph_server"):
+        return override
+    return getattr(config, "gateway_backend", "local")
+
+
 def get_config_value(key: str) -> Any:
     """Get a single configuration value.
 
@@ -908,6 +970,11 @@ _ENV_MAPPINGS = {
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
     "gateway_backend": "EVOSCIENTIST_GATEWAY_BACKEND",
+    "gateway_backend_serve": "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+    "gateway_backend_single_shot": "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+    "gateway_backend_interactive": "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+    "gateway_backend_tui": "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+    "gateway_backend_standalone": "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",

@@ -509,10 +509,17 @@ def run_textual_interactive(
     # (read side). The fallback-notice display is bound to the App's
     # _append_system once the App exists (on_mount); tool-selection needs no
     # display hook (its widget is mounted from the stream event).
+    from ..config import GatewaySurface, resolve_gateway_backend
     from ..stream.sink import SessionEventSink
+    from .commands import warn_server_backend_hitl_caveats
+
+    gateway_backend = resolve_gateway_backend(config, GatewaySurface.TUI)
+    warn_server_backend_hitl_caveats(gateway_backend, surface_label="TUI")
 
     event_sink = SessionEventSink()
-    runtime_gateways = create_runtime_gateways_for_config(config, events=event_sink)
+    runtime_gateways = create_runtime_gateways_for_config(
+        config, backend=gateway_backend, events=event_sink
+    )
     graph_gateway = runtime_gateways.graph_gateway
 
     try:
@@ -947,6 +954,7 @@ def run_textual_interactive(
                     await _sync_background_agent_server_workspace(
                         config,
                         workspace_dir=workspace_dir,
+                        backend=gateway_backend,
                     )
                 except WorkspaceMismatchError as exc:
                     # Another EvoSci process owns the langgraph dev for a
@@ -3714,6 +3722,7 @@ def run_textual_interactive(
                             await _sync_background_agent_server_workspace(
                                 config,
                                 workspace_dir=ws,
+                                backend=gateway_backend,
                             )
                         except WorkspaceMismatchError as _ws_mismatch_exc:
                             # Surface the user-actionable message via the

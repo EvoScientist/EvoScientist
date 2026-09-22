@@ -93,6 +93,7 @@ async def _async_main(
     use_agent: bool,
     send_thinking: bool,
     config: object = None,
+    backend: str | None = None,
 ) -> None:
     """Async entry point — gather channel, dispatcher and optional consumer."""
     from .channel_manager import ChannelManager
@@ -121,7 +122,7 @@ async def _async_main(
         # owned-runtime bridge.  Keep it off this already-running channel loop
         # (and avoid blocking channel health/startup work while it loads).
         agent = await _create_standalone_agent()
-        runtime_gateways = create_runtime_gateways_for_config(config)
+        runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
         logger.info("Agent loaded")
 
         consumer = InboundConsumer(
@@ -171,7 +172,9 @@ async def _async_main(
     await asyncio.gather(*tasks)
 
 
-def _ensure_standalone_dev_server(config: object) -> None:
+def _ensure_standalone_dev_server(
+    config: object, *, backend: str | None = None
+) -> None:
     """Spawn the langgraph dev server for a server-backed standalone runner.
 
     Spawns the same dev server serve uses so a headless channel running on the
@@ -190,7 +193,7 @@ def _ensure_standalone_dev_server(config: object) -> None:
     autoskill-schedule reconciliation and config-drift hint are intentionally not
     mirrored here (no console, and channels do not reconcile schedules).
     """
-    if getattr(config, "gateway_backend", "local") != "langgraph_server":
+    if backend != "langgraph_server":
         return
 
     import os
@@ -208,7 +211,7 @@ def _ensure_standalone_dev_server(config: object) -> None:
     ensure_dirs()
     logger.info("Starting background agent server (langgraph dev)...")
     try:
-        ensure_langgraph_dev(config, workspace_dir=ws)
+        ensure_langgraph_dev(config, workspace_dir=ws, backend=backend)
     except WorkspaceMismatchError as exc:
         logger.error("Cannot start server-backed standalone channel: %s", exc)
         raise
@@ -237,9 +240,15 @@ def run_standalone(
         thinking messages to the channel.
     """
     config = None
+    backend = None
     if use_agent:
-        from ..config import get_effective_config
+        from ..config import (
+            GatewaySurface,
+            get_effective_config,
+            resolve_gateway_backend,
+        )
 
         config = get_effective_config()
-        _ensure_standalone_dev_server(config)
-    asyncio.run(_async_main(channel, bus, use_agent, send_thinking, config))
+        backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
+        _ensure_standalone_dev_server(config, backend=backend)
+    asyncio.run(_async_main(channel, bus, use_agent, send_thinking, config, backend))
