@@ -190,8 +190,8 @@ def _configure_provider_base_url(
     elif provider == "xiaomi-token-plan":
         if strict:
             config.mimo_token_plan_base_url = (
-                config.mimo_token_plan_base_url
-                or os.environ.get("MIMO_TOKEN_PLAN_BASE_URL", "")
+                config.mimo_token_plan_base_url.strip()
+                or os.environ.get("MIMO_TOKEN_PLAN_BASE_URL", "").strip()
                 or _XIAOMI_TOKEN_PLAN_DEFAULT_BASE_URL
             )
         else:

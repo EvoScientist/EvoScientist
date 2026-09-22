@@ -1411,6 +1411,39 @@ class TestThirdPartyRouting:
             == "https://token-plan-sgp.xiaomimimo.com/anthropic"
         )
 
+    @pytest.mark.parametrize(
+        ("provider", "model", "env", "default"),
+        [
+            (
+                "xiaomi-token-plan",
+                "mimo-v2.6-pro",
+                "MIMO_TOKEN_PLAN_BASE_URL",
+                "https://token-plan-cn.xiaomimimo.com/anthropic",
+            ),
+            (
+                "minimax",
+                "MiniMax-M3",
+                "MINIMAX_BASE_URL",
+                "https://api.minimaxi.com/anthropic",
+            ),
+        ],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_blank_base_url_env_falls_back_to_default(
+        self, mock_init, monkeypatch, provider, model, env, default
+    ):
+        """A blank override must not drop base_url and route the key to api.anthropic.com."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv(env, "  ")
+
+        get_chat_model(model, provider=provider)
+
+        assert mock_init.call_args[1]["base_url"] == default
+
+    def test_mimo_short_name_defaults_to_pay_as_you_go(self):
+        assert MODELS["mimo-v2.6-pro"] == ("mimo-v2.6-pro", "xiaomi")
+        assert MODELS["mimo-v2.6-flash"] == ("mimo-v2.6-flash", "xiaomi")
+
     def test_xiaomi_host_maps_to_provider(self):
         """Provider error envelopes should identify Xiaomi MiMo by host."""
         from EvoScientist.llm.errors import _lookup_host_or_compat

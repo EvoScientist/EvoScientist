@@ -2654,6 +2654,22 @@ class TestXiaomiTokenPlanRegion:
             == "https://token-plan-cn.xiaomimimo.com/anthropic"
         )
 
+    def test_non_interactive_blank_env_reaches_validator_as_default(self, monkeypatch):
+        from EvoScientist.config.onboard.helpers import _provider_key_info
+        from EvoScientist.config.onboard.wizard import _configure_provider_base_url
+
+        monkeypatch.setenv("MIMO_TOKEN_PLAN_BASE_URL", "  ")
+        config = EvoScientistConfig()
+        _configure_provider_base_url(config, "xiaomi-token-plan", strict=True)
+        with patch(
+            "EvoScientist.config.onboard.helpers.validate_xiaomi_key"
+        ) as mock_validate:
+            _provider_key_info(config, "xiaomi-token-plan")[2]("tp-key")
+
+        default = "https://token-plan-cn.xiaomimimo.com/anthropic"
+        assert config.mimo_token_plan_base_url == default
+        assert mock_validate.call_args.kwargs["base_url"] == default
+
     def test_region_step_returns_selected_region(self):
         from EvoScientist.config.onboard.steps import _step_xiaomi_token_plan_region
 
@@ -2666,3 +2682,32 @@ class TestXiaomiTokenPlanRegion:
 
         assert url == "https://token-plan-sgp.xiaomimimo.com/anthropic"
         assert mock_select.call_args.kwargs["default"] == "ams"
+
+
+@pytest.mark.parametrize(
+    ("provider", "validator", "env", "default"),
+    [
+        (
+            "minimax",
+            "validate_minimax_key",
+            "MINIMAX_BASE_URL",
+            "https://api.minimaxi.com/anthropic",
+        ),
+        (
+            "xiaomi-token-plan",
+            "validate_xiaomi_key",
+            "MIMO_TOKEN_PLAN_BASE_URL",
+            "https://token-plan-cn.xiaomimimo.com/anthropic",
+        ),
+    ],
+)
+def test_key_validator_ignores_blank_base_url_env(
+    monkeypatch, provider, validator, env, default
+):
+    from EvoScientist.config.onboard.helpers import _provider_key_info
+
+    monkeypatch.setenv(env, "  ")
+    with patch(f"EvoScientist.config.onboard.helpers.{validator}") as mock_validate:
+        _provider_key_info(EvoScientistConfig(), provider)[2]("key")
+
+    assert mock_validate.call_args.kwargs["base_url"] == default

@@ -49,9 +49,8 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             lambda key: validate_minimax_key(
                 key,
                 base_url=config.minimax_base_url
-                or os.environ.get(
-                    "MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"
-                ),
+                or os.environ.get("MINIMAX_BASE_URL", "").strip()
+                or "https://api.minimaxi.com/anthropic",
             ),
         ),
         "nvidia": (
@@ -145,11 +144,9 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             or os.environ.get("MIMO_TOKEN_PLAN_API_KEY", ""),
             lambda key: validate_xiaomi_key(
                 key,
-                base_url=config.mimo_token_plan_base_url
-                or os.environ.get(
-                    "MIMO_TOKEN_PLAN_BASE_URL",
-                    "https://token-plan-cn.xiaomimimo.com/anthropic",
-                ),
+                base_url=config.mimo_token_plan_base_url.strip()
+                or os.environ.get("MIMO_TOKEN_PLAN_BASE_URL", "").strip()
+                or "https://token-plan-cn.xiaomimimo.com/anthropic",
             ),
         ),
         "custom-openai": (

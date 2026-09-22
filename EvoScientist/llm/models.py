@@ -52,6 +52,11 @@ from .registry import (
     list_models_by_provider,  # noqa: F401 — re-exported for existing import sites
 )
 
+_ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
+    "minimax": "MINIMAX_BASE_URL",
+    "xiaomi-token-plan": "MIMO_TOKEN_PLAN_BASE_URL",
+}
+
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
 # installed versions are advertised automatically.
 _CODEX_CLIENT_VERSION_FALLBACK = "0.144.1"
@@ -551,12 +556,11 @@ def get_chat_model(
                     "Anthropic-compatible API endpoint URL (e.g. https://api.anthropic.com)."
                 )
             base_url = base_url.rstrip("/")
-        elif provider == "minimax":
-            base_url = os.environ.get("MINIMAX_BASE_URL", base_url_default).rstrip("/")
-        elif provider == "xiaomi-token-plan":
-            base_url = os.environ.get(
-                "MIMO_TOKEN_PLAN_BASE_URL", base_url_default
-            ).rstrip("/")
+        elif provider in _ANTHROPIC_BASE_URL_OVERRIDE_ENV:
+            # A blank override must fall back, or ChatAnthropic defaults to
+            # api.anthropic.com and sends this provider's key there.
+            override = os.environ.get(_ANTHROPIC_BASE_URL_OVERRIDE_ENV[provider], "")
+            base_url = (override.strip() or base_url_default).rstrip("/")
         else:
             base_url = base_url_default
         if base_url:

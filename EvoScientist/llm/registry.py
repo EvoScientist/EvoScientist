@@ -294,12 +294,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("moonshot-v1-8k", "moonshot-v1-8k", "moonshot"),
     # Kimi Coding Plan (Anthropic-compatible)
     ("kimi-for-coding", "kimi-for-coding", "kimi-coding"),
-    # Xiaomi MiMo (Anthropic-compatible)
-    ("mimo-v2.6-pro", "mimo-v2.6-pro", "xiaomi"),
-    ("mimo-v2.6-flash", "mimo-v2.6-flash", "xiaomi"),
     # Xiaomi MiMo Token Plan (subscription, Anthropic-compatible)
     ("mimo-v2.6-pro", "mimo-v2.6-pro", "xiaomi-token-plan"),
     ("mimo-v2.6-flash", "mimo-v2.6-flash", "xiaomi-token-plan"),
+    # Xiaomi MiMo (Anthropic-compatible, default for simple lookups)
+    ("mimo-v2.6-pro", "mimo-v2.6-pro", "xiaomi"),
+    ("mimo-v2.6-flash", "mimo-v2.6-flash", "xiaomi"),
 ]
 
 # Public dict for simple lookups (last entry wins for duplicate names).
