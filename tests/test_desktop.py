@@ -202,24 +202,30 @@ def test_should_confirm_only_when_owned_and_active():
 
 
 def _patch_probe(monkeypatch, *, reachable, result=None, exc=None):
+    """Patch the reachability guard + the raw httpx probe used by
+    ``backend_has_active_runs`` (which bypasses the proxy via trust_env=False)."""
+    import httpx
+
     from EvoScientist.langgraph_dev import manager as lgm
-    from EvoScientist.langgraph_dev import sdk as lgsdk
 
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: reachable)
     captured = {}
 
-    class _Threads:
-        def search(self, **kwargs):
-            captured["kwargs"] = kwargs
-            if exc is not None:
-                raise exc
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
             return result if result is not None else []
 
-    monkeypatch.setattr(
-        lgsdk,
-        "get_langgraph_sync_client",
-        lambda **k: SimpleNamespace(threads=_Threads()),
-    )
+    def _fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        if exc is not None:
+            raise exc
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
     return captured
 
 
@@ -228,7 +234,9 @@ def test_active_runs_true_when_busy_thread(monkeypatch):
 
     captured = _patch_probe(monkeypatch, reachable=True, result=[{"thread_id": "t"}])
     assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is True
-    assert captured["kwargs"] == {"status": "busy", "limit": 1}
+    assert captured["url"].endswith("/threads/search")
+    assert captured["kwargs"]["json"] == {"status": "busy", "limit": 1}
+    assert captured["kwargs"]["trust_env"] is False  # must bypass the proxy
 
 
 def test_active_runs_false_when_idle(monkeypatch):
@@ -241,10 +249,11 @@ def test_active_runs_false_when_idle(monkeypatch):
 def test_active_runs_false_when_unreachable(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
-    _patch_probe(monkeypatch, reachable=False, result=[{"thread_id": "t"}])
+    captured = _patch_probe(monkeypatch, reachable=False, result=[{"thread_id": "t"}])
     # Unreachable backend: no reachable runs to protect → fail-open (False),
-    # and the client is never built/queried.
+    # and the probe endpoint is never hit.
     assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is False
+    assert captured == {}
 
 
 def test_active_runs_false_on_probe_error(monkeypatch):
