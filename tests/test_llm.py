@@ -2709,6 +2709,8 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
             provider="deepseek",
             http_client=client,
         )
+        # Pin the profile so the test does not track upstream profile data.
+        model.profile = {**(model.profile or {}), "image_inputs": False}
         model.invoke(
             [
                 HumanMessage("inspect the file"),

@@ -1100,6 +1100,16 @@ def test_real_selector_switches_to_auto_end_to_end(monkeypatch):
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    # langchain-anthropic >= 1.7.3 skips forced tool_choice for Opus 5.5 itself;
+    # emulate older releases, which still force it and hit the rejection.
+    import langchain_anthropic.chat_models as anthropic_chat_models
+
+    monkeypatch.setattr(
+        anthropic_chat_models,
+        "_supports_forced_tool_choice",
+        lambda _model: True,
+        raising=False,
+    )
     bodies = []
 
     def respond(request):
