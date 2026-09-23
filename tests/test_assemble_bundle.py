@@ -64,6 +64,17 @@ def test_extract_rejects_path_traversal(tmp_path):
         ab._extract_tar_subtree(tgz, strip="package/dist/", dest=tmp_path)
 
 
+def test_extract_rejects_sibling_prefix_path(tmp_path):
+    # A same-parent sibling (``<dest>-evil``) shares ``dest``'s string prefix but
+    # is outside it; the containment check must still reject it.
+    dest = tmp_path / "dist"
+    dest.mkdir()
+    tgz = _make_tar([("package/dist/../dist-evil/x", b"X")])
+    with pytest.raises(RuntimeError, match="unsafe path"):
+        ab._extract_tar_subtree(tgz, strip="package/dist/", dest=dest)
+    assert not (tmp_path / "dist-evil").exists()
+
+
 def test_node_arch_mapping_known_and_unknown(tmp_path):
     assert "win32-x64" in ab._NODE_ARCH
     # Unknown target fails fast, before any network access.

@@ -95,7 +95,10 @@ def _extract_tar_subtree(tgz: bytes, *, strip: str, dest: Path) -> tuple[int, in
             if not rel:
                 continue
             target = (dest / rel).resolve()
-            if not str(target).startswith(str(dest)):
+            # Path-containment check on the resolved path, not a string prefix:
+            # ``startswith(str(dest))`` would accept a same-parent sibling like
+            # ``<dest>-evil`` as if it were inside ``dest``.
+            if dest != target and dest not in target.parents:
                 raise RuntimeError(f"unsafe path in archive: {m.name}")
             if m.issym() or m.islnk():
                 skipped += 1
