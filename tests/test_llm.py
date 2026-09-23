@@ -3882,3 +3882,95 @@ class TestValidateRequestyKey:
         assert is_valid is False
         assert "inconclusive" in msg.lower()
         assert str(status) in msg
+
+
+class TestResolveProvider:
+    """Short-name resolution keeps the caller's provider when it serves the name."""
+
+    @pytest.fixture(autouse=True)
+    def _registry(self, monkeypatch):
+        from EvoScientist.llm import registry
+
+        entries = [
+            ("m", "m-plan", "vendor-plan"),
+            ("m", "m", "vendor"),
+            ("solo", "solo", "vendor"),
+        ]
+        monkeypatch.setattr(registry, "_MODEL_ENTRIES", entries)
+        monkeypatch.setattr(registry, "MODELS", {n: (mid, p) for n, mid, p in entries})
+
+    def test_keeps_preferred_provider_that_serves_the_name(self):
+        from EvoScientist.llm.registry import resolve_provider
+
+        assert resolve_provider("m", "vendor-plan") == "vendor-plan"
+
+    def test_falls_back_to_last_entry_otherwise(self):
+        from EvoScientist.llm.registry import resolve_provider
+
+        assert resolve_provider("m") == "vendor"
+        assert resolve_provider("solo", "vendor-plan") == "vendor"
+
+    def test_unknown_name(self):
+        from EvoScientist.llm.registry import resolve_provider
+
+        assert resolve_provider("nope", "vendor") is None
+
+
+@pytest.mark.parametrize(
+    ("region_url", "host"),
+    [
+        (None, "token-plan-cn.xiaomimimo.com"),
+        (
+            "https://token-plan-sgp.xiaomimimo.com/anthropic",
+            "token-plan-sgp.xiaomimimo.com",
+        ),
+    ],
+)
+def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
+    """Wire-level: the request lands on the Token Plan host with the tp- key."""
+    import json
+
+    import anthropic
+    from langchain_core.messages import HumanMessage
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("MIMO_TOKEN_PLAN_API_KEY", "tp-test")
+    if region_url:
+        monkeypatch.setenv("MIMO_TOKEN_PLAN_BASE_URL", region_url)
+    else:
+        monkeypatch.delenv("MIMO_TOKEN_PLAN_BASE_URL", raising=False)
+    model = get_chat_model("mimo-v2.6-pro", provider="xiaomi-token-plan")
+    captured = {}
+
+    def respond(request):
+        captured["url"] = str(request.url)
+        captured["api_key"] = request.headers.get("x-api-key")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "mimo-v2.6-pro",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # Rebuild the client from the model's own settings so routing is what's tested.
+    model._client = anthropic.Anthropic(
+        api_key=model.anthropic_api_key.get_secret_value(),
+        base_url=model.anthropic_api_url,
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    model.invoke([HumanMessage("hi")])
+
+    assert captured["url"] == f"https://{host}/anthropic/v1/messages"
+    assert captured["api_key"] == "tp-test"
+    assert captured["body"]["model"] == "mimo-v2.6-pro"
+    assert captured["body"]["max_tokens"] == 131072
+    assert captured["body"]["thinking"]["type"] == "enabled"

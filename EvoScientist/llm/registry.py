@@ -374,6 +374,18 @@ async def list_model_picker_entries(
     return entries
 
 
+def resolve_provider(model: str, preferred: str | None = None) -> str | None:
+    """Provider for a short name, staying on ``preferred`` when it serves it.
+
+    ``MODELS`` keeps only the last entry per short name, which would move a
+    user off their provider (Token Plan -> pay-as-you-go, native -> OpenRouter).
+    """
+    if preferred and any(n == model and p == preferred for n, _, p in _MODEL_ENTRIES):
+        return preferred
+    info = MODELS.get(model)
+    return info[1] if info else None
+
+
 def get_model_info(model: str) -> tuple[str, str] | None:
     """Get the (model_id, provider) tuple for a short name.
 

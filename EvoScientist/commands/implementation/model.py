@@ -6,11 +6,14 @@ from ..base import Argument, Command, CommandContext
 from ..manager import manager
 
 
-def extract_model_and_provider(args: list[str]) -> tuple[str, str]:
+def extract_model_and_provider(
+    args: list[str], current_provider: str | None = None
+) -> tuple[str, str]:
     """Parse model name and provider from argument list.
 
     Args:
         args: Non-empty argument list (model_name [provider]).
+        current_provider: Kept when it also serves the named model.
 
     Returns:
         ``(model_name, provider)`` tuple.
@@ -21,6 +24,7 @@ def extract_model_and_provider(args: list[str]) -> tuple[str, str]:
             locally-installed and never appear in ``MODELS``.
     """
     from ...llm.models import MODELS
+    from ...llm.registry import resolve_provider
 
     model_name = args[0]
     provider_override = args[1] if len(args) > 1 else None
@@ -37,7 +41,7 @@ def extract_model_and_provider(args: list[str]) -> tuple[str, str]:
     if provider_override:
         provider = provider_override
     else:
-        _, provider = MODELS[model_name]
+        provider = resolve_provider(model_name, current_provider)
 
     return model_name, provider
 
@@ -79,7 +83,9 @@ class ModelCommand(Command):
 
         if args:
             try:
-                model_name, provider = extract_model_and_provider(args)
+                model_name, provider = extract_model_and_provider(
+                    args, current_provider
+                )
             except ValueError:
                 ctx.ui.append_system(
                     f"Unknown model '{args[0]}'. Use /model to browse available models.",

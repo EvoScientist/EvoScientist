@@ -304,6 +304,26 @@ class TestConfigPaths:
 
 
 class TestLoadSaveReset:
+    def test_blank_yaml_values_fall_back_to_defaults(self, temp_config_dir):
+        """A hand-edited ``key:`` loads as None; it must not reach the config."""
+        from EvoScientist.config import get_config_path
+
+        path = get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "provider: minimax\n"
+            "minimax_base_url:\n"
+            "mimo_token_plan_base_url:\n"
+            "langgraph_dev_port:\n"
+        )
+
+        config = load_config()
+
+        assert config.provider == "minimax"
+        assert config.minimax_base_url == ""
+        assert config.mimo_token_plan_base_url == ""
+        assert config.langgraph_dev_port == EvoScientistConfig().langgraph_dev_port
+
     def test_load_returns_defaults_when_no_file(self, temp_config_dir, clean_env):
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()

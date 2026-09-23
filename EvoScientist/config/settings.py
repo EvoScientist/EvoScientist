@@ -636,9 +636,12 @@ def load_config() -> EvoScientistConfig:
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
-        # Filter to only valid fields
+        # Filter to only valid fields; a blank ``key:`` loads as None, which no
+        # field accepts, so it falls back to the default.
         valid_fields = {f.name for f in fields(EvoScientistConfig)}
-        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        filtered_data = {
+            k: v for k, v in data.items() if k in valid_fields and v is not None
+        }
 
         return EvoScientistConfig(**filtered_data)
     except Exception:
