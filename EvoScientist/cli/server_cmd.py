@@ -83,9 +83,13 @@ def server_stop() -> None:
             f"touched.[/yellow]"
         )
         if sys.platform == "win32":
+            # Stop-Process won't bind a bare PID from the pipeline; pass it as
+            # -Id explicitly. -State Listen + -Unique avoids stray/duplicate PIDs
+            # from established connections on the same port.
             manual = (
-                f'powershell "Get-NetTCPConnection -LocalPort {port} | '
-                f'Select-Object -ExpandProperty OwningProcess | Stop-Process"'
+                f'powershell "Get-NetTCPConnection -LocalPort {port} -State Listen '
+                f"| Select-Object -ExpandProperty OwningProcess -Unique "
+                f'| ForEach-Object {{ Stop-Process -Id $_ -Force }}"'
             )
         else:
             manual = f"kill $(lsof -ti :{port})"
