@@ -38,11 +38,21 @@ class _FakeWindow:
 
 class _FakeLauncher:
     def __init__(
-        self, *, start_exc=None, ready_exc=None, webui_url="http://127.0.0.1:4716"
+        self,
+        *,
+        start_exc=None,
+        ready_exc=None,
+        webui_url="http://127.0.0.1:4716",
+        backend_url="http://127.0.0.1:2024",
+        workspace_dir="/ws/old",
+        backend_started=True,
     ):
         self._start_exc = start_exc
         self._ready_exc = ready_exc
         self._webui_url = webui_url
+        self.backend_url = backend_url
+        self.workspace_dir = workspace_dir
+        self.backend_started = backend_started
         self.started = False
         self.stopped = False
 
@@ -110,13 +120,84 @@ def test_shutdown_stops_launcher():
     assert launcher.stopped
 
 
-def test_switch_workspace_stub_does_not_raise(caplog):
+def test_switch_workspace_no_factory_is_noop(caplog):
     win = _FakeWindow()
     launcher = _FakeLauncher()
     with caplog.at_level(logging.INFO, logger="EvoScientist.desktop"):
-        DesktopController(launcher, win).switch_workspace()
+        DesktopController(launcher, win).switch_workspace("/ws/new")
     assert not launcher.stopped
-    assert any("switch_workspace" in r.message for r in caplog.records)
+    assert any("no launcher factory" in r.message for r in caplog.records)
+
+
+def test_switch_workspace_restarts_with_new_launcher():
+    win = _FakeWindow()
+    old = _FakeLauncher(workspace_dir="/ws/old")
+    new = _FakeLauncher(webui_url="http://127.0.0.1:4900")
+    built: dict = {}
+
+    def factory(ws):
+        built["ws"] = ws
+        return new
+
+    ctl = DesktopController(
+        old,
+        win,
+        launcher_factory=factory,
+        busy_probe=lambda url: "idle",  # nothing running -> switch immediately
+    )
+    ctl.switch_workspace("/ws/new")
+
+    assert old.stopped  # old backend torn down
+    assert new.started  # new one booted
+    assert built["ws"] == "/ws/new"
+    assert ctl.launcher is new  # live launcher swapped
+    assert win.loaded_url == "http://127.0.0.1:4900"
+
+
+def test_switch_workspace_waits_until_idle():
+    win = _FakeWindow()
+    old = _FakeLauncher()
+    new = _FakeLauncher(webui_url="http://127.0.0.1:4901")
+    calls = {"n": 0}
+    slept: list = []
+
+    def probe(url):
+        calls["n"] += 1
+        return "idle" if calls["n"] >= 3 else "busy"
+
+    ctl = DesktopController(
+        old,
+        win,
+        launcher_factory=lambda ws: new,
+        busy_probe=probe,
+        sleep=slept.append,
+        poll_interval=0.01,
+    )
+    ctl.switch_workspace("/ws/new")
+
+    assert slept  # did not restart until the backend went idle
+    assert any("Waiting" in s for s in win.status)  # showed the wait status
+    assert old.stopped
+    assert new.started
+    assert ctl.launcher is new
+
+
+def test_switch_workspace_aborts_when_cancelled():
+    win = _FakeWindow()
+    old = _FakeLauncher()
+
+    ctl = DesktopController(
+        old,
+        win,
+        launcher_factory=lambda ws: _FakeLauncher(),
+        busy_probe=lambda url: "busy",  # would wait forever...
+        should_cancel=lambda: True,  # ...but the app is shutting down
+        sleep=lambda s: None,
+    )
+    ctl.switch_workspace("/ws/new")
+
+    assert not old.stopped  # no teardown, no relaunch on a closing app
+    assert ctl.launcher is old
 
 
 # --------------------------------------------------------------------------- #
@@ -271,6 +352,100 @@ def test_active_runs_false_on_probe_error(monkeypatch):
 
     _patch_probe(monkeypatch, reachable=True, exc=RuntimeError("boom"))
     assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is False
+
+
+# --------------------------------------------------------------------------- #
+# Tri-state probe + wait-for-idle (switch path)
+# --------------------------------------------------------------------------- #
+def test_probe_busy_state_busy(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    _patch_probe(monkeypatch, reachable=True, result=[{"thread_id": "t"}])
+    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "busy"
+
+
+def test_probe_busy_state_idle(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    _patch_probe(monkeypatch, reachable=True, result=[])
+    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "idle"
+
+
+def test_probe_busy_state_unreachable_is_idle(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # Backend gone -> its runs are gone -> a restart is safe -> "idle".
+    _patch_probe(monkeypatch, reachable=False)
+    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "idle"
+
+
+def test_probe_busy_state_error_is_unknown(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # Backend up but the probe threw -> we cannot tell -> "unknown".
+    _patch_probe(monkeypatch, reachable=True, exc=RuntimeError("boom"))
+    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "unknown"
+
+
+def test_wait_for_backend_idle_returns_immediately_when_idle():
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    slept: list = []
+    ok = dshutdown.wait_for_backend_idle(
+        "http://x", probe=lambda url: "idle", sleep=slept.append
+    )
+    assert ok is True
+    assert slept == []  # never waited
+
+
+def test_wait_for_backend_idle_treats_unknown_as_busy():
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    states = iter(["busy", "unknown", "idle"])
+    slept: list = []
+    ok = dshutdown.wait_for_backend_idle(
+        "http://x",
+        probe=lambda url: next(states),
+        sleep=slept.append,
+        poll_interval=0.5,
+    )
+    assert ok is True
+    # "unknown" must NOT end the wait: two sleeps (after busy, after unknown).
+    assert slept == [0.5, 0.5]
+
+
+def test_wait_for_backend_idle_cancel_returns_false():
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    probed: list = []
+
+    def _probe(url):
+        probed.append(url)
+        return "busy"
+
+    ok = dshutdown.wait_for_backend_idle(
+        "http://x", probe=_probe, sleep=lambda s: None, should_cancel=lambda: True
+    )
+    assert ok is False
+    assert probed == []  # cancel is checked before probing
+
+
+# --------------------------------------------------------------------------- #
+# Shell folder-picker helpers
+# --------------------------------------------------------------------------- #
+def test_first_path_folds_dialog_results():
+    assert shell._first_path(None) is None
+    assert shell._first_path(()) is None
+    assert shell._first_path(("/a", "/b")) == "/a"
+    assert shell._first_path("/a") == "/a"
+
+
+def test_same_dir_normalises(tmp_path):
+    d = tmp_path / "ws"
+    d.mkdir()
+    assert shell._same_dir(str(d), str(d)) is True
+    assert shell._same_dir(str(d), str(tmp_path / "other")) is False
+    assert shell._same_dir(None, str(d)) is False
 
 
 class _RecordingLoaded:

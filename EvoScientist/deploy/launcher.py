@@ -299,6 +299,13 @@ class WebUILauncher:
         return f"http://{_format_hostport(self._cfg.webui_host, self._cfg.webui_port)}"
 
     @property
+    def workspace_dir(self) -> str:
+        """The workspace this launcher's backend serves. Read by the desktop
+        shell to seed the folder picker and skip a no-op switch, and by the
+        controller when rebuilding a launcher for a new workspace."""
+        return self._cfg.workspace_dir
+
+    @property
     def backend_started(self) -> bool:
         """True when this launcher started (and thus owns teardown of) the
         backend; False when it reused an already-running one. Closing the

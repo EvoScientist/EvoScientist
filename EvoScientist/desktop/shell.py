@@ -10,12 +10,33 @@ from __future__ import annotations
 
 import html
 import logging
+import os
 import threading
 
 from .controller import DesktopController
 from .setup import apply_setup, render_setup_html, setup_needed, validate_setup
 
 logger = logging.getLogger("EvoScientist.desktop")
+
+
+def _first_path(selection) -> str | None:
+    """Normalise a pywebview folder-dialog result to a single path or None.
+
+    ``create_file_dialog`` returns a tuple/list of selected paths, ``None`` when
+    the user cancels, and (on some backends) a bare string. Fold all three."""
+    if not selection:
+        return None
+    if isinstance(selection, (list, tuple)):
+        return selection[0] if selection else None
+    return str(selection)
+
+
+def _same_dir(a: str | None, b: str | None) -> bool:
+    """True if two paths point at the same directory (case-insensitive on
+    Windows), so a picker that reselects the current workspace is a no-op."""
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 def _configure_logging() -> None:
@@ -210,14 +231,18 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         js_api=setup_api,
     )
     win = _WebviewWindow(window)
-    state: dict = {"launcher": None, "controller": None}
+    # The controller owns the live launcher (``switch_workspace`` replaces it),
+    # so read the current backend/webui through ``controller.launcher`` — never a
+    # cached launcher reference, which goes stale after a switch.
+    state: dict = {"controller": None}
+    switch_lock = threading.Lock()
 
     def _shutdown() -> None:
         cancelled.set()
         setup_done.set()  # release a boot thread blocked waiting on setup
-        launcher = state["launcher"]
-        if launcher is not None:
-            launcher.stop()
+        controller = state["controller"]
+        if controller is not None and controller.launcher is not None:
+            controller.launcher.stop()
 
     def _on_closing() -> bool:
         """pywebview ``closing`` handler (fires before close; returning False
@@ -226,9 +251,10 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         Returns True (allow close) in every other case, including any probe
         error, so a flaky check never traps the user in an unclosable window.
         """
-        launcher = state["launcher"]
-        if launcher is None:
+        controller = state["controller"]
+        if controller is None or controller.launcher is None:
             return True
+        launcher = controller.launcher
         try:
             from .shutdown import backend_has_active_runs, should_confirm_close
 
@@ -250,21 +276,72 @@ def run_desktop(workspace_dir: str | None = None) -> None:
             return True
 
     def _switch_workspace() -> None:
-        """Native "Workspace > Switch Workspace…" menu action. Delegates to the
-        controller, which owns the (still-stubbed) switch logic. The menu is
-        built before the boot thread creates the controller, so ignore clicks
-        that arrive before services are up.
+        """Native "Workspace > Switch Workspace…" menu action.
+
+        Picks a folder, then hands the switch to the controller on a background
+        thread — the switch waits for in-flight runs to finish before restarting
+        the backend, which must not block the GUI thread. The menu is built
+        before the boot thread creates the controller, so clicks that arrive
+        before services are up are ignored.
         """
         controller = state["controller"]
         if controller is None:
             logger.info("switch_workspace requested before services ready; ignoring")
             return
-        controller.switch_workspace()
+        current = controller.launcher.workspace_dir
+        try:
+            import webview
+
+            selection = window.create_file_dialog(
+                webview.FileDialog.FOLDER, directory=current
+            )
+        except Exception as exc:  # a picker failure must not crash the menu
+            logger.warning("workspace picker failed: %s", exc)
+            return
+        target = _first_path(selection)
+        if target is None:
+            logger.info("workspace switch cancelled at picker")
+            return
+        if _same_dir(target, current):
+            logger.info("workspace switch to the current workspace; ignoring")
+            return
+        # Serialize switches: a second click while one is running is a no-op.
+        if not switch_lock.acquire(blocking=False):
+            logger.info("workspace switch already in progress; ignoring")
+            return
+
+        def _run() -> None:
+            try:
+                controller.switch_workspace(target)
+            finally:
+                switch_lock.release()
+
+        threading.Thread(
+            target=_run, name="evosci-workspace-switch", daemon=True
+        ).start()
 
     # ``closing`` gates the close (confirm on active tasks); ``closed`` does the
     # actual idempotent teardown once the close is allowed to proceed.
     window.events.closing += _on_closing
     window.events.closed += _shutdown
+
+    def make_launcher(ws: str | None) -> WebUILauncher:
+        """Build a launcher pinned to workspace ``ws``. Used for the initial
+        boot and, as the controller's ``launcher_factory``, for each workspace
+        switch — so a switch reuses the exact same launch configuration, only
+        the workspace changing. Reads the current ``config`` (which the setup
+        step below may have re-resolved).
+
+        Desktop shell: no terminal to act on a port conflict, so ``auto_port``
+        falls back to a free port instead of dead-ending at the error panel.
+        """
+        cfg = build_launcher_config(config, ws, auto_port=True)
+        runner = BundledWebUIRunner(
+            app_dir=app_paths.webui_dir(),
+            node_exe=app_paths.node_exe(),
+            log_path=app_paths.webui_log_path(),
+        )
+        return WebUILauncher(config, cfg, runner)
 
     def boot() -> bool:
         nonlocal config
@@ -283,17 +360,12 @@ def run_desktop(workspace_dir: str | None = None) -> None:
             config = get_effective_config()
             apply_config_to_env(config)
 
-        # Desktop shell: no terminal to act on a port conflict, so fall back to
-        # a free port instead of dead-ending at the error panel.
-        cfg = build_launcher_config(config, workspace_dir, auto_port=True)
-        runner = BundledWebUIRunner(
-            app_dir=app_paths.webui_dir(),
-            node_exe=app_paths.node_exe(),
-            log_path=app_paths.webui_log_path(),
+        controller = DesktopController(
+            make_launcher(workspace_dir),
+            win,
+            launcher_factory=make_launcher,
+            should_cancel=cancelled.is_set,
         )
-        launcher = WebUILauncher(config, cfg, runner)
-        state["launcher"] = launcher
-        controller = DesktopController(launcher, win)
         state["controller"] = controller
         return controller.boot()
 
