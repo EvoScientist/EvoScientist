@@ -18,14 +18,6 @@ logger = logging.getLogger("EvoScientist.desktop")
 
 ActiveState = Literal["idle", "active", "unknown"]
 
-# Thread statuses that mean work is in flight and the app-owned backend must not
-# be torn down under it. ``busy`` = a run is executing (includes background
-# sub-agents, which run on their own threads); ``interrupted`` = a run is paused
-# awaiting human input (ask_user / HITL) — still a live turn, not a finished one.
-# (langgraph ThreadStatus is idle | busy | interrupted | error; ``error`` is
-# terminal, ``idle`` is done.)
-_ACTIVE_THREAD_STATUSES = ("busy", "interrupted")
-
 
 def should_confirm_close(backend_started: bool, has_active: bool) -> bool:
     """Whether closing should prompt the user first.
@@ -38,76 +30,123 @@ def should_confirm_close(backend_started: bool, has_active: bool) -> bool:
     return bool(backend_started and has_active)
 
 
-def _probe_active_state(url: str, *, timeout: float = 3.0) -> ActiveState:
-    """Tri-state active-work probe for the backend at ``url``.
+def _search_threads(url: str, payload: dict, *, timeout: float) -> list:
+    """Raw ``POST /threads/search`` returning the matched threads (may be empty).
 
-    Work is "active" when any thread is ``busy`` (a run executing, including
-    background sub-agents on their own threads) OR ``interrupted`` (a run paused
-    awaiting human input — ask_user / HITL — which is still a live turn, not a
-    finished one). Answered with a ``POST /threads/search`` (limit 1) per status
-    in :data:`_ACTIVE_THREAD_STATUSES`; the endpoint filters one status at a
-    time, so this is one short request each, short-circuiting on the first hit.
-
-    Each request is a raw ``httpx`` call using ``trust_env=False`` and a short
-    timeout, NOT the langgraph SDK client. The SDK's client (``get_sync_client``)
-    builds its ``httpx.Client`` without ``trust_env=False`` and with a 300s read
-    timeout, so on Windows it routes this 127.0.0.1 call through the
-    system/registry proxy (present even with no ``*_PROXY`` env vars) — a
-    VPN/corporate proxy then swallows the loopback request, making a genuinely
-    active backend look idle (and can stall the GUI thread for the long timeout).
-    ``trust_env=False`` bypasses the proxy, exactly as ``is_langgraph_dev_running``
-    does for the health check.
-
-    Returns:
-        - ``"idle"`` — backend unreachable (its runs are already gone), or every
-          status was probed successfully and none matched.
-        - ``"active"`` — a successful probe found at least one busy/interrupted
-          thread.
-        - ``"unknown"`` — the backend is up but a probe request errored (timeout,
-          refused, bad response) and no other probe confirmed activity, so the
-          caller cannot tell whether work is in flight.
-
-    The two callers collapse this differently, which is the whole point of the
-    tri-state: :func:`backend_has_active_runs` (close path) folds ``"unknown"``
-    to *not active* so a flaky probe never traps the user in an unclosable
-    window; :func:`wait_for_backend_idle` (switch path) folds ``"unknown"`` to
-    *keep waiting* so a transient error never ends the wait and kills a live run.
+    A raw ``httpx`` call using ``trust_env=False`` and a short timeout, NOT the
+    langgraph SDK client. The SDK's client (``get_sync_client``) builds its
+    ``httpx.Client`` without ``trust_env=False`` and with a 300s read timeout, so
+    on Windows it routes this 127.0.0.1 call through the system/registry proxy
+    (present even with no ``*_PROXY`` env vars) — a VPN/corporate proxy then
+    swallows the loopback request, making a genuinely active backend look idle
+    (and can stall the GUI thread for the long timeout). ``trust_env=False``
+    bypasses the proxy, exactly as ``is_langgraph_dev_running`` does for the
+    health check. Raises on any transport/HTTP error (the caller decides how to
+    treat "couldn't tell").
     """
     import httpx
 
-    from ..langgraph_dev.manager import is_langgraph_dev_running
     from ..langgraph_dev.sdk import langgraph_dev_headers
+
+    resp = httpx.post(
+        f"{url}/threads/search",
+        json=payload,
+        headers=langgraph_dev_headers(),
+        timeout=timeout,
+        trust_env=False,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _probe_active_state(
+    url: str, *, watched_thread_id: str | None = None, timeout: float = 3.0
+) -> ActiveState:
+    """Tri-state active-work probe for the backend at ``url``.
+
+    Work is "active" when either:
+
+    - ANY thread is ``busy`` — a run is executing (including background
+      sub-agents, which run on their own threads). Busy work is finite and a
+      restart kills it, so it blocks regardless of which thread the user is on.
+    - the WATCHED thread (``watched_thread_id``, the one open in the WebUI) is
+      ``interrupted`` — a turn paused awaiting human input (ask_user / HITL).
+      Interrupted threads are checkpointed to ``.langgraph_api`` and survive a
+      restart (resumable, not lost), and they accumulate, so a stale interrupted
+      thread the user is NOT watching must not block; only the one they are
+      actively deciding does. With no ``watched_thread_id`` the interrupted check
+      is skipped entirely (used by the close path — see
+      :func:`backend_has_active_runs`).
+
+    Answered with a ``POST /threads/search`` (limit 1) per check; the endpoint
+    filters one ``status`` at a time and ANDs an ``ids`` filter, so the watched
+    check is ``{status: "interrupted", ids: [watched], limit: 1}``.
+
+    Returns:
+        - ``"idle"`` — backend unreachable (its runs are already gone), or every
+          check ran and none matched.
+        - ``"active"`` — a check confirmed busy work or a watched interrupt.
+        - ``"unknown"`` — the backend is up but a check errored (timeout,
+          refused, bad response) and no other check confirmed activity, so the
+          caller cannot tell whether work is in flight.
+
+    The two callers collapse ``"unknown"`` differently, which is the whole point
+    of the tri-state: :func:`backend_has_active_runs` (close path) folds it to
+    *not active* so a flaky probe never traps the user in an unclosable window;
+    :func:`wait_for_backend_idle` (switch path) folds it to *keep waiting* so a
+    transient error never ends the wait and kills a live run.
+    """
+    from ..langgraph_dev.manager import is_langgraph_dev_running
 
     if not is_langgraph_dev_running(base_url=url):
         return "idle"
     saw_unknown = False
-    for status in _ACTIVE_THREAD_STATUSES:
+    # Any busy thread anywhere blocks (finite executing work a restart kills).
+    try:
+        if _search_threads(url, {"status": "busy", "limit": 1}, timeout=timeout):
+            return "active"
+    except Exception as exc:
+        logger.warning("Active-work probe (busy) failed for %s: %s", url, exc)
+        saw_unknown = True
+    # An interrupted thread blocks only when it is the one the user is watching.
+    if watched_thread_id:
         try:
-            resp = httpx.post(
-                f"{url}/threads/search",
-                json={"status": status, "limit": 1},
-                headers=langgraph_dev_headers(),
+            if _search_threads(
+                url,
+                {"status": "interrupted", "ids": [watched_thread_id], "limit": 1},
                 timeout=timeout,
-                trust_env=False,
-            )
-            resp.raise_for_status()
-            if resp.json():
+            ):
                 return "active"
         except Exception as exc:
-            logger.warning("Active-work probe (%s) failed for %s: %s", status, url, exc)
+            logger.warning(
+                "Active-work probe (interrupted %s) failed for %s: %s",
+                watched_thread_id,
+                url,
+                exc,
+            )
             saw_unknown = True
     return "unknown" if saw_unknown else "idle"
 
 
-def backend_has_active_runs(url: str, *, timeout: float = 3.0) -> bool:
-    """Return True if the backend at ``url`` has any busy or interrupted thread.
+def backend_has_active_runs(
+    url: str, *, watched_thread_id: str | None = None, timeout: float = 3.0
+) -> bool:
+    """Return True if the backend at ``url`` has active work.
+
+    Same definition as the switch: any thread ``busy``, or the WATCHED thread
+    (``watched_thread_id``, the one open in the WebUI) ``interrupted``. So closing
+    prompts when it would kill a running turn or abandon the interrupt the user is
+    on, but not for a stale interrupted thread they are not looking at.
 
     Fails OPEN (returns False) when the backend is unreachable or the probe
     errors: an unreachable backend has no reachable runs to protect, and a close
     must never hang or be vetoed by a flaky probe. Thin bool view over
     :func:`_probe_active_state` — only a confirmed ``"active"`` counts.
     """
-    return _probe_active_state(url, timeout=timeout) == "active"
+    return (
+        _probe_active_state(url, watched_thread_id=watched_thread_id, timeout=timeout)
+        == "active"
+    )
 
 
 def wait_for_backend_idle(

@@ -94,18 +94,25 @@ class DesktopController:
             self._window.show_error("unexpected", str(exc), None)
             return False
 
-    def switch_workspace(self, workspace_dir: str) -> None:
+    def switch_workspace(
+        self, workspace_dir: str, watched_thread_id: str | None = None
+    ) -> None:
         """Switch the active workspace to ``workspace_dir`` (issue #484 Part 6).
 
         Single active workspace, controlled restart: wait for the app-owned
-        backend to finish every active turn — runs, background sub-agents, and
-        turns paused awaiting human input — then tear it down and boot a fresh
+        backend to finish every active turn, then tear it down and boot a fresh
         launcher pinned to the new workspace, reloading the WebUI. No confirm
         dialog: the wait, not a prompt, is how in-flight work is protected, and
         while it waits a non-blocking banner keeps the WebUI visible so the user
         can watch and answer the current turn. Follows the desktop's existing
         restart path (stop launcher -> rebuild -> boot), so moving to #413 Phase
         1 later only changes what this method calls.
+
+        ``watched_thread_id`` is the thread the user has open in the WebUI (read
+        from the URL by the shell). The wait blocks on any busy thread anywhere,
+        but on an ``interrupted`` (HITL) thread only when it is this watched one
+        — a stale interrupted turn the user is not looking at must not block the
+        switch (interrupted turns are saved and resumable, and they accumulate).
 
         The single choke point the switch flows through: the native menu drives
         it today, and a future in-WebUI switcher drives the same method.
@@ -117,9 +124,15 @@ class DesktopController:
         from .shutdown import _probe_active_state, wait_for_backend_idle
 
         backend_url = self._launcher.backend_url
-        logger.info("workspace switch requested -> %s", workspace_dir)
+        logger.info(
+            "workspace switch requested -> %s (watched thread %s)",
+            workspace_dir,
+            watched_thread_id or "none",
+        )
 
-        probe = self._active_probe or _probe_active_state
+        probe = self._active_probe or (
+            lambda u: _probe_active_state(u, watched_thread_id=watched_thread_id)
+        )
         waiting = probe(backend_url) != "idle"
         if waiting:
             # Keep the WebUI visible (non-blocking banner) so the user can keep

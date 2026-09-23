@@ -12,12 +12,21 @@ import html
 import json
 import logging
 import os
+import re
 import threading
 
 from .controller import DesktopController
 from .setup import apply_setup, render_setup_html, setup_needed, validate_setup
 
 logger = logging.getLogger("EvoScientist.desktop")
+
+# UUID (any version) — the shape of a langgraph thread id. Used to reject a
+# malformed ``threadId`` read from the WebUI URL before it reaches a backend
+# query (a bad id would 404/400 the probe, which the switch would read as
+# "can't tell" and wait forever).
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
 
 
 def _first_path(selection) -> str | None:
@@ -182,6 +191,22 @@ class _WebviewWindow:
         except Exception as exc:  # a banner must never block or crash the switch
             logger.warning("pending-banner JS failed: %s", exc)
 
+    def current_thread_id(self) -> str | None:
+        """The thread the user is viewing, read from the WebUI URL's ``threadId``
+        query param. Best-effort and validated as a UUID — returns None if it is
+        absent, malformed, or unreadable, so the switch falls back to gating on
+        busy work only (never blocks forever on a bad id)."""
+        try:
+            tid = self._window.evaluate_js(
+                "new URLSearchParams(window.location.search).get('threadId')"
+            )
+        except Exception as exc:
+            logger.warning("current-thread read failed: %s", exc)
+            return None
+        if isinstance(tid, str) and _UUID_RE.match(tid.strip()):
+            return tid.strip()
+        return None
+
 
 class _SetupApi:
     """pywebview ``js_api`` for the first-run setup form.
@@ -289,7 +314,9 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         try:
             from .shutdown import backend_has_active_runs, should_confirm_close
 
-            active = backend_has_active_runs(launcher.backend_url)
+            active = backend_has_active_runs(
+                launcher.backend_url, watched_thread_id=win.current_thread_id()
+            )
             if not should_confirm_close(launcher.backend_started, active):
                 return True
             ok = bool(
@@ -320,6 +347,9 @@ def run_desktop(workspace_dir: str | None = None) -> None:
             logger.info("switch_workspace requested before services ready; ignoring")
             return
         current = controller.launcher.workspace_dir
+        # Read the watched thread here on the GUI thread (evaluate_js), before the
+        # picker steals focus, so the switch gates on the turn the user is on.
+        watched = win.current_thread_id()
         try:
             import webview
 
@@ -343,7 +373,7 @@ def run_desktop(workspace_dir: str | None = None) -> None:
 
         def _run() -> None:
             try:
-                controller.switch_workspace(target)
+                controller.switch_workspace(target, watched_thread_id=watched)
             finally:
                 switch_lock.release()
 

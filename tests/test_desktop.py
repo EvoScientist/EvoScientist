@@ -211,6 +211,24 @@ def test_switch_workspace_aborts_when_cancelled():
     assert win.pending_cleared  # banner removed on abort
 
 
+def test_switch_workspace_passes_watched_thread_to_default_probe(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    seen: dict = {}
+
+    def fake_probe(url, *, watched_thread_id=None, timeout=3.0):
+        seen["watched"] = watched_thread_id
+        return "idle"
+
+    monkeypatch.setattr(dshutdown, "_probe_active_state", fake_probe)
+    win = _FakeWindow()
+    ctl = DesktopController(  # no active_probe -> uses the default via a partial
+        _FakeLauncher(), win, launcher_factory=lambda ws: _FakeLauncher()
+    )
+    ctl.switch_workspace("/ws/new", watched_thread_id="abc-123")
+    assert seen["watched"] == "abc-123"
+
+
 # --------------------------------------------------------------------------- #
 # app_paths
 # --------------------------------------------------------------------------- #
@@ -365,15 +383,21 @@ def test_active_runs_false_on_probe_error(monkeypatch):
     assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is False
 
 
+_WATCHED = "01a07c30-3858-7bb2-a0e4-288cdc91f264"
+
+
 def _patch_probe_by_status(monkeypatch, mapping):
     """Patch the probe so each ``/threads/search`` call returns the result list
     ``mapping`` gives for its requested status (default empty). Lets a test make
-    ``busy`` empty but ``interrupted`` non-empty, and vice versa."""
+    ``busy`` empty but ``interrupted`` non-empty, and vice versa. Returns a list
+    that captures each call's JSON payload, so a test can assert the ``ids``
+    filter carried the watched thread."""
     import httpx
 
     from EvoScientist.langgraph_dev import manager as lgm
 
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: True)
+    calls: list[dict] = []
 
     class _Resp:
         def __init__(self, data):
@@ -386,10 +410,12 @@ def _patch_probe_by_status(monkeypatch, mapping):
             return self._data
 
     def _fake_post(url, **kwargs):
-        status = kwargs["json"]["status"]
-        return _Resp(mapping.get(status, []))
+        payload = kwargs["json"]
+        calls.append(payload)
+        return _Resp(mapping.get(payload["status"], []))
 
     monkeypatch.setattr(httpx, "post", _fake_post)
+    return calls
 
 
 # --------------------------------------------------------------------------- #
@@ -402,20 +428,44 @@ def test_probe_active_state_busy(monkeypatch):
     assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "active"
 
 
-def test_probe_active_state_interrupted(monkeypatch):
+def test_probe_active_state_watched_interrupted_is_active(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
-    # A turn paused awaiting human input (HITL) is "interrupted", not "busy" —
-    # it must still count as active so a switch does not fire mid-turn.
-    _patch_probe_by_status(monkeypatch, {"busy": [], "interrupted": [{"id": "t"}]})
-    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "active"
+    # The WATCHED thread awaiting HITL input is active — the switch must wait.
+    calls = _patch_probe_by_status(
+        monkeypatch, {"busy": [], "interrupted": [{"id": _WATCHED}]}
+    )
+    assert (
+        dshutdown._probe_active_state(
+            "http://127.0.0.1:6174", watched_thread_id=_WATCHED
+        )
+        == "active"
+    )
+    # the interrupted probe scoped to the watched thread via the ids filter
+    interrupted = [c for c in calls if c["status"] == "interrupted"]
+    assert interrupted
+    assert interrupted[0]["ids"] == [_WATCHED]
+
+
+def test_probe_active_state_unwatched_interrupted_is_idle(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # An interrupted thread the user is NOT watching (or with no watched thread)
+    # must not block: interrupted turns are saved/resumable and accumulate.
+    _patch_probe_by_status(monkeypatch, {"busy": [], "interrupted": [{"id": "other"}]})
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "idle"
 
 
 def test_probe_active_state_idle(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
     _patch_probe(monkeypatch, reachable=True, result=[])
-    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "idle"
+    assert (
+        dshutdown._probe_active_state(
+            "http://127.0.0.1:6174", watched_thread_id=_WATCHED
+        )
+        == "idle"
+    )
 
 
 def test_probe_active_state_unreachable_is_idle(monkeypatch):
@@ -434,13 +484,27 @@ def test_probe_active_state_error_is_unknown(monkeypatch):
     assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "unknown"
 
 
-def test_active_runs_true_when_interrupted(monkeypatch):
+def test_active_runs_false_when_interrupted_not_watched(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
-    # Close path also treats an interrupted (HITL) turn as active, so closing
-    # while a turn awaits input prompts before tearing the backend down.
+    # With no watched thread, an interrupted turn does not count — a stale
+    # interrupt the user is not looking at must not make close prompt.
     _patch_probe_by_status(monkeypatch, {"busy": [], "interrupted": [{"id": "t"}]})
-    assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is True
+    assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is False
+
+
+def test_active_runs_true_when_watched_interrupted(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # Close prompts on the WATCHED interrupt too (same rule as the switch):
+    # global busy + watched interrupt.
+    _patch_probe_by_status(monkeypatch, {"busy": [], "interrupted": [{"id": _WATCHED}]})
+    assert (
+        dshutdown.backend_has_active_runs(
+            "http://127.0.0.1:6174", watched_thread_id=_WATCHED
+        )
+        is True
+    )
 
 
 def test_wait_for_backend_idle_returns_immediately_when_idle():
@@ -502,6 +566,37 @@ def test_same_dir_normalises(tmp_path):
     assert shell._same_dir(str(d), str(d)) is True
     assert shell._same_dir(str(d), str(tmp_path / "other")) is False
     assert shell._same_dir(None, str(d)) is False
+
+
+class _FakeRawWindow:
+    """Stand-in for a pywebview window exposing only ``evaluate_js``."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def evaluate_js(self, script):
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+def test_current_thread_id_reads_valid_uuid():
+    win = shell._WebviewWindow(_FakeRawWindow(_WATCHED))
+    assert win.current_thread_id() == _WATCHED
+
+
+def test_current_thread_id_rejects_non_uuid_and_missing():
+    # No thread selected (JS returns null) or a malformed value -> None, so the
+    # switch falls back to busy-only gating instead of a bad backend query.
+    assert shell._WebviewWindow(_FakeRawWindow(None)).current_thread_id() is None
+    assert (
+        shell._WebviewWindow(_FakeRawWindow("not-a-uuid")).current_thread_id() is None
+    )
+
+
+def test_current_thread_id_swallows_eval_errors():
+    win = shell._WebviewWindow(_FakeRawWindow(RuntimeError("no page")))
+    assert win.current_thread_id() is None
 
 
 class _RecordingLoaded:
