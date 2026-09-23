@@ -163,20 +163,30 @@ class _WebviewWindow:
 
     def show_pending(self, message: str) -> None:
         """Inject/update a fixed banner over the LIVE WebUI (no navigation), so
-        a pending workspace switch shows without hiding the current turn. Runs JS
-        in the third-party WebUI page, so it is strictly best-effort — a failure
-        must never block the switch. ``json.dumps`` makes the message a safe JS
-        string literal."""
+        a pending workspace switch shows without hiding the current turn. Carries
+        a Cancel button that calls the exposed ``cancel_workspace_switch`` bridge
+        (see :func:`run_desktop`) to abort the wait and stay in the current
+        workspace. Runs JS in the third-party WebUI page, so it is strictly
+        best-effort — a failure must never block the switch. ``json.dumps`` makes
+        the message a safe JS string literal."""
         self._eval_best_effort(
             "(function(){var id='__evosci_pending__';"
             "var d=document.getElementById(id);"
             "if(!d){d=document.createElement('div');d.id=id;"
             "d.style.cssText='position:fixed;top:0;left:0;right:0;"
-            "z-index:2147483647;padding:8px 14px;text-align:center;"
+            "z-index:2147483647;padding:8px 14px;display:flex;align-items:center;"
+            "justify-content:center;gap:12px;"
             "font:13px -apple-system,Segoe UI,system-ui,sans-serif;"
             "background:#1a73e8;color:#fff;box-shadow:0 1px 6px rgba(0,0,0,.3);';"
-            "document.body.appendChild(d);}"
-            f"d.textContent={json.dumps(message)};}})();"
+            "var m=document.createElement('span');m.id='__evosci_pending_msg__';"
+            "var b=document.createElement('button');b.textContent='Cancel';"
+            "b.style.cssText='font:inherit;padding:2px 10px;border:1px solid #fff;"
+            "border-radius:4px;background:transparent;color:#fff;cursor:pointer;';"
+            "b.onclick=function(){this.disabled=true;this.textContent='Cancelling\\u2026';"
+            "try{window.pywebview.api.cancel_workspace_switch();}catch(e){}};"
+            "d.appendChild(m);d.appendChild(b);document.body.appendChild(d);}"
+            f"document.getElementById('__evosci_pending_msg__').textContent="
+            f"{json.dumps(message)};}})();"
         )
 
     def clear_pending(self) -> None:
@@ -292,6 +302,18 @@ def run_desktop(workspace_dir: str | None = None) -> None:
     # cached launcher reference, which goes stale after a switch.
     state: dict = {"controller": None}
     switch_lock = threading.Lock()
+    # Tripped by the banner's Cancel button (via the exposed bridge below) to
+    # abort a pending switch's wait; cleared at the start of each switch.
+    switch_cancel = threading.Event()
+
+    def cancel_workspace_switch() -> None:
+        """JS bridge, exposed as ``window.pywebview.api.cancel_workspace_switch``.
+        The waiting banner's Cancel button trips this so the user can stop
+        waiting for in-flight work and stay in the current workspace."""
+        logger.info("workspace switch cancel requested from banner")
+        switch_cancel.set()
+
+    window.expose(cancel_workspace_switch)
 
     def _shutdown() -> None:
         cancelled.set()
@@ -370,6 +392,7 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         if not switch_lock.acquire(blocking=False):
             logger.info("workspace switch already in progress; ignoring")
             return
+        switch_cancel.clear()  # fresh wait; drop any leftover cancel from before
 
         def _run() -> None:
             try:
@@ -425,7 +448,8 @@ def run_desktop(workspace_dir: str | None = None) -> None:
             make_launcher(workspace_dir),
             win,
             launcher_factory=make_launcher,
-            should_cancel=cancelled.is_set,
+            # Abort a pending switch either on app shutdown or on a Cancel click.
+            should_cancel=lambda: cancelled.is_set() or switch_cancel.is_set(),
         )
         state["controller"] = controller
         return controller.boot()

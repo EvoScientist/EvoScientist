@@ -8,6 +8,7 @@ here.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -571,10 +572,12 @@ def test_same_dir_normalises(tmp_path):
 class _FakeRawWindow:
     """Stand-in for a pywebview window exposing only ``evaluate_js``."""
 
-    def __init__(self, result):
+    def __init__(self, result=None):
         self._result = result
+        self.scripts: list[str] = []
 
     def evaluate_js(self, script):
+        self.scripts.append(script)
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -597,6 +600,23 @@ def test_current_thread_id_rejects_non_uuid_and_missing():
 def test_current_thread_id_swallows_eval_errors():
     win = shell._WebviewWindow(_FakeRawWindow(RuntimeError("no page")))
     assert win.current_thread_id() is None
+
+
+def test_show_pending_banner_has_cancel_bridge():
+    raw = _FakeRawWindow()
+    shell._WebviewWindow(raw).show_pending("Waiting for tasks…")
+    js = raw.scripts[-1]
+    # the banner's Cancel button calls the exposed JS->Python bridge
+    assert "window.pywebview.api.cancel_workspace_switch()" in js
+    # and the message is injected as a safe JS string literal
+    assert json.dumps("Waiting for tasks…") in js
+
+
+def test_clear_pending_removes_banner():
+    raw = _FakeRawWindow()
+    shell._WebviewWindow(raw).clear_pending()
+    assert "__evosci_pending__" in raw.scripts[-1]
+    assert "remove()" in raw.scripts[-1]
 
 
 class _RecordingLoaded:
