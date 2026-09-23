@@ -1549,6 +1549,16 @@ async def test_langgraph_server_gateway_registers_thread_before_state_read():
         )
     )
 
+    create_calls = 0
+    original_create = threads.create
+
+    async def _counting_create(**kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        return await original_create(**kwargs)
+
+    threads.create = _counting_create
+
     events = [
         event
         async for event in gateway.stream_events(
@@ -1556,14 +1566,54 @@ async def test_langgraph_server_gateway_registers_thread_before_state_read():
         )
     ]
 
-    assert not any(
-        event.get("type") == "text" and event.get("content") == "old"
-        for event in events
-    )
+    # One create: the pre-run ensure. The start/resume path must not
+    # repeat it once registration succeeded. The state read happens
+    # after that create, which is what lets the old turn be suppressed.
+    assert create_calls == 1
+    assert len(threads.created) == 1
+    assert threads.state_gets
     assert events == [
         {"type": "text", "content": "new"},
         {"type": "done", "content": "new", "response": "new"},
     ]
+
+
+async def test_langgraph_server_gateway_messages_register_unlisted_thread():
+    """History reads must register a checkpointed thread before get_state (#490).
+
+    ``get_thread_messages`` used to treat ``NotFoundError`` as an empty
+    thread, so CLI/TUI history after resume rendered nothing when the dev
+    server had not registered the thread yet.
+    """
+    from langchain_core.messages import AIMessage
+
+    class _RegistryBackedStateThreadsClient(FakeLangGraphThreadsClient):
+        async def get_state(self, thread_id: str) -> dict[str, Any]:
+            from langgraph_sdk.errors import NotFoundError
+
+            if all(thread.get("thread_id") != thread_id for thread in self.threads):
+                raise NotFoundError(
+                    "not found", response=_not_found_response(), body=None
+                )
+            return await super().get_state(thread_id)
+
+    threads = _RegistryBackedStateThreadsClient(
+        threads=[],
+        states={
+            "abc12345": {
+                "values": {"messages": [{"type": "ai", "content": "remembered"}]}
+            }
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+
+    messages = await gateway.get_thread_messages("abc12345")
+
+    assert len(threads.created) == 1
+    assert isinstance(messages[0], AIMessage)
+    assert messages[0].content == "remembered"
 
 
 async def test_langgraph_server_gateway_values_do_not_duplicate_message_stream():
