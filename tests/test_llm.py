@@ -550,6 +550,7 @@ class TestThirdPartyRouting:
         get_chat_model("azure/gpt-5.5", provider="opper")
 
         call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "azure/gpt-5.5"
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
 
