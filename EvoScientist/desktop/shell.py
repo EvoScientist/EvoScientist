@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import threading
+from urllib.parse import parse_qs, urlparse
 
 from .controller import DesktopController
 from .setup import apply_setup, render_setup_html, setup_needed, validate_setup
@@ -202,20 +203,28 @@ class _WebviewWindow:
             logger.warning("pending-banner JS failed: %s", exc)
 
     def current_thread_id(self) -> str | None:
-        """The thread the user is viewing, read from the WebUI URL's ``threadId``
-        query param. Best-effort and validated as a UUID — returns None if it is
-        absent, malformed, or unreadable, so the switch falls back to gating on
-        busy work only (never blocks forever on a bad id)."""
+        """The thread the user is viewing, parsed from the WebUI URL's
+        ``threadId`` query param. Best-effort and validated as a UUID — returns
+        None if it is absent, malformed, or unreadable, so the switch/close
+        gating falls back to busy-only (never blocks on a bad id).
+
+        Uses ``get_current_url`` (a cached attribute the webview updates on
+        navigation, including SPA ``pushState``), NOT ``evaluate_js``: running JS
+        synchronously from the ``closing`` event handler deadlocks the webview
+        message loop (it waits on a JS-result semaphore that the closing pump
+        can't release), which froze the app on close."""
         try:
-            tid = self._window.evaluate_js(
-                "new URLSearchParams(window.location.search).get('threadId')"
-            )
+            url = self._window.get_current_url()
         except Exception as exc:
             logger.warning("current-thread read failed: %s", exc)
             return None
-        if isinstance(tid, str) and _UUID_RE.match(tid.strip()):
-            return tid.strip()
-        return None
+        if not url:
+            return None
+        try:
+            tid = parse_qs(urlparse(str(url)).query).get("threadId", [""])[0]
+        except Exception:
+            return None
+        return tid.strip() if _UUID_RE.match(tid.strip()) else None
 
 
 class _SetupApi:
@@ -369,8 +378,8 @@ def run_desktop(workspace_dir: str | None = None) -> None:
             logger.info("switch_workspace requested before services ready; ignoring")
             return
         current = controller.launcher.workspace_dir
-        # Read the watched thread here on the GUI thread (evaluate_js), before the
-        # picker steals focus, so the switch gates on the turn the user is on.
+        # Read the watched thread before the picker steals focus, so the switch
+        # gates on the turn the user is on.
         watched = win.current_thread_id()
         try:
             import webview

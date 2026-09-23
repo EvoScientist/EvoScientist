@@ -570,10 +570,13 @@ def test_same_dir_normalises(tmp_path):
 
 
 class _FakeRawWindow:
-    """Stand-in for a pywebview window exposing only ``evaluate_js``."""
+    """Stand-in for a pywebview window: records ``evaluate_js`` scripts and
+    returns a canned ``get_current_url`` (a URL string, or an Exception to
+    raise)."""
 
-    def __init__(self, result=None):
+    def __init__(self, result=None, url=None):
         self._result = result
+        self._url = url
         self.scripts: list[str] = []
 
     def evaluate_js(self, script):
@@ -582,23 +585,32 @@ class _FakeRawWindow:
             raise self._result
         return self._result
 
+    def get_current_url(self):
+        if isinstance(self._url, Exception):
+            raise self._url
+        return self._url
+
 
 def test_current_thread_id_reads_valid_uuid():
-    win = shell._WebviewWindow(_FakeRawWindow(_WATCHED))
+    url = f"http://127.0.0.1:5150/?assistantId=E&sidebar=1&threadId={_WATCHED}"
+    win = shell._WebviewWindow(_FakeRawWindow(url=url))
     assert win.current_thread_id() == _WATCHED
 
 
 def test_current_thread_id_rejects_non_uuid_and_missing():
-    # No thread selected (JS returns null) or a malformed value -> None, so the
-    # switch falls back to busy-only gating instead of a bad backend query.
-    assert shell._WebviewWindow(_FakeRawWindow(None)).current_thread_id() is None
-    assert (
-        shell._WebviewWindow(_FakeRawWindow("not-a-uuid")).current_thread_id() is None
-    )
+    # No threadId in the URL, a malformed value, or no URL -> None, so the
+    # switch/close gating falls back to busy-only instead of a bad backend query.
+    no_tid = "http://127.0.0.1:5150/?assistantId=E&sidebar=1"
+    bad = "http://127.0.0.1:5150/?threadId=not-a-uuid"
+    assert shell._WebviewWindow(_FakeRawWindow(url=no_tid)).current_thread_id() is None
+    assert shell._WebviewWindow(_FakeRawWindow(url=bad)).current_thread_id() is None
+    assert shell._WebviewWindow(_FakeRawWindow(url=None)).current_thread_id() is None
 
 
-def test_current_thread_id_swallows_eval_errors():
-    win = shell._WebviewWindow(_FakeRawWindow(RuntimeError("no page")))
+def test_current_thread_id_swallows_url_errors():
+    # get_current_url is a cached attribute read (no evaluate_js -> no close
+    # deadlock); any failure still degrades to None.
+    win = shell._WebviewWindow(_FakeRawWindow(url=RuntimeError("no page")))
     assert win.current_thread_id() is None
 
 
