@@ -3,9 +3,9 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and
-custom OpenAI/Anthropic-compatible endpoints) and convenient short names for
-common models.
+Novita, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine, DashScope,
+DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-compatible
+endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -51,6 +51,11 @@ from .registry import (
     list_models,  # noqa: F401 — re-exported for existing import sites
     list_models_by_provider,  # noqa: F401 — re-exported for existing import sites
 )
+
+_ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
+    "minimax": "MINIMAX_BASE_URL",
+    "xiaomi-token-plan": "MIMO_TOKEN_PLAN_BASE_URL",
+}
 
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
 # installed versions are advertised automatically.
@@ -551,8 +556,11 @@ def get_chat_model(
                     "Anthropic-compatible API endpoint URL (e.g. https://api.anthropic.com)."
                 )
             base_url = base_url.rstrip("/")
-        elif provider == "minimax":
-            base_url = os.environ.get("MINIMAX_BASE_URL", base_url_default).rstrip("/")
+        elif provider in _ANTHROPIC_BASE_URL_OVERRIDE_ENV:
+            # A blank override must fall back, or ChatAnthropic defaults to
+            # api.anthropic.com and sends this provider's key there.
+            override = os.environ.get(_ANTHROPIC_BASE_URL_OVERRIDE_ENV[provider], "")
+            base_url = (override.strip() or base_url_default).rstrip("/")
         else:
             base_url = base_url_default
         if base_url:
@@ -563,6 +571,10 @@ def get_chat_model(
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
+        # MiMo ids have no langchain profile, so ChatAnthropic would fall back to
+        # 4096; match the server's own default (131072) instead.
+        if provider in ("xiaomi", "xiaomi-token-plan"):
+            kwargs.setdefault("max_tokens", 131072)
         provider = "anthropic"
 
     elif provider == "ollama":

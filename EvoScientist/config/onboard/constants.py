@@ -27,6 +27,8 @@ VALID_PROVIDERS: frozenset[str] = frozenset(
         "deepseek",
         "moonshot",
         "kimi-coding",
+        "xiaomi",
+        "xiaomi-token-plan",
         "ollama",
         "nvidia",
         "siliconflow",

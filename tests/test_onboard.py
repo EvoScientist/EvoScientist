@@ -474,6 +474,70 @@ class TestValidateNovitaKey:
         assert "inconclusive" in msg.lower()
 
 
+class TestValidateXiaomiKey:
+    @staticmethod
+    def _run(status, body, **kwargs):
+        import httpx
+        import openai
+
+        from EvoScientist.config.onboard.validators import validate_xiaomi_key
+
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            return httpx.Response(status, json=body)
+
+        real = openai.OpenAI
+        with patch(
+            "openai.OpenAI",
+            side_effect=lambda **kw: real(
+                **kw,
+                max_retries=0,
+                http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            ),
+        ):
+            result = validate_xiaomi_key("sk-mimo", **kwargs)
+        return result, seen
+
+    def test_empty_key_skipped(self):
+        from EvoScientist.config.onboard.validators import validate_xiaomi_key
+
+        assert validate_xiaomi_key("") == (True, "Skipped (no key provided)")
+
+    def test_valid_key_lists_models(self):
+        (is_valid, msg), seen = self._run(
+            200, {"object": "list", "data": [{"id": "mimo-v2.6-pro"}]}
+        )
+
+        assert (is_valid, msg) == (True, "Valid")
+        assert str(seen[0].url) == "https://api.xiaomimimo.com/v1/models"
+        assert seen[0].headers["authorization"] == "Bearer sk-mimo"
+
+    def test_token_plan_region_lists_models_on_its_own_host(self):
+        (is_valid, _), seen = self._run(
+            200,
+            {"object": "list", "data": []},
+            base_url="https://token-plan-sgp.xiaomimimo.com/anthropic",
+        )
+
+        assert is_valid is True
+        assert str(seen[0].url) == "https://token-plan-sgp.xiaomimimo.com/v1/models"
+
+    def test_auth_rejection_is_invalid(self):
+        body = {
+            "error": {
+                "message": "Invalid API Key",
+                "param": "Please provide valid API Key",
+                "code": "401",
+                "type": "invalid_key",
+            }
+        }
+        (is_valid, msg), _ = self._run(401, body)
+
+        assert (is_valid, msg) == (False, "Invalid API key")
+
+
 # =============================================================================
 # Test Step Functions (Mocked questionary)
 # =============================================================================
@@ -2575,3 +2639,79 @@ class TestStepTinytex:
             mock_q.select.return_value.ask.return_value = True
             _step_tinytex()
             mock_ps.assert_called_once_with("LaTeX", "manual install needed")
+
+
+class TestXiaomiTokenPlanRegion:
+    def test_non_interactive_defaults_to_cn(self, monkeypatch):
+        from EvoScientist.config.onboard.wizard import _configure_provider_base_url
+
+        monkeypatch.delenv("MIMO_TOKEN_PLAN_BASE_URL", raising=False)
+        config = EvoScientistConfig()
+        _configure_provider_base_url(config, "xiaomi-token-plan", strict=True)
+
+        assert (
+            config.mimo_token_plan_base_url
+            == "https://token-plan-cn.xiaomimimo.com/anthropic"
+        )
+
+    def test_non_interactive_blank_env_reaches_validator_as_default(self, monkeypatch):
+        from EvoScientist.config.onboard.helpers import _provider_key_info
+        from EvoScientist.config.onboard.wizard import _configure_provider_base_url
+
+        monkeypatch.setenv("MIMO_TOKEN_PLAN_BASE_URL", "  ")
+        config = EvoScientistConfig()
+        _configure_provider_base_url(config, "xiaomi-token-plan", strict=True)
+        with patch(
+            "EvoScientist.config.onboard.helpers.validate_xiaomi_key"
+        ) as mock_validate:
+            _provider_key_info(config, "xiaomi-token-plan")[2]("tp-key")
+
+        default = "https://token-plan-cn.xiaomimimo.com/anthropic"
+        assert config.mimo_token_plan_base_url == default
+        assert mock_validate.call_args.kwargs["base_url"] == default
+
+    def test_region_step_returns_selected_region(self):
+        from EvoScientist.config.onboard.steps import _step_xiaomi_token_plan_region
+
+        config = EvoScientistConfig(
+            mimo_token_plan_base_url="https://token-plan-ams.xiaomimimo.com/anthropic"
+        )
+        with patch("questionary.select") as mock_select:
+            mock_select.return_value.ask.return_value = "sgp"
+            url = _step_xiaomi_token_plan_region(config)
+
+        assert url == "https://token-plan-sgp.xiaomimimo.com/anthropic"
+        assert mock_select.call_args.kwargs["default"] == "ams"
+
+
+@pytest.mark.parametrize(
+    ("provider", "validator", "field", "env", "default"),
+    [
+        (
+            "minimax",
+            "validate_minimax_key",
+            "minimax_base_url",
+            "MINIMAX_BASE_URL",
+            "https://api.minimaxi.com/anthropic",
+        ),
+        (
+            "xiaomi-token-plan",
+            "validate_xiaomi_key",
+            "mimo_token_plan_base_url",
+            "MIMO_TOKEN_PLAN_BASE_URL",
+            "https://token-plan-cn.xiaomimimo.com/anthropic",
+        ),
+    ],
+)
+def test_key_validator_ignores_blank_base_url(
+    monkeypatch, provider, validator, field, env, default
+):
+    """Whitespace in either the saved config or the env var falls back to the default."""
+    from EvoScientist.config.onboard.helpers import _provider_key_info
+
+    monkeypatch.setenv(env, "  ")
+    config = EvoScientistConfig(**{field: "  "})
+    with patch(f"EvoScientist.config.onboard.helpers.{validator}") as mock_validate:
+        _provider_key_info(config, provider)[2]("key")
+
+    assert mock_validate.call_args.kwargs["base_url"] == default

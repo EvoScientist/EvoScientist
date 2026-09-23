@@ -30,6 +30,7 @@ from .validators import (
     validate_requesty_key,
     validate_siliconflow_key,
     validate_volcengine_key,
+    validate_xiaomi_key,
     validate_zhipu_key,
 )
 
@@ -47,10 +48,9 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             config.minimax_api_key or os.environ.get("MINIMAX_API_KEY", ""),
             lambda key: validate_minimax_key(
                 key,
-                base_url=config.minimax_base_url
-                or os.environ.get(
-                    "MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic"
-                ),
+                base_url=config.minimax_base_url.strip()
+                or os.environ.get("MINIMAX_BASE_URL", "").strip()
+                or "https://api.minimaxi.com/anthropic",
             ),
         ),
         "nvidia": (
@@ -132,6 +132,22 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Kimi Coding Plan",
             config.kimi_api_key or os.environ.get("KIMI_API_KEY", ""),
             validate_kimi_key,
+        ),
+        "xiaomi": (
+            "Xiaomi MiMo",
+            config.mimo_api_key or os.environ.get("MIMO_API_KEY", ""),
+            validate_xiaomi_key,
+        ),
+        "xiaomi-token-plan": (
+            "Xiaomi MiMo Token Plan",
+            config.mimo_token_plan_api_key
+            or os.environ.get("MIMO_TOKEN_PLAN_API_KEY", ""),
+            lambda key: validate_xiaomi_key(
+                key,
+                base_url=config.mimo_token_plan_base_url.strip()
+                or os.environ.get("MIMO_TOKEN_PLAN_BASE_URL", "").strip()
+                or "https://token-plan-cn.xiaomimimo.com/anthropic",
+            ),
         ),
         "custom-openai": (
             "OpenAI-compatible",
