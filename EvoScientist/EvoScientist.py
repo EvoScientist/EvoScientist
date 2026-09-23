@@ -316,6 +316,7 @@ def _inject_subagent_middleware(
     workspace_dir: str | Path | None = None,
     cfg=None,
     chat_model=None,
+    backend=None,
 ) -> None:
     """Ensure every subagent gets error handling and context management middleware.
 
@@ -326,6 +327,14 @@ def _inject_subagent_middleware(
     *chat_model*, when provided, is forwarded to the subagents'
     ``create_context_editing_middleware`` so the pure ``create_cli_agent``
     path doesn't fall back to the global-writing ``_ensure_chat_model()``.
+
+    *backend*, when provided, also installs the per-run summarization
+    subclass. ``_ensure_general_purpose_subagent`` materializes
+    ``general-purpose`` as an explicit spec, so deepagents does not build
+    the auto-GP and the parent's middleware is not inherited by name.
+    The spec's own list has to carry the subclass; deepagents' name merge
+    then replaces the stock frozen-window instance in that subagent's
+    core slot (#466).
     """
     from .middleware import (
         ConfigurableModelMiddleware,
@@ -336,6 +345,7 @@ def _inject_subagent_middleware(
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
+        create_per_run_summarization_middleware,
         create_runtime_context_middleware,
         default_memory_scheduler,
     )
@@ -395,6 +405,13 @@ def _inject_subagent_middleware(
                     source_agent=name,
                     memory_scheduler=memory_scheduler,
                 )
+            )
+        if backend is not None:
+            summarization_model = (
+                chat_model if chat_model is not None else _ensure_chat_model()
+            )
+            middleware.append(
+                create_per_run_summarization_middleware(summarization_model, backend)
             )
         sa.setdefault("middleware", []).extend(middleware)
 
@@ -643,7 +660,11 @@ def _build_base_kwargs(
     _fold_expert_subagents(subs, tool_registry)
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
-        subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+        subs,
+        workspace_dir=workspace_dir,
+        cfg=cfg,
+        chat_model=chat_model,
+        backend=base_backend,
     )
     subs = _maybe_swap_async_subagents(
         subs,
@@ -726,7 +747,11 @@ def load_mcp_and_build_kwargs(
 
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
-        subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+        subs,
+        workspace_dir=workspace_dir,
+        cfg=cfg,
+        chat_model=chat_model,
+        backend=base_backend,
     )
 
     # Inject MCP tools into subagents by name
@@ -1034,11 +1059,12 @@ def _get_default_middleware(
     # installs its own (frozen on the construction model's window) inside the
     # core stack. Appending this same-named subclass makes deepagents'
     # name-based merge REPLACE the stock instance in place, so the per-run
-    # limits land in the identical stack slot — including the general-purpose
-    # subagent's inheritable stack. Requires the agent backend: the
-    # replacement must offload conversation history to the same backend the
-    # stock instance would have used. Without one, leave the stock built-in
-    # (tests and the async sub-agent factories, which keep frozen limits).
+    # limits land in the identical stack slot. Explicit subagent specs
+    # (including general-purpose, which we materialize ourselves) do not
+    # inherit this list; ``_inject_subagent_middleware`` installs the same
+    # subclass on those specs when a backend is supplied. Without a backend,
+    # leave the stock built-in (tests that build the middleware list with
+    # no agent backend).
     if backend is not None:
         mw.append(create_per_run_summarization_middleware(model, backend))
 

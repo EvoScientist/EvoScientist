@@ -100,6 +100,7 @@ def test_factory_requests_async_safe_middleware(
         for_async_subagent=True,
         memory_source_agent="writing-agent",
         backend=mock_backend.return_value,
+        chat_model=mock_chat.return_value,
     )
     subagents = mock_create.call_args.kwargs["subagents"]
     assert subagents[0]["name"] == "general-purpose"

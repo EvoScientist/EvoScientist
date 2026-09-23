@@ -35,10 +35,7 @@ from .scheduler import (
     SchedulerMiddleware,
     create_scheduler_middleware,
 )
-from .summarization import (
-    _PerRunLimitsSummarizationMiddleware,
-    create_per_run_summarization_middleware,
-)
+from .summarization import create_per_run_summarization_middleware
 from .tool_error_handler import ToolErrorHandlerMiddleware
 from .tool_history_repair import ToolHistoryRepairMiddleware
 from .tool_selector import create_tool_selector_middleware
@@ -61,7 +58,6 @@ __all__ = [
     "SchedulerMiddleware",
     "ToolErrorHandlerMiddleware",
     "ToolHistoryRepairMiddleware",
-    "_PerRunLimitsSummarizationMiddleware",
     "compute_context_editing_trigger",
     "create_active_team_middleware",
     "create_code_interpreter_middleware",

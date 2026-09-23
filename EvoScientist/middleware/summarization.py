@@ -28,6 +28,7 @@ Usage (wired in ``EvoScientist.EvoScientist._get_default_middleware``)::
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 from typing import TYPE_CHECKING, Any
@@ -63,26 +64,28 @@ class _ProfileWindowShim:
     and the delegation target are read from ``state_var`` — the
     ``contextvars.ContextVar`` the owning middleware ``.set()``s per task —
     so concurrent runs with different windows never see each other's state.
-    In a task where no override is synced, the shim reports the construction
-    window and delegates to the construction model, i.e. exactly what the
-    bare construction model would have answered.
+    In a task where no override is synced, ``profile`` is the construction
+    model's own ``profile`` attribute (``None`` when that model has none) —
+    the same read stock ``_get_profile_limits`` does. It does not invent a
+    window via ``resolve_context_window`` or ``get_context_window``, which
+    consult direct attrs (``context_window``, ``num_ctx``, …) before profile
+    and fall back to 200k.
     """
 
     def __init__(
         self,
         state_var: contextvars.ContextVar[tuple[Any, int] | None],
         fallback_model: Any,
-        fallback_window: int,
     ) -> None:
         self._state_var = state_var
         self._fallback_model = fallback_model
-        self._fallback_window = fallback_window
 
     @property
-    def profile(self) -> dict[str, int]:
+    def profile(self) -> Any:
         state = self._state_var.get()
-        window = state[1] if state is not None else self._fallback_window
-        return {"max_input_tokens": window}
+        if state is not None:
+            return {"max_input_tokens": state[1]}
+        return getattr(self._fallback_model, "profile", None)
 
     def __getattr__(self, name: str) -> Any:
         state = self._state_var.get()
@@ -178,10 +181,6 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             truncate_args_settings=defaults["truncate_args_settings"],
         )
         self._construction_model: Any = construction_model
-        # Construction-window fallback for the profile shim, resolved once
-        # here so unsynced tasks never re-resolve it. Deliberately resolved,
-        # not ``get_context_window``: the shim must always answer an int.
-        self._construction_window: int = resolve_context_window(construction_model)
         # Per-task synced state: ``(target_model, resolved_window)`` or None.
         # The default is None and __init__ never sets it — "no override synced
         # in this task" means stock delegation semantics (see
@@ -199,38 +198,27 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
         # ConfigurableModelMiddleware's resolution cache. Shared on purpose.
         self._model_cache: dict[tuple[str, str | None], Any] = {}
 
-    def _sync_limits(self) -> None:
-        """Record the current run's context window in per-task state.
+    def _resolve_override_model(self, model_name: str, provider: str | None) -> Any:
+        """Build (and cache) the chat model for a ``configurable`` override.
 
-        Resolves the run's model, then publishes ``(target, window)`` through
-        the ContextVar so every later read in this task — including the
-        post-``await`` reads on deepagents' overflow fallback path — keeps
-        seeing this run's window no matter what other tasks sync in between.
-        Writing the var is the only per-run mutation; it lands in this task's
-        private context copy, never on the shared instance.
+        Called directly from the sync ``wrap_model_call`` path. The async
+        path runs it via ``asyncio.to_thread`` so LangGraph dev's blockbuster
+        does not see ``get_chat_model`` blocking the event loop — and so a
+        blockbuster error is not swallowed by the resolution ``except`` and
+        mis-reported as "keep the construction model".
         """
-        model_name, provider = _read_model_override()
-        if model_name is None:
-            target = self._construction_model
-        else:
-            key = (model_name, provider)
-            target = self._model_cache.get(key)
-            if target is None:
-                try:
-                    from ..llm import get_chat_model
+        key = (model_name, provider)
+        cached = self._model_cache.get(key)
+        if cached is not None:
+            return cached
+        from ..llm import get_chat_model
 
-                    target = get_chat_model(model=model_name, provider=provider)
-                except Exception:
-                    logger.warning(
-                        "SummarizationMiddleware failed to resolve model=%r "
-                        "provider=%r; keeping construction-model context limits",
-                        model_name,
-                        provider,
-                        exc_info=True,
-                    )
-                    target = self._construction_model
-                else:
-                    self._model_cache[key] = target
+        target = get_chat_model(model=model_name, provider=provider)
+        self._model_cache[key] = target
+        return target
+
+    def _publish_limits(self, target: Any) -> None:
+        """Record ``target``'s window in this task's context, if it changed."""
         state = self._synced_state.get()
         if state is not None and state[0] is target:
             return
@@ -253,16 +241,61 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             self._lc_helper.model = _ProfileWindowShim(
                 self._synced_state,
                 self._construction_model,
-                self._construction_window,
             )
         self._synced_state.set((target, resolved))
+
+    def _target_for_override(self, model_name: str | None, provider: str | None) -> Any:
+        if model_name is None:
+            return self._construction_model
+        try:
+            return self._resolve_override_model(model_name, provider)
+        except Exception:
+            logger.warning(
+                "SummarizationMiddleware failed to resolve model=%r "
+                "provider=%r; keeping construction-model context limits",
+                model_name,
+                provider,
+                exc_info=True,
+            )
+            return self._construction_model
+
+    def _sync_limits(self) -> None:
+        """Record the current run's context window in per-task state."""
+        model_name, provider = _read_model_override()
+        self._publish_limits(self._target_for_override(model_name, provider))
+
+    async def _async_sync_limits(self) -> None:
+        """Async twin of ``_sync_limits``: cache misses leave the event loop."""
+        model_name, provider = _read_model_override()
+        if model_name is None:
+            self._publish_limits(self._construction_model)
+            return
+        if (model_name, provider) in self._model_cache:
+            self._publish_limits(self._model_cache[(model_name, provider)])
+            return
+        try:
+            target = await asyncio.to_thread(
+                self._resolve_override_model, model_name, provider
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "SummarizationMiddleware failed to resolve model=%r "
+                "provider=%r; keeping construction-model context limits",
+                model_name,
+                provider,
+                exc_info=True,
+            )
+            target = self._construction_model
+        self._publish_limits(target)
 
     def wrap_model_call(self, request: ModelRequest, handler):
         self._sync_limits()
         return super().wrap_model_call(request, handler)
 
     async def awrap_model_call(self, request: ModelRequest, handler) -> Any:
-        self._sync_limits()
+        await self._async_sync_limits()
         return await super().awrap_model_call(request, handler)
 
     def _get_profile_limits(self) -> int | None:

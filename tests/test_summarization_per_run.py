@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -240,8 +241,10 @@ def test_shim_delegates_non_profile_attributes():
         "test_shim_state", default=None
     )
     construction = MagicMock()
-    shim = _ProfileWindowShim(state, construction, 32_768)
-    # Unsynchronized task: construction window + construction delegation.
+    construction.profile = {"max_input_tokens": 32_768}
+    shim = _ProfileWindowShim(state, construction)
+    # Unsynchronized task: the construction model's own profile, not a
+    # resolved fallback window.
     assert shim.profile == {"max_input_tokens": 32_768}
     assert shim._get_ls_params() is construction._get_ls_params()
     assert shim.some_future_attr is construction.some_future_attr
@@ -314,6 +317,87 @@ async def test_resolution_failure_keeps_construction_limits():
     assert mw._lc_helper._get_profile_limits() == CONSTRUCTION_WINDOW
 
 
+async def test_unsynced_shim_reports_construction_profile_not_resolved_window():
+    """After an override, clearing the sync must not invent a window.
+
+    Stock ``_get_profile_limits`` reads ``model.profile`` only. A construction
+    model with no profile returns None (not the 200k resolve fallback), and a
+    model whose ``context_window`` attr disagrees with ``profile`` keeps the
+    profile number (#466 review).
+    """
+
+    class _Model:
+        _llm_type = "fake"
+
+        def __init__(self, profile, context_window=None):
+            self.profile = profile
+            self.context_window = context_window
+
+        def with_retry(self):
+            return self
+
+    construction = _Model(profile=None, context_window=32_768)
+    mw = create_per_run_summarization_middleware(construction, MagicMock())
+    run_model = _Model(profile={"max_input_tokens": 8_000})
+    with (
+        _patched_config({"model": "small-model"}),
+        patch("EvoScientist.llm.get_chat_model", return_value=run_model),
+    ):
+        await mw.awrap_model_call(
+            _fake_model_request(construction), AsyncMock(return_value=MagicMock())
+        )
+    assert mw._get_profile_limits() == 8_000
+
+    with _patched_config({}):
+        await mw.awrap_model_call(
+            _fake_model_request(construction), AsyncMock(return_value=MagicMock())
+        )
+    assert mw._get_profile_limits() is None
+
+    profiled = _Model(
+        profile={"max_input_tokens": CONSTRUCTION_WINDOW}, context_window=999
+    )
+    mw_profiled = create_per_run_summarization_middleware(profiled, MagicMock())
+    with (
+        _patched_config({"model": "small-model"}),
+        patch("EvoScientist.llm.get_chat_model", return_value=run_model),
+    ):
+        await mw_profiled.awrap_model_call(
+            _fake_model_request(profiled), AsyncMock(return_value=MagicMock())
+        )
+    with _patched_config({}):
+        await mw_profiled.awrap_model_call(
+            _fake_model_request(profiled), AsyncMock(return_value=MagicMock())
+        )
+    assert mw_profiled._get_profile_limits() == CONSTRUCTION_WINDOW
+
+
+async def test_async_resolution_leaves_the_event_loop():
+    """Cache misses must not call ``get_chat_model`` on the event loop."""
+    mw, construction = _make_mw()
+    small = MagicMock()
+    small.profile = {"max_input_tokens": 32_768}
+    calls = []
+
+    async def _to_thread(fn, *args, **kwargs):
+        calls.append(fn)
+        return fn(*args, **kwargs)
+
+    with (
+        _patched_config({"model": "small-model"}),
+        patch("EvoScientist.llm.get_chat_model", return_value=small),
+        patch(
+            "EvoScientist.middleware.summarization.asyncio.to_thread",
+            side_effect=_to_thread,
+        ),
+    ):
+        await mw.awrap_model_call(
+            _fake_model_request(construction), AsyncMock(return_value=MagicMock())
+        )
+    assert calls == [mw._resolve_override_model]
+    assert mw._get_profile_limits() == 32_768
+
+
 def test_summary_model_stays_construction_model():
     """Summaries don't switch models: ``_summary_model`` is captured once at
     construction and is not re-pointed by the per-run sync."""
@@ -377,7 +461,11 @@ def test_deepagents_name_merge_replaces_stock_instance(
     mock_config, mock_model, mock_ts
 ):
     """deepagents' name-based merge swaps the frozen built-in for our
-    subclass in the identical core-stack slot (the fix mechanism for #466)."""
+    subclass in the identical core-stack slot (the fix mechanism for #466).
+
+    ``MagicMock(name=...)`` only sets the repr, not ``.name``, so the core
+    entries are real objects whose ``.name`` attribute is the stack name.
+    """
     mock_model.return_value = MagicMock(
         profile={"max_input_tokens": CONSTRUCTION_WINDOW}
     )
@@ -392,18 +480,47 @@ def test_deepagents_name_merge_replaces_stock_instance(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
+    class _Named:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
     user_mw = _get_default_middleware(backend=MagicMock())
 
     core = [
-        MagicMock(name="FilesystemMiddleware"),
-        MagicMock(name="SubAgentMiddleware"),
-        MagicMock(name="SummarizationMiddleware"),
-        MagicMock(name="PatchToolCallsMiddleware"),
+        _Named("FilesystemMiddleware"),
+        _Named("SubAgentMiddleware"),
+        _Named("SummarizationMiddleware"),
+        _Named("PatchToolCallsMiddleware"),
     ]
     merged = _apply_custom_middleware(core, user_mw, core_names={m.name for m in core})
     summ = [m for m in merged if m.name == "SummarizationMiddleware"]
     assert len(summ) == 1
     assert isinstance(summ[0], _PerRunLimitsSummarizationMiddleware)
+    assert summ[0] is not core[2]
+
+
+def test_explicit_general_purpose_spec_gets_per_run_summarization():
+    """general-purpose is an explicit spec, so it does not inherit the
+    parent's middleware by name. Injection has to install the subclass
+    itself (#466 review)."""
+    from EvoScientist.EvoScientist import (
+        _ensure_general_purpose_subagent,
+        _inject_subagent_middleware,
+    )
+
+    backend = MagicMock()
+    model = MagicMock(profile={"max_input_tokens": CONSTRUCTION_WINDOW})
+    subs: list[dict] = []
+    _ensure_general_purpose_subagent(subs)
+    _inject_subagent_middleware(
+        subs,
+        cfg=_factory_cfg_mock(),
+        chat_model=model,
+        backend=backend,
+    )
+    gp = next(sa for sa in subs if sa.get("name") == "general-purpose")
+    _assert_per_run_summarization(gp["middleware"], backend)
+    assert gp["middleware"][-1]._construction_model is model
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +592,74 @@ def test_async_subagent_factory_installs_per_run_summarization(
     kwargs = mock_create.call_args.kwargs
     _assert_per_run_summarization(kwargs["middleware"], mock_backend.return_value)
     assert kwargs["backend"] is mock_backend.return_value
+    gp = next(sa for sa in kwargs["subagents"] if sa.get("name") == "general-purpose")
+    _assert_per_run_summarization(gp["middleware"], mock_backend.return_value)
+
+
+@patch("deepagents.create_deep_agent")
+@patch("EvoScientist.EvoScientist._load_mcp_tools_cached", return_value={})
+@patch("EvoScientist.EvoScientist._get_default_backend")
+@patch("EvoScientist.EvoScientist._ensure_config")
+@patch("EvoScientist.EvoScientist._ensure_auxiliary_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.utils.load_subagents")
+@patch("EvoScientist.config.apply_config_to_env")
+@patch("EvoScientist.config.get_effective_config")
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+def test_scheduler_summarization_uses_auxiliary_model(
+    mock_ts,
+    mock_get_cfg,
+    mock_apply_env,
+    mock_load_subs,
+    mock_main_model,
+    mock_aux_model,
+    mock_config,
+    mock_backend,
+    mock_mcp,
+    mock_create,
+):
+    """The scheduler graph is built on the auxiliary model. Summaries must
+    use that model too, not the main model the middleware factory would
+    otherwise resolve (#466 review)."""
+    cfg = _factory_cfg_mock()
+    mock_get_cfg.return_value = cfg
+    mock_config.return_value = cfg
+    main = MagicMock(name="main", profile={"max_input_tokens": 200_000})
+    aux = MagicMock(name="aux", profile={"max_input_tokens": 128_000})
+    mock_main_model.return_value = main
+    mock_aux_model.return_value = aux
+    mock_load_subs.return_value = [
+        {"name": "scheduler", "system_prompt": "", "tools": [], "skills": None}
+    ]
+    mock_create.return_value.with_config.return_value = MagicMock()
+    # FilesystemMiddleware rejects a callable backend (MagicMock). A plain
+    # instance is enough: the scheduler grader only stores it.
+    mock_backend.return_value = SimpleNamespace()
+
+    from EvoScientist.subagents._factory import build_async_subagent_graph
+
+    build_async_subagent_graph("scheduler")
+
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["model"] is aux
+    summ = [
+        m
+        for m in kwargs["middleware"]
+        if isinstance(m, _PerRunLimitsSummarizationMiddleware)
+    ]
+    assert len(summ) == 1
+    assert summ[0]._construction_model is aux
+    gp = next(sa for sa in kwargs["subagents"] if sa.get("name") == "general-purpose")
+    gp_summ = [
+        m
+        for m in gp["middleware"]
+        if isinstance(m, _PerRunLimitsSummarizationMiddleware)
+    ]
+    assert len(gp_summ) == 1
+    assert gp_summ[0]._construction_model is aux
 
 
 @patch("deepagents.create_deep_agent")
