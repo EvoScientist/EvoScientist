@@ -767,11 +767,14 @@ def _agent_shell_env() -> dict[str, str] | None:
     """Env overrides so the agent's ``execute`` shell uses the bundled Python.
 
     In the packaged Windows app a standalone CPython ships under
-    ``runtime/python/``; point ``python``/``python3``/``pip`` at it (via PATH)
-    so agent code never depends on whatever interpreter is on the end-user's
-    PATH, and route on-demand ``pip install``s to a writable per-user dir
-    (the install dir is read-only for a non-admin user). Returns ``None`` when
-    no bundled Python is present (dev checkouts, Linux), leaving PATH untouched.
+    ``runtime/python/``; prepend it to PATH so ``python``/``python3`` resolve to
+    the bundled interpreter, not whatever is on the end-user's PATH. ``pip`` is
+    NOT exposed on PATH (python-build-standalone puts ``pip.exe`` under a
+    ``Scripts`` dir, which we do not add); agent code reaches it as ``python -m
+    pip``, and ``PIP_USER`` + ``PYTHONUSERBASE`` route on-demand installs to a
+    writable per-user dir (the install dir is read-only for a non-admin user).
+    Returns ``None`` when no bundled Python is present (dev checkouts, Linux),
+    leaving PATH untouched.
     """
     from .desktop import app_paths
 
