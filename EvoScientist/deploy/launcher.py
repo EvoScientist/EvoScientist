@@ -3,10 +3,8 @@
 Extracts the reusable start / health / stop logic out of
 ``deploy/webui.py:run_webui`` so it can be driven by *any* front-end:
 
-- the existing terminal CLI (``run_webui`` is now a thin adapter over this),
-- an embedded desktop shell (imports :class:`WebUILauncher` in-process), and
-- an out-of-process shell that spawns ``python -m EvoScientist.deploy.launcher``
-  and parses the one-line JSON ready-signal from stdout.
+- the existing terminal CLI (``run_webui`` is now a thin adapter over this), and
+- an embedded desktop shell (imports :class:`WebUILauncher` in-process).
 
 Design rules that keep it shell-agnostic:
 
@@ -26,13 +24,10 @@ Design rules that keep it shell-agnostic:
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import signal
 import subprocess
-import sys
-import threading
 import time
 import urllib.request
 import webbrowser
@@ -697,84 +692,3 @@ def build_launcher_config(
         open_browser=False,
         auto_port=auto_port,
     )
-
-
-def _emit(obj: dict[str, Any]) -> None:
-    """Write one JSON line to stdout and flush — the ready/error signal."""
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Standalone entrypoint: start the WebUI, emit a JSON ready-signal on
-    stdout, then block (keeping the processes alive) until stdin closes or a
-    termination signal arrives, then tear down.
-
-    Success prints ``{"status": "ready", "backend_url", "webui_url"}``; failure
-    prints ``{"status": "error", "code", "message", "detail"}`` to stdout and
-    the error to stderr. stderr stays empty on success.
-    """
-    import argparse
-
-    parser = argparse.ArgumentParser(prog="EvoScientist.deploy.launcher")
-    parser.add_argument("--workspace", default=None)
-    parser.add_argument("--ready-timeout", type=float, default=60.0)
-    args = parser.parse_args(argv)
-
-    from ..config import apply_config_to_env, get_effective_config
-
-    config = get_effective_config()
-    apply_config_to_env(config)
-    # Standalone entrypoint is an out-of-process GUI shell (e.g. Electron):
-    # auto-port like the in-process desktop shell.
-    cfg = build_launcher_config(config, args.workspace, auto_port=True)
-
-    launcher = WebUILauncher(config, cfg, NpxWebUIRunner())
-    try:
-        launcher.start()
-        result = launcher.wait_ready(timeout=args.ready_timeout)
-    except LauncherError as exc:
-        _emit(
-            {
-                "status": "error",
-                "code": exc.code,
-                "message": exc.message,
-                "detail": exc.detail,
-            }
-        )
-        print(f"{exc.code}: {exc.message}", file=sys.stderr)
-        launcher.stop()
-        return 1
-
-    _emit(
-        {
-            "status": "ready",
-            "backend_url": result.backend_url,
-            "webui_url": result.webui_url,
-            "warnings": result.warnings,
-        }
-    )
-
-    # Block until the shell closes our stdin, a signal arrives, or the
-    # front-end dies on its own — then tear down what we started.
-    shutdown = threading.Event()
-
-    def _handle(signum: int, _frame: Any) -> None:
-        shutdown.set()
-
-    signal.signal(signal.SIGINT, _handle)
-    signal.signal(signal.SIGTERM, _handle)
-    try:
-        while not shutdown.is_set():
-            if not launcher.poll():
-                break
-            if sys.stdin.closed:
-                break
-            shutdown.wait(timeout=0.5)
-    finally:
-        launcher.stop()
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())

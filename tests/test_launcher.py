@@ -8,7 +8,6 @@ and the JSON ready/error signal from the standalone entrypoint.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -435,43 +434,6 @@ def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         launcher.wait_ready(timeout=0.05)
     assert ei.value.code == "not_ready"
-
-
-# --------------------------------------------------------------------------- #
-# Standalone JSON entrypoint
-# --------------------------------------------------------------------------- #
-def test_main_emits_error_json_on_launcher_error(monkeypatch, capsys):
-    import EvoScientist.config as config_mod
-
-    monkeypatch.setattr(
-        config_mod, "get_effective_config", lambda: SimpleNamespace(default_workdir="")
-    )
-    monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _c: None)
-    monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
-
-    class _FailingLauncher:
-        def __init__(self, *_a, **_k):
-            pass
-
-        def start(self):
-            raise lm.LauncherError("stripped_backend", "boom", "do X")
-
-        def stop(self):
-            pass
-
-    monkeypatch.setattr(lm, "WebUILauncher", _FailingLauncher)
-
-    rc = lm.main(["--workspace", "/tmp/ws"])
-    assert rc == 1
-
-    out = capsys.readouterr()
-    payload = json.loads(out.out.strip())
-    assert payload["status"] == "error"
-    assert payload["code"] == "stripped_backend"
-    assert payload["message"] == "boom"
-    assert payload["detail"] == "do X"
-    # stderr carries the error for logs; stdout stays machine-parseable.
-    assert "stripped_backend" in out.err
 
 
 # --------------------------------------------------------------------------- #
