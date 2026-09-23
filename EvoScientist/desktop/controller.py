@@ -28,6 +28,13 @@ class DesktopWindow(Protocol):
 
     def show_error(self, code: str, message: str, detail: str | None) -> None: ...
 
+    # A non-blocking banner over the live WebUI (unlike ``show_status``, which
+    # replaces the whole page). Used while a switch waits for the current turn
+    # to finish, so the user can keep watching and answering it.
+    def show_pending(self, message: str) -> None: ...
+
+    def clear_pending(self) -> None: ...
+
 
 class DesktopController:
     """Runs the startup sequence and owns teardown.
@@ -44,7 +51,7 @@ class DesktopController:
         ready_timeout: float = 90.0,
         *,
         launcher_factory: Callable[[str], object] | None = None,
-        busy_probe: Callable[[str], str] | None = None,
+        active_probe: Callable[[str], str] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         poll_interval: float = 1.0,
@@ -56,7 +63,7 @@ class DesktopController:
         # the shell injects the same closure it uses for the initial boot. Left
         # None in tests that never switch (and the switch then no-ops).
         self._launcher_factory = launcher_factory
-        self._busy_probe = busy_probe
+        self._active_probe = active_probe
         self._should_cancel = should_cancel
         self._sleep = sleep
         self._poll_interval = poll_interval
@@ -91,12 +98,14 @@ class DesktopController:
         """Switch the active workspace to ``workspace_dir`` (issue #484 Part 6).
 
         Single active workspace, controlled restart: wait for the app-owned
-        backend to finish every active run (including background sub-agents),
-        then tear it down and boot a fresh launcher pinned to the new workspace,
-        reloading the WebUI. No confirm dialog — the wait, not a prompt, is how
-        in-flight work is protected. Follows the desktop's existing restart path
-        (stop launcher -> rebuild -> boot), so moving to #413 Phase 1 later only
-        changes what this method calls.
+        backend to finish every active turn — runs, background sub-agents, and
+        turns paused awaiting human input — then tear it down and boot a fresh
+        launcher pinned to the new workspace, reloading the WebUI. No confirm
+        dialog: the wait, not a prompt, is how in-flight work is protected, and
+        while it waits a non-blocking banner keeps the WebUI visible so the user
+        can watch and answer the current turn. Follows the desktop's existing
+        restart path (stop launcher -> rebuild -> boot), so moving to #413 Phase
+        1 later only changes what this method calls.
 
         The single choke point the switch flows through: the native menu drives
         it today, and a future in-WebUI switcher drives the same method.
@@ -105,15 +114,18 @@ class DesktopController:
             logger.info("switch_workspace requested but no launcher factory; ignoring")
             return
 
-        from .shutdown import _probe_busy_state, wait_for_backend_idle
+        from .shutdown import _probe_active_state, wait_for_backend_idle
 
         backend_url = self._launcher.backend_url
         logger.info("workspace switch requested -> %s", workspace_dir)
 
-        probe = self._busy_probe or _probe_busy_state
-        if probe(backend_url) != "idle":
-            self._window.show_status(
-                "Waiting for running tasks to finish before switching workspace…"
+        probe = self._active_probe or _probe_active_state
+        waiting = probe(backend_url) != "idle"
+        if waiting:
+            # Keep the WebUI visible (non-blocking banner) so the user can keep
+            # working the current turn; the switch completes once it finishes.
+            self._window.show_pending(
+                "Switching workspace once the current task finishes…"
             )
         idle = wait_for_backend_idle(
             backend_url,
@@ -124,9 +136,16 @@ class DesktopController:
         )
         if not idle:
             # Cancelled — the app is shutting down. Do not relaunch a backend.
+            if waiting:
+                self._window.clear_pending()
             logger.info("workspace switch aborted before restart (cancelled)")
             return
 
+        # ``show_status`` replaces the whole page, so the banner goes with it;
+        # clearing first keeps the surface honest if the backend was idle from
+        # the start (no banner shown) or the WebUI lingers a moment.
+        if waiting:
+            self._window.clear_pending()
         self._window.show_status("Switching workspace…")
         self._launcher.stop()
         self._launcher = self._launcher_factory(workspace_dir)

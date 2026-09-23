@@ -25,6 +25,8 @@ class _FakeWindow:
         self.status: list[str] = []
         self.loaded_url: str | None = None
         self.error: tuple | None = None
+        self.pending: list[str] = []
+        self.pending_cleared = 0
 
     def show_status(self, message):
         self.status.append(message)
@@ -34,6 +36,12 @@ class _FakeWindow:
 
     def show_error(self, code, message, detail):
         self.error = (code, message, detail)
+
+    def show_pending(self, message):
+        self.pending.append(message)
+
+    def clear_pending(self):
+        self.pending_cleared += 1
 
 
 class _FakeLauncher:
@@ -143,7 +151,7 @@ def test_switch_workspace_restarts_with_new_launcher():
         old,
         win,
         launcher_factory=factory,
-        busy_probe=lambda url: "idle",  # nothing running -> switch immediately
+        active_probe=lambda url: "idle",  # nothing running -> switch immediately
     )
     ctl.switch_workspace("/ws/new")
 
@@ -152,6 +160,7 @@ def test_switch_workspace_restarts_with_new_launcher():
     assert built["ws"] == "/ws/new"
     assert ctl.launcher is new  # live launcher swapped
     assert win.loaded_url == "http://127.0.0.1:4900"
+    assert win.pending == []  # idle from the start -> no waiting banner
 
 
 def test_switch_workspace_waits_until_idle():
@@ -163,20 +172,21 @@ def test_switch_workspace_waits_until_idle():
 
     def probe(url):
         calls["n"] += 1
-        return "idle" if calls["n"] >= 3 else "busy"
+        return "idle" if calls["n"] >= 3 else "active"
 
     ctl = DesktopController(
         old,
         win,
         launcher_factory=lambda ws: new,
-        busy_probe=probe,
+        active_probe=probe,
         sleep=slept.append,
         poll_interval=0.01,
     )
     ctl.switch_workspace("/ws/new")
 
     assert slept  # did not restart until the backend went idle
-    assert any("Waiting" in s for s in win.status)  # showed the wait status
+    assert win.pending  # showed the non-blocking waiting banner (not a full page)
+    assert win.pending_cleared  # and cleared it before restarting
     assert old.stopped
     assert new.started
     assert ctl.launcher is new
@@ -190,7 +200,7 @@ def test_switch_workspace_aborts_when_cancelled():
         old,
         win,
         launcher_factory=lambda ws: _FakeLauncher(),
-        busy_probe=lambda url: "busy",  # would wait forever...
+        active_probe=lambda url: "active",  # would wait forever...
         should_cancel=lambda: True,  # ...but the app is shutting down
         sleep=lambda s: None,
     )
@@ -198,6 +208,7 @@ def test_switch_workspace_aborts_when_cancelled():
 
     assert not old.stopped  # no teardown, no relaunch on a closing app
     assert ctl.launcher is old
+    assert win.pending_cleared  # banner removed on abort
 
 
 # --------------------------------------------------------------------------- #
@@ -354,37 +365,82 @@ def test_active_runs_false_on_probe_error(monkeypatch):
     assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is False
 
 
+def _patch_probe_by_status(monkeypatch, mapping):
+    """Patch the probe so each ``/threads/search`` call returns the result list
+    ``mapping`` gives for its requested status (default empty). Lets a test make
+    ``busy`` empty but ``interrupted`` non-empty, and vice versa."""
+    import httpx
+
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: True)
+
+    class _Resp:
+        def __init__(self, data):
+            self._data = data
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._data
+
+    def _fake_post(url, **kwargs):
+        status = kwargs["json"]["status"]
+        return _Resp(mapping.get(status, []))
+
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+
 # --------------------------------------------------------------------------- #
 # Tri-state probe + wait-for-idle (switch path)
 # --------------------------------------------------------------------------- #
-def test_probe_busy_state_busy(monkeypatch):
+def test_probe_active_state_busy(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
     _patch_probe(monkeypatch, reachable=True, result=[{"thread_id": "t"}])
-    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "busy"
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "active"
 
 
-def test_probe_busy_state_idle(monkeypatch):
+def test_probe_active_state_interrupted(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # A turn paused awaiting human input (HITL) is "interrupted", not "busy" —
+    # it must still count as active so a switch does not fire mid-turn.
+    _patch_probe_by_status(monkeypatch, {"busy": [], "interrupted": [{"id": "t"}]})
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "active"
+
+
+def test_probe_active_state_idle(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
     _patch_probe(monkeypatch, reachable=True, result=[])
-    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "idle"
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "idle"
 
 
-def test_probe_busy_state_unreachable_is_idle(monkeypatch):
+def test_probe_active_state_unreachable_is_idle(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
     # Backend gone -> its runs are gone -> a restart is safe -> "idle".
     _patch_probe(monkeypatch, reachable=False)
-    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "idle"
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "idle"
 
 
-def test_probe_busy_state_error_is_unknown(monkeypatch):
+def test_probe_active_state_error_is_unknown(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
     # Backend up but the probe threw -> we cannot tell -> "unknown".
     _patch_probe(monkeypatch, reachable=True, exc=RuntimeError("boom"))
-    assert dshutdown._probe_busy_state("http://127.0.0.1:6174") == "unknown"
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "unknown"
+
+
+def test_active_runs_true_when_interrupted(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # Close path also treats an interrupted (HITL) turn as active, so closing
+    # while a turn awaits input prompts before tearing the backend down.
+    _patch_probe_by_status(monkeypatch, {"busy": [], "interrupted": [{"id": "t"}]})
+    assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is True
 
 
 def test_wait_for_backend_idle_returns_immediately_when_idle():

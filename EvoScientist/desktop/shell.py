@@ -9,6 +9,7 @@ rest of the package imports without the optional ``desktop`` extra installed.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import threading
@@ -150,6 +151,36 @@ class _WebviewWindow:
 
     def show_setup(self, markup: str) -> None:
         self._load_html(markup)
+
+    def show_pending(self, message: str) -> None:
+        """Inject/update a fixed banner over the LIVE WebUI (no navigation), so
+        a pending workspace switch shows without hiding the current turn. Runs JS
+        in the third-party WebUI page, so it is strictly best-effort — a failure
+        must never block the switch. ``json.dumps`` makes the message a safe JS
+        string literal."""
+        self._eval_best_effort(
+            "(function(){var id='__evosci_pending__';"
+            "var d=document.getElementById(id);"
+            "if(!d){d=document.createElement('div');d.id=id;"
+            "d.style.cssText='position:fixed;top:0;left:0;right:0;"
+            "z-index:2147483647;padding:8px 14px;text-align:center;"
+            "font:13px -apple-system,Segoe UI,system-ui,sans-serif;"
+            "background:#1a73e8;color:#fff;box-shadow:0 1px 6px rgba(0,0,0,.3);';"
+            "document.body.appendChild(d);}"
+            f"d.textContent={json.dumps(message)};}})();"
+        )
+
+    def clear_pending(self) -> None:
+        self._eval_best_effort(
+            "(function(){var e=document.getElementById('__evosci_pending__');"
+            "if(e)e.remove();})();"
+        )
+
+    def _eval_best_effort(self, script: str) -> None:
+        try:
+            self._window.evaluate_js(script)
+        except Exception as exc:  # a banner must never block or crash the switch
+            logger.warning("pending-banner JS failed: %s", exc)
 
 
 class _SetupApi:
