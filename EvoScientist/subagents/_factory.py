@@ -80,7 +80,7 @@ def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
         logger.warning(
             "scheduler rubric: grader model %s via OpenRouter cannot return "
             "structured verdicts (this route rejects forced tool_choice and its "
-            "JSON mode drops required fields); rubric runs will end in "
+            "JSON mode rejects the grader schema); rubric runs will end in "
             "grader_error. Use the native anthropic provider for this model, or "
             "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku "
             "and Gemini all grade through OpenRouter).",

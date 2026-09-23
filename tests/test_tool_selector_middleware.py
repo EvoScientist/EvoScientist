@@ -953,11 +953,11 @@ def test_concurrent_rejection_retries_with_installed_auto_selector():
     """A request that failed on the forced selector after another request
     already switched still retries with the auto selector."""
     auto_selector = MagicMock()
-    cond, _, auto_factory = _switching_middleware(_FORCED_REJECTED, auto_selector)
+    cond, primary, auto_factory = _switching_middleware(_FORCED_REJECTED, auto_selector)
     cond._build_selector(_request([_tool(f"t{i}") for i in range(10)]))
 
-    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED) is True
-    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED) is True
+    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED, primary) is True
+    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED, primary) is True
 
     auto_factory.assert_called_once()
     assert cond._selector is auto_selector
@@ -968,11 +968,27 @@ def test_rejection_restores_auto_selector_if_overwritten():
     auto_selector = MagicMock()
     cond, primary, _ = _switching_middleware(_FORCED_REJECTED, auto_selector)
     cond._build_selector(_request([_tool(f"t{i}") for i in range(10)]))
-    cond._switch_to_auto_tool_choice(_FORCED_REJECTED)
+    cond._switch_to_auto_tool_choice(_FORCED_REJECTED, primary)
     cond._selector = primary  # simulate a racing first-time build
 
-    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED) is True
+    assert cond._switch_to_auto_tool_choice(_FORCED_REJECTED, primary) is True
     assert cond._selector is auto_selector
+
+
+def test_rejected_auto_selector_is_not_retried():
+    """Once auto itself is rejected, each turn makes one auto call, not two."""
+    auto_selector = MagicMock()
+    auto_selector.wrap_model_call.side_effect = _FORCED_REJECTED
+    cond, primary, _ = _switching_middleware(_FORCED_REJECTED, auto_selector)
+    request = _request([_tool(f"t{i}") for i in range(10)])
+
+    cond.wrap_model_call(request, MagicMock())
+    handler = MagicMock()
+    cond.wrap_model_call(request, handler)
+
+    primary.wrap_model_call.assert_called_once()
+    assert auto_selector.wrap_model_call.call_count == 2  # one per turn
+    handler.assert_called_once_with(request)
 
 
 def test_other_selector_errors_do_not_switch_to_auto():
@@ -1064,3 +1080,110 @@ def test_auto_selector_sends_auto_tool_choice_at_low_effort(monkeypatch):
     assert captured["tool_choice"] == {"type": "auto"}
     assert captured["output_config"]["effort"] == "low"
     assert result == {"tools": ["ls", "grep"]}
+
+
+def test_real_selector_switches_to_auto_end_to_end(monkeypatch):
+    """Drives langchain's real LLMToolSelectorMiddleware through the switch, so a
+    future langchain change to how it uses ``.model`` fails here first."""
+    import json
+
+    import anthropic
+    from langchain_core.messages import HumanMessage
+    from packaging.version import Version
+
+    from EvoScientist.llm.models import get_chat_model
+
+    if Version(anthropic.__version__) >= Version("1"):
+        import httpx2 as httpx
+    else:
+        import httpx
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    bodies = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        if body.get("tool_choice", {}).get("type") != "auto":
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": 'tool_choice: type "tool" and "any" are not '
+                        "supported for this model.",
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "ToolSelectionResponse",
+                        "input": {"tools": ["t1", "t2"]},
+                    }
+                ],
+                "model": "claude-opus-5-5",
+                "stop_reason": "tool_use",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    model = get_chat_model("claude-opus-5-5", provider="anthropic")
+    # Every selector copy shares this cached client.
+    model._client = anthropic.Anthropic(
+        api_key="sk-test",
+        timeout=None,
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    [cond] = create_tool_selector_middleware(model=model, threshold=5)
+    request = ModelRequest(
+        model=MagicMock(),
+        messages=[HumanMessage("find papers")],
+        tools=[_tool(f"t{i}") for i in range(10)],
+    )
+    handler = MagicMock(return_value="response")
+
+    assert cond.wrap_model_call(request, handler) == "response"
+
+    assert [b.get("tool_choice", {}).get("type") for b in bodies] == ["tool", "auto"]
+    assert bodies[1]["output_config"]["effort"] == "low"
+    hint = "Always respond by calling the ToolSelectionResponse tool"
+    assert hint not in json.dumps(bodies[0]["system"])
+    assert hint in json.dumps(bodies[1]["system"])
+    assert [t.name for t in handler.call_args.args[0].tools] == ["t1", "t2"]
+
+
+def test_auto_selector_model_delegates_other_attributes():
+    from EvoScientist.middleware.tool_selector import _AutoToolChoiceSelectorModel
+
+    inner = MagicMock(profile={"max_input_tokens": 1})
+    wrapped = _AutoToolChoiceSelectorModel(inner)
+
+    assert wrapped.profile == {"max_input_tokens": 1}
+    assert wrapped.with_config is inner.with_config
+
+
+def test_auto_selector_model_survives_copy():
+    """Forwarding must not hand copy protocols to the wrapped model."""
+    import copy
+
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    from EvoScientist.middleware.tool_selector import _AutoToolChoiceSelectorModel
+
+    wrapped = _AutoToolChoiceSelectorModel(FakeListChatModel(responses=["x"]))
+
+    for clone in (copy.copy(wrapped), copy.deepcopy(wrapped)):
+        assert type(clone) is _AutoToolChoiceSelectorModel
+        assert isinstance(clone._model, FakeListChatModel)

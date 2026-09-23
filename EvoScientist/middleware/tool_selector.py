@@ -119,6 +119,13 @@ class _AutoToolChoiceSelectorModel:
     def __init__(self, model: BaseChatModel) -> None:
         self._model = model
 
+    def __getattr__(self, name: str) -> Any:
+        # Forward what the selector reads besides ``with_structured_output``;
+        # dunders stay local so copy/pickle see the wrapper, not the model.
+        if name.startswith("__") or name == "_model":
+            raise AttributeError(name)
+        return getattr(self._model, name)
+
     def with_structured_output(self, schema: dict[str, Any], **_: Any) -> Runnable:
         name = schema.get("title", "ToolSelectionResponse")
         return (
@@ -193,15 +200,19 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
                 self._selector = self._selector_factory(self._always_include_names)
             return self._selector
 
-    def _switch_to_auto_tool_choice(self, exc: Exception) -> bool:
+    def _switch_to_auto_tool_choice(
+        self, exc: Exception, failed: AgentMiddleware
+    ) -> bool:
         """Install the auto-tool-choice selector when the model rejects forced use.
 
-        Returns True when the failed request should retry with it.
+        Returns True when the failed request should retry with it; never when
+        the selector that failed is already the auto one.
         """
         # OpenRouter's str(exc) is generic; the provider message is in ``body``.
         detail = f"{exc} {getattr(exc, 'body', '') or ''}"
         if (
             self._auto_selector_factory is None
+            or (self._auto_selector is not None and failed is self._auto_selector)
             or getattr(exc, "status_code", None) != 400
             or "tool_choice" not in detail
         ):
@@ -268,12 +279,13 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return handler(req)
 
         try:
+            selector = self._build_selector(request)
             try:
-                return self._build_selector(request).wrap_model_call(
-                    request, _handler_after_selection
-                )
+                return selector.wrap_model_call(request, _handler_after_selection)
             except Exception as exc:
-                if _handler_called or not self._switch_to_auto_tool_choice(exc):
+                if _handler_called or not self._switch_to_auto_tool_choice(
+                    exc, selector
+                ):
                     raise
                 return self._build_selector(request).wrap_model_call(
                     request, _handler_after_selection
@@ -324,12 +336,15 @@ class _ConditionalToolSelectorMiddleware(AgentMiddleware):
             return await handler(req)
 
         try:
+            selector = self._build_selector(request)
             try:
-                return await self._build_selector(request).awrap_model_call(
+                return await selector.awrap_model_call(
                     request, _handler_after_selection
                 )
             except Exception as exc:
-                if _handler_called or not self._switch_to_auto_tool_choice(exc):
+                if _handler_called or not self._switch_to_auto_tool_choice(
+                    exc, selector
+                ):
                     raise
                 return await self._build_selector(request).awrap_model_call(
                     request, _handler_after_selection
@@ -412,10 +427,12 @@ def create_tool_selector_middleware(
         "select all of them — filtering is not always necessary."
     )
 
-    def selector_factory(always_include: list[str]) -> AgentMiddleware:
+    def selector_factory(
+        always_include: list[str], prompt: str = system_prompt
+    ) -> AgentMiddleware:
         return LLMToolSelectorMiddleware(
             model=safe_model,
-            system_prompt=system_prompt,
+            system_prompt=prompt,
             always_include=always_include,
         )
 
@@ -425,7 +442,13 @@ def create_tool_selector_middleware(
         auto_model = safe_model.model_copy(update={"reasoning_effort": "low"})
 
     def auto_selector_factory(always_include: list[str]) -> AgentMiddleware:
-        selector = selector_factory(always_include)
+        # Without a forced call, name the tool in the prompt as well.
+        selector = selector_factory(
+            always_include,
+            system_prompt
+            + " Always respond by calling the ToolSelectionResponse tool; "
+            "never answer the user directly.",
+        )
         # The constructor only accepts a BaseChatModel; selection only calls
         # ``with_structured_output`` on it.
         selector.model = _AutoToolChoiceSelectorModel(auto_model)
