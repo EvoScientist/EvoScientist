@@ -327,7 +327,10 @@ class FakeGraphGateway(GraphGateway):
         self.clone_calls: list[
             tuple[str, dict[str, Any] | None, GraphTarget | None]
         ] = []
-        self.updated_states: list[tuple[GraphTarget, str, GraphStateValues]] = []
+        self.updated_states: list[
+            tuple[GraphTarget, str, GraphStateValues | None, str | None]
+        ] = []
+        self.update_error: BaseException | None = None
 
     async def create_thread(
         self,
@@ -427,9 +430,13 @@ class FakeGraphGateway(GraphGateway):
         self,
         target: GraphTarget,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
+        *,
+        as_node: str | None = None,
     ) -> None:
-        self.updated_states.append((target, thread_id, values))
+        if self.update_error is not None:
+            raise self.update_error
+        self.updated_states.append((target, thread_id, values, as_node))
 
     async def get_run_status(
         self,

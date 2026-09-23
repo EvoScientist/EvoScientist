@@ -7,9 +7,9 @@ involved, so a long unattended turn must run to completion instead of
 halting mid-work after 50 rounds. When the budget IS spent, the loop must
 stop visibly — a message for the user plus a WARNING — refuse the NEXT
 pending BEFORE prompting for it (the 50th decision is always resumed),
-and close the parked checkpoint with a rejecting resume so it does not
-poison the next turn (the #464 recovery preserves genuine interrupt
-pauses on purpose).
+and close the parked checkpoint without resuming the agent. A rejecting
+resume would run another model step; the close writes tool results and
+clears ``next`` instead, so the checkpoint cannot poison the next turn.
 """
 
 from __future__ import annotations
@@ -84,8 +84,11 @@ class TestRichCliHitlRoundBudget:
     ):
         """51 human-prompted interrupts: 50 prompts are served, then the
         loop stops with a visible notice, keeps the partial response, and
-        closes the parked interrupt with a rejecting resume (issue #469)."""
+        closes the parked interrupt without another model step (issue #469)."""
+        from langchain_core.messages import AIMessage
         from langgraph.types import Command  # type: ignore[import-untyped]
+
+        from EvoScientist.backends import HITL_ROUND_LIMIT_REJECT_MESSAGE
 
         monkeypatch.setattr(display_mod, "_session_auto_approve", False)
         monkeypatch.setattr(
@@ -118,11 +121,27 @@ class TestRichCliHitlRoundBudget:
             if stream_calls <= 51:
                 yield _interrupt_event(stream_calls)
                 return
-            # Drain round after exhaustion: its output is discarded.
-            yield {"type": "text", "content": "post-rejection wrap-up"}
-            yield {"type": "done", "content": "post-rejection wrap-up"}
+            yield {"type": "text", "content": "should not stream a drain"}
+            yield {"type": "done", "content": "should not stream a drain"}
 
-        gateway = FakeGraphGateway(stream=_fake_stream)
+        gateway = FakeGraphGateway(
+            stream=_fake_stream,
+            state_values={
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "execute",
+                                "args": {"command": "echo step"},
+                                "id": "call-1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                ]
+            },
+        )
         state = display_mod.StreamState()
 
         with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
@@ -139,21 +158,27 @@ class TestRichCliHitlRoundBudget:
 
         assert prompt_calls == 50  # the 51st round hits the budget, not a prompt
         assert result == "Partial work so far"  # partial-response semantics kept
-        assert stream_calls == 52  # + 50 approve resumes + 1 reject drain
+        assert stream_calls == 51  # initial + 50 approve resumes, no drain stream
         assert state.pending_interrupt is None  # parked interrupt was closed
         assert any("Approval round limit reached" in p for p in printed)
         assert any("max rounds" in r.getMessage() for r in caplog.records)
 
-        drain = gateway.requests[-1]
-        assert isinstance(drain.message, Command)
-        decisions = drain.message.resume["i51"]["decisions"]
-        assert decisions[0]["type"] == "reject"
+        resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
+        assert len(resumes) == 50
+        assert "i51" not in resumes[-1].message.resume
+        tool_update = next(
+            update for update in gateway.updated_states if update[3] == "tools"
+        )
+        content = tool_update[2]["messages"][0].content
+        assert HITL_ROUND_LIMIT_REJECT_MESSAGE in content
+        assert "Do not retry this tool call" in content
+        assert gateway.updated_states[-1][2] is None
+        assert gateway.updated_states[-1][3] == "__end__"
 
     def test_ask_user_rounds_share_the_human_budget(self, monkeypatch):
         """ask_user rounds are always human-prompted and count toward the
-        same budget; exhaustion closes the parked ask_user checkpoint with
-        a cancelled resume instead of leaving it abandoned (issue #469)."""
-        from langgraph.types import Command  # type: ignore[import-untyped]
+        same budget; exhaustion closes the parked ask_user checkpoint
+        without a cancelled resume (issue #469)."""
 
         stream_calls = 0
 
@@ -187,12 +212,152 @@ class TestRichCliHitlRoundBudget:
             _state=state,
         )
 
-        assert stream_calls == 52  # 50 ask_user rounds + parked 51st + drain
+        assert stream_calls == 51  # 50 ask_user rounds + parked 51st, no drain
         assert state.pending_ask_user is None
-        drain = gateway.requests[-1]
-        assert isinstance(drain.message, Command)
-        assert drain.message.resume == {"status": "cancelled"}
+        assert gateway.updated_states[-1][2] is None
+        assert gateway.updated_states[-1][3] == "__end__"
         assert result == ""
+
+    def test_total_cap_closes_without_streaming_another_step(self, monkeypatch, caplog):
+        """The runaway guard stops an auto-approved turn without a rejecting
+        resume, which would otherwise run another model step (issue #469)."""
+        from langgraph.types import Command  # type: ignore[import-untyped]
+
+        import EvoScientist.channels.hitl_budget as budget_mod
+
+        monkeypatch.setattr(budget_mod, "MAX_HITL_TOTAL_ROUNDS", 2)
+        monkeypatch.setattr(display_mod, "_session_auto_approve", True)
+        stream_calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            yield _interrupt_event(stream_calls)
+
+        gateway = FakeGraphGateway(stream=_fake_stream)
+        state = display_mod.StreamState()
+        printed: list[str] = []
+        monkeypatch.setattr(
+            display_mod.console,
+            "print",
+            lambda *args, **_kwargs: printed.append(str(args[0]) if args else ""),
+        )
+
+        with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
+            display_mod._run_streaming(
+                agent=MagicMock(),
+                message="hello",
+                thread_id="t1",
+                show_thinking=False,
+                interactive=True,
+                gateway=gateway,
+                _state=state,
+            )
+
+        resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
+        assert stream_calls == 2
+        assert len(resumes) == 1  # the second interrupt is closed, not resumed
+        assert gateway.updated_states[-1][3] == "__end__"
+        assert any("Approval round limit reached" in line for line in printed)
+
+    def test_session_grant_after_human_budget_still_auto_resolves(self, monkeypatch):
+        """The human budget is checked only when a prompt would be shown."""
+        import EvoScientist.channels.hitl_budget as budget_mod
+
+        monkeypatch.setattr(budget_mod, "MAX_HUMAN_HITL_ROUNDS", 1)
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(
+            "EvoScientist.EvoScientist._ensure_config",
+            lambda: SimpleNamespace(
+                auto_approve=False, dangerous_mode=False, shell_allow_list=""
+            ),
+        )
+        prompts = 0
+
+        def _grant_on_first(_requests):
+            nonlocal prompts
+            prompts += 1
+            display_mod._session_auto_approve = True
+            return [{"type": "approve"}]
+
+        stream_calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls <= 3:
+                yield _interrupt_event(stream_calls)
+                return
+            yield {"type": "text", "content": "kept going"}
+            yield {"type": "done", "content": "kept going"}
+
+        gateway = FakeGraphGateway(stream=_fake_stream)
+        result = display_mod._run_streaming(
+            agent=MagicMock(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            hitl_prompt_fn=_grant_on_first,
+            gateway=gateway,
+            _state=display_mod.StreamState(),
+        )
+
+        assert prompts == 1
+        assert result == "kept going"
+        assert stream_calls == 4
+
+    def test_close_failure_keeps_the_partial_response(self, monkeypatch, caplog):
+        import EvoScientist.channels.hitl_budget as budget_mod
+
+        monkeypatch.setattr(budget_mod, "MAX_HUMAN_HITL_ROUNDS", 0)
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(
+            "EvoScientist.EvoScientist._ensure_config",
+            lambda: SimpleNamespace(
+                auto_approve=False, dangerous_mode=False, shell_allow_list=""
+            ),
+        )
+
+        async def _fake_stream(_request):
+            yield {"type": "text", "content": "partial"}
+            yield _interrupt_event(1)
+
+        gateway = FakeGraphGateway(stream=_fake_stream)
+        gateway.update_error = RuntimeError("checkpoint store down")
+        monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
+
+        with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
+            result = display_mod._run_streaming(
+                agent=MagicMock(),
+                message="hello",
+                thread_id="t1",
+                show_thinking=False,
+                interactive=True,
+                hitl_prompt_fn=lambda _requests: [{"type": "approve"}],
+                gateway=gateway,
+                _state=display_mod.StreamState(),
+            )
+
+        assert result == "partial"
+        assert len(gateway.requests) == 1
+        assert any(
+            "Failed to close parked HITL" in r.getMessage() for r in caplog.records
+        )
+
+
+def test_hitl_budget_stop_ignores_human_cap_for_auto_rounds():
+    import EvoScientist.channels.hitl_budget as budget_mod
+
+    assert not budget_mod.hitl_budget_stop(
+        human_rounds=50, total_rounds=51, needs_human=False
+    )
+    assert budget_mod.hitl_budget_stop(
+        human_rounds=50, total_rounds=51, needs_human=True
+    )
+    assert budget_mod.hitl_budget_stop(
+        human_rounds=0, total_rounds=1000, needs_human=False
+    )
 
 
 class TestConsumerHitlRoundBudget:
@@ -283,11 +448,10 @@ class TestConsumerHitlRoundBudget:
     ):
         """50 human decisions are all resumed (the 50th approval IS sent);
         the 51st pending is refused BEFORE prompting, the parked checkpoint
-        is closed with a rejecting resume, and the user sees the stop
+        is closed without a rejecting resume, and the user sees the stop
         message (issue #469)."""
         from langgraph.types import Command  # type: ignore[import-untyped]
 
-        from EvoScientist.backends import HITL_ROUND_LIMIT_REJECT_MESSAGE
         from EvoScientist.channels.interaction import ApprovalOutcome
 
         stream_calls = 0
@@ -299,9 +463,17 @@ class TestConsumerHitlRoundBudget:
             yield _interrupt_event(stream_calls)
 
         async def _human_approves(
-            _action_reqs, _io, _policy, _session_key, *, timeout=0
+            _action_reqs,
+            _io,
+            _policy,
+            _session_key,
+            *,
+            timeout=0,
+            human_budget_exhausted=False,
         ):
             nonlocal prompt_calls
+            if human_budget_exhausted:
+                return ApprovalOutcome(budget_exhausted=True)
             prompt_calls += 1
             return ApprovalOutcome(decisions=[{"type": "approve"}], prompted=True)
 
@@ -316,21 +488,15 @@ class TestConsumerHitlRoundBudget:
             outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
 
         assert prompt_calls == 50  # the 51st pending never prompts a human
-        assert stream_calls == 52  # initial + 50 approve resumes + 1 drain
+        assert stream_calls == 51  # initial + 50 approve resumes, no drain stream
         assert outbound.content == "Approval round limit reached; stopping this turn."
         assert any("HITL round limit" in r.getMessage() for r in caplog.records)
 
-        # The 50th approval was actually sent as a resume …
-        fiftieth = gateway.requests[-2]
+        fiftieth = gateway.requests[-1]
         assert isinstance(fiftieth.message, Command)
         assert fiftieth.message.resume["i50"]["decisions"] == [{"type": "approve"}]
-        # … and the parked 51st interrupt was closed with a reject drain.
-        drain = gateway.requests[-1]
-        assert isinstance(drain.message, Command)
-        assert drain.media is None  # media never rides with a resume Command
-        assert drain.message.resume["i51"]["decisions"] == [
-            {"type": "reject", "message": HITL_ROUND_LIMIT_REJECT_MESSAGE}
-        ]
+        assert gateway.updated_states[-1][2] is None
+        assert gateway.updated_states[-1][3] == "__end__"
 
         await consumer.stop()
         await task
@@ -339,9 +505,8 @@ class TestConsumerHitlRoundBudget:
         self, monkeypatch, caplog
     ):
         """ask_user rounds count toward the same human budget; the 51st
-        question is never asked and its checkpoint is closed with a
+        question is never asked and its checkpoint is closed without a
         cancelled resume (issue #469)."""
-        from langgraph.types import Command  # type: ignore[import-untyped]
 
         stream_calls = 0
         asked = 0
@@ -375,13 +540,166 @@ class TestConsumerHitlRoundBudget:
             outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
 
         assert asked == 50  # the 51st question is never asked
-        assert stream_calls == 52  # initial + 50 answer resumes + 1 drain
+        assert stream_calls == 51  # initial + 50 answer resumes, no drain stream
         assert outbound.content == "Approval round limit reached; stopping this turn."
         assert any("HITL round limit" in r.getMessage() for r in caplog.records)
-
-        drain = gateway.requests[-1]
-        assert isinstance(drain.message, Command)
-        assert drain.message.resume == {"status": "cancelled"}
+        assert gateway.updated_states[-1][3] == "__end__"
 
         await consumer.stop()
         await task
+
+    async def test_human_budget_does_not_block_a_following_session_grant(
+        self, monkeypatch
+    ):
+        """Approving one-by-one and then granting the session must not stop
+        the next auto-resolved pending (issue #469 review)."""
+        import EvoScientist.channels.hitl_budget as budget_mod
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        monkeypatch.setattr(budget_mod, "MAX_HUMAN_HITL_ROUNDS", 1)
+        stream_calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls <= 3:
+                yield _interrupt_event(stream_calls)
+                return
+            yield {"type": "text", "content": "continued"}
+            yield {"type": "done", "content": "continued"}
+
+        prompts = 0
+
+        async def _human_then_grant(
+            _action_reqs,
+            _io,
+            policy,
+            session_key,
+            *,
+            timeout=0,
+            human_budget_exhausted=False,
+        ):
+            nonlocal prompts
+            if policy.is_session_granted(session_key):
+                return ApprovalOutcome(decisions=[{"type": "approve"}])
+            if human_budget_exhausted:
+                return ApprovalOutcome(budget_exhausted=True)
+            prompts += 1
+            policy.grant_session(session_key)
+            return ApprovalOutcome(decisions=[{"type": "approve"}], prompted=True)
+
+        consumer, bus, _gateway = self._consumer(_fake_stream)
+        monkeypatch.setattr(consumer_mod, "resolve_approval", _human_then_grant)
+
+        await bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
+        )
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+
+        assert prompts == 1
+        assert outbound.content == "continued"
+        assert stream_calls == 4
+
+        await consumer.stop()
+        await task
+
+    async def test_close_failure_still_sends_partial_and_stop(
+        self, monkeypatch, caplog
+    ):
+        import EvoScientist.channels.hitl_budget as budget_mod
+
+        monkeypatch.setattr(budget_mod, "MAX_HUMAN_HITL_ROUNDS", 0)
+
+        async def _fake_stream(_request):
+            yield {"type": "text", "content": "partial answer"}
+            yield _interrupt_event(1)
+
+        consumer, bus, gateway = self._consumer(_fake_stream)
+        gateway.update_error = RuntimeError("checkpoint store down")
+
+        await bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
+        )
+        with caplog.at_level(logging.WARNING, logger="EvoScientist.channels.consumer"):
+            task = asyncio.create_task(consumer.run())
+            first = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+            second = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+
+        assert first.content == "partial answer"
+        assert second.content == "Approval round limit reached; stopping this turn."
+        assert any(
+            "Failed to close parked HITL" in r.getMessage() for r in caplog.records
+        )
+
+        await consumer.stop()
+        await task
+
+    async def test_total_cap_closes_without_another_resume(self, monkeypatch):
+        """The 1000-round runaway guard stops an auto-approved consumer turn
+        and closes the checkpoint. No further resume is streamed."""
+        from langgraph.types import Command
+
+        import EvoScientist.channels.hitl_budget as budget_mod
+
+        monkeypatch.setattr(budget_mod, "MAX_HITL_TOTAL_ROUNDS", 2)
+        stream_calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            yield _interrupt_event(stream_calls)
+
+        consumer, bus, gateway = self._consumer(_fake_stream)
+        consumer._approval_policy.grant_session("stub:c1")
+
+        await bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
+        )
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+
+        resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
+        assert stream_calls == 2
+        assert len(resumes) == 1
+        assert gateway.updated_states[-1][3] == "__end__"
+        assert outbound.content == "Approval round limit reached; stopping this turn."
+
+        await consumer.stop()
+        await task
+
+
+def test_tui_loop_does_not_build_a_resume_past_the_total_cap(monkeypatch):
+    """TUI HITL loop, without a Pilot harness.
+
+    ``tui_hitl_loop_stop`` is what each TUI branch calls before it prompts or
+    builds a resume. Auto rounds ignore the human cap; at the total cap the
+    branch stops with no resume left unsent.
+    """
+    import EvoScientist.channels.hitl_budget as budget_mod
+    from EvoScientist.cli.tui_interactive import tui_hitl_loop_stop
+
+    monkeypatch.setattr(budget_mod, "MAX_HITL_TOTAL_ROUNDS", 2)
+    resumes_built = 0
+    unsent_resume = None
+    for total_rounds in range(1, 6):
+        # The previous iteration's resume, if any, is what this round streams.
+        unsent_resume = None
+        if tui_hitl_loop_stop(
+            human_rounds=0, total_rounds=total_rounds, needs_human=False
+        ):
+            break
+        unsent_resume = {"type": "approve", "round": total_rounds}
+        resumes_built += 1
+
+    assert resumes_built == 1
+    assert unsent_resume is None
+
+
+def test_tui_loop_human_cap_does_not_stop_an_auto_branch():
+    """A session-grant branch keeps resuming after the human cap; a widget
+    branch does not."""
+    from EvoScientist.cli.tui_interactive import tui_hitl_loop_stop
+
+    assert not tui_hitl_loop_stop(human_rounds=50, total_rounds=51, needs_human=False)
+    assert tui_hitl_loop_stop(human_rounds=50, total_rounds=51, needs_human=True)

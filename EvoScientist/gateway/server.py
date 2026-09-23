@@ -814,9 +814,16 @@ class LangGraphServerGateway:
         self,
         target: GraphTarget,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
+        *,
+        as_node: str | None = None,
     ) -> None:
-        as_node = "model" if "_summarization_event" in values else None
+        if (
+            as_node is None
+            and isinstance(values, dict)
+            and "_summarization_event" in values
+        ):
+            as_node = "model"
         await self.thread_store.client.threads.update_state(
             thread_id,
             values,

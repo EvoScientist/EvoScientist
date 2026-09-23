@@ -24,9 +24,6 @@ from rich.panel import Panel  # type: ignore[import-untyped]
 from rich.spinner import Spinner  # type: ignore[import-untyped]
 from rich.text import Text  # type: ignore[import-untyped]
 
-from ..backends import (
-    HITL_ROUND_LIMIT_REJECT_MESSAGE as _HITL_ROUND_LIMIT_REJECT_MESSAGE,
-)
 from ..cancellation import bind_cancel_event
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from ..paths import resolve_virtual_path
@@ -1151,15 +1148,6 @@ def display_final_results(
 # ---------------------------------------------------------------------------
 
 _logger = logging.getLogger(__name__)
-# Round budget for the HITL resume loop, counting ONLY rounds that prompted
-# a human (approval prompt or ask_user). Auto-resolved rounds (session
-# "approve all" grant, config allow-list / auto_approve rules) are free: an
-# unattended turn with hundreds of guarded tool calls must run to completion
-# instead of halting mid-work with no explanation (issue #469).
-_MAX_HUMAN_HITL_ROUNDS = 50
-# Runaway guard on the total number of resume rounds per turn (human or
-# auto) so a pathological stream cannot loop forever.
-_MAX_HITL_TOTAL_ROUNDS = 1000
 _session_auto_approve = False
 
 
@@ -1167,13 +1155,16 @@ _session_auto_approve = False
 class _HitlResolution:
     """Result of :func:`_resolve_hitl_approval`.
 
-    ``decisions`` is the resume payload (``None`` when rejected).
-    ``human_prompted`` says whether a human was asked this round — the HITL
-    resume loop counts only those rounds against its budget (issue #469).
+    ``decisions`` is the resume payload (``None`` when rejected or when the
+    human budget is spent). ``human_prompted`` says whether a human was
+    asked this round. ``budget_exhausted`` is set only when a human prompt
+    was skipped because the human-round budget was already spent; auto
+    fast paths never set it (issue #469).
     """
 
     decisions: list[dict] | None
     human_prompted: bool
+    budget_exhausted: bool = False
 
 
 def _resolve_hitl_approval(
@@ -1181,6 +1172,7 @@ def _resolve_hitl_approval(
     prompt_fn: Callable[[list], list[dict] | None] | None = None,
     *,
     question_runner: _QuestionRunner | None = None,
+    human_budget_exhausted: bool = False,
 ) -> _HitlResolution:
     """Resolve HITL approval for an interrupt.
 
@@ -1219,6 +1211,11 @@ def _resolve_hitl_approval(
     decisions, rejections = config_policy_snapshot(action_requests)
     if decisions is not None:
         return _HitlResolution(decisions, human_prompted=False)
+
+    # After the auto fast paths: a spent human budget must not prompt, but
+    # it also must not have blocked the session grant / allow-list above.
+    if human_budget_exhausted:
+        return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
 
     human = (
         prompt_fn(action_requests)
@@ -1627,82 +1624,58 @@ def _run_streaming(
             if aclose is not None:
                 await aclose()
 
-    async def _drain_parked_resume(drain_input: GraphRunInput) -> None:
-        """Consume one resume without rendering.
-
-        Used to close a parked interrupt/ask_user checkpoint when the HITL
-        round budget runs out: the #464 recovery deliberately preserves
-        genuine interrupt pauses, so an abandoned interrupt would otherwise
-        poison the next turn (issue #469).
-        """
-        event_stream = gateway.stream_events(
-            RunRequest(
-                message=drain_input,
-                thread_id=thread_id,
-                metadata=metadata,
-                configurable_extra=configurable_extra,
-                target=_graph_target_for_local_agent(agent, metadata),
-            )
-        )
-        try:
-            async for _event in event_stream:
-                pass
-        finally:
-            aclose = getattr(event_stream, "aclose", None)
-            if aclose is not None:
-                await aclose()
-
     def _stop_on_hitl_round_limit(human_rounds: int) -> str:
         """Stop an exhausted HITL resume loop visibly (issue #469).
 
-        Prints a notice in addition to the WARNING log, closes the parked
-        interrupt (or ask_user) with a rejecting resume so the checkpoint
-        is not left pending, and returns the partial response gathered so
-        far.
+        Prints a notice, closes the parked interrupt without resuming the
+        agent (a rejecting resume would run another invisible model step),
+        and returns the partial response gathered so far.
         """
+        from ..channels.hitl_budget import (
+            MAX_HITL_TOTAL_ROUNDS,
+            MAX_HUMAN_HITL_ROUNDS,
+        )
+
         limit = (
-            _MAX_HUMAN_HITL_ROUNDS
-            if human_rounds >= _MAX_HUMAN_HITL_ROUNDS
-            else _MAX_HITL_TOTAL_ROUNDS
+            MAX_HUMAN_HITL_ROUNDS
+            if human_rounds >= MAX_HUMAN_HITL_ROUNDS
+            else MAX_HITL_TOTAL_ROUNDS
         )
         console.print(
             "[yellow]Approval round limit reached; stopping this turn.[/yellow]"
         )
         _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
-        if state.pending_interrupt is not None:
-            from ..backends import build_hitl_resume
+        state.pending_interrupt = None
+        state.pending_ask_user = None
 
-            drain_input = build_hitl_resume(
-                state.pending_interrupt.get("interrupt_id"),
-                [
-                    {"type": "reject", "message": _HITL_ROUND_LIMIT_REJECT_MESSAGE}
-                    for _ in state.pending_interrupt.get("action_requests", [])
-                ],
+        async def _run_close() -> None:
+            from ..backends import close_parked_checkpoint
+
+            await close_parked_checkpoint(
+                gateway,
+                _graph_target_for_local_agent(agent, metadata),
+                thread_id,
             )
-            state.pending_interrupt = None
-        else:
-            from langgraph.types import Command  # type: ignore[import-untyped]
-
-            drain_input = Command(resume={"status": "cancelled"})
-            state.pending_ask_user = None
-
-        async def _run_drain() -> None:
-            with bind_stream_cancel(cancel_scope):
-                await _drain_parked_resume(drain_input)
 
         try:
-            runtime.run_sync(_run_drain)
+            runtime.run_sync(_run_close)
         except concurrent.futures.CancelledError:
             if not is_stream_cancel_requested(cancel_scope):
                 raise
             _stopped_response()
+        except Exception:
+            _logger.warning(
+                "Failed to close parked HITL checkpoint on thread %s",
+                thread_id,
+                exc_info=True,
+            )
         return (state.response_text or "").strip()
 
     try:
         # Iterative HITL resume loop (converted from recursion so a long
         # unattended turn cannot exhaust the frame stack). Only rounds that
-        # prompted a human count toward _MAX_HUMAN_HITL_ROUNDS; auto-resolved
-        # rounds are free (issue #469).
+        # prompted a human count toward the human budget in
+        # ``channels.hitl_budget``; auto-resolved rounds are free (issue #469).
         human_rounds = 0
         total_rounds = 0
 
@@ -1811,20 +1784,30 @@ def _run_streaming(
                     on_thinking(current)
                     _sent_thinking_text = current
 
-            # Round budget spent with a resume still pending: stop visibly and
-            # close the parked interrupt instead of halting mid-work with no
-            # explanation (issue #469).
+            # Total cap applies even to auto-resolved pendings. The human
+            # budget is applied later, only when a prompt would actually be
+            # shown, so a session grant still auto-resolves after 50 human
+            # rounds (issue #469).
+            from ..channels.hitl_budget import hitl_budget_stop
+
             if (
                 state.pending_ask_user is not None
                 or state.pending_interrupt is not None
-            ) and (
-                human_rounds >= _MAX_HUMAN_HITL_ROUNDS
-                or total_rounds >= _MAX_HITL_TOTAL_ROUNDS
+            ) and hitl_budget_stop(
+                human_rounds=human_rounds,
+                total_rounds=total_rounds,
+                needs_human=False,
             ):
                 return _stop_on_hitl_round_limit(human_rounds)
 
             # ask_user: check before HITL (ask_user uses the same resume loop)
             if state.pending_ask_user is not None:
+                if hitl_budget_stop(
+                    human_rounds=human_rounds,
+                    total_rounds=total_rounds,
+                    needs_human=True,
+                ):
+                    return _stop_on_hitl_round_limit(human_rounds)
                 human_rounds += 1  # ask_user always prompts a human
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
@@ -1870,9 +1853,16 @@ def _run_streaming(
                                 cancel_scope=cancel_scope,
                             )
                         ),
+                        human_budget_exhausted=hitl_budget_stop(
+                            human_rounds=human_rounds,
+                            total_rounds=total_rounds,
+                            needs_human=True,
+                        ),
                     )
                 except _StreamPromptCancelled:
                     return _stopped_response()
+                if resolution.budget_exhausted:
+                    return _stop_on_hitl_round_limit(human_rounds)
                 if resolution.human_prompted:
                     human_rounds += 1
                 if is_stream_cancel_requested(cancel_scope):

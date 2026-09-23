@@ -677,6 +677,9 @@ class ApprovalOutcome:
     decisions: list[dict] | None = None
     unrecognized_reply: str | None = None
     prompted: bool = False
+    # True only when a human prompt was skipped because the caller's human
+    # budget was already spent. Auto fast paths leave this False.
+    budget_exhausted: bool = False
 
 
 async def resolve_approval(
@@ -686,6 +689,7 @@ async def resolve_approval(
     session_key: str,
     *,
     timeout: float = HITL_APPROVAL_TIMEOUT,
+    human_budget_exhausted: bool = False,
 ) -> ApprovalOutcome:
     """Drive a HITL approval interrupt to an :class:`ApprovalOutcome`.
 
@@ -704,6 +708,11 @@ async def resolve_approval(
     auto, policy_rejections = policy.decision_snapshot(session_key, action_requests)
     if auto is not None:
         return ApprovalOutcome(decisions=auto)
+
+    # After the session/config fast path, before any prompt. A spent human
+    # budget must not ask, and must not have blocked the auto return above.
+    if human_budget_exhausted:
+        return ApprovalOutcome(budget_exhausted=True)
 
     has_buttons = bool(io.capabilities.inline_buttons)
     prompt = format_approval_prompt(action_requests, with_buttons=has_buttons)

@@ -476,12 +476,114 @@ def resolve_action_decision(
     return ActionVerdict(ActionDecision.PROMPT)
 
 
-# Reject-decision message used by every HITL resume-loop surface (Rich CLI,
-# TUI, channel consumer) when the round budget runs out and the parked
-# interrupt is closed with a rejecting resume (issue #469). Lives here next
-# to ``build_hitl_resume`` — the shared home of HITL resume plumbing — so the
-# surfaces import one constant instead of duplicating the string.
+# Reason recorded on tool results written when a HITL round budget closes a
+# parked interrupt without resuming the agent (issue #469). A rejecting
+# ``Command(resume=...)`` does not close the checkpoint: HumanInTheLoop
+# middleware turns it into a ToolMessage and routes straight back to the
+# model. Surfaces write the tool results themselves and then clear ``next``
+# via ``update_state(as_node="__end__")``. The constant is part of that
+# result text, alongside the stock "do not retry" sentence — passing it as
+# a reject decision's ``message`` would drop that sentence.
 HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
+
+
+def abandoned_tool_messages(messages: list) -> list:
+    """Tool results for unanswered calls on the last AI message.
+
+    Closing a parked interrupt without these leaves dangling ``tool_calls``,
+    and the next user turn is rejected by the provider. The wording keeps
+    the middleware's default "do not retry" instruction.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
+
+    try:
+        converted = list(convert_to_messages(messages))
+    except Exception:
+        return []
+    last_ai = None
+    last_index = -1
+    for index, message in enumerate(converted):
+        if isinstance(message, AIMessage) and message.tool_calls:
+            last_ai = message
+            last_index = index
+    if last_ai is None:
+        return []
+    answered = {
+        message.tool_call_id
+        for message in converted[last_index + 1 :]
+        if getattr(message, "type", None) == "tool" and message.tool_call_id
+    }
+    results = []
+    for call in last_ai.tool_calls:
+        call_id = call.get("id")
+        if not call_id or call_id in answered:
+            continue
+        name = call.get("name") or "tool"
+        results.append(
+            ToolMessage(
+                content=(
+                    f"User rejected the tool call for `{name}` with id {call_id} "
+                    f"({HITL_ROUND_LIMIT_REJECT_MESSAGE}). The tool was not "
+                    "executed. Do not retry this tool call unless the user "
+                    "explicitly requests it."
+                ),
+                name=name,
+                tool_call_id=call_id,
+                status="error",
+            )
+        )
+    return results
+
+
+async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
+    """End a parked HITL/ask_user turn without another model step.
+
+    Writes rejection tool results (so history stays valid) as the tools
+    node, then clears the pending tasks with ``as_node="__end__"``. A
+    rejecting resume is not used: that resumes the agent.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    tool_messages: list = []
+    try:
+        state = await gateway.get_state_values(target, thread_id)
+        raw = state.get("messages") if isinstance(state, dict) else None
+        tool_messages = abandoned_tool_messages(list(raw or []))
+    except Exception:
+        log.warning(
+            "Could not read thread %s to close a parked HITL interrupt",
+            thread_id,
+            exc_info=True,
+        )
+    if tool_messages:
+        try:
+            await gateway.update_state_values(
+                target,
+                thread_id,
+                {"messages": tool_messages},
+                as_node="tools",
+            )
+        except Exception:
+            log.warning(
+                "Could not record abandoned tool results on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+    try:
+        await gateway.update_state_values(
+            target,
+            thread_id,
+            None,
+            as_node="__end__",
+        )
+    except Exception:
+        log.warning(
+            "Could not clear parked HITL checkpoint on thread %s",
+            thread_id,
+            exc_info=True,
+        )
+        raise
 
 
 def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":

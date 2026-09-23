@@ -232,9 +232,16 @@ class GraphGateway(Protocol):
         self,
         target: GraphTarget,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
+        *,
+        as_node: str | None = None,
     ) -> None:
-        """Update graph state values for a thread."""
+        """Update graph state values for a thread.
+
+        ``as_node`` attributes the write. ``None`` keeps the historical
+        default (``"model"`` when the values carry a summarization event).
+        ``values=None`` with ``as_node="__end__"`` clears pending tasks.
+        """
 
     async def get_run_status(
         self,
