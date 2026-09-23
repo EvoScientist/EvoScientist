@@ -3271,9 +3271,18 @@ class TestAutoConfig:
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert call_kwargs["effort"] == "max"
 
-    @pytest.mark.parametrize("model", ["claude-opus-5", "claude-sonnet-5"])
+    @pytest.mark.parametrize(
+        ("model", "max_tokens"),
+        [
+            ("claude-opus-5", None),
+            ("claude-opus-5-5", 128000),
+            ("claude-sonnet-5", None),
+        ],
+    )
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_anthropic_5_series_adaptive_thinking(self, mock_init, model, monkeypatch):
+    def test_anthropic_5_series_adaptive_thinking(
+        self, mock_init, model, max_tokens, monkeypatch
+    ):
         """Anthropic 5-series models get adaptive thinking (budget_tokens would 400)."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
@@ -3283,6 +3292,26 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert call_kwargs["effort"] == "max"
+        assert call_kwargs.get("max_tokens") == max_tokens
+
+    @pytest.mark.parametrize(
+        ("kwargs", "base_url"),
+        [({"thinking": {"type": "adaptive"}}, None), ({}, "http://localhost:8000")],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opus_5_5_max_tokens_outside_thinking_branch(
+        self, mock_init, kwargs, base_url, monkeypatch
+    ):
+        """Explicit thinking or a local proxy (ccproxy) must still get 128000."""
+        mock_init.return_value = "mock_model"
+        if base_url:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        else:
+            monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        get_chat_model("claude-opus-5-5", provider="anthropic", **kwargs)
+
+        assert mock_init.call_args[1]["max_tokens"] == 128000
 
     @pytest.mark.parametrize("model", ["moonshotai/kimi-k3", "kimi-k3"])
     @patch("EvoScientist.llm.models.init_chat_model")
