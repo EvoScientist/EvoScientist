@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import SystemMessage
 
 from EvoScientist.subagents.expert_container_async import (
@@ -338,6 +339,37 @@ class TestWrapModelCall:
             _PERSONA_SENTINEL in r.message and "not found" in r.message
             for r in caplog.records
         )
+
+
+class TestAsyncWrapModelCall:
+    async def test_awrap_scans_skills_off_the_event_loop(self):
+        """langgraph dev's blockbuster rejects skill-dir scans on the event loop
+        (``os.scandir`` on 3.13+, ``os.listdir`` guarded too so 3.11/3.12 catch it)."""
+        blockbuster = pytest.importorskip("blockbuster")
+        mw = ExpertSkillLoaderMiddleware()
+        request, seen, handler = _mock_request(
+            _system_message_with_sentinel_and_witnesses()
+        )
+
+        async def ahandler(new_request):
+            return handler(new_request)
+
+        bb = blockbuster.BlockBuster()
+        guarded = [
+            bb.functions[name]
+            for name in ("os.scandir", "os.listdir")
+            if name in bb.functions
+        ]
+        for fn in guarded:
+            fn.activate()
+        try:
+            await mw.awrap_model_call(request, ahandler)
+        finally:
+            for fn in guarded:
+                fn.deactivate()
+
+        assert len(seen) == 1
+        assert isinstance(seen[0], SystemMessage)
 
 
 class TestSpecWalkSkipsWarnOnce:

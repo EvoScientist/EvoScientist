@@ -37,6 +37,7 @@ from .steps import (
     _step_ui_backend,
     _step_webui_port,
     _step_workspace,
+    _step_xiaomi_token_plan_region,
 )
 from .style import (
     CONFIRM_STYLE,
@@ -130,11 +131,14 @@ _PROVIDER_KEY_ATTR = {
     "dashscope-code": "dashscope_api_key",
     "moonshot": "moonshot_api_key",
     "kimi-coding": "kimi_api_key",
+    "xiaomi": "mimo_api_key",
+    "xiaomi-token-plan": "mimo_token_plan_api_key",
     "custom-openai": "custom_openai_api_key",
     "custom-anthropic": "custom_anthropic_api_key",
 }
 
 _MINIMAX_GLOBAL_BASE_URL = "https://api.minimax.io/anthropic"
+_XIAOMI_TOKEN_PLAN_DEFAULT_BASE_URL = "https://token-plan-cn.xiaomimimo.com/anthropic"
 _CUSTOM_PROVIDER_BASE_URL = {
     "custom-openai": ("custom_openai_base_url", "CUSTOM_OPENAI_BASE_URL"),
     "custom-anthropic": ("custom_anthropic_base_url", "CUSTOM_ANTHROPIC_BASE_URL"),
@@ -179,10 +183,19 @@ def _configure_provider_base_url(
     elif provider == "minimax":
         if strict:
             config.minimax_base_url = (
-                config.minimax_base_url or _MINIMAX_GLOBAL_BASE_URL
+                config.minimax_base_url.strip() or _MINIMAX_GLOBAL_BASE_URL
             )
         else:
             config.minimax_base_url = _step_minimax_region(config)
+    elif provider == "xiaomi-token-plan":
+        if strict:
+            config.mimo_token_plan_base_url = (
+                config.mimo_token_plan_base_url.strip()
+                or os.environ.get("MIMO_TOKEN_PLAN_BASE_URL", "").strip()
+                or _XIAOMI_TOKEN_PLAN_DEFAULT_BASE_URL
+            )
+        else:
+            config.mimo_token_plan_base_url = _step_xiaomi_token_plan_region(config)
     elif provider == "ollama":
         if strict:
             config.ollama_base_url = (
@@ -311,6 +324,8 @@ def _provider_connection_configured(config: EvoScientistConfig, provider: str) -
     if provider == "custom-anthropic" and not config.custom_anthropic_base_url:
         return False
     if provider == "minimax" and not config.minimax_base_url:
+        return False
+    if provider == "xiaomi-token-plan" and not config.mimo_token_plan_base_url:
         return False
     if _provider_uses_oauth(config, provider):
         return True

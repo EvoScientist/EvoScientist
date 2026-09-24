@@ -27,6 +27,26 @@ class TestExtractModelAndProvider:
         assert name == "claude-sonnet-4-6"
         assert prov == "openrouter"
 
+    def test_short_name_stays_on_current_provider(self):
+        """``/model <name>`` must not hop a Token Plan user to pay-as-you-go."""
+        from EvoScientist.commands.implementation.model import (
+            extract_model_and_provider,
+        )
+
+        assert extract_model_and_provider(["mimo-v2.6-flash"], "xiaomi-token-plan") == (
+            "mimo-v2.6-flash",
+            "xiaomi-token-plan",
+        )
+        # A provider that doesn't serve the name keeps the registry default.
+        assert extract_model_and_provider(["mimo-v2.6-flash"], "anthropic") == (
+            "mimo-v2.6-flash",
+            "xiaomi",
+        )
+        # An explicit provider still wins.
+        assert extract_model_and_provider(
+            ["mimo-v2.6-flash", "xiaomi"], "xiaomi-token-plan"
+        ) == ("mimo-v2.6-flash", "xiaomi")
+
     def test_unknown_model_no_provider_raises(self):
         from EvoScientist.commands.implementation.model import (
             extract_model_and_provider,
@@ -1021,3 +1041,24 @@ class TestModelCommandOllamaPicker:
         committed = set_cfg.call_args[0][0]
         assert committed.model == "llama3.3"
         assert committed.provider == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_fallback_add_short_name_stays_on_current_provider():
+    from EvoScientist.commands.implementation.model_fallback import (
+        ModelFallbackCommand,
+    )
+
+    ctx = MagicMock()
+    with (
+        patch(
+            "EvoScientist.EvoScientist._ensure_config",
+            return_value=SimpleNamespace(provider="xiaomi-token-plan"),
+        ),
+        patch(
+            "EvoScientist.middleware.model_fallback.add_fallback", return_value=True
+        ) as add,
+    ):
+        await ModelFallbackCommand().execute(ctx, ["add", "mimo-v2.6-flash"])
+
+    add.assert_called_once_with("mimo-v2.6-flash", "xiaomi-token-plan")

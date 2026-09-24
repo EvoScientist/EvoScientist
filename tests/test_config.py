@@ -304,6 +304,26 @@ class TestConfigPaths:
 
 
 class TestLoadSaveReset:
+    def test_blank_yaml_values_fall_back_to_defaults(self, temp_config_dir):
+        """A hand-edited ``key:`` loads as None; it must not reach the config."""
+        from EvoScientist.config import get_config_path
+
+        path = get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "provider: minimax\n"
+            "minimax_base_url:\n"
+            "mimo_token_plan_base_url:\n"
+            "langgraph_dev_port:\n"
+        )
+
+        config = load_config()
+
+        assert config.provider == "minimax"
+        assert config.minimax_base_url == ""
+        assert config.mimo_token_plan_base_url == ""
+        assert config.langgraph_dev_port == EvoScientistConfig().langgraph_dev_port
+
     def test_load_returns_defaults_when_no_file(self, temp_config_dir, clean_env):
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()
@@ -1102,6 +1122,45 @@ class TestDotenvIsolation:
         get_effective_config()
 
         assert "MINIMAX_BASE_URL" not in os.environ
+
+    def test_env_example_template_parses_to_blank_values(self):
+        """Inline comments would be parsed as values ("KEY=  # note" -> "# note")."""
+        from dotenv import dotenv_values
+
+        template = Path(__file__).resolve().parents[1] / ".env.example"
+        values = dotenv_values(template)
+
+        assert values
+        assert {k: v for k, v in values.items() if v} == {}
+
+    def test_copied_template_does_not_shadow_config_keys(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Copying the template and filling one key must leave config-file keys intact."""
+        template = Path(__file__).resolve().parents[1] / ".env.example"
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            template.read_text().replace(
+                "ANTHROPIC_API_KEY=\n", "ANTHROPIC_API_KEY=sk-ant-filled\n"
+            )
+        )
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        from dotenv import dotenv_values
+
+        # setenv (unlike delenv on an absent key) registers a restore, so the
+        # merge's os.environ writes are undone after the test.
+        for key in dotenv_values(env_file):
+            monkeypatch.setenv(key, "")
+        save_config(EvoScientistConfig(openai_api_key="sk-from-config"))
+
+        config = get_effective_config()
+
+        assert config.anthropic_api_key == "sk-ant-filled"
+        assert config.openai_api_key == "sk-from-config"
+        assert os.environ.get("MINIMAX_BASE_URL", "") == ""
 
     def test_parent_env_wins_over_dotenv_for_mapped_keys(
         self, temp_config_dir, tmp_path, monkeypatch

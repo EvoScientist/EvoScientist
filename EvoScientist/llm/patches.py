@@ -902,9 +902,12 @@ def _patch_anthropic_strip_foreign_reasoning() -> None:
 
         _orig = _mod._format_messages
 
+        # Forward extra args: langchain-anthropic 1.7.3 added a required `model=` kwarg.
         @functools.wraps(_orig)
-        def _patched(messages: Sequence[BaseMessage]) -> Any:
-            return _orig(_normalize_anthropic_replay_messages(messages))
+        def _patched(messages: Sequence[BaseMessage], *args: Any, **kwargs: Any) -> Any:
+            return _orig(
+                _normalize_anthropic_replay_messages(messages), *args, **kwargs
+            )
 
         _mod._format_messages = _patched
         _anthropic_foreign_reasoning_patched = True

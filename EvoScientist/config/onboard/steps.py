@@ -302,6 +302,14 @@ def _step_provider(
             title="Kimi Coding Plan (Kimi 代码计划 — coding-focused)",
             value="kimi-coding",
         ),
+        Choice(
+            title="Xiaomi MiMo (MiMo v2.6 models, 1M context, thinking)",
+            value="xiaomi",
+        ),
+        Choice(
+            title="Xiaomi MiMo Token Plan (subscription — coding tools only)",
+            value="xiaomi-token-plan",
+        ),
         # Local
         Choice(title="Ollama (local models)", value="ollama"),
         # Third-party / aggregator
@@ -399,6 +407,45 @@ def _step_minimax_region(config: EvoScientistConfig) -> str:
         raise KeyboardInterrupt()
 
     return _MINIMAX_REGIONS[region]
+
+
+_XIAOMI_TOKEN_PLAN_REGIONS: dict[str, str] = {
+    "cn": "https://token-plan-cn.xiaomimimo.com/anthropic",
+    "sgp": "https://token-plan-sgp.xiaomimimo.com/anthropic",
+    "ams": "https://token-plan-ams.xiaomimimo.com/anthropic",
+}
+
+
+def _step_xiaomi_token_plan_region(config: EvoScientistConfig) -> str:
+    """Step 2a (Xiaomi Token Plan): Select the subscription's API region.
+
+    Returns:
+        The selected base URL.
+    """
+    current = config.mimo_token_plan_base_url or os.environ.get(
+        "MIMO_TOKEN_PLAN_BASE_URL", ""
+    )
+    default = next(
+        (k for k, url in _XIAOMI_TOKEN_PLAN_REGIONS.items() if url == current), "cn"
+    )
+
+    region = questionary.select(
+        "Select Xiaomi MiMo Token Plan region (must match your subscription):",
+        choices=[
+            Choice(title="China (token-plan-cn.xiaomimimo.com)", value="cn"),
+            Choice(title="Singapore (token-plan-sgp.xiaomimimo.com)", value="sgp"),
+            Choice(title="Europe (token-plan-ams.xiaomimimo.com)", value="ams"),
+        ],
+        default=default,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+        use_indicator=True,
+    ).ask()
+
+    if region is None:
+        raise KeyboardInterrupt()
+
+    return _XIAOMI_TOKEN_PLAN_REGIONS[region]
 
 
 def _step_oauth_auth_mode(

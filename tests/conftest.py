@@ -154,16 +154,8 @@ def restore_model_passthrough_patch():
 def _isolate_dotenv(monkeypatch):
     """Keep the developer's real .env out of the test environment.
 
-    ``get_effective_config`` runs ``load_dotenv(find_dotenv(usecwd=True),
-    override=True)``, so any test that loads config injects the repo's
-    real .env into ``os.environ`` for the rest of the pytest process.
-    An empty-valued line like ``MINIMAX_BASE_URL=`` then makes
-    ``os.environ.get(key, default)`` return "" instead of the default,
-    breaking unrelated tests later in the run (see issue #322).
-
-    Pointing ``find_dotenv`` at a fixed path that does not exist makes
-    ``load_dotenv`` a no-op without creating a temporary directory for
-    every test.
+    ``get_effective_config`` merges the cwd .env into ``os.environ``, which
+    would leak into every later test; a nonexistent path makes it a no-op.
     """
     monkeypatch.setattr(
         "EvoScientist.config.settings.find_dotenv",
