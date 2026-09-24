@@ -55,9 +55,10 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-; Pin the install dir to the per-user default: the user cannot point it at a
-; shared/existing folder (e.g. C:\Tools), so the {app} sweep in
-; [UninstallDelete] can never delete files EvoScientist did not install.
+; Hide the directory page so the normal install lands in the per-user default,
+; not a shared/existing folder. Defense in depth only: /DIR= and upgrades can
+; still redirect {app}, so uninstall never deletes all of {app} (see
+; [UninstallDelete], which is scoped to app-owned subtrees).
 DisableDirPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=dist
@@ -103,12 +104,16 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; WorkingDir: "{userdocs}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Sweep runtime-created files Inno didn't install itself: bytecode caches under
-; the bundled Python/WebUI in {app}, and the per-user pip cache the agent's
-; on-demand installs write under ~/.evoscientist (PYTHONUSERBASE). Deleting all
-; of {app} is safe only because DisableDirPage pins it to the app-owned default,
-; so it can never be a folder that holds the user's own files.
-Type: filesandordirs; Name: "{app}"
+; Sweep only the app-owned subtrees for runtime-created files Inno didn't install
+; itself (Python bytecode caches, the Next.js .next cache), plus the per-user pip
+; cache under ~/.evoscientist. Scoped to subtrees, never all of {app}:
+; DisableDirPage pins the dir, but /DIR= and upgrades of an older custom-dir
+; install can still point {app} at a user folder, so a whole-{app} delete would
+; risk files EvoScientist never installed. Inno already removes everything it
+; installed; these entries only cover files created at runtime under the bundle.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\webui"
 Type: filesandordirs; Name: "{%USERPROFILE}\.evoscientist\pypackages"
 
 [Code]
