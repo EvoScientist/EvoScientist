@@ -57,10 +57,12 @@ class _ProfileWindowShim:
     read) and provider-matches reported token usage through
     ``self.model._get_ls_params()``. Re-pointing ``_lc_helper.model`` at this
     shim makes the first read see the per-run context window and the second
-    fall through to the run's model. The summary model is NOT affected: it
-    was captured at construction (``_summary_model = self.model.with_retry()``).
+    fall through to the run's model. Summaries use the same pairing: a
+    second shim reads the synced run model (``with_retry()``) so the model
+    that sees the conversation also writes the summary. When no override is
+    synced, that shim falls back to the construction summary model.
 
-    The shim is installed ONCE and never mutated afterwards: both the window
+    The shims are installed ONCE and never mutated afterwards: both the window
     and the delegation target are read from ``state_var`` — the
     ``contextvars.ContextVar`` the owning middleware ``.set()``s per task —
     so concurrent runs with different windows never see each other's state.
@@ -93,6 +95,36 @@ class _ProfileWindowShim:
         return getattr(target, name)
 
 
+class _SummaryModelShim:
+    """Invoke the synced run model for summaries, else the construction model.
+
+    The trigger now follows the run's window. Leaving summaries on the
+    construction model hands ``~0.75 * run_window`` tokens to a smaller
+    model and the thread sticks once ``_acreate_summary`` exhausts retries.
+    Stock middleware summarizes with the same model that reads the
+    conversation; this shim restores that pairing without mutating the
+    shared instance.
+    """
+
+    def __init__(
+        self,
+        state_var: contextvars.ContextVar[tuple[Any, int] | None],
+        fallback: Any,
+    ) -> None:
+        self._state_var = state_var
+        self._fallback = fallback
+
+    def _target(self) -> Any:
+        state = self._state_var.get()
+        return state[0].with_retry() if state is not None else self._fallback
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        return self._target().invoke(*args, **kwargs)
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+        return await self._target().ainvoke(*args, **kwargs)
+
+
 class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
     """SummarizationMiddleware with per-run, per-task trigger/cutoff/overflow limits.
 
@@ -118,11 +150,10 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
     never fire when ``_get_profile_limits()`` returns ``None``, so an
     unresolvable window falls back to ``resolve_context_window``'s 200k default.
 
-    ``_summary_model`` deliberately stays the construction model (built once at
-    langchain ``SummarizationMiddleware.__init__``): summaries don't switch
-    models, only the trigger/cutoff/overflow-clip limits do. The approximate
-    token counter likewise stays construction-tuned (chars-per-token heuristic
-    differences across providers are noise next to the frozen-window bug).
+    Summaries follow the synced run model (``_SummaryModelShim``). The
+    approximate token counter stays construction-tuned (chars-per-token
+    heuristic differences across providers are noise next to the
+    frozen-window bug).
 
     Concurrency (per-task isolation, #466 review): the synced state must NOT
     live on the shared instance, because deepagents' ``awrap_model_call``
@@ -242,6 +273,10 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
                 self._synced_state,
                 self._construction_model,
             )
+            self._lc_helper._summary_model = _SummaryModelShim(
+                self._synced_state,
+                self._lc_helper._summary_model,
+            )
         self._synced_state.set((target, resolved))
 
     def _target_for_override(self, model_name: str | None, provider: str | None) -> Any:
@@ -311,15 +346,16 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
         the synced per-run window: the stock version reads
         ``request.model.profile``, which at this layer is still the
         construction model (ConfigurableModelMiddleware swaps the model
-        further in). The output-token reservation still honors the request's
-        settings/model, exactly like the stock version.
+        further in). The output-token reservation reads the run's model too, so
+        the window and the reservation always describe the same model. Explicit
+        ``request.model_settings`` still win, matching stock.
         """
         state = self._synced_state.get()
         if state is None:
             return super()._input_budget(request)
         output = 0
         for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
-            value = request.model_settings.get(key, getattr(request.model, key, None))
+            value = request.model_settings.get(key, getattr(state[0], key, None))
             if isinstance(value, int) and not isinstance(value, bool):
                 output = max(output, value)
         return max(0, int(state[1] * 0.95) - output)
@@ -333,7 +369,8 @@ def create_per_run_summarization_middleware(
 
     Args:
         construction_model: Chat model the graph was built with; sizes the
-            construction-time defaults and generates the summaries.
+            construction-time defaults and summarizes when no per-run override
+            is in effect. An override summarizes with that run's model.
         backend: Backend for conversation-history offload — must be the same
             backend the stock instance would have used, since deepagents'
             name-based merge replaces the built-in with this instance.
