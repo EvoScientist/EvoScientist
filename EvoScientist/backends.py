@@ -539,28 +539,20 @@ def abandoned_tool_messages(messages: list) -> list:
 async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
     """End a parked HITL/ask_user turn without another model step.
 
-    Reuses ``_recover_interrupted_graph_state(close_interrupts=True)`` on
-    ``target.local_graph`` so HITL budget exhaustion and crash recovery share
-    one clear → patch → clear → verify sequence. Finished sibling writes
-    (``ask_user`` beside another tool) stay in history; unanswered calls get
-    HITL reject results. A rejecting resume is not used: that resumes the
-    agent.
+    Reuses ``_recover_interrupted_graph_state(close_interrupts=True)`` through
+    ``gateway`` so HITL budget exhaustion and crash recovery share one
+    clear → patch → clear → verify sequence. After #470,
+    ``GraphTarget.local_graph`` may be None and execution is server-backed;
+    the gateway is the authority for checkpoint reads and writes.
 
-    ``gateway`` is accepted because every surface already has one; recovery
-    talks to the compiled graph on the target (CLI, TUI, and consumer all
-    pass ``local_graph``).
+    Finished sibling writes (``ask_user`` beside another tool) stay in
+    history; unanswered calls get HITL reject results. A rejecting resume
+    is not used: that resumes the agent.
     """
-    from .stream.events import _recover_interrupted_graph_state
+    from .stream.events import _GatewayCheckpointOps, _recover_interrupted_graph_state
 
-    _ = gateway
-    agent = getattr(target, "local_graph", None)
-    if agent is None:
-        raise RuntimeError(
-            f"Cannot close parked HITL checkpoint on thread {thread_id}: "
-            "GraphTarget.local_graph is required"
-        )
     ok = await _recover_interrupted_graph_state(
-        agent,
+        _GatewayCheckpointOps(gateway, target, thread_id),
         {"configurable": {"thread_id": thread_id}},
         close_interrupts=True,
     )

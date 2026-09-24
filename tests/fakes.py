@@ -307,6 +307,7 @@ class FakeGraphGateway(GraphGateway):
         run_status_error: BaseException | None = None,
         process_statuses: dict[str, str] | None = None,
         process_status_error: BaseException | None = None,
+        checkpoint: Any | None = None,
     ) -> None:
         self.events = list(events or [])
         self.stream = stream
@@ -324,6 +325,7 @@ class FakeGraphGateway(GraphGateway):
         self.process_statuses = process_statuses or {}
         self.process_status_error = process_status_error
         self.process_status_calls: list[str] = []
+        self.checkpoint = checkpoint
         self.requests: list[RunRequest] = []
         self.clone_calls: list[
             tuple[str, dict[str, Any] | None, GraphTarget | None]
@@ -425,7 +427,27 @@ class FakeGraphGateway(GraphGateway):
     ) -> GraphStateValues:
         if self.state_error is not None:
             raise self.state_error
+        if self.checkpoint is not None:
+            snapshot = await self.get_state_snapshot(target, thread_id)
+            values = getattr(snapshot, "values", None) or {}
+            return dict(values) if isinstance(values, dict) else {}
         return self.state_values
+
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> Any:
+        if self.checkpoint is not None:
+            return await self.checkpoint.aget_state(
+                {"configurable": {"thread_id": thread_id}}
+            )
+        return SimpleNamespace(
+            next=(),
+            tasks=(),
+            interrupts=(),
+            values=self.state_values,
+        )
 
     async def update_state_values(
         self,
@@ -438,6 +460,12 @@ class FakeGraphGateway(GraphGateway):
         if self.update_error is not None:
             raise self.update_error
         self.updated_states.append((target, thread_id, values, as_node))
+        if self.checkpoint is not None:
+            await self.checkpoint.aupdate_state(
+                {"configurable": {"thread_id": thread_id}},
+                values,
+                as_node=as_node,
+            )
 
     async def get_run_status(
         self,

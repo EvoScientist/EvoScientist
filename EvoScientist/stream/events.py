@@ -93,6 +93,37 @@ def _snapshot_needs_recovery(snapshot: Any) -> bool:
     return bool(getattr(snapshot, "next", None) or getattr(snapshot, "tasks", None))
 
 
+class _GatewayCheckpointOps:
+    """Compiled-graph state ops backed by a GraphGateway.
+
+    ``_recover_interrupted_graph_state`` talks to ``aget_state`` /
+    ``aupdate_state``. HITL close already has a gateway, and after #470
+    ``GraphTarget.local_graph`` may be None; this adapter is the seam so
+    recovery does not reach into the in-process graph.
+    """
+
+    def __init__(self, gateway: Any, target: Any, thread_id: str) -> None:
+        self._gateway = gateway
+        self._target = target
+        self._thread_id = thread_id
+
+    async def aget_state(self, _config: dict[str, Any]) -> Any:
+        return await self._gateway.get_state_snapshot(self._target, self._thread_id)
+
+    async def aupdate_state(
+        self,
+        _config: dict[str, Any],
+        values: dict[str, Any] | None,
+        as_node: str | None = None,
+    ) -> None:
+        await self._gateway.update_state_values(
+            self._target,
+            self._thread_id,
+            values,
+            as_node=as_node,
+        )
+
+
 def _interrupted_dangling_patch(messages: list) -> list[ToolMessage]:
     """Synthetic error results for tool calls still unanswered in *messages*."""
     answered_ids = {
@@ -169,6 +200,10 @@ async def _recover_interrupted_graph_state(
     anyway (spent round budget). Synthetic results then use the HITL reject
     wording instead of the crash-recovery interrupted text. The checkpoint
     is verified empty of both pending tasks and interrupts.
+
+    ``agent`` is any object with ``aget_state`` / ``aupdate_state`` — the
+    compiled graph on the crash-recovery path, or ``_GatewayCheckpointOps``
+    when HITL close drives recovery through ``GraphGateway``.
 
     Returns:
         ``True`` when the thread is safe to run: it was already clean, it is

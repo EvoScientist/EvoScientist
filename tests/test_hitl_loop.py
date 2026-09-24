@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -138,7 +138,7 @@ class TestRichCliHitlRoundBudget:
             ],
         )
         agent = FakeCheckpointAgent(values={"messages": [dangling]})
-        gateway = FakeGraphGateway(stream=_fake_stream)
+        gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         state = display_mod.StreamState()
 
         with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
@@ -196,7 +196,7 @@ class TestRichCliHitlRoundBudget:
             yield {"type": "done", "content": "never reached"}
 
         agent = FakeCheckpointAgent()
-        gateway = FakeGraphGateway(stream=_fake_stream)
+        gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         state = display_mod.StreamState()
 
         def _ask_user_fn(_pending):
@@ -235,7 +235,7 @@ class TestRichCliHitlRoundBudget:
             yield _interrupt_event(stream_calls)
 
         agent = FakeCheckpointAgent()
-        gateway = FakeGraphGateway(stream=_fake_stream)
+        gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         state = display_mod.StreamState()
         printed: list[str] = []
         monkeypatch.setattr(
@@ -325,7 +325,7 @@ class TestRichCliHitlRoundBudget:
             yield _interrupt_event(1)
 
         agent = FakeCheckpointAgent(update_error=RuntimeError("checkpoint store down"))
-        gateway = FakeGraphGateway(stream=_fake_stream)
+        gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
 
         with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
@@ -368,12 +368,13 @@ class TestConsumerHitlRoundBudget:
         bus = MessageBus()
         mgr = ChannelManager(bus)
         mgr.register(_StubChannel())
-        gateway = FakeGraphGateway(stream=stream)
+        agent = FakeCheckpointAgent()
+        gateway = FakeGraphGateway(stream=stream, checkpoint=agent)
         return (
             InboundConsumer(
                 bus=bus,
                 manager=mgr,
-                agent=FakeCheckpointAgent(),
+                agent=agent,
                 thread_id="",
                 graph_gateway=gateway,
                 max_concurrent=2,
@@ -825,9 +826,8 @@ async def test_close_parked_checkpoint_keeps_finished_sibling_results():
         pending_write=pending_ask,
     )
 
-    await close_parked_checkpoint(
-        MagicMock(), GraphTarget(local_graph=agent), "t-sibling"
-    )
+    gateway = FakeGraphGateway(checkpoint=agent)
+    await close_parked_checkpoint(gateway, GraphTarget(), "t-sibling")
 
     assert [as_node for _values, as_node in agent.updates] == [
         "__end__",
@@ -858,9 +858,8 @@ async def test_close_parked_checkpoint_trailing_end_even_without_dangling_calls(
     from EvoScientist.gateway import GraphTarget
 
     agent = FakeCheckpointAgent()
-    await close_parked_checkpoint(
-        MagicMock(), GraphTarget(local_graph=agent), "t-empty"
-    )
+    gateway = FakeGraphGateway(checkpoint=agent)
+    await close_parked_checkpoint(gateway, GraphTarget(), "t-empty")
     assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
     assert all(values is None for values, _node in agent.updates)
     verify = await agent.aget_state({})
@@ -875,7 +874,41 @@ async def test_close_parked_checkpoint_raises_when_verify_still_stuck():
 
     with pytest.raises(RuntimeError, match="Could not close parked HITL"):
         await close_parked_checkpoint(
-            MagicMock(),
-            GraphTarget(local_graph=_StickyCheckpointAgent()),
+            FakeGraphGateway(checkpoint=_StickyCheckpointAgent()),
+            GraphTarget(),
             "t-sticky",
         )
+
+
+async def test_close_parked_checkpoint_ignores_local_graph():
+    """After #470, close must use the gateway even if local_graph is present."""
+    from EvoScientist.backends import close_parked_checkpoint
+    from EvoScientist.gateway import GraphTarget
+
+    agent = FakeCheckpointAgent()
+    sentinel = SimpleNamespace(
+        aget_state=AsyncMock(side_effect=AssertionError("used local_graph")),
+        aupdate_state=AsyncMock(side_effect=AssertionError("used local_graph")),
+    )
+    gateway = FakeGraphGateway(checkpoint=agent)
+    await close_parked_checkpoint(
+        gateway, GraphTarget(local_graph=sentinel), "t-gateway"
+    )
+    assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
+    assert sentinel.aget_state.await_count == 0
+    assert [node for _target, _tid, _values, node in gateway.updated_states] == [
+        "__end__",
+        "__end__",
+    ]
+
+
+async def test_close_parked_checkpoint_via_local_gateway():
+    """The in-process gateway still closes through its snapshot/update seam."""
+    from EvoScientist.backends import close_parked_checkpoint
+    from EvoScientist.gateway import GraphTarget, LocalGraphGateway
+
+    agent = FakeCheckpointAgent()
+    await close_parked_checkpoint(
+        LocalGraphGateway(), GraphTarget(local_graph=agent), "t-local"
+    )
+    assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]

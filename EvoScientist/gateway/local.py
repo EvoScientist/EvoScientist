@@ -173,15 +173,20 @@ class LocalGraphGateway:
         finally:
             await inner.aclose()
 
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> Any:
+        local_graph = self._require_local_graph(target)
+        return await local_graph.aget_state({"configurable": {"thread_id": thread_id}})
+
     async def get_state_values(
         self,
         target: GraphTarget,
         thread_id: str,
     ) -> GraphStateValues:
-        local_graph = self._require_local_graph(target)
-        snapshot = await local_graph.aget_state(
-            {"configurable": {"thread_id": thread_id}}
-        )
+        snapshot = await self.get_state_snapshot(target, thread_id)
         values: GraphStateValues = snapshot.values
         return values
 

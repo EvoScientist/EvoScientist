@@ -148,6 +148,25 @@ async def test_local_graph_gateway_reads_state_values():
     )
 
 
+async def test_local_graph_gateway_reads_state_snapshot():
+    agent = MagicMock()
+    snapshot = SimpleNamespace(
+        next=("tools",),
+        tasks=(),
+        interrupts=(object(),),
+        values={"async_tasks": {"task-1": {}}},
+    )
+    agent.aget_state = AsyncMock(return_value=snapshot)
+    gateway = LocalGraphGateway()
+
+    got = await gateway.get_state_snapshot(GraphTarget(local_graph=agent), "abc12345")
+
+    assert got is snapshot
+    agent.aget_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "abc12345"}}
+    )
+
+
 # ---------------------------------------------------------------------------
 # get_run_status seam (Slice 2.4a) — both backends read the live run status
 # the state-based client reader uses to detect async-task completion.
@@ -761,6 +780,33 @@ async def test_langgraph_server_gateway_reads_state_values():
     values = await gateway.get_state_values(GraphTarget(), "abc12345")
 
     assert values == {"async_tasks": {"task-1": {}}}
+
+
+async def test_langgraph_server_gateway_reads_state_snapshot():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {"async_tasks": {"task-1": {}}},
+                "next": ["tools"],
+                "tasks": [{"name": "tools", "interrupts": [{"id": "i1"}]}],
+                "interrupts": [{"id": "i1"}],
+            }
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    snap = await gateway.get_state_snapshot(GraphTarget(), "abc12345")
+
+    assert snap.next == ("tools",)
+    assert snap.values == {"async_tasks": {"task-1": {}}}
+    assert snap.interrupts == ({"id": "i1"},)
+    assert snap.tasks[0].name == "tools"
+    assert snap.tasks[0].interrupts == ({"id": "i1"},)
 
 
 async def test_langgraph_server_gateway_messages_apply_summarization_event():
