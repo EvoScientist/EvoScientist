@@ -228,6 +228,15 @@ class TestIsLanggraphDevRunning:
         assert called_url == "http://127.0.0.1:6174/ok"
 
     @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_probe_bypasses_proxy(self, mock_get):
+        # The loopback probe must set trust_env=False: on Windows httpx otherwise
+        # routes 127.0.0.1 through the system (registry) proxy and never reaches
+        # the local server, so a healthy backend reads as unhealthy.
+        mock_get.return_value = MagicMock(status_code=200)
+        manager.is_langgraph_dev_running(port=6174)
+        assert mock_get.call_args.kwargs.get("trust_env") is False
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
     def test_returns_false_on_non_200(self, mock_get):
         mock_get.return_value = MagicMock(status_code=503)
         assert manager.is_langgraph_dev_running(port=6174) is False
@@ -720,6 +729,7 @@ def start_langgraph_dev_capture(tmp_path, monkeypatch):
         # strictly after the capture line in start_langgraph_dev.
         captured["args"] = args
         captured["env"] = kwargs["env"]
+        captured["kwargs"] = kwargs
         captured["offset"] = manager._LOG_OFFSET_AT_START
         raise FileNotFoundError("stop before real spawn")
 
@@ -882,3 +892,33 @@ class TestReadTunnelUrl:
             manager.read_tunnel_url(timeout=1.0)
             == "https://fresh-new-url.trycloudflare.com"
         )
+
+
+class TestStartLanggraphDevNoConsole:
+    """The langgraph dev child must spawn without a console window on Windows
+    (its output goes to the log) so the desktop shell gets no stray terminal."""
+
+    def test_windows_suppresses_console(self, start_langgraph_dev_capture, monkeypatch):
+        env = start_langgraph_dev_capture
+        monkeypatch.setattr(manager.os, "name", "nt", raising=False)
+        monkeypatch.setattr(
+            manager.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+        )
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+        except FileNotFoundError:
+            pass  # _fake_popen stops before the real spawn
+        kw = env.captured["kwargs"]
+        assert kw.get("creationflags") == 0x08000000
+        assert "start_new_session" not in kw
+
+    def test_posix_uses_new_session(self, start_langgraph_dev_capture, monkeypatch):
+        env = start_langgraph_dev_capture
+        monkeypatch.setattr(manager.os, "name", "posix", raising=False)
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+        except FileNotFoundError:
+            pass
+        kw = env.captured["kwargs"]
+        assert kw.get("start_new_session") is True
+        assert "creationflags" not in kw

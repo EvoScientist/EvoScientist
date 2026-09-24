@@ -333,6 +333,28 @@ def _provider_connection_configured(config: EvoScientistConfig, provider: str) -
     return bool(getattr(config, key_attr))
 
 
+def provider_key_attr(provider: str) -> str:
+    """Return the config field that holds *provider*'s API key.
+
+    Public accessor over the internal ``_PROVIDER_KEY_ATTR`` map so callers
+    outside the wizard (e.g. the desktop first-run setup) write the right
+    field without duplicating the mapping. Unknown providers fall back to
+    ``openai_api_key`` (the same default the wizard uses)."""
+    return _PROVIDER_KEY_ATTR.get(provider, "openai_api_key")
+
+
+def is_provider_configured(
+    config: EvoScientistConfig, provider: str | None = None
+) -> bool:
+    """Whether *provider* (default ``config.provider``) has a usable connection.
+
+    Public wrapper over :func:`_provider_connection_configured`. Because
+    ``get_effective_config`` folds ``<PROVIDER>_API_KEY`` env vars into the
+    config fields, this returns True when the key is set in either the config
+    file or the environment."""
+    return _provider_connection_configured(config, provider or config.provider)
+
+
 def _configure_provider_connection(
     config: EvoScientistConfig,
     provider: str,
