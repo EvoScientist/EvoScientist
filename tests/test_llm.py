@@ -4037,6 +4037,7 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
     assert captured["body"]["max_tokens"] == 131072
     assert captured["body"]["thinking"]["type"] == "enabled"
 
+
 # =============================================================================
 # Test validate_opper_key
 # =============================================================================
