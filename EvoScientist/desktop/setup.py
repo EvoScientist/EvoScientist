@@ -95,11 +95,15 @@ def apply_setup(
     """
     from ..config import save_config
     from ..config.onboard.wizard import provider_key_attr
+    from .app_paths import default_workspace
 
     config.provider = provider
     config.model = model.strip()
     setattr(config, provider_key_attr(provider), api_key.strip())
-    config.default_workdir = workspace.strip()
+    # A blank field must never fall through to the process cwd (which the
+    # installer sets to the user's whole Documents folder) — default to a
+    # dedicated subfolder there instead.
+    config.default_workdir = workspace.strip() or str(default_workspace())
     save_config(config)
 
 
@@ -139,7 +143,7 @@ def render_setup_html(
         f"<p class=hint>Stored locally in your config file.</p>"
         f"<label for=workspace>Workspace folder</label>"
         f'<input id=workspace type=text value="{html.escape(workspace)}" '
-        f'autocomplete=off spellcheck=false placeholder="(current folder)">'
+        f'autocomplete=off spellcheck=false placeholder="Documents\\EvoScientist">'
         f"<button id=save onclick=submitSetup()>Save and start</button>"
         f"{error_block}"
         f"</div>"

@@ -719,6 +719,23 @@ def test_apply_setup_maps_anthropic_key_field(monkeypatch):
     assert cfg.anthropic_api_key == "sk-ant"
 
 
+def test_apply_setup_blank_workspace_defaults_to_documents_subdir(monkeypatch):
+    """A blank workspace field must not become "" (which resolves to the cwd —
+    the whole Documents folder under the installer's WorkingDir); it defaults to
+    the dedicated Documents\\EvoScientist folder instead."""
+    monkeypatch.setattr("EvoScientist.config.save_config", lambda c: None)
+    cfg = EvoScientistConfig()
+    dsetup.apply_setup("anthropic", "claude-sonnet-4-6", "sk-ant", "  ", config=cfg)
+    assert cfg.default_workdir == str(app_paths.default_workspace())
+    assert cfg.default_workdir  # never blank
+
+
+def test_default_workspace_is_a_named_documents_subfolder():
+    ws = app_paths.default_workspace()
+    assert ws.name == "EvoScientist"
+    assert ws.parent.name == "Documents"
+
+
 def test_validate_setup_flags_missing_and_unknown():
     assert dsetup.validate_setup("anthropic", "m", "") is not None  # no key
     assert dsetup.validate_setup("anthropic", "", "k") is not None  # no model

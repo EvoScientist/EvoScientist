@@ -93,6 +93,19 @@ def user_pypackages_dir() -> Path:
     return paths.DATA_DIR / "pypackages"
 
 
+def default_workspace() -> Path:
+    """Default agent workspace for the desktop when the user picks none.
+
+    A dedicated folder under the user's Documents, never Documents itself or the
+    process cwd: the installer launches the app with its working directory set
+    to Documents, so a cwd fallback would make the whole Documents tree the
+    agent's root — its file tools, its ``execute`` shell, and the ``runs/`` /
+    ``skills/`` / ``.langgraph_api`` / ``.bg_processes`` state it writes. A named
+    subfolder keeps all of that in one place the user can find and delete.
+    """
+    return Path(os.path.expanduser("~")) / "Documents" / "EvoScientist"
+
+
 def desktop_log_path() -> Path:
     """Diagnostic log for the desktop shell (boot/shutdown/errors).
 

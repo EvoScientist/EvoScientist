@@ -455,8 +455,15 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         switch (the old server keeps the port, the next launch auto-ports and
         starts another) and leave one running silently on close, with no
         terminal to run ``EvoSci server stop``.
+
+        The workspace is resolved here so the desktop never falls through to the
+        process cwd (the installer sets it to the user's whole Documents folder);
+        an unset workspace uses the dedicated default under Documents.
         """
-        cfg = build_launcher_config(config, ws, auto_port=True, keepalive=False)
+        ws_resolved = ws or config.default_workdir or str(app_paths.default_workspace())
+        cfg = build_launcher_config(
+            config, ws_resolved, auto_port=True, keepalive=False
+        )
         runner = BundledWebUIRunner(
             app_dir=app_paths.webui_dir(),
             node_exe=app_paths.node_exe(),
@@ -471,7 +478,8 @@ def run_desktop(workspace_dir: str | None = None) -> None:
                 render_setup_html(
                     provider=config.provider,
                     model=config.model,
-                    workspace=config.default_workdir,
+                    workspace=config.default_workdir
+                    or str(app_paths.default_workspace()),
                 )
             )
             setup_done.wait()
