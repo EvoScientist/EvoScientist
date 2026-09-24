@@ -750,9 +750,7 @@ class _CommitSiblingOnEndGateway:
     async def get_state_values(self, _target, _thread_id):
         return self.state_values
 
-    async def update_state_values(
-        self, target, thread_id, values, *, as_node=None
-    ):
+    async def update_state_values(self, target, thread_id, values, *, as_node=None):
         self.updated_states.append((target, thread_id, values, as_node))
         if as_node == "__end__" and self._pending_write is not None:
             self.state_values = {
