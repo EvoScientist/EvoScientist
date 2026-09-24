@@ -83,9 +83,10 @@ def python_exe() -> Path:
 def user_pypackages_dir() -> Path:
     """Writable per-user dir for on-demand ``pip install``s by the agent.
 
-    The bundled interpreter lives under the (read-only for non-admin) install
-    dir, so runtime installs are routed here via ``PYTHONUSERBASE`` instead.
-    Lives under the existing per-user data root (``~/.evoscientist``).
+    The bundled interpreter lives inside the app bundle, which is replaced
+    wholesale on upgrade; routing runtime installs here via ``PYTHONUSERBASE``
+    keeps them out of that tree. Lives under the existing per-user data root
+    (``~/.evoscientist``).
     """
     from .. import paths
 

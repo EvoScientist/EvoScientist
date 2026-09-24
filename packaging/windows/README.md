@@ -40,8 +40,9 @@ The installed app directory (what `EvoScientist/desktop/app_paths.py` resolves):
 `runtime/python/` is a bare python-build-standalone CPython (with pip, no
 third-party packages) that the agent's `execute` shell runs code with — so it
 never depends on whatever python is on the end-user's PATH. On-demand
-`pip install`s are routed to a writable per-user dir (`~/.evoscientist/pypackages`)
-via `PYTHONUSERBASE`, since the install dir is read-only for a non-admin user.
+`pip install`s are routed to a per-user dir (`~/.evoscientist/pypackages`) via
+`PYTHONUSERBASE`, keeping them out of the pinned bundle tree (replaced wholesale
+on upgrade) rather than writing into `runtime/python`.
 
 ## assemble_bundle.py
 
@@ -96,8 +97,9 @@ before the installer packages it.
 Wraps the merged app directory into `EvoScientist-Setup.exe`. It ensures the
 Edge WebView2 Evergreen runtime is present (registry detect; download +
 silent-install the Microsoft bootstrapper only if missing), lays the app tree
-down under `Program Files`, and creates a Start-menu shortcut (desktop shortcut
-optional). Needs Inno Setup 6.1+ (for `DownloadTemporaryFile`).
+down in a per-user location (`{localappdata}\Programs`, no elevation), and
+creates a Start-menu shortcut (desktop shortcut optional). Needs Inno Setup 6.1+
+(for `DownloadTemporaryFile`).
 
 Its input is a single directory holding BOTH halves of the bundle — the
 PyInstaller onedir with the `assemble_bundle.py` output copied in next to the
@@ -121,8 +123,9 @@ the `.iss`), not the repo-root `dist\`.
 
 `iscc` defines override the pins: `iscc /DAppVersion=0.3.0 /DSourceDir=..\..\dist\EvoScientist packaging\windows\evoscientist.iss`.
 
-Shortcut `WorkingDir` is `{userdocs}`, not `{app}`: Program Files is read-only,
-and the launcher defaults its workspace (`runs/`, `skills/`, `media/`) to the
-working directory (see `build_launcher_config`).
+Shortcut `WorkingDir` is `{userdocs}`, not `{app}`: `{app}` holds the app (and is
+wiped on uninstall), so user data does not belong there — the launcher defaults
+its workspace (`runs/`, `skills/`, `media/`) to the working directory (see
+`build_launcher_config`).
 
 Authorable on Linux; compile/verify only on Windows.

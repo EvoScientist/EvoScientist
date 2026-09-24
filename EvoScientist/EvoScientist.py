@@ -772,7 +772,8 @@ def _agent_shell_env() -> dict[str, str] | None:
     NOT exposed on PATH (python-build-standalone puts ``pip.exe`` under a
     ``Scripts`` dir, which we do not add); agent code reaches it as ``python -m
     pip``, and ``PIP_USER`` + ``PYTHONUSERBASE`` route on-demand installs to a
-    writable per-user dir (the install dir is read-only for a non-admin user).
+    per-user dir, keeping them out of the pinned bundle tree (replaced wholesale
+    on upgrade) rather than writing into the interpreter's own site-packages.
     Returns ``None`` when no bundled Python is present (dev checkouts, Linux),
     leaving PATH untouched.
     """
