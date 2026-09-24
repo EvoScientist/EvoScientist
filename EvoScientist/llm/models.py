@@ -154,6 +154,14 @@ def _apply_openai_compat_reasoning_config(
             kwargs["reasoning_effort"] = effort
         return
 
+    if provider == "opper" and configured:
+        # Opper's compat ChatRequest accepts the standard OpenAI
+        # ``reasoning_effort`` field, but the pool spans reasoning and
+        # non-reasoning models, so forward an explicit setting only rather
+        # than defaulting one on the user's behalf.
+        kwargs.setdefault("reasoning_effort", configured)
+        return
+
     if provider == "custom-openai" and configured:
         kwargs.setdefault("reasoning_effort", configured)
 

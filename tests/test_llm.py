@@ -530,13 +530,17 @@ class TestThirdPartyRouting:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_opper_routes_through_openai(self, mock_init, monkeypatch):
-        """Opper provider should route through OpenAI with correct base_url."""
+        """The short name resolves through the registry to Opper's pool id."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPPER_API_KEY", "op-key-123")
 
-        get_chat_model("claude-sonnet-4-6", provider="opper")
+        # Short name is dotted (``claude-sonnet-4.6``); the pool id Opper
+        # serves is dashed (``claude-sonnet-4-6``). Go through the short name
+        # so the registry lookup is actually exercised.
+        get_chat_model("claude-sonnet-4.6", provider="opper")
 
         call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "claude-sonnet-4-6"
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
         assert call_kwargs["api_key"] == "op-key-123"
