@@ -24,9 +24,11 @@ would fail at runtime. This script removes the non-target sharp binaries and
 installs the target one (``@img/sharp-<target>`` at the same sharp version).
 
 Usage:
+    # --webui-version defaults to the npm ``latest`` dist-tag; pin it for a
+    # reproducible build. Either way the resolved version lands in manifest.json.
     uv run python packaging/windows/assemble_bundle.py --out dist/win-bundle
     uv run python packaging/windows/assemble_bundle.py --out X \\
-        --webui-version 0.2.7 --node-version 22.11.0 \\
+        --webui-version 0.3.0 --node-version 22.11.0 \\
         --python-version 3.12.7 --python-tag 20241016 --target win32-x64
 """
 
@@ -119,22 +121,29 @@ def _extract_tar_subtree(tgz: bytes, *, strip: str, dest: Path) -> tuple[int, in
     return files, skipped
 
 
-def _npm_tarball_url(pkg: str, version: str) -> str:
-    """Resolve the exact tarball URL from the version packument (authoritative,
-    rather than guessing the ``-/`` path)."""
+def _npm_dist(pkg: str, version: str) -> tuple[str, str]:
+    """Resolve ``(tarball URL, concrete version)`` from the version packument.
+
+    ``version`` may be a dist-tag (e.g. ``latest``); the registry resolves it
+    and the returned version is the concrete one, so callers record what was
+    actually fetched rather than the tag. Authoritative — reads ``dist.tarball``
+    rather than guessing the ``-/`` path.
+    """
     quoted = pkg.replace("/", "%2F")
     meta = _get_json(f"{REGISTRY}/{quoted}/{version}")
-    return meta["dist"]["tarball"]
+    return meta["dist"]["tarball"], meta["version"]
 
 
 def fetch_webui(version: str, out: Path) -> dict:
     """Download @evoscientist/webui@<version> and extract package/dist ->
-    <out>/webui/dist. Returns manifest fields."""
+    <out>/webui/dist. ``version`` may be a dist-tag (e.g. ``latest``); the
+    resolved concrete version is recorded in the manifest. Returns manifest
+    fields."""
     webui_dir = out / "webui"
     if webui_dir.exists():
         shutil.rmtree(webui_dir)
-    url = _npm_tarball_url("@evoscientist/webui", version)
-    print(f"[webui] {url}")
+    url, resolved = _npm_dist("@evoscientist/webui", version)
+    print(f"[webui] {version} -> {resolved}: {url}")
     tgz = _get(url)
     files, skipped = _extract_tar_subtree(
         tgz, strip="package/dist/", dest=webui_dir / "dist"
@@ -145,7 +154,7 @@ def fetch_webui(version: str, out: Path) -> dict:
             f"{server} missing after extraction — tarball layout changed?"
         )
     print(f"[webui] extracted {files} files ({skipped} symlinks skipped)")
-    return {"webui_version": version, "webui_sha256": _sha256(tgz)}
+    return {"webui_version": resolved, "webui_sha256": _sha256(tgz)}
 
 
 def _read_sharp_version(webui_dir: Path) -> str:
@@ -191,7 +200,7 @@ def fix_sharp(out: Path, target: str) -> dict:
         ver = sharp_ver
         if pkg != wanted[0]:
             ver = (meta.get("dependencies") or {})[pkg].lstrip("^~>=")
-        url = _npm_tarball_url(pkg, ver)
+        url, _ = _npm_dist(pkg, ver)
         print(f"[sharp] + {pkg}@{ver}")
         tgz = _get(url)
         _extract_tar_subtree(tgz, strip="package/", dest=img / pkg.split("/")[-1])
@@ -270,7 +279,10 @@ def fetch_python(version: str, tag: str, target: str, out: Path) -> dict:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--out", required=True, type=Path, help="output bundle dir")
-    p.add_argument("--webui-version", default="0.2.7")
+    # Default to the npm ``latest`` dist-tag so a release build tracks the
+    # current WebUI; the resolved concrete version is recorded in the manifest.
+    # Pin an exact version for a reproducible build.
+    p.add_argument("--webui-version", default="latest")
     p.add_argument("--node-version", default="22.11.0")
     # python-build-standalone: version is the CPython version, tag is the PBS
     # release date. Both pin one release asset; override from the releases page

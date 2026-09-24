@@ -26,6 +26,10 @@
 [CmdletBinding()]
 param(
     [string]$AppVersion = "0.3.0",
+    # WebUI npm version to bundle. Defaults to the "latest" dist-tag so a release
+    # build tracks the current WebUI; pass an exact version (e.g. 0.3.0) to pin.
+    # The resolved concrete version is recorded in the bundle's manifest.json.
+    [string]$WebuiVersion = "latest",
     # Relative paths are resolved against the repo root, not the current dir.
     [string]$BundleDir = "build\bundle",
     [string]$DistDir = "dist\EvoScientist",
@@ -75,7 +79,7 @@ try {
     # --- 1. runtime half (webui + node + python) ---
     if (-not $SkipAssemble) {
         Invoke-Checked "assemble_bundle.py -> $BundleDir" {
-            uv run python (Join-Path $PkgDir "assemble_bundle.py") --out $BundleFull @AssembleArgs
+            uv run python (Join-Path $PkgDir "assemble_bundle.py") --out $BundleFull --webui-version $WebuiVersion @AssembleArgs
         }
     }
     else {
