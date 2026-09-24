@@ -1,6 +1,7 @@
 """Tests for ccproxy_manager module."""
 
 import os
+import tomllib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -171,34 +172,39 @@ class TestStartCcproxy:
 
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
     @patch("subprocess.Popen")
-    def test_passes_generated_config(self, mock_popen, mock_running, tmp_path):
-        proc = MagicMock()
-        proc.poll.return_value = None
-        mock_popen.return_value = proc
-        mock_running.side_effect = [True]
-
-        with patch("EvoScientist.config.get_config_dir", return_value=tmp_path):
-            start_ccproxy(8000)
-
-        cmd = mock_popen.call_args[0][0]
-        assert "--config" in cmd
-        assert cmd[cmd.index("--config") + 1] == str(tmp_path / "ccproxy.toml")
-
-    @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
-    @patch("EvoScientist.ccproxy_manager.write_ccproxy_config", side_effect=OSError)
-    @patch("subprocess.Popen")
-    def test_config_write_failure_starts_without_config(
-        self, mock_popen, mock_write, mock_running
+    def test_passes_generated_config_via_env(
+        self, mock_popen, mock_running, tmp_path, monkeypatch
     ):
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
         mock_running.side_effect = [True]
+        monkeypatch.setenv("EVOSCI_TEST_INHERITED", "1")
+
+        with patch("EvoScientist.config.get_config_dir", return_value=tmp_path):
+            start_ccproxy(8000)
+
+        # ccproxy's app factory re-reads settings from CONFIG_FILE, not --config
+        env = mock_popen.call_args[1]["env"]
+        assert env["CONFIG_FILE"] == str(tmp_path / "ccproxy.toml")
+        assert env["EVOSCI_TEST_INHERITED"] == "1"
+
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
+    @patch("EvoScientist.ccproxy_manager.write_ccproxy_config", side_effect=OSError)
+    @patch("subprocess.Popen")
+    def test_config_write_failure_starts_without_config(
+        self, mock_popen, mock_write, mock_running, monkeypatch
+    ):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        mock_running.side_effect = [True]
+        monkeypatch.delenv("CONFIG_FILE", raising=False)
 
         start_ccproxy(8000)
 
-        cmd = mock_popen.call_args[0][0]
-        assert "--config" not in cmd
+        env = mock_popen.call_args[1].get("env") or os.environ
+        assert "CONFIG_FILE" not in env
 
 
 # =============================================================================
@@ -213,9 +219,11 @@ class TestWriteCcproxyConfig:
             path = write_ccproxy_config()
 
         assert path == str(config_dir / "ccproxy.toml")
-        content = (config_dir / "ccproxy.toml").read_text(encoding="utf-8")
-        assert "[plugins.codex]" in content
-        assert "model_mappings = []" in content
+        codex = tomllib.loads((config_dir / "ccproxy.toml").read_text("utf-8"))[
+            "plugins"
+        ]["codex"]
+        assert codex["model_mappings"] == []
+        assert codex["inject_detection_payload"] is False
 
 
 # =============================================================================

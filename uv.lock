@@ -1165,7 +1165,7 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.9" },
     { name = "aiohttp", marker = "extra == 'wechat'", specifier = ">=3.9" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.0" },
-    { name = "ccproxy-api", marker = "extra == 'oauth'", specifier = ">=0.2.7" },
+    { name = "ccproxy-api", marker = "extra == 'oauth'", specifier = ">=0.2.10" },
     { name = "certifi", marker = "extra == 'all-channels'", specifier = ">=2024.0" },
     { name = "certifi", marker = "extra == 'wechat'", specifier = ">=2024.0" },
     { name = "cryptography", marker = "extra == 'all-channels'", specifier = ">=41.0" },
