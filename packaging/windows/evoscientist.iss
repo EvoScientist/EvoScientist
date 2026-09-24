@@ -86,6 +86,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; Upgrades share AppId and {app}, and the [Files] copy below uses ignoreversion
+; (overwrites, never removes). Without pruning first, files a previous version
+; shipped but the new one drops — renamed modules in _internal\, stale chunks in
+; webui\dist\ — would pile up, and a PyInstaller onedir could shadow new files.
+; Clear the three app-owned subtrees before copying so each upgrade lays down a
+; clean tree. Scoped to app-owned subtrees only (same rationale as
+; [UninstallDelete]); never all of {app}, which /DIR= or an old custom-dir
+; install could point at a user folder.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\webui"
+Type: filesandordirs; Name: "{app}\runtime"
+
 [Files]
 ; The whole assembled app tree. recursesubdirs+createallsubdirs pull in
 ; _internal\, webui\, runtime\ verbatim.
