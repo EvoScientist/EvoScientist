@@ -23,7 +23,10 @@ from rich.text import Text
 import EvoScientist.cli.channel as _ch_mod
 from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
-from ..channels.hitl_budget import hitl_budget_stop
+from ..channels.hitl_budget import (
+    hitl_budget_stop,
+    hitl_completed_round_cap_reached,
+)
 from ..commands import Command, CommandContext
 from ..commands import manager as cmd_manager
 from ..gateway import (
@@ -1842,11 +1845,7 @@ def run_textual_interactive(
                 # pending (empty ask_user, swallowed handle_event error)
                 # without building a resume, which would otherwise replay
                 # the same ``_stream_input`` with no bound (issue #469).
-                if _hitl_round > 0 and hitl_budget_stop(
-                    human_rounds=_human_rounds,
-                    total_rounds=_hitl_round,
-                    needs_human=False,
-                ):
+                if hitl_completed_round_cap_reached(_hitl_round):
                     _hitl_budget_exhausted = True
                     break
                 state.pending_interrupt = None

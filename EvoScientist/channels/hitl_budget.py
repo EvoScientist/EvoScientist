@@ -28,3 +28,15 @@ def hitl_budget_stop(
     if total_rounds >= MAX_HITL_TOTAL_ROUNDS:
         return True
     return needs_human and human_rounds >= MAX_HUMAN_HITL_ROUNDS
+
+
+def hitl_completed_round_cap_reached(completed_rounds: int) -> bool:
+    """True when the HITL resume loop must stop before starting another stream.
+
+    ``completed_rounds`` is the number of streams already finished — the
+    loop counter *before* it is incremented for the next iteration. Zero
+    never stops, so the first iteration is unchanged. Pause branches still
+    call ``hitl_budget_stop`` before they prompt; this is the loop-level
+    bound for a round that stored a pending without building a resume.
+    """
+    return completed_rounds >= MAX_HITL_TOTAL_ROUNDS

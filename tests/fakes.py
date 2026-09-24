@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -459,6 +460,69 @@ class FakeGraphGateway(GraphGateway):
         if self.process_status_error is not None:
             raise self.process_status_error
         return self.process_statuses.get(process_id, "running")
+
+
+class FakeCheckpointAgent:
+    """Compiled-graph stand-in for ``_recover_interrupted_graph_state``.
+
+    Models a HITL park: the first ``as_node="__end__"`` commits an optional
+    pending sibling write and schedules ``model``; a trailing ``__end__``
+    leaves ``next`` and ``tasks`` empty so recovery's verify can pass.
+    """
+
+    def __init__(
+        self,
+        *,
+        values: dict[str, Any] | None = None,
+        next: tuple[str, ...] = ("tools",),
+        pending_write: Any | None = None,
+        update_error: BaseException | None = None,
+    ) -> None:
+        self.values: dict[str, Any] = dict(values or {})
+        self.next: tuple[str, ...] = next
+        self.tasks: tuple[Any, ...] = (
+            (SimpleNamespace(name=next[0], interrupts=()),) if next else ()
+        )
+        self.interrupts: tuple[Any, ...] = (object(),) if next else ()
+        self.pending_write = pending_write
+        self.update_error = update_error
+        self.updates: list[tuple[Any, str | None]] = []
+
+    async def aget_state(self, _config: dict[str, Any]) -> SimpleNamespace:
+        return SimpleNamespace(
+            next=self.next,
+            tasks=self.tasks,
+            interrupts=self.interrupts,
+            values=self.values,
+        )
+
+    async def aupdate_state(
+        self,
+        _config: dict[str, Any],
+        values: dict[str, Any] | None,
+        as_node: str | None = None,
+    ) -> None:
+        if self.update_error is not None:
+            raise self.update_error
+        self.updates.append((values, as_node))
+        if as_node == "__end__":
+            if self.pending_write is not None:
+                messages = list(self.values.get("messages") or [])
+                messages.append(self.pending_write)
+                self.values = {**self.values, "messages": messages}
+                self.pending_write = None
+            if self.next and self.next != ("model",):
+                self.next = ("model",)
+                self.tasks = (SimpleNamespace(name="model", interrupts=()),)
+                self.interrupts = ()
+            else:
+                self.next = ()
+                self.tasks = ()
+                self.interrupts = ()
+        elif as_node == "tools" and isinstance(values, dict):
+            messages = list(self.values.get("messages") or [])
+            messages.extend(values.get("messages") or [])
+            self.values = {**self.values, "messages": messages}
 
 
 class FakeLangGraphRunModule:

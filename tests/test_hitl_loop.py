@@ -19,13 +19,15 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 import EvoScientist.channels.consumer as consumer_mod
 from EvoScientist.channels.bus.events import InboundMessage as BusInbound
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeGraphGateway
+from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
 from tests.fakes import StubChannel as _StubChannel
 
 
@@ -124,29 +126,24 @@ class TestRichCliHitlRoundBudget:
             yield {"type": "text", "content": "should not stream a drain"}
             yield {"type": "done", "content": "should not stream a drain"}
 
-        gateway = FakeGraphGateway(
-            stream=_fake_stream,
-            state_values={
-                "messages": [
-                    AIMessage(
-                        content="",
-                        tool_calls=[
-                            {
-                                "name": "execute",
-                                "args": {"command": "echo step"},
-                                "id": "call-1",
-                                "type": "tool_call",
-                            }
-                        ],
-                    )
-                ]
-            },
+        dangling = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "execute",
+                    "args": {"command": "echo step"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
         )
+        agent = FakeCheckpointAgent(values={"messages": [dangling]})
+        gateway = FakeGraphGateway(stream=_fake_stream)
         state = display_mod.StreamState()
 
         with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
             result = display_mod._run_streaming(
-                agent=MagicMock(),
+                agent=agent,
                 message="hello",
                 thread_id="t1",
                 show_thinking=False,
@@ -166,17 +163,17 @@ class TestRichCliHitlRoundBudget:
         resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
         assert len(resumes) == 50
         assert "i51" not in resumes[-1].message.resume
-        assert [update[3] for update in gateway.updated_states] == [
+        assert [as_node for _values, as_node in agent.updates] == [
             "__end__",
             "tools",
             "__end__",
         ]
-        tool_update = gateway.updated_states[1]
-        content = tool_update[2]["messages"][0].content
+        tool_update = next(update for update in agent.updates if update[1] == "tools")
+        content = tool_update[0]["messages"][0].content
         assert HITL_ROUND_LIMIT_REJECT_MESSAGE in content
         assert "Do not retry this tool call" in content
-        assert gateway.updated_states[-1][2] is None
-        assert gateway.updated_states[-1][3] == "__end__"
+        assert agent.updates[-1][0] is None
+        assert agent.updates[-1][1] == "__end__"
 
     def test_ask_user_rounds_share_the_human_budget(self, monkeypatch):
         """ask_user rounds are always human-prompted and count toward the
@@ -198,6 +195,7 @@ class TestRichCliHitlRoundBudget:
             yield {"type": "text", "content": "never reached"}
             yield {"type": "done", "content": "never reached"}
 
+        agent = FakeCheckpointAgent()
         gateway = FakeGraphGateway(stream=_fake_stream)
         state = display_mod.StreamState()
 
@@ -205,7 +203,7 @@ class TestRichCliHitlRoundBudget:
             return {"answers": ["yes"], "status": "answered"}
 
         result = display_mod._run_streaming(
-            agent=MagicMock(),
+            agent=agent,
             message="hello",
             thread_id="t1",
             show_thinking=False,
@@ -217,8 +215,7 @@ class TestRichCliHitlRoundBudget:
 
         assert stream_calls == 51  # 50 ask_user rounds + parked 51st, no drain
         assert state.pending_ask_user is None
-        assert gateway.updated_states[-1][2] is None
-        assert gateway.updated_states[-1][3] == "__end__"
+        assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
         assert result == ""
 
     def test_total_cap_closes_without_streaming_another_step(self, monkeypatch, caplog):
@@ -237,6 +234,7 @@ class TestRichCliHitlRoundBudget:
             stream_calls += 1
             yield _interrupt_event(stream_calls)
 
+        agent = FakeCheckpointAgent()
         gateway = FakeGraphGateway(stream=_fake_stream)
         state = display_mod.StreamState()
         printed: list[str] = []
@@ -248,7 +246,7 @@ class TestRichCliHitlRoundBudget:
 
         with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
             display_mod._run_streaming(
-                agent=MagicMock(),
+                agent=agent,
                 message="hello",
                 thread_id="t1",
                 show_thinking=False,
@@ -260,7 +258,7 @@ class TestRichCliHitlRoundBudget:
         resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
         assert stream_calls == 2
         assert len(resumes) == 1  # the second interrupt is closed, not resumed
-        assert gateway.updated_states[-1][3] == "__end__"
+        assert agent.updates[-1][1] == "__end__"
         assert any("Approval round limit reached" in line for line in printed)
 
     def test_session_grant_after_human_budget_still_auto_resolves(self, monkeypatch):
@@ -326,13 +324,13 @@ class TestRichCliHitlRoundBudget:
             yield {"type": "text", "content": "partial"}
             yield _interrupt_event(1)
 
+        agent = FakeCheckpointAgent(update_error=RuntimeError("checkpoint store down"))
         gateway = FakeGraphGateway(stream=_fake_stream)
-        gateway.update_error = RuntimeError("checkpoint store down")
         monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
 
         with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
             result = display_mod._run_streaming(
-                agent=MagicMock(),
+                agent=agent,
                 message="hello",
                 thread_id="t1",
                 show_thinking=False,
@@ -375,7 +373,7 @@ class TestConsumerHitlRoundBudget:
             InboundConsumer(
                 bus=bus,
                 manager=mgr,
-                agent=MagicMock(),
+                agent=FakeCheckpointAgent(),
                 thread_id="",
                 graph_gateway=gateway,
                 max_concurrent=2,
@@ -498,8 +496,8 @@ class TestConsumerHitlRoundBudget:
         fiftieth = gateway.requests[-1]
         assert isinstance(fiftieth.message, Command)
         assert fiftieth.message.resume["i50"]["decisions"] == [{"type": "approve"}]
-        assert gateway.updated_states[-1][2] is None
-        assert gateway.updated_states[-1][3] == "__end__"
+        assert consumer.agent.updates[-1][0] is None
+        assert consumer.agent.updates[-1][1] == "__end__"
 
         await consumer.stop()
         await task
@@ -532,7 +530,7 @@ class TestConsumerHitlRoundBudget:
             asked += 1
             return {"answers": ["yes"], "status": "answered"}
 
-        consumer, bus, gateway = self._consumer(_fake_stream)
+        consumer, bus, _gateway = self._consumer(_fake_stream)
         monkeypatch.setattr(consumer_mod, "resolve_ask_user", _fake_ask_user)
 
         await bus.publish_inbound(
@@ -546,7 +544,7 @@ class TestConsumerHitlRoundBudget:
         assert stream_calls == 51  # initial + 50 answer resumes, no drain stream
         assert outbound.content == "Approval round limit reached; stopping this turn."
         assert any("HITL round limit" in r.getMessage() for r in caplog.records)
-        assert gateway.updated_states[-1][3] == "__end__"
+        assert consumer.agent.updates[-1][1] == "__end__"
 
         await consumer.stop()
         await task
@@ -618,8 +616,8 @@ class TestConsumerHitlRoundBudget:
             yield {"type": "text", "content": "partial answer"}
             yield _interrupt_event(1)
 
-        consumer, bus, gateway = self._consumer(_fake_stream)
-        gateway.update_error = RuntimeError("checkpoint store down")
+        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer.agent.update_error = RuntimeError("checkpoint store down")
 
         await bus.publish_inbound(
             BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
@@ -665,7 +663,7 @@ class TestConsumerHitlRoundBudget:
         resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
         assert stream_calls == 2
         assert len(resumes) == 1
-        assert gateway.updated_states[-1][3] == "__end__"
+        assert consumer.agent.updates[-1][1] == "__end__"
         assert outbound.content == "Approval round limit reached; stopping this turn."
 
         await consumer.stop()
@@ -708,62 +706,49 @@ def test_tui_loop_human_cap_does_not_stop_an_auto_branch():
     assert hitl_budget_stop(human_rounds=50, total_rounds=51, needs_human=True)
 
 
-def test_tui_loop_level_total_cap_stops_before_clearing_pending(monkeypatch):
-    """A round that leaves pending without building a resume must stop
-    before the next iteration clears it, using the completed-round count
-    so the first stream is unchanged (issue #469 review)."""
+def test_tui_loop_level_total_cap_uses_completed_round_helper(monkeypatch):
+    """The TUI loop-top guard is ``hitl_completed_round_cap_reached``,
+    not a rewritten copy of the stop condition (issue #469 review)."""
     import EvoScientist.channels.hitl_budget as budget_mod
-    from EvoScientist.channels.hitl_budget import hitl_budget_stop
+    from EvoScientist.channels.hitl_budget import hitl_completed_round_cap_reached
 
     monkeypatch.setattr(budget_mod, "MAX_HITL_TOTAL_ROUNDS", 2)
-    pending = False
-    streams = 0
-    hitl_round = 0
-    human_rounds = 0
-    exhausted = False
-    while True:
-        if hitl_round > 0 and hitl_budget_stop(
-            human_rounds=human_rounds,
-            total_rounds=hitl_round,
-            needs_human=False,
-        ):
-            exhausted = True
-            break
-        pending = False
-        hitl_round += 1
-        streams += 1
-        pending = True  # empty ask_user / swallowed error leaves pending
-
-    assert streams == 2
-    assert exhausted
-    assert pending  # still parked for close_parked_checkpoint
+    assert not hitl_completed_round_cap_reached(0)
+    assert not hitl_completed_round_cap_reached(1)
+    assert hitl_completed_round_cap_reached(2)
+    assert hitl_completed_round_cap_reached(3)
 
 
-class _CommitSiblingOnEndGateway:
-    """First ``__end__`` commits a finished sibling write, as LangGraph does."""
+def test_tui_hitl_loop_checks_completed_round_cap_before_clearing_pending():
+    """``_stream_with_widgets`` applies the helper before it clears pending,
+    so a round that stored a pause without building a resume cannot replay
+    unbounded. Reads the TUI source so this fails if the call is moved
+    after the pending clear (no Pilot harness)."""
+    from pathlib import Path
 
-    def __init__(self, messages, pending_write):
-        self.state_values = {"messages": list(messages)}
-        self._pending_write = pending_write
-        self.updated_states: list[tuple] = []
+    import EvoScientist.cli.tui_interactive as tui
 
-    async def get_state_values(self, _target, _thread_id):
-        return self.state_values
+    src = Path(tui.__file__).read_text()
+    cap = src.index("hitl_completed_round_cap_reached(_hitl_round)")
+    pending = src.index("state.pending_interrupt = None", cap)
+    assert pending - cap < 400
+    between = src[cap:pending]
+    assert "while True" not in between
 
-    async def update_state_values(self, target, thread_id, values, *, as_node=None):
-        self.updated_states.append((target, thread_id, values, as_node))
-        if as_node == "__end__" and self._pending_write is not None:
-            self.state_values = {
-                "messages": [*self.state_values["messages"], self._pending_write]
-            }
-            self._pending_write = None
-        elif as_node == "tools" and isinstance(values, dict):
-            self.state_values = {
-                "messages": [
-                    *self.state_values["messages"],
-                    *(values.get("messages") or []),
-                ]
-            }
+
+class _StickyCheckpointAgent:
+    """``aupdate_state`` is a no-op so recovery's verify still sees ``next``."""
+
+    async def aget_state(self, _config):
+        return SimpleNamespace(
+            next=("tools",),
+            tasks=(),
+            interrupts=(object(),),
+            values={},
+        )
+
+    async def aupdate_state(self, *_args, **_kwargs):
+        return None
 
 
 async def test_close_parked_checkpoint_keeps_finished_sibling_results():
@@ -775,60 +760,89 @@ async def test_close_parked_checkpoint_keeps_finished_sibling_results():
         HITL_ROUND_LIMIT_REJECT_MESSAGE,
         close_parked_checkpoint,
     )
+    from EvoScientist.gateway import GraphTarget
 
     pending_ask = ToolMessage(
         content="user answered from the widget",
         name="ask_user",
         tool_call_id="ask-1",
     )
-    gateway = _CommitSiblingOnEndGateway(
-        messages=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "ask_user",
-                        "args": {"questions": [{"question": "Continue?"}]},
-                        "id": "ask-1",
-                        "type": "tool_call",
-                    },
-                    {
-                        "name": "execute",
-                        "args": {"command": "echo sibling"},
-                        "id": "exec-1",
-                        "type": "tool_call",
-                    },
-                ],
-            )
-        ],
+    agent = FakeCheckpointAgent(
+        values={
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "ask_user",
+                            "args": {"questions": [{"question": "Continue?"}]},
+                            "id": "ask-1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "execute",
+                            "args": {"command": "echo sibling"},
+                            "id": "exec-1",
+                            "type": "tool_call",
+                        },
+                    ],
+                )
+            ]
+        },
         pending_write=pending_ask,
     )
 
-    await close_parked_checkpoint(gateway, MagicMock(), "t-sibling")
+    await close_parked_checkpoint(
+        MagicMock(), GraphTarget(local_graph=agent), "t-sibling"
+    )
 
-    assert [update[3] for update in gateway.updated_states] == [
+    assert [as_node for _values, as_node in agent.updates] == [
         "__end__",
         "tools",
         "__end__",
     ]
-    patch = gateway.updated_states[1][2]["messages"]
+    patch = next(values for values, node in agent.updates if node == "tools")[
+        "messages"
+    ]
     assert [message.tool_call_id for message in patch] == ["exec-1"]
     assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patch[0].content
     seen = {
         getattr(message, "tool_call_id", None): getattr(message, "content", None)
-        for message in gateway.state_values["messages"]
+        for message in agent.values["messages"]
         if getattr(message, "type", None) == "tool"
     }
     assert seen["ask-1"] == "user answered from the widget"
     assert HITL_ROUND_LIMIT_REJECT_MESSAGE in seen["exec-1"]
+    verify = await agent.aget_state({})
+    assert verify.next == ()
+    assert not verify.interrupts
 
 
 async def test_close_parked_checkpoint_trailing_end_even_without_dangling_calls():
     """With no unanswered calls the first END still gets a trailing END,
     matching recovery: the first clear can leave next == ('model',)."""
     from EvoScientist.backends import close_parked_checkpoint
+    from EvoScientist.gateway import GraphTarget
 
-    gateway = FakeGraphGateway()
-    await close_parked_checkpoint(gateway, MagicMock(), "t-empty")
-    assert [update[3] for update in gateway.updated_states] == ["__end__", "__end__"]
-    assert all(update[2] is None for update in gateway.updated_states)
+    agent = FakeCheckpointAgent()
+    await close_parked_checkpoint(
+        MagicMock(), GraphTarget(local_graph=agent), "t-empty"
+    )
+    assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
+    assert all(values is None for values, _node in agent.updates)
+    verify = await agent.aget_state({})
+    assert verify.next == ()
+    assert not verify.interrupts
+
+
+async def test_close_parked_checkpoint_raises_when_verify_still_stuck():
+    """Unlike the old parallel close, a failed repair is visible."""
+    from EvoScientist.backends import close_parked_checkpoint
+    from EvoScientist.gateway import GraphTarget
+
+    with pytest.raises(RuntimeError, match="Could not close parked HITL"):
+        await close_parked_checkpoint(
+            MagicMock(),
+            GraphTarget(local_graph=_StickyCheckpointAgent()),
+            "t-sticky",
+        )

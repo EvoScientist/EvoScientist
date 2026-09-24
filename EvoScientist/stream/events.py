@@ -93,10 +93,36 @@ def _snapshot_needs_recovery(snapshot: Any) -> bool:
     return bool(getattr(snapshot, "next", None) or getattr(snapshot, "tasks", None))
 
 
+def _interrupted_dangling_patch(messages: list) -> list[ToolMessage]:
+    """Synthetic error results for tool calls still unanswered in *messages*."""
+    answered_ids = {
+        m.tool_call_id
+        for m in messages
+        if getattr(m, "type", None) == "tool" and getattr(m, "tool_call_id", None)
+    }
+    return [
+        ToolMessage(
+            content=_INTERRUPTED_TOOL_RESULT,
+            tool_call_id=call["id"],
+            name=call.get("name") or "unknown",
+            status="error",
+        )
+        for m in messages
+        if isinstance(m, AIMessage)
+        for call in (
+            *m.tool_calls,
+            *(getattr(m, "invalid_tool_calls", None) or ()),
+        )
+        if call.get("id") and call["id"] not in answered_ids
+    ]
+
+
 async def _recover_interrupted_graph_state(
     agent: Any,
     config: dict[str, Any],
     snapshot: Any | None = None,
+    *,
+    close_interrupts: bool = False,
 ) -> bool:
     """Close out a run that ended mid-step so the next turn starts fresh.
 
@@ -127,25 +153,37 @@ async def _recover_interrupted_graph_state(
     build on normally. Channel values (message history) are otherwise
     preserved.
 
-    Critically, this only runs when the stuck state is *not* a legitimate
-    human-in-the-loop interrupt. The agent pauses via ``interrupt()`` /
-    ``Command(resume=...)`` for ask-user flows, which also leaves ``next``
-    non-empty; clearing those would silently discard a pending question the
-    user still needs to answer. ``_snapshot_has_pending_interrupt`` distinguishes the
-    two.
+    The dangling-call patch is computed *after* the first END so finished
+    sibling writes that were still pending on tasks (not yet in
+    ``values.messages``) count as answered. Patching from the pre-clear
+    snapshot would treat those calls as unanswered.
+
+    Critically, the default path only runs when the stuck state is *not* a
+    legitimate human-in-the-loop interrupt. The agent pauses via
+    ``interrupt()`` / ``Command(resume=...)`` for ask-user flows, which also
+    leaves ``next`` non-empty; clearing those would silently discard a pending
+    question the user still needs to answer.
+    ``_snapshot_has_pending_interrupt`` distinguishes the two.
+
+    Pass ``close_interrupts=True`` to close a genuine HITL/ask_user pause
+    anyway (spent round budget). Synthetic results then use the HITL reject
+    wording instead of the crash-recovery interrupted text. The checkpoint
+    is verified empty of both pending tasks and interrupts.
 
     Returns:
         ``True`` when the thread is safe to run: it was already clean, it is
-        parked at a genuine human-in-the-loop interrupt (left untouched), or
-        recovery completed and the checkpoint verified clean. ``False`` when
-        the checkpoint may still be stuck — recovery failed or could not be
-        verified. The next run is still safe to start: LangGraph discards the
-        stale tasks and deepagents closes the dangling calls, with the
-        "was cancelled" wording this recovery exists to avoid.
+        parked at a genuine human-in-the-loop interrupt (left untouched,
+        unless ``close_interrupts``), or recovery completed and the
+        checkpoint verified clean. ``False`` when the checkpoint may still
+        be stuck — recovery failed or could not be verified. The next run is
+        still safe to start: LangGraph discards the stale tasks and
+        deepagents closes the dangling calls, with the "was cancelled"
+        wording this recovery exists to avoid.
 
     Best-effort: any failure is logged and swallowed so it never shadows the
     original exception or cancellation that triggered recovery — the return
-    value is how callers learn the outcome.
+    value is how callers learn the outcome. HITL budget close raises when
+    this returns ``False``.
     """
     import logging
 
@@ -153,12 +191,10 @@ async def _recover_interrupted_graph_state(
     try:
         if snapshot is None:
             snapshot = await agent.aget_state(config)
-        # Only act when the graph is genuinely stuck: non-empty next, or
-        # tasks whose writes never made it into a checkpoint.
-        if not snapshot or not _snapshot_needs_recovery(snapshot):
+        if not snapshot:
             return True
-        # ...and not parked at a real human-in-the-loop interrupt.
-        if _snapshot_has_pending_interrupt(snapshot):
+        parked = _snapshot_has_pending_interrupt(snapshot)
+        if parked and not close_interrupts:
             _log.debug(
                 "Leaving interrupted graph state intact for thread %s: "
                 "pending human-in-the-loop interrupt (next=%s)",
@@ -166,31 +202,27 @@ async def _recover_interrupted_graph_state(
                 snapshot.next,
             )
             return True
+        # Only act when the graph is genuinely stuck: non-empty next, or
+        # tasks whose writes never made it into a checkpoint. A HITL close
+        # also proceeds when the pause is parked even if ``next`` is empty.
+        if not _snapshot_needs_recovery(snapshot) and not (close_interrupts and parked):
+            return True
 
         stuck_at = snapshot.next or tuple(
             t.name for t in (getattr(snapshot, "tasks", None) or ())
         )
-        values = getattr(snapshot, "values", None) or {}
-        messages = values.get("messages") or []
-        answered_ids = {m.tool_call_id for m in messages if m.type == "tool"}
-        patch = [
-            ToolMessage(
-                content=_INTERRUPTED_TOOL_RESULT,
-                tool_call_id=call["id"],
-                name=call.get("name") or "unknown",
-                status="error",
-            )
-            for m in messages
-            if isinstance(m, AIMessage)
-            for call in (
-                *m.tool_calls,
-                *(getattr(m, "invalid_tool_calls", None) or ()),
-            )
-            if call.get("id") and call["id"] not in answered_ids
-        ]
         # Clear first: it commits the pending writes of calls that did finish.
         # Patching first would reuse a finished task's id and lose the patch.
         await agent.aupdate_state(config, None, as_node=END)
+        after = await agent.aget_state(config)
+        values = getattr(after, "values", None) or {}
+        messages = values.get("messages") or []
+        if close_interrupts:
+            from ..backends import abandoned_tool_messages
+
+            patch = abandoned_tool_messages(list(messages))
+        else:
+            patch = _interrupted_dangling_patch(list(messages))
         if patch:
             # Attribute the synthetic results to the stuck execution node so
             # they land in history exactly where the real results would have.
@@ -209,7 +241,10 @@ async def _recover_interrupted_graph_state(
         # observable (logged + reported via the return value) rather than
         # silently reverting to the dangling-calls state.
         verify = await agent.aget_state(config)
-        if _snapshot_needs_recovery(verify):
+        still_stuck = _snapshot_needs_recovery(verify) or (
+            close_interrupts and _snapshot_has_pending_interrupt(verify)
+        )
+        if still_stuck:
             _log.warning(
                 "Interrupted graph state for thread %s is still stuck at %s "
                 "after recovery",

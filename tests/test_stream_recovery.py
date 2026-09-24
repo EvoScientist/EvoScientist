@@ -123,6 +123,25 @@ async def test_recovery_preserves_pending_hitl_interrupt():
     assert after.interrupts
 
 
+async def test_close_interrupts_flag_closes_a_genuine_hitl_pause():
+    """Spent HITL budget reuses recovery with close_interrupts=True."""
+    app = _interrupting_app()
+    cfg = {"configurable": {"thread_id": "t-hitl-close"}}
+    app.invoke({"x": 0}, cfg)
+    before = app.get_state(cfg)
+    assert before.next == ("ask",)
+    assert before.interrupts
+
+    assert (
+        await _recover_interrupted_graph_state(app, cfg, close_interrupts=True) is True
+    )
+
+    after = app.get_state(cfg)
+    assert after.next == ()
+    assert not after.interrupts
+    assert after.tasks == ()
+
+
 # --- Full-stack regression: Ctrl+C mid-tools must not replay the batch -------
 #
 # These mirror the real construction path (deepagents create_deep_agent with

@@ -480,10 +480,11 @@ def resolve_action_decision(
 # parked interrupt without resuming the agent (issue #469). A rejecting
 # ``Command(resume=...)`` does not close the checkpoint: HumanInTheLoop
 # middleware turns it into a ToolMessage and routes straight back to the
-# model. Surfaces clear pending writes first, patch unanswered calls as
-# the tools node, then ``update_state(as_node="__end__")``. The constant is
-# part of that result text, alongside the stock "do not retry" sentence —
-# passing it as a reject decision's ``message`` would drop that sentence.
+# model. Surfaces call ``_recover_interrupted_graph_state(close_interrupts=
+# True)`` so the clear → patch → clear → verify sequence is shared with
+# crash recovery. The constant is part of the HITL result text, alongside
+# the stock "do not retry" sentence — passing it as a reject decision's
+# ``message`` would drop that sentence.
 HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
 
 
@@ -538,74 +539,35 @@ def abandoned_tool_messages(messages: list) -> list:
 async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
     """End a parked HITL/ask_user turn without another model step.
 
-    Clears pending tasks first (``as_node="__end__"``) so finished sibling
-    writes — e.g. ``ask_user`` beside another tool — land in history.
-    Unanswered calls are then patched as the tools node from the post-clear
-    messages, and a trailing ``__end__`` leaves ``next`` empty. Patching
-    before the first clear reuses a finished task's id and drops the real
-    result. A rejecting resume is not used: that resumes the agent.
+    Reuses ``_recover_interrupted_graph_state(close_interrupts=True)`` on
+    ``target.local_graph`` so HITL budget exhaustion and crash recovery share
+    one clear → patch → clear → verify sequence. Finished sibling writes
+    (``ask_user`` beside another tool) stay in history; unanswered calls get
+    HITL reject results. A rejecting resume is not used: that resumes the
+    agent.
+
+    ``gateway`` is accepted because every surface already has one; recovery
+    talks to the compiled graph on the target (CLI, TUI, and consumer all
+    pass ``local_graph``).
     """
-    import logging
+    from .stream.events import _recover_interrupted_graph_state
 
-    log = logging.getLogger(__name__)
-    # Clear first: it commits the pending writes of calls that did finish.
-    try:
-        await gateway.update_state_values(
-            target,
-            thread_id,
-            None,
-            as_node="__end__",
+    _ = gateway
+    agent = getattr(target, "local_graph", None)
+    if agent is None:
+        raise RuntimeError(
+            f"Cannot close parked HITL checkpoint on thread {thread_id}: "
+            "GraphTarget.local_graph is required"
         )
-    except Exception:
-        log.warning(
-            "Could not clear parked HITL checkpoint on thread %s",
-            thread_id,
-            exc_info=True,
+    ok = await _recover_interrupted_graph_state(
+        agent,
+        {"configurable": {"thread_id": thread_id}},
+        close_interrupts=True,
+    )
+    if not ok:
+        raise RuntimeError(
+            f"Could not close parked HITL checkpoint on thread {thread_id}"
         )
-        raise
-
-    tool_messages: list = []
-    try:
-        state = await gateway.get_state_values(target, thread_id)
-        raw = state.get("messages") if isinstance(state, dict) else None
-        tool_messages = abandoned_tool_messages(list(raw or []))
-    except Exception:
-        log.warning(
-            "Could not read thread %s to close a parked HITL interrupt",
-            thread_id,
-            exc_info=True,
-        )
-    if tool_messages:
-        try:
-            await gateway.update_state_values(
-                target,
-                thread_id,
-                {"messages": tool_messages},
-                as_node="tools",
-            )
-        except Exception:
-            log.warning(
-                "Could not record abandoned tool results on thread %s",
-                thread_id,
-                exc_info=True,
-            )
-    # Unconditional: the first END can leave next == ('model',). Nesting
-    # the trailing clear under ``if tool_messages`` would then leave the
-    # thread parked on the model node.
-    try:
-        await gateway.update_state_values(
-            target,
-            thread_id,
-            None,
-            as_node="__end__",
-        )
-    except Exception:
-        log.warning(
-            "Could not clear parked HITL checkpoint on thread %s",
-            thread_id,
-            exc_info=True,
-        )
-        raise
 
 
 def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
