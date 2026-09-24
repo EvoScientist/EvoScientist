@@ -33,12 +33,19 @@ def _cfg(workspace_dir: str = "/tmp/wsA", **kw):
 # _resolve_backend — decision + error-code taxonomy
 # --------------------------------------------------------------------------- #
 def _patch_backend_probes(
-    monkeypatch, *, occupied: bool, running: bool, sidecar=None, fingerprint="fp-now"
+    monkeypatch,
+    *,
+    occupied: bool,
+    running: bool,
+    sidecar=None,
+    fingerprint="fp-now",
+    pid_serves=True,
 ):
     monkeypatch.setattr(lgm, "_is_port_occupied", lambda *_a, **_k: occupied)
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: running)
     monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: sidecar)
     monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: fingerprint)
+    monkeypatch.setattr(lgm, "_pid_serves_port", lambda *_a, **_k: pid_serves)
 
 
 def test_resolve_backend_free_port_starts(monkeypatch):
@@ -119,6 +126,21 @@ def test_resolve_backend_no_sidecar_reuses(monkeypatch):
     assert decision.action == "reuse"
 
 
+def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
+    """A sidecar whose recorded PID does not serve this port (a fallback launch
+    overwrote the global record) is rejected before its workspace is trusted."""
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 12345},
+        pid_serves=False,
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.code == "sidecar_port_mismatch"
+
+
 # --------------------------------------------------------------------------- #
 # Auto-port — collision recovery for GUI shells (no terminal to act on it)
 # --------------------------------------------------------------------------- #
@@ -195,6 +217,9 @@ def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: True)
     monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: sidecar)
     monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: "fp")
+    # The sidecar genuinely describes the server on this port; these tests
+    # exercise the workspace/deploy-mode checks past the PID-serves-port guard.
+    monkeypatch.setattr(lgm, "_pid_serves_port", lambda *a, **k: True)
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 

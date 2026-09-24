@@ -255,7 +255,7 @@ class _BackendDecision:
 # a different workspace, and a stripped CLI-mode server are all unusable for the
 # desktop's own workspace, and there is no terminal to act on the message.
 _AUTO_PORT_FALLBACK_CODES = frozenset(
-    {"port_conflict", "workspace_mismatch", "stripped_backend"}
+    {"port_conflict", "workspace_mismatch", "stripped_backend", "sidecar_port_mismatch"}
 )
 
 
@@ -521,6 +521,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     """
     from ..langgraph_dev.manager import (
         _is_port_occupied,
+        _pid_serves_port,
         _read_workspace_sidecar,
         _server_config_fingerprint,
         is_langgraph_dev_running,
@@ -543,6 +544,20 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     sidecar = _read_workspace_sidecar()
     ws = Path(cfg.workspace_dir).resolve()
     if sidecar is not None:
+        # The sidecar is a single global record with no port field, so a
+        # fallback launch on another port can overwrite it. Confirm its PID
+        # actually serves THIS port before trusting its workspace — otherwise a
+        # stale record could reuse the wrong workspace, and teardown could stop
+        # the wrong server. Auto-port shells fall back to a fresh backend; the
+        # CLI gets an explicit error.
+        if not _pid_serves_port(sidecar.get("pid"), cfg.backend_port):
+            raise LauncherError(
+                "sidecar_port_mismatch",
+                f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
+                f"has no matching ownership record for.",
+                "Stop it with 'EvoSci server stop', or change the port with "
+                "'EvoSci config set langgraph_dev_port <port>'.",
+            )
         if Path(sidecar["workspace"]).resolve() != ws:
             raise LauncherError(
                 "workspace_mismatch",
