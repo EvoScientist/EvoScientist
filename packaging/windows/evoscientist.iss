@@ -55,6 +55,10 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+; Pin the install dir to the per-user default: the user cannot point it at a
+; shared/existing folder (e.g. C:\Tools), so the {app} sweep in
+; [UninstallDelete] can never delete files EvoScientist did not install.
+DisableDirPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir=dist
 OutputBaseFilename=EvoScientist-Setup
@@ -101,7 +105,9 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 [UninstallDelete]
 ; Sweep runtime-created files Inno didn't install itself: bytecode caches under
 ; the bundled Python/WebUI in {app}, and the per-user pip cache the agent's
-; on-demand installs write under ~/.evoscientist (PYTHONUSERBASE).
+; on-demand installs write under ~/.evoscientist (PYTHONUSERBASE). Deleting all
+; of {app} is safe only because DisableDirPage pins it to the app-owned default,
+; so it can never be a folder that holds the user's own files.
 Type: filesandordirs; Name: "{app}"
 Type: filesandordirs; Name: "{%USERPROFILE}\.evoscientist\pypackages"
 
