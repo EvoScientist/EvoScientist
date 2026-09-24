@@ -120,7 +120,7 @@ try {
     # --- 4. compile the installer ---
     if (-not $SkipInstaller) {
         if (-not (Test-Path $Iscc)) {
-            throw "ISCC.exe not found at '$Iscc' - install Inno Setup 6.1+ or pass -Iscc <path>."
+            throw "ISCC.exe not found at '$Iscc' - install Inno Setup 6.3+ or pass -Iscc <path>."
         }
         Invoke-Checked "iscc -> EvoScientist-Setup.exe" {
             & $Iscc "/DAppVersion=$AppVersion" "/DSourceDir=$DistFull" (Join-Path $PkgDir "evoscientist.iss")

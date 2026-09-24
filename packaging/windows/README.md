@@ -98,8 +98,8 @@ Wraps the merged app directory into `EvoScientist-Setup.exe`. It ensures the
 Edge WebView2 Evergreen runtime is present (registry detect; download +
 silent-install the Microsoft bootstrapper only if missing), lays the app tree
 down in a per-user location (`{localappdata}\Programs`, no elevation), and
-creates a Start-menu shortcut (desktop shortcut optional). Needs Inno Setup 6.1+
-(for `DownloadTemporaryFile`).
+creates a Start-menu shortcut (desktop shortcut optional). Needs Inno Setup 6.3+
+(`x64compatible` needs 6.3; `DownloadTemporaryFile` 6.1).
 
 Its input is a single directory holding BOTH halves of the bundle — the
 PyInstaller onedir with the `assemble_bundle.py` output copied in next to the

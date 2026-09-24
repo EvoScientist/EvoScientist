@@ -19,7 +19,7 @@
 ;     webui\dist\server.js  (+ .next, node_modules, public)
 ;     manifest.json
 ;
-; Build (on Windows, with Inno Setup 6.1+ installed for DownloadTemporaryFile):
+; Build (on Windows, with Inno Setup 6.3+: x64compatible needs 6.3, DownloadTemporaryFile 6.1):
 ;   One command does all of the below with a sanity gate:
 ;     powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
 ;   Or by hand:
