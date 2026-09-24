@@ -542,15 +542,6 @@ class LangGraphServerGateway:
         thread_id: str,
         target: GraphTarget | None = None,
     ) -> list[BaseMessage]:
-        # Same registry gap as the pre-run state read (#490): checkpoints can
-        # exist for a thread the dev server has not registered yet. Without
-        # this, get_state 404s and history renderers show an empty thread
-        # after resume.
-        await self.thread_store.ensure_thread_exists(
-            thread_id,
-            graph_id=self._target_graph_id(target),
-            workspace_dir=(target.workspace_dir if target is not None else None),
-        )
         return await self.thread_store.get_thread_messages(thread_id)
 
     async def thread_exists(
