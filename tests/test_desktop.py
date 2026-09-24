@@ -726,6 +726,38 @@ def test_validate_setup_flags_missing_and_unknown():
     assert dsetup.validate_setup("anthropic", "m", "k") is None
 
 
+def test_setup_api_submit_is_one_shot(monkeypatch):
+    """A second submit is rejected once setup completed — a later WebUI page
+    must not be able to overwrite the config through the still-attached bridge."""
+    import threading
+
+    calls = []
+    monkeypatch.setattr(shell, "validate_setup", lambda *a, **k: None)
+    monkeypatch.setattr(shell, "apply_setup", lambda *a, **k: calls.append(a))
+    api = shell._SetupApi(EvoScientistConfig(), threading.Event())
+
+    payload = {"provider": "anthropic", "model": "m", "api_key": "k", "workspace": ""}
+    assert api.submit(payload) == {"ok": True}
+    second = api.submit(payload)
+    assert second["ok"] is False
+    assert len(calls) == 1  # config written exactly once
+
+
+def test_setup_api_submit_rejected_when_already_done(monkeypatch):
+    """With setup pre-completed (existing config), submit never writes."""
+    import threading
+
+    writes = []
+    monkeypatch.setattr(shell, "validate_setup", lambda *a, **k: None)
+    monkeypatch.setattr(shell, "apply_setup", lambda *a, **k: writes.append(a))
+    done = threading.Event()
+    done.set()
+    api = shell._SetupApi(EvoScientistConfig(), done)
+    result = api.submit({"provider": "anthropic", "model": "m", "api_key": "k"})
+    assert result["ok"] is False
+    assert writes == []  # nothing written
+
+
 def test_render_setup_html_prefills_escapes_and_hides_key():
     out = dsetup.render_setup_html(provider="openrouter", model="<m>", workspace="/w")
     assert 'value="openrouter" selected' in out  # provider preselected
