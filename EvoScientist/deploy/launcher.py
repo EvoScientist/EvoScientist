@@ -24,6 +24,7 @@ Design rules that keep it shell-agnostic:
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import signal
@@ -35,6 +36,8 @@ import webbrowser
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 # Front-end npm package + spec. ``@latest`` → always the newest published UI.
 _WEBUI_PACKAGE = "@evoscientist/webui@latest"
@@ -277,6 +280,12 @@ class WebUILauncher:
         self._runner = runner
         self._backend_proc: subprocess.Popen | None = None
         self._backend_started = False
+        # True from just before start_langgraph_dev() until its proc handle is
+        # wired. start_langgraph_dev blocks up to 60s on health, so a stop()
+        # during that window has no _backend_proc to kill yet — this flag lets
+        # _teardown fall back to the PID-file-recorded server so a close
+        # mid-boot can't orphan the in-flight backend.
+        self._backend_start_initiated = False
         self._webui_proc: subprocess.Popen | None = None
         self._stopped = False
         # Guards _teardown: start() (boot thread) and stop() (GUI thread) can
@@ -433,6 +442,23 @@ class WebUILauncher:
 
                 proc, self._backend_proc = self._backend_proc, None
                 stop_langgraph_dev(proc)
+            elif self._backend_start_initiated and not self._cfg.keepalive:
+                # stop() fired while start_langgraph_dev was still in its health
+                # wait, so we have no proc handle — but the process is already
+                # recorded (PID file + module state). Stop it via the recorded
+                # path (tree kill under the file lock) so a close mid-boot can't
+                # orphan it.
+                from ..langgraph_dev.manager import stop_recorded_server
+
+                self._backend_start_initiated = False
+                stopped = stop_recorded_server()
+                if stopped is not None:
+                    logger.warning(
+                        "Launcher torn down mid-backend-start; stopped the "
+                        "in-flight langgraph dev (pid %s) via the recorded-server "
+                        "fallback.",
+                        stopped,
+                    )
 
     # -- internals -------------------------------------------------------- #
     def _resolve_backend_with_auto_port(self) -> _BackendDecision:
@@ -474,6 +500,10 @@ class WebUILauncher:
         file_persistence = bool(
             getattr(self._config, "langgraph_dev_file_persistence", True)
         )
+        # Mark in-flight before the (up-to-60s blocking) call so a concurrent
+        # stop() can tear down the recorded process even though our proc handle
+        # is not wired until this returns.
+        self._backend_start_initiated = True
         try:
             self._backend_proc = start_langgraph_dev(
                 workspace_dir=Path(self._cfg.workspace_dir),
@@ -489,6 +519,8 @@ class WebUILauncher:
                 "backend_start_failed", f"langgraph dev startup failed: {exc}"
             ) from exc
         self._backend_started = True
+        # Handle is wired now; the recorded-server fallback is no longer needed.
+        self._backend_start_initiated = False
 
     def _build_frontend_env(self) -> dict[str, str]:
         # The UI reaches the backend from the BROWSER; give it the backend port

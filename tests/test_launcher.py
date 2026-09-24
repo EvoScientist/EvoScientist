@@ -207,6 +207,33 @@ def test_start_without_auto_port_raises_on_conflict(monkeypatch):
     assert ei.value.code == "port_conflict"
 
 
+def test_stop_mid_backend_start_stops_recorded_server(monkeypatch):
+    """stop() during start_langgraph_dev's health wait (proc handle not wired
+    yet) tears down the PID-file-recorded backend, so a desktop close mid-boot
+    cannot orphan the in-flight langgraph dev."""
+    calls: list[int] = []
+    monkeypatch.setattr(lgm, "stop_recorded_server", lambda: (calls.append(1), 4321)[1])
+    launcher = lm.WebUILauncher(object(), _cfg(keepalive=False), _FakeRunner())
+    # Simulate being inside _start_backend's blocking call: start initiated,
+    # no proc handle assigned yet.
+    launcher._backend_start_initiated = True
+    launcher.stop()
+    assert calls == [1]  # recorded-server fallback fired
+    assert launcher._backend_start_initiated is False
+    launcher.stop()  # idempotent — does not fire again
+    assert calls == [1]
+
+
+def test_stop_after_reuse_does_not_stop_recorded_server(monkeypatch):
+    """A reused backend (no start initiated, no proc handle) is never torn down
+    by stop() — we do not own it."""
+    calls: list[int] = []
+    monkeypatch.setattr(lgm, "stop_recorded_server", lambda: calls.append(1))
+    launcher = lm.WebUILauncher(object(), _cfg(keepalive=False), _FakeRunner())
+    launcher.stop()
+    assert calls == []
+
+
 def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     """An EvoSci langgraph dev occupies ``occupied`` with ``sidecar``.
 

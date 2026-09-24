@@ -357,6 +357,12 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         if controller is None or controller.launcher is None:
             return True
         launcher = controller.launcher
+        # A confirm is only possible when we own a started backend (see
+        # should_confirm_close). Checking this first skips the active-runs HTTP
+        # probe during boot — when the backend is not ready yet, the probe would
+        # otherwise stall the GUI thread on its timeout ("not responding").
+        if not launcher.backend_started:
+            return True
         try:
             from .shutdown import backend_has_active_runs, should_confirm_close
 
