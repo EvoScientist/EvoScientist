@@ -28,6 +28,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import urllib.request
 import webbrowser
@@ -278,6 +279,9 @@ class WebUILauncher:
         self._backend_started = False
         self._webui_proc: subprocess.Popen | None = None
         self._stopped = False
+        # Guards _teardown: start() (boot thread) and stop() (GUI thread) can
+        # run concurrently on the desktop.
+        self._lock = threading.Lock()
         self._warnings: list[str] = []
 
     # -- properties ------------------------------------------------------- #
@@ -310,38 +314,56 @@ class WebUILauncher:
     # -- lifecycle -------------------------------------------------------- #
     def start(self) -> LaunchResult:
         """Resolve/start the backend and start the front-end. Non-blocking:
-        does not wait for readiness (use :meth:`wait_ready`)."""
+        does not wait for readiness (use :meth:`wait_ready`).
+
+        Tears down whatever it already spawned if a later step raises, or if
+        ``stop()`` fires concurrently — the desktop calls ``stop()`` from the GUI
+        thread while this runs on the boot thread. Without this, a failed CLI
+        launch (``atexit`` not yet registered) or a window closed mid-boot would
+        orphan the backend holding the port.
+        """
         from ..langgraph_dev.manager import _is_port_occupied
 
         self._runner.preflight(self._cfg)
 
-        decision = self._resolve_backend_with_auto_port()
-        self._warnings.extend(decision.warnings)
-        if decision.action == "start":
-            self._start_backend()
+        try:
+            decision = self._resolve_backend_with_auto_port()
+            self._warnings.extend(decision.warnings)
+            if decision.action == "start":
+                self._start_backend()
+            self._raise_if_stopped()
 
-        # Front-end port: auto-port shells move off an occupied port too;
-        # otherwise it's a non-fatal warning (node will surface a hard bind
-        # failure if it actually can't listen).
-        if _is_port_occupied(self._cfg.webui_port, self._cfg.webui_host):
-            if self._cfg.auto_port:
-                free = _find_free_port(self._cfg.webui_port, self._cfg.webui_host)
-                self._warnings.append(
-                    f"Port {self._cfg.webui_port} was occupied; using {free} "
-                    f"for the WebUI instead."
-                )
-                self._cfg = replace(self._cfg, webui_port=free)
-            else:
-                self._warnings.append(
-                    f"Port {self._cfg.webui_port} is already in use; the WebUI "
-                    f"server may fail to start. Change it with "
-                    f"'EvoSci config set webui_port <port>'."
-                )
+            # Front-end port: auto-port shells move off an occupied port too;
+            # otherwise it's a non-fatal warning (node will surface a hard bind
+            # failure if it actually can't listen).
+            if _is_port_occupied(self._cfg.webui_port, self._cfg.webui_host):
+                if self._cfg.auto_port:
+                    free = _find_free_port(self._cfg.webui_port, self._cfg.webui_host)
+                    self._warnings.append(
+                        f"Port {self._cfg.webui_port} was occupied; using {free} "
+                        f"for the WebUI instead."
+                    )
+                    self._cfg = replace(self._cfg, webui_port=free)
+                else:
+                    self._warnings.append(
+                        f"Port {self._cfg.webui_port} is already in use; the WebUI "
+                        f"server may fail to start. Change it with "
+                        f"'EvoSci config set webui_port <port>'."
+                    )
 
-        env = self._build_frontend_env()
-        self._webui_proc = self._runner.start(self._cfg, env)
+            env = self._build_frontend_env()
+            self._webui_proc = self._runner.start(self._cfg, env)
+            self._raise_if_stopped()
+        except BaseException:
+            self._teardown()
+            raise
 
         return self._result()
+
+    def _raise_if_stopped(self) -> None:
+        """Abort startup if ``stop()`` fired on another thread mid-boot."""
+        if self._stopped:
+            raise LauncherError("cancelled", "Launch cancelled by shutdown.")
 
     def wait_ready(self, timeout: float = 60.0) -> LaunchResult:
         """Block until both services answer, or raise ``LauncherError``.
@@ -388,16 +410,29 @@ class WebUILauncher:
 
     def stop(self) -> None:
         """Idempotent teardown. Stops the front-end always; stops the backend
-        only if we started it and keepalive is off."""
-        if self._stopped:
-            return
+        only if we started it and keepalive is off. Safe before/during
+        ``start()``: always marks the launcher stopped so an in-flight
+        ``start()`` aborts and cleans up what it spawned."""
         self._stopped = True
-        if self._webui_proc is not None:
-            self._runner.stop(self._webui_proc)
-        if self._backend_started and not self._cfg.keepalive:
-            from ..langgraph_dev.manager import stop_langgraph_dev
+        self._teardown()
 
-            stop_langgraph_dev(self._backend_proc)
+    def _teardown(self) -> None:
+        """Stop every process this launcher spawned, at most once each.
+
+        Lock-guarded because ``start()`` (boot thread) and ``stop()`` (GUI
+        thread) can enter concurrently; each handle is cleared as it is stopped
+        so a second entry is a no-op. A reused backend has no handle here, so it
+        is never touched.
+        """
+        with self._lock:
+            if self._webui_proc is not None:
+                proc, self._webui_proc = self._webui_proc, None
+                self._runner.stop(proc)
+            if self._backend_proc is not None and not self._cfg.keepalive:
+                from ..langgraph_dev.manager import stop_langgraph_dev
+
+                proc, self._backend_proc = self._backend_proc, None
+                stop_langgraph_dev(proc)
 
     # -- internals -------------------------------------------------------- #
     def _resolve_backend_with_auto_port(self) -> _BackendDecision:
