@@ -28,6 +28,7 @@ from ..channels.hitl_budget import (
     channel_response_with_budget_stop,
     hitl_budget_stop,
     hitl_completed_round_cap_reached,
+    hitl_pause_unresolved,
 )
 from ..commands import Command, CommandContext
 from ..commands import manager as cmd_manager
@@ -1837,6 +1838,9 @@ def run_textual_interactive(
             # auto-resume is built, so a decision is never computed and then
             # dropped by the loop condition (issue #469).
             _hitl_budget_exhausted = False
+            # A pause was stored but no resume was built. Close it without
+            # the budget-stop notice (that notice is only for a spent cap).
+            _hitl_unresolved = False
             while True:
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
@@ -1853,6 +1857,7 @@ def run_textual_interactive(
                 state.pending_interrupt = None
                 state.pending_ask_user = None
                 _hitl_resuming = False
+                _hitl_unresolved = False
                 # Reset per-round widgets so resumed streams get fresh ones
                 if _hitl_round > 0:
                     thinking_w = None
@@ -2504,9 +2509,29 @@ def run_textual_interactive(
                     # content, so finalize it without removing the widget.
                     await _preserve_active_narration()
                     await _remove_w(processing_w)
+                    # A pause with no resume is closed after the loop. Mark it
+                    # here, before widgets, so they stay "running" for the
+                    # rejected mark instead of "interrupted".
+                    if (
+                        not is_stream_cancel_requested(cancel_scope)
+                        and not _hitl_resuming
+                        and not _hitl_budget_exhausted
+                        and hitl_pause_unresolved(
+                            resuming=False,
+                            pending=(
+                                state.pending_interrupt is not None
+                                or state.pending_ask_user is not None
+                            ),
+                        )
+                    ):
+                        _hitl_unresolved = True
                     # Mark any still-running tool widgets as interrupted
                     # (skip if HITL approved — tools will continue next round)
-                    if not _hitl_resuming and not _hitl_budget_exhausted:
+                    if (
+                        not _hitl_resuming
+                        and not _hitl_budget_exhausted
+                        and not _hitl_unresolved
+                    ):
                         _expand_completed_tools()
                         for tw in tool_widgets.values():
                             if tw._status == "running":
@@ -2562,6 +2587,15 @@ def run_textual_interactive(
                     break
                 if state.pending_interrupt is None and state.pending_ask_user is None:
                     break  # normal completion or rejection — exit HITL loop
+                if hitl_pause_unresolved(
+                    resuming=_hitl_resuming,
+                    pending=True,
+                ):
+                    # Empty ask_user, or an error after handle_event stored
+                    # the pause. Replaying ``_stream_input`` would resend the
+                    # same user message; close the checkpoint instead.
+                    _hitl_unresolved = True
+                    break
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
 
@@ -2595,16 +2629,19 @@ def run_textual_interactive(
                 for tw in tool_widgets.values():
                     if tw._status == "running":
                         tw.set_rejected()
-                self._append_system(
-                    HITL_BUDGET_STOP_NOTICE,
-                    style="yellow",
-                )
-                # Channel users never see ``_append_system``. Fold the
-                # notice into the returned response so
-                # ``_process_channel_message`` sends it (approval,
-                # ask_user, and total-cap stops).
-                if channel_hitl_fn is not None or channel_ask_user_fn is not None:
-                    response = channel_response_with_budget_stop(response)
+                # Unresolved pauses (empty ask_user, swallowed error) are
+                # closed the same way, but they are not a spent budget.
+                if _hitl_budget_exhausted:
+                    self._append_system(
+                        HITL_BUDGET_STOP_NOTICE,
+                        style="yellow",
+                    )
+                    # Channel users never see ``_append_system``. Fold the
+                    # notice into the returned response so
+                    # ``_process_channel_message`` sends it (approval,
+                    # ask_user, and total-cap stops).
+                    if channel_hitl_fn is not None or channel_ask_user_fn is not None:
+                        response = channel_response_with_budget_stop(response)
 
             # On stream close, enqueue any async-task + bg-process completions from
             # thread state; the notification poller drains + injects. Best-effort —

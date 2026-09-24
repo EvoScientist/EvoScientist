@@ -31,6 +31,18 @@ def hitl_budget_stop(
     return needs_human and human_rounds >= MAX_HUMAN_HITL_ROUNDS
 
 
+def hitl_pause_unresolved(*, resuming: bool, pending: bool) -> bool:
+    """A stored pause with no resume must not replay the same stream input.
+
+    Empty ``ask_user`` questions and a swallowed error after
+    ``handle_event`` leave ``pending`` set while ``_stream_input`` is
+    unchanged. Replaying that input resends the user message as a new
+    turn. The loop should close the checkpoint instead. This is not a
+    budget stop, so callers must not show the round-limit notice.
+    """
+    return pending and not resuming
+
+
 def hitl_completed_round_cap_reached(completed_rounds: int) -> bool:
     """True when the HITL resume loop must stop before starting another stream.
 

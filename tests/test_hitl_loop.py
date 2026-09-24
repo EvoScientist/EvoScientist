@@ -754,6 +754,29 @@ def test_channel_response_with_budget_stop_keeps_partial_then_notice():
     )
 
 
+def test_hitl_pause_unresolved_does_not_replay_without_a_resume():
+    from EvoScientist.channels.hitl_budget import hitl_pause_unresolved
+
+    assert hitl_pause_unresolved(resuming=False, pending=True)
+    assert not hitl_pause_unresolved(resuming=True, pending=True)
+    assert not hitl_pause_unresolved(resuming=False, pending=False)
+
+
+def test_tui_unresolved_pause_exits_without_budget_notice():
+    """A stored pause with no resume breaks the loop. The round-limit
+    notice stays inside the budget-exhausted branch (CodeRabbit)."""
+    from pathlib import Path
+
+    import EvoScientist.cli.tui_interactive as tui
+
+    src = Path(tui.__file__).read_text()
+    unresolved = src.index("hitl_pause_unresolved(")
+    notice = src.index("HITL_BUDGET_STOP_NOTICE", unresolved)
+    gate = src[notice - 250 : notice]
+    assert "_hitl_budget_exhausted" in gate
+    assert "_hitl_unresolved = True" in src
+
+
 def test_tui_budget_stop_folds_notice_into_channel_response():
     """Channel replies come from ``_stream_with_widgets``'s return value,
     not ``_append_system``. The close path must fold the notice in when
