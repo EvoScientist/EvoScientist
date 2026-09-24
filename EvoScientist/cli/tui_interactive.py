@@ -24,6 +24,8 @@ import EvoScientist.cli.channel as _ch_mod
 from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
 from ..channels.hitl_budget import (
+    HITL_BUDGET_STOP_NOTICE,
+    channel_response_with_budget_stop,
     hitl_budget_stop,
     hitl_completed_round_cap_reached,
 )
@@ -2594,9 +2596,15 @@ def run_textual_interactive(
                     if tw._status == "running":
                         tw.set_rejected()
                 self._append_system(
-                    "Approval round limit reached; stopping this turn.",
+                    HITL_BUDGET_STOP_NOTICE,
                     style="yellow",
                 )
+                # Channel users never see ``_append_system``. Fold the
+                # notice into the returned response so
+                # ``_process_channel_message`` sends it (approval,
+                # ask_user, and total-cap stops).
+                if channel_hitl_fn is not None or channel_ask_user_fn is not None:
+                    response = channel_response_with_budget_stop(response)
 
             # On stream close, enqueue any async-task + bg-process completions from
             # thread state; the notification poller drains + injects. Best-effort —

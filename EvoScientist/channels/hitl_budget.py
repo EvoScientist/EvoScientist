@@ -11,6 +11,7 @@ from __future__ import annotations
 
 MAX_HUMAN_HITL_ROUNDS = 50
 MAX_HITL_TOTAL_ROUNDS = 1000
+HITL_BUDGET_STOP_NOTICE = "Approval round limit reached; stopping this turn."
 
 
 def hitl_budget_stop(
@@ -40,3 +41,18 @@ def hitl_completed_round_cap_reached(completed_rounds: int) -> bool:
     bound for a round that stored a pending without building a resume.
     """
     return completed_rounds >= MAX_HITL_TOTAL_ROUNDS
+
+
+def channel_response_with_budget_stop(response: str) -> str:
+    """Fold the budget-stop notice into a channel reply.
+
+    The TUI shows the notice with ``_append_system``; channel users only
+    see what ``_process_channel_message`` sends back. Partial text from
+    the last real round is kept, matching the consumer.
+    """
+    text = (response or "").strip()
+    if not text:
+        return HITL_BUDGET_STOP_NOTICE
+    if HITL_BUDGET_STOP_NOTICE in text:
+        return text
+    return f"{text}\n\n{HITL_BUDGET_STOP_NOTICE}"

@@ -1632,6 +1632,7 @@ def _run_streaming(
         and returns the partial response gathered so far.
         """
         from ..channels.hitl_budget import (
+            HITL_BUDGET_STOP_NOTICE,
             MAX_HITL_TOTAL_ROUNDS,
             MAX_HUMAN_HITL_ROUNDS,
         )
@@ -1641,9 +1642,7 @@ def _run_streaming(
             if human_rounds >= MAX_HUMAN_HITL_ROUNDS
             else MAX_HITL_TOTAL_ROUNDS
         )
-        console.print(
-            "[yellow]Approval round limit reached; stopping this turn.[/yellow]"
-        )
+        console.print(f"[yellow]{HITL_BUDGET_STOP_NOTICE}[/yellow]")
         _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
         state.pending_interrupt = None
         state.pending_ask_user = None

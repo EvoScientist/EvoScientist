@@ -736,6 +736,39 @@ def test_tui_hitl_loop_checks_completed_round_cap_before_clearing_pending():
     assert "while True" not in between
 
 
+def test_channel_response_with_budget_stop_keeps_partial_then_notice():
+    from EvoScientist.channels.hitl_budget import (
+        HITL_BUDGET_STOP_NOTICE,
+        channel_response_with_budget_stop,
+    )
+
+    assert channel_response_with_budget_stop("") == HITL_BUDGET_STOP_NOTICE
+    assert channel_response_with_budget_stop("   ") == HITL_BUDGET_STOP_NOTICE
+    assert channel_response_with_budget_stop("partial") == (
+        f"partial\n\n{HITL_BUDGET_STOP_NOTICE}"
+    )
+    assert (
+        channel_response_with_budget_stop(HITL_BUDGET_STOP_NOTICE)
+        == HITL_BUDGET_STOP_NOTICE
+    )
+
+
+def test_tui_budget_stop_folds_notice_into_channel_response():
+    """Channel replies come from ``_stream_with_widgets``'s return value,
+    not ``_append_system``. The close path must fold the notice in when
+    channel HITL callbacks are set (issue #469 / CodeRabbit)."""
+    from pathlib import Path
+
+    import EvoScientist.cli.tui_interactive as tui
+
+    src = Path(tui.__file__).read_text()
+    folded = src.index("channel_response_with_budget_stop(response)")
+    gate = src[folded - 700 : folded]
+    assert "HITL_BUDGET_STOP_NOTICE" in gate
+    assert "channel_hitl_fn" in gate
+    assert "channel_ask_user_fn" in gate
+
+
 class _StickyCheckpointAgent:
     """``aupdate_state`` is a no-op so recovery's verify still sees ``next``."""
 

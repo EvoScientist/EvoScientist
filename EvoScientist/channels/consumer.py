@@ -444,7 +444,7 @@ class InboundConsumer:
             # Total cap is checked after each stream, before the next
             # decision. The human budget is checked only when a prompt
             # would be shown (issue #469).
-            from .hitl_budget import hitl_budget_stop
+            from .hitl_budget import HITL_BUDGET_STOP_NOTICE, hitl_budget_stop
 
             while True:
                 _hitl_round += 1
@@ -663,7 +663,7 @@ class InboundConsumer:
             io = _ConsumerIO(self, msg, session_key)
             if final_content.strip():
                 await io.send(final_content)
-            await io.send("Approval round limit reached; stopping this turn.")
+            await io.send(HITL_BUDGET_STOP_NOTICE)
 
         except TimeoutError:
             self._metrics.total_timeouts += 1
