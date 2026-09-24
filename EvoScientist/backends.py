@@ -491,9 +491,10 @@ HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
 def abandoned_tool_messages(messages: list) -> list:
     """Tool results for unanswered calls on the last AI message.
 
-    Closing a parked interrupt without these leaves dangling ``tool_calls``,
-    and the next user turn is rejected by the provider. The wording keeps
-    the middleware's default "do not retry" instruction.
+    Closing a parked interrupt without these leaves dangling ``tool_calls``
+    or ``invalid_tool_calls``, and the next user turn is rejected by the
+    provider. The wording keeps the middleware's default "do not retry"
+    instruction. Crash recovery covers both lists; this does too.
     """
     from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
 
@@ -501,10 +502,16 @@ def abandoned_tool_messages(messages: list) -> list:
         converted = list(convert_to_messages(messages))
     except Exception:
         return []
+    def _calls(message: AIMessage) -> list:
+        return [
+            *message.tool_calls,
+            *(getattr(message, "invalid_tool_calls", None) or ()),
+        ]
+
     last_ai = None
     last_index = -1
     for index, message in enumerate(converted):
-        if isinstance(message, AIMessage) and message.tool_calls:
+        if isinstance(message, AIMessage) and _calls(message):
             last_ai = message
             last_index = index
     if last_ai is None:
@@ -515,7 +522,7 @@ def abandoned_tool_messages(messages: list) -> list:
         if getattr(message, "type", None) == "tool" and message.tool_call_id
     }
     results = []
-    for call in last_ai.tool_calls:
+    for call in _calls(last_ai):
         call_id = call.get("id")
         if not call_id or call_id in answered:
             continue

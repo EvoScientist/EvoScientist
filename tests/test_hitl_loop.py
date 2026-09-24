@@ -754,6 +754,44 @@ def test_channel_response_with_budget_stop_keeps_partial_then_notice():
     )
 
 
+def test_abandoned_tool_messages_closes_invalid_tool_calls():
+    """HITL close must patch invalid calls too, matching crash recovery."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from EvoScientist.backends import (
+        HITL_ROUND_LIMIT_REJECT_MESSAGE,
+        abandoned_tool_messages,
+    )
+
+    patch = abandoned_tool_messages(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "execute",
+                        "args": {},
+                        "id": "ok-1",
+                        "type": "tool_call",
+                    }
+                ],
+                invalid_tool_calls=[
+                    {
+                        "name": "execute",
+                        "args": "not-json",
+                        "id": "bad-1",
+                        "error": "parse",
+                        "type": "invalid_tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(content="done", name="execute", tool_call_id="ok-1"),
+        ]
+    )
+    assert [message.tool_call_id for message in patch] == ["bad-1"]
+    assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patch[0].content
+
+
 def test_hitl_pause_unresolved_does_not_replay_without_a_resume():
     from EvoScientist.channels.hitl_budget import hitl_pause_unresolved
 
