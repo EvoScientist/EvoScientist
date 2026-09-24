@@ -207,18 +207,28 @@ def test_start_without_auto_port_raises_on_conflict(monkeypatch):
     assert ei.value.code == "port_conflict"
 
 
-def test_stop_mid_backend_start_stops_recorded_server(monkeypatch):
-    """stop() during start_langgraph_dev's health wait (proc handle not wired
-    yet) tears down the PID-file-recorded backend, so a desktop close mid-boot
-    cannot orphan the in-flight langgraph dev."""
+def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
+    """stop() during start_langgraph_dev's run (proc handle not wired yet) tears
+    down only the process THIS launcher spawned — never the on-disk recorded
+    server, which before our own Popen still names a different session's backend
+    (e.g. one the desktop auto-ported around). So a desktop close mid-boot can't
+    kill an unrelated CLI backend."""
     calls: list[int] = []
-    monkeypatch.setattr(lgm, "stop_recorded_server", lambda: (calls.append(1), 4321)[1])
+    # The mid-start fallback must use the owned-process stop, not the disk one.
+    monkeypatch.setattr(
+        lgm, "stop_inflight_owned_server", lambda: (calls.append(1), 4321)[1]
+    )
+    monkeypatch.setattr(
+        lgm,
+        "stop_recorded_server",
+        lambda: calls.append("disk"),  # must NOT fire
+    )
     launcher = lm.WebUILauncher(object(), _cfg(keepalive=False), _FakeRunner())
     # Simulate being inside _start_backend's blocking call: start initiated,
     # no proc handle assigned yet.
     launcher._backend_start_initiated = True
     launcher.stop()
-    assert calls == [1]  # recorded-server fallback fired
+    assert calls == [1]  # owned-process fallback fired, disk path did not
     assert launcher._backend_start_initiated is False
     launcher.stop()  # idempotent — does not fire again
     assert calls == [1]

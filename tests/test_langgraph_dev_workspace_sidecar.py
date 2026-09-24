@@ -456,6 +456,51 @@ def test_stop_recorded_server_kills_owned_langgraph_process(
         victim.wait()
 
 
+def test_stop_inflight_owned_server_ignores_disk_record(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """The launcher's mid-start fallback stops only the in-memory owned process.
+    With nothing spawned yet (pre-Popen), the on-disk PID file still names a
+    different session's backend — it must be left untouched, not killed."""
+    import subprocess
+    import sys
+
+    victim = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph"]
+    )
+    try:
+        pid_file = tmp_path / "pid.txt"
+        pid_file.write_text(str(victim.pid))
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, pid_file=pid_file)
+        )
+        monkeypatch.setattr(manager, "_PROCESS", None)  # nothing spawned yet
+        assert manager.stop_inflight_owned_server() is None
+        assert victim.poll() is None, "disk-recorded server must not be killed"
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_stop_inflight_owned_server_stops_the_owned_process(monkeypatch, runtime_paths):
+    """Once our own child is spawned (``_PROCESS`` set), a mid-start stop still
+    tears it down, so the close-during-boot orphan is cleaned up."""
+    import subprocess
+    import sys
+
+    owned = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
+        monkeypatch.setattr(manager, "_PROCESS", owned)
+        assert manager.stop_inflight_owned_server() == owned.pid
+        owned.wait(timeout=5)
+        assert owned.poll() is not None, "owned in-flight process must be stopped"
+    finally:
+        if owned.poll() is None:
+            owned.kill()
+            owned.wait()
+
+
 def test_stop_recorded_server_cleans_corrupt_pid_file(
     tmp_path, monkeypatch, runtime_paths
 ):

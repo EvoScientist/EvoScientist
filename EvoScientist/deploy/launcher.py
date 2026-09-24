@@ -443,20 +443,22 @@ class WebUILauncher:
                 proc, self._backend_proc = self._backend_proc, None
                 stop_langgraph_dev(proc)
             elif self._backend_start_initiated and not self._cfg.keepalive:
-                # stop() fired while start_langgraph_dev was still in its health
-                # wait, so we have no proc handle — but the process is already
-                # recorded (PID file + module state). Stop it via the recorded
-                # path (tree kill under the file lock) so a close mid-boot can't
-                # orphan it.
-                from ..langgraph_dev.manager import stop_recorded_server
+                # stop() fired while start_langgraph_dev was still running, so we
+                # have no proc handle yet. Stop only the process THIS launcher
+                # spawned (the manager's in-memory record), never the shared
+                # on-disk PID file: before our child is spawned that file still
+                # names a *different* server (e.g. a CLI backend on another port
+                # we auto-ported around), and killing it would orphan an
+                # unrelated session. Once our child is spawned it is tracked in
+                # memory, so a close mid-health-wait still tears it down.
+                from ..langgraph_dev.manager import stop_inflight_owned_server
 
                 self._backend_start_initiated = False
-                stopped = stop_recorded_server()
+                stopped = stop_inflight_owned_server()
                 if stopped is not None:
                     logger.warning(
                         "Launcher torn down mid-backend-start; stopped the "
-                        "in-flight langgraph dev (pid %s) via the recorded-server "
-                        "fallback.",
+                        "in-flight langgraph dev (pid %s).",
                         stopped,
                     )
 

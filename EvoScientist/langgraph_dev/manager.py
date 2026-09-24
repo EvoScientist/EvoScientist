@@ -739,6 +739,28 @@ def stop_recorded_server() -> int | None:
         return None
 
 
+def stop_inflight_owned_server() -> int | None:
+    """Stop only the langgraph dev *this* process spawned, never one recorded
+    on disk by another process.
+
+    The launcher's mid-start teardown uses this instead of
+    :func:`stop_recorded_server`. Before its own child is spawned, the shared
+    on-disk PID file still names a *different* server — e.g. a CLI backend on
+    another port that the desktop auto-ported around — so killing the recorded
+    server on a close-during-boot would take down an unrelated session. The
+    in-memory ``_PROCESS`` is set only by this process's ``start_langgraph_dev``
+    (after Popen), so it can only ever name our own in-flight child; a close
+    before Popen finds it ``None`` and stops nothing. Returns the stopped pid,
+    or ``None`` when we had not spawned anything yet.
+    """
+    with _LOCK:
+        if _PROCESS is not None and _PROCESS.poll() is None:
+            pid = _PROCESS.pid
+            stop_langgraph_dev()
+            return pid
+    return None
+
+
 def _stop_recorded_server_locked() -> int | None:
     with _LOCK:
         if _PROCESS is not None and _PROCESS.poll() is None:
