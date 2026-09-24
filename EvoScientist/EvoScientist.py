@@ -778,6 +778,12 @@ def _agent_shell_env() -> dict[str, str] | None:
     """
     from .desktop import app_paths
 
+    # Only the frozen desktop bundle (or an explicit override) ships a trusted
+    # interpreter. In a dev checkout app_root() falls back to the cwd, so a
+    # workspace-supplied runtime/python/ would be prepended to the agent shell's
+    # PATH (execute runs shell=True) and could shadow real tools — don't trust it.
+    if not (app_paths.is_frozen() or os.environ.get(app_paths.ENV_PYTHON_EXE)):
+        return None
     py = app_paths.python_exe()
     if not py.exists():
         return None

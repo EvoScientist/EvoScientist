@@ -747,6 +747,21 @@ def test_agent_shell_env_none_without_bundled_python(monkeypatch, tmp_path):
     assert ev._agent_shell_env() is None
 
 
+def test_agent_shell_env_none_in_dev_checkout_without_override(monkeypatch, tmp_path):
+    """Not frozen and no explicit override: leave PATH untouched even if a
+    runtime/python/ happens to exist under the cwd (untrusted workspace tree)."""
+    from EvoScientist import EvoScientist as ev
+    from EvoScientist.desktop import app_paths as ap
+
+    py = tmp_path / "py" / "python.exe"
+    py.parent.mkdir(parents=True)
+    py.write_text("x")
+    monkeypatch.setattr(ap, "is_frozen", lambda: False)
+    monkeypatch.delenv(ap.ENV_PYTHON_EXE, raising=False)
+    monkeypatch.setattr(ap, "python_exe", lambda: py)
+    assert ev._agent_shell_env() is None
+
+
 def test_agent_shell_env_injects_bundled_python(monkeypatch, tmp_path):
     from EvoScientist import EvoScientist as ev
     from EvoScientist.desktop import app_paths as ap
@@ -754,6 +769,9 @@ def test_agent_shell_env_injects_bundled_python(monkeypatch, tmp_path):
     py = tmp_path / "py" / "python.exe"
     py.parent.mkdir(parents=True)
     py.write_text("x")
+    # An explicit override marks the interpreter as trusted (the frozen bundle is
+    # the other trusted source).
+    monkeypatch.setenv(ap.ENV_PYTHON_EXE, str(py))
     monkeypatch.setattr(ap, "python_exe", lambda: py)
     monkeypatch.setattr(ap, "user_pypackages_dir", lambda: tmp_path / "pp")
     monkeypatch.setenv("PATH", "/usr/bin")
