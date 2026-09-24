@@ -510,6 +510,19 @@ def test_build_launcher_config_resolves_ports_and_workspace(monkeypatch, tmp_pat
     assert cfg.open_browser is False
 
 
+def test_build_launcher_config_keepalive_override_wins(monkeypatch, tmp_path):
+    """The desktop passes keepalive=False so its backend is always torn down,
+    even when the CLI config has langgraph_dev_keepalive=True."""
+    monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
+    config = SimpleNamespace(
+        default_workdir=str(tmp_path),
+        langgraph_dev_keepalive=True,
+    )
+    assert lm.build_launcher_config(config, None, keepalive=False).keepalive is False
+    # None (the default) still reads the config value, keeping CLI behavior.
+    assert lm.build_launcher_config(config, None).keepalive is True
+
+
 def test_build_launcher_config_blank_host_falls_back_to_loopback(monkeypatch):
     monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
     config = SimpleNamespace(default_workdir="/tmp/x", webui_host="   ")

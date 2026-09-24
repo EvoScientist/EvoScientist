@@ -448,8 +448,15 @@ def run_desktop(workspace_dir: str | None = None) -> None:
 
         Desktop shell: no terminal to act on a port conflict, so ``auto_port``
         falls back to a free port instead of dead-ending at the error panel.
+
+        ``keepalive=False`` regardless of the CLI's ``langgraph_dev_keepalive``:
+        the desktop owns its backend and must tear it down on every switch and
+        on close. Inheriting the CLI flag would leak a backend per workspace
+        switch (the old server keeps the port, the next launch auto-ports and
+        starts another) and leave one running silently on close, with no
+        terminal to run ``EvoSci server stop``.
         """
-        cfg = build_launcher_config(config, ws, auto_port=True)
+        cfg = build_launcher_config(config, ws, auto_port=True, keepalive=False)
         runner = BundledWebUIRunner(
             app_dir=app_paths.webui_dir(),
             node_exe=app_paths.node_exe(),

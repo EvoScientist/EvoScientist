@@ -737,13 +737,22 @@ def _poll_ready(url: str, timeout: float, interval: float = 0.5) -> None:
 # Standalone JSON entrypoint (for an out-of-process shell, e.g. Electron)
 # --------------------------------------------------------------------------- #
 def build_launcher_config(
-    config: Any, workspace_dir: str | None, *, auto_port: bool = False
+    config: Any,
+    workspace_dir: str | None,
+    *,
+    auto_port: bool = False,
+    keepalive: bool | None = None,
 ) -> LauncherConfig:
     """Resolve a :class:`LauncherConfig` from an ``EvoScientistConfig`` the
     same way ``run_webui`` does, so both entrypoints agree.
 
     ``auto_port`` is set by GUI shells (no terminal to act on a conflict); the
     CLI leaves it False so a busy port surfaces as an explicit error.
+
+    ``keepalive`` defaults to the ``langgraph_dev_keepalive`` config value; pass
+    an explicit bool to override it. The desktop passes ``False`` so its backend
+    is always torn down (it owns the backend and has no terminal to reclaim a
+    leftover from).
     """
     from ..langgraph_dev.manager import _DEFAULT_HOST, _DEFAULT_PORT
 
@@ -770,7 +779,11 @@ def build_launcher_config(
         webui_host=webui_host,
         webui_port=webui_port,
         deploy_mode=True,
-        keepalive=bool(getattr(config, "langgraph_dev_keepalive", False)),
+        keepalive=(
+            bool(getattr(config, "langgraph_dev_keepalive", False))
+            if keepalive is None
+            else keepalive
+        ),
         open_browser=False,
         auto_port=auto_port,
     )
