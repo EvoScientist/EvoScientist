@@ -985,6 +985,7 @@ class ServeRuntimeState:
     runtime_gateways: "RuntimeGateways"
     async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
+    gateway_backend: str | None = None
 
     def set_agent(
         self,
@@ -1083,6 +1084,7 @@ async def _apply_serve_resume_state(
             await _sync_background_agent_server_workspace(
                 effective_config,
                 workspace_dir=new_workspace,
+                backend=runtime_state.gateway_backend,
             )
             workspace_update = (new_workspace, new_agent)
         except Exception:
@@ -1621,6 +1623,7 @@ def serve(
         config=config,
         runtime_gateways=runtime_gateways,
         async_runtime=async_runtime,
+        gateway_backend=gateway_backend,
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
