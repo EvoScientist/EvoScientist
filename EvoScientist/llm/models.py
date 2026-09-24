@@ -3,9 +3,9 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and
-custom OpenAI/Anthropic-compatible endpoints) and convenient short names for
-common models.
+Novita, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine, DashScope,
+DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-compatible
+endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -51,6 +51,11 @@ from .registry import (
     list_models,  # noqa: F401 — re-exported for existing import sites
     list_models_by_provider,  # noqa: F401 — re-exported for existing import sites
 )
+
+_ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
+    "minimax": "MINIMAX_BASE_URL",
+    "xiaomi-token-plan": "MIMO_TOKEN_PLAN_BASE_URL",
+}
 
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
 # installed versions are advertised automatically.
@@ -274,6 +279,11 @@ def _apply_auto_config(
     Mutates *kwargs* in place.  Only sets keys that the caller hasn't already
     provided, so explicit user settings are never overridden.
     """
+    # No langchain-anthropic profile for Opus 5.5 yet, so max_tokens would fall
+    # back to 4096; applies on every route (explicit thinking, ccproxy, ...).
+    if provider == "anthropic" and model_id.endswith("opus-5-5"):
+        kwargs.setdefault("max_tokens", 128000)
+
     # Anthropic: extended thinking
     if provider == "anthropic" and "thinking" not in kwargs:
         _supports_thinking = original_provider in _THINKING_CAPABLE_PROVIDERS
@@ -293,7 +303,7 @@ def _apply_auto_config(
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
                 kwargs.setdefault("max_tokens", 16000)
         elif "fable" in model_id or model_id.endswith(
-            ("opus-5", "sonnet-5", "4-6", "4-7", "4-8")
+            ("opus-5", "opus-5-5", "sonnet-5", "4-6", "4-7", "4-8")
         ):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")
@@ -551,8 +561,11 @@ def get_chat_model(
                     "Anthropic-compatible API endpoint URL (e.g. https://api.anthropic.com)."
                 )
             base_url = base_url.rstrip("/")
-        elif provider == "minimax":
-            base_url = os.environ.get("MINIMAX_BASE_URL", base_url_default).rstrip("/")
+        elif provider in _ANTHROPIC_BASE_URL_OVERRIDE_ENV:
+            # A blank override must fall back, or ChatAnthropic defaults to
+            # api.anthropic.com and sends this provider's key there.
+            override = os.environ.get(_ANTHROPIC_BASE_URL_OVERRIDE_ENV[provider], "")
+            base_url = (override.strip() or base_url_default).rstrip("/")
         else:
             base_url = base_url_default
         if base_url:
@@ -563,6 +576,10 @@ def get_chat_model(
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
+        # MiMo ids have no langchain profile, so ChatAnthropic would fall back to
+        # 4096; match the server's own default (131072) instead.
+        if provider in ("xiaomi", "xiaomi-token-plan"):
+            kwargs.setdefault("max_tokens", 131072)
         provider = "anthropic"
 
     elif provider == "ollama":

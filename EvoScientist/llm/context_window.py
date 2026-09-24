@@ -23,8 +23,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.7 closed-source tiers — Max flagship and Plus (1M).
     "qwen3.7-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
-    # xAI Grok — per-model windows (build-0.1: 256K, 4.5/4.6: 500K).
+    # xAI Grok — per-model windows (build-0.1: 256K, 4.5–4.7: 500K).
     "grok-build-0.1": 256_000,
+    "grok-4.7": 500_000,
     "grok-4.6": 500_000,
     "grok-4.5": 500_000,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
@@ -69,6 +70,8 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("glm-5", 203_000),
     # DeepSeek V4 family — pro, flash, future variants
     ("deepseek-v4", 1_050_000),
+    # Xiaomi MiMo v2.6 family — pro, flash, future variants
+    ("mimo-v2.6", 1_048_576),
     # Xiaomi MiMo v2.5 family — base, pro, future variants
     ("mimo-v2.5", 1_050_000),
     # Meta Muse Spark family — 1.1/1.2/1.3 (OpenRouter ``meta/muse-spark-*``, 1M).

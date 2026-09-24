@@ -65,7 +65,12 @@ class ModelFallbackCommand(Command):
 
                 if provider is None:
                     if model_name in MODELS:
-                        _, provider = MODELS[model_name]
+                        from ...EvoScientist import _ensure_config
+                        from ...llm.registry import resolve_provider
+
+                        provider = resolve_provider(
+                            model_name, _ensure_config().provider
+                        )
                     else:
                         ctx.ui.append_system(
                             f"Unknown model '{model_name}'. Specify provider explicitly: "

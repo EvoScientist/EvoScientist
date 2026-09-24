@@ -27,6 +27,7 @@ task description, not in state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, NotRequired
@@ -213,9 +214,10 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        return await handler(
-            request.override(system_message=self._compose_system_message(request))
-        )
+        # Composing walks the skill tiers on disk; langgraph dev's blockbuster
+        # raises on that scan when it runs on the event loop (Python 3.13+).
+        system_message = await asyncio.to_thread(self._compose_system_message, request)
+        return await handler(request.override(system_message=system_message))
 
 
 def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
