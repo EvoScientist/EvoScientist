@@ -480,10 +480,10 @@ def resolve_action_decision(
 # parked interrupt without resuming the agent (issue #469). A rejecting
 # ``Command(resume=...)`` does not close the checkpoint: HumanInTheLoop
 # middleware turns it into a ToolMessage and routes straight back to the
-# model. Surfaces write the tool results themselves and then clear ``next``
-# via ``update_state(as_node="__end__")``. The constant is part of that
-# result text, alongside the stock "do not retry" sentence — passing it as
-# a reject decision's ``message`` would drop that sentence.
+# model. Surfaces clear pending writes first, patch unanswered calls as
+# the tools node, then ``update_state(as_node="__end__")``. The constant is
+# part of that result text, alongside the stock "do not retry" sentence —
+# passing it as a reject decision's ``message`` would drop that sentence.
 HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
 
 
@@ -538,13 +538,32 @@ def abandoned_tool_messages(messages: list) -> list:
 async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
     """End a parked HITL/ask_user turn without another model step.
 
-    Writes rejection tool results (so history stays valid) as the tools
-    node, then clears the pending tasks with ``as_node="__end__"``. A
-    rejecting resume is not used: that resumes the agent.
+    Clears pending tasks first (``as_node="__end__"``) so finished sibling
+    writes — e.g. ``ask_user`` beside another tool — land in history.
+    Unanswered calls are then patched as the tools node from the post-clear
+    messages, and a trailing ``__end__`` leaves ``next`` empty. Patching
+    before the first clear reuses a finished task's id and drops the real
+    result. A rejecting resume is not used: that resumes the agent.
     """
     import logging
 
     log = logging.getLogger(__name__)
+    # Clear first: it commits the pending writes of calls that did finish.
+    try:
+        await gateway.update_state_values(
+            target,
+            thread_id,
+            None,
+            as_node="__end__",
+        )
+    except Exception:
+        log.warning(
+            "Could not clear parked HITL checkpoint on thread %s",
+            thread_id,
+            exc_info=True,
+        )
+        raise
+
     tool_messages: list = []
     try:
         state = await gateway.get_state_values(target, thread_id)
@@ -570,6 +589,9 @@ async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
                 thread_id,
                 exc_info=True,
             )
+    # Unconditional: the first END can leave next == ('model',). Nesting
+    # the trailing clear under ``if tool_messages`` would then leave the
+    # thread parked on the model node.
     try:
         await gateway.update_state_values(
             target,

@@ -166,9 +166,12 @@ class TestRichCliHitlRoundBudget:
         resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
         assert len(resumes) == 50
         assert "i51" not in resumes[-1].message.resume
-        tool_update = next(
-            update for update in gateway.updated_states if update[3] == "tools"
-        )
+        assert [update[3] for update in gateway.updated_states] == [
+            "__end__",
+            "tools",
+            "__end__",
+        ]
+        tool_update = gateway.updated_states[1]
         content = tool_update[2]["messages"][0].content
         assert HITL_ROUND_LIMIT_REJECT_MESSAGE in content
         assert "Do not retry this tool call" in content
@@ -672,12 +675,12 @@ class TestConsumerHitlRoundBudget:
 def test_tui_loop_does_not_build_a_resume_past_the_total_cap(monkeypatch):
     """TUI HITL loop, without a Pilot harness.
 
-    ``tui_hitl_loop_stop`` is what each TUI branch calls before it prompts or
+    Each pause branch calls ``hitl_budget_stop`` before it prompts or
     builds a resume. Auto rounds ignore the human cap; at the total cap the
     branch stops with no resume left unsent.
     """
     import EvoScientist.channels.hitl_budget as budget_mod
-    from EvoScientist.cli.tui_interactive import tui_hitl_loop_stop
+    from EvoScientist.channels.hitl_budget import hitl_budget_stop
 
     monkeypatch.setattr(budget_mod, "MAX_HITL_TOTAL_ROUNDS", 2)
     resumes_built = 0
@@ -685,7 +688,7 @@ def test_tui_loop_does_not_build_a_resume_past_the_total_cap(monkeypatch):
     for total_rounds in range(1, 6):
         # The previous iteration's resume, if any, is what this round streams.
         unsent_resume = None
-        if tui_hitl_loop_stop(
+        if hitl_budget_stop(
             human_rounds=0, total_rounds=total_rounds, needs_human=False
         ):
             break
@@ -699,7 +702,135 @@ def test_tui_loop_does_not_build_a_resume_past_the_total_cap(monkeypatch):
 def test_tui_loop_human_cap_does_not_stop_an_auto_branch():
     """A session-grant branch keeps resuming after the human cap; a widget
     branch does not."""
-    from EvoScientist.cli.tui_interactive import tui_hitl_loop_stop
+    from EvoScientist.channels.hitl_budget import hitl_budget_stop
 
-    assert not tui_hitl_loop_stop(human_rounds=50, total_rounds=51, needs_human=False)
-    assert tui_hitl_loop_stop(human_rounds=50, total_rounds=51, needs_human=True)
+    assert not hitl_budget_stop(human_rounds=50, total_rounds=51, needs_human=False)
+    assert hitl_budget_stop(human_rounds=50, total_rounds=51, needs_human=True)
+
+
+def test_tui_loop_level_total_cap_stops_before_clearing_pending(monkeypatch):
+    """A round that leaves pending without building a resume must stop
+    before the next iteration clears it, using the completed-round count
+    so the first stream is unchanged (issue #469 review)."""
+    import EvoScientist.channels.hitl_budget as budget_mod
+    from EvoScientist.channels.hitl_budget import hitl_budget_stop
+
+    monkeypatch.setattr(budget_mod, "MAX_HITL_TOTAL_ROUNDS", 2)
+    pending = False
+    streams = 0
+    hitl_round = 0
+    human_rounds = 0
+    exhausted = False
+    while True:
+        if hitl_round > 0 and hitl_budget_stop(
+            human_rounds=human_rounds,
+            total_rounds=hitl_round,
+            needs_human=False,
+        ):
+            exhausted = True
+            break
+        pending = False
+        hitl_round += 1
+        streams += 1
+        pending = True  # empty ask_user / swallowed error leaves pending
+
+    assert streams == 2
+    assert exhausted
+    assert pending  # still parked for close_parked_checkpoint
+
+
+class _CommitSiblingOnEndGateway:
+    """First ``__end__`` commits a finished sibling write, as LangGraph does."""
+
+    def __init__(self, messages, pending_write):
+        self.state_values = {"messages": list(messages)}
+        self._pending_write = pending_write
+        self.updated_states: list[tuple] = []
+
+    async def get_state_values(self, _target, _thread_id):
+        return self.state_values
+
+    async def update_state_values(
+        self, target, thread_id, values, *, as_node=None
+    ):
+        self.updated_states.append((target, thread_id, values, as_node))
+        if as_node == "__end__" and self._pending_write is not None:
+            self.state_values = {
+                "messages": [*self.state_values["messages"], self._pending_write]
+            }
+            self._pending_write = None
+        elif as_node == "tools" and isinstance(values, dict):
+            self.state_values = {
+                "messages": [
+                    *self.state_values["messages"],
+                    *(values.get("messages") or []),
+                ]
+            }
+
+
+async def test_close_parked_checkpoint_keeps_finished_sibling_results():
+    """Clear first so an answered sibling (ask_user beside execute) stays
+    in history; only the unanswered call is patched (issue #469 review)."""
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from EvoScientist.backends import (
+        HITL_ROUND_LIMIT_REJECT_MESSAGE,
+        close_parked_checkpoint,
+    )
+
+    pending_ask = ToolMessage(
+        content="user answered from the widget",
+        name="ask_user",
+        tool_call_id="ask-1",
+    )
+    gateway = _CommitSiblingOnEndGateway(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "ask_user",
+                        "args": {"questions": [{"question": "Continue?"}]},
+                        "id": "ask-1",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "execute",
+                        "args": {"command": "echo sibling"},
+                        "id": "exec-1",
+                        "type": "tool_call",
+                    },
+                ],
+            )
+        ],
+        pending_write=pending_ask,
+    )
+
+    await close_parked_checkpoint(gateway, MagicMock(), "t-sibling")
+
+    assert [update[3] for update in gateway.updated_states] == [
+        "__end__",
+        "tools",
+        "__end__",
+    ]
+    patch = gateway.updated_states[1][2]["messages"]
+    assert [message.tool_call_id for message in patch] == ["exec-1"]
+    assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patch[0].content
+    seen = {
+        getattr(message, "tool_call_id", None): getattr(message, "content", None)
+        for message in gateway.state_values["messages"]
+        if getattr(message, "type", None) == "tool"
+    }
+    assert seen["ask-1"] == "user answered from the widget"
+    assert HITL_ROUND_LIMIT_REJECT_MESSAGE in seen["exec-1"]
+
+
+async def test_close_parked_checkpoint_trailing_end_even_without_dangling_calls():
+    """With no unanswered calls the first END still gets a trailing END,
+    matching recovery: the first clear can leave next == ('model',)."""
+    from EvoScientist.backends import close_parked_checkpoint
+
+    gateway = FakeGraphGateway()
+    await close_parked_checkpoint(gateway, MagicMock(), "t-empty")
+    assert [update[3] for update in gateway.updated_states] == ["__end__", "__end__"]
+    assert all(update[2] is None for update in gateway.updated_states)

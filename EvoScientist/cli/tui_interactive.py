@@ -23,6 +23,7 @@ from rich.text import Text
 import EvoScientist.cli.channel as _ch_mod
 from EvoScientist.cli.widgets.thread_selector import ThreadPickerWidget
 
+from ..channels.hitl_budget import hitl_budget_stop
 from ..commands import Command, CommandContext
 from ..commands import manager as cmd_manager
 from ..gateway import (
@@ -83,34 +84,11 @@ from .status_bar import (
 )
 
 if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
     from ..runtime import AsyncRuntime
 
 _channel_logger = logging.getLogger(__name__)
-
-
-def tui_hitl_loop_stop(
-    *,
-    human_rounds: int,
-    total_rounds: int,
-    needs_human: bool,
-) -> bool:
-    """Budget check for one TUI HITL-loop branch, before a prompt or resume.
-
-    Auto branches (session grant, config allow-list) pass ``needs_human=False``
-    so the human cap does not stop them. Human branches (ask_user, channel
-    prompt, approval widget) pass ``True``. The total cap applies to both.
-    """
-    from ..channels.hitl_budget import hitl_budget_stop
-
-    return hitl_budget_stop(
-        human_rounds=human_rounds,
-        total_rounds=total_rounds,
-        needs_human=needs_human,
-    )
-
-
-if TYPE_CHECKING:
-    from langgraph.graph.state import CompiledStateGraph
 
 
 def _shorten_path(path: str) -> str:
@@ -1858,6 +1836,19 @@ def run_textual_interactive(
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
                     break
+                # Loop-level total cap on the *completed* round count,
+                # before pending is cleared. Pause branches already refuse
+                # before they prompt; this catches a round that stored a
+                # pending (empty ask_user, swallowed handle_event error)
+                # without building a resume, which would otherwise replay
+                # the same ``_stream_input`` with no bound (issue #469).
+                if _hitl_round > 0 and hitl_budget_stop(
+                    human_rounds=_human_rounds,
+                    total_rounds=_hitl_round,
+                    needs_human=False,
+                ):
+                    _hitl_budget_exhausted = True
+                    break
                 state.pending_interrupt = None
                 state.pending_ask_user = None
                 _hitl_resuming = False
@@ -2222,7 +2213,7 @@ def run_textual_interactive(
                                 # Budget refusal must precede the prompt:
                                 # the 50th answer was already resumed; this
                                 # pending is the one we refuse (issue #469).
-                                if tui_hitl_loop_stop(
+                                if hitl_budget_stop(
                                     human_rounds=_human_rounds,
                                     total_rounds=_hitl_round,
                                     needs_human=True,
@@ -2276,7 +2267,7 @@ def run_textual_interactive(
                             # does, and it is checked before a resume is built
                             # so the loop cannot exit holding an unsent one.
                             if self._hitl_auto_approve:
-                                if tui_hitl_loop_stop(
+                                if hitl_budget_stop(
                                     human_rounds=_human_rounds,
                                     total_rounds=_hitl_round,
                                     needs_human=False,
@@ -2297,7 +2288,7 @@ def run_textual_interactive(
                                 # Refuse BEFORE asking the channel user, so
                                 # their decision cannot be collected and
                                 # then discarded (issue #469).
-                                if tui_hitl_loop_stop(
+                                if hitl_budget_stop(
                                     human_rounds=_human_rounds,
                                     total_rounds=_hitl_round,
                                     needs_human=True,
@@ -2352,7 +2343,7 @@ def run_textual_interactive(
                                 action_reqs
                             )
                             if _cfg_decisions is not None:
-                                if tui_hitl_loop_stop(
+                                if hitl_budget_stop(
                                     human_rounds=_human_rounds,
                                     total_rounds=_hitl_round,
                                     needs_human=False,
@@ -2382,7 +2373,7 @@ def run_textual_interactive(
                             # Refuse BEFORE mounting the approval widget, so
                             # the user's choice cannot be collected and then
                             # discarded (issue #469).
-                            if tui_hitl_loop_stop(
+                            if hitl_budget_stop(
                                 human_rounds=_human_rounds,
                                 total_rounds=_hitl_round,
                                 needs_human=True,
