@@ -289,22 +289,33 @@ def build_async_subagent_graph(name: str) -> Any:
     #
     # Memory middleware is included so async sub-agents get the same profile
     # context and `/memories/profile/...` file guidance as the main agent.
-    subagents = []
-    _ensure_general_purpose_subagent(subagents)
-    _inject_subagent_middleware(subagents)
-
-    middleware = _get_default_middleware(
-        for_async_subagent=True,
-        memory_source_agent=name,
-    )
-
     # Scheduler is an unattended timer task → use the cheaper auxiliary model.
+    # Pass that same model as ``chat_model`` below: summarization's summary
+    # model is the construction model, and deepagents' stock instance used
+    # the graph's model (the auxiliary one). Omitting ``chat_model`` would
+    # size and run summaries on the main model instead (#466 review).
     model = (
         _ensure_auxiliary_chat_model() if name == "scheduler" else _ensure_chat_model()
     )
 
     guarded = name in _GUARDED_ASYNC_SUBAGENTS
     backend = _get_default_backend(guard_dangerous=guarded, refuse_delete=guarded)
+
+    subagents = []
+    _ensure_general_purpose_subagent(subagents)
+    _inject_subagent_middleware(subagents, chat_model=model, backend=backend)
+
+    # ``backend=`` matters: without it the per-run SummarizationMiddleware
+    # subclass is not appended and the stock frozen-window built-in survives
+    # in these graphs even though they take ``configurable.model`` overrides
+    # (#466) — the replacement must also offload history to this backend.
+    middleware = _get_default_middleware(
+        for_async_subagent=True,
+        memory_source_agent=name,
+        backend=backend,
+        chat_model=model,
+    )
+
     if name == "scheduler":
         middleware = [
             *middleware,
