@@ -300,7 +300,7 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         "config resolved: provider=%s model=%s workspace=%s",
         config.provider,
         config.model,
-        config.default_workdir or workspace_dir or "(cwd)",
+        workspace_dir or config.default_workdir or str(app_paths.default_workspace()),
     )
 
     # First-run setup runs in the boot thread (below), so the launcher is built
@@ -391,14 +391,19 @@ def run_desktop(workspace_dir: str | None = None) -> None:
                 should_confirm_close,
             )
 
+            # Short 1s probe timeout: this runs on the GUI thread and the close
+            # fails open anyway, so a wedged backend must not freeze the window
+            # for the full multi-probe budget.
             active = backend_has_active_runs(
-                launcher.backend_url, watched_thread_id=win.current_thread_id()
+                launcher.backend_url,
+                watched_thread_id=win.current_thread_id(),
+                timeout=1.0,
             )
             if not should_confirm_close(launcher.backend_started, active):
                 return True
             # Name the running background jobs when that is what is active, so the
             # user knows what quitting would stop (best-effort — [] on any error).
-            names = running_bg_process_names(launcher.backend_url)
+            names = running_bg_process_names(launcher.backend_url, timeout=1.0)
             if names:
                 detail = f"Background tasks are still running ({', '.join(names)})."
             else:
