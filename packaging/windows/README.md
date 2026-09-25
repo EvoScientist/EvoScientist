@@ -34,7 +34,7 @@ The installed app directory (what `EvoScientist/desktop/app_paths.py` resolves):
   _internal/...             bundled Python + all deps                             (evoscientist.spec)
   runtime/node/node.exe     pinned Node runtime                                   (assemble_bundle.py)
   runtime/python/python.exe standalone CPython for the agent's code execution     (assemble_bundle.py)
-  webui/dist/server.js      pinned prebuilt @evoscientist/webui standalone        (assemble_bundle.py)
+  webui/dist/server.js      prebuilt @evoscientist/webui standalone               (assemble_bundle.py)
   webui/dist/.next, node_modules, public
   manifest.json             pinned versions + sha256 of the fetched inputs
 ```
@@ -113,7 +113,7 @@ PyInstaller onedir with the `assemble_bundle.py` output copied in next to the
 exes. Full build (on Windows):
 
 ```
-# 1. runtime half (webui/ + runtime/node/)
+# 1. runtime half (webui/ + runtime/node/ + runtime/python/)
 uv run python packaging\windows\assemble_bundle.py --out build\bundle
 # 2. Python half (EvoScientist.exe, langgraph.exe, _internal\)
 uv run --extra winbuild --extra desktop pyinstaller packaging\windows\evoscientist.spec --noconfirm
@@ -131,8 +131,8 @@ the `.iss`), not the repo-root `dist\`.
 `iscc` defines override the pins: `iscc /DAppVersion=0.3.0 /DSourceDir=..\..\dist\EvoScientist packaging\windows\evoscientist.iss`.
 
 Shortcut `WorkingDir` is `{userdocs}`, not `{app}`: `{app}` holds the app (and is
-wiped on uninstall), so user data does not belong there — the launcher defaults
-its workspace (`runs/`, `skills/`, `media/`) to the working directory (see
-`build_launcher_config`).
+wiped on uninstall), so user data does not belong there. The desktop defaults its
+workspace (`runs/`, `skills/`, `media/`) to a `Documents\EvoScientist` subfolder
+(`app_paths.default_workspace()`), never the whole working directory.
 
 Authorable on Linux; compile/verify only on Windows.

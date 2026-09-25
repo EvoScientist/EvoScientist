@@ -9,13 +9,15 @@
 ;
 ; Input: a single directory that already contains BOTH halves of the bundle —
 ; the PyInstaller onedir (EvoScientist.exe, langgraph.exe, _internal\) with the
-; assemble_bundle.py output (webui\, runtime\node\) copied in next to the exes:
+; assemble_bundle.py output (webui\, runtime\node\, runtime\python\) copied in
+; next to the exes:
 ;
 ;   <SourceDir>\
 ;     EvoScientist.exe
 ;     langgraph.exe
 ;     _internal\...
 ;     runtime\node\node.exe
+;     runtime\python\python.exe  (+ Lib, DLLs, pip.ini)
 ;     webui\dist\server.js  (+ .next, node_modules, public)
 ;     manifest.json
 ;
@@ -24,7 +26,7 @@
 ;     powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
 ;   Or by hand:
 ;   1. uv run python packaging\windows\assemble_bundle.py --out build\bundle
-;   2. uv run --extra winbuild pyinstaller packaging\windows\evoscientist.spec --noconfirm
+;   2. uv run --extra winbuild --extra desktop pyinstaller packaging\windows\evoscientist.spec --noconfirm
 ;   3. xcopy /E /I build\bundle\webui   dist\EvoScientist\webui
 ;      xcopy /E /I build\bundle\runtime dist\EvoScientist\runtime   (node/ AND python/)
 ;      copy    build\bundle\manifest.json dist\EvoScientist\

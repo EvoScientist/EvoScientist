@@ -169,7 +169,8 @@ class DesktopController:
                 should_proceed_now=self._should_proceed_now,
             )
             if not idle:
-                # Cancelled — the app is shutting down. Do not relaunch a backend.
+                # Cancelled — the app is shutting down or the user pressed the
+                # banner's Cancel. Do not relaunch a backend.
                 if waiting:
                     self._window.clear_pending()
                 logger.info("workspace switch aborted before restart (cancelled)")

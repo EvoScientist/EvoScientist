@@ -83,9 +83,8 @@ class LauncherError(Exception):
     """A fatal launch condition, tagged with a machine-readable ``code``.
 
     ``code`` is the stable contract every shell maps from: the CLI to a Rich
-    panel, a GUI to an error dialog, the JSON entrypoint to ``{"status":
-    "error", "code": ...}``. ``message`` is human-readable and actionable;
-    ``detail`` is an optional secondary line.
+    panel, the desktop GUI to its error page. ``message`` is human-readable and
+    actionable; ``detail`` is an optional secondary line.
     """
 
     def __init__(self, code: str, message: str, detail: str | None = None) -> None:
@@ -283,8 +282,8 @@ class WebUILauncher:
         # True from just before start_langgraph_dev() until its proc handle is
         # wired. start_langgraph_dev blocks up to 60s on health, so a stop()
         # during that window has no _backend_proc to kill yet — this flag lets
-        # _teardown fall back to the PID-file-recorded server so a close
-        # mid-boot can't orphan the in-flight backend.
+        # _teardown stop the in-flight server this process spawned (the
+        # manager's in-memory record) so a close mid-boot can't orphan it.
         self._backend_start_initiated = False
         self._webui_proc: subprocess.Popen | None = None
         self._stopped = False
@@ -511,7 +510,7 @@ class WebUILauncher:
             getattr(self._config, "langgraph_dev_file_persistence", True)
         )
         # Mark in-flight before the (up-to-60s blocking) call so a concurrent
-        # stop() can tear down the recorded process even though our proc handle
+        # stop() can tear down our in-flight process even though our proc handle
         # is not wired until this returns.
         self._backend_start_initiated = True
         try:
@@ -529,7 +528,7 @@ class WebUILauncher:
                 "backend_start_failed", f"langgraph dev startup failed: {exc}"
             ) from exc
         self._backend_started = True
-        # Handle is wired now; the recorded-server fallback is no longer needed.
+        # Handle is wired now; the in-flight fallback is no longer needed.
         self._backend_start_initiated = False
 
     def _build_frontend_env(self) -> dict[str, str]:
@@ -556,9 +555,9 @@ class WebUILauncher:
 def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     """Decide whether to reuse an already-running backend or start a fresh one.
 
-    Pure decision logic (mirrors the guards in ``run_webui``): raises
-    :class:`LauncherError` for foreign occupants, workspace mismatch and
-    stripped (CLI-mode) servers; returns ``reuse`` or ``start`` otherwise.
+    Pure decision logic: raises :class:`LauncherError` for foreign occupants,
+    workspace mismatch, stripped (CLI-mode) servers and sidecar port
+    mismatches; returns ``reuse`` or ``start`` otherwise.
     Config-fingerprint drift is a warning, not an error.
     """
     from ..langgraph_dev.manager import (

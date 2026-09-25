@@ -33,14 +33,15 @@ def should_confirm_close(backend_started: bool, has_active: bool) -> bool:
 def _search_threads(url: str, payload: dict, *, timeout: float) -> list:
     """Raw ``POST /threads/search`` returning the matched threads (may be empty).
 
-    A raw ``httpx`` call using ``trust_env=False`` and a short timeout, NOT the
-    langgraph SDK client. The SDK's client (``get_sync_client``) builds its
-    ``httpx.Client`` without ``trust_env=False`` and with a 300s read timeout, so
-    on Windows it routes this 127.0.0.1 call through the system/registry proxy
-    (present even with no ``*_PROXY`` env vars) — a VPN/corporate proxy then
-    swallows the loopback request, making a genuinely active backend look idle
-    (and can stall the GUI thread for the long timeout). ``trust_env=False``
-    bypasses the proxy, exactly as ``is_langgraph_dev_running`` does for the
+    A raw ``httpx`` call with a short timeout, NOT the langgraph SDK client: the
+    SDK's client (``get_sync_client``) defaults to a 300s read timeout over a
+    5-retry transport, which could stall the GUI thread long after the user
+    clicked close. (The SDK is not exposed to proxies — it always passes an
+    explicit transport, which disables httpx's env/registry proxy mounts.) A raw
+    ``httpx.post`` DOES honour the system/registry proxy on Windows (present even
+    with no ``*_PROXY`` env vars), and a VPN/corporate proxy would then swallow
+    the loopback request, making a genuinely active backend look idle; hence
+    ``trust_env=False``, exactly as ``is_langgraph_dev_running`` does for the
     health check. Raises on any transport/HTTP error (the caller decides how to
     treat "couldn't tell").
     """
@@ -121,9 +122,10 @@ def _probe_active_state(
       unlike interrupted turns they are not checkpointed — losing them loses the
       work. So they block a switch and prompt a close, regardless of thread.
 
-    Answered with a ``POST /threads/search`` (limit 1) per check; the endpoint
+    The run checks are each a ``POST /threads/search`` (limit 1); the endpoint
     filters one ``status`` at a time and ANDs an ``ids`` filter, so the watched
-    check is ``{status: "interrupted", ids: [watched], limit: 1}``.
+    check is ``{status: "interrupted", ids: [watched], limit: 1}``. The
+    background-job check is ``GET /api/bg_processes/running``.
 
     Returns:
         - ``"idle"`` — backend unreachable (its runs are already gone), or every
@@ -221,8 +223,8 @@ def wait_for_backend_idle(
     Two callbacks are polled each iteration (cancel takes precedence):
 
     - ``should_cancel`` True -> abort, return False, restart nothing (wired to
-      the window-close event so quitting mid-wait doesn't relaunch a backend on
-      an app that is shutting down).
+      the window-close event, so quitting mid-wait doesn't relaunch a backend on
+      an app that is shutting down, and to the pending banner's Cancel button).
     - ``should_proceed_now`` True -> stop waiting and return True even if work is
       still active (the pending banner's "Stop tasks and switch now" button: the
       user chose to kill the running tasks and switch immediately).

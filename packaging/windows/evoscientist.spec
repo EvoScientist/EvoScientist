@@ -9,8 +9,8 @@
 # resolves a langgraph[.exe] sitting next to sys.executable. Shipping langgraph.exe
 # in the same onedir makes that work with no PATH and no separate install.
 #
-# The webui/ and runtime/node/ trees come from assemble_bundle.py and are placed
-# next to these exes by the installer (Task 6) — they are NOT built here.
+# The webui/, runtime/node/ and runtime/python/ trees come from assemble_bundle.py
+# and are merged next to these exes by build.ps1 (step 3) — they are NOT built here.
 #
 # Build (on Windows):
 #   uv run --extra winbuild --extra desktop pyinstaller packaging/windows/evoscientist.spec --noconfirm

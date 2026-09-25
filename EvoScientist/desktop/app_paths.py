@@ -10,8 +10,9 @@ agree. Expected installed layout::
       _internal/...              # bundled Python + all deps (PyInstaller)
       runtime/
         node/node.exe            # bundled Node runtime (bare binary)
+        python/python.exe        # standalone CPython for the agent's shell
       webui/
-        dist/server.js           # pinned prebuilt @evoscientist/webui standalone
+        dist/server.js           # prebuilt @evoscientist/webui standalone
         dist/.next/ ...
 
 ``app_root`` is derived from the frozen executable when packaged, and from the
