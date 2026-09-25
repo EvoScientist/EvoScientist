@@ -222,6 +222,74 @@ def test_start_without_auto_port_raises_on_conflict(monkeypatch):
     assert ei.value.code == "port_conflict"
 
 
+def test_start_failure_after_backend_start_tears_the_backend_down(monkeypatch):
+    """A front-end failure after the backend was spawned must not leave that
+    backend running: start()'s error path tears down what it started."""
+    _patch_for_start(monkeypatch, set())
+    stopped: list = []
+    monkeypatch.setattr(
+        lgm, "stop_langgraph_dev", lambda proc=None: stopped.append(proc)
+    )
+
+    class _FailingRunner(_FakeRunner):
+        def start(self, cfg, env):
+            raise RuntimeError("node failed to spawn")
+
+    launcher = lm.WebUILauncher(object(), _cfg(keepalive=False), _FailingRunner())
+    with pytest.raises(RuntimeError, match="node failed"):
+        launcher.start()
+    assert len(stopped) == 1
+    assert isinstance(stopped[0], _FakeProc)
+    assert launcher._backend_proc is None
+
+
+def test_stop_during_blocked_backend_start_cancels_and_tears_down(monkeypatch):
+    """A real concurrent stop() while start_langgraph_dev is still blocking: the
+    in-flight fallback fires, and once the call returns start() aborts with
+    ``cancelled`` and stops the late-wired backend instead of carrying on."""
+    import threading
+
+    _patch_for_start(monkeypatch, set())
+    entered, release = threading.Event(), threading.Event()
+    spawned = _FakeProc()
+
+    def _blocking_start(**_k):
+        entered.set()
+        release.wait(5)
+        return spawned
+
+    monkeypatch.setattr(lgm, "start_langgraph_dev", _blocking_start)
+    inflight: list[int] = []
+    monkeypatch.setattr(
+        lgm, "stop_inflight_owned_server", lambda: (inflight.append(1), None)[1]
+    )
+    stopped: list = []
+    monkeypatch.setattr(
+        lgm, "stop_langgraph_dev", lambda proc=None: stopped.append(proc)
+    )
+
+    launcher = lm.WebUILauncher(object(), _cfg(keepalive=False), _FakeRunner())
+    errors: list[BaseException] = []
+
+    def _boot():
+        try:
+            launcher.start()
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=_boot)
+    t.start()
+    assert entered.wait(5)
+    launcher.stop()  # GUI-thread close while the backend start is blocked
+    release.set()
+    t.join(5)
+    assert not t.is_alive()
+    assert inflight == [1]  # mid-start fallback fired from stop()
+    assert isinstance(errors[0], lm.LauncherError)
+    assert errors[0].code == "cancelled"
+    assert stopped == [spawned]  # late-wired backend torn down by start()
+
+
 def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
     """stop() during start_langgraph_dev's run (proc handle not wired yet) tears
     down only the process THIS launcher spawned — never the on-disk recorded
