@@ -43,7 +43,15 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
-_INTERRUPTED_RESULT = "Tool execution was interrupted before completion."
+# Shared with stream recovery: close dangling calls with an honest result that
+# tells the model not to re-issue the interrupted batch. Checkpoint repair
+# persists this as a real ToolMessage; this middleware only rewrites the
+# outgoing request when the checkpoint was never repaired (e.g. WebUI).
+_INTERRUPTED_RESULT = (
+    "Tool execution was interrupted before the run completed. Side effects may "
+    "already have been partially applied; check the current state instead of "
+    "re-running this call unless the user asks."
+)
 _REPAIR_ID_PREFIX = "_repair_"
 
 

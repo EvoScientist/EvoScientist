@@ -609,12 +609,7 @@ class LangGraphServerGateway:
             hitl_suppressed=hitl_suppressed_for_run(cfg),
         )
 
-    async def _start_or_resume(
-        self,
-        stream: AsyncThreadStream,
-        request: RunRequest,
-    ) -> None:
-        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
+    async def _ensure_thread(self, request: RunRequest) -> None:
         await self.thread_store.ensure_thread_exists(
             request.thread_id,
             graph_id=self._target_graph_id(request.target),
@@ -623,6 +618,21 @@ class LangGraphServerGateway:
                 request.target.workspace_dir if request.target is not None else None
             ),
         )
+
+    async def _start_or_resume(
+        self,
+        stream: AsyncThreadStream,
+        request: RunRequest,
+        *,
+        thread_ready: bool = False,
+    ) -> None:
+        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
+        # ``_stream_events`` already registered the thread before the pre-run
+        # state read. Skip the second ``threads.create(if_exists="do_nothing")``
+        # when that succeeded; retry only if it raised (the warn-and-continue
+        # branch swallows the failure and leaves the thread unregistered).
+        if not thread_ready:
+            await self._ensure_thread(request)
         # Refresh metadata on every run: ensure_thread_exists is a no-op on
         # existing threads (if_exists="do_nothing"), so without this update
         # fields like updated_at and model would go stale after the first run.
@@ -953,14 +963,25 @@ class LangGraphServerGateway:
         state_values: GraphStateValues = {}
         existing_summarization_event: Mapping[str, object] | None = None
         process_value_messages = True
+        thread_ready = False
         try:
+            # Register the thread before the pre-run state read: a thread
+            # whose checkpoints exist (shared checkpointer) but which is
+            # missing from the server registry would fail the read with
+            # NotFoundError, leaving the suppression baselines empty and
+            # replaying prior turns on the next values snapshot (#490).
+            await self._ensure_thread(request)
+            thread_ready = True
             state_values = await self._get_state_values(request.thread_id)
             existing_summarization_event = _find_summarization_event_payload(
                 state_values
             )
-        except NotFoundError:
-            pass
         except Exception:
+            # A 404 after registration is unexpected (a missing registry
+            # entry is handled by ``_ensure_thread``; a registered thread
+            # returns an empty snapshot, not NotFoundError). Treat it like
+            # any other pre-run read failure: disable value-message
+            # processing instead of replaying with an empty baseline.
             process_value_messages = False
             logger.warning(
                 "Pre-run state fetch failed for thread %s; "
@@ -988,7 +1009,7 @@ class LangGraphServerGateway:
         emitted_interrupt = False
         try:
             async with stream:
-                await self._start_or_resume(stream, request)
+                await self._start_or_resume(stream, request, thread_ready=thread_ready)
                 run_started = True
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)

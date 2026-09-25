@@ -17,6 +17,9 @@ from langgraph.graph import END
 from langgraph.types import Command, Interrupt
 
 from ..memory.worker_activity import clear_completed_memory_activity_counts
+from ..middleware.tool_history_repair import (
+    _INTERRUPTED_RESULT as _INTERRUPTED_TOOL_RESULT,
+)
 from .emitter import StreamEventEmitter
 from .summarization import (
     _extract_summary_message_text,
@@ -76,42 +79,84 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
     return False
 
 
-async def _clear_interrupted_graph_state(
+def _snapshot_needs_recovery(snapshot: Any) -> bool:
+    """True if the checkpoint has unfinished work or uncommitted task writes.
+
+    LangGraph computes ``next`` as the tasks that have not yet produced
+    writes. A SIGKILL between ``put_writes`` and ``put_checkpoint`` can
+    leave every tool call finished (so ``next`` is empty) while
+    ``snapshot.tasks`` still holds those tools with their pending results.
+    A completed turn has both ``next`` and ``tasks`` empty.
+    """
+    if snapshot is None:
+        return False
+    return bool(getattr(snapshot, "next", None) or getattr(snapshot, "tasks", None))
+
+
+async def _recover_interrupted_graph_state(
     agent: Any,
     config: dict[str, Any],
-) -> None:
-    """Force the graph back to a clean (non-interrupted) state after an error.
+    snapshot: Any | None = None,
+) -> bool:
+    """Close out a run that ended mid-step so the next turn starts fresh.
 
-    When an exception occurs mid-run the LangGraph checkpoint can be left with a
-    non-empty ``next`` tuple — the graph is stuck waiting to resume at a specific
-    node. On the next invocation with a fresh user message LangGraph tries to
-    **resume** that interrupted step rather than starting a new turn: it ignores
-    the new human message and replays the broken step, which typically produces
-    no output and leaves the messages channel unchanged. From the user's side the
-    conversation looks like it lost all history because the agent stops responding.
+    A cancelled (Ctrl+C / ``/stop``), crashed, or hard-killed run can leave the
+    LangGraph checkpoint in two kinds of trouble:
 
-    The fix: ``aupdate_state(config, None, as_node=END)`` clears all pending tasks
-    and writes a checkpoint whose ``next`` is the empty tuple, without touching
-    any channel values (message history is preserved).
+    1. Pending tasks: ``next`` stays parked on the interrupted node. New
+       input makes LangGraph discard those tasks, along with the results of
+       any tool call in the batch that had already finished. ``next`` is
+       computed as the tasks without writes, so a SIGKILL between
+       ``put_writes`` and ``put_checkpoint`` can leave ``next`` empty while
+       ``snapshot.tasks`` still holds the finished tools; recovery has to
+       look at both.
+    2. Dangling tool calls: the assistant message that dispatched the tools was
+       committed, but its results never were. deepagents'
+       ``PatchToolCallsMiddleware`` then closes each dangling call with "was
+       cancelled - another message came in before it could be completed" and
+       rewrites the whole messages channel — which re-broadcasts every
+       historical tool call to the UI and actively invites the model to
+       re-issue the entire interrupted batch, re-applying real side effects.
+
+    Recovery commits the turn as finished via ``aupdate_state(config, None,
+    as_node=END)`` — which also lands the pending writes of tool calls that
+    did finish, so they keep their real results — and synthesizes an honest
+    ``ToolMessage`` for every still-dangling call (telling the model the run
+    was interrupted and side effects may already have partially applied),
+    leaving ``next`` empty and a self-consistent history the next turn can
+    build on normally. Channel values (message history) are otherwise
+    preserved.
 
     Critically, this only runs when the stuck state is *not* a legitimate
     human-in-the-loop interrupt. The agent pauses via ``interrupt()`` /
     ``Command(resume=...)`` for ask-user flows, which also leaves ``next``
-    non-empty; clearing those would silently discard a pending question the user
-    still needs to answer. ``_snapshot_has_pending_interrupt`` distinguishes the
+    non-empty; clearing those would silently discard a pending question the
+    user still needs to answer. ``_snapshot_has_pending_interrupt`` distinguishes the
     two.
 
-    Best-effort: any failure is logged at DEBUG and swallowed so it never shadows
-    the original exception that triggered recovery.
+    Returns:
+        ``True`` when the thread is safe to run: it was already clean, it is
+        parked at a genuine human-in-the-loop interrupt (left untouched), or
+        recovery completed and the checkpoint verified clean. ``False`` when
+        the checkpoint may still be stuck — recovery failed or could not be
+        verified. The next run is still safe to start: LangGraph discards the
+        stale tasks and deepagents closes the dangling calls, with the
+        "was cancelled" wording this recovery exists to avoid.
+
+    Best-effort: any failure is logged and swallowed so it never shadows the
+    original exception or cancellation that triggered recovery — the return
+    value is how callers learn the outcome.
     """
     import logging
 
     _log = logging.getLogger(__name__)
     try:
-        snapshot = await agent.aget_state(config)
-        # Only act when the graph is genuinely stuck (non-empty next tuple)...
-        if not snapshot or not getattr(snapshot, "next", None):
-            return
+        if snapshot is None:
+            snapshot = await agent.aget_state(config)
+        # Only act when the graph is genuinely stuck: non-empty next, or
+        # tasks whose writes never made it into a checkpoint.
+        if not snapshot or not _snapshot_needs_recovery(snapshot):
+            return True
         # ...and not parked at a real human-in-the-loop interrupt.
         if _snapshot_has_pending_interrupt(snapshot):
             _log.debug(
@@ -120,21 +165,74 @@ async def _clear_interrupted_graph_state(
                 config.get("configurable", {}).get("thread_id", "?"),
                 snapshot.next,
             )
-            return
+            return True
 
-        stuck_at = snapshot.next
+        stuck_at = snapshot.next or tuple(
+            t.name for t in (getattr(snapshot, "tasks", None) or ())
+        )
+        values = getattr(snapshot, "values", None) or {}
+        messages = values.get("messages") or []
+        answered_ids = {m.tool_call_id for m in messages if m.type == "tool"}
+        patch = [
+            ToolMessage(
+                content=_INTERRUPTED_TOOL_RESULT,
+                tool_call_id=call["id"],
+                name=call.get("name") or "unknown",
+                status="error",
+            )
+            for m in messages
+            if isinstance(m, AIMessage)
+            for call in (
+                *m.tool_calls,
+                *(getattr(m, "invalid_tool_calls", None) or ()),
+            )
+            if call.get("id") and call["id"] not in answered_ids
+        ]
+        # Clear first: it commits the pending writes of calls that did finish.
+        # Patching first would reuse a finished task's id and lose the patch.
         await agent.aupdate_state(config, None, as_node=END)
+        if patch:
+            # Attribute the synthetic results to the stuck execution node so
+            # they land in history exactly where the real results would have.
+            write_node = (
+                "tools"
+                if "tools" in stuck_at
+                else (stuck_at[0] if stuck_at else "tools")
+            )
+            await agent.aupdate_state(config, {"messages": patch}, as_node=write_node)
+        # Unconditional: with pending writes and an empty patch, the first
+        # END commits those writes and leaves next == ('model',). Nesting the
+        # trailing clear under ``if patch`` would then warn-fail a thread
+        # that is actually fine.
+        await agent.aupdate_state(config, None, as_node=END)
+        # Verify the checkpoint actually cleared, so a failed repair is
+        # observable (logged + reported via the return value) rather than
+        # silently reverting to the dangling-calls state.
+        verify = await agent.aget_state(config)
+        if _snapshot_needs_recovery(verify):
+            _log.warning(
+                "Interrupted graph state for thread %s is still stuck at %s "
+                "after recovery",
+                config.get("configurable", {}).get("thread_id", "?"),
+                getattr(verify, "next", None) or getattr(verify, "tasks", None),
+            )
+            return False
         _log.debug(
-            "Cleared interrupted graph state for thread %s (was stuck at: %s)",
+            "Recovered interrupted graph state for thread %s (was stuck at: "
+            "%s; closed %d dangling tool call(s))",
             config.get("configurable", {}).get("thread_id", "?"),
             stuck_at,
+            len(patch),
         )
-    except Exception as exc:  # pragma: no cover — best-effort recovery
-        _log.debug(
-            "Could not clear interrupted graph state: %s",
+        return True
+    except Exception as exc:
+        _log.warning(
+            "Could not recover interrupted graph state for thread %s: %s",
+            config.get("configurable", {}).get("thread_id", "?"),
             exc,
             exc_info=True,
         )
+        return False
 
 
 @dataclass(frozen=True)
@@ -910,6 +1008,7 @@ async def stream_agent_events(
         config["metadata"] = metadata
     emitter = StreamEventEmitter()
     existing_summarization_event: Mapping[str, object] | None = None
+    snapshot: Any = None
     try:
         snapshot = await agent.aget_state(config)
         existing_summarization_event = _find_summarization_event_payload(
@@ -917,6 +1016,15 @@ async def stream_agent_events(
         )
     except Exception:
         pass
+
+    # A previous run cancelled (Ctrl+C), crashed, or hard-killed mid-step leaves
+    # the checkpoint parked with pending tasks and dangling tool calls. Close
+    # it out before this run's input is applied, or deepagents patches the
+    # calls as "was cancelled", re-broadcasts the history to the UI and invites
+    # the model to re-issue the batch. A failed repair is logged, not fatal.
+    # Also covers the all-writes-uncommitted case (next empty, tasks present).
+    if _snapshot_needs_recovery(snapshot):
+        await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
     clear_completed_memory_activity_counts()
     astream_input = await build_agent_stream_input(message, media=media)
@@ -1065,10 +1173,10 @@ async def stream_agent_events(
         if event_sink_token is not None:
             reset_run_event_sink(event_sink_token)
         # When the run ended with an exception the LangGraph checkpoint may be
-        # left interrupted (``next`` non-empty). Clear it — unless it's a real
-        # human-in-the-loop pause — so the next user message starts a fresh turn
-        # instead of replaying the broken step (which would look like lost history).
+        # left interrupted (``next`` non-empty). Recover — unless it's a real
+        # human-in-the-loop pause. Cancelled and hard-killed runs are recovered
+        # at the start of the next run instead.
         if _run_raised:
-            await _clear_interrupted_graph_state(agent, config)
+            await _recover_interrupted_graph_state(agent, config)
 
     yield emitter.done(processor.full_response).data

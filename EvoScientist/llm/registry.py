@@ -22,6 +22,8 @@ _MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 _KIMI_CODING_BASE_URL = "https://api.kimi.com/coding/"
 _REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
 _NOVITA_BASE_URL = "https://api.novita.ai/openai/v1"
+_XIAOMI_ANTHROPIC_BASE_URL = "https://api.xiaomimimo.com/anthropic"
+_XIAOMI_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/anthropic"
 
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -48,11 +50,13 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
 _ANTHROPIC_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "minimax": (_MINIMAX_ANTHROPIC_BASE_URL, "MINIMAX_API_KEY"),
     "kimi-coding": (_KIMI_CODING_BASE_URL, "KIMI_API_KEY"),
+    "xiaomi": (_XIAOMI_ANTHROPIC_BASE_URL, "MIMO_API_KEY"),
+    "xiaomi-token-plan": (_XIAOMI_TOKEN_PLAN_BASE_URL, "MIMO_TOKEN_PLAN_API_KEY"),
     "custom-anthropic": (None, "CUSTOM_ANTHROPIC_API_KEY"),
 }
 
 # Anthropic-routed providers that support extended thinking.
-_THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax"}
+_THINKING_CAPABLE_PROVIDERS: set[str] = {"minimax", "xiaomi", "xiaomi-token-plan"}
 
 # Moonshot rejects a forced tool choice while thinking is enabled, and kimi-k3
 # cannot disable thinking — structured output must use json_schema there.
@@ -87,12 +91,15 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Anthropic (current generation)
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
     ("claude-fable-5", "claude-fable-5", "anthropic"),
+    ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),
     ("claude-opus-5", "claude-opus-5", "anthropic"),
     ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
     ("claude-sonnet-5", "claude-sonnet-5", "anthropic"),
     ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
     ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
     # OpenAI
+    ("gpt-6-sol", "gpt-6-sol", "openai"),
+    ("gpt-6-luna", "gpt-6-luna", "openai"),
     ("gpt-6-astra", "gpt-6-astra", "openai"),
     ("gpt-5.6-sol", "gpt-5.6-sol", "openai"),
     ("gpt-5.6-terra", "gpt-5.6-terra", "openai"),
@@ -167,12 +174,15 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # OpenRouter
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
+    ("claude-opus-5.5", "anthropic/claude-opus-5.5", "openrouter"),
     ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
     ("claude-opus-5-fast", "anthropic/claude-opus-5-fast", "openrouter"),
     ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
     ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
     ("claude-sonnet-5", "anthropic/claude-sonnet-5", "openrouter"),
     ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
+    ("gpt-6-sol", "openai/gpt-6-sol", "openrouter"),
+    ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
     ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
     ("gpt-5.6-sol", "openai/gpt-5.6-sol", "openrouter"),
     ("gpt-5.6-terra", "openai/gpt-5.6-terra", "openrouter"),
@@ -192,12 +202,16 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5.3", "z-ai/glm-5.3", "openrouter"),
     ("glm-5.3-flash", "z-ai/glm-5.3-flash", "openrouter"),
+    ("glm-5.3-flashx", "z-ai/glm-5.3-flashx", "openrouter"),
     ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
+    ("mimo-v2.6-pro", "xiaomi/mimo-v2.6-pro", "openrouter"),
+    ("mimo-v2.6-flash", "xiaomi/mimo-v2.6-flash", "openrouter"),
     ("mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "openrouter"),
     ("mimo-v2.5", "xiaomi/mimo-v2.5", "openrouter"),
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
+    ("grok-4.7", "x-ai/grok-4.7", "openrouter"),
     ("grok-4.6", "x-ai/grok-4.6", "openrouter"),
     ("grok-4.5", "x-ai/grok-4.5", "openrouter"),
     ("hy4-preview", "tencent/hy4-preview", "openrouter"),
@@ -229,6 +243,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Zhipu (智谱 — general endpoint, default for simple lookups)
     ("glm-5.3", "glm-5.3", "zhipu"),
     ("glm-5.3-flash", "glm-5.3-flash", "zhipu"),
+    ("glm-5.3-flashx", "glm-5.3-flashx", "zhipu"),
     ("glm-5.2", "glm-5.2", "zhipu"),
     ("glm-5.1", "glm-5.1", "zhipu"),
     ("glm-5", "glm-5", "zhipu"),
@@ -285,6 +300,12 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("moonshot-v1-8k", "moonshot-v1-8k", "moonshot"),
     # Kimi Coding Plan (Anthropic-compatible)
     ("kimi-for-coding", "kimi-for-coding", "kimi-coding"),
+    # Xiaomi MiMo Token Plan (subscription, Anthropic-compatible)
+    ("mimo-v2.6-pro", "mimo-v2.6-pro", "xiaomi-token-plan"),
+    ("mimo-v2.6-flash", "mimo-v2.6-flash", "xiaomi-token-plan"),
+    # Xiaomi MiMo (Anthropic-compatible, default for simple lookups)
+    ("mimo-v2.6-pro", "mimo-v2.6-pro", "xiaomi"),
+    ("mimo-v2.6-flash", "mimo-v2.6-flash", "xiaomi"),
 ]
 
 # Public dict for simple lookups (last entry wins for duplicate names).
@@ -357,6 +378,18 @@ async def list_model_picker_entries(
         if include_custom_ollama:
             entries.append(("Custom Ollama model...", "__custom_ollama__", "ollama"))
     return entries
+
+
+def resolve_provider(model: str, preferred: str | None = None) -> str | None:
+    """Provider for a short name, staying on ``preferred`` when it serves it.
+
+    ``MODELS`` keeps only the last entry per short name, which would move a
+    user off their provider (Token Plan -> pay-as-you-go, native -> OpenRouter).
+    """
+    if preferred and any(n == model and p == preferred for n, _, p in _MODEL_ENTRIES):
+        return preferred
+    info = MODELS.get(model)
+    return info[1] if info else None
 
 
 def get_model_info(model: str) -> tuple[str, str] | None:

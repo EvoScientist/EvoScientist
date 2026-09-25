@@ -316,6 +316,7 @@ def _inject_subagent_middleware(
     workspace_dir: str | Path | None = None,
     cfg=None,
     chat_model=None,
+    backend=None,
 ) -> None:
     """Ensure every subagent gets error handling and context management middleware.
 
@@ -326,6 +327,14 @@ def _inject_subagent_middleware(
     *chat_model*, when provided, is forwarded to the subagents'
     ``create_context_editing_middleware`` so the pure ``create_cli_agent``
     path doesn't fall back to the global-writing ``_ensure_chat_model()``.
+
+    *backend*, when provided, also installs the per-run summarization
+    subclass. ``_ensure_general_purpose_subagent`` materializes
+    ``general-purpose`` as an explicit spec, so deepagents does not build
+    the auto-GP and the parent's middleware is not inherited by name.
+    The spec's own list has to carry the subclass; deepagents' name merge
+    then replaces the stock frozen-window instance in that subagent's
+    core slot (#466).
     """
     from .middleware import (
         ConfigurableModelMiddleware,
@@ -336,6 +345,7 @@ def _inject_subagent_middleware(
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
+        create_per_run_summarization_middleware,
         create_runtime_context_middleware,
         default_memory_scheduler,
     )
@@ -395,6 +405,13 @@ def _inject_subagent_middleware(
                     source_agent=name,
                     memory_scheduler=memory_scheduler,
                 )
+            )
+        if backend is not None:
+            summarization_model = (
+                chat_model if chat_model is not None else _ensure_chat_model()
+            )
+            middleware.append(
+                create_per_run_summarization_middleware(summarization_model, backend)
             )
         sa.setdefault("middleware", []).extend(middleware)
 
@@ -643,7 +660,11 @@ def _build_base_kwargs(
     _fold_expert_subagents(subs, tool_registry)
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
-        subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+        subs,
+        workspace_dir=workspace_dir,
+        cfg=cfg,
+        chat_model=chat_model,
+        backend=base_backend,
     )
     subs = _maybe_swap_async_subagents(
         subs,
@@ -726,7 +747,11 @@ def load_mcp_and_build_kwargs(
 
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
-        subs, workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model
+        subs,
+        workspace_dir=workspace_dir,
+        cfg=cfg,
+        chat_model=chat_model,
+        backend=base_backend,
     )
 
     # Inject MCP tools into subagents by name
@@ -832,6 +857,7 @@ def _get_default_middleware(
     workspace_dir: str | Path | None = None,
     cfg=None,
     chat_model=None,
+    backend=None,
     memory_source_agent: str = "EvoScientist",
     events: "MiddlewareEventSink | None" = None,
 ):
@@ -851,6 +877,14 @@ def _get_default_middleware(
         cfg: Explicit config to use instead of the cached ``_config``.
         chat_model: Explicit model to bind instead of ``_ensure_chat_model()``
             (avoids writing module globals on the pure path).
+        backend: Agent backend (as passed to ``create_deep_agent``). When
+            provided, the per-run-limits SummarizationMiddleware subclass is
+            appended; deepagents' name-based merge then REPLACES its frozen
+            built-in in place so the replacement offloads history to this
+            same backend. Every graph built on a real backend — main, CLI,
+            async sub-agents, expert container — passes it; only backend-less
+            test assemblies omit it, leaving the stock frozen-limits built-in
+            untouched.
         memory_source_agent: Attribution name for profile/observation writes.
             Async sub-agent factories pass their deployed agent name here.
         events: Frontend/session-supplied event sink. Middleware report
@@ -871,6 +905,7 @@ def _get_default_middleware(
         create_context_editing_middleware,
         create_memory_lifecycle_middleware,
         create_memory_middleware,
+        create_per_run_summarization_middleware,
         create_runtime_context_middleware,
         create_scheduler_middleware,
         create_tool_selector_middleware,
@@ -1020,6 +1055,19 @@ def _get_default_middleware(
             )
         )
 
+    # SummarizationMiddleware with per-run context limits (#466): deepagents
+    # installs its own (frozen on the construction model's window) inside the
+    # core stack. Appending this same-named subclass makes deepagents'
+    # name-based merge REPLACE the stock instance in place, so the per-run
+    # limits land in the identical stack slot. Explicit subagent specs
+    # (including general-purpose, which we materialize ourselves) do not
+    # inherit this list; ``_inject_subagent_middleware`` installs the same
+    # subclass on those specs when a backend is supplied. Without a backend,
+    # leave the stock built-in (tests that build the middleware list with
+    # no agent backend).
+    if backend is not None:
+        mw.append(create_per_run_summarization_middleware(model, backend))
+
     return mw
 
 
@@ -1092,7 +1140,7 @@ def _get_default_agent():
 
         cfg = _ensure_config()
         be = _get_default_backend()
-        mw = _get_default_middleware()
+        mw = _get_default_middleware(backend=be)
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
             kwargs = _build_base_kwargs(
@@ -1252,7 +1300,11 @@ def create_cli_agent(
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain.
     mw: list[AgentMiddleware] = _get_default_middleware(
-        workspace_dir=workspace_dir, cfg=cfg, chat_model=chat_model, events=events
+        workspace_dir=workspace_dir,
+        cfg=cfg,
+        chat_model=chat_model,
+        backend=be,
+        events=events,
     )
 
     # Re-load MCP tools from current config (picks up /mcp add changes)

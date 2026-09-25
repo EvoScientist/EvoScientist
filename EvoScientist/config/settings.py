@@ -188,6 +188,9 @@ class EvoScientistConfig:
     atlascloud_api_key: str = ""
     requesty_api_key: str = ""
     novita_api_key: str = ""
+    mimo_api_key: str = ""
+    mimo_token_plan_api_key: str = ""
+    mimo_token_plan_base_url: str = ""
     deepseek_api_key: str = ""
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
@@ -670,9 +673,12 @@ def load_config() -> EvoScientistConfig:
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
-        # Filter to only valid fields
+        # Filter to only valid fields; a blank ``key:`` loads as None, which no
+        # field accepts, so it falls back to the default.
         valid_fields = {f.name for f in fields(EvoScientistConfig)}
-        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        filtered_data = {
+            k: v for k, v in data.items() if k in valid_fields and v is not None
+        }
 
         return EvoScientistConfig(**filtered_data)
     except Exception:
@@ -955,6 +961,9 @@ _ENV_MAPPINGS = {
     "atlascloud_api_key": "ATLASCLOUD_API_KEY",
     "requesty_api_key": "REQUESTY_API_KEY",
     "novita_api_key": "NOVITA_API_KEY",
+    "mimo_api_key": "MIMO_API_KEY",
+    "mimo_token_plan_api_key": "MIMO_TOKEN_PLAN_API_KEY",
+    "mimo_token_plan_base_url": "MIMO_TOKEN_PLAN_BASE_URL",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
@@ -1016,6 +1025,21 @@ _ENV_MAPPINGS = {
     "memory_skill_synthesis_time": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_TIME",
     "memory_observation_cache_max_files": "EVOSCIENTIST_MAX_CACHED_FILES",
 }
+
+
+# Placeholder ``ccproxy_manager.setup_*_env`` writes for a provider's API key
+# when routing it through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
+_OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
+
+
+def _oauth_routed(env_key: str) -> bool:
+    """Return True when ``env_key`` currently carries ccproxy OAuth routing."""
+    env_key = env_key.upper()  # Windows env keys are case-insensitive
+    if env_key.endswith("_BASE_URL"):
+        env_key = env_key[: -len("_BASE_URL")] + "_API_KEY"
+    elif not env_key.endswith("_API_KEY"):
+        return False
+    return os.environ.get(env_key) == _OAUTH_PLACEHOLDER_KEY
 
 
 def get_effective_config(
@@ -1084,6 +1108,8 @@ def get_effective_config(
         if env_key.startswith("EVOSCIENTIST_"):
             if not os.environ.get(env_key):
                 os.environ[env_key] = env_value
+        elif _oauth_routed(env_key):
+            continue  # ccproxy OAuth routing must survive later re-merges
         else:
             os.environ[env_key] = env_value
 
@@ -1148,6 +1174,14 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["REQUESTY_API_KEY"] = config.requesty_api_key
     if config.novita_api_key and not os.environ.get("NOVITA_API_KEY"):
         os.environ["NOVITA_API_KEY"] = config.novita_api_key
+    if config.mimo_api_key and not os.environ.get("MIMO_API_KEY"):
+        os.environ["MIMO_API_KEY"] = config.mimo_api_key
+    if config.mimo_token_plan_api_key and not os.environ.get("MIMO_TOKEN_PLAN_API_KEY"):
+        os.environ["MIMO_TOKEN_PLAN_API_KEY"] = config.mimo_token_plan_api_key
+    if config.mimo_token_plan_base_url and not os.environ.get(
+        "MIMO_TOKEN_PLAN_BASE_URL"
+    ):
+        os.environ["MIMO_TOKEN_PLAN_BASE_URL"] = config.mimo_token_plan_base_url
     if config.deepseek_api_key and not os.environ.get("DEEPSEEK_API_KEY"):
         os.environ["DEEPSEEK_API_KEY"] = config.deepseek_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):

@@ -384,6 +384,26 @@ class TestConfigPaths:
 
 
 class TestLoadSaveReset:
+    def test_blank_yaml_values_fall_back_to_defaults(self, temp_config_dir):
+        """A hand-edited ``key:`` loads as None; it must not reach the config."""
+        from EvoScientist.config import get_config_path
+
+        path = get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "provider: minimax\n"
+            "minimax_base_url:\n"
+            "mimo_token_plan_base_url:\n"
+            "langgraph_dev_port:\n"
+        )
+
+        config = load_config()
+
+        assert config.provider == "minimax"
+        assert config.minimax_base_url == ""
+        assert config.mimo_token_plan_base_url == ""
+        assert config.langgraph_dev_port == EvoScientistConfig().langgraph_dev_port
+
     def test_load_returns_defaults_when_no_file(self, temp_config_dir, clean_env):
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()
@@ -1201,6 +1221,96 @@ class TestDotenvIsolation:
         get_effective_config()
 
         assert "MINIMAX_BASE_URL" not in os.environ
+
+    def test_env_example_template_parses_to_blank_values(self):
+        """Inline comments would be parsed as values ("KEY=  # note" -> "# note")."""
+        from dotenv import dotenv_values
+
+        template = Path(__file__).resolve().parents[1] / ".env.example"
+        values = dotenv_values(template)
+
+        assert values
+        assert {k: v for k, v in values.items() if v} == {}
+
+    def test_copied_template_does_not_shadow_config_keys(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Copying the template and filling one key must leave config-file keys intact."""
+        template = Path(__file__).resolve().parents[1] / ".env.example"
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            template.read_text().replace(
+                "ANTHROPIC_API_KEY=\n", "ANTHROPIC_API_KEY=sk-ant-filled\n"
+            )
+        )
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        from dotenv import dotenv_values
+
+        # setenv (unlike delenv on an absent key) registers a restore, so the
+        # merge's os.environ writes are undone after the test.
+        for key in dotenv_values(env_file):
+            monkeypatch.setenv(key, "")
+        save_config(EvoScientistConfig(openai_api_key="sk-from-config"))
+
+        config = get_effective_config()
+
+        assert config.anthropic_api_key == "sk-ant-filled"
+        assert config.openai_api_key == "sk-from-config"
+        assert os.environ.get("MINIMAX_BASE_URL", "") == ""
+
+    def test_dotenv_does_not_clobber_oauth_routing(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """A workspace ``.env`` credential must not undo ccproxy OAuth routing.
+
+        ``setup_codex_env`` marks the route with a placeholder key; every later
+        ``get_effective_config`` call re-merges ``.env``, so without the guard
+        the key and base URL flip back mid-session and Codex headers vanish.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "OPENAI_API_KEY=sk-real\nOPENAI_BASE_URL=https://api.openai.com/v1\n"
+        )
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+
+        get_effective_config()
+
+        assert os.environ["OPENAI_API_KEY"] == "ccproxy-oauth"
+        assert os.environ["OPENAI_BASE_URL"] == "http://127.0.0.1:8000/codex/v1"
+
+    def test_dotenv_guard_matches_lowercase_keys(self, tmp_path, monkeypatch):
+        """Windows env keys are case-insensitive, so a lowercase ``.env`` key
+        would reach the same variable; the guard must not depend on case."""
+        from EvoScientist.config.settings import _oauth_routed
+
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+
+        assert _oauth_routed("openai_api_key")
+        assert _oauth_routed("openai_base_url")
+
+    def test_dotenv_credentials_still_merge_without_oauth(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Without the placeholder, ``.env`` credentials keep winning as before."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=sk-from-dotenv\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-shell")
+
+        get_effective_config()
+
+        assert os.environ["OPENAI_API_KEY"] == "sk-from-dotenv"
 
     def test_parent_env_wins_over_dotenv_for_mapped_keys(
         self, temp_config_dir, tmp_path, monkeypatch

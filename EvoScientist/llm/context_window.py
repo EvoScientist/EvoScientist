@@ -8,8 +8,8 @@ from typing import Any
 DEFAULT_CONTEXT_WINDOW_FALLBACK = 200_000
 
 # Patch table for new models that providers haven't registered profile data
-# for yet. Remove an entry once langchain/provider exposes max_input_tokens
-# via ``model.profile`` — the attribute-reading layer always wins.
+# for yet. Real ``model.profile`` data always wins, so entries only fill gaps;
+# remove one only once the provider ships it at its pyproject floor, not just the lock.
 # Keys are matched against ``model.model_name`` (or ``model.model`` /
 # ``model.name``); lookup tries exact match first, then ``split('/')[-1]``
 # to also accept OpenRouter-style ``vendor/model`` IDs.
@@ -23,8 +23,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.7 closed-source tiers — Max flagship and Plus (1M).
     "qwen3.7-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
-    # xAI Grok — per-model windows (build-0.1: 256K, 4.5/4.6: 500K).
+    # xAI Grok — per-model windows (build-0.1: 256K, 4.5–4.7: 500K).
     "grok-build-0.1": 256_000,
+    "grok-4.7": 500_000,
     "grok-4.6": 500_000,
     "grok-4.5": 500_000,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
@@ -33,12 +34,8 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Covers OpenRouter ``minimax/minimax-m3`` (via split('/')[-1]) and direct
     # ``MiniMax-M3`` (via lowercased exact match).
     "minimax-m3": 1_000_000,
-    # Zhipu GLM-5.3/5.2 — 1M context, exceptions to the ``glm-5`` family (203K).
-    # Matches OpenRouter ``z-ai/glm-5.x`` via split('/')[-1].
-    "glm-5.3": 1_000_000,
-    "glm-5.3-flash": 1_000_000,
-    "glm-5.2": 1_000_000,
-    # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2.
+    # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2 (1M); the
+    # dashed id misses the ``glm-5.2`` family pattern below.
     "glm-5-2": 1_000_000,
     # Tencent Hunyuan — HY4 preview 1M, HY3 262K (OpenRouter ``tencent/hy*``).
     "hy4-preview": 1_048_576,
@@ -66,10 +63,15 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("kimi-k3", 1_048_576),
     # Moonshot Kimi K2 family — k2.5, k2.6, k2-thinking, k2-thinking-turbo
     ("kimi-k2", 262_000),
+    # Zhipu GLM-5.3 / 5.2 — 1M context; covers flash, flashx, future variants.
+    ("glm-5.3", 1_000_000),
+    ("glm-5.2", 1_000_000),
     # Zhipu GLM-5 family — base, 5.1, 5-turbo, 5v-turbo, etc.
     ("glm-5", 203_000),
     # DeepSeek V4 family — pro, flash, future variants
     ("deepseek-v4", 1_050_000),
+    # Xiaomi MiMo v2.6 family — pro, flash, future variants
+    ("mimo-v2.6", 1_048_576),
     # Xiaomi MiMo v2.5 family — base, pro, future variants
     ("mimo-v2.5", 1_050_000),
     # Meta Muse Spark family — 1.1/1.2/1.3 (OpenRouter ``meta/muse-spark-*``, 1M).
