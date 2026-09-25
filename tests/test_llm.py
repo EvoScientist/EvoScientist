@@ -1,7 +1,7 @@
 """Tests for EvoScientist LLM module."""
 
 import warnings
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -2828,6 +2828,28 @@ class TestPatchOpenAICaptureReasoningContent:
         )
         assert chunk.additional_kwargs.get("reasoning_content") == "thinking"
 
+    def test_capture_reasoning_alias_from_non_streaming_response(self):
+        """A `reasoning` string (vLLM-style) is captured under reasoning_content."""
+        from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        msg = _convert_dict_to_message(
+            {"role": "assistant", "content": "No.", "reasoning": "91 = 7 x 13"}
+        )
+        assert msg.additional_kwargs.get("reasoning_content") == "91 = 7 x 13"
+
+    def test_capture_reasoning_alias_from_streaming_chunk(self):
+        """A `reasoning` delta is captured onto the chunk's additional_kwargs."""
+        from langchain_core.messages import AIMessageChunk
+        from langchain_openai.chat_models.base import (
+            _convert_delta_to_message_chunk,
+        )
+
+        chunk = _convert_delta_to_message_chunk(
+            {"role": "assistant", "content": "", "reasoning": "91 = "},
+            AIMessageChunk,
+        )
+        assert chunk.additional_kwargs.get("reasoning_content") == "91 = "
+
     def test_capture_does_not_affect_other_fields(self):
         """Existing tool_calls / function_call extraction unaffected."""
         from langchain_openai.chat_models.base import _convert_dict_to_message
@@ -3521,7 +3543,7 @@ class TestAutoConfig:
 
     @patch(
         "EvoScientist.llm.models._installed_codex_client_version",
-        return_value="0.144.1",
+        return_value="0.999.0",
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_ccproxy_codex_client_headers(
@@ -3537,8 +3559,8 @@ class TestAutoConfig:
 
         headers = mock_init.call_args[1]["default_headers"]
         assert headers["originator"] == "codex_cli_rs"
-        assert headers["version"] == "0.144.1"
-        assert headers["User-Agent"].startswith("codex_cli_rs/0.144.1")
+        assert headers["version"] == "0.999.0"
+        assert headers["User-Agent"].startswith("codex_cli_rs/0.999.0")
         mock_installed_version.assert_called_once_with()
         assert mock_init.call_args[1]["reasoning"]["effort"] == "xhigh"
         assert mock_init.call_args[1]["reasoning"]["context"] == "all_turns"
@@ -3558,26 +3580,54 @@ class TestAutoConfig:
         assert headers["User-Agent"].startswith("codex_cli_rs/9.9.9")
 
     @patch("EvoScientist.llm.models.subprocess.run")
-    def test_installed_codex_client_version(self, mock_run):
+    def test_installed_codex_client_version(self, mock_run, monkeypatch):
         """The advertised version follows the installed Codex CLI."""
-        from EvoScientist.llm.models import _installed_codex_client_version
+        from EvoScientist.llm import models
 
+        monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = "codex-cli 0.144.1\n"
         mock_run.return_value.stderr = ""
-        _installed_codex_client_version.cache_clear()
-        try:
-            assert _installed_codex_client_version() == "0.144.1"
-            assert _installed_codex_client_version() == "0.144.1"
-        finally:
-            _installed_codex_client_version.cache_clear()
+
+        assert models._installed_codex_client_version() == "0.144.1"
+        assert models._installed_codex_client_version() == "0.144.1"
         mock_run.assert_called_once_with(
             ["codex", "--version"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=models._CODEX_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
+
+    @patch("EvoScientist.llm.models.subprocess.run")
+    def test_missing_codex_binary_is_not_reprobed(self, mock_run, monkeypatch):
+        """No Codex CLI installed is permanent for the process: probe once."""
+        from EvoScientist.llm import models
+
+        monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
+        mock_run.side_effect = FileNotFoundError
+
+        assert models._installed_codex_client_version() == ""
+        assert models._installed_codex_client_version() == ""
+        assert mock_run.call_count == 1
+
+    @patch("EvoScientist.llm.models.subprocess.run")
+    def test_failed_codex_version_probe_is_retried(self, mock_run, monkeypatch):
+        """A transient probe failure (e.g. mid-upgrade) must not stick for the process."""
+        import subprocess
+
+        from EvoScientist.llm import models
+
+        monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
+        ok = MagicMock(returncode=0, stdout="codex-cli 0.156.1\n", stderr="")
+        mock_run.side_effect = [subprocess.TimeoutExpired(["codex"], 1), ok]
+
+        assert models._installed_codex_client_version() == ""
+        assert models._installed_codex_client_version() == "0.156.1"
+        assert mock_run.call_count == 2
 
     @patch(
         "EvoScientist.llm.models._installed_codex_client_version",

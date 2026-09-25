@@ -81,7 +81,7 @@ qq = [
     "qrcode>=7.4",
 ]
 stt = ["faster-whisper>=1.0"]
-oauth = ["ccproxy-api>=0.2.7"]
+oauth = ["ccproxy-api>=0.2.10"]
 all-channels = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.3",

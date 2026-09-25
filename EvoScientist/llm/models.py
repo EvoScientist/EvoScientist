@@ -14,7 +14,6 @@ import os
 import re
 import subprocess
 import warnings
-from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
 
@@ -58,28 +57,43 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 }
 
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
-# installed versions are advertised automatically.
-_CODEX_CLIENT_VERSION_FALLBACK = "0.144.1"
+# installed versions are advertised automatically. The backend gates models on
+# it (gpt-6-* is refused as "not supported" at 0.144.1).
+_CODEX_CLIENT_VERSION_FALLBACK = "0.156.1"
+_CODEX_VERSION_TIMEOUT_SECONDS = 10
+_installed_codex_version = ""
+_codex_probe_disabled = False
 
 
-@lru_cache(maxsize=1)
 def _installed_codex_client_version() -> str:
-    """Return the installed Codex CLI version, or an empty string."""
+    """Return the installed Codex CLI version, or an empty string.
+
+    A success and a missing binary are cached; a timeout or non-zero exit
+    (e.g. mid-upgrade) is retried on the next call.
+    """
+    global _installed_codex_version, _codex_probe_disabled
+    if _installed_codex_version or _codex_probe_disabled:
+        return _installed_codex_version
     try:
         result = subprocess.run(
             ["codex", "--version"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_CODEX_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
+    except FileNotFoundError:
+        _codex_probe_disabled = True
+        return ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
     if result.returncode != 0:
         return ""
     match = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout + result.stderr)
-    return match.group(1) if match else ""
+    if match:
+        _installed_codex_version = match.group(1)
+    return _installed_codex_version
 
 
 def _resolve_codex_client_version() -> str:

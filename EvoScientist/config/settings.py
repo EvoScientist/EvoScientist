@@ -958,6 +958,21 @@ _ENV_MAPPINGS = {
 }
 
 
+# Placeholder ``ccproxy_manager.setup_*_env`` writes for a provider's API key
+# when routing it through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
+_OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
+
+
+def _oauth_routed(env_key: str) -> bool:
+    """Return True when ``env_key`` currently carries ccproxy OAuth routing."""
+    env_key = env_key.upper()  # Windows env keys are case-insensitive
+    if env_key.endswith("_BASE_URL"):
+        env_key = env_key[: -len("_BASE_URL")] + "_API_KEY"
+    elif not env_key.endswith("_API_KEY"):
+        return False
+    return os.environ.get(env_key) == _OAUTH_PLACEHOLDER_KEY
+
+
 def get_effective_config(
     cli_overrides: dict[str, Any] | None = None,
 ) -> EvoScientistConfig:
@@ -1024,6 +1039,8 @@ def get_effective_config(
         if env_key.startswith("EVOSCIENTIST_"):
             if not os.environ.get(env_key):
                 os.environ[env_key] = env_value
+        elif _oauth_routed(env_key):
+            continue  # ccproxy OAuth routing must survive later re-merges
         else:
             os.environ[env_key] = env_value
 

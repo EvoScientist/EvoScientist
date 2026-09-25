@@ -1162,6 +1162,57 @@ class TestDotenvIsolation:
         assert config.openai_api_key == "sk-from-config"
         assert os.environ.get("MINIMAX_BASE_URL", "") == ""
 
+    def test_dotenv_does_not_clobber_oauth_routing(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """A workspace ``.env`` credential must not undo ccproxy OAuth routing.
+
+        ``setup_codex_env`` marks the route with a placeholder key; every later
+        ``get_effective_config`` call re-merges ``.env``, so without the guard
+        the key and base URL flip back mid-session and Codex headers vanish.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "OPENAI_API_KEY=sk-real\nOPENAI_BASE_URL=https://api.openai.com/v1\n"
+        )
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+
+        get_effective_config()
+
+        assert os.environ["OPENAI_API_KEY"] == "ccproxy-oauth"
+        assert os.environ["OPENAI_BASE_URL"] == "http://127.0.0.1:8000/codex/v1"
+
+    def test_dotenv_guard_matches_lowercase_keys(self, tmp_path, monkeypatch):
+        """Windows env keys are case-insensitive, so a lowercase ``.env`` key
+        would reach the same variable; the guard must not depend on case."""
+        from EvoScientist.config.settings import _oauth_routed
+
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+
+        assert _oauth_routed("openai_api_key")
+        assert _oauth_routed("openai_base_url")
+
+    def test_dotenv_credentials_still_merge_without_oauth(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Without the placeholder, ``.env`` credentials keep winning as before."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=sk-from-dotenv\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-shell")
+
+        get_effective_config()
+
+        assert os.environ["OPENAI_API_KEY"] == "sk-from-dotenv"
+
     def test_parent_env_wins_over_dotenv_for_mapped_keys(
         self, temp_config_dir, tmp_path, monkeypatch
     ):
