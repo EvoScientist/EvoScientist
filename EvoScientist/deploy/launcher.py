@@ -322,8 +322,12 @@ class WebUILauncher:
 
     # -- lifecycle -------------------------------------------------------- #
     def start(self) -> LaunchResult:
-        """Resolve/start the backend and start the front-end. Non-blocking:
-        does not wait for readiness (use :meth:`wait_ready`).
+        """Resolve/start the backend and start the front-end.
+
+        Does not wait for the front-end to be *ready* (use :meth:`wait_ready`
+        for that). It does block while the backend starts: on the start path
+        ``start_langgraph_dev`` polls the backend's ``/ok`` until healthy (up to
+        ~60s). The front-end process is only spawned, not awaited.
 
         Tears down whatever it already spawned if a later step raises, or if
         ``stop()`` fires concurrently — the desktop calls ``stop()`` from the GUI
@@ -783,7 +787,7 @@ def _poll_ready(
 
 
 # --------------------------------------------------------------------------- #
-# Standalone JSON entrypoint (for an out-of-process shell, e.g. Electron)
+# Launcher-config resolution (shared by the CLI WebUI and the desktop shell)
 # --------------------------------------------------------------------------- #
 def build_launcher_config(
     config: Any,

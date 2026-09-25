@@ -107,8 +107,9 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdi
 [Icons]
 ; WorkingDir is {userdocs}, not {app}: even though {app} is now user-writable,
 ; the app dir holds the app (and is wiped on uninstall), so user data does not
-; belong there. The launcher defaults its workspace to the working directory,
-; and runs/skills/media are written under it. See build_launcher_config.
+; belong there. The desktop defaults its workspace to a Documents\EvoScientist
+; subfolder (app_paths.default_workspace()), never the whole working directory,
+; and runs/skills/media are written under that.
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{userdocs}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{userdocs}"; Tasks: desktopicon
