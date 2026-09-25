@@ -39,8 +39,10 @@
 #define MyAppExeName "EvoScientist.exe"
 
 ; Overridable at compile time: iscc /DAppVersion=... /DSourceDir=...
+; build.ps1 reads the real version from pyproject.toml and passes it via
+; /DAppVersion; this literal is only a fallback for a direct iscc run.
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "0.0.0"
 #endif
 #ifndef SourceDir
   #define SourceDir "..\..\dist\EvoScientist"

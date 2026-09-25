@@ -25,7 +25,9 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$AppVersion = "0.3.0",
+    # Defaults to the version in pyproject.toml (single source of truth);
+    # pass -AppVersion to override.
+    [string]$AppVersion = "",
     # WebUI npm version to bundle. Defaults to the "latest" dist-tag so a release
     # build tracks the current WebUI; pass an exact version (e.g. 0.3.0) to pin.
     # The resolved concrete version is recorded in the bundle's manifest.json.
@@ -45,6 +47,19 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $PkgDir = $PSScriptRoot
+
+# Version is single-sourced from pyproject.toml so the installer never drifts
+# from the package version; -AppVersion overrides for one-off builds.
+if (-not $AppVersion) {
+    $pyprojectPath = Join-Path $RepoRoot "pyproject.toml"
+    $verMatch = Select-String -Path $pyprojectPath -Pattern '^version = "(.+?)"' |
+        Select-Object -First 1
+    if (-not $verMatch) {
+        throw "Could not read 'version' from $pyprojectPath (needed for AppVersion)."
+    }
+    $AppVersion = $verMatch.Matches[0].Groups[1].Value
+}
+Write-Host "App version: $AppVersion"
 
 function Resolve-RepoPath([string]$p) {
     if ([System.IO.Path]::IsPathRooted($p)) { return $p }
