@@ -133,7 +133,7 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
     printed: list[str] = []
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
-        lambda config, *, workspace_dir: None,
+        lambda config, *, workspace_dir, backend=None: None,
     )
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
@@ -188,8 +188,8 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
 
     calls = []
 
-    def fake_ensure(config, *, workspace_dir):
-        calls.append((config, workspace_dir))
+    def fake_ensure(config, *, workspace_dir, backend=None):
+        calls.append((config, workspace_dir, backend))
 
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
@@ -197,9 +197,11 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
     )
 
     config = SimpleNamespace(enable_async_subagents=False)
-    cmds._ensure_async_subagent_server(config, workspace_dir="/tmp/workspace")
+    cmds._ensure_async_subagent_server(
+        config, workspace_dir="/tmp/workspace", backend="langgraph_server"
+    )
 
-    assert calls == [(config, "/tmp/workspace")]
+    assert calls == [(config, "/tmp/workspace", "langgraph_server")]
 
 
 async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
@@ -209,8 +211,8 @@ async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
 
     calls = []
 
-    def fake_ensure(config, *, workspace_dir):
-        calls.append((config, workspace_dir))
+    def fake_ensure(config, *, workspace_dir, backend=None):
+        calls.append((config, workspace_dir, backend))
 
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
@@ -221,9 +223,10 @@ async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
     await cmds._sync_background_agent_server_workspace(
         config,
         workspace_dir="/tmp/resumed-workspace",
+        backend="langgraph_server",
     )
 
-    assert calls == [(config, "/tmp/resumed-workspace")]
+    assert calls == [(config, "/tmp/resumed-workspace", "langgraph_server")]
 
 
 def test_cmd_interactive_dispatches_to_textual(monkeypatch):

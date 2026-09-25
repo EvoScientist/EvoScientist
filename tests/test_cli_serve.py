@@ -94,8 +94,9 @@ def _run_serve_once(
         def get(self, timeout=None):
             raise KeyboardInterrupt()
 
-    def _fake_ensure_async_server(cfg, *, workspace_dir):
+    def _fake_ensure_async_server(cfg, *, workspace_dir, backend=None):
         captured["ensure_config"] = cfg
+        captured["ensure_backend"] = backend
 
     monkeypatch.setattr(commands, "set_workspace_root", _fake_set_workspace_root)
     monkeypatch.setattr(commands, "ensure_dirs", _fake_ensure_dirs)

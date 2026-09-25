@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         RuntimeGatewayBackend,
         RuntimeGateways,
         create_runtime_gateways,
+        create_runtime_gateways_for_config,
     )
     from .server import (
         LangGraphServerGateway,
@@ -50,6 +51,7 @@ __getattr__, _attach_dir, _ = _lazy.attach(
             "RuntimeGatewayBackend",
             "RuntimeGateways",
             "create_runtime_gateways",
+            "create_runtime_gateways_for_config",
         ],
         "server": [
             "LangGraphServerGateway",
@@ -82,4 +84,5 @@ __all__ = [
     "ThreadStore",
     "background_runs",
     "create_runtime_gateways",
+    "create_runtime_gateways_for_config",
 ]
