@@ -1252,8 +1252,10 @@ def _serve_process_message(
                 timeout=30,
             )
 
-    def _hitl_prompt(action_requests: list) -> list[dict] | None:
-        return channel_hitl_prompt(action_requests, msg)
+    def _hitl_outcome(action_requests: list, human_budget_exhausted: bool):
+        return channel_hitl_prompt(
+            action_requests, msg, human_budget_exhausted=human_budget_exhausted
+        )
 
     def _ask_user_prompt(ask_user_data: dict) -> dict:
         return channel_ask_user_prompt(ask_user_data, msg)
@@ -1332,7 +1334,7 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
-                hitl_prompt_fn=_hitl_prompt,
+                hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
                 gateway=runtime_gateways.graph_gateway,

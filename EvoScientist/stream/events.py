@@ -184,10 +184,9 @@ async def _recover_interrupted_graph_state(
     build on normally. Channel values (message history) are otherwise
     preserved.
 
-    The dangling-call patch is computed *after* the first END so finished
-    sibling writes that were still pending on tasks (not yet in
-    ``values.messages``) count as answered. Patching from the pre-clear
-    snapshot would treat those calls as unanswered.
+    The dangling-call patch is computed from the state re-read after the
+    first END, the same view the verify step sees, so the patch and the
+    final checkpoint agree on which calls are still unanswered.
 
     Critically, the default path only runs when the stuck state is *not* a
     legitimate human-in-the-loop interrupt. The agent pauses via

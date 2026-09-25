@@ -48,6 +48,8 @@ from .utils import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..channels.interaction import ApprovalOutcome
+
 # ---------------------------------------------------------------------------
 # Shared globals
 # ---------------------------------------------------------------------------
@@ -1171,6 +1173,7 @@ def _resolve_hitl_approval(
     interrupt_data: dict,
     prompt_fn: Callable[[list], list[dict] | None] | None = None,
     *,
+    outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     question_runner: _QuestionRunner | None = None,
     human_budget_exhausted: bool = False,
 ) -> _HitlResolution:
@@ -1211,6 +1214,14 @@ def _resolve_hitl_approval(
     decisions, rejections = config_policy_snapshot(action_requests)
     if decisions is not None:
         return _HitlResolution(decisions, human_prompted=False)
+
+    # A channel bridge owns a further fast path (its session grant), so it
+    # gets the budget flag and reports whether it actually prompted.
+    if outcome_fn is not None:
+        outcome = outcome_fn(action_requests, human_budget_exhausted)
+        if outcome.budget_exhausted:
+            return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
+        return _HitlResolution(outcome.decisions, human_prompted=outcome.prompted)
 
     # After the auto fast paths: a spent human budget must not prompt, but
     # it also must not have blocked the session grant / allow-list above.
@@ -1439,6 +1450,7 @@ def _run_streaming(
     ask_user_prompt_fn: Callable[[dict], dict] | None = None,
     cancel_scope: str | None = None,
     *,
+    hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
     runtime: AsyncRuntime | None = None,
     _state: StreamState | None = None,
@@ -1489,6 +1501,7 @@ def _run_streaming(
                 hitl_prompt_fn=hitl_prompt_fn,
                 ask_user_prompt_fn=ask_user_prompt_fn,
                 cancel_scope=cancel_scope,
+                hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
                 runtime=owned_runtime,
                 _state=_state,
@@ -1624,12 +1637,14 @@ def _run_streaming(
             if aclose is not None:
                 await aclose()
 
-    def _stop_on_hitl_round_limit(human_rounds: int) -> str:
+    def _stop_on_hitl_round_limit() -> str:
         """Stop an exhausted HITL resume loop visibly (issue #469).
 
         Prints a notice, closes the parked interrupt without resuming the
         agent (a rejecting resume would run another invisible model step),
-        and returns the partial response gathered so far.
+        and returns the partial response gathered so far. Channel callers
+        (``hitl_outcome_fn``) also get the notice in the returned text,
+        because the console line never reaches the channel user.
         """
         from ..channels.hitl_budget import (
             HITL_BUDGET_STOP_NOTICE,
@@ -1638,9 +1653,9 @@ def _run_streaming(
         )
 
         limit = (
-            MAX_HUMAN_HITL_ROUNDS
-            if human_rounds >= MAX_HUMAN_HITL_ROUNDS
-            else MAX_HITL_TOTAL_ROUNDS
+            MAX_HITL_TOTAL_ROUNDS
+            if total_rounds >= MAX_HITL_TOTAL_ROUNDS
+            else MAX_HUMAN_HITL_ROUNDS
         )
         console.print(f"[yellow]{HITL_BUDGET_STOP_NOTICE}[/yellow]")
         _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
@@ -1668,7 +1683,12 @@ def _run_streaming(
                 thread_id,
                 exc_info=True,
             )
-        return (state.response_text or "").strip()
+        text = (state.response_text or "").strip()
+        if hitl_outcome_fn is None:
+            return text
+        from ..channels.hitl_budget import channel_response_with_budget_stop
+
+        return channel_response_with_budget_stop(text)
 
     try:
         # Iterative HITL resume loop (converted from recursion so a long
@@ -1797,7 +1817,7 @@ def _run_streaming(
                 total_rounds=total_rounds,
                 needs_human=False,
             ):
-                return _stop_on_hitl_round_limit(human_rounds)
+                return _stop_on_hitl_round_limit()
 
             # ask_user: check before HITL (ask_user uses the same resume loop)
             if state.pending_ask_user is not None:
@@ -1806,7 +1826,7 @@ def _run_streaming(
                     total_rounds=total_rounds,
                     needs_human=True,
                 ):
-                    return _stop_on_hitl_round_limit(human_rounds)
+                    return _stop_on_hitl_round_limit()
                 human_rounds += 1  # ask_user always prompts a human
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
@@ -1843,9 +1863,10 @@ def _run_streaming(
                     resolution = _resolve_hitl_approval(
                         state.pending_interrupt,
                         prompt_fn=hitl_prompt_fn,
+                        outcome_fn=hitl_outcome_fn,
                         question_runner=(
                             None
-                            if hitl_prompt_fn is not None
+                            if hitl_prompt_fn is not None or hitl_outcome_fn is not None
                             else lambda question: _run_owned_questionary_prompt(
                                 question,
                                 runtime=runtime,
@@ -1861,7 +1882,7 @@ def _run_streaming(
                 except _StreamPromptCancelled:
                     return _stopped_response()
                 if resolution.budget_exhausted:
-                    return _stop_on_hitl_round_limit(human_rounds)
+                    return _stop_on_hitl_round_limit()
                 if resolution.human_prompted:
                     human_rounds += 1
                 if is_stream_cancel_requested(cancel_scope):

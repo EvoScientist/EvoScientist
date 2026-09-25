@@ -346,6 +346,90 @@ class TestRichCliHitlRoundBudget:
             "Failed to close parked HITL" in r.getMessage() for r in caplog.records
         )
 
+    def test_channel_session_grant_resumes_past_50_rounds(self, monkeypatch):
+        from langgraph.types import Command  # type: ignore[import-untyped]
+
+        from EvoScientist.cli import channel as channel_mod
+
+        msg = channel_mod.ChannelMessage(
+            msg_id="m1", content="run", sender="u", channel_type="telegram"
+        )
+        policy = channel_mod.ApprovalPolicy()
+        policy.grant_session(channel_mod._channel_message_session_key(msg))
+        monkeypatch.setattr(channel_mod, "_approval_policy", policy)
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        stream_calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls <= 60:
+                yield _interrupt_event(stream_calls)
+                return
+            yield {"type": "text", "content": "All sixty rounds done"}
+            yield {"type": "done", "content": "All sixty rounds done"}
+
+        gateway = FakeGraphGateway(stream=_fake_stream)
+        result = display_mod._run_streaming(
+            agent=MagicMock(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=gateway,
+            _state=display_mod.StreamState(),
+            hitl_outcome_fn=lambda reqs, exhausted: channel_mod.channel_hitl_prompt(
+                reqs, msg, human_budget_exhausted=exhausted
+            ),
+        )
+
+        resumes = [r for r in gateway.requests if isinstance(r.message, Command)]
+        assert stream_calls == 61
+        assert len(resumes) == 60
+        assert result == "All sixty rounds done"
+
+    def test_channel_budget_stop_reaches_the_channel_reply(self, monkeypatch):
+        from EvoScientist.channels.hitl_budget import HITL_BUDGET_STOP_NOTICE
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(display_mod.console, "print", lambda *a, **k: None)
+        stream_calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            if stream_calls == 1:
+                yield {"type": "text", "content": "Partial work so far"}
+            yield _interrupt_event(stream_calls)
+
+        prompted = 0
+
+        def _bridge(_requests, exhausted):
+            nonlocal prompted
+            if exhausted:
+                return ApprovalOutcome(budget_exhausted=True)
+            prompted += 1
+            return ApprovalOutcome(decisions=[{"type": "approve"}], prompted=True)
+
+        gateway = FakeGraphGateway(
+            stream=_fake_stream, checkpoint=FakeCheckpointAgent()
+        )
+        result = display_mod._run_streaming(
+            agent=MagicMock(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=gateway,
+            _state=display_mod.StreamState(),
+            hitl_outcome_fn=_bridge,
+        )
+
+        assert prompted == 50
+        assert stream_calls == 51
+        assert result == f"Partial work so far\n\n{HITL_BUDGET_STOP_NOTICE}"
+
 
 def test_hitl_budget_stop_ignores_human_cap_for_auto_rounds():
     import EvoScientist.channels.hitl_budget as budget_mod

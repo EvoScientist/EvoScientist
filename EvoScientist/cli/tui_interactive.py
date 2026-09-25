@@ -1591,7 +1591,7 @@ def run_textual_interactive(
             on_media_cb: Callable[[str], None] | None = None,
             skip_user_message: bool = False,
             file_warnings: list[str] | None = None,
-            channel_hitl_fn: Callable[[list], list[dict] | None] | None = None,
+            channel_hitl_fn: Callable[..., Any] | None = None,
             channel_ask_user_fn: Callable[[dict], dict] | None = None,
             cancel_scope: str | None = None,
             thread_id_override: str | None = None,
@@ -1611,7 +1611,9 @@ def run_textual_interactive(
                     already mounted it — e.g. channel messages with labels).
                 channel_hitl_fn: Optional channel-based HITL approval function.
                     When provided (channel messages), this is called instead
-                    of mounting the ApprovalWidget.
+                    of mounting the ApprovalWidget. It receives
+                    ``(action_requests, human_budget_exhausted=...)`` and
+                    returns an :class:`ApprovalOutcome`.
                 channel_ask_user_fn: Optional channel-based ask_user function.
                     When provided (channel messages), this is called instead
                     of mounting the AskUserWidget.
@@ -2289,27 +2291,30 @@ def run_textual_interactive(
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop
 
-                            # Channel messages: use channel-based text approval
+                            # Channel messages: use channel-based text approval.
+                            # The bridge owns the channel session grant, so it
+                            # applies the human budget after that fast path and
+                            # reports whether it prompted.
                             if channel_hitl_fn is not None:
-                                # Refuse BEFORE asking the channel user, so
-                                # their decision cannot be collected and
-                                # then discarded (issue #469).
-                                if hitl_budget_stop(
-                                    human_rounds=_human_rounds,
-                                    total_rounds=_hitl_round,
-                                    needs_human=True,
-                                ):
-                                    _hitl_budget_exhausted = True
-                                    break
-                                _human_rounds += 1  # a human answers the prompt
                                 self._append_system(
                                     "Waiting for channel user approval...",
                                     style="dim italic",
                                 )
-                                decisions = await asyncio.to_thread(
+                                outcome = await asyncio.to_thread(
                                     channel_hitl_fn,
                                     action_reqs,
+                                    human_budget_exhausted=hitl_budget_stop(
+                                        human_rounds=_human_rounds,
+                                        total_rounds=_hitl_round,
+                                        needs_human=True,
+                                    ),
                                 )
+                                if outcome.budget_exhausted:
+                                    _hitl_budget_exhausted = True
+                                    break
+                                if outcome.prompted:
+                                    _human_rounds += 1
+                                decisions = outcome.decisions
                                 if is_stream_cancel_requested(cancel_scope):
                                     state.pending_interrupt = None
                                     response = await _mark_cancelled_response()
@@ -2837,13 +2842,13 @@ def run_textual_interactive(
                             "Media",
                         )
 
-                def _channel_hitl_prompt(action_requests: list) -> list[dict] | None:
+                def _channel_hitl_prompt(action_requests: list, **kwargs):
                     """Send HITL approval prompt to channel user and wait for reply.
 
                     This runs in a thread (called via asyncio.to_thread) so it can
                     block without freezing the Textual event loop.
                     """
-                    return _ch_mod.channel_hitl_prompt(action_requests, msg)
+                    return _ch_mod.channel_hitl_prompt(action_requests, msg, **kwargs)
 
                 def _channel_ask_user(ask_user_data: dict) -> dict:
                     """Send ask_user questions to channel user and wait for reply.
