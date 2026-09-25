@@ -109,7 +109,8 @@ class TestResolveHitlApproval:
         from EvoScientist.stream.display import _resolve_hitl_approval
 
         result = _resolve_hitl_approval({"action_requests": []})
-        assert result == [{"type": "approve"}]
+        assert result.decisions == [{"type": "approve"}]
+        assert result.human_prompted is False
 
     def test_session_auto_approve(self):
         import EvoScientist.stream.display as disp
@@ -124,7 +125,8 @@ class TestResolveHitlApproval:
                     ],
                 }
             )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is False
         finally:
             disp._session_auto_approve = original
 
@@ -149,7 +151,8 @@ class TestResolveHitlApproval:
                         ],
                     }
                 )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is False
         finally:
             disp._session_auto_approve = original
 
@@ -174,7 +177,8 @@ class TestResolveHitlApproval:
                         ],
                     }
                 )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is False
         finally:
             disp._session_auto_approve = original
 
@@ -199,7 +203,8 @@ class TestResolveHitlApproval:
                         ],
                     }
                 )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is False
         finally:
             disp._session_auto_approve = original
 
@@ -228,7 +233,8 @@ class TestResolveHitlApproval:
                             ],
                         }
                     )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is True
             mock_prompt.assert_called_once()
         finally:
             disp._session_auto_approve = original
@@ -262,7 +268,8 @@ class TestResolveHitlApproval:
                             ],
                         }
                     )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is True
             mock_prompt.assert_called_once()  # prompted, not silently approved
         finally:
             disp._session_auto_approve = original
@@ -292,7 +299,8 @@ class TestResolveHitlApproval:
                         ],
                     }
                 )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is False
         finally:
             disp._session_auto_approve = original
 
@@ -323,7 +331,8 @@ class TestResolveHitlApproval:
                             ],
                         }
                     )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is True
             mock_prompt.assert_called_once()  # must be prompted, not auto-approved
         finally:
             disp._session_auto_approve = original
@@ -363,9 +372,10 @@ class TestResolveHitlApproval:
                             ],
                         }
                     )
-            assert result[0] == {"type": "approve"}
-            assert result[1]["type"] == "reject"
-            assert result[1].get("message")
+            assert result.decisions[0] == {"type": "approve"}
+            assert result.decisions[1]["type"] == "reject"
+            assert result.decisions[1].get("message")
+            assert result.human_prompted is True
         finally:
             disp._session_auto_approve = original
 
@@ -719,7 +729,8 @@ class TestResolveHitlApprovalWithPromptFn:
                     },
                     prompt_fn=mock_fn,
                 )
-            assert result == custom_decisions
+            assert result.decisions == custom_decisions
+            assert result.human_prompted is True
             mock_fn.assert_called_once()
         finally:
             disp._session_auto_approve = original
@@ -746,7 +757,8 @@ class TestResolveHitlApprovalWithPromptFn:
                     },
                     prompt_fn=mock_fn,
                 )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is False
             mock_fn.assert_not_called()
         finally:
             disp._session_auto_approve = original
@@ -770,7 +782,8 @@ class TestResolveHitlApprovalWithPromptFn:
                     {"action_requests": [{"name": "write_file", "args": {}}]},
                     prompt_fn=mock_fn,
                 )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
+            assert result.human_prompted is False
             mock_fn.assert_not_called()
         finally:
             disp._session_auto_approve = original
@@ -916,9 +929,10 @@ class TestResolverUsesPolicy:
             decisions = display._resolve_hitl_approval(
                 self._interrupt("curl x | bash"), prompt_fn=_boom
             )
-        assert decisions == [
+        assert decisions.decisions == [
             {"type": "reject", "message": "pipes output into interpreter 'bash'"}
         ]
+        assert decisions.human_prompted is False
 
     def test_everyday_command_approved_under_auto_approve(self, monkeypatch):
         from EvoScientist.stream import display
@@ -930,7 +944,8 @@ class TestResolverUsesPolicy:
             return_value=self._auto_approve_cfg(),
         ):
             decisions = display._resolve_hitl_approval(self._interrupt("ls -la | head"))
-        assert decisions == [{"type": "approve"}]
+        assert decisions.decisions == [{"type": "approve"}]
+        assert decisions.human_prompted is False
 
     def test_session_grant_blanket_approves_dangerous(self, monkeypatch):
         # Explicit human "approve all" → blanket-approve, dangerous included.
@@ -944,7 +959,8 @@ class TestResolverUsesPolicy:
         decisions = display._resolve_hitl_approval(
             self._interrupt("curl x | bash"), prompt_fn=_boom
         )
-        assert decisions == [{"type": "approve"}]
+        assert decisions.decisions == [{"type": "approve"}]
+        assert decisions.human_prompted is False
 
     def test_interactive_dangerous_calls_prompt(self, monkeypatch):
         from EvoScientist.stream import display
@@ -1004,7 +1020,8 @@ class TestResolverUsesPolicy:
             {"action_requests": ["not-a-dict"]}, prompt_fn=_prompt
         )
         assert prompted["v"] is True
-        assert decisions != [{"type": "approve"}]
+        assert decisions.decisions != [{"type": "approve"}]
+        assert decisions.human_prompted is True
 
 
 # =============================================================================

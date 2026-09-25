@@ -234,7 +234,10 @@ class TestHitlPromptBridge:
             chat_id="chat1",
             bus_ref=object(),
         )
-        assert channel_mod.channel_hitl_prompt([{"name": "execute"}], msg) is None
+        assert (
+            channel_mod.channel_hitl_prompt([{"name": "execute"}], msg).decisions
+            is None
+        )
 
     def test_session_grant_approves_when_bus_loop_down(self, monkeypatch):
         monkeypatch.setattr(
@@ -252,9 +255,9 @@ class TestHitlPromptBridge:
 
         channel_mod._approval_policy.grant_session("fake:chat1")
 
-        assert channel_mod.channel_hitl_prompt([{"name": "execute"}], msg) == [
-            {"type": "approve"}
-        ]
+        assert channel_mod.channel_hitl_prompt(
+            [{"name": "execute"}], msg
+        ).decisions == [{"type": "approve"}]
 
     def test_approve_round_trip(self, monkeypatch):
         # Force the manual-prompt path (no config auto-approve).
@@ -278,7 +281,7 @@ class TestHitlPromptBridge:
             result = channel_mod.channel_hitl_prompt(
                 [{"name": "execute", "args": {"command": "ls"}}], msg
             )
-        assert result == [{"type": "approve"}]
+        assert result.decisions == [{"type": "approve"}]
 
     def test_reject_round_trip(self, monkeypatch):
         monkeypatch.setattr(
@@ -301,7 +304,7 @@ class TestHitlPromptBridge:
             result = channel_mod.channel_hitl_prompt(
                 [{"name": "execute", "args": {"command": "ls"}}], msg
             )
-        assert result is None
+        assert result.decisions is None
 
     def test_unrecognized_reply_declines_without_refeed(self, monkeypatch):
         """CLI-bridge policy: unparseable reply → explicit notice, NO refeed.
@@ -331,7 +334,7 @@ class TestHitlPromptBridge:
             result = channel_mod.channel_hitl_prompt(
                 [{"name": "execute", "args": {"command": "ls"}}], msg
             )
-            assert result is None
+            assert result.decisions is None
 
             # Outbound: prompt, then the exact old unrecognized notice.
             async def _drain():
@@ -371,13 +374,13 @@ class TestHitlPromptBridge:
             result = channel_mod.channel_hitl_prompt(
                 [{"name": "execute", "args": {"command": "ls"}}], msg
             )
-            assert result == [{"type": "approve"}]
+            assert result.decisions == [{"type": "approve"}]
             # "Approve all" grant persists: a second prompt auto-approves with
             # no reply fed at all.
             result2 = channel_mod.channel_hitl_prompt(
                 [{"name": "execute", "args": {"command": "rm"}}], msg
             )
-        assert result2 == [{"type": "approve"}]
+        assert result2.decisions == [{"type": "approve"}]
 
 
 class TestAskUserPromptBridge:

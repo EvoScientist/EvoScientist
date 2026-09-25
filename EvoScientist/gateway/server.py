@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -129,6 +130,45 @@ def _state_interrupts(state: ThreadState) -> list[Mapping[str, object]]:
     if not isinstance(interrupts, list):
         return []
     return [interrupt for interrupt in interrupts if isinstance(interrupt, Mapping)]
+
+
+def _as_tuple(value: object) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        return value
+    if isinstance(value, list):
+        return tuple(value)
+    return (value,)
+
+
+def _thread_state_as_snapshot(state: Mapping[str, Any]) -> SimpleNamespace:
+    """Normalize SDK ``threads.get_state`` to the recovery snapshot surface.
+
+    ``_recover_interrupted_graph_state`` inspects ``next``, ``tasks`` (with
+    ``name`` / ``interrupts``), ``interrupts``, and ``values`` via attributes,
+    matching ``langgraph.types.StateSnapshot``. The SDK returns a dict.
+    """
+    tasks: list[Any] = []
+    for task in state.get("tasks") or ():
+        if isinstance(task, Mapping):
+            tasks.append(
+                SimpleNamespace(
+                    name=task.get("name") or "",
+                    interrupts=_as_tuple(task.get("interrupts")),
+                )
+            )
+        else:
+            tasks.append(task)
+    values = state.get("values")
+    if not isinstance(values, dict):
+        values = {}
+    return SimpleNamespace(
+        next=_as_tuple(state.get("next")),
+        tasks=tuple(tasks),
+        interrupts=_as_tuple(state.get("interrupts")),
+        values=values,
+    )
 
 
 def _is_id_keyed_hitl_resume(response: object) -> bool:
@@ -813,6 +853,14 @@ class LangGraphServerGateway:
     def stream_events(self, request: RunRequest) -> AsyncIterator[GraphEvent]:
         return self._stream_events(request)
 
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> SimpleNamespace:
+        state = await self.thread_store.client.threads.get_state(thread_id)
+        return _thread_state_as_snapshot(state)
+
     async def get_state_values(
         self,
         target: GraphTarget,
@@ -824,9 +872,16 @@ class LangGraphServerGateway:
         self,
         target: GraphTarget,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
+        *,
+        as_node: str | None = None,
     ) -> None:
-        as_node = "model" if "_summarization_event" in values else None
+        if (
+            as_node is None
+            and isinstance(values, dict)
+            and "_summarization_event" in values
+        ):
+            as_node = "model"
         await self.thread_store.client.threads.update_state(
             thread_id,
             values,

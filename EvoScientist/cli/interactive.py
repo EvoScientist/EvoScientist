@@ -1026,11 +1026,15 @@ def cmd_interactive(
                                 timeout=30,
                             )
 
-                    def _channel_hitl_prompt(
-                        action_requests: list,
-                    ) -> list[dict] | None:
+                    def _channel_hitl_outcome(
+                        action_requests: list, human_budget_exhausted: bool
+                    ):
                         """Send HITL approval prompt to channel user and wait for reply."""
-                        return _ch_mod.channel_hitl_prompt(action_requests, msg)
+                        return _ch_mod.channel_hitl_prompt(
+                            action_requests,
+                            msg,
+                            human_budget_exhausted=human_budget_exhausted,
+                        )
 
                     def _channel_ask_user(ask_user_data: dict) -> dict:
                         """Send ask_user questions to channel user and wait for reply."""
@@ -1134,7 +1138,7 @@ def cmd_interactive(
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
-                            hitl_prompt_fn=_channel_hitl_prompt,
+                            hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,

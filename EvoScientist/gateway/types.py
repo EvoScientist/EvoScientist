@@ -228,13 +228,34 @@ class GraphGateway(Protocol):
     ) -> GraphStateValues:
         """Return the graph state values for a thread."""
 
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> Any:
+        """Return the checkpoint snapshot for a thread.
+
+        Recovery and HITL close inspect ``next``, ``tasks``, ``interrupts``,
+        and ``values`` through this method instead of
+        ``GraphTarget.local_graph``. Local backends return the compiled
+        graph's ``StateSnapshot``; server backends normalize
+        ``threads.get_state`` to the same attribute surface.
+        """
+
     async def update_state_values(
         self,
         target: GraphTarget,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
+        *,
+        as_node: str | None = None,
     ) -> None:
-        """Update graph state values for a thread."""
+        """Update graph state values for a thread.
+
+        ``as_node`` attributes the write. ``None`` keeps the historical
+        default (``"model"`` when the values carry a summarization event).
+        ``values=None`` with ``as_node="__end__"`` clears pending tasks.
+        """
 
     async def get_run_status(
         self,

@@ -199,6 +199,7 @@ class TestResolveApproval:
         io = FakeIO()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
         assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
+        assert result.prompted is False
         assert io.sent == []  # no prompt, silent
 
     async def test_config_decisions_short_circuit(self, monkeypatch):
@@ -208,13 +209,16 @@ class TestResolveApproval:
         io = FakeIO()
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
+        assert result.prompted is False
         assert io.sent == []
 
     async def test_approve(self, monkeypatch):
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
         io = FakeIO(["1"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
+        assert result == I.ApprovalOutcome(
+            decisions=[{"type": "approve"}], prompted=True
+        )
         assert io.contents[0].startswith("⚠️ Approval Required")
         assert io.contents[-1] == I.APPROVED_FEEDBACK
 
@@ -222,7 +226,7 @@ class TestResolveApproval:
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
         io = FakeIO(["2"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome()
+        assert result == I.ApprovalOutcome(prompted=True)
         assert io.contents[-1] == I.REJECTED_FEEDBACK
 
     async def test_approve_all_grants_session(self, monkeypatch):
@@ -230,7 +234,9 @@ class TestResolveApproval:
         io = FakeIO(["3"])
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
-        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
+        assert result == I.ApprovalOutcome(
+            decisions=[{"type": "approve"}], prompted=True
+        )
         assert io.contents[-1] == I.APPROVED_AUTO_FEEDBACK
         assert p.is_session_granted("tg:c1")  # future prompts auto-approve
 
@@ -261,14 +267,14 @@ class TestResolveApproval:
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
         io = FakeIO([])  # times out
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome()
+        assert result == I.ApprovalOutcome(prompted=True)
         assert io.contents[-1] == I.APPROVAL_TIMEOUT_FEEDBACK
 
     async def test_stop_command_silent_cancel(self, monkeypatch):
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
         io = FakeIO(["/stop"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome()
+        assert result == I.ApprovalOutcome(prompted=True)
         # /stop already got its own ack; no reject/unrecognized feedback here.
         assert I.REJECTED_FEEDBACK not in io.contents
         assert I.UNRECOGNIZED_FEEDBACK not in io.contents
@@ -278,7 +284,7 @@ class TestResolveApproval:
         io = FakeIO(["1"])
         io.send_ok = False
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome()
+        assert result == I.ApprovalOutcome(prompted=True)
 
     # ── R3: button-capability formatting + payload normalization ──
 
@@ -311,7 +317,9 @@ class TestResolveApproval:
         io = FakeIO(["3"], capabilities=QQ_CAPS)
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
-        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
+        assert result == I.ApprovalOutcome(
+            decisions=[{"type": "approve"}], prompted=True
+        )
         assert p.is_session_granted("tg:c1")
 
 

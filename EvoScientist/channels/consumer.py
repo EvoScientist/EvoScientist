@@ -38,7 +38,6 @@ T = TypeVar("T")
 
 _MAX_CHAT_LOCKS = 10_000
 _MAX_SESSIONS = 10_000
-_MAX_HITL_ROUNDS = 50
 
 
 @dataclass
@@ -438,13 +437,23 @@ class InboundConsumer:
 
             _last_sent_thinking: str | None = None
 
-            for _hitl_round in range(_MAX_HITL_ROUNDS):
+            _hitl_round = 0
+            _human_rounds = 0
+            final_content = ""
+            interrupt_data: dict | None = None
+            # Total cap is checked after each stream, before the next
+            # decision. The human budget is checked only when a prompt
+            # would be shown (issue #469).
+            from .hitl_budget import HITL_BUDGET_STOP_NOTICE, hitl_budget_stop
+
+            while True:
+                _hitl_round += 1
                 final_content = ""
                 thinking_buffer: list[str] = []
                 todo_sent = False
                 subagent_text_buffers: dict[str, tuple[str, list[str]]] = {}
                 thinking_sent = False
-                interrupt_data: dict | None = None
+                interrupt_data = None
 
                 async def _flush_thinking_buffer(
                     buffer: list[str] = thinking_buffer,
@@ -554,8 +563,24 @@ class InboundConsumer:
                             pass
                     return  # done
 
+                # Total cap, including auto-resolved pendings. The human
+                # budget is not applied here.
+                if hitl_budget_stop(
+                    human_rounds=_human_rounds,
+                    total_rounds=_hitl_round,
+                    needs_human=False,
+                ):
+                    break
+
                 # ask_user: send questions to channel user, collect answers
                 if interrupt_data.get("type") == "ask_user":
+                    if hitl_budget_stop(
+                        human_rounds=_human_rounds,
+                        total_rounds=_hitl_round,
+                        needs_human=True,
+                    ):
+                        break
+                    _human_rounds += 1  # ask_user always prompts a human
                     result = await self._resolve_ask_user(
                         msg,
                         interrupt_data,
@@ -577,7 +602,16 @@ class InboundConsumer:
                     self._approval_policy,
                     session_key,
                     timeout=HITL_APPROVAL_TIMEOUT,
+                    human_budget_exhausted=hitl_budget_stop(
+                        human_rounds=_human_rounds,
+                        total_rounds=_hitl_round,
+                        needs_human=True,
+                    ),
                 )
+                if outcome.budget_exhausted:
+                    break
+                if outcome.prompted:
+                    _human_rounds += 1
                 if outcome.unrecognized_reply is not None:
                     # Serve-mode policy: an unrecognized reply rejects the
                     # pending action, confirms with reject feedback, and is
@@ -603,6 +637,33 @@ class InboundConsumer:
                     interrupt_data.get("interrupt_id"), outcome.decisions
                 )
                 # continue to next HITL round
+
+            # Round budget exhausted. Close the parked checkpoint without
+            # resuming the agent (a rejecting resume runs another model
+            # step), send any partial answer from the last real round, then
+            # the stop notice (issue #469).
+            from ..backends import close_parked_checkpoint
+
+            try:
+                await close_parked_checkpoint(
+                    self.graph_gateway,
+                    GraphTarget(local_graph=self.agent),
+                    thread_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to close parked HITL checkpoint for %s in %s",
+                    msg.sender_id,
+                    session_key,
+                    exc_info=True,
+                )
+            logger.warning(
+                "HITL round limit reached for %s in %s", msg.sender_id, session_key
+            )
+            io = _ConsumerIO(self, msg, session_key)
+            if final_content.strip():
+                await io.send(final_content)
+            await io.send(HITL_BUDGET_STOP_NOTICE)
 
         except TimeoutError:
             self._metrics.total_timeouts += 1

@@ -476,6 +476,100 @@ def resolve_action_decision(
     return ActionVerdict(ActionDecision.PROMPT)
 
 
+# Reason recorded on tool results written when a HITL round budget closes a
+# parked interrupt without resuming the agent (issue #469). A rejecting
+# ``Command(resume=...)`` does not close the checkpoint: HumanInTheLoop
+# middleware turns it into a ToolMessage and routes straight back to the
+# model. Surfaces call ``_recover_interrupted_graph_state(close_interrupts=
+# True)`` so the clear → patch → clear → verify sequence is shared with
+# crash recovery. The constant is part of the HITL result text, alongside
+# the stock "do not retry" sentence — passing it as a reject decision's
+# ``message`` would drop that sentence.
+HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
+
+
+def abandoned_tool_messages(messages: list) -> list:
+    """Tool results for unanswered calls on the last AI message.
+
+    Closing a parked interrupt without these leaves dangling ``tool_calls``
+    or ``invalid_tool_calls``, and the next user turn is rejected by the
+    provider. The wording keeps the middleware's default "do not retry"
+    instruction. Crash recovery covers both lists; this does too.
+    """
+    from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
+
+    try:
+        converted = list(convert_to_messages(messages))
+    except Exception:
+        return []
+
+    def _calls(message: AIMessage) -> list:
+        return [
+            *message.tool_calls,
+            *(getattr(message, "invalid_tool_calls", None) or ()),
+        ]
+
+    last_ai = None
+    last_index = -1
+    for index, message in enumerate(converted):
+        if isinstance(message, AIMessage) and _calls(message):
+            last_ai = message
+            last_index = index
+    if last_ai is None:
+        return []
+    answered = {
+        message.tool_call_id
+        for message in converted[last_index + 1 :]
+        if getattr(message, "type", None) == "tool" and message.tool_call_id
+    }
+    results = []
+    for call in _calls(last_ai):
+        call_id = call.get("id")
+        if not call_id or call_id in answered:
+            continue
+        name = call.get("name") or "tool"
+        results.append(
+            ToolMessage(
+                content=(
+                    f"User rejected the tool call for `{name}` with id {call_id} "
+                    f"({HITL_ROUND_LIMIT_REJECT_MESSAGE}). The tool was not "
+                    "executed. Do not retry this tool call unless the user "
+                    "explicitly requests it."
+                ),
+                name=name,
+                tool_call_id=call_id,
+                status="error",
+            )
+        )
+    return results
+
+
+async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
+    """End a parked HITL/ask_user turn without another model step.
+
+    Reuses ``_recover_interrupted_graph_state(close_interrupts=True)`` through
+    ``gateway`` so HITL budget exhaustion and crash recovery share one
+    clear → patch → clear → verify sequence. After #470,
+    ``GraphTarget.local_graph`` may be None and execution is server-backed;
+    the gateway is the authority for checkpoint reads and writes.
+
+    Finished sibling writes (``ask_user`` beside another tool) stay in
+    history; unanswered calls get HITL reject results. A rejecting resume
+    is not used: that resumes the agent.
+    """
+    from .stream.events import _GatewayCheckpointOps, _recover_interrupted_graph_state
+
+    ok = await _recover_interrupted_graph_state(
+        _GatewayCheckpointOps(gateway, target, thread_id),
+        {"configurable": {"thread_id": thread_id}},
+        close_interrupts=True,
+    )
+    if not ok:
+        raise RuntimeError(
+            f"Could not close parked HITL checkpoint on thread {thread_id}"
+        )
+
+
 def build_hitl_resume(interrupt_id: str, decisions: list[dict]) -> "Command":
     """Build a HITL resume Command keyed by interrupt_id.
 
