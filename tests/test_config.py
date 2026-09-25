@@ -8,6 +8,7 @@ import yaml
 
 from EvoScientist.config import (
     EvoScientistConfig,
+    GatewaySurface,
     MemoryControls,
     MemoryObservationTarget,
     MemoryObservationWriter,
@@ -21,6 +22,7 @@ from EvoScientist.config import (
     list_config,
     load_config,
     reset_config,
+    resolve_gateway_backend,
     save_config,
     set_config_value,
 )
@@ -62,6 +64,12 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
         "EVOSCIENTIST_UI_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+        "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+        "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
         "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
@@ -94,6 +102,12 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_DEFAULT_MODE",
         "EVOSCIENTIST_WORKSPACE_DIR",
         "EVOSCIENTIST_UI_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+        "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+        "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+        "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
         "EVOSCIENTIST_MEMORY_PROFILE_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATIONS_ENABLED",
         "EVOSCIENTIST_MEMORY_OBSERVATION_WRITER",
@@ -260,6 +274,72 @@ class TestEvoScientistConfig:
         config = EvoScientistConfig(gateway_backend="langgraph_server")
         assert config.gateway_backend == "langgraph_server"
 
+    def test_gateway_backend_per_surface_defaults_split(self):
+        """Global server flips the fixed-workspace surfaces, not CLI/TUI.
+
+        serve/single-shot/standalone default to ``inherit`` (so a global
+        ``langgraph_server`` moves them); the interactive CLI and TUI default to
+        ``local``, so the global flag can't move them (the server path is lossy
+        there until #413/#454 close).
+        """
+        config = EvoScientistConfig(gateway_backend="langgraph_server")
+        for surface in (
+            GatewaySurface.SERVE,
+            GatewaySurface.SINGLE_SHOT,
+            GatewaySurface.STANDALONE,
+        ):
+            assert resolve_gateway_backend(config, surface) == "langgraph_server"
+        assert resolve_gateway_backend(config, GatewaySurface.INTERACTIVE) == "local"
+        assert resolve_gateway_backend(config, GatewaySurface.TUI) == "local"
+
+    def test_gateway_backend_per_surface_override_wins(self):
+        """A per-surface override resolves independently of the global flag."""
+        config = EvoScientistConfig(
+            gateway_backend="local",
+            gateway_backend_serve="langgraph_server",
+        )
+        assert (
+            resolve_gateway_backend(config, GatewaySurface.SERVE) == "langgraph_server"
+        )
+        # TUI/INTERACTIVE default to local, and the global is local too.
+        assert resolve_gateway_backend(config, GatewaySurface.TUI) == "local"
+        assert resolve_gateway_backend(config, GatewaySurface.INTERACTIVE) == "local"
+
+    def test_gateway_backend_cli_tui_explicit_server_opt_in(self):
+        """CLI/TUI reach the server backend only via an explicit override.
+
+        Their default is ``local``, so opting in takes a per-surface
+        ``langgraph_server`` (not the global flag); ``inherit`` restores
+        following the global.
+        """
+        config = EvoScientistConfig(
+            gateway_backend="local",
+            gateway_backend_interactive="langgraph_server",
+            gateway_backend_tui="inherit",
+        )
+        assert (
+            resolve_gateway_backend(config, GatewaySurface.INTERACTIVE)
+            == "langgraph_server"
+        )
+        # tui set back to inherit -> follows the (local) global.
+        assert resolve_gateway_backend(config, GatewaySurface.TUI) == "local"
+
+    def test_gateway_backend_per_surface_invalid_value_coerces_to_inherit(self, caplog):
+        """A typo'd per-surface override degrades to inherit, not to a raw value."""
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="EvoScientist.config.settings"):
+            config = EvoScientistConfig(
+                gateway_backend="langgraph_server",
+                gateway_backend_serve="langgraph-server",  # hyphen typo
+            )
+        assert config.gateway_backend_serve == "inherit"
+        assert "Invalid gateway_backend_serve" in caplog.text
+        # Inherit means the (valid) global still applies.
+        assert (
+            resolve_gateway_backend(config, GatewaySurface.SERVE) == "langgraph_server"
+        )
+
     def test_ui_backend_legacy_aliases_and_case_fold(self):
         """Legacy ``ui_backend`` spellings survive Literal normalization.
 
@@ -304,6 +384,26 @@ class TestConfigPaths:
 
 
 class TestLoadSaveReset:
+    def test_blank_yaml_values_fall_back_to_defaults(self, temp_config_dir):
+        """A hand-edited ``key:`` loads as None; it must not reach the config."""
+        from EvoScientist.config import get_config_path
+
+        path = get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "provider: minimax\n"
+            "minimax_base_url:\n"
+            "mimo_token_plan_base_url:\n"
+            "langgraph_dev_port:\n"
+        )
+
+        config = load_config()
+
+        assert config.provider == "minimax"
+        assert config.minimax_base_url == ""
+        assert config.mimo_token_plan_base_url == ""
+        assert config.langgraph_dev_port == EvoScientistConfig().langgraph_dev_port
+
     def test_load_returns_defaults_when_no_file(self, temp_config_dir, clean_env):
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()
@@ -589,6 +689,12 @@ class TestPriorityChain:
             "EVOSCIENTIST_DEFAULT_MODE",
             "EVOSCIENTIST_WORKSPACE_DIR",
             "EVOSCIENTIST_UI_BACKEND",
+            "EVOSCIENTIST_GATEWAY_BACKEND",
+            "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+            "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+            "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+            "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+            "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
         ]:
             monkeypatch.delenv(key, raising=False)
         config = get_effective_config()
@@ -656,6 +762,19 @@ class TestPriorityChain:
         monkeypatch.setenv("EVOSCIENTIST_GATEWAY_BACKEND", "langgraph-server")
         config = get_effective_config()
         assert config.gateway_backend == "local"
+
+    def test_env_gateway_backend_per_surface_override(
+        self, temp_config_dir, monkeypatch
+    ):
+        """Each per-surface backend has its own env var, resolving independently."""
+        monkeypatch.setenv("EVOSCIENTIST_GATEWAY_BACKEND_SERVE", "langgraph_server")
+        config = get_effective_config()
+        assert config.gateway_backend_serve == "langgraph_server"
+        assert config.gateway_backend_tui == "local"  # CLI/TUI default
+        assert (
+            resolve_gateway_backend(config, GatewaySurface.SERVE) == "langgraph_server"
+        )
+        assert resolve_gateway_backend(config, GatewaySurface.TUI) == "local"
 
     def test_env_log_level_override(self, temp_config_dir, monkeypatch):
         """Log level can be selected via environment variable."""
@@ -1102,6 +1221,96 @@ class TestDotenvIsolation:
         get_effective_config()
 
         assert "MINIMAX_BASE_URL" not in os.environ
+
+    def test_env_example_template_parses_to_blank_values(self):
+        """Inline comments would be parsed as values ("KEY=  # note" -> "# note")."""
+        from dotenv import dotenv_values
+
+        template = Path(__file__).resolve().parents[1] / ".env.example"
+        values = dotenv_values(template)
+
+        assert values
+        assert {k: v for k, v in values.items() if v} == {}
+
+    def test_copied_template_does_not_shadow_config_keys(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Copying the template and filling one key must leave config-file keys intact."""
+        template = Path(__file__).resolve().parents[1] / ".env.example"
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            template.read_text().replace(
+                "ANTHROPIC_API_KEY=\n", "ANTHROPIC_API_KEY=sk-ant-filled\n"
+            )
+        )
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        from dotenv import dotenv_values
+
+        # setenv (unlike delenv on an absent key) registers a restore, so the
+        # merge's os.environ writes are undone after the test.
+        for key in dotenv_values(env_file):
+            monkeypatch.setenv(key, "")
+        save_config(EvoScientistConfig(openai_api_key="sk-from-config"))
+
+        config = get_effective_config()
+
+        assert config.anthropic_api_key == "sk-ant-filled"
+        assert config.openai_api_key == "sk-from-config"
+        assert os.environ.get("MINIMAX_BASE_URL", "") == ""
+
+    def test_dotenv_does_not_clobber_oauth_routing(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """A workspace ``.env`` credential must not undo ccproxy OAuth routing.
+
+        ``setup_codex_env`` marks the route with a placeholder key; every later
+        ``get_effective_config`` call re-merges ``.env``, so without the guard
+        the key and base URL flip back mid-session and Codex headers vanish.
+        """
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "OPENAI_API_KEY=sk-real\nOPENAI_BASE_URL=https://api.openai.com/v1\n"
+        )
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+
+        get_effective_config()
+
+        assert os.environ["OPENAI_API_KEY"] == "ccproxy-oauth"
+        assert os.environ["OPENAI_BASE_URL"] == "http://127.0.0.1:8000/codex/v1"
+
+    def test_dotenv_guard_matches_lowercase_keys(self, tmp_path, monkeypatch):
+        """Windows env keys are case-insensitive, so a lowercase ``.env`` key
+        would reach the same variable; the guard must not depend on case."""
+        from EvoScientist.config.settings import _oauth_routed
+
+        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+
+        assert _oauth_routed("openai_api_key")
+        assert _oauth_routed("openai_base_url")
+
+    def test_dotenv_credentials_still_merge_without_oauth(
+        self, temp_config_dir, tmp_path, monkeypatch
+    ):
+        """Without the placeholder, ``.env`` credentials keep winning as before."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("OPENAI_API_KEY=sk-from-dotenv\n")
+        monkeypatch.setattr(
+            "EvoScientist.config.settings.find_dotenv",
+            lambda *args, **kwargs: str(env_file),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-shell")
+
+        get_effective_config()
+
+        assert os.environ["OPENAI_API_KEY"] == "sk-from-dotenv"
 
     def test_parent_env_wins_over_dotenv_for_mapped_keys(
         self, temp_config_dir, tmp_path, monkeypatch

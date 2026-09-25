@@ -63,11 +63,11 @@ _OPENROUTER_GRADER_STRATEGY: dict[str, type[ProviderStrategy] | type[ToolStrateg
 _SCHEDULER_GRADER_MAX_CALLS = 12
 
 
-# OpenRouter ids for which neither strategy yields a verdict (probed 2026-09-04):
-# the route rejects forced ``tool_choice`` (reasoning on or off) and JSON mode
-# drops required fields. Exact ids, not families: ``anthropic/claude-fable-5``
-# and the native ``claude-fable-5-1`` grade fine.
-_OPENROUTER_UNGRADABLE_IDS = ("anthropic/claude-fable-5.1",)
+# OpenRouter ids for which neither strategy yields a verdict (re-probed 2026-09-22):
+# the model rejects forced ``tool_choice`` and JSON mode rejects the grader
+# schema's ``oneOf``. Exact ids, not families: ``anthropic/claude-fable-5`` and
+# the native ``claude-fable-5-1`` / ``claude-opus-5-5`` grade fine.
+_OPENROUTER_UNGRADABLE_IDS = ("anthropic/claude-fable-5.1", "anthropic/claude-opus-5.5")
 
 
 def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
@@ -80,7 +80,7 @@ def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
         logger.warning(
             "scheduler rubric: grader model %s via OpenRouter cannot return "
             "structured verdicts (this route rejects forced tool_choice and its "
-            "JSON mode drops required fields); rubric runs will end in "
+            "JSON mode rejects the grader schema); rubric runs will end in "
             "grader_error. Use the native anthropic provider for this model, or "
             "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku "
             "and Gemini all grade through OpenRouter).",
@@ -289,22 +289,33 @@ def build_async_subagent_graph(name: str) -> Any:
     #
     # Memory middleware is included so async sub-agents get the same profile
     # context and `/memories/profile/...` file guidance as the main agent.
-    subagents = []
-    _ensure_general_purpose_subagent(subagents)
-    _inject_subagent_middleware(subagents)
-
-    middleware = _get_default_middleware(
-        for_async_subagent=True,
-        memory_source_agent=name,
-    )
-
     # Scheduler is an unattended timer task → use the cheaper auxiliary model.
+    # Pass that same model as ``chat_model`` below: summarization's summary
+    # model is the construction model, and deepagents' stock instance used
+    # the graph's model (the auxiliary one). Omitting ``chat_model`` would
+    # size and run summaries on the main model instead (#466 review).
     model = (
         _ensure_auxiliary_chat_model() if name == "scheduler" else _ensure_chat_model()
     )
 
     guarded = name in _GUARDED_ASYNC_SUBAGENTS
     backend = _get_default_backend(guard_dangerous=guarded, refuse_delete=guarded)
+
+    subagents = []
+    _ensure_general_purpose_subagent(subagents)
+    _inject_subagent_middleware(subagents, chat_model=model, backend=backend)
+
+    # ``backend=`` matters: without it the per-run SummarizationMiddleware
+    # subclass is not appended and the stock frozen-window built-in survives
+    # in these graphs even though they take ``configurable.model`` overrides
+    # (#466) — the replacement must also offload history to this backend.
+    middleware = _get_default_middleware(
+        for_async_subagent=True,
+        memory_source_agent=name,
+        backend=backend,
+        chat_model=model,
+    )
+
     if name == "scheduler":
         middleware = [
             *middleware,

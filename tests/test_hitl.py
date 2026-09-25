@@ -1118,7 +1118,11 @@ class TestAsyncSubagentGuard:
             patch.object(ev, "_load_mcp_tools_cached", return_value={}),
             patch.object(ev, "_get_default_middleware", return_value=[]),
             patch.object(ev, "_ensure_general_purpose_subagent", lambda subs: None),
-            patch.object(ev, "_inject_subagent_middleware", lambda subs: None),
+            patch.object(
+                ev,
+                "_inject_subagent_middleware",
+                lambda subs, **_kwargs: None,
+            ),
             patch.object(ev, "_ensure_chat_model", return_value=MagicMock()),
             patch.object(ev, "_ensure_auxiliary_chat_model", return_value=MagicMock()),
             patch("deepagents.create_deep_agent", return_value=MagicMock()),

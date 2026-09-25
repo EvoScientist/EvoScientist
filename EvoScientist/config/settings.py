@@ -124,6 +124,21 @@ def get_config_path() -> Path:
     return get_config_dir() / "config.yaml"
 
 
+class GatewaySurface(StrEnum):
+    """A production surface that selects a gateway backend.
+
+    Each member maps to a per-surface ``gateway_backend_*`` config field; see
+    :func:`resolve_gateway_backend`. Only one surface runs per process, so a
+    surface resolves its backend once at startup and threads it explicitly.
+    """
+
+    SERVE = "serve"
+    SINGLE_SHOT = "single_shot"
+    INTERACTIVE = "interactive"
+    TUI = "tui"
+    STANDALONE = "standalone"
+
+
 # =============================================================================
 # Configuration dataclass
 # =============================================================================
@@ -173,6 +188,9 @@ class EvoScientistConfig:
     atlascloud_api_key: str = ""
     requesty_api_key: str = ""
     novita_api_key: str = ""
+    mimo_api_key: str = ""
+    mimo_token_plan_api_key: str = ""
+    mimo_token_plan_base_url: str = ""
     deepseek_api_key: str = ""
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
@@ -278,6 +296,28 @@ class EvoScientistConfig:
     # sessions) until a surface actually cuts over to the server gateway -
     # skipping that init lands with the surface cutover, not here.
     gateway_backend: Literal["local", "langgraph_server"] = "local"
+
+    # Per-surface overrides of ``gateway_backend``. Each production surface can
+    # pick its own backend; ``"inherit"`` defers to the global ``gateway_backend``
+    # above. The fixed-workspace surfaces (serve, single-shot, standalone) default
+    # to ``inherit``, so the global flag moves them. The interactive CLI and TUI
+    # default to ``local`` instead: the server path is still lossy there (the
+    # per-session workspace is not applied server-side, #413, and per-run config
+    # is dropped on resume, #454), so a global ``langgraph_server`` must not move
+    # them - reaching the server backend on those surfaces takes an explicit
+    # ``langgraph_server`` here. Resolve with :func:`resolve_gateway_backend`;
+    # never read these fields directly for a routing decision.
+    gateway_backend_serve: Literal["inherit", "local", "langgraph_server"] = "inherit"
+    gateway_backend_single_shot: Literal["inherit", "local", "langgraph_server"] = (
+        "inherit"
+    )
+    gateway_backend_interactive: Literal["inherit", "local", "langgraph_server"] = (
+        "local"
+    )
+    gateway_backend_tui: Literal["inherit", "local", "langgraph_server"] = "local"
+    gateway_backend_standalone: Literal["inherit", "local", "langgraph_server"] = (
+        "inherit"
+    )
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -633,9 +673,12 @@ def load_config() -> EvoScientistConfig:
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
-        # Filter to only valid fields
+        # Filter to only valid fields; a blank ``key:`` loads as None, which no
+        # field accepts, so it falls back to the default.
         valid_fields = {f.name for f in fields(EvoScientistConfig)}
-        filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+        filtered_data = {
+            k: v for k, v in data.items() if k in valid_fields and v is not None
+        }
 
         return EvoScientistConfig(**filtered_data)
     except Exception:
@@ -806,6 +849,33 @@ def _normalize_literal_fields(config: EvoScientistConfig) -> None:
         setattr(config, field.name, value)
 
 
+_GATEWAY_SURFACE_FIELDS: dict[GatewaySurface, str] = {
+    GatewaySurface.SERVE: "gateway_backend_serve",
+    GatewaySurface.SINGLE_SHOT: "gateway_backend_single_shot",
+    GatewaySurface.INTERACTIVE: "gateway_backend_interactive",
+    GatewaySurface.TUI: "gateway_backend_tui",
+    GatewaySurface.STANDALONE: "gateway_backend_standalone",
+}
+
+
+def resolve_gateway_backend(
+    config: Any,
+    surface: GatewaySurface,
+) -> Literal["local", "langgraph_server"]:
+    """Resolve the effective gateway backend for one surface.
+
+    Returns the surface's ``gateway_backend_*`` override when it is not
+    ``"inherit"``, else the global ``gateway_backend``. This is the single
+    place routing decisions read the flag from; callers thread the returned
+    value down (to the runtime factory and the dev-server spawn), so the
+    factory and manager never re-read the global and get a different answer.
+    """
+    override = getattr(config, _GATEWAY_SURFACE_FIELDS[surface], "inherit")
+    if override in ("local", "langgraph_server"):
+        return override
+    return getattr(config, "gateway_backend", "local")
+
+
 def get_config_value(key: str) -> Any:
     """Get a single configuration value.
 
@@ -891,6 +961,9 @@ _ENV_MAPPINGS = {
     "atlascloud_api_key": "ATLASCLOUD_API_KEY",
     "requesty_api_key": "REQUESTY_API_KEY",
     "novita_api_key": "NOVITA_API_KEY",
+    "mimo_api_key": "MIMO_API_KEY",
+    "mimo_token_plan_api_key": "MIMO_TOKEN_PLAN_API_KEY",
+    "mimo_token_plan_base_url": "MIMO_TOKEN_PLAN_BASE_URL",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
@@ -908,6 +981,11 @@ _ENV_MAPPINGS = {
     "ui_backend": "EVOSCIENTIST_UI_BACKEND",
     "log_level": "EVOSCIENTIST_LOG_LEVEL",
     "gateway_backend": "EVOSCIENTIST_GATEWAY_BACKEND",
+    "gateway_backend_serve": "EVOSCIENTIST_GATEWAY_BACKEND_SERVE",
+    "gateway_backend_single_shot": "EVOSCIENTIST_GATEWAY_BACKEND_SINGLE_SHOT",
+    "gateway_backend_interactive": "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
+    "gateway_backend_tui": "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
+    "gateway_backend_standalone": "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
@@ -947,6 +1025,21 @@ _ENV_MAPPINGS = {
     "memory_skill_synthesis_time": "EVOSCIENTIST_MEMORY_SKILL_SYNTHESIS_TIME",
     "memory_observation_cache_max_files": "EVOSCIENTIST_MAX_CACHED_FILES",
 }
+
+
+# Placeholder ``ccproxy_manager.setup_*_env`` writes for a provider's API key
+# when routing it through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
+_OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
+
+
+def _oauth_routed(env_key: str) -> bool:
+    """Return True when ``env_key`` currently carries ccproxy OAuth routing."""
+    env_key = env_key.upper()  # Windows env keys are case-insensitive
+    if env_key.endswith("_BASE_URL"):
+        env_key = env_key[: -len("_BASE_URL")] + "_API_KEY"
+    elif not env_key.endswith("_API_KEY"):
+        return False
+    return os.environ.get(env_key) == _OAUTH_PLACEHOLDER_KEY
 
 
 def get_effective_config(
@@ -1015,6 +1108,8 @@ def get_effective_config(
         if env_key.startswith("EVOSCIENTIST_"):
             if not os.environ.get(env_key):
                 os.environ[env_key] = env_value
+        elif _oauth_routed(env_key):
+            continue  # ccproxy OAuth routing must survive later re-merges
         else:
             os.environ[env_key] = env_value
 
@@ -1079,6 +1174,14 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         os.environ["REQUESTY_API_KEY"] = config.requesty_api_key
     if config.novita_api_key and not os.environ.get("NOVITA_API_KEY"):
         os.environ["NOVITA_API_KEY"] = config.novita_api_key
+    if config.mimo_api_key and not os.environ.get("MIMO_API_KEY"):
+        os.environ["MIMO_API_KEY"] = config.mimo_api_key
+    if config.mimo_token_plan_api_key and not os.environ.get("MIMO_TOKEN_PLAN_API_KEY"):
+        os.environ["MIMO_TOKEN_PLAN_API_KEY"] = config.mimo_token_plan_api_key
+    if config.mimo_token_plan_base_url and not os.environ.get(
+        "MIMO_TOKEN_PLAN_BASE_URL"
+    ):
+        os.environ["MIMO_TOKEN_PLAN_BASE_URL"] = config.mimo_token_plan_base_url
     if config.deepseek_api_key and not os.environ.get("DEEPSEEK_API_KEY"):
         os.environ["DEEPSEEK_API_KEY"] = config.deepseek_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):

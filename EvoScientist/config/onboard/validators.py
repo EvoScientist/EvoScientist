@@ -662,6 +662,38 @@ def validate_kimi_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_xiaomi_key(
+    api_key: str,
+    base_url: str = "https://api.xiaomimimo.com/anthropic",
+) -> tuple[bool, str]:
+    """Validate a Xiaomi MiMo API key by listing models.
+
+    ``/v1/models`` requires auth (401 on a bad key), so no tokens are spent.
+    ``base_url`` is the Anthropic-compatible endpoint (pay-as-you-go or a
+    Token Plan region); its sibling ``/v1`` root serves the model list.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import openai
+
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url.rstrip("/").removesuffix("/anthropic") + "/v1",
+        )
+        client.models.list()
+        return True, "Valid"
+    except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        return False, f"Error: {e}"
+
+
 def validate_tavily_key(api_key: str) -> tuple[bool, str]:
     """Validate a Tavily API key by making a test request.
 

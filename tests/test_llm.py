@@ -1,7 +1,7 @@
 """Tests for EvoScientist LLM module."""
 
 import warnings
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -50,6 +50,8 @@ class TestModelsRegistry:
         assert "kimi-coding" in providers
         assert "atlascloud" in providers
         assert "novita" in providers
+        assert "xiaomi" in providers
+        assert "xiaomi-token-plan" in providers
 
     def test_entries_are_valid_tuples(self):
         """Test that _MODEL_ENTRIES contains valid (name, model_id, provider) tuples."""
@@ -75,6 +77,8 @@ class TestModelsRegistry:
             "kimi-coding",
             "atlascloud",
             "novita",
+            "xiaomi",
+            "xiaomi-token-plan",
         }
         for entry in _MODEL_ENTRIES:
             assert len(entry) == 3, f"Entry {entry} doesn't have 3 elements"
@@ -1365,6 +1369,97 @@ class TestThirdPartyRouting:
         assert call_kwargs["api_key"] == "mm-key-123"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_xiaomi_routes_through_anthropic(self, mock_init, monkeypatch):
+        """Xiaomi MiMo routes through Anthropic with thinking and a 131072 output cap."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MIMO_API_KEY", "sk-mimo-123")
+
+        get_chat_model("mimo-v2.6-pro", provider="xiaomi")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "mimo-v2.6-pro"
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert call_kwargs["base_url"] == "https://api.xiaomimimo.com/anthropic"
+        assert call_kwargs["api_key"] == "sk-mimo-123"
+        assert call_kwargs["max_tokens"] == 131072
+        assert "thinking" in call_kwargs
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_xiaomi_token_plan_routes_to_region(self, mock_init, monkeypatch):
+        """Token Plan uses its own key, defaults to the cn region, and honours the env override."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("MIMO_TOKEN_PLAN_API_KEY", "tp-mimo-123")
+        monkeypatch.delenv("MIMO_TOKEN_PLAN_BASE_URL", raising=False)
+
+        get_chat_model("mimo-v2.6-pro", provider="xiaomi-token-plan")
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model_provider"] == "anthropic"
+        assert (
+            call_kwargs["base_url"] == "https://token-plan-cn.xiaomimimo.com/anthropic"
+        )
+        assert call_kwargs["api_key"] == "tp-mimo-123"
+        assert call_kwargs["max_tokens"] == 131072
+        assert "thinking" in call_kwargs
+
+        monkeypatch.setenv(
+            "MIMO_TOKEN_PLAN_BASE_URL",
+            "https://token-plan-sgp.xiaomimimo.com/anthropic/",
+        )
+        get_chat_model("mimo-v2.6-pro", provider="xiaomi-token-plan")
+        assert (
+            mock_init.call_args[1]["base_url"]
+            == "https://token-plan-sgp.xiaomimimo.com/anthropic"
+        )
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "env", "default"),
+        [
+            (
+                "xiaomi-token-plan",
+                "mimo-v2.6-pro",
+                "MIMO_TOKEN_PLAN_BASE_URL",
+                "https://token-plan-cn.xiaomimimo.com/anthropic",
+            ),
+            (
+                "minimax",
+                "MiniMax-M3",
+                "MINIMAX_BASE_URL",
+                "https://api.minimaxi.com/anthropic",
+            ),
+        ],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_blank_base_url_env_falls_back_to_default(
+        self, mock_init, monkeypatch, provider, model, env, default
+    ):
+        """A blank override must not drop base_url and route the key to api.anthropic.com."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv(env, "  ")
+
+        get_chat_model(model, provider=provider)
+
+        assert mock_init.call_args[1]["base_url"] == default
+
+    def test_mimo_short_name_defaults_to_pay_as_you_go(self):
+        assert MODELS["mimo-v2.6-pro"] == ("mimo-v2.6-pro", "xiaomi")
+        assert MODELS["mimo-v2.6-flash"] == ("mimo-v2.6-flash", "xiaomi")
+
+    def test_xiaomi_host_maps_to_provider(self):
+        """Provider error envelopes should identify Xiaomi MiMo by host."""
+        from EvoScientist.llm.errors import _lookup_host_or_compat
+
+        assert (
+            _lookup_host_or_compat("https://api.xiaomimimo.com/anthropic", "anthropic")
+            == "xiaomi"
+        )
+        assert (
+            _lookup_host_or_compat(
+                "https://token-plan-ams.xiaomimimo.com/anthropic", "anthropic"
+            )
+            == "xiaomi"
+        )
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_base_url_env_override(self, mock_init, monkeypatch):
         """MINIMAX_BASE_URL env var should override the default base URL."""
         mock_init.return_value = "mock_model"
@@ -2614,6 +2709,8 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
             provider="deepseek",
             http_client=client,
         )
+        # Pin the profile so the test does not track upstream profile data.
+        model.profile = {**(model.profile or {}), "image_inputs": False}
         model.invoke(
             [
                 HumanMessage("inspect the file"),
@@ -2730,6 +2827,28 @@ class TestPatchOpenAICaptureReasoningContent:
             AIMessageChunk,
         )
         assert chunk.additional_kwargs.get("reasoning_content") == "thinking"
+
+    def test_capture_reasoning_alias_from_non_streaming_response(self):
+        """A `reasoning` string (vLLM-style) is captured under reasoning_content."""
+        from langchain_openai.chat_models.base import _convert_dict_to_message
+
+        msg = _convert_dict_to_message(
+            {"role": "assistant", "content": "No.", "reasoning": "91 = 7 x 13"}
+        )
+        assert msg.additional_kwargs.get("reasoning_content") == "91 = 7 x 13"
+
+    def test_capture_reasoning_alias_from_streaming_chunk(self):
+        """A `reasoning` delta is captured onto the chunk's additional_kwargs."""
+        from langchain_core.messages import AIMessageChunk
+        from langchain_openai.chat_models.base import (
+            _convert_delta_to_message_chunk,
+        )
+
+        chunk = _convert_delta_to_message_chunk(
+            {"role": "assistant", "content": "", "reasoning": "91 = "},
+            AIMessageChunk,
+        )
+        assert chunk.additional_kwargs.get("reasoning_content") == "91 = "
 
     def test_capture_does_not_affect_other_fields(self):
         """Existing tool_calls / function_call extraction unaffected."""
@@ -3176,9 +3295,18 @@ class TestAutoConfig:
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert call_kwargs["effort"] == "max"
 
-    @pytest.mark.parametrize("model", ["claude-opus-5", "claude-sonnet-5"])
+    @pytest.mark.parametrize(
+        ("model", "max_tokens"),
+        [
+            ("claude-opus-5", None),
+            ("claude-opus-5-5", 128000),
+            ("claude-sonnet-5", None),
+        ],
+    )
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_anthropic_5_series_adaptive_thinking(self, mock_init, model, monkeypatch):
+    def test_anthropic_5_series_adaptive_thinking(
+        self, mock_init, model, max_tokens, monkeypatch
+    ):
         """Anthropic 5-series models get adaptive thinking (budget_tokens would 400)."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
@@ -3188,6 +3316,26 @@ class TestAutoConfig:
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert call_kwargs["effort"] == "max"
+        assert call_kwargs.get("max_tokens") == max_tokens
+
+    @pytest.mark.parametrize(
+        ("kwargs", "base_url"),
+        [({"thinking": {"type": "adaptive"}}, None), ({}, "http://localhost:8000")],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opus_5_5_max_tokens_outside_thinking_branch(
+        self, mock_init, kwargs, base_url, monkeypatch
+    ):
+        """Explicit thinking or a local proxy (ccproxy) must still get 128000."""
+        mock_init.return_value = "mock_model"
+        if base_url:
+            monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+        else:
+            monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        get_chat_model("claude-opus-5-5", provider="anthropic", **kwargs)
+
+        assert mock_init.call_args[1]["max_tokens"] == 128000
 
     @pytest.mark.parametrize("model", ["moonshotai/kimi-k3", "kimi-k3"])
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -3395,7 +3543,7 @@ class TestAutoConfig:
 
     @patch(
         "EvoScientist.llm.models._installed_codex_client_version",
-        return_value="0.144.1",
+        return_value="0.999.0",
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openai_ccproxy_codex_client_headers(
@@ -3411,8 +3559,8 @@ class TestAutoConfig:
 
         headers = mock_init.call_args[1]["default_headers"]
         assert headers["originator"] == "codex_cli_rs"
-        assert headers["version"] == "0.144.1"
-        assert headers["User-Agent"].startswith("codex_cli_rs/0.144.1")
+        assert headers["version"] == "0.999.0"
+        assert headers["User-Agent"].startswith("codex_cli_rs/0.999.0")
         mock_installed_version.assert_called_once_with()
         assert mock_init.call_args[1]["reasoning"]["effort"] == "xhigh"
         assert mock_init.call_args[1]["reasoning"]["context"] == "all_turns"
@@ -3432,26 +3580,54 @@ class TestAutoConfig:
         assert headers["User-Agent"].startswith("codex_cli_rs/9.9.9")
 
     @patch("EvoScientist.llm.models.subprocess.run")
-    def test_installed_codex_client_version(self, mock_run):
+    def test_installed_codex_client_version(self, mock_run, monkeypatch):
         """The advertised version follows the installed Codex CLI."""
-        from EvoScientist.llm.models import _installed_codex_client_version
+        from EvoScientist.llm import models
 
+        monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = "codex-cli 0.144.1\n"
         mock_run.return_value.stderr = ""
-        _installed_codex_client_version.cache_clear()
-        try:
-            assert _installed_codex_client_version() == "0.144.1"
-            assert _installed_codex_client_version() == "0.144.1"
-        finally:
-            _installed_codex_client_version.cache_clear()
+
+        assert models._installed_codex_client_version() == "0.144.1"
+        assert models._installed_codex_client_version() == "0.144.1"
         mock_run.assert_called_once_with(
             ["codex", "--version"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=models._CODEX_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
+
+    @patch("EvoScientist.llm.models.subprocess.run")
+    def test_missing_codex_binary_is_not_reprobed(self, mock_run, monkeypatch):
+        """No Codex CLI installed is permanent for the process: probe once."""
+        from EvoScientist.llm import models
+
+        monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
+        mock_run.side_effect = FileNotFoundError
+
+        assert models._installed_codex_client_version() == ""
+        assert models._installed_codex_client_version() == ""
+        assert mock_run.call_count == 1
+
+    @patch("EvoScientist.llm.models.subprocess.run")
+    def test_failed_codex_version_probe_is_retried(self, mock_run, monkeypatch):
+        """A transient probe failure (e.g. mid-upgrade) must not stick for the process."""
+        import subprocess
+
+        from EvoScientist.llm import models
+
+        monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
+        ok = MagicMock(returncode=0, stdout="codex-cli 0.156.1\n", stderr="")
+        mock_run.side_effect = [subprocess.TimeoutExpired(["codex"], 1), ok]
+
+        assert models._installed_codex_client_version() == ""
+        assert models._installed_codex_client_version() == "0.156.1"
+        assert mock_run.call_count == 2
 
     @patch(
         "EvoScientist.llm.models._installed_codex_client_version",
@@ -3787,3 +3963,95 @@ class TestValidateRequestyKey:
         assert is_valid is False
         assert "inconclusive" in msg.lower()
         assert str(status) in msg
+
+
+class TestResolveProvider:
+    """Short-name resolution keeps the caller's provider when it serves the name."""
+
+    @pytest.fixture(autouse=True)
+    def _registry(self, monkeypatch):
+        from EvoScientist.llm import registry
+
+        entries = [
+            ("m", "m-plan", "vendor-plan"),
+            ("m", "m", "vendor"),
+            ("solo", "solo", "vendor"),
+        ]
+        monkeypatch.setattr(registry, "_MODEL_ENTRIES", entries)
+        monkeypatch.setattr(registry, "MODELS", {n: (mid, p) for n, mid, p in entries})
+
+    def test_keeps_preferred_provider_that_serves_the_name(self):
+        from EvoScientist.llm.registry import resolve_provider
+
+        assert resolve_provider("m", "vendor-plan") == "vendor-plan"
+
+    def test_falls_back_to_last_entry_otherwise(self):
+        from EvoScientist.llm.registry import resolve_provider
+
+        assert resolve_provider("m") == "vendor"
+        assert resolve_provider("solo", "vendor-plan") == "vendor"
+
+    def test_unknown_name(self):
+        from EvoScientist.llm.registry import resolve_provider
+
+        assert resolve_provider("nope", "vendor") is None
+
+
+@pytest.mark.parametrize(
+    ("region_url", "host"),
+    [
+        (None, "token-plan-cn.xiaomimimo.com"),
+        (
+            "https://token-plan-sgp.xiaomimimo.com/anthropic",
+            "token-plan-sgp.xiaomimimo.com",
+        ),
+    ],
+)
+def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
+    """Wire-level: the request lands on the Token Plan host with the tp- key."""
+    import json
+
+    import anthropic
+    from langchain_core.messages import HumanMessage
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("MIMO_TOKEN_PLAN_API_KEY", "tp-test")
+    if region_url:
+        monkeypatch.setenv("MIMO_TOKEN_PLAN_BASE_URL", region_url)
+    else:
+        monkeypatch.delenv("MIMO_TOKEN_PLAN_BASE_URL", raising=False)
+    model = get_chat_model("mimo-v2.6-pro", provider="xiaomi-token-plan")
+    captured = {}
+
+    def respond(request):
+        captured["url"] = str(request.url)
+        captured["api_key"] = request.headers.get("x-api-key")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "mimo-v2.6-pro",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # Rebuild the client from the model's own settings so routing is what's tested.
+    model._client = anthropic.Anthropic(
+        api_key=model.anthropic_api_key.get_secret_value(),
+        base_url=model.anthropic_api_url,
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    model.invoke([HumanMessage("hi")])
+
+    assert captured["url"] == f"https://{host}/anthropic/v1/messages"
+    assert captured["api_key"] == "tp-test"
+    assert captured["body"]["model"] == "mimo-v2.6-pro"
+    assert captured["body"]["max_tokens"] == 131072
+    assert captured["body"]["thinking"]["type"] == "enabled"
