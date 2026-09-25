@@ -3585,6 +3585,7 @@ class TestAutoConfig:
         from EvoScientist.llm import models
 
         monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
         mock_run.return_value.returncode = 0
         mock_run.return_value.stdout = "codex-cli 0.144.1\n"
         mock_run.return_value.stderr = ""
