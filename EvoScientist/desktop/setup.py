@@ -120,6 +120,11 @@ def render_setup_html(
     submit button calls ``window.pywebview.api.submit(...)`` and shows any
     validation error inline without a full reload.
     """
+    import json
+
+    from ..llm import get_models_for_provider
+
+    shown = [v for v, _ in PROVIDERS]
     options = []
     for value, text in PROVIDERS:
         selected = " selected" if value == provider else ""
@@ -127,6 +132,25 @@ def render_setup_html(
             f'<option value="{html.escape(value)}"{selected}>'
             f"{html.escape(text)}</option>"
         )
+    # Keep a configured provider that isn't one of the curated six visible AND
+    # selected, so the form reflects reality instead of silently reverting to the
+    # first option (Anthropic) while ``config.provider`` still says otherwise.
+    if provider and provider not in shown:
+        options.append(
+            f'<option value="{html.escape(provider)}" selected>'
+            f"{html.escape(provider)}</option>"
+        )
+        shown.append(provider)
+    # Default model per provider (first registry entry), so changing the provider
+    # swaps the model to a valid one instead of leaving a stale id that would
+    # break the first request — mirrors the CLI wizard's provider->model cascade.
+    # The current provider keeps the prefilled model as its default.
+    model_defaults: dict[str, str] = {}
+    for v in shown:
+        entries = get_models_for_provider(v)
+        model_defaults[v] = entries[0][0] if entries else ""
+    if provider:
+        model_defaults[provider] = model or model_defaults.get(provider, "")
     error_block = f'<div class="error">{html.escape(error)}</div>' if error else ""
     return (
         f"<!doctype html><meta charset=utf-8><style>{_STYLE}</style>"
@@ -134,7 +158,7 @@ def render_setup_html(
         f"<h1>Welcome to EvoScientist</h1>"
         f"<p class=sub>Set up your model provider to get started.</p>"
         f"<label for=provider>Model provider</label>"
-        f"<select id=provider>{''.join(options)}</select>"
+        f"<select id=provider onchange=onProviderChange()>{''.join(options)}</select>"
         f"<label for=model>Model</label>"
         f'<input id=model type=text value="{html.escape(model)}" '
         f"autocomplete=off spellcheck=false>"
@@ -148,6 +172,10 @@ def render_setup_html(
         f"{error_block}"
         f"</div>"
         "<script>"
+        f"var MODEL_DEFAULTS={json.dumps(model_defaults)};"
+        "function onProviderChange(){"
+        "var d=MODEL_DEFAULTS[document.getElementById('provider').value];"
+        "if(d!==undefined)document.getElementById('model').value=d;}"
         "async function submitSetup(){"
         "var b=document.getElementById('save');b.disabled=true;b.textContent='Starting…';"
         "var r=await window.pywebview.api.submit({"

@@ -917,6 +917,34 @@ def test_render_setup_html_prefills_escapes_and_hides_key():
     assert "pywebview.api.submit" in out  # wired to the js_api
 
 
+def test_render_setup_html_unknown_provider_stays_selected(monkeypatch):
+    # A configured provider outside the curated six must be shown+selected, not
+    # silently reverted to Anthropic (the first <option>).
+    out = dsetup.render_setup_html(provider="siliconflow", model="glm-4")
+    assert 'value="siliconflow" selected' in out
+    # None of the curated options is selected in its place.
+    assert 'value="anthropic" selected' not in out
+
+
+def test_render_setup_html_provider_change_cascades_model(monkeypatch):
+    import json
+    import re
+
+    from EvoScientist.llm import get_models_for_provider
+
+    out = dsetup.render_setup_html(provider="anthropic", model="claude-custom")
+    assert "onProviderChange()" in out  # select wired to the cascade
+    m = re.search(r"var MODEL_DEFAULTS=(\{.*?\});", out)
+    assert m, "MODEL_DEFAULTS map must be embedded"
+    defaults = json.loads(m.group(1))
+    # Current provider keeps the prefilled model as its default...
+    assert defaults["anthropic"] == "claude-custom"
+    # ...and another provider maps to its own registry default (first entry).
+    entries = get_models_for_provider("openai")
+    if entries:
+        assert defaults["openai"] == entries[0][0]
+
+
 # --------------------------------------------------------------------------- #
 # Bundled-python env for the agent's shell (EvoScientist._agent_shell_env)
 # --------------------------------------------------------------------------- #
