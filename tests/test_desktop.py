@@ -164,6 +164,37 @@ def test_switch_workspace_restarts_with_new_launcher():
     assert win.pending == []  # idle from the start -> no waiting banner
 
 
+def test_switch_workspace_reused_backend_skips_wait(monkeypatch):
+    """A reused (not app-owned) backend's runs survive the switch, so the switch
+    must not wait on it — mirrors the close path's backend_started guard."""
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    monkeypatch.setattr(dshutdown, "running_bg_process_names", lambda url, **k: [])
+    win = _FakeWindow()
+    old = _FakeLauncher(backend_started=False)  # reused, not ours
+    new = _FakeLauncher(webui_url="http://127.0.0.1:4903")
+    probed = {"n": 0}
+
+    def probe(url):
+        probed["n"] += 1
+        return "active"  # would block forever if it were consulted
+
+    ctl = DesktopController(
+        old,
+        win,
+        launcher_factory=lambda ws: new,
+        active_probe=probe,
+        sleep=lambda s: None,
+    )
+    ctl.switch_workspace("/ws/new")
+
+    assert probed["n"] == 0  # never probed/waited on a backend we don't own
+    assert win.pending == []  # no waiting banner
+    assert old.stopped  # went straight to the rebuild
+    assert new.started
+    assert ctl.launcher is new
+
+
 def test_switch_workspace_waits_until_idle(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 

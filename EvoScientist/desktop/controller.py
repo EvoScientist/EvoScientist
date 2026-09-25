@@ -138,43 +138,53 @@ class DesktopController:
             watched_thread_id or "none",
         )
 
-        probe = self._active_probe or (
-            lambda u: _probe_active_state(u, watched_thread_id=watched_thread_id)
-        )
-        waiting = probe(backend_url) != "idle"
-        if waiting:
-            # Keep the WebUI visible (non-blocking banner) so the user can keep
-            # working the current turn; the switch completes once it finishes, or
-            # the user stops the running tasks and switches now via the banner.
-            names = running_bg_process_names(backend_url)
-            if names:
-                msg = (
-                    "Switching workspace once running tasks finish: "
-                    f"{', '.join(names)}. Or stop them and switch now."
-                )
-            else:
-                msg = "Switching workspace once the current task finishes…"
-            self._window.show_pending(msg)
-        idle = wait_for_backend_idle(
-            backend_url,
-            probe=probe,
-            sleep=self._sleep,
-            poll_interval=self._poll_interval,
-            should_cancel=self._should_cancel,
-            should_proceed_now=self._should_proceed_now,
-        )
-        if not idle:
-            # Cancelled — the app is shutting down. Do not relaunch a backend.
+        # A reused backend (we did not start it) is not torn down by our stop(),
+        # so its runs and background jobs survive the switch — there is nothing to
+        # wait for. Skip straight to the rebuild, mirroring ``_on_closing``'s
+        # ``backend_started`` guard so the switch and close paths agree.
+        if getattr(self._launcher, "backend_started", True):
+            probe = self._active_probe or (
+                lambda u: _probe_active_state(u, watched_thread_id=watched_thread_id)
+            )
+            waiting = probe(backend_url) != "idle"
+            if waiting:
+                # Keep the WebUI visible (non-blocking banner) so the user can keep
+                # working the current turn; the switch completes once it finishes,
+                # or the user stops the tasks and switches now via the banner.
+                names = running_bg_process_names(backend_url)
+                if names:
+                    msg = (
+                        "Switching workspace once running tasks finish: "
+                        f"{', '.join(names)}. Or stop them and switch now."
+                    )
+                else:
+                    msg = "Switching workspace once the current task finishes…"
+                self._window.show_pending(msg)
+            idle = wait_for_backend_idle(
+                backend_url,
+                probe=probe,
+                sleep=self._sleep,
+                poll_interval=self._poll_interval,
+                should_cancel=self._should_cancel,
+                should_proceed_now=self._should_proceed_now,
+            )
+            if not idle:
+                # Cancelled — the app is shutting down. Do not relaunch a backend.
+                if waiting:
+                    self._window.clear_pending()
+                logger.info("workspace switch aborted before restart (cancelled)")
+                return
+            # ``show_status`` replaces the whole page, so the banner goes with it;
+            # clearing first keeps the surface honest if the backend was idle from
+            # the start (no banner shown) or the WebUI lingers a moment.
             if waiting:
                 self._window.clear_pending()
-            logger.info("workspace switch aborted before restart (cancelled)")
-            return
+        else:
+            logger.info(
+                "workspace switch: backend was reused, not app-owned — skipping the "
+                "idle wait (its runs and background jobs survive the switch)"
+            )
 
-        # ``show_status`` replaces the whole page, so the banner goes with it;
-        # clearing first keeps the surface honest if the backend was idle from
-        # the start (no banner shown) or the WebUI lingers a moment.
-        if waiting:
-            self._window.clear_pending()
         self._window.show_status("Switching workspace…")
         self._launcher.stop()
         self._launcher = self._launcher_factory(workspace_dir)
