@@ -581,46 +581,64 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     # workspace, is full deploy-mode, and (soft) matches the current config.
     sidecar = _read_workspace_sidecar()
     ws = Path(cfg.workspace_dir).resolve()
-    if sidecar is not None:
-        # The sidecar is a single global record with no port field, so a
-        # fallback launch on another port can overwrite it. Confirm its PID
-        # actually serves THIS port before trusting its workspace — otherwise a
-        # stale record could reuse the wrong workspace, and teardown could stop
-        # the wrong server. Auto-port shells fall back to a fresh backend; the
-        # CLI gets an explicit error.
-        if not _pid_serves_port(sidecar.get("pid"), cfg.backend_port):
+    if sidecar is None:
+        # No ownership record for the server on this port. The single global
+        # sidecar is unlinked when any EvoSci server stops, so a surviving
+        # sibling on another port can be left record-less. The CLI still reuses
+        # it (backward-compat: pre-sidecar and externally-managed servers). But
+        # an auto-port shell (the desktop) can't verify the workspace/deploy-mode
+        # it needs and always wants its OWN backend, so it must not blindly reuse
+        # an unverifiable server — fall back (via sidecar_port_mismatch, an
+        # auto-port code) to starting a fresh backend on another port.
+        if cfg.auto_port:
             raise LauncherError(
                 "sidecar_port_mismatch",
                 f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
-                f"has no matching ownership record for.",
-                "Stop it with 'EvoSci server stop', or change the port with "
-                "'EvoSci config set langgraph_dev_port <port>'.",
+                f"has no ownership record for.",
+                f"Free port {cfg.backend_port} (lsof -i :{cfg.backend_port}) or "
+                f"change it with 'EvoSci config set langgraph_dev_port <port>'.",
             )
-        if Path(sidecar["workspace"]).resolve() != ws:
-            raise LauncherError(
-                "workspace_mismatch",
-                f"Port {cfg.backend_port} is already serving a langgraph dev "
-                f"for a different workspace ({sidecar['workspace']}).",
-                f"Stop that EvoSci session, or launch from that workspace "
-                f"(--workdir {sidecar['workspace']}).",
-            )
-        if sidecar.get("deploy_mode") is False:
-            raise LauncherError(
-                "stripped_backend",
-                f"Port {cfg.backend_port} is serving a stripped (CLI-mode) "
-                f"langgraph dev — the WebUI needs the full deploy-mode server "
-                f"(MCP + async sub-agents).",
-                "Stop it with 'EvoSci server stop', then re-run EvoSci.",
-            )
-        recorded_fp = sidecar.get("config_fingerprint")
-        if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
-            config
-        ):
-            warnings.append(
-                "Config changed since this server was launched — it still "
-                "serves the old settings. Apply them with 'EvoSci server "
-                "stop', then re-run EvoSci."
-            )
+        return _BackendDecision(action="reuse", warnings=warnings)
+    # A sidecar is present. It is a single global record with no port field, so a
+    # fallback launch on another port can overwrite it. Confirm its PID actually
+    # serves THIS port before trusting its workspace — otherwise a stale record
+    # could reuse the wrong workspace, and teardown could stop the wrong server.
+    # Auto-port shells fall back to a fresh backend; the CLI gets an explicit error.
+    if not _pid_serves_port(sidecar.get("pid"), cfg.backend_port):
+        raise LauncherError(
+            "sidecar_port_mismatch",
+            f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
+            f"has no matching ownership record for.",
+            f"Free port {cfg.backend_port} (lsof -i :{cfg.backend_port}) or "
+            f"change it with 'EvoSci config set langgraph_dev_port <port>'. "
+            f"'EvoSci server stop' stops EvoSci's recorded server on another "
+            f"port, not this one.",
+        )
+    if Path(sidecar["workspace"]).resolve() != ws:
+        raise LauncherError(
+            "workspace_mismatch",
+            f"Port {cfg.backend_port} is already serving a langgraph dev "
+            f"for a different workspace ({sidecar['workspace']}).",
+            f"Stop that EvoSci session, or launch from that workspace "
+            f"(--workdir {sidecar['workspace']}).",
+        )
+    if sidecar.get("deploy_mode") is False:
+        raise LauncherError(
+            "stripped_backend",
+            f"Port {cfg.backend_port} is serving a stripped (CLI-mode) "
+            f"langgraph dev — the WebUI needs the full deploy-mode server "
+            f"(MCP + async sub-agents).",
+            "Stop it with 'EvoSci server stop', then re-run EvoSci.",
+        )
+    recorded_fp = sidecar.get("config_fingerprint")
+    if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
+        config
+    ):
+        warnings.append(
+            "Config changed since this server was launched — it still "
+            "serves the old settings. Apply them with 'EvoSci server "
+            "stop', then re-run EvoSci."
+        )
     return _BackendDecision(action="reuse", warnings=warnings)
 
 

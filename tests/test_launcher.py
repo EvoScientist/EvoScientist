@@ -120,10 +120,22 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
 
 
 def test_resolve_backend_no_sidecar_reuses(monkeypatch):
-    """An older subprocess with no sidecar is reused, as before."""
+    """CLI (auto_port off): an older subprocess with no sidecar is reused, as
+    before — backward-compat for pre-sidecar / externally-managed servers."""
     _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
     decision = lm._resolve_backend(_cfg(), object())
     assert decision.action == "reuse"
+
+
+def test_resolve_backend_no_sidecar_auto_port_refuses(monkeypatch):
+    """Desktop (auto_port on): a server with no ownership record must NOT be
+    blindly reused — refuse so the caller auto-ports to a fresh own backend
+    (sidecar_port_mismatch is an auto-port fallback code)."""
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(auto_port=True), object())
+    assert ei.value.code == "sidecar_port_mismatch"
+    assert ei.value.code in lm._AUTO_PORT_FALLBACK_CODES  # desktop will auto-port
 
 
 def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
@@ -139,6 +151,9 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert ei.value.code == "sidecar_port_mismatch"
+    # The remedy must not misdirect to `EvoSci server stop` (which stops the
+    # recorded server on another port, not the one occupying this one).
+    assert "not this one" in (ei.value.detail or "")
 
 
 # --------------------------------------------------------------------------- #
