@@ -490,6 +490,33 @@ def test_poll_ready_bypasses_proxy(monkeypatch):
     )
 
 
+def test_poll_ready_treats_served_4xx_as_ready(monkeypatch):
+    # The default opener RAISES HTTPError for any non-2xx; a served 404/401 still
+    # means the Next server is up and answering -> ready, not a 90s timeout.
+    from urllib.error import HTTPError
+
+    class _Opener:
+        def open(self, *_a, **_k):
+            raise HTTPError("http://127.0.0.1:4716", 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(lm.urllib.request, "build_opener", lambda *_h: _Opener())
+    lm._poll_ready("http://127.0.0.1:4716", timeout=1)  # returns; no raise
+
+
+def test_poll_ready_keeps_waiting_on_5xx(monkeypatch):
+    # A 5xx is a real server error, not readiness -> keep polling, then time out.
+    from urllib.error import HTTPError
+
+    class _Opener:
+        def open(self, *_a, **_k):
+            raise HTTPError("http://127.0.0.1:4716", 503, "Unavailable", {}, None)
+
+    monkeypatch.setattr(lm.urllib.request, "build_opener", lambda *_h: _Opener())
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._poll_ready("http://127.0.0.1:4716", timeout=0.05, interval=0.01)
+    assert ei.value.code == "not_ready"
+
+
 def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: False)
     launcher = lm.WebUILauncher(object(), _cfg(), lm.NpxWebUIRunner())

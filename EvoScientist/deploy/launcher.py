@@ -716,6 +716,8 @@ def _poll_ready(url: str, timeout: float, interval: float = 0.5) -> None:
     # default opener honours the environment/OS proxy — and on Windows that
     # includes the system (registry/IE) proxy even with no *_PROXY env vars —
     # which routes the 127.0.0.1 request off-box so the poll never succeeds.
+    from urllib.error import HTTPError
+
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + timeout
     last_err: str | None = None
@@ -725,6 +727,15 @@ def _poll_ready(url: str, timeout: float, interval: float = 0.5) -> None:
                 if getattr(resp, "status", 200) < 500:
                     return
                 last_err = f"HTTP {resp.status}"
+        except HTTPError as exc:
+            # The default opener installs HTTPErrorProcessor, which RAISES for any
+            # non-2xx response — so a served-but-erroring page (e.g. 404/401 for a
+            # moved landing route or added auth) lands here, not the success path.
+            # It still means the server is up and answering, so <500 is ready;
+            # only a 5xx keeps us waiting.
+            if exc.code < 500:
+                return
+            last_err = f"HTTP {exc.code}"
         except Exception as exc:  # connection refused while still starting
             last_err = str(exc)
         time.sleep(interval)
