@@ -87,3 +87,30 @@ def test_python_arch_mapping_known_and_unknown(tmp_path):
     # Unknown target fails fast, before any network access.
     with pytest.raises(RuntimeError, match="no Python archive mapping"):
         ab.fetch_python("3.12.7", "20241016", "linux-x64", tmp_path)
+
+
+def test_verify_integrity_sha512_match_and_mismatch():
+    import base64
+    import hashlib
+
+    data = b"webui-tarball-bytes"
+    good = "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+    assert "sha512" in ab._verify_tarball_integrity(data, {"integrity": good})
+    bad = "sha512-" + base64.b64encode(hashlib.sha512(b"other").digest()).decode()
+    with pytest.raises(RuntimeError, match="integrity"):
+        ab._verify_tarball_integrity(data, {"integrity": bad})
+
+
+def test_verify_integrity_falls_back_to_shasum():
+    import hashlib
+
+    data = b"tarball"
+    good = hashlib.sha1(data).hexdigest()
+    assert "sha1" in ab._verify_tarball_integrity(data, {"shasum": good})
+    with pytest.raises(RuntimeError, match="shasum"):
+        ab._verify_tarball_integrity(data, {"shasum": "0" * 40})
+
+
+def test_verify_integrity_no_published_checksum_does_not_raise():
+    # Defensive: a missing integrity/shasum must warn, not break the build.
+    assert "no npm-published checksum" in ab._verify_tarball_integrity(b"x", {})

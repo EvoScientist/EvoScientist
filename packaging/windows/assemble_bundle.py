@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import io
 import json
@@ -121,17 +122,56 @@ def _extract_tar_subtree(tgz: bytes, *, strip: str, dest: Path) -> tuple[int, in
     return files, skipped
 
 
-def _npm_dist(pkg: str, version: str) -> tuple[str, str]:
-    """Resolve ``(tarball URL, concrete version)`` from the version packument.
+def _npm_dist(pkg: str, version: str) -> tuple[str, str, dict]:
+    """Resolve ``(tarball URL, concrete version, dist)`` from the packument.
 
     ``version`` may be a dist-tag (e.g. ``latest``); the registry resolves it
     and the returned version is the concrete one, so callers record what was
     actually fetched rather than the tag. Authoritative — reads ``dist.tarball``
-    rather than guessing the ``-/`` path.
+    rather than guessing the ``-/`` path. ``dist`` also carries the published
+    ``integrity`` / ``shasum`` (see :func:`_verify_tarball_integrity`).
     """
     quoted = pkg.replace("/", "%2F")
     meta = _get_json(f"{REGISTRY}/{quoted}/{version}")
-    return meta["dist"]["tarball"], meta["version"]
+    dist = meta["dist"]
+    return dist["tarball"], meta["version"], dist
+
+
+def _verify_tarball_integrity(tgz: bytes, dist: dict) -> str:
+    """Verify downloaded bytes against the checksum npm published for this
+    version, and return a short description of what was checked.
+
+    Closes the gap where the WebUI tarball's hash was recorded but never
+    verified — a corrupted or tampered download now fails the build — without
+    pinning a version (the check is against the registry's own published value
+    for whatever ``latest`` resolved to). Prefers the SRI ``integrity`` field
+    (sha512/384/256), falling back to the legacy ``shasum`` (sha1). Defensive:
+    if the registry published neither (unexpected for npm), it warns rather than
+    failing, so a metadata quirk never blocks a build.
+    """
+    integrity = dist.get("integrity")
+    if isinstance(integrity, str) and "-" in integrity:
+        algo, _, rest = integrity.partition("-")
+        algo = algo.strip().lower()
+        expected = rest.split()[0] if rest.split() else ""  # SRI may list several
+        if algo in ("sha512", "sha384", "sha256") and expected:
+            actual = base64.b64encode(hashlib.new(algo, tgz).digest()).decode()
+            if actual != expected:
+                raise RuntimeError(
+                    f"WebUI tarball {algo} does not match npm's published "
+                    f"integrity — corrupted or tampered download."
+                )
+            return f"{algo} matches npm integrity"
+    shasum = dist.get("shasum")
+    if isinstance(shasum, str) and shasum:
+        actual = hashlib.sha1(tgz).hexdigest()
+        if actual != shasum:
+            raise RuntimeError(
+                f"WebUI tarball sha1 {actual} does not match npm's published "
+                f"shasum {shasum} — corrupted or tampered download."
+            )
+        return "sha1 matches npm shasum"
+    return "no npm-published checksum to verify against"
 
 
 def fetch_webui(version: str, out: Path) -> dict:
@@ -142,9 +182,10 @@ def fetch_webui(version: str, out: Path) -> dict:
     webui_dir = out / "webui"
     if webui_dir.exists():
         shutil.rmtree(webui_dir)
-    url, resolved = _npm_dist("@evoscientist/webui", version)
+    url, resolved, dist = _npm_dist("@evoscientist/webui", version)
     print(f"[webui] {version} -> {resolved}: {url}")
     tgz = _get(url)
+    print(f"[webui] integrity: {_verify_tarball_integrity(tgz, dist)}")
     files, skipped = _extract_tar_subtree(
         tgz, strip="package/dist/", dest=webui_dir / "dist"
     )
@@ -200,7 +241,7 @@ def fix_sharp(out: Path, target: str) -> dict:
         ver = sharp_ver
         if pkg != wanted[0]:
             ver = (meta.get("dependencies") or {})[pkg].lstrip("^~>=")
-        url, _ = _npm_dist(pkg, ver)
+        url, _, _ = _npm_dist(pkg, ver)
         print(f"[sharp] + {pkg}@{ver}")
         tgz = _get(url)
         _extract_tar_subtree(tgz, strip="package/", dest=img / pkg.split("/")[-1])
