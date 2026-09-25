@@ -181,6 +181,18 @@ def list_records(
         return [_record_dict(p) for p in procs]
 
 
+def running_records() -> list[dict[str, Any]]:
+    """Mirror records for every tracked process still running, across all threads.
+
+    Backs the desktop's switch/close gate: before restarting or killing the
+    backend (which tree-kills all bg children), the shell asks whether any bg
+    job is still running so it can wait for or confirm stopping them, naming
+    each. Records exits first (like :func:`list_records`), so a just-finished
+    process drops out.
+    """
+    return [r for r in list_records(include_all=True) if r.get("status") == "running"]
+
+
 def _read_tail(log_path: Path, tail_bytes: int) -> str:
     # Seek from the end so a huge log isn't fully read into memory on each status check.
     try:

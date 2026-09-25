@@ -164,7 +164,10 @@ def test_switch_workspace_restarts_with_new_launcher():
     assert win.pending == []  # idle from the start -> no waiting banner
 
 
-def test_switch_workspace_waits_until_idle():
+def test_switch_workspace_waits_until_idle(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    monkeypatch.setattr(dshutdown, "running_bg_process_names", lambda url, **k: [])
     win = _FakeWindow()
     old = _FakeLauncher()
     new = _FakeLauncher(webui_url="http://127.0.0.1:4901")
@@ -193,7 +196,10 @@ def test_switch_workspace_waits_until_idle():
     assert ctl.launcher is new
 
 
-def test_switch_workspace_aborts_when_cancelled():
+def test_switch_workspace_aborts_when_cancelled(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    monkeypatch.setattr(dshutdown, "running_bg_process_names", lambda url, **k: [])
     win = _FakeWindow()
     old = _FakeLauncher()
 
@@ -210,6 +216,35 @@ def test_switch_workspace_aborts_when_cancelled():
     assert not old.stopped  # no teardown, no relaunch on a closing app
     assert ctl.launcher is old
     assert win.pending_cleared  # banner removed on abort
+
+
+def test_switch_workspace_stop_now_kills_and_switches(monkeypatch):
+    """The banner's "Stop tasks and switch now": end the wait even though work is
+    still active, and proceed with the restart (which kills the running tasks)."""
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    monkeypatch.setattr(
+        dshutdown, "running_bg_process_names", lambda url, **k: ["train"]
+    )
+    win = _FakeWindow()
+    old = _FakeLauncher()
+    new = _FakeLauncher(webui_url="http://127.0.0.1:4902")
+
+    ctl = DesktopController(
+        old,
+        win,
+        launcher_factory=lambda ws: new,
+        active_probe=lambda url: "active",  # never goes idle on its own
+        should_proceed_now=lambda: True,  # ...but the user clicked "stop and switch"
+        sleep=lambda s: None,
+    )
+    ctl.switch_workspace("/ws/new")
+
+    assert old.stopped  # restart happened -> running tasks torn down
+    assert new.started
+    assert ctl.launcher is new
+    assert win.pending  # banner shown while active
+    assert win.pending_cleared  # then cleared before restart
 
 
 def test_switch_workspace_passes_watched_thread_to_default_probe(monkeypatch):
@@ -327,9 +362,12 @@ def _patch_probe(monkeypatch, *, reachable, result=None, exc=None):
     ``backend_has_active_runs`` (which bypasses the proxy via trust_env=False)."""
     import httpx
 
+    from EvoScientist.desktop import shutdown as dshutdown
     from EvoScientist.langgraph_dev import manager as lgm
 
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: reachable)
+    # Default: no background jobs running (thread-based tests own the result).
+    monkeypatch.setattr(dshutdown, "_running_bg_processes", lambda url, **k: [])
     captured = {}
 
     class _Resp:
@@ -367,6 +405,18 @@ def test_active_runs_false_when_idle(monkeypatch):
     assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is False
 
 
+def test_active_runs_true_when_bg_running(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # Threads idle, but a background job runs -> the close must confirm (quitting
+    # would tree-kill it). Same bg-awareness the switch wait uses.
+    _patch_probe(monkeypatch, reachable=True, result=[])
+    monkeypatch.setattr(
+        dshutdown, "_running_bg_processes", lambda url, **k: [{"name": "train"}]
+    )
+    assert dshutdown.backend_has_active_runs("http://127.0.0.1:6174") is True
+
+
 def test_active_runs_false_when_unreachable(monkeypatch):
     from EvoScientist.desktop import shutdown as dshutdown
 
@@ -395,9 +445,12 @@ def _patch_probe_by_status(monkeypatch, mapping):
     filter carried the watched thread."""
     import httpx
 
+    from EvoScientist.desktop import shutdown as dshutdown
     from EvoScientist.langgraph_dev import manager as lgm
 
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: True)
+    # Default: no background jobs running (these tests exercise thread status).
+    monkeypatch.setattr(dshutdown, "_running_bg_processes", lambda url, **k: [])
     calls: list[dict] = []
 
     class _Resp:
@@ -483,6 +536,54 @@ def test_probe_active_state_error_is_unknown(monkeypatch):
     # Backend up but the probe threw -> we cannot tell -> "unknown".
     _patch_probe(monkeypatch, reachable=True, exc=RuntimeError("boom"))
     assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "unknown"
+
+
+def test_probe_active_state_bg_running_is_active(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # No busy/interrupted threads, but a background job is still running -> active
+    # (a restart would tree-kill it, and it is not resumable).
+    _patch_probe(monkeypatch, reachable=True, result=[])
+    monkeypatch.setattr(
+        dshutdown,
+        "_running_bg_processes",
+        lambda url, **k: [{"process_id": "p1", "name": "train"}],
+    )
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "active"
+
+
+def test_probe_active_state_bg_probe_error_is_unknown(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    # Threads idle, but the bg-process probe threw -> cannot tell -> "unknown"
+    # (the switch keeps waiting; the close fails open).
+    _patch_probe(monkeypatch, reachable=True, result=[])
+
+    def _boom(url, **k):
+        raise RuntimeError("bg probe down")
+
+    monkeypatch.setattr(dshutdown, "_running_bg_processes", _boom)
+    assert dshutdown._probe_active_state("http://127.0.0.1:6174") == "unknown"
+
+
+def test_running_bg_process_names_lists_names_and_empty_on_error(monkeypatch):
+    from EvoScientist.desktop import shutdown as dshutdown
+
+    monkeypatch.setattr(
+        dshutdown,
+        "_running_bg_processes",
+        lambda url, **k: [{"name": "train"}, {"name": "eval"}],
+    )
+    assert dshutdown.running_bg_process_names("http://127.0.0.1:6174") == [
+        "train",
+        "eval",
+    ]
+
+    def _boom(url, **k):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(dshutdown, "_running_bg_processes", _boom)
+    assert dshutdown.running_bg_process_names("http://127.0.0.1:6174") == []
 
 
 def test_active_runs_false_when_interrupted_not_watched(monkeypatch):

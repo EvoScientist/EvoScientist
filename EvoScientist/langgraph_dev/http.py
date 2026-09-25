@@ -153,6 +153,24 @@ async def get_bg_process_status(request: Request) -> JSONResponse:
     return JSONResponse({"status": status})
 
 
+async def get_bg_processes_running(_request: Request) -> JSONResponse:
+    """Return every background process still running in THIS server, across all
+    threads, as ``{"running": [{"process_id", "name"}, ...]}``.
+
+    The desktop shell polls this to gate a workspace switch or app close: a
+    restart / stop tree-kills all bg children, so the shell waits for or confirms
+    stopping them and names each. Scoped to all threads (not one origin thread)
+    because the restart affects every bg job in the backend. Offloaded to a
+    thread for the same reason as :func:`get_bg_process_status` (registry lock +
+    ``Popen.poll()`` syscall, which blockbuster refuses on the event loop).
+    """
+    from EvoScientist import background
+
+    records = await asyncio.to_thread(background.running_records)
+    running = [{"process_id": r["process_id"], "name": r["name"]} for r in records]
+    return JSONResponse({"running": running})
+
+
 async def post_policy(request: Request) -> JSONResponse:
     """Resolve HITL decisions for action requests, for non-Python clients.
 
@@ -199,6 +217,7 @@ app = Starlette(
         Route("/api/models", get_models, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),
         Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
+        Route("/api/bg_processes/running", get_bg_processes_running, methods=["GET"]),
         Route("/api/policy", post_policy, methods=["POST"]),
     ]
 )

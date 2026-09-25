@@ -59,6 +59,45 @@ def _search_threads(url: str, payload: dict, *, timeout: float) -> list:
     return resp.json()
 
 
+def _running_bg_processes(url: str, *, timeout: float) -> list[dict]:
+    """Raw ``GET /api/bg_processes/running`` returning the running bg jobs (may be empty).
+
+    Same raw-``httpx`` + ``trust_env=False`` rationale as :func:`_search_threads`
+    (the SDK client would route this loopback call through a system/registry
+    proxy on Windows and stall or swallow it). Each item is ``{process_id, name}``.
+    Raises on any transport/HTTP error; the caller decides how to treat
+    "couldn't tell".
+    """
+    import httpx
+
+    from ..langgraph_dev.sdk import langgraph_dev_headers
+
+    resp = httpx.get(
+        f"{url}/api/bg_processes/running",
+        headers=langgraph_dev_headers(),
+        timeout=timeout,
+        trust_env=False,
+    )
+    resp.raise_for_status()
+    return resp.json().get("running", [])
+
+
+def running_bg_process_names(url: str, *, timeout: float = 3.0) -> list[str]:
+    """Names of the running background jobs, for a switch/close dialog to list.
+
+    Best-effort display helper: returns ``[]`` on any error (a failed name
+    lookup must never block a close or a switch — the gating decision is made by
+    :func:`_probe_active_state`, which treats the same error as ``"unknown"``).
+    """
+    try:
+        return [
+            p.get("name", "task") for p in _running_bg_processes(url, timeout=timeout)
+        ]
+    except Exception as exc:
+        logger.warning("Listing running bg processes failed for %s: %s", url, exc)
+        return []
+
+
 def _probe_active_state(
     url: str, *, watched_thread_id: str | None = None, timeout: float = 3.0
 ) -> ActiveState:
@@ -77,6 +116,10 @@ def _probe_active_state(
       actively deciding does. With no ``watched_thread_id`` the interrupted check
       is skipped entirely (used by the close path — see
       :func:`backend_has_active_runs`).
+    - ANY background process (``run_in_background``) is still running. These are
+      children of the langgraph dev server, so a restart tree-kills them, and
+      unlike interrupted turns they are not checkpointed — losing them loses the
+      work. So they block a switch and prompt a close, regardless of thread.
 
     Answered with a ``POST /threads/search`` (limit 1) per check; the endpoint
     filters one ``status`` at a time and ANDs an ``ids`` filter, so the watched
@@ -125,6 +168,13 @@ def _probe_active_state(
                 exc,
             )
             saw_unknown = True
+    # A running background job blocks too (killed by the restart, not resumable).
+    try:
+        if _running_bg_processes(url, timeout=timeout):
+            return "active"
+    except Exception as exc:
+        logger.warning("Active-work probe (bg processes) failed for %s: %s", url, exc)
+        saw_unknown = True
     return "unknown" if saw_unknown else "idle"
 
 
@@ -133,10 +183,11 @@ def backend_has_active_runs(
 ) -> bool:
     """Return True if the backend at ``url`` has active work.
 
-    Same definition as the switch: any thread ``busy``, or the WATCHED thread
-    (``watched_thread_id``, the one open in the WebUI) ``interrupted``. So closing
-    prompts when it would kill a running turn or abandon the interrupt the user is
-    on, but not for a stale interrupted thread they are not looking at.
+    Same definition as the switch: any thread ``busy``, the WATCHED thread
+    (``watched_thread_id``, the one open in the WebUI) ``interrupted``, or any
+    background job still running. So closing prompts when it would kill a running
+    turn, abandon the interrupt the user is on, or stop a background job — but not
+    for a stale interrupted thread they are not looking at.
 
     Fails OPEN (returns False) when the backend is unreachable or the probe
     errors: an unreachable backend has no reachable runs to protect, and a close
@@ -156,24 +207,34 @@ def wait_for_backend_idle(
     sleep: Callable[[float], None] = time.sleep,
     poll_interval: float = 1.0,
     should_cancel: Callable[[], bool] | None = None,
+    should_proceed_now: Callable[[], bool] | None = None,
 ) -> bool:
     """Block until the backend at ``url`` has no active work, then return True.
 
     Waits INDEFINITELY (issue #484 Part 6: a workspace switch restarts the
     app-owned backend only once all active work — runs, background sub-agents,
-    and turns paused awaiting human input — has finished). Proceeds only on a
-    CONFIRMED-idle state; an ``"unknown"`` result (backend up but the probe
-    errored) is treated as still active, so a transient blip never ends the wait
-    early and kills a live run.
+    background jobs, and turns paused awaiting human input — has finished).
+    Proceeds only on a CONFIRMED-idle state; an ``"unknown"`` result (backend up
+    but the probe errored) is treated as still active, so a transient blip never
+    ends the wait early and kills a live run.
 
-    ``should_cancel`` is polled each iteration; when it returns True the wait
-    aborts and returns False without restarting anything (the desktop wires this
-    to the window-close event so quitting mid-wait does not relaunch a backend on
-    an app that is shutting down). Returns True once the backend is idle.
+    Two callbacks are polled each iteration (cancel takes precedence):
+
+    - ``should_cancel`` True -> abort, return False, restart nothing (wired to
+      the window-close event so quitting mid-wait doesn't relaunch a backend on
+      an app that is shutting down).
+    - ``should_proceed_now`` True -> stop waiting and return True even if work is
+      still active (the pending banner's "Stop tasks and switch now" button: the
+      user chose to kill the running tasks and switch immediately).
+
+    Returns True once the backend is idle (or the user forced it), False if
+    cancelled.
     """
     while True:
         if should_cancel is not None and should_cancel():
             return False
+        if should_proceed_now is not None and should_proceed_now():
+            return True
         if probe(url) == "idle":
             return True
         sleep(poll_interval)

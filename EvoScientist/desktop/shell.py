@@ -165,11 +165,13 @@ class _WebviewWindow:
     def show_pending(self, message: str) -> None:
         """Inject/update a fixed banner over the LIVE WebUI (no navigation), so
         a pending workspace switch shows without hiding the current turn. Carries
-        a Cancel button that calls the exposed ``cancel_workspace_switch`` bridge
-        (see :func:`run_desktop`) to abort the wait and stay in the current
-        workspace. Runs JS in the third-party WebUI page, so it is strictly
-        best-effort — a failure must never block the switch. ``json.dumps`` makes
-        the message a safe JS string literal."""
+        two buttons: "Stop tasks and switch now" (``stop_tasks_and_switch`` bridge
+        — end the wait and switch immediately, killing the running tasks) and
+        "Cancel" (``cancel_workspace_switch`` bridge — abort the wait and stay in
+        the current workspace). Both bridges are exposed in :func:`run_desktop`.
+        Runs JS in the third-party WebUI page, so it is strictly best-effort — a
+        failure must never block the switch. ``json.dumps`` makes the message a
+        safe JS string literal."""
         self._eval_best_effort(
             "(function(){var id='__evosci_pending__';"
             "var d=document.getElementById(id);"
@@ -180,12 +182,18 @@ class _WebviewWindow:
             "font:13px -apple-system,Segoe UI,system-ui,sans-serif;"
             "background:#1a73e8;color:#fff;box-shadow:0 1px 6px rgba(0,0,0,.3);';"
             "var m=document.createElement('span');m.id='__evosci_pending_msg__';"
-            "var b=document.createElement('button');b.textContent='Cancel';"
-            "b.style.cssText='font:inherit;padding:2px 10px;border:1px solid #fff;"
+            "var bstyle='font:inherit;padding:2px 10px;border:1px solid #fff;"
             "border-radius:4px;background:transparent;color:#fff;cursor:pointer;';"
+            "var s=document.createElement('button');"
+            "s.textContent='Stop tasks and switch now';s.style.cssText=bstyle;"
+            "s.onclick=function(){this.disabled=true;this.textContent='Stopping\\u2026';"
+            "try{window.pywebview.api.stop_tasks_and_switch();}catch(e){}};"
+            "var b=document.createElement('button');b.textContent='Cancel';"
+            "b.style.cssText=bstyle;"
             "b.onclick=function(){this.disabled=true;this.textContent='Cancelling\\u2026';"
             "try{window.pywebview.api.cancel_workspace_switch();}catch(e){}};"
-            "d.appendChild(m);d.appendChild(b);document.body.appendChild(d);}"
+            "d.appendChild(m);d.appendChild(s);d.appendChild(b);"
+            "document.body.appendChild(d);}"
             f"document.getElementById('__evosci_pending_msg__').textContent="
             f"{json.dumps(message)};}})();"
         )
@@ -329,6 +337,10 @@ def run_desktop(workspace_dir: str | None = None) -> None:
     # Tripped by the banner's Cancel button (via the exposed bridge below) to
     # abort a pending switch's wait; cleared at the start of each switch.
     switch_cancel = threading.Event()
+    # Tripped by the banner's "Stop tasks and switch now" button to end the wait
+    # and switch immediately (the restart then kills the running tasks); cleared
+    # at the start of each switch.
+    switch_stop_now = threading.Event()
 
     def cancel_workspace_switch() -> None:
         """JS bridge, exposed as ``window.pywebview.api.cancel_workspace_switch``.
@@ -337,7 +349,16 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         logger.info("workspace switch cancel requested from banner")
         switch_cancel.set()
 
+    def stop_tasks_and_switch() -> None:
+        """JS bridge, exposed as ``window.pywebview.api.stop_tasks_and_switch``.
+        The waiting banner's "Stop tasks and switch now" button trips this so the
+        user can end the wait and switch immediately — the restart tears down the
+        backend and its running tasks."""
+        logger.info("workspace switch: stop-tasks-and-switch requested from banner")
+        switch_stop_now.set()
+
     window.expose(cancel_workspace_switch)
+    window.expose(stop_tasks_and_switch)
 
     def _shutdown() -> None:
         cancelled.set()
@@ -364,17 +385,28 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         if not launcher.backend_started:
             return True
         try:
-            from .shutdown import backend_has_active_runs, should_confirm_close
+            from .shutdown import (
+                backend_has_active_runs,
+                running_bg_process_names,
+                should_confirm_close,
+            )
 
             active = backend_has_active_runs(
                 launcher.backend_url, watched_thread_id=win.current_thread_id()
             )
             if not should_confirm_close(launcher.backend_started, active):
                 return True
+            # Name the running background jobs when that is what is active, so the
+            # user knows what quitting would stop (best-effort — [] on any error).
+            names = running_bg_process_names(launcher.backend_url)
+            if names:
+                detail = f"Background tasks are still running ({', '.join(names)})."
+            else:
+                detail = "Research tasks are still running."
             ok = bool(
                 window.create_confirmation_dialog(
                     "Quit EvoScientist?",
-                    "Research tasks are still running. Quit and stop them?",
+                    f"{detail} Quit and stop them?",
                 )
             )
             logger.info(
@@ -422,7 +454,9 @@ def run_desktop(workspace_dir: str | None = None) -> None:
         if not switch_lock.acquire(blocking=False):
             logger.info("workspace switch already in progress; ignoring")
             return
-        switch_cancel.clear()  # fresh wait; drop any leftover cancel from before
+        # Fresh wait; drop any leftover cancel / stop-now from a previous switch.
+        switch_cancel.clear()
+        switch_stop_now.clear()
 
         def _run() -> None:
             try:
@@ -495,6 +529,9 @@ def run_desktop(workspace_dir: str | None = None) -> None:
             launcher_factory=make_launcher,
             # Abort a pending switch either on app shutdown or on a Cancel click.
             should_cancel=lambda: cancelled.is_set() or switch_cancel.is_set(),
+            # End the wait and switch now (killing running tasks) on the banner's
+            # "Stop tasks and switch now" click.
+            should_proceed_now=switch_stop_now.is_set,
         )
         state["controller"] = controller
         return controller.boot()

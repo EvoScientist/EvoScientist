@@ -103,6 +103,24 @@ def test_list_records_scopes_to_thread(tmp_path):
     assert len(bg.list_records(None, include_all=True)) == 2
 
 
+def test_running_records_lists_only_running_across_threads(tmp_path):
+    """running_records() backs the desktop switch/close gate: every still-running
+    process across all threads, and nothing that has already finished."""
+    long_a = bg.launch(_sleep_cmd(3), str(tmp_path), origin_thread_id="T-1")
+    long_b = bg.launch(_sleep_cmd(3), str(tmp_path), origin_thread_id="T-2")
+    done = bg.launch(_true_cmd(), str(tmp_path), origin_thread_id="T-1")
+    assert _wait_until(lambda: bg.poll_status(done) == "success")
+
+    running_ids = {r["process_id"] for r in bg.running_records()}
+    assert running_ids == {long_a, long_b}  # both threads, finished one excluded
+
+
+def test_running_records_empty_when_none_running(tmp_path):
+    done = bg.launch(_true_cmd(), str(tmp_path))
+    assert _wait_until(lambda: bg.poll_status(done) == "success")
+    assert bg.running_records() == []
+
+
 def test_output_captured_in_status(tmp_path):
     pid = bg.launch("echo hello-from-bg", str(tmp_path))
     assert _wait_until(lambda: "hello-from-bg" in bg.status(pid))

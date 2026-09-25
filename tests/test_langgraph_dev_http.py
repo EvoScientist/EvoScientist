@@ -319,6 +319,36 @@ def test_get_bg_process_status_unknown_for_missing_process():
     assert resp.json()["status"] == "unknown"
 
 
+# ---- /api/bg_processes/running --------------------------------------------
+# The desktop shell polls this to gate a workspace switch / app close on any
+# still-running bg job (which a backend restart would tree-kill).
+
+
+def test_get_bg_processes_running_returns_id_and_name(monkeypatch):
+    monkeypatch.setattr(
+        "EvoScientist.background.running_records",
+        lambda: [
+            {"process_id": "p1", "name": "train", "status": "running", "pid": 10},
+            {"process_id": "p2", "name": "eval", "status": "running", "pid": 11},
+        ],
+    )
+    resp = client.get("/api/bg_processes/running")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "running": [
+            {"process_id": "p1", "name": "train"},
+            {"process_id": "p2", "name": "eval"},
+        ]
+    }
+
+
+def test_get_bg_processes_running_empty_when_none(monkeypatch):
+    monkeypatch.setattr("EvoScientist.background.running_records", lambda: [])
+    resp = client.get("/api/bg_processes/running")
+    assert resp.status_code == 200
+    assert resp.json() == {"running": []}
+
+
 # ---- /api/policy ----------------------------------------------------------
 # Non-Python clients (WebUI) resolve HITL decisions here instead of re-porting
 # the allow-list / dangerous-command policy. Serves resolve_config_decisions
