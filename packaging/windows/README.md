@@ -81,7 +81,7 @@ desktop shell) and `langgraph.exe` (the backend CLI), sharing one `_internal`.
 
 ```
 # on Windows:
-uv run --extra winbuild pyinstaller packaging/windows/evoscientist.spec --noconfirm
+uv run --extra winbuild --extra desktop pyinstaller packaging/windows/evoscientist.spec --noconfirm
 # -> dist/EvoScientist/  (EvoScientist.exe, langgraph.exe, _internal/, ...)
 ```
 
@@ -113,7 +113,7 @@ exes. Full build (on Windows):
 # 1. runtime half (webui/ + runtime/node/)
 uv run python packaging\windows\assemble_bundle.py --out build\bundle
 # 2. Python half (EvoScientist.exe, langgraph.exe, _internal\)
-uv run --extra winbuild pyinstaller packaging\windows\evoscientist.spec --noconfirm
+uv run --extra winbuild --extra desktop pyinstaller packaging\windows\evoscientist.spec --noconfirm
 # 3. merge the runtime half into the onedir
 xcopy /E /I build\bundle\webui   dist\EvoScientist\webui
 xcopy /E /I build\bundle\runtime dist\EvoScientist\runtime

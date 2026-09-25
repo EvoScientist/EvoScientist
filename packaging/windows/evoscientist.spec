@@ -13,7 +13,7 @@
 # next to these exes by the installer (Task 6) — they are NOT built here.
 #
 # Build (on Windows):
-#   uv run --extra winbuild pyinstaller packaging/windows/evoscientist.spec --noconfirm
+#   uv run --extra winbuild --extra desktop pyinstaller packaging/windows/evoscientist.spec --noconfirm
 # Output: dist/EvoScientist/  (EvoScientist.exe, langgraph.exe, _internal/, ...)
 #
 # This spec is authored on Linux and MUST be shaken out on a real Windows build:

@@ -89,7 +89,7 @@ try {
     # --- 2. Python half (frozen exes + _internal) ---
     if (-not $SkipPyInstaller) {
         Invoke-Checked "pyinstaller -> $DistDir" {
-            uv run --extra winbuild pyinstaller (Join-Path $PkgDir "evoscientist.spec") --noconfirm
+            uv run --extra winbuild --extra desktop pyinstaller (Join-Path $PkgDir "evoscientist.spec") --noconfirm
         }
     }
     else {
