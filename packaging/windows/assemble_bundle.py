@@ -137,11 +137,13 @@ def _npm_dist(pkg: str, version: str) -> tuple[str, str, dict]:
     return dist["tarball"], meta["version"], dist
 
 
-def _verify_tarball_integrity(tgz: bytes, dist: dict) -> str:
+def _verify_tarball_integrity(tgz: bytes, dist: dict, *, name: str) -> str:
     """Verify downloaded bytes against the checksum npm published for this
-    version, and return a short description of what was checked.
+    version, and return a short description of what was checked. ``name``
+    labels the package in the error message.
 
-    Closes the gap where the WebUI tarball's hash was recorded but never
+    Used for every npm download (the WebUI and sharp's native binaries). Closes
+    the gap where the WebUI tarball's hash was recorded but never
     verified — a corrupted or tampered download now fails the build — without
     pinning a version (the check is against the registry's own published value
     for whatever ``latest`` resolved to). Prefers the SRI ``integrity`` field
@@ -158,7 +160,7 @@ def _verify_tarball_integrity(tgz: bytes, dist: dict) -> str:
             actual = base64.b64encode(hashlib.new(algo, tgz).digest()).decode()
             if actual != expected:
                 raise RuntimeError(
-                    f"WebUI tarball {algo} does not match npm's published "
+                    f"{name} tarball {algo} does not match npm's published "
                     f"integrity — corrupted or tampered download."
                 )
             return f"{algo} matches npm integrity"
@@ -167,7 +169,7 @@ def _verify_tarball_integrity(tgz: bytes, dist: dict) -> str:
         actual = hashlib.sha1(tgz).hexdigest()
         if actual != shasum:
             raise RuntimeError(
-                f"WebUI tarball sha1 {actual} does not match npm's published "
+                f"{name} tarball sha1 {actual} does not match npm's published "
                 f"shasum {shasum} — corrupted or tampered download."
             )
         return "sha1 matches npm shasum"
@@ -185,7 +187,7 @@ def fetch_webui(version: str, out: Path) -> dict:
     url, resolved, dist = _npm_dist("@evoscientist/webui", version)
     print(f"[webui] {version} -> {resolved}: {url}")
     tgz = _get(url)
-    print(f"[webui] integrity: {_verify_tarball_integrity(tgz, dist)}")
+    print(f"[webui] integrity: {_verify_tarball_integrity(tgz, dist, name='WebUI')}")
     files, skipped = _extract_tar_subtree(
         tgz, strip="package/dist/", dest=webui_dir / "dist"
     )
@@ -241,9 +243,10 @@ def fix_sharp(out: Path, target: str) -> dict:
         ver = sharp_ver
         if pkg != wanted[0]:
             ver = (meta.get("dependencies") or {})[pkg].lstrip("^~>=")
-        url, _, _ = _npm_dist(pkg, ver)
+        url, _, dist = _npm_dist(pkg, ver)
         print(f"[sharp] + {pkg}@{ver}")
         tgz = _get(url)
+        print(f"[sharp] integrity: {_verify_tarball_integrity(tgz, dist, name=pkg)}")
         _extract_tar_subtree(tgz, strip="package/", dest=img / pkg.split("/")[-1])
         installed.append(f"{pkg}@{ver}")
     return {"sharp_version": sharp_ver, "sharp_natives": installed}

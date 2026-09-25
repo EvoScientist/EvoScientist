@@ -106,10 +106,12 @@ def test_verify_integrity_sha512_match_and_mismatch():
 
     data = b"webui-tarball-bytes"
     good = "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
-    assert "sha512" in ab._verify_tarball_integrity(data, {"integrity": good})
+    assert "sha512" in ab._verify_tarball_integrity(
+        data, {"integrity": good}, name="pkg"
+    )
     bad = "sha512-" + base64.b64encode(hashlib.sha512(b"other").digest()).decode()
     with pytest.raises(RuntimeError, match="integrity"):
-        ab._verify_tarball_integrity(data, {"integrity": bad})
+        ab._verify_tarball_integrity(data, {"integrity": bad}, name="pkg")
 
 
 def test_verify_integrity_falls_back_to_shasum():
@@ -117,11 +119,13 @@ def test_verify_integrity_falls_back_to_shasum():
 
     data = b"tarball"
     good = hashlib.sha1(data).hexdigest()
-    assert "sha1" in ab._verify_tarball_integrity(data, {"shasum": good})
+    assert "sha1" in ab._verify_tarball_integrity(data, {"shasum": good}, name="pkg")
     with pytest.raises(RuntimeError, match="shasum"):
-        ab._verify_tarball_integrity(data, {"shasum": "0" * 40})
+        ab._verify_tarball_integrity(data, {"shasum": "0" * 40}, name="pkg")
 
 
 def test_verify_integrity_no_published_checksum_does_not_raise():
     # Defensive: a missing integrity/shasum must warn, not break the build.
-    assert "no npm-published checksum" in ab._verify_tarball_integrity(b"x", {})
+    assert "no npm-published checksum" in ab._verify_tarball_integrity(
+        b"x", {}, name="pkg"
+    )
