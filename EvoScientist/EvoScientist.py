@@ -28,13 +28,13 @@ from langchain.agents.middleware import (
 )
 
 from . import paths as _paths_mod
+from .agent_env import agent_shell_env
 from .config import (
     MemoryControls,
     MemoryObservationTarget,
     apply_config_to_env,
     get_effective_config,
 )
-from .desktop.app_paths import agent_shell_env
 from .memory import MemorySourceType
 from .paths import set_active_workspace, set_workspace_root
 from .prompts import get_system_prompt

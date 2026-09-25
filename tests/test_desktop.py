@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from EvoScientist import agent_env
 from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.deploy.launcher import LauncherError
 from EvoScientist.desktop import app_paths, shell
@@ -991,7 +992,7 @@ def test_render_setup_html_provider_change_cascades_model(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Bundled-python env for the agent's shell (app_paths.agent_shell_env)
+# Bundled-python env for the agent's shell (agent_env.agent_shell_env)
 # --------------------------------------------------------------------------- #
 def test_agent_shell_env_none_without_bundled_python(monkeypatch, tmp_path):
     from EvoScientist.desktop import app_paths as ap
@@ -999,7 +1000,7 @@ def test_agent_shell_env_none_without_bundled_python(monkeypatch, tmp_path):
     # Trusted source (frozen) so the missing interpreter is what decides.
     monkeypatch.setattr(ap, "is_frozen", lambda: True)
     monkeypatch.setattr(ap, "python_exe", lambda: tmp_path / "absent" / "python.exe")
-    assert ap.agent_shell_env() is None
+    assert agent_env.agent_shell_env() is None
 
 
 def test_agent_shell_env_none_in_dev_checkout_without_override(monkeypatch, tmp_path):
@@ -1013,7 +1014,7 @@ def test_agent_shell_env_none_in_dev_checkout_without_override(monkeypatch, tmp_
     monkeypatch.setattr(ap, "is_frozen", lambda: False)
     monkeypatch.delenv(ap.ENV_PYTHON_EXE, raising=False)
     monkeypatch.setattr(ap, "python_exe", lambda: py)
-    assert ap.agent_shell_env() is None
+    assert agent_env.agent_shell_env() is None
 
 
 def test_agent_shell_env_injects_bundled_python(monkeypatch, tmp_path):
@@ -1029,7 +1030,7 @@ def test_agent_shell_env_injects_bundled_python(monkeypatch, tmp_path):
     monkeypatch.setattr(ap, "user_pypackages_dir", lambda: tmp_path / "pp")
     monkeypatch.setenv("PATH", "/usr/bin")
 
-    env = ap.agent_shell_env()
+    env = agent_env.agent_shell_env()
     assert env["PYTHONUSERBASE"] == str(tmp_path / "pp")
     assert env["PATH"].startswith(str(py.parent) + os.pathsep)
     assert (tmp_path / "pp").is_dir()  # created for the pip target

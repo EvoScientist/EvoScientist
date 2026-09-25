@@ -30,7 +30,7 @@ from typing import Any
 
 import psutil
 
-from .desktop.app_paths import agent_shell_env
+from .agent_env import agent_shell_env
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,7 @@ def launch(
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
 
     The child gets the same env overrides as the ``execute`` shell
-    (:func:`~EvoScientist.desktop.app_paths.agent_shell_env`), so a background
+    (:func:`~EvoScientist.agent_env.agent_shell_env`), so a background
     ``python`` resolves the same interpreter as a foreground one.
     """
     overrides = agent_shell_env()
