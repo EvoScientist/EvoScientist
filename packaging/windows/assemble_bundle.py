@@ -176,6 +176,35 @@ def _verify_tarball_integrity(tgz: bytes, dist: dict, *, name: str) -> str:
     return "no npm-published checksum to verify against"
 
 
+def _verify_sha256_from_sums(
+    data: bytes, sums_text: str, filename: str, *, name: str
+) -> None:
+    """Verify *data* against *filename*'s entry in a published SHA-256 sums file.
+
+    Parses the ``<sha256>  <filename>`` lines of ``SHASUMS256.txt`` (Node) /
+    ``SHA256SUMS`` (python-build-standalone). Fails the build on a mismatch AND
+    when the file is not listed: both projects publish sums for every asset, so
+    a missing entry means the wrong file or a tampered sums list, not a quirk.
+    """
+    expected = None
+    for line in sums_text.splitlines():
+        parts = line.split()
+        # ``*name`` marks binary mode in sha256sum output.
+        if len(parts) == 2 and parts[1].lstrip("*") == filename:
+            expected = parts[0].lower()
+            break
+    if expected is None:
+        raise RuntimeError(
+            f"{name}: {filename} is not listed in the published checksums."
+        )
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected:
+        raise RuntimeError(
+            f"{name}: {filename} sha256 {actual} does not match the published "
+            f"{expected} — corrupted or tampered download."
+        )
+
+
 def fetch_webui(version: str, out: Path) -> dict:
     """Download @evoscientist/webui@<version> and extract package/dist ->
     <out>/webui/dist. ``version`` may be a dist-tag (e.g. ``latest``); the
@@ -269,6 +298,9 @@ def fetch_node(version: str, target: str, out: Path) -> dict:
     url = f"{NODE_DIST}/v{version}/{base}.zip"
     print(f"[node] {url}")
     data = _get(url)
+    sums = _get(f"{NODE_DIST}/v{version}/SHASUMS256.txt").decode()
+    _verify_sha256_from_sums(data, sums, f"{base}.zip", name="Node")
+    print("[node] sha256 matches SHASUMS256.txt")
     member = f"{base}/node.exe"
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         try:
@@ -315,6 +347,9 @@ def fetch_python(version: str, tag: str, target: str, out: Path) -> dict:
     url = f"{PBS_RELEASES}/{tag}/{asset}"
     print(f"[python] {url}")
     data = _get(url)
+    sums = _get(f"{PBS_RELEASES}/{tag}/SHA256SUMS").decode()
+    _verify_sha256_from_sums(data, sums, asset, name="Python")
+    print("[python] sha256 matches the release's SHA256SUMS")
     # install_only archives contain a single top-level ``python/`` directory.
     files, skipped = _extract_tar_subtree(data, strip="python/", dest=py_dir)
     exe = py_dir / "python.exe"

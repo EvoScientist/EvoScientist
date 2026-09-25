@@ -18,8 +18,10 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
 Useful switches: `-SkipAssemble` (reuse the fetched bundle when only the Python
 side changed), `-SkipInstaller` (stop after the merged tree), `-Iscc <path>`
 (non-default ISCC.exe), `-AppVersion <v>`, `-WebuiVersion <v>` (WebUI npm
-version; defaults to the `latest` dist-tag, pass an exact version to pin). It
-kills a running
+version; defaults to the `latest` dist-tag, pass an exact version to pin). When
+rebuilding an older EvoScientist tag, pass the WebUI version that was current
+for that release: `latest` would pull a newer WebUI than the one it shipped
+with. It kills a running
 `EvoScientist.exe`/`langgraph.exe` first so PyInstaller can overwrite `_internal`.
 The sections below document each step for when you need to run them by hand.
 
@@ -64,6 +66,10 @@ uv run python packaging/windows/assemble_bundle.py --out build/bundle \
     --webui-version 0.3.0 --node-version 22.11.0 \
     --python-version 3.12.7 --python-tag 20241016 --target win32-x64
 ```
+
+Every download is checked against its publisher's checksum and a mismatch
+fails the build: the WebUI and sharp tarballs against npm's `integrity`, Node
+against `SHASUMS256.txt`, and Python against the release's `SHA256SUMS`.
 
 The Python half is a python-build-standalone `install_only` CPython (pin via
 `--python-version` + `--python-tag`; if the default 404s, pick a release from

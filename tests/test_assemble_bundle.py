@@ -129,3 +129,41 @@ def test_verify_integrity_no_published_checksum_does_not_raise():
     assert "no npm-published checksum" in ab._verify_tarball_integrity(
         b"x", {}, name="pkg"
     )
+
+
+_SUMS = (
+    "{good}  node-v22.11.0-win-x64.zip\n"
+    "0000000000000000000000000000000000000000000000000000000000000000 *other.zip\n"
+)
+
+
+def test_verify_sha256_from_sums_match():
+    import hashlib
+
+    data = b"node-archive"
+    sums = _SUMS.format(good=hashlib.sha256(data).hexdigest())
+    ab._verify_sha256_from_sums(data, sums, "node-v22.11.0-win-x64.zip", name="Node")
+
+
+def test_verify_sha256_from_sums_mismatch_fails():
+    sums = _SUMS.format(good="f" * 64)
+    with pytest.raises(RuntimeError, match="does not match"):
+        ab._verify_sha256_from_sums(
+            b"x", sums, "node-v22.11.0-win-x64.zip", name="Node"
+        )
+
+
+def test_verify_sha256_from_sums_binary_mode_marker():
+    import hashlib
+
+    data = b"other"
+    sums = f"{hashlib.sha256(data).hexdigest()} *other.zip\n"
+    ab._verify_sha256_from_sums(data, sums, "other.zip", name="Node")
+
+
+def test_verify_sha256_from_sums_unlisted_file_fails():
+    """Both publishers list every asset, so a missing entry fails closed."""
+    with pytest.raises(RuntimeError, match="not listed"):
+        ab._verify_sha256_from_sums(
+            b"x", _SUMS.format(good="f" * 64), "absent.zip", name="Node"
+        )
