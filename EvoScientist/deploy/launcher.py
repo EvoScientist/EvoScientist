@@ -400,7 +400,11 @@ class WebUILauncher:
                 )
             time.sleep(0.5)
 
-        _poll_ready(self.webui_url, timeout=max(1.0, deadline - time.monotonic()))
+        _poll_ready(
+            self.webui_url,
+            timeout=max(1.0, deadline - time.monotonic()),
+            webui_proc=self._webui_proc,
+        )
 
         if self._cfg.open_browser and not getattr(
             self._runner, "handles_browser_open", False
@@ -706,11 +710,19 @@ def _scrubbed_env(extra: dict[str, str]) -> dict[str, str]:
     return env
 
 
-def _poll_ready(url: str, timeout: float, interval: float = 0.5) -> None:
+def _poll_ready(
+    url: str, timeout: float, interval: float = 0.5, *, webui_proc=None
+) -> None:
     """GET ``url`` until it answers (any HTTP status < 500) or raise.
 
     A served-but-erroring page (< 500) counts as ready — the Next server is up;
     per-route errors are the app's concern, not the launcher's.
+
+    ``webui_proc`` (the front-end ``Popen``, when the caller has one) is checked
+    each iteration: if it has exited, the poll fails fast with
+    ``webui_start_failed`` instead of waiting out the whole timeout as
+    ``not_ready``. The backend-health loop already does this before the front-end
+    is up; node can still crash (bad bundle, port race) after the backend is up.
     """
     # No-proxy opener: this is a loopback probe of our own front-end. The
     # default opener honours the environment/OS proxy — and on Windows that
@@ -722,6 +734,12 @@ def _poll_ready(url: str, timeout: float, interval: float = 0.5) -> None:
     deadline = time.monotonic() + timeout
     last_err: str | None = None
     while time.monotonic() < deadline:
+        if webui_proc is not None and webui_proc.poll() is not None:
+            raise LauncherError(
+                "webui_start_failed",
+                "WebUI process exited before it became ready.",
+                last_err,
+            )
         try:
             with opener.open(url, timeout=2) as resp:
                 if getattr(resp, "status", 200) < 500:

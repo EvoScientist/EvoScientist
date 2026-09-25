@@ -517,6 +517,25 @@ def test_poll_ready_keeps_waiting_on_5xx(monkeypatch):
     assert ei.value.code == "not_ready"
 
 
+def test_poll_ready_fails_fast_when_webui_proc_exits(monkeypatch):
+    # node crashed after the backend came up -> fail with webui_start_failed at
+    # once, not a full not_ready timeout.
+    class _Opener:
+        def open(self, *_a, **_k):
+            raise ConnectionRefusedError("not answering yet")
+
+    class _DeadProc:
+        def poll(self):
+            return 1  # already exited
+
+    monkeypatch.setattr(lm.urllib.request, "build_opener", lambda *_h: _Opener())
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._poll_ready(
+            "http://127.0.0.1:4716", timeout=5, interval=0.01, webui_proc=_DeadProc()
+        )
+    assert ei.value.code == "webui_start_failed"
+
+
 def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: False)
     launcher = lm.WebUILauncher(object(), _cfg(), lm.NpxWebUIRunner())
