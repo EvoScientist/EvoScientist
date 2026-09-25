@@ -89,6 +89,17 @@ def test_python_arch_mapping_known_and_unknown(tmp_path):
         ab.fetch_python("3.12.7", "20241016", "linux-x64", tmp_path)
 
 
+def test_write_pip_config_defaults_bundled_installs_to_user(tmp_path):
+    """The bundled interpreter's site config makes installs ``--user`` (routed
+    to PYTHONUSERBASE); venvs have their own prefix so never read it."""
+    import configparser
+
+    ab._write_pip_config(tmp_path)
+    cfg = configparser.ConfigParser()
+    cfg.read(tmp_path / "pip.ini")
+    assert cfg.getboolean("install", "user") is True
+
+
 def test_verify_integrity_sha512_match_and_mismatch():
     import base64
     import hashlib

@@ -946,20 +946,20 @@ def test_render_setup_html_provider_change_cascades_model(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Bundled-python env for the agent's shell (EvoScientist._agent_shell_env)
+# Bundled-python env for the agent's shell (app_paths.agent_shell_env)
 # --------------------------------------------------------------------------- #
 def test_agent_shell_env_none_without_bundled_python(monkeypatch, tmp_path):
-    from EvoScientist import EvoScientist as ev
     from EvoScientist.desktop import app_paths as ap
 
+    # Trusted source (frozen) so the missing interpreter is what decides.
+    monkeypatch.setattr(ap, "is_frozen", lambda: True)
     monkeypatch.setattr(ap, "python_exe", lambda: tmp_path / "absent" / "python.exe")
-    assert ev._agent_shell_env() is None
+    assert ap.agent_shell_env() is None
 
 
 def test_agent_shell_env_none_in_dev_checkout_without_override(monkeypatch, tmp_path):
     """Not frozen and no explicit override: leave PATH untouched even if a
     runtime/python/ happens to exist under the cwd (untrusted workspace tree)."""
-    from EvoScientist import EvoScientist as ev
     from EvoScientist.desktop import app_paths as ap
 
     py = tmp_path / "py" / "python.exe"
@@ -968,11 +968,10 @@ def test_agent_shell_env_none_in_dev_checkout_without_override(monkeypatch, tmp_
     monkeypatch.setattr(ap, "is_frozen", lambda: False)
     monkeypatch.delenv(ap.ENV_PYTHON_EXE, raising=False)
     monkeypatch.setattr(ap, "python_exe", lambda: py)
-    assert ev._agent_shell_env() is None
+    assert ap.agent_shell_env() is None
 
 
 def test_agent_shell_env_injects_bundled_python(monkeypatch, tmp_path):
-    from EvoScientist import EvoScientist as ev
     from EvoScientist.desktop import app_paths as ap
 
     py = tmp_path / "py" / "python.exe"
@@ -985,8 +984,10 @@ def test_agent_shell_env_injects_bundled_python(monkeypatch, tmp_path):
     monkeypatch.setattr(ap, "user_pypackages_dir", lambda: tmp_path / "pp")
     monkeypatch.setenv("PATH", "/usr/bin")
 
-    env = ev._agent_shell_env()
-    assert env["PIP_USER"] == "1"
+    env = ap.agent_shell_env()
     assert env["PYTHONUSERBASE"] == str(tmp_path / "pp")
     assert env["PATH"].startswith(str(py.parent) + os.pathsep)
     assert (tmp_path / "pp").is_dir()  # created for the pip target
+    # --user comes from the bundle's pip.ini, never an env var: PIP_USER would
+    # leak into venvs the agent creates and make pip refuse to install there.
+    assert "PIP_USER" not in env

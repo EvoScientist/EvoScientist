@@ -277,6 +277,19 @@ def fetch_node(version: str, target: str, out: Path) -> dict:
     return {"node_version": version, "node_sha256": _sha256(data)}
 
 
+def _write_pip_config(py_dir: Path) -> None:
+    """Make the bundled interpreter's ``pip install`` default to ``--user``.
+
+    pip reads ``<sys.prefix>/pip.ini`` as its site config, so this applies to
+    the bundled interpreter only: with the agent shell's ``PYTHONUSERBASE``,
+    its installs land in a per-user dir instead of the bundle tree (replaced
+    wholesale on upgrade). A venv created from it has its own prefix, so it
+    does not read this file and installs into itself as usual (a ``PIP_USER``
+    env var would leak into the venv and make pip refuse there).
+    """
+    (py_dir / "pip.ini").write_text("[install]\nuser = true\n")
+
+
 def fetch_python(version: str, tag: str, target: str, out: Path) -> dict:
     """Download a python-build-standalone ``install_only`` CPython for the
     target and extract it to <out>/runtime/python/ (python.exe at its root).
@@ -309,6 +322,7 @@ def fetch_python(version: str, tag: str, target: str, out: Path) -> dict:
     exe3 = py_dir / "python3.exe"
     if not exe3.exists():
         shutil.copyfile(exe, exe3)
+    _write_pip_config(py_dir)
     print(f"[python] extracted {files} files ({skipped} symlinks skipped)")
     return {
         "python_version": version,

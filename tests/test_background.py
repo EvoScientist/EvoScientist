@@ -52,6 +52,21 @@ def test_launch_returns_id_and_creates_log(tmp_path):
     assert (tmp_path / ".bg_processes" / f"{pid}.log").exists()
 
 
+def test_launch_applies_agent_shell_env(tmp_path, monkeypatch):
+    """Background jobs get the same env overrides as the execute shell (bundled
+    python on PATH), merged over the inherited environment."""
+    monkeypatch.setattr(bg, "agent_shell_env", lambda: {"EVOSCI_BG_PROBE": "bundled"})
+    monkeypatch.setenv("EVOSCI_BG_INHERITED", "kept")
+    if sys.platform == "win32":
+        cmd = "echo %EVOSCI_BG_PROBE% %EVOSCI_BG_INHERITED%"
+    else:
+        cmd = "echo $EVOSCI_BG_PROBE $EVOSCI_BG_INHERITED"
+    pid = bg.launch(cmd, str(tmp_path))
+    assert _wait_until(lambda: "EXITED" in bg.status(pid))
+    log = (tmp_path / ".bg_processes" / f"{pid}.log").read_text()
+    assert "bundled kept" in log
+
+
 def test_status_running_then_exited(tmp_path):
     pid = bg.launch(_sleep_cmd(1), str(tmp_path))
     assert "RUNNING" in bg.status(pid)

@@ -43,8 +43,11 @@ The installed app directory (what `EvoScientist/desktop/app_paths.py` resolves):
 third-party packages) that the agent's `execute` shell runs code with — so it
 never depends on whatever python is on the end-user's PATH. On-demand
 `pip install`s are routed to a per-user dir (`~/.evoscientist/pypackages`) via
-`PYTHONUSERBASE`, keeping them out of the pinned bundle tree (replaced wholesale
-on upgrade) rather than writing into `runtime/python`.
+`PYTHONUSERBASE` plus a `runtime/python/pip.ini` that defaults the bundled
+interpreter's installs to `--user`, keeping them out of the pinned bundle tree
+(replaced wholesale on upgrade) rather than writing into `runtime/python`. A
+venv the agent creates has its own prefix, so it ignores that `pip.ini` and
+installs into itself.
 
 ## assemble_bundle.py
 
