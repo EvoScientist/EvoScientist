@@ -393,6 +393,12 @@ class TestRichCliHitlRoundBudget:
         from EvoScientist.channels.interaction import ApprovalOutcome
 
         monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(
+            "EvoScientist.EvoScientist._ensure_config",
+            lambda: SimpleNamespace(
+                auto_approve=False, dangerous_mode=False, shell_allow_list=""
+            ),
+        )
         monkeypatch.setattr(display_mod.console, "print", lambda *a, **k: None)
         stream_calls = 0
 
