@@ -62,15 +62,17 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 _CODEX_CLIENT_VERSION_FALLBACK = "0.156.1"
 _CODEX_VERSION_TIMEOUT_SECONDS = 10
 _installed_codex_version = ""
+_codex_probe_disabled = False
 
 
 def _installed_codex_client_version() -> str:
     """Return the installed Codex CLI version, or an empty string.
 
-    Only a successful probe is cached, so a transient failure is retried.
+    A success and a missing binary are cached; a timeout or non-zero exit
+    (e.g. mid-upgrade) is retried on the next call.
     """
-    global _installed_codex_version
-    if _installed_codex_version:
+    global _installed_codex_version, _codex_probe_disabled
+    if _installed_codex_version or _codex_probe_disabled:
         return _installed_codex_version
     try:
         result = subprocess.run(
@@ -80,6 +82,9 @@ def _installed_codex_client_version() -> str:
             timeout=_CODEX_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
+    except FileNotFoundError:
+        _codex_probe_disabled = True
+        return ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 

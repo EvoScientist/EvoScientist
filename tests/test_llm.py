@@ -3600,6 +3600,19 @@ class TestAutoConfig:
         )
 
     @patch("EvoScientist.llm.models.subprocess.run")
+    def test_missing_codex_binary_is_not_reprobed(self, mock_run, monkeypatch):
+        """No Codex CLI installed is permanent for the process: probe once."""
+        from EvoScientist.llm import models
+
+        monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
+        mock_run.side_effect = FileNotFoundError
+
+        assert models._installed_codex_client_version() == ""
+        assert models._installed_codex_client_version() == ""
+        assert mock_run.call_count == 1
+
+    @patch("EvoScientist.llm.models.subprocess.run")
     def test_failed_codex_version_probe_is_retried(self, mock_run, monkeypatch):
         """A transient probe failure (e.g. mid-upgrade) must not stick for the process."""
         import subprocess
@@ -3607,6 +3620,7 @@ class TestAutoConfig:
         from EvoScientist.llm import models
 
         monkeypatch.setattr(models, "_installed_codex_version", "")
+        monkeypatch.setattr(models, "_codex_probe_disabled", False)
         ok = MagicMock(returncode=0, stdout="codex-cli 0.156.1\n", stderr="")
         mock_run.side_effect = [subprocess.TimeoutExpired(["codex"], 1), ok]
 

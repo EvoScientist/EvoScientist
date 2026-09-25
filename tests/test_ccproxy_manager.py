@@ -1,7 +1,6 @@
 """Tests for ccproxy_manager module."""
 
 import os
-import tomllib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,7 +17,6 @@ from EvoScientist.ccproxy_manager import (
     setup_codex_env,
     start_ccproxy,
     stop_ccproxy,
-    write_ccproxy_config,
 )
 
 # =============================================================================
@@ -172,58 +170,30 @@ class TestStartCcproxy:
 
     @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
     @patch("subprocess.Popen")
-    def test_passes_generated_config_via_env(
-        self, mock_popen, mock_running, tmp_path, monkeypatch
+    def test_codex_plugin_overrides_via_env(
+        self, mock_popen, mock_running, monkeypatch
     ):
+        """Codex plugin defaults are overridden through ccproxy's env layer.
+
+        Env overrides sit on top of whatever config file ccproxy discovers, so a
+        user's own ``config.toml`` keeps working; no generated file is involved.
+        """
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
         mock_running.side_effect = [True]
         monkeypatch.setenv("EVOSCI_TEST_INHERITED", "1")
-
-        with patch("EvoScientist.config.get_config_dir", return_value=tmp_path):
-            start_ccproxy(8000)
-
-        # ccproxy's app factory re-reads settings from CONFIG_FILE, not --config
-        env = mock_popen.call_args[1]["env"]
-        assert env["CONFIG_FILE"] == str(tmp_path / "ccproxy.toml")
-        assert env["EVOSCI_TEST_INHERITED"] == "1"
-
-    @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
-    @patch("EvoScientist.ccproxy_manager.write_ccproxy_config", side_effect=OSError)
-    @patch("subprocess.Popen")
-    def test_config_write_failure_starts_without_config(
-        self, mock_popen, mock_write, mock_running, monkeypatch
-    ):
-        proc = MagicMock()
-        proc.poll.return_value = None
-        mock_popen.return_value = proc
-        mock_running.side_effect = [True]
         monkeypatch.delenv("CONFIG_FILE", raising=False)
 
         start_ccproxy(8000)
 
-        env = mock_popen.call_args[1].get("env") or os.environ
+        cmd = mock_popen.call_args[0][0]
+        env = mock_popen.call_args[1]["env"]
+        assert "--config" not in cmd
+        assert env["PLUGINS__CODEX__MODEL_MAPPINGS"] == "[]"
+        assert env["PLUGINS__CODEX__INJECT_DETECTION_PAYLOAD"] == "false"
+        assert env["EVOSCI_TEST_INHERITED"] == "1"
         assert "CONFIG_FILE" not in env
-
-
-# =============================================================================
-# write_ccproxy_config
-# =============================================================================
-
-
-class TestWriteCcproxyConfig:
-    def test_writes_codex_mapping_override(self, tmp_path):
-        config_dir = tmp_path / "missing" / "config"
-        with patch("EvoScientist.config.get_config_dir", return_value=config_dir):
-            path = write_ccproxy_config()
-
-        assert path == str(config_dir / "ccproxy.toml")
-        codex = tomllib.loads((config_dir / "ccproxy.toml").read_text("utf-8"))[
-            "plugins"
-        ]["codex"]
-        assert codex["model_mappings"] == []
-        assert codex["inject_detection_payload"] is False
 
 
 # =============================================================================
