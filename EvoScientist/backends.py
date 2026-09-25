@@ -502,6 +502,7 @@ def abandoned_tool_messages(messages: list) -> list:
         converted = list(convert_to_messages(messages))
     except Exception:
         return []
+
     def _calls(message: AIMessage) -> list:
         return [
             *message.tool_calls,
