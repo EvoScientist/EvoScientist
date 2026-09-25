@@ -263,7 +263,7 @@ class _SetupApi:
             model = str((payload or {}).get("model", ""))
             api_key = str((payload or {}).get("api_key", ""))
             workspace = str((payload or {}).get("workspace", ""))
-            error = validate_setup(provider, model, api_key)
+            error = validate_setup(provider, model, api_key, config=self._config)
             if error:
                 return {"ok": False, "error": error}
             try:

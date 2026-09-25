@@ -14,6 +14,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from EvoScientist.config.settings import EvoScientistConfig
 from EvoScientist.deploy.launcher import LauncherError
 from EvoScientist.desktop import app_paths, shell
@@ -869,10 +871,34 @@ def test_default_workspace_is_a_named_documents_subfolder():
 
 
 def test_validate_setup_flags_missing_and_unknown():
-    assert dsetup.validate_setup("anthropic", "m", "") is not None  # no key
-    assert dsetup.validate_setup("anthropic", "", "k") is not None  # no model
-    assert dsetup.validate_setup("mystery", "m", "k") is not None  # unknown provider
-    assert dsetup.validate_setup("anthropic", "m", "k") is None
+    cfg = EvoScientistConfig()
+    assert dsetup.validate_setup("anthropic", "m", "", config=cfg) is not None
+    assert dsetup.validate_setup("anthropic", "", "k", config=cfg) is not None
+    assert dsetup.validate_setup("mystery", "m", "k", config=cfg) is not None
+    assert dsetup.validate_setup("anthropic", "m", "k", config=cfg) is None
+
+
+def test_validate_setup_accepts_non_curated_key_only_provider():
+    """A provider set in config.yaml but not in the dropdown (shown preselected)
+    submits when a key is all it needs — and the config is not mutated."""
+    cfg = EvoScientistConfig(provider="siliconflow")
+    assert dsetup.validate_setup("siliconflow", "m", "k", config=cfg) is None
+    assert cfg.siliconflow_api_key == ""  # validation works on a copy
+
+
+@pytest.mark.parametrize("provider", ["ollama", "custom-openai", "custom-anthropic"])
+def test_validate_setup_rejects_provider_needing_base_url(provider):
+    """No base-URL field on the form: reject before saving instead of saving a
+    config that leaves setup_needed True (form back on every launch)."""
+    err = dsetup.validate_setup(provider, "m", "k", config=EvoScientistConfig())
+    assert err is not None
+    assert "base URL" in err
+    assert "EvoSci" not in err  # the desktop ships no EvoSci command
+
+
+def test_validate_setup_accepts_base_url_provider_already_configured():
+    cfg = EvoScientistConfig(custom_openai_base_url="http://localhost:8000/v1")
+    assert dsetup.validate_setup("custom-openai", "m", "k", config=cfg) is None
 
 
 def test_setup_api_submit_is_one_shot(monkeypatch):

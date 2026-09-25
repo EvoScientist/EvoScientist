@@ -18,8 +18,9 @@ import html
 from typing import Any
 
 # Curated common providers for the dropdown (value = config ``provider``). The
-# key field for each is resolved through the wizard's public accessor, so any
-# provider it knows works even though the dropdown lists the mainstream ones.
+# key field for each is resolved through the wizard's public accessor, and
+# validation accepts any provider the wizard knows, so a provider already set in
+# the config (shown preselected) works even though it is not listed here.
 PROVIDERS: list[tuple[str, str]] = [
     ("anthropic", "Anthropic (Claude)"),
     ("openai", "OpenAI (GPT)"),
@@ -28,8 +29,6 @@ PROVIDERS: list[tuple[str, str]] = [
     ("deepseek", "DeepSeek"),
     ("nvidia", "NVIDIA"),
 ]
-
-_KNOWN_PROVIDERS = frozenset(value for value, _ in PROVIDERS)
 
 _STYLE = """
   :root { color-scheme: light dark; }
@@ -72,14 +71,38 @@ def setup_needed(config: Any) -> bool:
     return not is_provider_configured(config)
 
 
-def validate_setup(provider: str, model: str, api_key: str) -> str | None:
-    """Return an actionable error message if the answers are unusable, else None."""
-    if provider not in _KNOWN_PROVIDERS:
+def validate_setup(
+    provider: str, model: str, api_key: str, *, config: Any
+) -> str | None:
+    """Return an actionable error message if the answers are unusable, else None.
+
+    Accepts any provider the CLI wizard knows, not only the curated dropdown, so
+    a provider already set in ``config.yaml`` (shown preselected) can be
+    completed here. The answers are applied to a copy of *config* and checked
+    with the wizard's own ``is_provider_configured``: a provider that still is
+    not usable with just a key (ollama / custom-* / minimax / xiaomi-token-plan
+    without a base URL, which this form has no field for) is rejected before
+    anything is saved, so the form does not come back on every launch.
+    """
+    import copy
+
+    from ..config.onboard.constants import VALID_PROVIDERS
+    from ..config.onboard.wizard import is_provider_configured, provider_key_attr
+
+    if provider not in VALID_PROVIDERS:
         return "Choose a model provider."
     if not model.strip():
         return "Enter a model name."
     if not api_key.strip():
         return "Enter an API key."
+    trial = copy.copy(config)
+    trial.provider = provider
+    setattr(trial, provider_key_attr(provider), api_key.strip())
+    if not is_provider_configured(trial):
+        return (
+            f"{provider} also needs a base URL, which this form can't set. "
+            "Add it to your config file, or choose another provider."
+        )
     return None
 
 
