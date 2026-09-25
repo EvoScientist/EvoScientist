@@ -140,8 +140,58 @@ def default_workspace() -> Path:
     agent's root — its file tools, its ``execute`` shell, and the ``runs/`` /
     ``skills/`` / ``.langgraph_api`` / ``.bg_processes`` state it writes. A named
     subfolder keeps all of that in one place the user can find and delete.
+
+    "Documents" is the real Documents known folder on Windows, which OneDrive
+    folder backup redirects (e.g. ``%USERPROFILE%\\OneDrive\\Documents``) —
+    the same folder Explorer shows and the installer's ``{userdocs}`` resolves.
+    ``~/Documents`` is only the fallback (non-Windows, or the lookup failed).
     """
-    return Path(os.path.expanduser("~")) / "Documents" / "EvoScientist"
+    docs = _windows_documents_dir() or Path(os.path.expanduser("~")) / "Documents"
+    return docs / "EvoScientist"
+
+
+def _windows_documents_dir() -> Path | None:
+    """The Documents known folder via ``SHGetKnownFolderPath``, or None.
+
+    Follows OneDrive Known Folder Move and any other redirection. Returns None
+    off Windows or if the lookup fails, so the caller falls back to
+    ``~/Documents``.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        # FOLDERID_Documents = {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
+        folder_id = _GUID(
+            0xFDD39AD0,
+            0x238F,
+            0x46AF,
+            (ctypes.c_ubyte * 8)(0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7),
+        )
+        path_ptr = ctypes.c_wchar_p()
+        hr = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(folder_id), 0, None, ctypes.byref(path_ptr)
+        )
+        try:
+            if hr != 0 or not path_ptr.value:
+                return None
+            return Path(path_ptr.value)
+        finally:
+            # Per the API contract the caller frees the string whether or not
+            # the call succeeded.
+            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+    except Exception:
+        return None
 
 
 def desktop_log_path() -> Path:

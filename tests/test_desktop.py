@@ -864,6 +864,25 @@ def test_apply_setup_blank_workspace_defaults_to_documents_subdir(monkeypatch):
     assert cfg.default_workdir  # never blank
 
 
+def test_default_workspace_uses_the_documents_known_folder(monkeypatch, tmp_path):
+    """OneDrive folder backup redirects Documents; follow the known folder
+    (what Explorer and the installer's {userdocs} use), not ~/Documents."""
+    redirected = tmp_path / "OneDrive" / "Documents"
+    monkeypatch.setattr(app_paths, "_windows_documents_dir", lambda: redirected)
+    assert app_paths.default_workspace() == redirected / "EvoScientist"
+
+
+def test_default_workspace_falls_back_to_home_documents(monkeypatch):
+    monkeypatch.setattr(app_paths, "_windows_documents_dir", lambda: None)
+    expected = Path(os.path.expanduser("~")) / "Documents" / "EvoScientist"
+    assert app_paths.default_workspace() == expected
+
+
+def test_windows_documents_dir_is_none_off_windows(monkeypatch):
+    monkeypatch.setattr(app_paths.os, "name", "posix")
+    assert app_paths._windows_documents_dir() is None
+
+
 def test_default_workspace_is_a_named_documents_subfolder():
     ws = app_paths.default_workspace()
     assert ws.name == "EvoScientist"
