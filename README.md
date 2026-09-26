@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.2" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.3" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[26 Sep 2026]** **[v0.3.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.3)** — Codex OAuth (ChatGPT Plus/Pro) works end to end, with reasoning captured from vLLM-style endpoints; HITL resume limits count only human-prompted rounds; summarization follows the context window of the model actually running; per-surface gateway backend selection (off by default); async expert dispatch fix; deepagents 0.7.19.
 - **[23 Sep 2026]** **[v0.3.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.2)** — New models: Claude Opus 5.5, GPT-6 Sol/Luna, MiMo-V2.6-Pro/Flash (new Xiaomi provider), and Grok 4.7; fixes for Anthropic-protocol requests and Ctrl+C during tool runs; deepagents 0.7.18.
 - **[19 Sep 2026]** **[v0.3.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.1)** — New models: GLM-5.3-FlashX (Zhipu + OpenRouter), DeepSeek-V4.1-Flash (DeepSeek + OpenRouter); memory search handles Chinese and other languages written without word spaces; opt-in LangGraph server gateway backend (`gateway_backend`, off by default); HITL approval routed through one shared policy; model fallback chain fix; deepagents 0.7.15.
 - **[11 Sep 2026]** **[v0.3.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.0)** — Async sub-agents follow the caller's model; mid-session expert install without `/new`; MiniMax multi-turn fix; channel retry and OpenRouter attribution fixes.

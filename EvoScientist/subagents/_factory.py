@@ -184,6 +184,7 @@ def _scheduler_rubric_middleware(*, model: BaseChatModel, backend: BackendProtoc
     import warnings
 
     from deepagents import FilesystemMiddleware
+    from deepagents.middleware import UnsupportedContentMiddleware
     from langchain_core._api import LangChainBetaWarning
 
     # Eviction thresholds off: both eviction paths write files through the
@@ -203,6 +204,8 @@ def _scheduler_rubric_middleware(*, model: BaseChatModel, backend: BackendProtoc
             grader_middleware=[
                 grader_fs,
                 _GraderCallBudget(max_calls=_SCHEDULER_GRADER_MAX_CALLS),
+                # create_agent does not add it; last so it sees the final request.
+                UnsupportedContentMiddleware(),
             ],
             max_iterations=2,
             on_evaluation=_log_rubric_evaluation,

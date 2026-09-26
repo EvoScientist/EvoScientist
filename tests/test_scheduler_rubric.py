@@ -296,9 +296,76 @@ def test_scheduler_grader_carries_a_call_budget(tmp_path):
     assert [type(m).__name__ for m in grader_mw] == [
         "FilesystemMiddleware",
         "_GraderCallBudget",
+        "UnsupportedContentMiddleware",
     ]
     assert isinstance(grader_mw[1], _GraderCallBudget)
     assert grader_mw[1].max_calls == 12
+
+
+class _RecordingGrader(BaseChatModel):
+    """Records each request's messages and returns a satisfied verdict."""
+
+    seen: list
+
+    @property
+    def _llm_type(self) -> str:
+        return "recording-grader"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(messages)
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "GraderResponse",
+                    "args": {"result": "satisfied", "explanation": "x", "criteria": []},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
+def test_scheduler_grader_replaces_media_its_model_cannot_accept(tmp_path):
+    from langchain_core.messages import ToolMessage
+
+    fake = _RecordingGrader(seen=[], profile={"image_inputs": False})
+    kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path, aux_model=fake)
+    grader = kwargs["middleware"][-1]._ensure_grader()
+    grader.invoke(
+        {
+            "messages": [
+                HumanMessage("grade the deliverables"),
+                AIMessage(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "r1",
+                            "name": "read_file",
+                            "args": {"file_path": "/a.png"},
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=[
+                        {
+                            "type": "image",
+                            "base64": "iVBORw0KGgo=",
+                            "mime_type": "image/png",
+                        }
+                    ],
+                    tool_call_id="r1",
+                ),
+            ]
+        },
+        config={"recursion_limit": 20},
+    )
+    tool_result = fake.seen[0][-1]
+    assert [block["type"] for block in tool_result.content] == ["text"]
 
 
 async def test_grader_call_budget_also_guards_the_async_path():
