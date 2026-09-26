@@ -24,6 +24,7 @@ _REQUESTY_BASE_URL = "https://router.requesty.ai/v1"
 _NOVITA_BASE_URL = "https://api.novita.ai/openai/v1"
 _XIAOMI_ANTHROPIC_BASE_URL = "https://api.xiaomimimo.com/anthropic"
 _XIAOMI_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/anthropic"
+_OPPER_BASE_URL = "https://api.opper.ai/v3/compat"
 
 # Providers routed through the OpenAI provider with a custom base_url.
 # Maps provider name → (base_url or None, env var for API key).
@@ -39,6 +40,7 @@ _OPENAI_ROUTED_PROVIDERS: dict[str, tuple[str | None, str]] = {
     "dashscope-code": (_DASHSCOPE_CODE_BASE_URL, "DASHSCOPE_API_KEY"),
     "requesty": (_REQUESTY_BASE_URL, "REQUESTY_API_KEY"),
     "novita": (_NOVITA_BASE_URL, "NOVITA_API_KEY"),
+    "opper": (_OPPER_BASE_URL, "OPPER_API_KEY"),
     "custom-openai": (
         None,
         "CUSTOM_OPENAI_API_KEY",
@@ -171,6 +173,17 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("kimi-k3", "moonshotai/kimi-k3", "novita"),
     ("glm-5.2", "zai-org/glm-5.2", "novita"),
     ("deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731", "novita"),
+    # Opper (EU-hosted aggregator — OpenAI-compatible, bare pool-name model IDs
+    # where a pool is every provider serving that model and Opper picks the
+    # route per request). Listed before OpenRouter so shared short names keep
+    # resolving to their existing provider (the dict below is last-entry-wins);
+    # Opper is selected explicitly via get_models_for_provider.
+    ("claude-sonnet-4.6", "claude-sonnet-4-6", "opper"),
+    ("claude-opus-5", "claude-opus-5", "opper"),
+    ("gpt-5.5", "gpt-5.5", "opper"),
+    ("gemini-3.8-flash", "gemini-3.8-flash", "opper"),
+    ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
+    ("mistral-large-2512", "mistral-large-2512", "opper"),
     # OpenRouter
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
     ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
