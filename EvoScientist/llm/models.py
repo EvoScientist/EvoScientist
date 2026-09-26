@@ -195,10 +195,12 @@ _OPENROUTER_MAX_CATEGORIES_PER_REQUEST = 2
 
 
 def _env_flag_enabled(name: str) -> bool:
+    """Return whether a boolean environment flag is enabled (truthy)."""
     return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
 
 
 def _env_flag_disabled(name: str) -> bool:
+    """Return whether a boolean environment flag is explicitly disabled (falsy)."""
     value = os.environ.get(name)
     return value is not None and value.strip().lower() in _FALSEY_ENV_VALUES
 
@@ -348,6 +350,45 @@ def _apply_auto_config(
         kwargs["reasoning"] = True
 
 
+def _require_routed_api_key(
+    provider: str,
+    api_key_env: str,
+    kwargs: dict[str, Any],
+    *,
+    routed_via: str,
+) -> None:
+    """Fail fast when a routed provider has no API key of its own.
+
+    Routed providers (e.g. ``minimax`` via ChatAnthropic, ``novita`` via
+    ChatOpenAI) set a custom ``base_url`` but rely on the underlying client
+    for authentication.  When the provider's own key env var is empty and the
+    caller did not pass a non-empty ``api_key=`` explicitly, the underlying
+    client silently reads ``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` and sends
+    *that* key to the third-party endpoint — a security bug and a confusing 401.
+
+    Args:
+        provider: Name of the routed provider (e.g. ``"minimax"``).
+        api_key_env: Environment variable name for the provider's own key.
+        kwargs: Keyword arguments passed through to ``get_chat_model``.
+        routed_via: Human-readable name of the underlying client
+            (``"Anthropic"`` or ``"OpenAI"``), used in the error message.
+
+    Raises:
+        ValueError: with a clear message naming the missing env var.
+    """
+    if os.environ.get(api_key_env, ""):
+        return
+    if kwargs.get("api_key"):
+        return
+    raise ValueError(
+        f"The '{provider}' provider requires an API key. Set the "
+        f"{api_key_env} environment variable, or pass api_key=... explicitly "
+        f"to get_chat_model(). Without it, the underlying {routed_via} client "
+        f"would silently fall back to the default vendor key and send it to "
+        f"the third-party endpoint."
+    )
+
+
 def get_chat_model(
     model: str | None = None,
     provider: str | None = None,
@@ -474,6 +515,7 @@ def get_chat_model(
             base_url = base_url_default
         if base_url:
             kwargs["base_url"] = base_url
+        _require_routed_api_key(provider, api_key_env, kwargs, routed_via="OpenAI")
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
@@ -584,6 +626,7 @@ def get_chat_model(
             base_url = base_url_default
         if base_url:
             kwargs["base_url"] = base_url
+        _require_routed_api_key(provider, api_key_env, kwargs, routed_via="Anthropic")
         api_key = os.environ.get(api_key_env, "")
         if api_key:
             kwargs["api_key"] = api_key
