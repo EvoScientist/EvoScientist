@@ -47,13 +47,15 @@ _SCHEDULER_GRADER_TOOLS = ("ls", "read_file")
 
 # Structured-output strategy per OpenRouter model family. langchain picks the
 # grader's strategy from the model profile plus a model-name regex table, and
-# OpenRouter breaks each family the other way round: Gemini tool schemas lose
-# the criteria ``oneOf`` (every entry comes back null), Anthropic JSON mode
-# returns non-JSON. Verified live 2026-09-04. Passed explicitly because a
-# profile pin loses to the name regex (``anthropic/claude-fable-5``).
+# OpenRouter breaks each family differently: Gemini tool schemas lose the
+# criteria ``oneOf`` (every entry comes back null), Anthropic JSON mode returns
+# non-JSON, OpenAI's strict JSON mode rejects that ``oneOf`` with a 400.
+# Verified live 2026-09-04 and 2026-09-26. Passed explicitly because a profile
+# pin loses to the name regex (``anthropic/claude-fable-5``).
 _OPENROUTER_GRADER_STRATEGY: dict[str, type[ProviderStrategy] | type[ToolStrategy]] = {
     "google/": ProviderStrategy,
     "anthropic/": ToolStrategy,
+    "openai/": ToolStrategy,
 }
 
 # Model calls one grader attempt may spend before the run fails closed with
@@ -82,8 +84,8 @@ def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
             "structured verdicts (this route rejects forced tool_choice and its "
             "JSON mode rejects the grader schema); rubric runs will end in "
             "grader_error. Use the native anthropic provider for this model, or "
-            "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku "
-            "and Gemini all grade through OpenRouter).",
+            "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku, "
+            "GPT and Gemini all grade through OpenRouter).",
             model_id,
         )
 

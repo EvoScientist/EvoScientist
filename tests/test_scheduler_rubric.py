@@ -190,6 +190,20 @@ def test_grader_strategy_is_tool_calling_for_anthropic_on_openrouter():
         assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
 
 
+def test_grader_strategy_is_tool_calling_for_openai_on_openrouter():
+    """OpenAI's strict JSON mode rejects the criteria oneOf; tool calling works.
+
+    ``gpt-5.6-luna`` matters: its profile declares structured output, so
+    langchain alone would pick JSON mode.
+    """
+    from langchain.agents.structured_output import ToolStrategy
+
+    from EvoScientist.subagents._factory import _grader_strategy
+
+    for model_id in ("openai/gpt-5.6-luna", "openai/gpt-6-luna"):
+        assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
+
+
 def test_grader_strategy_defers_to_langchain_elsewhere():
     from langchain_anthropic import ChatAnthropic
 
