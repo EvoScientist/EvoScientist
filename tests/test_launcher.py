@@ -1,7 +1,7 @@
 """Tests for the shell-agnostic launcher core (``EvoScientist.deploy.launcher``).
 
-These pin the pieces that moved out of ``run_webui`` so they can be reused by a
-desktop shell: the backend reuse/start decision and its error-code taxonomy,
+These pin the pieces that moved out of ``run_webui`` so they can be reused by
+other front-ends: the backend reuse/start decision and its error-code taxonomy,
 the secret-scrubbing env, the front-end runners' preflight, readiness polling,
 and the JSON ready/error signal from the standalone entrypoint.
 """
@@ -119,28 +119,22 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
     assert any("Config changed" in w for w in decision.warnings)
 
 
-def test_resolve_backend_no_sidecar_reuses(monkeypatch):
-    """CLI (auto_port off): an older subprocess with no sidecar is reused, as
-    before — backward-compat for pre-sidecar / externally-managed servers."""
+@pytest.mark.parametrize("move_port_if_taken", [False, True])
+def test_resolve_backend_no_sidecar_reuses(monkeypatch, move_port_if_taken):
+    """An older subprocess with no sidecar is reused, as before —
+    backward-compat for pre-sidecar / externally-managed servers. The port-move
+    flag does not change that: the port serves a langgraph dev, not another
+    application."""
     _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
-    decision = lm._resolve_backend(_cfg(), object())
+    decision = lm._resolve_backend(
+        _cfg(move_port_if_taken=move_port_if_taken), object()
+    )
     assert decision.action == "reuse"
 
 
-def test_resolve_backend_no_sidecar_auto_port_refuses(monkeypatch):
-    """Desktop (auto_port on): a server with no ownership record must NOT be
-    blindly reused — refuse so the caller auto-ports to a fresh own backend
-    (sidecar_port_mismatch is an auto-port fallback code)."""
-    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
-    with pytest.raises(lm.LauncherError) as ei:
-        lm._resolve_backend(_cfg(auto_port=True), object())
-    assert ei.value.code == "sidecar_port_mismatch"
-    assert ei.value.code in lm._AUTO_PORT_FALLBACK_CODES  # desktop will auto-port
-
-
 def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
-    """A sidecar whose recorded PID does not serve this port (a fallback launch
-    overwrote the global record) is rejected before its workspace is trusted."""
+    """A sidecar whose recorded PID does not serve this port (a launch on another
+    port overwrote the global record) is rejected before its workspace is trusted."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
@@ -157,7 +151,7 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Auto-port — collision recovery for GUI shells (no terminal to act on it)
+# move_port_if_taken — moving off a port held by another application
 # --------------------------------------------------------------------------- #
 def test_find_free_port_scans_upward(monkeypatch):
     occupied = {6174, 6175}
@@ -202,21 +196,21 @@ def _patch_for_start(monkeypatch, occupied_ports):
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 
-def test_start_auto_ports_off_occupied_backend(monkeypatch):
+def test_start_moves_backend_port_off_foreign_occupant(monkeypatch):
     _patch_for_start(monkeypatch, {6174})  # default backend port taken (foreign)
-    launcher = lm.WebUILauncher(object(), _cfg(auto_port=True), _FakeRunner())
+    launcher = lm.WebUILauncher(object(), _cfg(move_port_if_taken=True), _FakeRunner())
     result = launcher.start()
     assert launcher._cfg.backend_port == 6175  # moved to next free
     assert launcher._cfg.webui_port == 4716  # webui untouched (was free)
     assert result.backend_started is True
     assert "6175" in result.backend_url
-    assert any("port_conflict" in w and "6175" in w for w in result.warnings)
+    assert any("another application" in w and "6175" in w for w in result.warnings)
 
 
-def test_start_without_auto_port_raises_on_conflict(monkeypatch):
-    """CLI (auto_port off) still gets the explicit conflict error."""
+def test_start_without_move_port_raises_on_conflict(monkeypatch):
+    """With the flag off (the CLI), a foreign occupant is an explicit error."""
     _patch_for_start(monkeypatch, {6174})
-    launcher = lm.WebUILauncher(object(), _cfg(auto_port=False), _FakeRunner())
+    launcher = lm.WebUILauncher(object(), _cfg(move_port_if_taken=False), _FakeRunner())
     with pytest.raises(lm.LauncherError) as ei:
         launcher.start()
     assert ei.value.code == "port_conflict"
@@ -280,7 +274,7 @@ def test_stop_during_blocked_backend_start_cancels_and_tears_down(monkeypatch):
     t = threading.Thread(target=_boot)
     t.start()
     assert entered.wait(5)
-    launcher.stop()  # GUI-thread close while the backend start is blocked
+    launcher.stop()  # close from another thread while the backend start blocks
     release.set()
     t.join(5)
     assert not t.is_alive()
@@ -294,8 +288,8 @@ def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
     """stop() during start_langgraph_dev's run (proc handle not wired yet) tears
     down only the process THIS launcher spawned — never the on-disk recorded
     server, which before our own Popen still names a different session's backend
-    (e.g. one the desktop auto-ported around). So a desktop close mid-boot can't
-    kill an unrelated CLI backend."""
+    (e.g. one on another port). So a stop mid-boot can't kill an unrelated
+    session's backend."""
     calls: list[int] = []
     # The mid-start fallback must use the owned-process stop, not the disk one.
     monkeypatch.setattr(
@@ -330,7 +324,8 @@ def test_stop_after_reuse_does_not_stop_recorded_server(monkeypatch):
 def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     """An EvoSci langgraph dev occupies ``occupied`` with ``sidecar``.
 
-    Any other port is free, so an auto-port fallback resolves to ``start``.
+    Any other port is free, so a port move (if one wrongly happened) would
+    resolve to ``start``.
     """
     occ = set(occupied)
     monkeypatch.setattr(lgm, "_is_port_occupied", lambda port, *a, **k: port in occ)
@@ -343,49 +338,57 @@ def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 
-def test_start_auto_ports_off_workspace_mismatch(monkeypatch):
-    """A GUI shell starts its own backend when the port serves another workspace."""
+@pytest.mark.parametrize(
+    ("sidecar", "pid_serves", "code"),
+    [
+        ({"workspace": "/tmp/wsB", "deploy_mode": True}, True, "workspace_mismatch"),
+        ({"workspace": "/tmp/wsA", "deploy_mode": False}, True, "stripped_backend"),
+        (
+            {"workspace": "/tmp/wsA", "deploy_mode": True},
+            False,
+            "sidecar_port_mismatch",
+        ),
+    ],
+)
+def test_move_port_if_taken_never_moves_off_a_langgraph_server(
+    monkeypatch, sidecar, pid_serves, code
+):
+    """The flag moves only off a foreign occupant. A langgraph dev on the port
+    still raises: moving would start a second EvoSci server next to it."""
+    _patch_for_evosci_occupant(monkeypatch, sidecar=sidecar)
+    monkeypatch.setattr(lgm, "_pid_serves_port", lambda *a, **k: pid_serves)
+    started: list = []
+    monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: started.append(k))
+    launcher = lm.WebUILauncher(
+        object(),
+        _cfg(workspace_dir="/tmp/wsA", move_port_if_taken=True),
+        _FakeRunner(),
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        launcher.start()
+    assert ei.value.code == code
+    assert launcher._cfg.backend_port == 6174  # did not move
+    assert started == []  # no second backend
+
+
+def test_start_without_move_port_raises_on_workspace_mismatch(monkeypatch):
+    """With the flag off (the CLI), a different-workspace server is refused."""
     _patch_for_evosci_occupant(
         monkeypatch, sidecar={"workspace": "/tmp/wsB", "deploy_mode": True}
     )
     launcher = lm.WebUILauncher(
-        object(), _cfg(workspace_dir="/tmp/wsA", auto_port=True), _FakeRunner()
-    )
-    result = launcher.start()
-    assert launcher._cfg.backend_port == 6175  # own backend on a free port
-    assert result.backend_started is True
-    assert any("workspace_mismatch" in w for w in result.warnings)
-
-
-def test_start_auto_ports_off_stripped_backend(monkeypatch):
-    """A GUI shell starts its own deploy-mode backend past a stripped server."""
-    _patch_for_evosci_occupant(
-        monkeypatch, sidecar={"workspace": "/tmp/wsA", "deploy_mode": False}
-    )
-    launcher = lm.WebUILauncher(
-        object(), _cfg(workspace_dir="/tmp/wsA", auto_port=True), _FakeRunner()
-    )
-    result = launcher.start()
-    assert launcher._cfg.backend_port == 6175
-    assert any("stripped_backend" in w for w in result.warnings)
-
-
-def test_start_without_auto_port_raises_on_workspace_mismatch(monkeypatch):
-    """CLI (auto_port off) still refuses a different-workspace server."""
-    _patch_for_evosci_occupant(
-        monkeypatch, sidecar={"workspace": "/tmp/wsB", "deploy_mode": True}
-    )
-    launcher = lm.WebUILauncher(
-        object(), _cfg(workspace_dir="/tmp/wsA", auto_port=False), _FakeRunner()
+        object(),
+        _cfg(workspace_dir="/tmp/wsA", move_port_if_taken=False),
+        _FakeRunner(),
     )
     with pytest.raises(lm.LauncherError) as ei:
         launcher.start()
     assert ei.value.code == "workspace_mismatch"
 
 
-def test_start_auto_ports_occupied_webui(monkeypatch):
+def test_start_moves_webui_port_off_occupied_port(monkeypatch):
     _patch_for_start(monkeypatch, {4716})  # webui port taken, backend free
-    launcher = lm.WebUILauncher(object(), _cfg(auto_port=True), _FakeRunner())
+    launcher = lm.WebUILauncher(object(), _cfg(move_port_if_taken=True), _FakeRunner())
     result = launcher.start()
     assert launcher._cfg.backend_port == 6174  # backend untouched
     assert launcher._cfg.webui_port == 4717  # moved to next free
@@ -650,8 +653,8 @@ def test_build_launcher_config_resolves_ports_and_workspace(monkeypatch, tmp_pat
 
 
 def test_build_launcher_config_keepalive_override_wins(monkeypatch, tmp_path):
-    """The desktop passes keepalive=False so its backend is always torn down,
-    even when the CLI config has langgraph_dev_keepalive=True."""
+    """An explicit keepalive=False tears the backend down even when the config
+    has langgraph_dev_keepalive=True."""
     monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
     config = SimpleNamespace(
         default_workdir=str(tmp_path),

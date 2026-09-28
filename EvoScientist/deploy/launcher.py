@@ -4,7 +4,7 @@ Extracts the reusable start / health / stop logic out of
 ``deploy/webui.py:run_webui`` so it can be driven by *any* front-end:
 
 - the existing terminal CLI (``run_webui`` is now a thin adapter over this), and
-- an embedded desktop shell (imports :class:`WebUILauncher` in-process).
+- any other front-end that imports :class:`WebUILauncher` in-process.
 
 Design rules that keep it shell-agnostic:
 
@@ -18,8 +18,8 @@ Design rules that keep it shell-agnostic:
   :meth:`WebUILauncher.stop`; the caller wires those into its own lifecycle.
 - **The front-end is pluggable.** Backend (langgraph dev) handling is shared;
   only the front-end differs, behind :class:`WebUIRunner`. Today's npm-fetched
-  front-end is :class:`NpxWebUIRunner`; the bundled Windows-desktop front-end
-  (``node dist/server.js``) is :class:`BundledWebUIRunner`.
+  front-end is :class:`NpxWebUIRunner`; a locally installed front-end
+  (``node dist/server.js``) runs through :class:`BundledWebUIRunner`.
 """
 
 from __future__ import annotations
@@ -63,10 +63,12 @@ class LauncherConfig:
     # Honoured only by front-ends whose ``handles_browser_open`` is False
     # (e.g. the bundled runner). The npx runner opens the browser itself.
     open_browser: bool = False
-    # Desktop shells set this: when the configured port is occupied by a
-    # foreign process, fall back to the next free port instead of raising.
-    # The CLI leaves it False so a terminal user gets the explicit conflict.
-    auto_port: bool = False
+    # When the configured backend port is held by another application (not a
+    # langgraph dev server), start the backend on the next free port instead of
+    # raising ``port_conflict``; an occupied WebUI port moves the same way.
+    # Off by default: the CLI reports the conflict so a terminal user can act
+    # on it.
+    move_port_if_taken: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,9 +84,9 @@ class LaunchResult:
 class LauncherError(Exception):
     """A fatal launch condition, tagged with a machine-readable ``code``.
 
-    ``code`` is the stable contract every shell maps from: the CLI to a Rich
-    panel, the desktop GUI to its error page. ``message`` is human-readable and
-    actionable; ``detail`` is an optional secondary line.
+    ``code`` is the stable contract every front-end maps from: the CLI to a Rich
+    panel, other front-ends to their own error display. ``message`` is
+    human-readable and actionable; ``detail`` is an optional secondary line.
     """
 
     def __init__(self, code: str, message: str, detail: str | None = None) -> None:
@@ -99,7 +101,7 @@ class LauncherError(Exception):
 # --------------------------------------------------------------------------- #
 class WebUIRunner(Protocol):
     """A front-end process strategy. Backend handling is shared; this is the
-    only part that differs between the CLI (npx) and the desktop (bundled)."""
+    only part that differs between the npx front-end and a locally installed one."""
 
     # True → the runner opens the system browser itself (so the launcher must
     # not). False → the launcher opens it when ``cfg.open_browser`` is set.
@@ -156,8 +158,8 @@ class NpxWebUIRunner:
 
 
 class BundledWebUIRunner:
-    """Phase-1 desktop front-end: run the bundled Next.js standalone server
-    directly with a bundled Node binary — no npx, no npm, no network.
+    """Locally installed front-end: run the Next.js standalone server directly
+    with a given Node binary — no npx, no npm, no network.
 
     ``@evoscientist/webui`` ships a prebuilt standalone build; its own ``bin``
     runs ``node dist/server.js``. We bypass the ``bin`` (which opens a browser
@@ -168,10 +170,10 @@ class BundledWebUIRunner:
     Args:
         app_dir: Directory containing the unpacked front-end (expects
             ``<app_dir>/dist/server.js``).
-        node_exe: Path to the bundled ``node`` binary.
+        node_exe: Path to the ``node`` binary.
         log_path: When set, the node process's stdout+stderr are appended here
-            (the windowed desktop app has no console, so otherwise the front-end
-            output is discarded). When None, output is left to inherit as before.
+            (a caller without a console would otherwise lose the front-end
+            output). When None, output is left to inherit as before.
     """
 
     handles_browser_open = False
@@ -205,9 +207,9 @@ class BundledWebUIRunner:
         run_env = {**env, "NODE_ENV": "production"}
         kwargs = _popen_group_kwargs()
         if os.name == "nt":
-            # Desktop shell: keep the node process off any console so no window
-            # flashes. OR it into the process-group flag so tree-kill still
-            # works. (CREATE_NO_WINDOW exists only on Windows.)
+            # Keep the node process off any console so no window flashes. OR it
+            # into the process-group flag so tree-kill still works.
+            # (CREATE_NO_WINDOW exists only on Windows.)
             kwargs["creationflags"] = (
                 kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
             )
@@ -252,15 +254,6 @@ class _BackendDecision:
     warnings: list[str] = field(default_factory=list)
 
 
-# Backend-resolution errors an auto-port (GUI) shell recovers from by starting
-# its own backend on a free port instead of raising. A busy port, a server for
-# a different workspace, and a stripped CLI-mode server are all unusable for the
-# desktop's own workspace, and there is no terminal to act on the message.
-_AUTO_PORT_FALLBACK_CODES = frozenset(
-    {"port_conflict", "workspace_mismatch", "stripped_backend", "sidecar_port_mismatch"}
-)
-
-
 class WebUILauncher:
     """Orchestrates the backend (langgraph dev) + a pluggable front-end.
 
@@ -287,8 +280,8 @@ class WebUILauncher:
         self._backend_start_initiated = False
         self._webui_proc: subprocess.Popen | None = None
         self._stopped = False
-        # Guards _teardown: start() (boot thread) and stop() (GUI thread) can
-        # run concurrently on the desktop.
+        # Guards _teardown: a caller may run start() on one thread and call
+        # stop() from another.
         self._lock = threading.Lock()
         self._warnings: list[str] = []
 
@@ -307,16 +300,14 @@ class WebUILauncher:
 
     @property
     def workspace_dir(self) -> str:
-        """The workspace this launcher's backend serves. Read by the desktop
-        shell to seed the folder picker and skip a no-op switch, and by the
-        controller when rebuilding a launcher for a new workspace."""
+        """The workspace this launcher's backend serves."""
         return self._cfg.workspace_dir
 
     @property
     def backend_started(self) -> bool:
         """True when this launcher started (and thus owns teardown of) the
-        backend; False when it reused an already-running one. Closing the
-        desktop only kills the backend's runs when this is True."""
+        backend; False when it reused an already-running one. :meth:`stop`
+        only kills the backend's runs when this is True."""
         return self._backend_started
 
     # -- lifecycle -------------------------------------------------------- #
@@ -329,27 +320,26 @@ class WebUILauncher:
         ~60s). The front-end process is only spawned, not awaited.
 
         Tears down whatever it already spawned if a later step raises, or if
-        ``stop()`` fires concurrently — the desktop calls ``stop()`` from the GUI
-        thread while this runs on the boot thread. Without this, a failed CLI
-        launch (``atexit`` not yet registered) or a window closed mid-boot would
-        orphan the backend holding the port.
+        ``stop()`` fires concurrently from another thread. Without this, a
+        failed CLI launch (``atexit`` not yet registered) or a caller that
+        stops mid-boot would orphan the backend holding the port.
         """
         from ..langgraph_dev.manager import _is_port_occupied
 
         self._runner.preflight(self._cfg)
 
         try:
-            decision = self._resolve_backend_with_auto_port()
+            decision = self._resolve_backend_or_move_port()
             self._warnings.extend(decision.warnings)
             if decision.action == "start":
                 self._start_backend()
             self._raise_if_stopped()
 
-            # Front-end port: auto-port shells move off an occupied port too;
-            # otherwise it's a non-fatal warning (node will surface a hard bind
-            # failure if it actually can't listen).
+            # Front-end port: with move_port_if_taken it moves off an occupied
+            # port too; otherwise it's a non-fatal warning (node will surface a
+            # hard bind failure if it actually can't listen).
             if _is_port_occupied(self._cfg.webui_port, self._cfg.webui_host):
-                if self._cfg.auto_port:
+                if self._cfg.move_port_if_taken:
                     free = _find_free_port(self._cfg.webui_port, self._cfg.webui_host)
                     self._warnings.append(
                         f"Port {self._cfg.webui_port} was occupied; using {free} "
@@ -435,8 +425,8 @@ class WebUILauncher:
     def _teardown(self) -> None:
         """Stop every process this launcher spawned, at most once each.
 
-        Lock-guarded because ``start()`` (boot thread) and ``stop()`` (GUI
-        thread) can enter concurrently; each handle is cleared as it is stopped
+        Lock-guarded because ``start()`` and ``stop()`` can enter concurrently
+        from different threads; each handle is cleared as it is stopped
         so a second entry is a no-op. A reused backend has no handle here, so it
         is never touched.
         """
@@ -454,8 +444,8 @@ class WebUILauncher:
                 # have no proc handle yet. Stop only the process THIS launcher
                 # spawned (the manager's in-memory record), never the shared
                 # on-disk PID file: before our child is spawned that file still
-                # names a *different* server (e.g. a CLI backend on another port
-                # we auto-ported around), and killing it would orphan an
+                # names a *different* server (e.g. another session's backend on
+                # a different port), and killing it would take down an
                 # unrelated session. Once our child is spawned it is tracked in
                 # memory, so a close mid-health-wait still tears it down.
                 from ..langgraph_dev.manager import stop_inflight_owned_server
@@ -470,28 +460,26 @@ class WebUILauncher:
                     )
 
     # -- internals -------------------------------------------------------- #
-    def _resolve_backend_with_auto_port(self) -> _BackendDecision:
-        """Resolve the backend, retrying on a free port for auto-port shells.
+    def _resolve_backend_or_move_port(self) -> _BackendDecision:
+        """Resolve the backend; with ``move_port_if_taken``, move off a port
+        held by another application.
 
-        In auto-port (GUI) mode the desktop always wants its OWN backend for
-        its OWN workspace, and there is no terminal to act on a conflict
-        message. So a busy port (``port_conflict``), a reusable server pinned
-        to a different workspace (``workspace_mismatch``), and a stripped
-        CLI-mode server (``stripped_backend``) all fall back to starting a
-        fresh backend on a free port rather than dead-ending. A reusable
-        server for THIS workspace is still reused: ``_resolve_backend``
-        returns ``reuse`` before it would raise. The CLI (auto_port=False)
-        keeps the explicit conflict errors so a terminal user can act on them.
+        Only ``port_conflict`` moves: the port is held by something that is not
+        a langgraph dev server, so starting ours on the next free port runs no
+        second EvoSci server. Every other code (``workspace_mismatch``,
+        ``stripped_backend``, ``sidecar_port_mismatch``) means a langgraph dev
+        server already holds the port, and moving would start a second one next
+        to it, so those always raise.
         """
         try:
             return _resolve_backend(self._cfg, self._config)
         except LauncherError as exc:
-            if not self._cfg.auto_port or exc.code not in _AUTO_PORT_FALLBACK_CODES:
+            if not self._cfg.move_port_if_taken or exc.code != "port_conflict":
                 raise
             free = _find_free_port(self._cfg.backend_port, self._cfg.backend_host)
             self._warnings.append(
-                f"Port {self._cfg.backend_port} was unavailable ({exc.code}); "
-                f"started a new backend on {free} instead."
+                f"Port {self._cfg.backend_port} is held by another application; "
+                f"started the backend on {free} instead."
             )
             self._cfg = replace(self._cfg, backend_port=free)
             # The new port is free, so this resolves to ``start``.
@@ -587,26 +575,13 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     if sidecar is None:
         # No ownership record for the server on this port. The single global
         # sidecar is unlinked when any EvoSci server stops, so a surviving
-        # sibling on another port can be left record-less. The CLI still reuses
-        # it (backward-compat: pre-sidecar and externally-managed servers). But
-        # an auto-port shell (the desktop) can't verify the workspace/deploy-mode
-        # it needs and always wants its OWN backend, so it must not blindly reuse
-        # an unverifiable server — fall back (via sidecar_port_mismatch, an
-        # auto-port code) to starting a fresh backend on another port.
-        if cfg.auto_port:
-            raise LauncherError(
-                "sidecar_port_mismatch",
-                f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
-                f"has no ownership record for.",
-                f"Free port {cfg.backend_port} (lsof -i :{cfg.backend_port}) or "
-                f"change it with 'EvoSci config set langgraph_dev_port <port>'.",
-            )
+        # sibling on another port can be left record-less. Reuse it anyway
+        # (backward-compat: pre-sidecar and externally-managed servers).
         return _BackendDecision(action="reuse", warnings=warnings)
     # A sidecar is present. It is a single global record with no port field, so a
-    # fallback launch on another port can overwrite it. Confirm its PID actually
-    # serves THIS port before trusting its workspace — otherwise a stale record
-    # could reuse the wrong workspace, and teardown could stop the wrong server.
-    # Auto-port shells fall back to a fresh backend; the CLI gets an explicit error.
+    # launch on another port can overwrite it. Confirm its PID actually serves
+    # THIS port before trusting its workspace — otherwise a stale record could
+    # reuse the wrong workspace, and teardown could stop the wrong server.
     if not _pid_serves_port(sidecar.get("pid"), cfg.backend_port):
         raise LauncherError(
             "sidecar_port_mismatch",
@@ -687,9 +662,9 @@ def _stop_process_tree(proc: subprocess.Popen) -> None:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         elif os.name == "nt":
             # taskkill /T terminates the whole child tree (node + next server).
-            # CREATE_NO_WINDOW: the windowed EvoScientist.exe has no console, so
-            # spawning the console app taskkill would otherwise flash a blank
-            # terminal window on shutdown.
+            # CREATE_NO_WINDOW: a caller without a console (a windowed app)
+            # would otherwise flash a blank terminal window when spawning the
+            # console app taskkill on shutdown.
             subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 check=False,
@@ -786,25 +761,25 @@ def _poll_ready(
 
 
 # --------------------------------------------------------------------------- #
-# Launcher-config resolution (shared by the CLI WebUI and the desktop shell)
+# Launcher-config resolution (shared by every front-end)
 # --------------------------------------------------------------------------- #
 def build_launcher_config(
     config: Any,
     workspace_dir: str | None,
     *,
-    auto_port: bool = False,
+    move_port_if_taken: bool = False,
     keepalive: bool | None = None,
 ) -> LauncherConfig:
     """Resolve a :class:`LauncherConfig` from an ``EvoScientistConfig`` the
-    same way ``run_webui`` does, so both entrypoints agree.
+    same way ``run_webui`` does, so every entrypoint agrees.
 
-    ``auto_port`` is set by GUI shells (no terminal to act on a conflict); the
-    CLI leaves it False so a busy port surfaces as an explicit error.
+    ``move_port_if_taken`` moves off a port held by another application (see
+    :class:`LauncherConfig`); the CLI leaves it False so a busy port surfaces
+    as an explicit error.
 
     ``keepalive`` defaults to the ``langgraph_dev_keepalive`` config value; pass
-    an explicit bool to override it. The desktop passes ``False`` so its backend
-    is always torn down (it owns the backend and has no terminal to reclaim a
-    leftover from).
+    an explicit bool to override it, e.g. ``False`` for a caller that must
+    always tear its backend down.
     """
     from ..langgraph_dev.manager import _DEFAULT_HOST, _DEFAULT_PORT
 
@@ -837,5 +812,5 @@ def build_launcher_config(
             else keepalive
         ),
         open_browser=False,
-        auto_port=auto_port,
+        move_port_if_taken=move_port_if_taken,
     )
