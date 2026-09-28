@@ -30,8 +30,6 @@ from typing import Any
 
 import psutil
 
-from .agent_env import agent_shell_env
-
 logger = logging.getLogger(__name__)
 
 _BG_DIRNAME = ".bg_processes"
@@ -244,13 +242,7 @@ def launch(
     The caller is responsible for validating ``command`` first.
 
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
-
-    The child gets the same env overrides as the ``execute`` shell
-    (:func:`~EvoScientist.agent_env.agent_shell_env`), so a background
-    ``python`` resolves the same interpreter as a foreground one.
     """
-    overrides = agent_shell_env()
-    env = {**os.environ, **overrides} if overrides else None
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -266,7 +258,6 @@ def launch(
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
-            env=env,
         )
     finally:
         # The child inherited its own dup of the fd during spawn; the parent's copy

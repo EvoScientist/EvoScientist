@@ -28,7 +28,6 @@ from langchain.agents.middleware import (
 )
 
 from . import paths as _paths_mod
-from .agent_env import agent_shell_env
 from .config import (
     MemoryControls,
     MemoryObservationTarget,
@@ -808,7 +807,6 @@ def _get_default_backend(
         dangerous=cfg.dangerous_mode,
         guard_dangerous=guard_dangerous,
         refuse_delete=refuse_delete,
-        env=agent_shell_env(),
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=user_skills_dir,
@@ -1233,7 +1231,6 @@ def create_cli_agent(
         # Guard derived per call from the run's HITL-suppression state (see
         # CustomSandboxBackend._effective_guard_dangerous), not baked here.
         guard_dangerous=False,
-        env=agent_shell_env(),
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=_usr_skills_dir,
