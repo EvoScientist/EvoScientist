@@ -896,7 +896,7 @@ class TestReadTunnelUrl:
 
 class TestStartLanggraphDevNoConsole:
     """The langgraph dev child must spawn without a console window on Windows
-    (its output goes to the log) so the desktop shell gets no stray terminal."""
+    (its output goes to the log), so no stray terminal window appears."""
 
     def test_windows_suppresses_console(self, start_langgraph_dev_capture, monkeypatch):
         env = start_langgraph_dev_capture

@@ -1,10 +1,9 @@
-"""Pure, GUI-free helpers for safe desktop shutdown (issue #484 Part 5).
+"""Ask a running langgraph dev server whether it has work in flight.
 
-Answers two questions the pywebview ``closing`` handler needs — "is the backend
-busy?" and "should we confirm before closing?" — without importing pywebview or
-requiring a live server, so both unit-test in isolation. The GUI glue (the
-confirmation dialog and the close-event wiring) lives in
-:mod:`EvoScientist.desktop.shell`.
+Anything that is about to stop or restart a backend (closing an app, ``EvoSci
+update``) asks first, because stopping the server kills its in-flight runs and
+the background jobs it spawned. These helpers answer that question over HTTP,
+with no UI and no dependency on a live server in tests.
 """
 
 from __future__ import annotations
@@ -14,20 +13,9 @@ import time
 from collections.abc import Callable
 from typing import Literal
 
-logger = logging.getLogger("EvoScientist.desktop")
+logger = logging.getLogger(__name__)
 
 ActiveState = Literal["idle", "active", "unknown"]
-
-
-def should_confirm_close(backend_started: bool, has_active: bool) -> bool:
-    """Whether closing should prompt the user first.
-
-    Only when this app OWNS the backend (``backend_started``) AND it is busy:
-    closing then tears the backend down and kills its in-flight runs. When the
-    backend was reused (``backend_started`` is False), our close does not stop
-    it, so its runs survive and there is nothing to confirm.
-    """
-    return bool(backend_started and has_active)
 
 
 def _search_threads(url: str, payload: dict, *, timeout: float) -> list:
@@ -35,8 +23,8 @@ def _search_threads(url: str, payload: dict, *, timeout: float) -> list:
 
     A raw ``httpx`` call with a short timeout, NOT the langgraph SDK client: the
     SDK's client (``get_sync_client``) defaults to a 300s read timeout over a
-    5-retry transport, which could stall the GUI thread long after the user
-    clicked close. (The SDK is not exposed to proxies — it always passes an
+    5-retry transport, which could stall the caller long after the user asked
+    to stop. (The SDK is not exposed to proxies — it always passes an
     explicit transport, which disables httpx's env/registry proxy mounts.) A raw
     ``httpx.post`` DOES honour the system/registry proxy on Windows (present even
     with no ``*_PROXY`` env vars), and a VPN/corporate proxy would then swallow
@@ -84,10 +72,10 @@ def _running_bg_processes(url: str, *, timeout: float) -> list[dict]:
 
 
 def running_bg_process_names(url: str, *, timeout: float = 3.0) -> list[str]:
-    """Names of the running background jobs, for a switch/close dialog to list.
+    """Names of the running background jobs, for a confirmation prompt to list.
 
     Best-effort display helper: returns ``[]`` on any error (a failed name
-    lookup must never block a close or a switch — the gating decision is made by
+    lookup must never block a stop — the gating decision is made by
     :func:`_probe_active_state`, which treats the same error as ``"unknown"``).
     """
     try:
@@ -95,7 +83,7 @@ def running_bg_process_names(url: str, *, timeout: float = 3.0) -> list[str]:
             p.get("name", "task") for p in _running_bg_processes(url, timeout=timeout)
         ]
     except Exception as exc:
-        logger.warning("Listing running bg processes failed for %s: %s", url, exc)
+        logger.warning(f"Listing running bg processes failed for {url}: {exc}")
         return []
 
 
@@ -108,19 +96,18 @@ def _probe_active_state(
 
     - ANY thread is ``busy`` — a run is executing (including background
       sub-agents, which run on their own threads). Busy work is finite and a
-      restart kills it, so it blocks regardless of which thread the user is on.
-    - the WATCHED thread (``watched_thread_id``, the one open in the WebUI) is
+      restart kills it, so it counts regardless of which thread the user is on.
+    - the WATCHED thread (``watched_thread_id``, the one the user has open) is
       ``interrupted`` — a turn paused awaiting human input (ask_user / HITL).
       Interrupted threads are checkpointed to ``.langgraph_api`` and survive a
       restart (resumable, not lost), and they accumulate, so a stale interrupted
-      thread the user is NOT watching must not block; only the one they are
+      thread the user is NOT watching must not count; only the one they are
       actively deciding does. With no ``watched_thread_id`` the interrupted check
-      is skipped entirely (used by the close path — see
-      :func:`backend_has_active_runs`).
+      is skipped entirely.
     - ANY background process (``run_in_background``) is still running. These are
       children of the langgraph dev server, so a restart tree-kills them, and
       unlike interrupted turns they are not checkpointed — losing them loses the
-      work. So they block a switch and prompt a close, regardless of thread.
+      work. So they count regardless of thread.
 
     The run checks are each a ``POST /threads/search`` (limit 1); the endpoint
     filters one ``status`` at a time and ANDs an ``ids`` filter, so the watched
@@ -135,25 +122,25 @@ def _probe_active_state(
           refused, bad response) and no other check confirmed activity, so the
           caller cannot tell whether work is in flight.
 
-    The two callers collapse ``"unknown"`` differently, which is the whole point
-    of the tri-state: :func:`backend_has_active_runs` (close path) folds it to
-    *not active* so a flaky probe never traps the user in an unclosable window;
-    :func:`wait_for_backend_idle` (switch path) folds it to *keep waiting* so a
-    transient error never ends the wait and kills a live run.
+    The two public callers collapse ``"unknown"`` differently, which is the whole
+    point of the tri-state: :func:`backend_has_active_runs` folds it to *not
+    active* so a flaky probe never blocks a stop the user asked for;
+    :func:`wait_for_backend_idle` folds it to *keep waiting* so a transient error
+    never ends the wait and kills a live run.
     """
     from ..langgraph_dev.manager import is_langgraph_dev_running
 
     if not is_langgraph_dev_running(base_url=url):
         return "idle"
     saw_unknown = False
-    # Any busy thread anywhere blocks (finite executing work a restart kills).
+    # Any busy thread anywhere counts (finite executing work a restart kills).
     try:
         if _search_threads(url, {"status": "busy", "limit": 1}, timeout=timeout):
             return "active"
     except Exception as exc:
-        logger.warning("Active-work probe (busy) failed for %s: %s", url, exc)
+        logger.warning(f"Active-work probe (busy) failed for {url}: {exc}")
         saw_unknown = True
-    # An interrupted thread blocks only when it is the one the user is watching.
+    # An interrupted thread counts only when it is the one the user is watching.
     if watched_thread_id:
         try:
             if _search_threads(
@@ -164,18 +151,16 @@ def _probe_active_state(
                 return "active"
         except Exception as exc:
             logger.warning(
-                "Active-work probe (interrupted %s) failed for %s: %s",
-                watched_thread_id,
-                url,
-                exc,
+                f"Active-work probe (interrupted {watched_thread_id}) failed "
+                f"for {url}: {exc}"
             )
             saw_unknown = True
-    # A running background job blocks too (killed by the restart, not resumable).
+    # A running background job counts too (killed by the restart, not resumable).
     try:
         if _running_bg_processes(url, timeout=timeout):
             return "active"
     except Exception as exc:
-        logger.warning("Active-work probe (bg processes) failed for %s: %s", url, exc)
+        logger.warning(f"Active-work probe (bg processes) failed for {url}: {exc}")
         saw_unknown = True
     return "unknown" if saw_unknown else "idle"
 
@@ -185,14 +170,14 @@ def backend_has_active_runs(
 ) -> bool:
     """Return True if the backend at ``url`` has active work.
 
-    Same definition as the switch: any thread ``busy``, the WATCHED thread
-    (``watched_thread_id``, the one open in the WebUI) ``interrupted``, or any
-    background job still running. So closing prompts when it would kill a running
-    turn, abandon the interrupt the user is on, or stop a background job — but not
-    for a stale interrupted thread they are not looking at.
+    Active means any thread ``busy``, the WATCHED thread (``watched_thread_id``)
+    ``interrupted``, or any background job still running. So a caller about to
+    stop the backend asks when stopping would kill a running turn, abandon the
+    interrupt the user is on, or stop a background job — but not for a stale
+    interrupted thread they are not looking at.
 
     Fails OPEN (returns False) when the backend is unreachable or the probe
-    errors: an unreachable backend has no reachable runs to protect, and a close
+    errors: an unreachable backend has no reachable runs to protect, and a stop
     must never hang or be vetoed by a flaky probe. Thin bool view over
     :func:`_probe_active_state` — only a confirmed ``"active"`` counts.
     """
@@ -213,21 +198,19 @@ def wait_for_backend_idle(
 ) -> bool:
     """Block until the backend at ``url`` has no active work, then return True.
 
-    Waits INDEFINITELY (issue #484 Part 6: a workspace switch restarts the
-    app-owned backend only once all active work — runs, background sub-agents,
-    background jobs, and turns paused awaiting human input — has finished).
-    Proceeds only on a CONFIRMED-idle state; an ``"unknown"`` result (backend up
-    but the probe errored) is treated as still active, so a transient blip never
-    ends the wait early and kills a live run.
+    Waits INDEFINITELY, for a caller that restarts the backend only once all
+    active work — runs, background sub-agents, background jobs, and turns
+    paused awaiting human input — has finished. Proceeds only on a
+    CONFIRMED-idle state; an ``"unknown"`` result (backend up but the probe
+    errored) is treated as still active, so a transient blip never ends the
+    wait early and kills a live run.
 
     Two callbacks are polled each iteration (cancel takes precedence):
 
-    - ``should_cancel`` True -> abort, return False, restart nothing (wired to
-      the window-close event, so quitting mid-wait doesn't relaunch a backend on
-      an app that is shutting down, and to the pending banner's Cancel button).
+    - ``should_cancel`` True -> abort, return False, restart nothing (the user
+      gave up on the restart, or the caller is shutting down).
     - ``should_proceed_now`` True -> stop waiting and return True even if work is
-      still active (the pending banner's "Stop tasks and switch now" button: the
-      user chose to kill the running tasks and switch immediately).
+      still active (the user chose to kill the running work and restart now).
 
     Returns True once the backend is idle (or the user forced it), False if
     cancelled.

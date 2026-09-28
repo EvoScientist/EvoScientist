@@ -13,7 +13,7 @@ Design boundary: this module is the **terminal front-end** over the
 shell-agnostic launcher core in :mod:`EvoScientist.deploy.launcher`. All the
 reusable start / health / stop logic lives there; this file only resolves CLI
 inputs, renders Rich panels for the launcher's structured results and errors,
-and owns the terminal's signal-driven blocking loop. A desktop shell drives the
+and owns the terminal's signal-driven blocking loop. Other front-ends drive the
 same :class:`~EvoScientist.deploy.launcher.WebUILauncher` without this module.
 
 ``EvoSci deploy`` stays a clean, opinionated standalone server for *external*

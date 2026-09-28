@@ -745,8 +745,8 @@ def stop_inflight_owned_server() -> int | None:
 
     The launcher's mid-start teardown uses this instead of
     :func:`stop_recorded_server`. Before its own child is spawned, the shared
-    on-disk PID file still names a *different* server — e.g. a CLI backend on
-    another port that the desktop auto-ported around — so killing the recorded
+    on-disk PID file still names a *different* server — e.g. another
+    session's backend on a different port — so killing the recorded
     server on a close-during-boot would take down an unrelated session. The
     in-memory ``_PROCESS`` is set only by this process's ``start_langgraph_dev``
     (after Popen), so it can only ever name our own in-flight child; a close
@@ -1057,7 +1057,7 @@ def start_langgraph_dev(
     # POSIX: own session so the child can be group-signalled on cleanup.
     # Windows: suppress the console window — this is a background server whose
     # stdout/stderr already go to the log file, so an allocated console is just
-    # a stray empty terminal next to the desktop shell's window.
+    # a stray empty terminal window.
     if os.name == "nt":
         # getattr keeps this import-safe off Windows (the flag is Windows-only).
         _spawn_kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}

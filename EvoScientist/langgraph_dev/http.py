@@ -157,9 +157,9 @@ async def get_bg_processes_running(_request: Request) -> JSONResponse:
     """Return every background process still running in THIS server, across all
     threads, as ``{"running": [{"process_id", "name"}, ...]}``.
 
-    The desktop shell polls this to gate a workspace switch or app close: a
-    restart / stop tree-kills all bg children, so the shell waits for or confirms
-    stopping them and names each. Scoped to all threads (not one origin thread)
+    A caller about to restart or stop the backend polls this first: a
+    restart / stop tree-kills all bg children, so the caller waits for or
+    confirms stopping them and names each. Scoped to all threads (not one origin thread)
     because the restart affects every bg job in the backend. Offloaded to a
     thread for the same reason as :func:`get_bg_process_status` (registry lock +
     ``Popen.poll()`` syscall, which blockbuster refuses on the event loop).

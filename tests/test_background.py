@@ -104,7 +104,7 @@ def test_list_records_scopes_to_thread(tmp_path):
 
 
 def test_running_records_lists_only_running_across_threads(tmp_path):
-    """running_records() backs the desktop switch/close gate: every still-running
+    """running_records() backs the pre-stop busy check: every still-running
     process across all threads, and nothing that has already finished."""
     long_a = bg.launch(_sleep_cmd(3), str(tmp_path), origin_thread_id="T-1")
     long_b = bg.launch(_sleep_cmd(3), str(tmp_path), origin_thread_id="T-2")

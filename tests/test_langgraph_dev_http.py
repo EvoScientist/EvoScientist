@@ -320,8 +320,8 @@ def test_get_bg_process_status_unknown_for_missing_process():
 
 
 # ---- /api/bg_processes/running --------------------------------------------
-# The desktop shell polls this to gate a workspace switch / app close on any
-# still-running bg job (which a backend restart would tree-kill).
+# Callers poll this before a backend restart / stop, which would tree-kill any
+# still-running bg job.
 
 
 def test_get_bg_processes_running_returns_id_and_name(monkeypatch):
