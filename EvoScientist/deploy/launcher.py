@@ -254,7 +254,7 @@ class WebUILauncher:
     Lifecycle owned by the caller:
 
         launcher = WebUILauncher(config, cfg, NpxWebUIRunner())
-        result = launcher.start()          # non-blocking
+        result = launcher.start()          # blocks while the backend starts (~60s max)
         result = launcher.wait_ready(60)   # poll both, or raise LauncherError
         ...                                # caller's own main loop / window
         launcher.stop()                    # idempotent teardown
@@ -291,18 +291,6 @@ class WebUILauncher:
         from ..langgraph_dev.manager import _format_hostport
 
         return f"http://{_format_hostport(self._cfg.webui_host, self._cfg.webui_port)}"
-
-    @property
-    def workspace_dir(self) -> str:
-        """The workspace this launcher's backend serves."""
-        return self._cfg.workspace_dir
-
-    @property
-    def backend_started(self) -> bool:
-        """True when this launcher started (and thus owns teardown of) the
-        backend; False when it reused an already-running one. :meth:`stop`
-        only kills the backend's runs when this is True."""
-        return self._backend_started
 
     # -- lifecycle -------------------------------------------------------- #
     def start(self) -> LaunchResult:
@@ -707,16 +695,9 @@ def _poll_ready(
 def build_launcher_config(
     config: Any,
     workspace_dir: str | None,
-    *,
-    keepalive: bool | None = None,
 ) -> LauncherConfig:
     """Resolve a :class:`LauncherConfig` from an ``EvoScientistConfig`` the
-    same way ``run_webui`` does, so every entrypoint agrees.
-
-    ``keepalive`` defaults to the ``langgraph_dev_keepalive`` config value; pass
-    an explicit bool to override it, e.g. ``False`` for a caller that must
-    always tear its backend down.
-    """
+    same way ``run_webui`` does, so every entrypoint agrees."""
     from ..langgraph_dev.manager import _DEFAULT_HOST, _DEFAULT_PORT
 
     if workspace_dir:
@@ -742,10 +723,6 @@ def build_launcher_config(
         webui_host=webui_host,
         webui_port=webui_port,
         deploy_mode=True,
-        keepalive=(
-            bool(getattr(config, "langgraph_dev_keepalive", False))
-            if keepalive is None
-            else keepalive
-        ),
+        keepalive=bool(getattr(config, "langgraph_dev_keepalive", False)),
         open_browser=False,
     )
