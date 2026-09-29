@@ -126,6 +126,10 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     except LauncherError as exc:
         _render_launcher_error(exc)
         raise typer.Exit(1) from exc
+    # start() has already spawned the backend (unless reused) and the front-end;
+    # register teardown now so a Ctrl+C while the output below renders still
+    # stops them. Idempotent, and honours keepalive inside launcher.stop().
+    atexit.register(launcher.stop)
 
     if result.backend_started:
         console.print("[green]✓[/green] langgraph dev ready")
@@ -189,9 +193,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         )
 
     # Block on signal — exit also if the front-end dies on its own (e.g. the
-    # user closes it), so we don't leave the backend orphaned. Teardown is
-    # idempotent and honours keepalive inside launcher.stop().
-    atexit.register(launcher.stop)
+    # user closes it), so we don't leave the backend orphaned.
     shutdown_event = threading.Event()
 
     def _handle_shutdown(signum: int, _frame: Any) -> None:

@@ -93,8 +93,31 @@ class _ImmediateEvent:
         self._called = 99
 
 
-def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False):
-    """Run ``run_webui`` with every external dependency mocked."""
+class _InterruptingConsole(_RecordingConsole):
+    """Raises ``KeyboardInterrupt`` when a line containing ``trigger`` prints,
+    simulating a Ctrl+C that lands while ``run_webui`` renders its output."""
+
+    def __init__(self, sink: list, trigger: str):
+        super().__init__(sink)
+        self._trigger = trigger
+
+    def print(self, *args, **kwargs):
+        super().print(*args, **kwargs)
+        if self._trigger in self._sink[-1]:
+            raise KeyboardInterrupt
+
+
+def _run_webui_once(
+    monkeypatch,
+    config,
+    *,
+    backend_port_occupied: bool = False,
+    interrupt_on: str | None = None,
+):
+    """Run ``run_webui`` with every external dependency mocked.
+
+    ``interrupt_on``: raise ``KeyboardInterrupt`` from the console when a line
+    containing this text prints; ``run_webui`` then propagates it."""
     import atexit
     import os
     import shutil
@@ -107,7 +130,12 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
     captured: dict[str, Any] = {"printed": [], "npx_env": {}, "npx_args": []}
 
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
-    monkeypatch.setattr(webui_mod, "console", _RecordingConsole(captured["printed"]))
+    console = (
+        _InterruptingConsole(captured["printed"], interrupt_on)
+        if interrupt_on
+        else _RecordingConsole(captured["printed"])
+    )
+    monkeypatch.setattr(webui_mod, "console", console)
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/npx")
 
@@ -163,7 +191,11 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
     monkeypatch.setattr(signal, "signal", lambda _sig, _handler: lambda *a: None)
     monkeypatch.setattr(threading, "Event", _ImmediateEvent)
 
-    webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+    if interrupt_on:
+        with pytest.raises(KeyboardInterrupt):
+            webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+    else:
+        webui_mod.run_webui(config, workspace_dir="/tmp/ws")
     return captured
 
 
@@ -309,3 +341,14 @@ def test_backend_keepalive_leaves_backend_running(monkeypatch):
     same-workspace launch reuses it instead of paying the cold boot."""
     captured = _run_webui_once(monkeypatch, _make_config(langgraph_dev_keepalive=True))
     assert captured["stop_calls"] == 0
+
+
+def test_teardown_registered_before_output_is_rendered(monkeypatch):
+    """``start()`` has already spawned the backend and the front-end, so a
+    Ctrl+C while the ready lines print must still find the teardown registered;
+    otherwise both processes are left running."""
+    captured = _run_webui_once(
+        monkeypatch, _make_config(), interrupt_on="langgraph dev ready"
+    )
+    assert len(captured["atexit_fns"]) == 1
+    assert captured["atexit_fns"][0].__name__ == "stop"
