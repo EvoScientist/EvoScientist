@@ -377,6 +377,9 @@ class EvoScientistConfig:
     # "webui" launches the browser front-end (@evoscientist/webui via npx) +
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
+    # Download source for `EvoSci setup` and on-demand installs (Node.js).
+    # "cn" uses mainland China mirrors; set by `EvoSci setup --cn`.
+    mirror: Literal["default", "cn"] = "default"
     log_level: str = "warning"
     # Empty means use the provider/model default. A non-empty value is an
     # explicit user override exported as EVOSCIENTIST_REASONING_EFFORT.
