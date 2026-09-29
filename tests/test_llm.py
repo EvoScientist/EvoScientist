@@ -3298,17 +3298,18 @@ class TestAutoConfig:
     @pytest.mark.parametrize(
         ("model", "max_tokens"),
         [
-            ("claude-opus-5", None),
+            ("claude-opus-5", 128000),
             ("claude-opus-5-5", 128000),
-            ("claude-sonnet-5", None),
+            ("claude-sonnet-5", 128000),
             ("claude-sonnet-5-5", 128000),
+            ("claude-opus-6", 128000),  # unregistered: new ids need no code change
         ],
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_anthropic_5_series_adaptive_thinking(
         self, mock_init, model, max_tokens, monkeypatch
     ):
-        """Anthropic 5-series models get adaptive thinking (budget_tokens would 400)."""
+        """Current Claude models get adaptive thinking (budget_tokens would 400)."""
         mock_init.return_value = "mock_model"
         monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
@@ -3337,6 +3338,22 @@ class TestAutoConfig:
         get_chat_model("claude-opus-5-5", provider="anthropic", **kwargs)
 
         assert mock_init.call_args[1]["max_tokens"] == 128000
+
+    def test_claude_structured_output_filled_only_when_profile_lacks_it(
+        self, monkeypatch
+    ):
+        """Profile-less Claude ids get native structured output; others untouched."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("MINIMAX_API_KEY", "sk-test")
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        new = get_chat_model("claude-sonnet-5-5", provider="anthropic").profile
+        known = get_chat_model("claude-haiku-4-5", provider="anthropic").profile
+        other = get_chat_model("minimax-m3", provider="minimax").profile or {}
+
+        assert new["structured_output"] is True
+        assert known["max_output_tokens"] == 64000  # upstream profile kept whole
+        assert "structured_output" not in other
 
     @pytest.mark.parametrize("model", ["moonshotai/kimi-k3", "kimi-k3"])
     @patch("EvoScientist.llm.models.init_chat_model")

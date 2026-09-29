@@ -277,6 +277,69 @@ def test_scheduler_grader_uses_tool_calling_without_thinking_on_deepseek(
     assert result["structured_response"].criteria == criteria
 
 
+@pytest.mark.parametrize("base_url", [None, "http://127.0.0.1:8000"])
+def test_native_sonnet_5_5_grader_uses_json_schema_not_forced_tools(
+    tmp_path, monkeypatch, base_url
+):
+    """Sonnet 5.5 rejects forced tool_choice, which a proxy route (no thinking) sends."""
+    import json
+
+    import anthropic
+    from packaging.version import Version
+
+    from EvoScientist.llm import get_chat_model
+
+    if Version(anthropic.__version__) >= Version("1"):
+        import httpx2 as httpx
+    else:
+        import httpx
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    if base_url:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+    else:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    bodies = []
+    verdict = {
+        "result": "needs_revision",
+        "explanation": "x",
+        "criteria": [{"name": "report.md exists", "passed": False, "gap": "missing"}],
+    }
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": json.dumps(verdict)}],
+                "model": "claude-sonnet-5-5",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    model = get_chat_model("claude-sonnet-5-5", provider="anthropic")
+    model._client = anthropic.Anthropic(
+        api_key="sk-test",
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path, aux_model=model)
+    grader = kwargs["middleware"][-1]._ensure_grader()
+    result = grader.invoke(
+        {"messages": [HumanMessage("grade the deliverables")]},
+        config={"recursion_limit": 20},
+    )
+
+    assert "tool_choice" not in bodies[0]
+    assert bodies[0]["output_config"]["format"]["type"] == "json_schema"
+    assert result["structured_response"].result == "needs_revision"
+
+
 def test_scheduler_grader_builds_against_current_upstream_attributes(tmp_path):
     """Unpatched build: the private deepagents names we mirror still exist."""
     kwargs, _backend, _aux, _stub = _build(
