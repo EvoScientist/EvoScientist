@@ -120,9 +120,12 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         raise typer.Exit(1)
 
     launcher = WebUILauncher(config, cfg, NpxWebUIRunner())
-    console.print("[dim]Starting langgraph dev (deploy mode: MCP + async)…[/dim]")
     try:
-        result = launcher.start()
+        with console.status(
+            "[dim]Starting langgraph dev (deploy mode: MCP + async)...[/dim]",
+            spinner="dots",
+        ):
+            result = launcher.start()
     except LauncherError as exc:
         _render_launcher_error(exc)
         raise typer.Exit(1) from exc
@@ -215,7 +218,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
-        launcher.stop()
         console.print(
             "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]"
         )
+        launcher.stop()
