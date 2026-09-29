@@ -68,28 +68,33 @@ class Emitter(Protocol):
 
 
 class JsonEmitter:
-    """Write each event as one JSON line and flush, so a reader sees it at once."""
+    """Write each event as one JSON line and flush, so a reader sees it at once.
+
+    Lines are pure ASCII (non-ASCII as ``\\uXXXX`` escapes): a piped stdout on
+    Windows uses the ANSI code page, which cannot encode every path.
+    """
 
     def __init__(self, stream: TextIO | None = None) -> None:
         self._stream = stream
 
     def __call__(self, event: dict[str, Any]) -> None:
         stream = self._stream or sys.stdout
-        stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+        stream.write(json.dumps(event) + "\n")
         stream.flush()
 
 
 class ConsoleEmitter:
     """Render events as human-readable lines on the Rich console.
 
-    ``running`` events with a progress value are shown only when the rounded
-    percentage moves by at least 10 points, so a download does not print a
-    line per chunk.
+    A ``running`` event with a progress value is shown when its message
+    differs from the last one shown for the stage, or when the whole-number
+    percentage has moved by at least 10 points, so a download does not print a
+    line per chunk but every step still appears.
     """
 
     def __init__(self, console: Any) -> None:
         self._console = console
-        self._last_shown: dict[str, int] = {}
+        self._last_shown: dict[str, tuple[int, str]] = {}
 
     def __call__(self, event: dict[str, Any]) -> None:
         stage = event["stage"]
@@ -100,9 +105,14 @@ class ConsoleEmitter:
             if progress is not None:
                 pct = int(progress * 100)
                 last = self._last_shown.get(stage)
-                if last is not None and pct - last < 10 and pct < 100:
+                if (
+                    last is not None
+                    and message == last[1]
+                    and pct - last[0] < 10
+                    and pct < 100
+                ):
                     return
-                self._last_shown[stage] = pct
+                self._last_shown[stage] = (pct, message)
                 self._console.print(f"  [dim]{stage}: {message} ({pct}%)[/dim]")
             else:
                 self._console.print(f"  [dim]{stage}: {message}[/dim]")

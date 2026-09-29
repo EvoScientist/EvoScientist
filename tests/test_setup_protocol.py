@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
@@ -116,6 +117,57 @@ def test_console_emitter_throttles_progress():
     for pct in (0.0, 0.02, 0.05, 0.12, 0.13, 1.0):
         emit(make_event("node", "running", progress=pct, message="dl"))
     assert len(printed) == 3  # 0%, 12%, 100%
+
+
+def test_json_emitter_survives_a_non_utf8_pipe():
+    """A piped stdout on Windows uses the ANSI code page (e.g. cp1252)."""
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    JsonEmitter(stream)(
+        make_event("node", "done", message=r"C:\Users\Jan Kowalski ąę", detail={})
+    )
+    line = raw.getvalue().decode("ascii")
+    assert json.loads(line)["message"] == r"C:\Users\Jan Kowalski ąę"
+
+
+def test_console_emitter_shows_every_step_message():
+    printed: list[str] = []
+
+    class _Console:
+        def print(self, text):
+            printed.append(text)
+
+    emit = ConsoleEmitter(_Console())
+    for pct, message in (
+        (0.85, "Downloading"),
+        (0.86, "Verifying checksum"),
+        (0.9, "Unpacking"),
+        (0.96, "Checking the installed Node"),
+    ):
+        emit(make_event("node", "running", progress=pct, message=message))
+    assert [p.split(": ")[1].split(" (")[0] for p in printed] == [
+        "Downloading",
+        "Verifying checksum",
+        "Unpacking",
+        "Checking the installed Node",
+    ]
+
+
+def test_main_activates_the_private_node(tmp_path, monkeypatch):
+    """cli.main() must put the private Node on PATH before the app runs."""
+    import EvoScientist.cli as cli_pkg
+    from EvoScientist.cli import commands
+    from EvoScientist.setup import node as setup_node
+
+    order: list[str] = []
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        setup_node, "activate_runtime", lambda: order.append("activate")
+    )
+    monkeypatch.setattr(commands, "_configure_logging", lambda: None)
+    monkeypatch.setattr(cli_pkg, "app", lambda: order.append("app"))
+    cli_pkg.main()
+    assert order == ["activate", "app"]
 
 
 # --------------------------------------------------------------------------- #
