@@ -253,6 +253,39 @@ def test_stop_during_blocked_backend_start_cancels_and_tears_down(monkeypatch):
     assert stopped == [spawned]  # late-wired backend torn down by start()
 
 
+def test_stop_during_backend_health_wait_reports_cancelled(monkeypatch):
+    import threading
+
+    _patch_for_start(monkeypatch, set())
+    entered, killed = threading.Event(), threading.Event()
+
+    def _start_killed_mid_health_wait(**_k):
+        entered.set()
+        killed.wait(5)
+        raise RuntimeError("langgraph dev exited immediately with code -15.")
+
+    monkeypatch.setattr(lgm, "start_langgraph_dev", _start_killed_mid_health_wait)
+    monkeypatch.setattr(
+        lgm, "stop_inflight_owned_server", lambda: (killed.set(), 4321)[1]
+    )
+    launcher = lm.WebUILauncher(object(), _cfg(keepalive=False), _FakeRunner())
+    errors: list[BaseException] = []
+
+    def _boot():
+        try:
+            launcher.start()
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=_boot)
+    t.start()
+    assert entered.wait(5)
+    launcher.stop()
+    t.join(5)
+    assert not t.is_alive()
+    assert errors[0].code == "cancelled"
+
+
 def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
     """stop() during start_langgraph_dev's run (proc handle not wired yet) tears
     down only the process THIS launcher spawned — never the on-disk recorded
@@ -564,6 +597,27 @@ def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
 # --------------------------------------------------------------------------- #
 # build_launcher_config resolution
 # --------------------------------------------------------------------------- #
+def test_wait_ready_returns_cancelled_when_stopped(monkeypatch):
+    import threading
+
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: False)
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
+    errors: list[BaseException] = []
+
+    def _wait():
+        try:
+            launcher.wait_ready(timeout=30)
+        except BaseException as exc:
+            errors.append(exc)
+
+    t = threading.Thread(target=_wait)
+    t.start()
+    launcher.stop()
+    t.join(5)
+    assert not t.is_alive()
+    assert errors[0].code == "cancelled"
+
+
 def test_build_launcher_config_resolves_ports_and_workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(lm.os, "makedirs", lambda *a, **k: None)
     config = SimpleNamespace(

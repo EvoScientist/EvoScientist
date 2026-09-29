@@ -353,6 +353,7 @@ class WebUILauncher:
         while not is_langgraph_dev_running(
             port=self._cfg.backend_port, host=self._cfg.backend_host
         ):
+            self._raise_if_stopped()
             if time.monotonic() >= deadline:
                 raise LauncherError(
                     "not_ready",
@@ -366,11 +367,15 @@ class WebUILauncher:
                 )
             time.sleep(0.5)
 
-        _poll_ready(
-            self.webui_url,
-            timeout=max(1.0, deadline - time.monotonic()),
-            webui_proc=self._webui_proc,
-        )
+        try:
+            _poll_ready(
+                self.webui_url,
+                timeout=max(1.0, deadline - time.monotonic()),
+                webui_proc=self._webui_proc,
+            )
+        except LauncherError:
+            self._raise_if_stopped()
+            raise
 
         if self._cfg.open_browser and not getattr(
             self._runner, "handles_browser_open", False
@@ -460,6 +465,7 @@ class WebUILauncher:
                 config_fingerprint=_server_config_fingerprint(self._config),
             )
         except Exception as exc:
+            self._raise_if_stopped()
             raise LauncherError(
                 "backend_start_failed", f"langgraph dev startup failed: {exc}"
             ) from exc
