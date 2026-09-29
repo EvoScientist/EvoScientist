@@ -243,46 +243,20 @@ def test_scheduler_grader_uses_tool_calling_without_thinking_on_deepseek(
     import httpx
 
     from EvoScientist.llm import get_chat_model
+    from tests.fakes import deepseek_tool_call_response
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     bodies = []
-    verdict = {"result": "satisfied", "explanation": "x", "criteria": []}
+    criteria = [
+        {"name": "report.md exists", "passed": True},
+        {"name": "report.md states F1", "passed": False, "gap": "no F1 reported"},
+    ]
+    verdict = {"result": "needs_revision", "explanation": "x", "criteria": criteria}
 
     def respond(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
         return httpx.Response(
-            200,
-            json={
-                "id": "chatcmpl-1",
-                "object": "chat.completion",
-                "created": 1,
-                "model": "deepseek-v4-pro",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": "tool_calls",
-                        "message": {
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": "call_1",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "GraderResponse",
-                                        "arguments": json.dumps(verdict),
-                                    },
-                                }
-                            ],
-                        },
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 1,
-                    "completion_tokens": 1,
-                    "total_tokens": 2,
-                },
-            },
+            200, json=deepseek_tool_call_response("GraderResponse", verdict)
         )
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
@@ -299,7 +273,8 @@ def test_scheduler_grader_uses_tool_calling_without_thinking_on_deepseek(
     assert "response_format" not in bodies[0]
     assert bodies[0]["tool_choice"] == "required"
     assert bodies[0]["thinking"] == {"type": "disabled"}
-    assert result["structured_response"].result == "satisfied"
+    assert result["structured_response"].result == "needs_revision"
+    assert result["structured_response"].criteria == criteria
 
 
 def test_scheduler_grader_builds_against_current_upstream_attributes(tmp_path):

@@ -2495,33 +2495,6 @@ def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
-def _deepseek_tool_call_response(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "deepseek-v4-pro",
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": name, "arguments": json.dumps(args)},
-                        }
-                    ],
-                },
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
-
-
 def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
     tmp_path, monkeypatch
 ):
@@ -2530,6 +2503,7 @@ def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
 
     from EvoScientist.llm import get_chat_model
     from EvoScientist.memory.agents._factory import build_memory_agent_graph
+    from tests.fakes import deepseek_tool_call_response
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     bodies: list[dict[str, Any]] = []
@@ -2538,7 +2512,7 @@ def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
         bodies.append(json.loads(request.content))
         return httpx.Response(
             200,
-            json=_deepseek_tool_call_response(
+            json=deepseek_tool_call_response(
                 "SubagentMemoryDecision", {"summary": "baseline trained"}
             ),
         )
@@ -2596,6 +2570,33 @@ def test_memory_agent_graph_leaves_other_models_to_langchain(tmp_path, monkeypat
         create.call_args.kwargs["response_format"]
         is memory_worker.SubagentMemoryDecision
     )
+
+
+def test_memory_agent_graph_keeps_deepseek_thinking_without_response_format(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.llm import get_chat_model
+    from EvoScientist.memory.agents._factory import build_memory_agent_graph
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    model = get_chat_model("deepseek-v4-pro", provider="deepseek")
+    create = MagicMock()
+    monkeypatch.setattr("deepagents.create_deep_agent", create)
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
+    )
+
+    build_memory_agent_graph(
+        name="evomemory-turn-worker",
+        system_prompt="Maintain the profile.",
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        tools=[],
+        middleware=[],
+    )
+
+    assert create.call_args.kwargs["model"] is model
+    assert "response_format" not in create.call_args.kwargs
 
 
 def _memory_tool_names(middleware) -> list[str]:

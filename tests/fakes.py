@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -788,3 +789,31 @@ class FakeLangGraphClient(LangGraphClient):
 def _not_found_response() -> httpx.Response:
     request = httpx.Request("GET", "https://test.local/not-found")
     return httpx.Response(404, request=request)
+
+
+def deepseek_tool_call_response(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """DeepSeek chat-completion body whose only content is one call to ``name``."""
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "deepseek-v4-pro",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(args)},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }

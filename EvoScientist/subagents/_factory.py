@@ -122,14 +122,18 @@ class _SchedulerRubricMiddleware(RubricMiddleware):
 
         resolved_model = resolve_model(self._model)
         self._resolved_model = resolved_model
-        model, response_format = structured_output_for(resolved_model, GraderResponse)
+        model, response_format = resolved_model, _grader_strategy(resolved_model)
+        if response_format is None:
+            model, response_format = structured_output_for(
+                resolved_model, GraderResponse
+            )
         self._grader = create_agent(
             model=model,
             system_prompt=self._system_prompt,
             tools=self._tools,
             middleware=self._grader_middleware,
             name=RUBRIC_GRADER_MESSAGE_SOURCE,
-            response_format=_grader_strategy(resolved_model) or response_format,
+            response_format=response_format,
             state_schema=self._grader_state_schema,
             context_schema=self._grader_context_schema,
         )

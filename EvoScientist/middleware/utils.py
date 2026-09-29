@@ -6,11 +6,14 @@ and should not depend on any specific middleware class.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
-from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from langchain.agents.structured_output import ToolStrategy
+    from pydantic import BaseModel
 
 
 def disable_thinking(model: BaseChatModel) -> BaseChatModel:
@@ -67,7 +70,7 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
 
 def structured_output_for(
     model: BaseChatModel, schema: type[BaseModel]
-) -> tuple[BaseChatModel, Any]:
+) -> tuple[BaseChatModel, type[BaseModel] | ToolStrategy]:
     """Return ``(model, response_format)`` for an agent that must emit ``schema``.
 
     Native DeepSeek rejects the ``json_schema`` response_format langchain picks
