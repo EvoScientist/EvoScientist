@@ -63,6 +63,7 @@ def _runtime_state(
     thread_store: ThreadStore | None = None,
     runtime_gateways: RuntimeGateways | None = None,
     async_runtime: AsyncRuntime | None = None,
+    gateway_backend: str | None = None,
 ) -> ServeRuntimeState:
     store = thread_store or _thread_store()
     return ServeRuntimeState(
@@ -72,6 +73,7 @@ def _runtime_state(
         config=config,
         runtime_gateways=runtime_gateways or _runtime_gateways(store),
         async_runtime=async_runtime or MagicMock(spec=AsyncRuntime),
+        gateway_backend=gateway_backend,
     )
 
 
@@ -219,7 +221,9 @@ async def test_hook_updates_workspace_dir_on_resume():
     ):
         await hook(ctx, old_agent, cmd)
 
-    sync_server.assert_awaited_once_with(cfg, workspace_dir="/restored-ws")
+    sync_server.assert_awaited_once_with(
+        cfg, workspace_dir="/restored-ws", backend=None
+    )
     load_agent.assert_called_once_with(
         workspace_dir="/restored-ws",
         config=cfg,
@@ -386,7 +390,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
     ):
         await cb("new-tid", "/new-ws")
 
-    sync_server.assert_awaited_once_with(cfg, workspace_dir="/new-ws")
+    sync_server.assert_awaited_once_with(cfg, workspace_dir="/new-ws", backend=None)
     load_agent.assert_called_once_with(
         workspace_dir="/new-ws",
         config=cfg,
@@ -398,6 +402,36 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
     assert state.agent is reloaded_agent
     assert runtime.thread_id == "new-tid"
     assert runtime.agent is reloaded_agent
+
+
+async def test_serve_resume_forwards_resolved_backend_to_server_sync():
+    """The resume workspace sync follows the serve surface's resolved backend,
+    not the global flag, so it cannot restart the owned server in stripped
+    mode."""
+    cfg = _config()
+    state = _runtime_state(
+        thread_id="old-tid",
+        workspace_dir="/old-ws",
+        config=cfg,
+        gateway_backend="langgraph_server",
+    )
+    cb = _make_serve_handle_session_resume_cb(state, None, config=cfg)
+
+    with (
+        patch(
+            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            new=AsyncMock(),
+        ) as sync_server,
+        patch(
+            "EvoScientist.cli.commands._load_agent",
+            side_effect=lambda **_kwargs: _agent("reloaded"),
+        ),
+    ):
+        await cb("new-tid", "/new-ws")
+
+    sync_server.assert_awaited_once_with(
+        cfg, workspace_dir="/new-ws", backend="langgraph_server"
+    )
 
 
 async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():

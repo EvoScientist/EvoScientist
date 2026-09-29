@@ -749,17 +749,24 @@ def _patch_openai_capture_reasoning_content() -> None:
         _orig_dict_to_msg = _base._convert_dict_to_message
         _orig_delta_to_chunk = _base._convert_delta_to_message_chunk
 
+        def _reasoning_text(_dict) -> str | None:
+            # vLLM-style servers stream the same text under `reasoning`.
+            if not isinstance(_dict, dict):
+                return None
+            rc = _dict.get("reasoning_content") or _dict.get("reasoning")
+            return rc if isinstance(rc, str) and rc else None
+
         def _patched_dict_to_msg(_dict, *args, **kwargs):
             msg = _orig_dict_to_msg(_dict, *args, **kwargs)
-            rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
-            if isinstance(rc, str) and rc and hasattr(msg, "additional_kwargs"):
+            rc = _reasoning_text(_dict)
+            if rc and hasattr(msg, "additional_kwargs"):
                 msg.additional_kwargs["reasoning_content"] = rc
             return msg
 
         def _patched_delta_to_chunk(_dict, *args, **kwargs):
             chunk = _orig_delta_to_chunk(_dict, *args, **kwargs)
-            rc = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
-            if isinstance(rc, str) and rc and hasattr(chunk, "additional_kwargs"):
+            rc = _reasoning_text(_dict)
+            if rc and hasattr(chunk, "additional_kwargs"):
                 # Per-chunk: stash this delta's reasoning_content on the chunk.
                 # Cross-chunk accumulation is handled by AIMessageChunk.__add__
                 # via merge_dicts (string values in additional_kwargs concatenate).

@@ -47,13 +47,15 @@ _SCHEDULER_GRADER_TOOLS = ("ls", "read_file")
 
 # Structured-output strategy per OpenRouter model family. langchain picks the
 # grader's strategy from the model profile plus a model-name regex table, and
-# OpenRouter breaks each family the other way round: Gemini tool schemas lose
-# the criteria ``oneOf`` (every entry comes back null), Anthropic JSON mode
-# returns non-JSON. Verified live 2026-09-04. Passed explicitly because a
-# profile pin loses to the name regex (``anthropic/claude-fable-5``).
+# OpenRouter breaks each family differently: Gemini tool schemas lose the
+# criteria ``oneOf`` (every entry comes back null), Anthropic JSON mode returns
+# non-JSON, OpenAI's strict JSON mode rejects that ``oneOf`` with a 400.
+# Verified live 2026-09-04 and 2026-09-26. Passed explicitly because a profile
+# pin loses to the name regex (``anthropic/claude-fable-5``).
 _OPENROUTER_GRADER_STRATEGY: dict[str, type[ProviderStrategy] | type[ToolStrategy]] = {
     "google/": ProviderStrategy,
     "anthropic/": ToolStrategy,
+    "openai/": ToolStrategy,
 }
 
 # Model calls one grader attempt may spend before the run fails closed with
@@ -82,8 +84,8 @@ def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
             "structured verdicts (this route rejects forced tool_choice and its "
             "JSON mode rejects the grader schema); rubric runs will end in "
             "grader_error. Use the native anthropic provider for this model, or "
-            "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku "
-            "and Gemini all grade through OpenRouter).",
+            "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku, "
+            "GPT and Gemini all grade through OpenRouter).",
             model_id,
         )
 
@@ -184,6 +186,7 @@ def _scheduler_rubric_middleware(*, model: BaseChatModel, backend: BackendProtoc
     import warnings
 
     from deepagents import FilesystemMiddleware
+    from deepagents.middleware import UnsupportedContentMiddleware
     from langchain_core._api import LangChainBetaWarning
 
     # Eviction thresholds off: both eviction paths write files through the
@@ -203,6 +206,8 @@ def _scheduler_rubric_middleware(*, model: BaseChatModel, backend: BackendProtoc
             grader_middleware=[
                 grader_fs,
                 _GraderCallBudget(max_calls=_SCHEDULER_GRADER_MAX_CALLS),
+                # create_agent does not add it; last so it sees the final request.
+                UnsupportedContentMiddleware(),
             ],
             max_iterations=2,
             on_evaluation=_log_rubric_evaluation,
@@ -289,22 +294,33 @@ def build_async_subagent_graph(name: str) -> Any:
     #
     # Memory middleware is included so async sub-agents get the same profile
     # context and `/memories/profile/...` file guidance as the main agent.
-    subagents = []
-    _ensure_general_purpose_subagent(subagents)
-    _inject_subagent_middleware(subagents)
-
-    middleware = _get_default_middleware(
-        for_async_subagent=True,
-        memory_source_agent=name,
-    )
-
     # Scheduler is an unattended timer task → use the cheaper auxiliary model.
+    # Pass that same model as ``chat_model`` below: summarization's summary
+    # model is the construction model, and deepagents' stock instance used
+    # the graph's model (the auxiliary one). Omitting ``chat_model`` would
+    # size and run summaries on the main model instead (#466 review).
     model = (
         _ensure_auxiliary_chat_model() if name == "scheduler" else _ensure_chat_model()
     )
 
     guarded = name in _GUARDED_ASYNC_SUBAGENTS
     backend = _get_default_backend(guard_dangerous=guarded, refuse_delete=guarded)
+
+    subagents = []
+    _ensure_general_purpose_subagent(subagents)
+    _inject_subagent_middleware(subagents, chat_model=model, backend=backend)
+
+    # ``backend=`` matters: without it the per-run SummarizationMiddleware
+    # subclass is not appended and the stock frozen-window built-in survives
+    # in these graphs even though they take ``configurable.model`` overrides
+    # (#466) — the replacement must also offload history to this backend.
+    middleware = _get_default_middleware(
+        for_async_subagent=True,
+        memory_source_agent=name,
+        backend=backend,
+        chat_model=model,
+    )
+
     if name == "scheduler":
         middleware = [
             *middleware,

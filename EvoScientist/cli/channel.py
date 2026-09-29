@@ -30,6 +30,7 @@ from ..channels.interaction import (
     ASK_USER_TIMEOUT,
     HITL_APPROVAL_TIMEOUT,
     UNRECOGNIZED_FEEDBACK,
+    ApprovalOutcome,
     ApprovalPolicy,
     InteractionIO,
     PendingReplyRegistry,
@@ -786,27 +787,32 @@ def channel_ask_user_prompt(
 def channel_hitl_prompt(
     action_requests: list,
     msg: ChannelMessage,
-) -> list[dict] | None:
+    *,
+    human_budget_exhausted: bool = False,
+) -> ApprovalOutcome:
     """Resolve a HITL approval prompt with a channel user.
 
     Thin bridge: runs :func:`channels.interaction.resolve_approval` on the
-    bus loop over a :class:`_BridgeIO` and blocks for the result.  Signature
-    and return shape are unchanged (callers are untouched).  Safe to call
-    from a background thread (CLI channel processing / TUI ``to_thread``).
+    bus loop over a :class:`_BridgeIO` and blocks for the result. Safe to
+    call from a background thread (CLI channel processing / TUI
+    ``to_thread``).
 
-    Returns the decisions list on approve/auto — including REJECT decisions
-    with a reason for dangerous commands under ``auto_approve`` (fed back to
-    the model, not escalated to the user) — or None on decline /
-    unrecognized / timeout / stop.
+    The channel session grant and config rules resolve first. The human
+    budget is applied only after that fast path, so a granted session keeps
+    auto-approving once 50 human rounds are used up (issue #469). The
+    returned :class:`ApprovalOutcome` reports whether a human was prompted
+    and whether the budget skipped the prompt.
     """
     session_key = _channel_message_session_key(msg)
     decisions = _approval_policy.auto_decision(session_key, action_requests)
     if decisions is not None:
-        return decisions
+        return ApprovalOutcome(decisions=decisions)
+    if human_budget_exhausted:
+        return ApprovalOutcome(budget_exhausted=True)
 
     if not (_bus_loop and msg.bus_ref):
         _channel_logger.debug("HITL: no bus_loop or bus_ref, rejecting")
-        return None
+        return ApprovalOutcome(prompted=True)
 
     # Look up the channel instance so the engine can attach buttons when the
     # channel supports `inline_buttons` (Feishu cards, QQ keyboards, …).
@@ -818,7 +824,7 @@ def channel_hitl_prompt(
     )
     io = _BridgeIO(msg.bus_ref, msg, capabilities, session_key)
 
-    async def _hitl_flow() -> list[dict] | None:
+    async def _hitl_flow() -> ApprovalOutcome:
         outcome = await resolve_approval(
             action_requests,
             io,
@@ -831,13 +837,13 @@ def channel_hitl_prompt(
             # explicit notice. Only the serve-mode consumer refeeds the
             # text as a new turn.
             await io.send(UNRECOGNIZED_FEEDBACK)
-            return None
-        return outcome.decisions
+            return ApprovalOutcome(prompted=True)
+        return outcome
 
     return _run_engine_on_bus(
         _hitl_flow(),
         result_timeout=_hitl_result_timeout(),
-        on_error=lambda: None,
+        on_error=lambda: ApprovalOutcome(prompted=True),
     )
 
 

@@ -35,6 +35,7 @@ from .scheduler import (
     SchedulerMiddleware,
     create_scheduler_middleware,
 )
+from .summarization import create_per_run_summarization_middleware
 from .tool_error_handler import ToolErrorHandlerMiddleware
 from .tool_history_repair import ToolHistoryRepairMiddleware
 from .tool_selector import create_tool_selector_middleware
@@ -63,6 +64,7 @@ __all__ = [
     "create_context_editing_middleware",
     "create_memory_lifecycle_middleware",
     "create_memory_middleware",
+    "create_per_run_summarization_middleware",
     "create_runtime_context_middleware",
     "create_scheduler_middleware",
     "create_tool_selector_middleware",

@@ -28,6 +28,7 @@ from tests.fakes import (
     FakeLangGraphThreadsClient,
     FakeLangGraphThreadStream,
     FakeThreadStore,
+    _not_found_response,
 )
 
 
@@ -143,6 +144,25 @@ async def test_local_graph_gateway_reads_state_values():
     values = await gateway.get_state_values(GraphTarget(local_graph=agent), "abc12345")
 
     assert values == {"async_tasks": {"task-1": {}}}
+    agent.aget_state.assert_awaited_once_with(
+        {"configurable": {"thread_id": "abc12345"}}
+    )
+
+
+async def test_local_graph_gateway_reads_state_snapshot():
+    agent = MagicMock()
+    snapshot = SimpleNamespace(
+        next=("tools",),
+        tasks=(),
+        interrupts=(object(),),
+        values={"async_tasks": {"task-1": {}}},
+    )
+    agent.aget_state = AsyncMock(return_value=snapshot)
+    gateway = LocalGraphGateway()
+
+    got = await gateway.get_state_snapshot(GraphTarget(local_graph=agent), "abc12345")
+
+    assert got is snapshot
     agent.aget_state.assert_awaited_once_with(
         {"configurable": {"thread_id": "abc12345"}}
     )
@@ -761,6 +781,33 @@ async def test_langgraph_server_gateway_reads_state_values():
     values = await gateway.get_state_values(GraphTarget(), "abc12345")
 
     assert values == {"async_tasks": {"task-1": {}}}
+
+
+async def test_langgraph_server_gateway_reads_state_snapshot():
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={
+            "abc12345": {
+                "values": {"async_tasks": {"task-1": {}}},
+                "next": ["tools"],
+                "tasks": [{"name": "tools", "interrupts": [{"id": "i1"}]}],
+                "interrupts": [{"id": "i1"}],
+            }
+        },
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    snap = await gateway.get_state_snapshot(GraphTarget(), "abc12345")
+
+    assert snap.next == ("tools",)
+    assert snap.values == {"async_tasks": {"task-1": {}}}
+    assert snap.interrupts == ({"id": "i1"},)
+    assert snap.tasks[0].name == "tools"
+    assert snap.tasks[0].interrupts == ({"id": "i1"},)
 
 
 async def test_langgraph_server_gateway_messages_apply_summarization_event():
@@ -1507,6 +1554,70 @@ async def test_langgraph_server_gateway_streams_value_message_snapshots():
         state_messages=[_OLD_AI],
     )
 
+    assert events == [
+        {"type": "text", "content": "new"},
+        {"type": "done", "content": "new", "response": "new"},
+    ]
+
+
+async def test_langgraph_server_gateway_registers_thread_before_state_read():
+    """A thread missing from the registry must not replay prior turns (#490).
+
+    Checkpoints can exist while the server's thread registry lacks the
+    thread (local backend + dev server share one checkpointer), so the
+    pre-run state read only succeeds after registration. Without the early
+    ensure, the read fails with NotFoundError, the suppression baselines
+    stay empty, and the first values snapshot re-emits prior messages.
+    """
+
+    class _RegistryBackedStateThreadsClient(FakeLangGraphThreadsClient):
+        async def get_state(self, thread_id: str) -> dict[str, Any]:
+            from langgraph_sdk.errors import NotFoundError
+
+            if all(thread.get("thread_id") != thread_id for thread in self.threads):
+                raise NotFoundError(
+                    "not found", response=_not_found_response(), body=None
+                )
+            return await super().get_state(thread_id)
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[_value_snapshot([_OLD_AI, _HUMAN, _NEW_AI])],
+    )
+    threads = _RegistryBackedStateThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {"messages": [_OLD_AI]}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(
+            client=FakeLangGraphClient(threads),
+        )
+    )
+
+    create_calls = 0
+    original_create = threads.create
+
+    async def _counting_create(**kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        return await original_create(**kwargs)
+
+    threads.create = _counting_create
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    # One create: the pre-run ensure. The start/resume path must not
+    # repeat it once registration succeeded. The state read happens
+    # after that create, which is what lets the old turn be suppressed.
+    assert create_calls == 1
+    assert len(threads.created) == 1
+    assert threads.state_gets
     assert events == [
         {"type": "text", "content": "new"},
         {"type": "done", "content": "new", "response": "new"},

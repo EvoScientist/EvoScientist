@@ -10,6 +10,7 @@ The onboard module is loaded lazily because it pulls in heavy dependencies
 
 from .settings import (
     EvoScientistConfig,
+    GatewaySurface,
     MemoryControls,
     MemoryObservationTarget,
     MemoryObservationWriter,
@@ -23,12 +24,14 @@ from .settings import (
     list_config,
     load_config,
     reset_config,
+    resolve_gateway_backend,
     save_config,
     set_config_value,
 )
 
 __all__ = [
     "EvoScientistConfig",
+    "GatewaySurface",
     "MemoryControls",
     "MemoryObservationTarget",
     "MemoryObservationWriter",
@@ -43,6 +46,7 @@ __all__ = [
     "list_config",
     "load_config",
     "reset_config",
+    "resolve_gateway_backend",
     # onboard (lazy)
     "run_onboard",
     "save_config",
