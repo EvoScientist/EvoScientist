@@ -106,9 +106,11 @@ def _grader_strategy(model: BaseChatModel) -> ProviderStrategy | ToolStrategy | 
 class _SchedulerRubricMiddleware(RubricMiddleware):
     """``RubricMiddleware`` whose grader gets an explicit structured-output strategy.
 
-    Mirrors upstream ``_ensure_grader`` except for ``response_format``; a bare
-    ``GraderResponse`` there lets langchain choose the strategy, which is wrong
-    on OpenRouter (see ``_OPENROUTER_GRADER_STRATEGY``).
+    Mirrors upstream ``_ensure_grader`` except for the model and
+    ``response_format``; a bare ``GraderResponse`` there lets langchain choose
+    the strategy, which is wrong on OpenRouter (see
+    ``_OPENROUTER_GRADER_STRATEGY``) and native DeepSeek (see
+    ``structured_output_for``).
     """
 
     def _ensure_grader(self) -> Any:
@@ -116,15 +118,18 @@ class _SchedulerRubricMiddleware(RubricMiddleware):
             return self._grader
         from deepagents._models import resolve_model
 
+        from EvoScientist.middleware.utils import structured_output_for
+
         resolved_model = resolve_model(self._model)
         self._resolved_model = resolved_model
+        model, response_format = structured_output_for(resolved_model, GraderResponse)
         self._grader = create_agent(
-            model=resolved_model,
+            model=model,
             system_prompt=self._system_prompt,
             tools=self._tools,
             middleware=self._grader_middleware,
             name=RUBRIC_GRADER_MESSAGE_SOURCE,
-            response_format=_grader_strategy(resolved_model) or GraderResponse,
+            response_format=_grader_strategy(resolved_model) or response_format,
             state_schema=self._grader_state_schema,
             context_schema=self._grader_context_schema,
         )

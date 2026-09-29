@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
+from pydantic import BaseModel
 
 
 def disable_thinking(model: BaseChatModel) -> BaseChatModel:
@@ -62,6 +63,24 @@ def disable_thinking(model: BaseChatModel) -> BaseChatModel:
         # Fallback for non-Pydantic or unusual model classes
         # Note: bind() may not effectively override first-class Pydantic fields
         return model.bind(**updates)
+
+
+def structured_output_for(
+    model: BaseChatModel, schema: type[BaseModel]
+) -> tuple[BaseChatModel, Any]:
+    """Return ``(model, response_format)`` for an agent that must emit ``schema``.
+
+    Native DeepSeek rejects the ``json_schema`` response_format langchain picks
+    from its profile, and its thinking mode rejects the forced ``tool_choice``
+    of tool calling, so it gets a thinking-disabled copy plus ``ToolStrategy``.
+    """
+    from langchain.agents.structured_output import ToolStrategy
+
+    from ..llm.errors import _provider_from_model
+
+    if _provider_from_model(model) == "deepseek":
+        return disable_thinking(model), ToolStrategy(schema)
+    return model, schema
 
 
 def disable_streaming(model: BaseChatModel) -> BaseChatModel:
