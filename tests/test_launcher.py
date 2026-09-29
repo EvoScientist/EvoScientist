@@ -119,16 +119,11 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
     assert any("Config changed" in w for w in decision.warnings)
 
 
-@pytest.mark.parametrize("move_port_if_taken", [False, True])
-def test_resolve_backend_no_sidecar_reuses(monkeypatch, move_port_if_taken):
+def test_resolve_backend_no_sidecar_reuses(monkeypatch):
     """An older subprocess with no sidecar is reused, as before —
-    backward-compat for pre-sidecar / externally-managed servers. The port-move
-    flag does not change that: the port serves a langgraph dev, not another
-    application."""
+    backward-compat for pre-sidecar / externally-managed servers."""
     _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
-    decision = lm._resolve_backend(
-        _cfg(move_port_if_taken=move_port_if_taken), object()
-    )
+    decision = lm._resolve_backend(_cfg(), object())
     assert decision.action == "reuse"
 
 
@@ -151,23 +146,8 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# move_port_if_taken — moving off a port held by another application
+# WebUILauncher.start — conflicts, teardown, concurrent stop
 # --------------------------------------------------------------------------- #
-def test_find_free_port_scans_upward(monkeypatch):
-    occupied = {6174, 6175}
-    monkeypatch.setattr(
-        lgm, "_is_port_occupied", lambda port, *a, **k: port in occupied
-    )
-    assert lm._find_free_port(6174, "127.0.0.1") == 6176
-
-
-def test_find_free_port_exhausted_raises(monkeypatch):
-    monkeypatch.setattr(lgm, "_is_port_occupied", lambda *a, **k: True)
-    with pytest.raises(lm.LauncherError) as ei:
-        lm._find_free_port(6174, "127.0.0.1", limit=3)
-    assert ei.value.code == "port_conflict"
-
-
 class _FakeProc:
     def poll(self):
         return None
@@ -196,21 +176,10 @@ def _patch_for_start(monkeypatch, occupied_ports):
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 
-def test_start_moves_backend_port_off_foreign_occupant(monkeypatch):
-    _patch_for_start(monkeypatch, {6174})  # default backend port taken (foreign)
-    launcher = lm.WebUILauncher(object(), _cfg(move_port_if_taken=True), _FakeRunner())
-    result = launcher.start()
-    assert launcher._cfg.backend_port == 6175  # moved to next free
-    assert launcher._cfg.webui_port == 4716  # webui untouched (was free)
-    assert result.backend_started is True
-    assert "6175" in result.backend_url
-    assert any("another application" in w and "6175" in w for w in result.warnings)
-
-
-def test_start_without_move_port_raises_on_conflict(monkeypatch):
-    """With the flag off (the CLI), a foreign occupant is an explicit error."""
+def test_start_raises_on_foreign_occupant(monkeypatch):
+    """A foreign process on the backend port is an explicit error."""
     _patch_for_start(monkeypatch, {6174})
-    launcher = lm.WebUILauncher(object(), _cfg(move_port_if_taken=False), _FakeRunner())
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
     with pytest.raises(lm.LauncherError) as ei:
         launcher.start()
     assert ei.value.code == "port_conflict"
@@ -322,11 +291,7 @@ def test_stop_after_reuse_does_not_stop_recorded_server(monkeypatch):
 
 
 def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
-    """An EvoSci langgraph dev occupies ``occupied`` with ``sidecar``.
-
-    Any other port is free, so a port move (if one wrongly happened) would
-    resolve to ``start``.
-    """
+    """An EvoSci langgraph dev occupies ``occupied`` with ``sidecar``."""
     occ = set(occupied)
     monkeypatch.setattr(lgm, "_is_port_occupied", lambda port, *a, **k: port in occ)
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: True)
@@ -338,61 +303,27 @@ def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 
-@pytest.mark.parametrize(
-    ("sidecar", "pid_serves", "code"),
-    [
-        ({"workspace": "/tmp/wsB", "deploy_mode": True}, True, "workspace_mismatch"),
-        ({"workspace": "/tmp/wsA", "deploy_mode": False}, True, "stripped_backend"),
-        (
-            {"workspace": "/tmp/wsA", "deploy_mode": True},
-            False,
-            "sidecar_port_mismatch",
-        ),
-    ],
-)
-def test_move_port_if_taken_never_moves_off_a_langgraph_server(
-    monkeypatch, sidecar, pid_serves, code
-):
-    """The flag moves only off a foreign occupant. A langgraph dev on the port
-    still raises: moving would start a second EvoSci server next to it."""
-    _patch_for_evosci_occupant(monkeypatch, sidecar=sidecar)
-    monkeypatch.setattr(lgm, "_pid_serves_port", lambda *a, **k: pid_serves)
-    started: list = []
-    monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: started.append(k))
-    launcher = lm.WebUILauncher(
-        object(),
-        _cfg(workspace_dir="/tmp/wsA", move_port_if_taken=True),
-        _FakeRunner(),
-    )
-    with pytest.raises(lm.LauncherError) as ei:
-        launcher.start()
-    assert ei.value.code == code
-    assert launcher._cfg.backend_port == 6174  # did not move
-    assert started == []  # no second backend
-
-
-def test_start_without_move_port_raises_on_workspace_mismatch(monkeypatch):
-    """With the flag off (the CLI), a different-workspace server is refused."""
+def test_start_raises_on_workspace_mismatch(monkeypatch):
+    """A server for a different workspace is refused; no second backend starts."""
     _patch_for_evosci_occupant(
         monkeypatch, sidecar={"workspace": "/tmp/wsB", "deploy_mode": True}
     )
-    launcher = lm.WebUILauncher(
-        object(),
-        _cfg(workspace_dir="/tmp/wsA", move_port_if_taken=False),
-        _FakeRunner(),
-    )
+    started: list = []
+    monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: started.append(k))
+    launcher = lm.WebUILauncher(object(), _cfg(workspace_dir="/tmp/wsA"), _FakeRunner())
     with pytest.raises(lm.LauncherError) as ei:
         launcher.start()
     assert ei.value.code == "workspace_mismatch"
+    assert started == []
 
 
-def test_start_moves_webui_port_off_occupied_port(monkeypatch):
+def test_start_warns_when_webui_port_occupied(monkeypatch):
+    """An occupied WebUI port is a warning, not an error, and the port is kept."""
     _patch_for_start(monkeypatch, {4716})  # webui port taken, backend free
-    launcher = lm.WebUILauncher(object(), _cfg(move_port_if_taken=True), _FakeRunner())
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
     result = launcher.start()
-    assert launcher._cfg.backend_port == 6174  # backend untouched
-    assert launcher._cfg.webui_port == 4717  # moved to next free
-    assert any("WebUI" in w for w in result.warnings)
+    assert launcher._cfg.webui_port == 4716
+    assert any("4716" in w and "already in use" in w for w in result.warnings)
 
 
 def test_stop_process_tree_taskkill_no_console_window(monkeypatch):

@@ -33,7 +33,7 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -63,12 +63,6 @@ class LauncherConfig:
     # Honoured only by front-ends whose ``handles_browser_open`` is False
     # (e.g. the bundled runner). The npx runner opens the browser itself.
     open_browser: bool = False
-    # When the configured backend port is held by another application (not a
-    # langgraph dev server), start the backend on the next free port instead of
-    # raising ``port_conflict``; an occupied WebUI port moves the same way.
-    # Off by default: the CLI reports the conflict so a terminal user can act
-    # on it.
-    move_port_if_taken: bool = False
 
 
 @dataclass(frozen=True)
@@ -329,29 +323,20 @@ class WebUILauncher:
         self._runner.preflight(self._cfg)
 
         try:
-            decision = self._resolve_backend_or_move_port()
+            decision = _resolve_backend(self._cfg, self._config)
             self._warnings.extend(decision.warnings)
             if decision.action == "start":
                 self._start_backend()
             self._raise_if_stopped()
 
-            # Front-end port: with move_port_if_taken it moves off an occupied
-            # port too; otherwise it's a non-fatal warning (node will surface a
-            # hard bind failure if it actually can't listen).
+            # Front-end port: a non-fatal warning (node will surface a hard
+            # bind failure if it actually can't listen).
             if _is_port_occupied(self._cfg.webui_port, self._cfg.webui_host):
-                if self._cfg.move_port_if_taken:
-                    free = _find_free_port(self._cfg.webui_port, self._cfg.webui_host)
-                    self._warnings.append(
-                        f"Port {self._cfg.webui_port} was occupied; using {free} "
-                        f"for the WebUI instead."
-                    )
-                    self._cfg = replace(self._cfg, webui_port=free)
-                else:
-                    self._warnings.append(
-                        f"Port {self._cfg.webui_port} is already in use; the WebUI "
-                        f"server may fail to start. Change it with "
-                        f"'EvoSci config set webui_port <port>'."
-                    )
+                self._warnings.append(
+                    f"Port {self._cfg.webui_port} is already in use; the WebUI "
+                    f"server may fail to start. Change it with "
+                    f"'EvoSci config set webui_port <port>'."
+                )
 
             env = self._build_frontend_env()
             self._webui_proc = self._runner.start(self._cfg, env)
@@ -460,31 +445,6 @@ class WebUILauncher:
                     )
 
     # -- internals -------------------------------------------------------- #
-    def _resolve_backend_or_move_port(self) -> _BackendDecision:
-        """Resolve the backend; with ``move_port_if_taken``, move off a port
-        held by another application.
-
-        Only ``port_conflict`` moves: the port is held by something that is not
-        a langgraph dev server, so starting ours on the next free port runs no
-        second EvoSci server. Every other code (``workspace_mismatch``,
-        ``stripped_backend``, ``sidecar_port_mismatch``) means a langgraph dev
-        server already holds the port, and moving would start a second one next
-        to it, so those always raise.
-        """
-        try:
-            return _resolve_backend(self._cfg, self._config)
-        except LauncherError as exc:
-            if not self._cfg.move_port_if_taken or exc.code != "port_conflict":
-                raise
-            free = _find_free_port(self._cfg.backend_port, self._cfg.backend_host)
-            self._warnings.append(
-                f"Port {self._cfg.backend_port} is held by another application; "
-                f"started the backend on {free} instead."
-            )
-            self._cfg = replace(self._cfg, backend_port=free)
-            # The new port is free, so this resolves to ``start``.
-            return _resolve_backend(self._cfg, self._config)
-
     def _start_backend(self) -> None:
         from ..langgraph_dev.manager import (
             _server_config_fingerprint,
@@ -620,25 +580,6 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     return _BackendDecision(action="reuse", warnings=warnings)
 
 
-def _find_free_port(start_port: int, host: str, *, limit: int = 100) -> int:
-    """Return the first free TCP port at or above ``start_port`` on ``host``.
-
-    Scans upward (predictable ports near the default, so the shown backend URL
-    stays close to the configured one). Raises ``port_conflict`` if the window
-    up to ``limit`` ports is fully occupied.
-    """
-    from ..langgraph_dev.manager import _is_port_occupied
-
-    for port in range(start_port, min(start_port + limit, 65536)):
-        if not _is_port_occupied(port, host):
-            return port
-    raise LauncherError(
-        "port_conflict",
-        f"No free port found in {start_port}–{start_port + limit - 1}.",
-        "Free a port in that range, or set an explicit port in config.",
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Process / env / readiness helpers (shared; imported back by webui.py)
 # --------------------------------------------------------------------------- #
@@ -767,15 +708,10 @@ def build_launcher_config(
     config: Any,
     workspace_dir: str | None,
     *,
-    move_port_if_taken: bool = False,
     keepalive: bool | None = None,
 ) -> LauncherConfig:
     """Resolve a :class:`LauncherConfig` from an ``EvoScientistConfig`` the
     same way ``run_webui`` does, so every entrypoint agrees.
-
-    ``move_port_if_taken`` moves off a port held by another application (see
-    :class:`LauncherConfig`); the CLI leaves it False so a busy port surfaces
-    as an explicit error.
 
     ``keepalive`` defaults to the ``langgraph_dev_keepalive`` config value; pass
     an explicit bool to override it, e.g. ``False`` for a caller that must
@@ -812,5 +748,4 @@ def build_launcher_config(
             else keepalive
         ),
         open_browser=False,
-        move_port_if_taken=move_port_if_taken,
     )
