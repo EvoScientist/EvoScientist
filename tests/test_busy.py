@@ -10,9 +10,11 @@ def _patch_probe(monkeypatch, *, reachable, result=None, exc=None):
     ``backend_has_active_runs`` (which bypasses the proxy via trust_env=False)."""
     import httpx
 
-    from EvoScientist.langgraph_dev import manager as lgm
+    def _fake_get(url, **kwargs):
+        if not reachable:
+            raise httpx.ConnectError("refused")
 
-    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: reachable)
+    monkeypatch.setattr(httpx, "get", _fake_get)
     # Default: no background jobs running (thread-based tests own the result).
     monkeypatch.setattr(busy, "_running_bg_processes", lambda url, **k: [])
     captured = {}
@@ -82,9 +84,7 @@ def _patch_probe_by_status(monkeypatch, mapping):
     filter carried the watched thread."""
     import httpx
 
-    from EvoScientist.langgraph_dev import manager as lgm
-
-    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **k: True)
+    monkeypatch.setattr(httpx, "get", lambda url, **kwargs: None)
     # Default: no background jobs running (these tests exercise thread status).
     monkeypatch.setattr(busy, "_running_bg_processes", lambda url, **k: [])
     calls: list[dict] = []
@@ -150,6 +150,18 @@ def test_probe_active_state_unreachable_is_idle(monkeypatch):
     # Backend gone -> its runs are gone -> a restart is safe -> "idle".
     _patch_probe(monkeypatch, reachable=False)
     assert busy._probe_active_state("http://127.0.0.1:6174") == "idle"
+
+
+def test_probe_active_state_slow_ok_still_checks_runs(monkeypatch):
+    import httpx
+
+    _patch_probe(monkeypatch, reachable=True, result=[{"thread_id": "t1"}])
+
+    def _slow_get(url, **kwargs):
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(httpx, "get", _slow_get)
+    assert busy._probe_active_state("http://127.0.0.1:6174") == "active"
 
 
 def test_probe_active_state_error_is_unknown(monkeypatch):

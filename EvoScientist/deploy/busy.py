@@ -128,10 +128,14 @@ def _probe_active_state(
     :func:`wait_for_backend_idle` folds it to *keep waiting* so a transient error
     never ends the wait and kills a live run.
     """
-    from ..langgraph_dev.manager import is_langgraph_dev_running
+    import httpx
 
-    if not is_langgraph_dev_running(base_url=url):
+    try:
+        httpx.get(f"{url}/ok", timeout=timeout, trust_env=False)
+    except httpx.ConnectError:
         return "idle"
+    except httpx.HTTPError as exc:
+        logger.warning(f"Active-work probe (/ok) failed for {url}: {exc}")
     saw_unknown = False
     # Any busy thread anywhere counts (finite executing work a restart kills).
     try:
