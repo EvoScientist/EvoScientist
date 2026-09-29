@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -91,15 +92,65 @@ def _record(data: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
-def _system_node(env, monkeypatch, version: tuple[int, int, int]) -> Path:
+def _system_node(
+    env, monkeypatch, version: tuple[int, int, int], *, with_npx: bool = True
+) -> Path:
     bin_dir = env["tmp"] / "system-bin"
     bin_dir.mkdir()
-    exe = bin_dir / ("node.exe" if os.name == "nt" else "node")
-    exe.write_text("")
-    exe.chmod(0o755)
+    names = ["node.exe", "npx.cmd"] if os.name == "nt" else ["node", "npx"]
+    for name in names if with_npx else names[:1]:
+        (bin_dir / name).write_text("")
+        (bin_dir / name).chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir))
+    exe = bin_dir / names[0]
     env["probes"][str(exe)] = version
     return exe
+
+
+def test_system_node_without_npx_triggers_download(env, monkeypatch):
+    """Distros that package npm separately ship node without npx; every
+    consumer needs npx, so that Node does not count."""
+    _system_node(env, monkeypatch, (22, 11, 0), with_npx=False)
+    assert node.ensure_node("default").source == "private"
+    assert env["net"].urls
+
+
+def test_unwritable_tools_dir_raises_stage_error(env, monkeypatch):
+    from EvoScientist import paths
+
+    blocker = env["tmp"] / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.setattr(paths, "DATA_DIR", blocker / ".evoscientist")
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "download_failed"
+
+
+def test_record_with_non_string_path_is_ignored(env):
+    tools = env["data"] / "tools"
+    tools.mkdir(parents=True)
+    (tools / "node.json").write_text(json.dumps({"version": "24.21.0", "path": 1}))
+    assert node.activate_runtime() is None
+    assert node.ensure_node("default").source == "private"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [http.client.IncompleteRead(b""), http.client.BadStatusLine("garbled")],
+)
+def test_http_client_errors_become_download_failed(tmp_path, monkeypatch, exc):
+    from EvoScientist.setup import download as dl
+
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(dl.urllib.request, "urlopen", boom)
+    with pytest.raises(StageError) as ei:
+        dl.download("https://example.invalid/x", tmp_path / "x")
+    assert ei.value.code == "download_failed"
+    with pytest.raises(StageError) as ei:
+        dl.fetch_text("https://example.invalid/x")
+    assert ei.value.code == "download_failed"
 
 
 def test_system_node_20_or_newer_wins_without_download(env, monkeypatch):

@@ -10,6 +10,7 @@ probes elsewhere, which bypass proxies.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -18,6 +19,15 @@ from pathlib import Path
 from .protocol import StageError
 
 _CHUNK = 256 * 1024
+# A truncated chunked body (IncompleteRead) or a garbled proxy reply
+# (BadStatusLine) raises http.client errors, which are neither URLError nor
+# OSError.
+_NETWORK_ERRORS = (
+    urllib.error.URLError,
+    http.client.HTTPException,
+    OSError,
+    ValueError,
+)
 _TIMEOUT = 120
 
 ProgressFn = Callable[[float], None]
@@ -42,7 +52,7 @@ def download(url: str, dest: Path, progress: ProgressFn | None = None) -> str:
                     done += len(chunk)
                     if progress is not None and total:
                         progress(done / total)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except _NETWORK_ERRORS as exc:
         raise StageError("download_failed", f"Download of {url} failed: {exc}") from exc
     return digest.hexdigest()
 
@@ -52,7 +62,7 @@ def fetch_text(url: str) -> str:
     try:
         with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:
             return resp.read().decode("utf-8")
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except _NETWORK_ERRORS as exc:
         raise StageError("download_failed", f"Download of {url} failed: {exc}") from exc
 
 

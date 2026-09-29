@@ -821,6 +821,17 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
             f"failed: {exc.message}. Run 'EvoSci setup' to retry."
         )
         return
+    except Exception as exc:
+        # Unpacking can still raise outside StageError (zipfile's
+        # NotImplementedError / RuntimeError, lzma.LZMAError). This hook runs
+        # before every MCP load; letting it raise would drop all servers, not
+        # just the Node ones.
+        logger.warning(
+            f"MCP servers {', '.join(missing)} need Node.js, and installing it "
+            f"failed unexpectedly: {exc!r}. Run 'EvoSci setup' to retry.",
+            exc_info=True,
+        )
+        return
     activate_runtime()
 
 

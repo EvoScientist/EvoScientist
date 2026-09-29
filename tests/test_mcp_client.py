@@ -1969,3 +1969,20 @@ class TestEnsureNodeForStdio:
             )
         assert "offline" in caplog.text
         assert "EvoSci setup" in caplog.text
+
+    def test_unexpected_error_is_logged_not_raised(self, monkeypatch, caplog):
+        """A non-StageError from the install must not abort the MCP load for
+        every server."""
+        from EvoScientist.mcp import client as mcp_client
+        from EvoScientist.setup import node as setup_node
+
+        def broken(*_a, **_k):
+            raise NotImplementedError("compression type 99")
+
+        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setattr(setup_node, "ensure_node", broken)
+        with caplog.at_level("WARNING"):
+            mcp_client._ensure_node_for_stdio(
+                {"fs": {"transport": "stdio", "command": "npx"}}
+            )
+        assert "compression type 99" in caplog.text

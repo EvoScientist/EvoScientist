@@ -13,6 +13,7 @@ fnm or conda install: the private Node reaches child processes only through
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
@@ -146,7 +147,12 @@ def _is_under(path: Path, root: Path) -> bool:
 
 
 def _system_node() -> NodeInfo | None:
-    """A ``node`` on PATH, outside our tools dir, at MIN_SYSTEM_NODE or newer."""
+    """A ``node`` on PATH, outside our tools dir, at MIN_SYSTEM_NODE or newer,
+    with ``npx`` next to it.
+
+    Every consumer runs ``npx``, and some distros package ``npm`` (which
+    provides it) separately from ``node``; a Node without it does not count.
+    """
     root = tools_dir()
     search = os.pathsep.join(
         p
@@ -154,7 +160,7 @@ def _system_node() -> NodeInfo | None:
         if p and not _is_under(Path(p), root)
     )
     found = shutil.which("node", path=search)
-    if found is None:
+    if found is None or shutil.which("npx", path=str(Path(found).parent)) is None:
         return None
     version = _probe(Path(found))
     if version is None or version[0] < MIN_SYSTEM_NODE:
@@ -167,7 +173,10 @@ def _read_record() -> dict[str, str] | None:
         data = json.loads(_record_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or not data.get("path") or not data.get("version"):
+    if not isinstance(data, dict):
+        return None
+    path, version = data.get("path"), data.get("version")
+    if not isinstance(path, str) or not path or not isinstance(version, str):
         return None
     return data
 
@@ -294,11 +303,12 @@ def ensure_node(
 ) -> NodeInfo:
     """Return a usable Node, installing the private one if needed.
 
-    Order: a system Node >= MIN_SYSTEM_NODE (the private record is then
-    dropped, so the system Node is the one on PATH); the recorded private Node
-    if it still runs (no network needed); otherwise download, verify, unpack,
-    probe and record. Raises :class:`StageError` on failure, leaving any
-    previous record in place.
+    Order: a system Node >= MIN_SYSTEM_NODE with ``npx`` (the private record
+    is then dropped, so the system Node is the one on PATH); the recorded
+    private Node if it still runs (no network needed); otherwise download,
+    verify, unpack, probe and record. Raises :class:`StageError` on failure,
+    leaving any previous record in place; file-system errors in the tools dir
+    are reported as ``download_failed``.
 
     ``mirror`` defaults to the configured ``mirror``.
     """
@@ -306,7 +316,10 @@ def ensure_node(
 
     system = _system_node()
     if system is not None:
-        _record_path().unlink(missing_ok=True)
+        # Housekeeping only: a record we cannot remove must not fail a usable
+        # system Node.
+        with contextlib.suppress(OSError):
+            _record_path().unlink(missing_ok=True)
         return system
 
     recorded = _recorded_node()
@@ -316,13 +329,18 @@ def ensure_node(
     from filelock import FileLock
 
     root = tools_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(root / "node.lock")):
-        # Another process may have finished the install while we waited.
-        recorded = _recorded_node()
-        if recorded is not None:
-            return recorded
-        return _install(mirror or _configured_mirror(), report)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(root / "node.lock")):
+            # Another process may have finished the install while we waited.
+            recorded = _recorded_node()
+            if recorded is not None:
+                return recorded
+            return _install(mirror or _configured_mirror(), report)
+    except OSError as exc:
+        raise StageError(
+            "download_failed", f"Could not install Node into {root}: {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #
