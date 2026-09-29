@@ -450,7 +450,12 @@ def is_langgraph_dev_running(
     """
     url = base_url or _base_url(port, host)
     try:
-        return httpx.get(f"{url}/ok", timeout=1.0).status_code == 200
+        # trust_env=False: this is a loopback probe of our own server. httpx
+        # otherwise routes it through the environment/OS proxy — and on Windows
+        # getproxies() reads the system (registry/IE) proxy even with no *_PROXY
+        # env vars set, so a corporate proxy silently swallows the 127.0.0.1
+        # request and the health check never sees the healthy server.
+        return httpx.get(f"{url}/ok", timeout=1.0, trust_env=False).status_code == 200
     except (httpx.TransportError, OSError):
         return False
 
@@ -754,6 +759,28 @@ def stop_recorded_server() -> int | None:
         return None
 
 
+def stop_inflight_owned_server() -> int | None:
+    """Stop only the langgraph dev *this* process spawned, never one recorded
+    on disk by another process.
+
+    The launcher's mid-start teardown uses this instead of
+    :func:`stop_recorded_server`. Before its own child is spawned, the shared
+    on-disk PID file still names a *different* server — e.g. another
+    session's backend on a different port — so killing the recorded
+    server on a close-during-boot would take down an unrelated session. The
+    in-memory ``_PROCESS`` is set only by this process's ``start_langgraph_dev``
+    (after Popen), so it can only ever name our own in-flight child; a close
+    before Popen finds it ``None`` and stops nothing. Returns the stopped pid,
+    or ``None`` when we had not spawned anything yet.
+    """
+    with _LOCK:
+        if _PROCESS is not None and _PROCESS.poll() is None:
+            pid = _PROCESS.pid
+            stop_langgraph_dev()
+            return pid
+    return None
+
+
 def _stop_recorded_server_locked() -> int | None:
     with _LOCK:
         if _PROCESS is not None and _PROCESS.poll() is None:
@@ -1047,6 +1074,19 @@ def start_langgraph_dev(
     # or async sub-agent launches would target whatever the config file says.
     sub_env["EVOSCIENTIST_LANGGRAPH_DEV_HOST"] = host
 
+    # POSIX: own session so the child can be group-signalled on cleanup.
+    # Windows: own process group, so Ctrl+C in the terminal does not reach the
+    # server (the CLI stops it itself unless keepalive is on). It still shares
+    # the parent's console: no new window opens, and closing that console ends
+    # the server instead of leaving it running without its CLI.
+    if os.name == "nt":
+        # getattr keeps this import-safe off Windows (the flag is Windows-only).
+        _spawn_kwargs = {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        }
+    else:
+        _spawn_kwargs = {"start_new_session": True}
+
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
         proc = subprocess.Popen(
@@ -1069,7 +1109,7 @@ def start_langgraph_dev(
             stdout=log_handle,
             stderr=log_handle,
             env=sub_env,
-            start_new_session=True,
+            **_spawn_kwargs,
         )
     finally:
         # The child has its own copy of the fd; closing ours prevents an

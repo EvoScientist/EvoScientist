@@ -93,8 +93,31 @@ class _ImmediateEvent:
         self._called = 99
 
 
-def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False):
-    """Run ``run_webui`` with every external dependency mocked."""
+class _InterruptingConsole(_RecordingConsole):
+    """Raises ``KeyboardInterrupt`` when a line containing ``trigger`` prints,
+    simulating a Ctrl+C that lands while ``run_webui`` renders its output."""
+
+    def __init__(self, sink: list, trigger: str):
+        super().__init__(sink)
+        self._trigger = trigger
+
+    def print(self, *args, **kwargs):
+        super().print(*args, **kwargs)
+        if self._trigger in self._sink[-1]:
+            raise KeyboardInterrupt
+
+
+def _run_webui_once(
+    monkeypatch,
+    config,
+    *,
+    backend_port_occupied: bool = False,
+    interrupt_on: str | None = None,
+):
+    """Run ``run_webui`` with every external dependency mocked.
+
+    ``interrupt_on``: raise ``KeyboardInterrupt`` from the console when a line
+    containing this text prints; ``run_webui`` then propagates it."""
     import atexit
     import os
     import shutil
@@ -107,7 +130,12 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
     captured: dict[str, Any] = {"printed": [], "npx_env": {}, "npx_args": []}
 
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
-    monkeypatch.setattr(webui_mod, "console", _RecordingConsole(captured["printed"]))
+    console = (
+        _InterruptingConsole(captured["printed"], interrupt_on)
+        if interrupt_on
+        else _RecordingConsole(captured["printed"])
+    )
+    monkeypatch.setattr(webui_mod, "console", console)
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/npx")
 
@@ -124,11 +152,12 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
 
     monkeypatch.setattr(lgm, "start_langgraph_dev", _fake_start_langgraph_dev)
 
+    captured["stop_calls"] = 0
+
     def _fake_stop(*_a, **_kw):
-        return None
+        captured["stop_calls"] += 1
 
     monkeypatch.setattr(lgm, "stop_langgraph_dev", _fake_stop)
-    captured["stop_fn"] = _fake_stop
 
     class _FakeProc:
         pid = 12345
@@ -151,8 +180,10 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
         return _FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
-    # _stop_webui shells out to taskkill on Windows — neutralize it.
-    monkeypatch.setattr(webui_mod, "_stop_webui", lambda _proc: None)
+    # The front-end runner's stop shells out to taskkill on Windows — neutralize.
+    from EvoScientist.deploy import launcher as launcher_mod
+
+    monkeypatch.setattr(launcher_mod, "_stop_process_tree", lambda _proc: None)
     captured["atexit_fns"] = []
     monkeypatch.setattr(
         atexit, "register", lambda fn, *a, **k: captured["atexit_fns"].append(fn) or fn
@@ -160,7 +191,11 @@ def _run_webui_once(monkeypatch, config, *, backend_port_occupied: bool = False)
     monkeypatch.setattr(signal, "signal", lambda _sig, _handler: lambda *a: None)
     monkeypatch.setattr(threading, "Event", _ImmediateEvent)
 
-    webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+    if interrupt_on:
+        with pytest.raises(KeyboardInterrupt):
+            webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+    else:
+        webui_mod.run_webui(config, workspace_dir="/tmp/ws")
     return captured
 
 
@@ -290,14 +325,30 @@ def test_no_remote_hint_when_both_exposed(monkeypatch):
 # =============================================================================
 
 
-def test_backend_default_registers_stop_on_exit(monkeypatch):
-    """Without keepalive the WebUI-started backend dies with the session."""
+def test_backend_default_stops_backend_on_exit(monkeypatch):
+    """Without keepalive the WebUI-started backend dies with the session.
+
+    Teardown moved into ``launcher.stop`` (registered via atexit and also run in
+    the finally block): the contract is now "stop_langgraph_dev is called", not
+    "which callable was handed to atexit"."""
     captured = _run_webui_once(monkeypatch, _make_config())
-    assert captured["stop_fn"] in captured["atexit_fns"]
+    assert captured["stop_calls"] >= 1
+    assert captured["atexit_fns"], "launcher.stop must be registered for teardown"
 
 
-def test_backend_keepalive_skips_stop_registration(monkeypatch):
+def test_backend_keepalive_leaves_backend_running(monkeypatch):
     """With keepalive the backend outlives the WebUI session, so the next
     same-workspace launch reuses it instead of paying the cold boot."""
     captured = _run_webui_once(monkeypatch, _make_config(langgraph_dev_keepalive=True))
-    assert captured["stop_fn"] not in captured["atexit_fns"]
+    assert captured["stop_calls"] == 0
+
+
+def test_teardown_registered_before_output_is_rendered(monkeypatch):
+    """``start()`` has already spawned the backend and the front-end, so a
+    Ctrl+C while the ready lines print must still find the teardown registered;
+    otherwise both processes are left running."""
+    captured = _run_webui_once(
+        monkeypatch, _make_config(), interrupt_on="langgraph dev ready"
+    )
+    assert len(captured["atexit_fns"]) == 1
+    assert captured["atexit_fns"][0].__name__ == "stop"
