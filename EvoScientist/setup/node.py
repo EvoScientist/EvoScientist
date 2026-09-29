@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import platform
 import re
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .download import download, fetch_text, verify_sha256_from_sums
-from .protocol import Emitter, StageError, make_event
+from .protocol import Emitter, ProgressThrottle, StageError, make_event
 
 NODE_VERSION = "24.21.0"
 MIN_SYSTEM_NODE = 20
@@ -55,6 +56,23 @@ _SUPPORTED = {
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
 ProgressFn = Callable[[float, str], None]
+
+
+def log_progress(log: logging.Logger) -> ProgressFn:
+    """A progress callback for on-demand installs that have no emitter.
+
+    Logs at WARNING, the level the CLI shows by default, so a first WebUI start
+    or MCP load does not look frozen during the download. Thinned by
+    :class:`ProgressThrottle`.
+    """
+    throttle = ProgressThrottle()
+
+    def report(fraction: float, message: str) -> None:
+        pct = int(fraction * 100)
+        if throttle.should_show("node", pct, message):
+            log.warning(f"Installing Node.js: {message} ({pct}%)")
+
+    return report
 
 
 @dataclass(frozen=True)
@@ -292,6 +310,16 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _remove_stale_temp_dirs(root: Path) -> None:
+    """Delete ``.node-*`` temp dirs left by an install that was killed.
+
+    Called with the install lock held, so no live install owns one.
+    """
+    for stale in root.glob(".node-*"):
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+
+
 def _configured_mirror() -> str:
     from ..config import load_config
 
@@ -336,6 +364,7 @@ def ensure_node(
             recorded = _recorded_node()
             if recorded is not None:
                 return recorded
+            _remove_stale_temp_dirs(root)
             return _install(mirror or _configured_mirror(), report)
     except OSError as exc:
         raise StageError(

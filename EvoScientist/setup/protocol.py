@@ -83,18 +83,33 @@ class JsonEmitter:
         stream.flush()
 
 
-class ConsoleEmitter:
-    """Render events as human-readable lines on the Rich console.
+class ProgressThrottle:
+    """Pick the progress updates a human should see.
 
-    A ``running`` event with a progress value is shown when its message
-    differs from the last one shown for the stage, or when the whole-number
-    percentage has moved by at least 10 points, so a download does not print a
-    line per chunk but every step still appears.
+    An update is shown when its message differs from the last one shown for
+    the stage, or when the whole-number percentage has moved by at least 10
+    points, so a download does not print a line per chunk but every step
+    still appears.
     """
+
+    def __init__(self) -> None:
+        self._last_shown: dict[str, tuple[int, str]] = {}
+
+    def should_show(self, stage: str, pct: int, message: str) -> bool:
+        last = self._last_shown.get(stage)
+        if last is not None and message == last[1] and pct - last[0] < 10 and pct < 100:
+            return False
+        self._last_shown[stage] = (pct, message)
+        return True
+
+
+class ConsoleEmitter:
+    """Render events as human-readable lines on the Rich console, with
+    ``running`` progress thinned by :class:`ProgressThrottle`."""
 
     def __init__(self, console: Any) -> None:
         self._console = console
-        self._last_shown: dict[str, tuple[int, str]] = {}
+        self._throttle = ProgressThrottle()
 
     def __call__(self, event: dict[str, Any]) -> None:
         stage = event["stage"]
@@ -104,15 +119,8 @@ class ConsoleEmitter:
             progress = event.get("progress")
             if progress is not None:
                 pct = int(progress * 100)
-                last = self._last_shown.get(stage)
-                if (
-                    last is not None
-                    and message == last[1]
-                    and pct - last[0] < 10
-                    and pct < 100
-                ):
+                if not self._throttle.should_show(stage, pct, message):
                     return
-                self._last_shown[stage] = (pct, message)
                 self._console.print(f"  [dim]{stage}: {message} ({pct}%)[/dim]")
             else:
                 self._console.print(f"  [dim]{stage}: {message}[/dim]")

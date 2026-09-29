@@ -810,11 +810,11 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     ]
     if not missing:
         return
-    from ..setup.node import activate_runtime, ensure_node
+    from ..setup.node import activate_runtime, ensure_node, log_progress
     from ..setup.protocol import StageError
 
     try:
-        ensure_node()
+        ensure_node(progress=log_progress(logger))
     except StageError as exc:
         logger.warning(
             f"MCP servers {', '.join(missing)} need Node.js, and installing it "

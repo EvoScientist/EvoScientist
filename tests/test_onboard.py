@@ -2739,7 +2739,8 @@ class TestEnsureNpx:
     def test_confirmed_install_makes_npx_available(self):
         result, ensure, activate = self._run(npx_after=True, confirm=True)
         assert result is True
-        ensure.assert_called_once_with()
+        ensure.assert_called_once()
+        assert callable(ensure.call_args.kwargs["progress"])
         activate.assert_called_once_with()
 
     def test_declined_install_does_nothing(self):

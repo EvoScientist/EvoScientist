@@ -439,9 +439,13 @@ def test_npx_runner_preflight_installs_node_on_demand(monkeypatch):
     monkeypatch.setattr(
         lm.shutil, "which", lambda _n: "/p/npx" if state["installed"] else None
     )
-    monkeypatch.setattr(
-        setup_node, "ensure_node", lambda *_a, **_k: state.update(installed=True)
-    )
+
+    def ensure(*_a, **kw):
+        # The install must report progress; a silent download looks frozen.
+        assert callable(kw.get("progress"))
+        state.update(installed=True)
+
+    monkeypatch.setattr(setup_node, "ensure_node", ensure)
     monkeypatch.setattr(setup_node, "activate_runtime", lambda: None)
     lm.NpxWebUIRunner().preflight(_cfg())
     assert state["installed"]

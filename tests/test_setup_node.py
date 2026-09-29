@@ -115,6 +115,29 @@ def test_system_node_without_npx_triggers_download(env, monkeypatch):
     assert env["net"].urls
 
 
+def test_stale_temp_dirs_are_removed_before_an_install(env):
+    stale = env["data"] / "tools" / ".node-killed"
+    stale.mkdir(parents=True)
+    (stale / "partial.tar.xz").write_bytes(b"x")
+    node.ensure_node("default")
+    assert not stale.exists()
+
+
+def test_log_progress_logs_every_step_and_thins_the_download(caplog):
+    report = node.log_progress(node.logging.getLogger("test-node-progress"))
+    with caplog.at_level("WARNING", logger="test-node-progress"):
+        for i in range(101):
+            report(0.05 + 0.8 * i / 100, "Downloading Node")
+        report(0.86, "Verifying checksum")
+        report(0.9, "Unpacking")
+    lines = [r.getMessage() for r in caplog.records]
+    assert 5 <= len(lines) <= 12
+    assert lines[-2:] == [
+        "Installing Node.js: Verifying checksum (86%)",
+        "Installing Node.js: Unpacking (90%)",
+    ]
+
+
 def test_unwritable_tools_dir_raises_stage_error(env, monkeypatch):
     from EvoScientist import paths
 

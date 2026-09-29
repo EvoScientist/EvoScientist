@@ -331,7 +331,7 @@ def _ensure_npx(reason: str) -> bool:
         return True
 
     from ...setup.node import NODE_VERSION, activate_runtime, ensure_node, tools_dir
-    from ...setup.protocol import StageError
+    from ...setup.protocol import ConsoleEmitter, StageError, make_event
 
     console.print(f"  [yellow]✗ npx not found — {reason}[/yellow]")
     install_node = questionary.confirm(
@@ -347,8 +347,13 @@ def _ensure_npx(reason: str) -> bool:
         return False
 
     console.print("  [dim]Installing Node.js...[/dim]")
+    emit = ConsoleEmitter(console)
     try:
-        ensure_node()
+        ensure_node(
+            progress=lambda fraction, message: emit(
+                make_event("node", "running", progress=fraction, message=message)
+            )
+        )
     except StageError as exc:
         console.print(f"  [red]✗ Installation failed: {exc.message}[/red]")
         console.print("  [dim]Retry with: EvoSci setup[/dim]")
