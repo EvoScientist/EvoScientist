@@ -1,7 +1,7 @@
 """Ask a running langgraph dev server whether it has work in flight.
 
-Anything that is about to stop or restart a backend (closing an app, ``EvoSci
-update``) asks first, because stopping the server kills its in-flight runs and
+Anything that is about to stop or restart a backend (e.g. ``EvoSci update``)
+asks first, because stopping the server kills its in-flight runs and
 the background jobs it spawned. These helpers answer that question over HTTP,
 with no UI and no dependency on a live server in tests.
 """
@@ -203,8 +203,9 @@ def wait_for_backend_idle(
     """Block until the backend at ``url`` has no active work, then return True.
 
     Waits INDEFINITELY, for a caller that restarts the backend only once all
-    active work — runs, background sub-agents, background jobs, and turns
-    paused awaiting human input — has finished. Proceeds only on a
+    active work — runs, background sub-agents and background jobs — has
+    finished. Turns paused awaiting human input count only when ``probe``
+    checks a watched thread; the default probe does not. Proceeds only on a
     CONFIRMED-idle state; an ``"unknown"`` result (backend up but the probe
     errored) is treated as still active, so a transient blip never ends the
     wait early and kills a live run.

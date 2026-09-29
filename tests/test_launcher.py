@@ -2,8 +2,8 @@
 
 These pin the pieces that moved out of ``run_webui`` so they can be reused by
 other front-ends: the backend reuse/start decision and its error-code taxonomy,
-the secret-scrubbing env, the front-end runners' preflight, readiness polling,
-and the JSON ready/error signal from the standalone entrypoint.
+the secret-scrubbing env, the front-end runners' preflight and readiness
+polling.
 """
 
 from __future__ import annotations
@@ -313,12 +313,15 @@ def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
     assert calls == [1]
 
 
-def test_stop_after_reuse_does_not_stop_recorded_server(monkeypatch):
-    """A reused backend (no start initiated, no proc handle) is never torn down
-    by stop() — we do not own it."""
-    calls: list[int] = []
-    monkeypatch.setattr(lgm, "stop_recorded_server", lambda: calls.append(1))
-    launcher = lm.WebUILauncher(object(), _cfg(keepalive=False), _FakeRunner())
+def test_stop_after_reuse_leaves_backend_running(monkeypatch):
+    _patch_for_evosci_occupant(
+        monkeypatch, sidecar={"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 1}
+    )
+    calls: list = []
+    monkeypatch.setattr(lgm, "stop_langgraph_dev", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(lgm, "stop_inflight_owned_server", lambda: calls.append(0))
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
+    assert launcher.start().backend_started is False
     launcher.stop()
     assert calls == []
 
