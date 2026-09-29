@@ -894,22 +894,27 @@ class TestReadTunnelUrl:
         )
 
 
-class TestStartLanggraphDevNoConsole:
-    """The langgraph dev child must spawn without a console window on Windows
-    (its output goes to the log), so no stray terminal window appears."""
+class TestStartLanggraphDevSpawnFlags:
+    """On Windows the langgraph dev child gets its own process group (Ctrl+C
+    does not reach it) but keeps the parent's console, so closing the console
+    ends it. On POSIX it gets its own session."""
 
-    def test_windows_suppresses_console(self, start_langgraph_dev_capture, monkeypatch):
+    def test_windows_uses_new_process_group(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
         env = start_langgraph_dev_capture
         monkeypatch.setattr(manager.os, "name", "nt", raising=False)
         monkeypatch.setattr(
-            manager.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False
+            manager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False
         )
         try:
             manager.start_langgraph_dev(workspace_dir=env.tmp_path)
         except FileNotFoundError:
             pass  # _fake_popen stops before the real spawn
         kw = env.captured["kwargs"]
-        assert kw.get("creationflags") == 0x08000000
+        # Exactly the process-group flag: no CREATE_NO_WINDOW, which would
+        # detach the server from the console and let it outlive a closed one.
+        assert kw.get("creationflags") == 0x00000200
         assert "start_new_session" not in kw
 
     def test_posix_uses_new_session(self, start_langgraph_dev_capture, monkeypatch):

@@ -1055,12 +1055,15 @@ def start_langgraph_dev(
     sub_env["EVOSCIENTIST_LANGGRAPH_DEV_HOST"] = host
 
     # POSIX: own session so the child can be group-signalled on cleanup.
-    # Windows: suppress the console window — this is a background server whose
-    # stdout/stderr already go to the log file, so an allocated console is just
-    # a stray empty terminal window.
+    # Windows: own process group, so Ctrl+C in the terminal does not reach the
+    # server (the CLI stops it itself unless keepalive is on). It still shares
+    # the parent's console: no new window opens, and closing that console ends
+    # the server instead of leaving it running without its CLI.
     if os.name == "nt":
         # getattr keeps this import-safe off Windows (the flag is Windows-only).
-        _spawn_kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+        _spawn_kwargs = {
+            "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        }
     else:
         _spawn_kwargs = {"start_new_session": True}
 
