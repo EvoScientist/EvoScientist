@@ -293,9 +293,9 @@ def _apply_auto_config(
     Mutates *kwargs* in place.  Only sets keys that the caller hasn't already
     provided, so explicit user settings are never overridden.
     """
-    # No langchain-anthropic profile for Opus 5.5 yet, so max_tokens would fall
-    # back to 4096; applies on every route (explicit thinking, ccproxy, ...).
-    if provider == "anthropic" and model_id.endswith("opus-5-5"):
+    # No langchain-anthropic profile for Opus 5.5 / Sonnet 5.5 yet, so max_tokens
+    # would fall back to 4096; applies on every route (explicit thinking, ccproxy, ...).
+    if provider == "anthropic" and model_id.endswith(("opus-5-5", "sonnet-5-5")):
         kwargs.setdefault("max_tokens", 128000)
 
     # Anthropic: extended thinking
@@ -317,7 +317,7 @@ def _apply_auto_config(
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
                 kwargs.setdefault("max_tokens", 16000)
         elif "fable" in model_id or model_id.endswith(
-            ("opus-5", "opus-5-5", "sonnet-5", "4-6", "4-7", "4-8")
+            ("opus-5", "opus-5-5", "sonnet-5", "sonnet-5-5", "4-6", "4-7", "4-8")
         ):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")

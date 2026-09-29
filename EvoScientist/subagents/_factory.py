@@ -65,11 +65,16 @@ _OPENROUTER_GRADER_STRATEGY: dict[str, type[ProviderStrategy] | type[ToolStrateg
 _SCHEDULER_GRADER_MAX_CALLS = 12
 
 
-# OpenRouter ids for which neither strategy yields a verdict (re-probed 2026-09-22):
-# the model rejects forced ``tool_choice`` and JSON mode rejects the grader
-# schema's ``oneOf``. Exact ids, not families: ``anthropic/claude-fable-5`` and
-# the native ``claude-fable-5-1`` / ``claude-opus-5-5`` grade fine.
-_OPENROUTER_UNGRADABLE_IDS = ("anthropic/claude-fable-5.1", "anthropic/claude-opus-5.5")
+# OpenRouter ids for which neither strategy yields a verdict (re-probed 2026-09-22,
+# sonnet-5.5 probed 2026-09-29): the model rejects forced ``tool_choice`` and JSON
+# mode rejects the grader schema's ``oneOf``. Exact ids, not families:
+# ``anthropic/claude-fable-5`` and the native ``claude-fable-5-1`` /
+# ``claude-opus-5-5`` grade fine.
+_OPENROUTER_UNGRADABLE_IDS = (
+    "anthropic/claude-fable-5.1",
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-sonnet-5.5",
+)
 
 
 def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
@@ -84,8 +89,8 @@ def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
             "structured verdicts (this route rejects forced tool_choice and its "
             "JSON mode rejects the grader schema); rubric runs will end in "
             "grader_error. Use the native anthropic provider for this model, or "
-            "set auxiliary_model to another model (claude-fable-5, Sonnet, Haiku, "
-            "GPT and Gemini all grade through OpenRouter).",
+            "set auxiliary_model to another model (claude-fable-5, claude-sonnet-5, "
+            "Haiku, GPT and Gemini all grade through OpenRouter).",
             model_id,
         )
 

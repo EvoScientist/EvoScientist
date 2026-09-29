@@ -3301,6 +3301,7 @@ class TestAutoConfig:
             ("claude-opus-5", None),
             ("claude-opus-5-5", 128000),
             ("claude-sonnet-5", None),
+            ("claude-sonnet-5-5", 128000),
         ],
     )
     @patch("EvoScientist.llm.models.init_chat_model")
