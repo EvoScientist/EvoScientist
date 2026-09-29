@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.3" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 9 月 29 日]** **[v0.3.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.4)** — 新增模型：Claude Sonnet 5.5（Anthropic 与 OpenRouter）；桌面端铺垫：WebUI 启动器重构为与 shell 无关的核心，并提供后台任务检测；Windows 修复：系统代理下能正确识别本地服务、langgraph dev 服务不再被终端 Ctrl+C 波及、`EvoSci server stop` 命令可用；修复原生 DeepSeek 下的记忆 worker 与定时任务验收评分。
 - **[2026 年 9 月 26 日]** **[v0.3.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.3)** — Codex OAuth（ChatGPT Plus/Pro）端到端可用，并能捕获 vLLM 风格端点返回的推理内容；HITL 恢复轮次上限只统计真正提示过人的轮次；上下文压缩按实际运行的模型计算上下文窗口；各入口可单独选择网关后端（默认关闭）；修复异步 expert 调度；deepagents 0.7.19。
 - **[2026 年 9 月 23 日]** **[v0.3.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.2)** — 新增模型：Claude Opus 5.5、GPT-6 Sol/Luna、MiMo-V2.6-Pro/Flash（新增小米 provider）与 Grok 4.7；修复 Anthropic 协议请求报错与工具运行中 Ctrl+C 的问题；deepagents 0.7.18。
 - **[2026 年 9 月 19 日]** **[v0.3.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.1)** — 新增模型：GLM-5.3-FlashX（智谱与 OpenRouter）、DeepSeek-V4.1-Flash（DeepSeek 与 OpenRouter）；记忆检索支持中文等不以空格分词的语言；可选的 LangGraph server 网关后端（`gateway_backend`，默认关闭）；HITL 审批统一走同一套策略；修复模型 fallback 链；deepagents 0.7.15。
