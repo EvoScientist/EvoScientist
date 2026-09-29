@@ -789,6 +789,41 @@ def _resolve_command(command: str) -> str:
     return command
 
 
+_NODE_COMMANDS = frozenset({"node", "npx", "npm"})
+
+
+def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
+    """Install the private Node when a stdio server runs ``node`` / ``npx`` /
+    ``npm`` and that command is not on PATH.
+
+    Covers users who never ran ``EvoSci setup``. A failed install is logged and
+    the server then fails to start as it would without Node.
+    """
+    missing = [
+        name
+        for name, server in config.items()
+        if server.get("transport") == "stdio"
+        and (command := str(server.get("command", "")))
+        and not os.path.isabs(command)
+        and Path(command).stem.lower() in _NODE_COMMANDS
+        and shutil.which(command) is None
+    ]
+    if not missing:
+        return
+    from ..setup.node import activate_runtime, ensure_node
+    from ..setup.protocol import StageError
+
+    try:
+        ensure_node()
+    except StageError as exc:
+        logger.warning(
+            f"MCP servers {', '.join(missing)} need Node.js, and installing it "
+            f"failed: {exc.message}. Run 'EvoSci setup' to retry."
+        )
+        return
+    activate_runtime()
+
+
 def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Convert YAML config to ``MultiServerMCPClient`` connections format.
 
@@ -936,6 +971,9 @@ async def _load_tools(
             "Install with: pip install langchain-mcp-adapters"
         ) from None
 
+    # May download Node; off the event loop so langgraph dev's blocking-call
+    # guard is not tripped.
+    await asyncio.to_thread(_ensure_node_for_stdio, config)
     connections = _build_connections(config)
     if not connections:
         return {}

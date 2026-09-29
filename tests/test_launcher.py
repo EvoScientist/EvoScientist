@@ -416,10 +416,67 @@ def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
 # Runner preflight
 # --------------------------------------------------------------------------- #
 def test_npx_runner_preflight_reports_node_missing(monkeypatch):
+    from EvoScientist.setup import node as setup_node
+    from EvoScientist.setup.protocol import StageError
+
+    def offline(*_a, **_k):
+        raise StageError("download_failed", "offline")
+
     monkeypatch.setattr(lm.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(setup_node, "ensure_node", offline)
     with pytest.raises(lm.LauncherError) as ei:
         lm.NpxWebUIRunner().preflight(_cfg())
     assert ei.value.code == "node_missing"
+    assert "offline" in ei.value.message
+    assert "EvoSci setup" in ei.value.detail
+
+
+def test_npx_runner_preflight_installs_node_on_demand(monkeypatch):
+    """No npx on PATH: preflight installs the private Node and activates it."""
+    from EvoScientist.setup import node as setup_node
+
+    state = {"installed": False}
+    monkeypatch.setattr(
+        lm.shutil, "which", lambda _n: "/p/npx" if state["installed"] else None
+    )
+    monkeypatch.setattr(
+        setup_node, "ensure_node", lambda *_a, **_k: state.update(installed=True)
+    )
+    monkeypatch.setattr(setup_node, "activate_runtime", lambda: None)
+    lm.NpxWebUIRunner().preflight(_cfg())
+    assert state["installed"]
+
+
+def test_npx_runner_preflight_with_npx_does_not_install(monkeypatch):
+    from EvoScientist.setup import node as setup_node
+
+    def boom(*_a, **_k):
+        raise AssertionError("ensure_node must not run when npx is on PATH")
+
+    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/usr/bin/npx")
+    monkeypatch.setattr(setup_node, "ensure_node", boom)
+    lm.NpxWebUIRunner().preflight(_cfg())
+
+
+@pytest.mark.parametrize("private", [True, False])
+def test_npx_runner_start_cleans_env_only_for_private_node(monkeypatch, private):
+    from EvoScientist.setup import node as setup_node
+
+    captured = {}
+
+    def fake_popen(argv, env, **_kw):
+        captured["env"] = env
+        return object()
+
+    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
+    lm.NpxWebUIRunner().start(_cfg(), env)
+    if private:
+        assert captured["env"] == {"PATH": "p"}
+    else:
+        assert captured["env"] == env
 
 
 def test_bundled_runner_preflight_missing_node(tmp_path):

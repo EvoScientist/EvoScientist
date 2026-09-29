@@ -121,10 +121,30 @@ class NpxWebUIRunner:
     handles_browser_open = True
 
     def preflight(self, cfg: LauncherConfig) -> None:
+        if shutil.which("npx") is not None:
+            return
+        # Users who installed with pip / uv may never have run `EvoSci setup`:
+        # install the private Node now instead of failing.
+        from ..setup.node import activate_runtime, ensure_node, tools_dir
+        from ..setup.protocol import StageError
+
+        logger.warning(f"Node.js not found on PATH; installing it into {tools_dir()}")
+        try:
+            ensure_node()
+        except StageError as exc:
+            raise LauncherError(
+                "node_missing",
+                "Node.js / npx was not found on PATH and installing it failed: "
+                f"{exc.message}",
+                "Run 'EvoSci setup' to retry (add --cn for mainland China "
+                "mirrors), or install Node.js 24 LTS yourself — or switch UI "
+                "modes with 'EvoSci config set ui_backend tui'.",
+            ) from exc
+        activate_runtime()
         if shutil.which("npx") is None:
             raise LauncherError(
                 "node_missing",
-                "Node.js / npx was not found on PATH. The WebUI front-end "
+                "Node.js was found but npx is not on PATH. The WebUI front-end "
                 "ships as the npm package @evoscientist/webui and is launched "
                 "with npx.",
                 "Install Node.js 24 LTS (which includes npx), then re-run "
@@ -133,13 +153,15 @@ class NpxWebUIRunner:
             )
 
     def start(self, cfg: LauncherConfig, env: dict[str, str]) -> subprocess.Popen:
+        from ..setup.node import is_private, node_child_env
+
         npx = shutil.which("npx")
         if npx is None:  # narrowed for type-checkers; preflight already ran
             raise LauncherError("node_missing", "npx disappeared after preflight.")
         try:
             return subprocess.Popen(
                 [npx, "--yes", _WEBUI_PACKAGE, "--port", str(cfg.webui_port)],
-                env=env,
+                env=node_child_env(env, private=is_private(npx)),
                 **_popen_group_kwargs(),
             )
         except Exception as exc:  # pragma: no cover - OS-level failure
