@@ -638,6 +638,10 @@ def get_chat_model(
         if isinstance(reasoning, dict):
             reasoning = dict(reasoning)
             reasoning.setdefault("context", "all_turns")
+            # store=False tells langchain-openai to keep only blocks with
+            # encrypted_content on passback; the Codex backend returns those
+            # on every response, so cross-turn reasoning replay works (#507).
+            reasoning.setdefault("store", False)
             kwargs["reasoning"] = reasoning
 
     if _uses_native_deepseek:
@@ -661,7 +665,11 @@ def get_chat_model(
     ):
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
-        _patch_openai_compat_content(chat_model)
+        # ccproxy Codex route must keep encrypted reasoning blocks so
+        # reasoning.context="all_turns" can replay them across turns (#507).
+        _patch_openai_compat_content(
+            chat_model, keep_encrypted_reasoning=_is_openai_proxy
+        )
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)

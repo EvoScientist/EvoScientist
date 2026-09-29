@@ -215,6 +215,29 @@ def _is_ccproxy_codex() -> bool:
 # ---------------------------------------------------------------------------
 _SKIP_CONTENT_TYPES = frozenset({"thinking", "reasoning", "reasoning_content"})
 
+
+def _has_encrypted_reasoning(block: dict) -> bool:
+    """Return True if a reasoning block carries encrypted_content for passback.
+
+    The Codex backend (via ccproxy) returns reasoning items with
+    ``encrypted_content`` on every Responses API response.  These blocks
+    must survive message flattening on the ccproxy route so that
+    ``reasoning.context = "all_turns"`` can replay them across turns (#507).
+    Plain-text reasoning blocks (no ``encrypted_content``) are still
+    dropped — they are display-only and cannot be passed back.
+    """
+    if not isinstance(block, dict):
+        return False
+    ec = block.get("encrypted_content")
+    if isinstance(ec, str) and ec:
+        return True
+    nested = block.get("reasoning")
+    if isinstance(nested, dict):
+        nec = nested.get("encrypted_content")
+        return isinstance(nec, str) and bool(nec)
+    return False
+
+
 # Media block types preserved when flattening (positive allowlist;
 # thinking/reasoning still dropped).  Images + files (PDF/documents): both
 # serialize on OpenAI-compatible APIs and capable models read them.  `video` is
@@ -227,7 +250,9 @@ _FILE_CONTENT_TYPES = frozenset({"file", "input_file", "document"})
 _MEDIA_CONTENT_TYPES = _IMAGE_CONTENT_TYPES | _FILE_CONTENT_TYPES
 
 
-def _flatten_message_content(content: Any) -> str | list[Any] | Any:
+def _flatten_message_content(
+    content: Any, *, keep_encrypted_reasoning: bool = False
+) -> str | list[Any] | Any:
     """Convert list-of-blocks content to a string, preserving media blocks.
 
     Thinking/reasoning blocks are dropped.  When a media block (image or file)
@@ -239,6 +264,10 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
     Args:
         content: Message content — a string, a list of content blocks, or
             another type.
+        keep_encrypted_reasoning: When True, reasoning blocks carrying
+            ``encrypted_content`` are preserved (for ccproxy Codex cross-turn
+            reasoning replay, #507).  Default False preserves the original
+            drop-all-reasoning behaviour for non-ccproxy routes.
 
     Returns:
         A plain string for text-only content, a list of blocks when media is
@@ -268,6 +297,13 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
                 saw_media = True
                 continue
             if btype in _SKIP_CONTENT_TYPES:
+                if keep_encrypted_reasoning and _has_encrypted_reasoning(block):
+                    # Encrypted reasoning must survive flattening so
+                    # langchain-openai can replay it on the next turn (#507).
+                    _flush_text()
+                    ordered_blocks.append(block)
+                    saw_media = True
+                    continue
                 continue
             text = block.get("text")
             if text:
@@ -281,7 +317,10 @@ def _flatten_message_content(content: Any) -> str | list[Any] | Any:
 
 
 def _sanitize_messages(
-    messages: list[BaseMessage], hoist_tool_media: bool = True
+    messages: list[BaseMessage],
+    hoist_tool_media: bool = True,
+    *,
+    keep_encrypted_reasoning: bool = False,
 ) -> list[BaseMessage]:
     """Flatten list content for OpenAI-compatible APIs, preserving media.
 
@@ -292,6 +331,12 @@ def _sanitize_messages(
     HumanMessage emitted after that turn's (possibly parallel) tool messages.
     Anthropic-routed providers accept tool-result media natively and pass
     ``hoist_tool_media=False`` to keep it inline.
+
+    Args:
+        messages: Input messages.
+        hoist_tool_media: Whether to hoist media out of tool messages.
+        keep_encrypted_reasoning: Whether to preserve encrypted reasoning
+            blocks during flattening (ccproxy Codex route, #507).
     """
     import copy
 
@@ -312,7 +357,9 @@ def _sanitize_messages(
         if not isinstance(msg.content, list):
             out.append(msg)
             continue
-        flat = _flatten_message_content(msg.content)
+        flat = _flatten_message_content(
+            msg.content, keep_encrypted_reasoning=keep_encrypted_reasoning
+        )
         if hoist_tool_media and is_tool and isinstance(flat, list):
             text_blocks = [
                 b for b in flat if isinstance(b, dict) and b.get("type") == "text"
@@ -434,8 +481,11 @@ class _OpenAICompatContent:
         self,
         profile: Mapping[str, object] | None,
         hoist_tool_media: bool,
+        *,
+        keep_encrypted_reasoning: bool = False,
     ) -> None:
         self.hoist_tool_media = hoist_tool_media
+        self.keep_encrypted_reasoning = keep_encrypted_reasoning
         self.blocked: set[str] = set()
         if profile is not None:
             if profile.get("image_inputs") is False:
@@ -447,7 +497,11 @@ class _OpenAICompatContent:
         prepared = (
             _strip_media_types(messages, self.blocked) if self.blocked else messages
         )
-        return _sanitize_messages(prepared, self.hoist_tool_media)
+        return _sanitize_messages(
+            prepared,
+            self.hoist_tool_media,
+            keep_encrypted_reasoning=self.keep_encrypted_reasoning,
+        )
 
     def _stripped(
         self,
@@ -457,6 +511,7 @@ class _OpenAICompatContent:
         return _sanitize_messages(
             _strip_media_types(messages, self.blocked | suspects),
             self.hoist_tool_media,
+            keep_encrypted_reasoning=self.keep_encrypted_reasoning,
         )
 
     def invoke(
@@ -586,7 +641,12 @@ class _OpenAICompatContent:
             raise media_exc from None
 
 
-def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> None:
+def _patch_openai_compat_content(
+    model: Any,
+    hoist_tool_media: bool = True,
+    *,
+    keep_encrypted_reasoning: bool = False,
+) -> None:
     """Normalize content for OpenAI-compatible models lacking a native adapter."""
     import functools
 
@@ -594,6 +654,7 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
     compat = _OpenAICompatContent(
         profile if isinstance(profile, Mapping) else None,
         hoist_tool_media,
+        keep_encrypted_reasoning=keep_encrypted_reasoning,
     )
 
     orig_generate = getattr(model, "_generate", None)
