@@ -2715,3 +2715,47 @@ def test_key_validator_ignores_blank_base_url(
         _provider_key_info(config, provider)[2]("key")
 
     assert mock_validate.call_args.kwargs["base_url"] == default
+
+
+class TestEnsureNpx:
+    """_ensure_npx installs the private Node via ensure_node after confirmation."""
+
+    def _run(self, *, npx_after: bool, confirm, ensure=None):
+        from EvoScientist.config.onboard import helpers
+        from EvoScientist.setup import node as setup_node
+
+        checks = iter([False, npx_after])
+        ensure = ensure or MagicMock()
+        with (
+            patch.object(helpers, "_check_npx", side_effect=lambda: next(checks)),
+            patch.object(helpers.questionary, "confirm") as mock_confirm,
+            patch.object(setup_node, "ensure_node", ensure),
+            patch.object(setup_node, "activate_runtime") as mock_activate,
+        ):
+            mock_confirm.return_value.ask.return_value = confirm
+            result = helpers._ensure_npx("test reason")
+        return result, ensure, mock_activate
+
+    def test_confirmed_install_makes_npx_available(self):
+        result, ensure, activate = self._run(npx_after=True, confirm=True)
+        assert result is True
+        ensure.assert_called_once_with()
+        activate.assert_called_once_with()
+
+    def test_declined_install_does_nothing(self):
+        result, ensure, activate = self._run(npx_after=False, confirm=False)
+        assert result is False
+        ensure.assert_not_called()
+        activate.assert_not_called()
+
+    def test_failed_install_returns_false(self):
+        from EvoScientist.setup.protocol import StageError
+
+        ensure = MagicMock(side_effect=StageError("download_failed", "offline"))
+        result, _, activate = self._run(npx_after=False, confirm=True, ensure=ensure)
+        assert result is False
+        activate.assert_not_called()
+
+    def test_cancelled_prompt_raises_keyboard_interrupt(self):
+        with pytest.raises(KeyboardInterrupt):
+            self._run(npx_after=False, confirm=None)

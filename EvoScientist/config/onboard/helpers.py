@@ -315,72 +315,11 @@ def _check_npx() -> bool:
         return False
 
 
-def _detect_node_install_method() -> tuple[str, str]:
-    """Detect the best way to install Node.js for this environment.
-
-    Returns:
-        Tuple of (method_name, install_command).
-    """
-    # Conda environment (any platform)
-    if os.environ.get("CONDA_PREFIX"):
-        return "conda", "conda install -y nodejs"
-
-    # macOS with Homebrew
-    if sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["brew", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                return "brew", "brew install node"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-    # Windows: winget (built-in on Win 10+) or chocolatey
-    if sys.platform == "win32":
-        if shutil.which("winget"):
-            return "winget", "winget install OpenJS.NodeJS.LTS"
-        if shutil.which("choco"):
-            return "choco", "choco install nodejs-lts -y"
-
-    return "manual", "https://nodejs.org"
-
-
-def _install_node(method: str, command: str) -> bool:
-    """Install Node.js using the detected method.
-
-    Returns:
-        True if installation succeeded.
-    """
-    if method == "manual":
-        return False
-
-    parts = command.split()
-    exe = shutil.which(parts[0]) or parts[0]
-    try:
-        proc = subprocess.run(
-            [exe, *parts[1:]],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return proc.returncode == 0
-    except FileNotFoundError:
-        console.print(f"  [red]✗ {method} not found[/red]")
-        return False
-    except subprocess.TimeoutExpired:
-        console.print("  [red]✗ Installation timed out[/red]")
-        return False
-    except Exception as e:
-        console.print(f"  [red]✗ Installation failed: {e}[/red]")
-        return False
-
-
 def _ensure_npx(reason: str) -> bool:
-    """Check for npx and offer to install Node.js if missing.
+    """Check for npx and offer to install EvoScientist's private Node.js if missing.
+
+    The private Node goes under ``<DATA_DIR>/tools`` (see
+    :func:`EvoScientist.setup.node.ensure_node`); nothing outside it is touched.
 
     Args:
         reason: Why npx is needed (shown in the warning message).
@@ -391,33 +330,34 @@ def _ensure_npx(reason: str) -> bool:
     if _check_npx():
         return True
 
+    from ...setup.node import NODE_VERSION, activate_runtime, ensure_node, tools_dir
+    from ...setup.protocol import StageError
+
     console.print(f"  [yellow]✗ npx not found — {reason}[/yellow]")
-    method, command = _detect_node_install_method()
+    install_node = questionary.confirm(
+        f"Install Node.js {NODE_VERSION} into {tools_dir()}?",
+        default=True,
+        style=WIZARD_STYLE,
+        qmark=f"  {QMARK}",
+    ).ask()
+    if install_node is None:
+        raise KeyboardInterrupt()
+    if not install_node:
+        console.print("  [dim]Install it later with: EvoSci setup[/dim]")
+        return False
 
-    if method != "manual":
-        install_node = questionary.confirm(
-            f"Install Node.js via {method}? ({command})",
-            default=True,
-            style=WIZARD_STYLE,
-            qmark=f"  {QMARK}",
-        ).ask()
-        if install_node is None:
-            raise KeyboardInterrupt()
-        if install_node:
-            console.print("  [dim]Installing Node.js...[/dim]")
-            if _install_node(method, command):
-                if _check_npx():
-                    console.print("  [green]✓ npx now available[/green]")
-                    return True
-                else:
-                    console.print(
-                        "  [yellow]✗ npx still not found after install[/yellow]"
-                    )
-            else:
-                console.print("  [red]✗ Installation failed[/red]")
-    else:
-        console.print(f"  [dim]Install Node.js: {command}[/dim]")
-
+    console.print("  [dim]Installing Node.js...[/dim]")
+    try:
+        ensure_node()
+    except StageError as exc:
+        console.print(f"  [red]✗ Installation failed: {exc.message}[/red]")
+        console.print("  [dim]Retry with: EvoSci setup[/dim]")
+        return False
+    activate_runtime()
+    if _check_npx():
+        console.print("  [green]✓ npx now available[/green]")
+        return True
+    console.print("  [yellow]✗ npx still not found after install[/yellow]")
     return False
 
 
