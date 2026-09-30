@@ -83,8 +83,10 @@ def _clean_registry():
     async_notifier.drain_notifications(None)
     yield
     for proc in list(bg._PROCESSES.values()):
+        # Kill the whole process group: ``popen.kill()`` only reaches the
+        # shell, leaving a ``sleep`` child running after the test.
         try:
-            proc.popen.kill()
+            bg._kill_process_tree(proc.popen, forceful=True)
         except Exception:
             pass
     bg._PROCESSES.clear()
@@ -164,8 +166,10 @@ def test_run_rejects_dangerous_command_without_launching(tmp_path, monkeypatch):
 
 
 def test_run_launches_valid_command(tmp_path, monkeypatch):
+    # A process still running when the tool reports: a command that exits at
+    # once races the "exited immediately" branch (covered by its own test).
     result = _run_bg(tmp_path).func(
-        command="echo ok", name="demo", runtime=_STUB_RUNTIME
+        command=_sleep_cmd(30), name="demo", runtime=_STUB_RUNTIME
     )
     text = _msg_text(result)
     assert "Started background process" in text
