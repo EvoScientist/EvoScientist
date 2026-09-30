@@ -315,7 +315,7 @@ pip install langchain-mcp-adapters
 <details>
 <summary><strong><code>npx</code> not available</strong></summary>
 
-stdio server fails to start — install Node.js and `npx`, or replace `npx` with a command available in your environment.
+EvoScientist installs a private Node.js on first use. If that install fails (offline, or behind a proxy), run `EvoSci setup` (add `--cn` for mainland China mirrors), or replace `npx` with a command available in your environment.
 
 </details>
 
