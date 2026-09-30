@@ -163,6 +163,41 @@ def test_unwritable_tools_dir_raises_stage_error(env, monkeypatch):
     assert ei.value.code == "install_failed"
 
 
+def _deny_moving_node(monkeypatch, times: int) -> list[int]:
+    """Make the move of the unpacked Node dir raise PermissionError ``times``
+    times (what a Windows scanner holding node.exe causes), then succeed."""
+    real_replace = os.replace
+    denied = [0]
+
+    def replace(src, dst):
+        if Path(src).name == BASE and denied[0] < times:
+            denied[0] += 1
+            raise PermissionError(13, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(node, "_MOVE_RETRY_DELAYS", (0, 0, 0, 0, 0))
+    monkeypatch.setattr(node.os, "replace", replace)
+    return denied
+
+
+def test_brief_access_denied_on_move_is_retried(env, monkeypatch, caplog):
+    denied = _deny_moving_node(monkeypatch, times=2)
+    with caplog.at_level("WARNING", logger=node.__name__):
+        info = node.ensure_node("default")
+    assert info.source == "private"
+    assert denied[0] == 2
+    assert _record(env["data"])["version"] == V
+    assert "denied 2 time(s)" in caplog.text
+
+
+def test_lasting_access_denied_on_move_is_install_failed(env, monkeypatch):
+    _deny_moving_node(monkeypatch, times=100)
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "install_failed"
+    assert _record(env["data"]) is None
+
+
 def test_disk_error_while_unpacking_is_install_failed(env, monkeypatch):
     def disk_full(archive, dest):
         raise OSError(28, "No space left on device")

@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -32,6 +33,8 @@ from typing import Any
 
 from .download import download, fetch_text, verify_sha256_from_sums
 from .protocol import Emitter, ProgressThrottle, StageError, make_event
+
+logger = logging.getLogger(__name__)
 
 NODE_VERSION = "24.21.0"
 MIN_SYSTEM_NODE = 20
@@ -265,6 +268,33 @@ def _extract(archive: Path, dest: Path) -> None:
         tf.extractall(dest)
 
 
+# Pauses between attempts to move the unpacked Node into place (about 4 s).
+_MOVE_RETRY_DELAYS = (0.1, 0.2, 0.5, 1.0, 2.0)
+
+
+def _move_into_place(src: Path, dst: Path) -> None:
+    """``os.replace`` that retries briefly on ``PermissionError``.
+
+    On Windows a scanner that opens the freshly written ``node.exe`` makes the
+    rename of its folder fail with "Access is denied" (WinError 5) for a
+    moment. Other errors, and a denial that outlasts the retries, raise.
+    """
+    for denied, delay in enumerate((*_MOVE_RETRY_DELAYS, None)):
+        try:
+            os.replace(src, dst)
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
+            continue
+        if denied:
+            logger.warning(
+                f"Moving Node into {dst} was denied {denied} time(s) before it "
+                "succeeded (likely a file scanner holding node.exe)."
+            )
+        return
+
+
 def _install(mirror: str, report: ProgressFn) -> NodeInfo:
     plat = platform_id()
     source = SOURCES.get(mirror, SOURCES["default"])
@@ -307,7 +337,7 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
             if final.exists():
                 # Left behind by an earlier attempt whose probe failed.
                 shutil.rmtree(final)
-            os.replace(extracted, final)
+            _move_into_place(extracted, final)
         except OSError as exc:
             raise StageError(
                 "install_failed", f"Could not move Node into {final}: {exc}"
