@@ -1,0 +1,338 @@
+"""The research environment setup stage.
+
+When no usable ``python`` is on PATH, the agent's shell gets a virtual
+environment under ``<DATA_DIR>/envs/default`` with numpy, pandas, matplotlib
+and scipy, so ``python script.py`` and ``pip install`` work as the prompts
+teach. A user's own ``python`` (conda, venv, system) always wins.
+
+The environment reaches only the agent's ``execute`` and ``run_in_background``
+commands, through :func:`research_env_overrides`; EvoScientist's own child
+processes keep their PATH.
+
+A venv is used rather than the Python EvoScientist runs on: uv-managed Pythons
+are marked ``EXTERNALLY-MANAGED``, so pip refuses to install into them. A venv
+hard-codes its own path, so it is built in place, and the ready marker is
+written only after the import check passed.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections.abc import Callable, Sequence
+from pathlib import Path
+
+from .protocol import Emitter, StageError, StageResult, make_event
+
+logger = logging.getLogger(__name__)
+
+PACKAGES = ("numpy", "pandas", "matplotlib", "scipy")
+CN_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+_READY_MARKER = ".evoscientist-ready"
+_PYTHON_PROBE_TIMEOUT = 10
+_VENV_TIMEOUT = 300
+_PIP_TIMEOUT = 1800
+# The first matplotlib import builds its font cache.
+_IMPORT_TIMEOUT = 300
+_IMPORT_CHECK = (
+    f"import platform, {', '.join(PACKAGES)}; print(platform.python_version())"
+)
+_STORE_ALIAS_RE = re.compile(r"[\\/]microsoft[\\/]windowsapps[\\/]", re.IGNORECASE)
+
+ProgressFn = Callable[[float, str], None]
+
+
+# --------------------------------------------------------------------------- #
+# Locations
+# --------------------------------------------------------------------------- #
+def env_dir() -> Path:
+    """``<DATA_DIR>/envs/default``, read at call time so an overridden DATA_DIR applies."""
+    from .. import paths
+
+    return paths.DATA_DIR / "envs" / "default"
+
+
+def _bin_dir(env: Path) -> Path:
+    return env / "Scripts" if os.name == "nt" else env / "bin"
+
+
+def _env_python(env: Path) -> Path:
+    return _bin_dir(env) / ("python.exe" if os.name == "nt" else "python")
+
+
+def _pip_config(env: Path) -> Path:
+    # pip reads a site config from ``sys.prefix``, which is the venv.
+    return env / ("pip.ini" if os.name == "nt" else "pip.conf")
+
+
+def is_ready(env: Path | None = None) -> bool:
+    """The environment passed its import check and its ``python`` still exists."""
+    env = env or env_dir()
+    return (env / _READY_MARKER).is_file() and _env_python(env).is_file()
+
+
+# --------------------------------------------------------------------------- #
+# Subprocesses
+# --------------------------------------------------------------------------- #
+def _run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd`` capturing combined output. Raises OSError / SubprocessError."""
+    return subprocess.run(
+        list(cmd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def _runs(
+    cmd: Sequence[str], timeout: float
+) -> subprocess.CompletedProcess[str] | None:
+    """``cmd``'s result when it exits 0, else None (also when it cannot start)."""
+    try:
+        result = _run(cmd, timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result if result.returncode == 0 else None
+
+
+def _last_line(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1] if lines else "no output"
+
+
+# --------------------------------------------------------------------------- #
+# Probing
+# --------------------------------------------------------------------------- #
+def find_usable_python() -> str | None:
+    """The ``python`` on PATH if it runs, else None.
+
+    Our own environment is left out of the search, and so is the Microsoft
+    Store alias under ``WindowsApps``, which is never run: without arguments
+    it opens the Store.
+    """
+    own_bin = os.path.normcase(str(_bin_dir(env_dir())))
+    search = os.pathsep.join(
+        p
+        for p in os.environ.get("PATH", "").split(os.pathsep)
+        if p and os.path.normcase(p.rstrip("\\/")) != own_bin
+    )
+    found = shutil.which("python", path=search)
+    if found is None or _STORE_ALIAS_RE.search(found):
+        return None
+    if _runs([found, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
+        return None
+    return found
+
+
+def _import_check(env: Path) -> str | None:
+    """The environment's Python version when all packages import, else None."""
+    result = _runs([str(_env_python(env)), "-c", _IMPORT_CHECK], _IMPORT_TIMEOUT)
+    return _last_line(result.stdout) if result is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# Install
+# --------------------------------------------------------------------------- #
+def _write_pip_config(env: Path, mirror: str) -> None:
+    """Make the environment's own pip config match ``mirror``."""
+    config = _pip_config(env)
+    if mirror == "cn":
+        config.write_text(f"[global]\nindex-url = {CN_INDEX_URL}\n", encoding="utf-8")
+    else:
+        config.unlink(missing_ok=True)
+
+
+def _create_venv(env: Path) -> None:
+    cmd = [sys.executable, "-m", "venv", str(env)]
+    try:
+        result = _run(cmd, _VENV_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StageError("install_failed", f"Could not create {env}: {exc}") from exc
+    logger.info(f"python -m venv output:\n{result.stdout}")
+    if result.returncode == 0:
+        return
+    message = f"Could not create {env}: {_last_line(result.stdout)}"
+    if "ensurepip" in result.stdout:
+        message += (
+            " This Python has no ensurepip; on Debian and Ubuntu install the"
+            " python3-venv package."
+        )
+    raise StageError("install_failed", message)
+
+
+def _pip_install(env: Path, mirror: str) -> None:
+    """Install :data:`PACKAGES` without upgrading what is already there."""
+    cmd = [
+        str(_env_python(env)),
+        "-m",
+        "pip",
+        "install",
+        "--only-binary",
+        ":all:",
+        "--disable-pip-version-check",
+        "--no-input",
+        *PACKAGES,
+    ]
+    if mirror == "cn":
+        cmd += ["--index-url", CN_INDEX_URL]
+    try:
+        result = _run(cmd, _PIP_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StageError("install_failed", f"pip install failed: {exc}") from exc
+    logger.info(f"pip install output:\n{result.stdout}")
+    if result.returncode != 0:
+        raise StageError(
+            "install_failed", f"pip install failed: {_last_line(result.stdout)}"
+        )
+
+
+def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
+    """Try to fix a ready environment in place; its version, or None to rebuild.
+
+    A Python that does not start (e.g. its base interpreter was removed) cannot
+    be repaired. Otherwise missing packages are installed; a pip failure raises
+    and leaves the environment and its marker as they are, so the agent keeps a
+    mostly working Python.
+    """
+    python = str(_env_python(env))
+    if _runs([python, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
+        return None
+    report(0.2, "Installing missing packages")
+    _pip_install(env, mirror)
+    report(0.9, "Checking the packages")
+    return _import_check(env)
+
+
+def _build(env: Path, mirror: str, report: ProgressFn) -> str:
+    try:
+        (env / _READY_MARKER).unlink(missing_ok=True)
+        if env.exists():
+            shutil.rmtree(env)
+    except OSError as exc:
+        raise StageError("install_failed", f"Could not remove {env}: {exc}") from exc
+    report(0.1, "Creating the virtual environment")
+    _create_venv(env)
+    _write_pip_config(env, mirror)
+    report(0.2, f"Installing {', '.join(PACKAGES)}")
+    _pip_install(env, mirror)
+    report(0.9, "Checking the packages")
+    version = _import_check(env)
+    if version is None:
+        raise StageError(
+            "probe_failed", f"{', '.join(PACKAGES)} do not import in {env}."
+        )
+    return version
+
+
+def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> str:
+    """Make ``envs/default`` ready and return its Python version.
+
+    A ready environment that still passes the import check is kept as it is,
+    including the agent's own installs, and needs no network. One that fails
+    it is repaired in place when its Python still starts, and rebuilt
+    otherwise. The pip config follows ``mirror`` on every run.
+    """
+    report = progress or (lambda _f, _m: None)
+    env = env_dir()
+
+    from filelock import FileLock
+
+    try:
+        env.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(env.parent / f"{env.name}.lock")):
+            if is_ready(env):
+                version = _import_check(env) or _repair(env, mirror, report)
+                if version is not None:
+                    _write_pip_config(env, mirror)
+                    return version
+            version = _build(env, mirror, report)
+            (env / _READY_MARKER).write_text(version, encoding="utf-8")
+            return version
+    except OSError as exc:
+        raise StageError(
+            "install_failed",
+            f"Could not set up the research environment in {env}: {exc}",
+        ) from exc
+
+
+# --------------------------------------------------------------------------- #
+# Runtime
+# --------------------------------------------------------------------------- #
+@functools.cache
+def _agent_python() -> tuple[str | None, Path | None]:
+    """The agent shell's ``python`` and the research environment it comes from.
+
+    Decided once per process: ``(system python, None)``, ``(env python, env)``
+    or ``(None, None)``. Logs the result once, and a setup hint when the agent
+    has no Python at all.
+    """
+    system = find_usable_python()
+    if system is not None:
+        logger.info(f"Agent shell python: {system}")
+        return system, None
+    env = env_dir()
+    if is_ready(env):
+        logger.info(f"Agent shell python: research environment {env}")
+        return str(_env_python(env)), env
+    logger.warning(
+        "No usable `python` on PATH for the agent's shell. Run "
+        "`EvoSci setup --stage research-env` to give the agent a Python with "
+        f"{', '.join(PACKAGES)}."
+    )
+    return None, None
+
+
+def research_env_overrides() -> dict[str, str] | None:
+    """Env overrides that put the research environment first for the agent's shell.
+
+    None when a usable ``python`` is on PATH or the environment is not ready.
+    ``PATH`` is built from the current ``os.environ`` on every call, so changes
+    made after the decision (e.g. the private Node from ``activate_runtime``)
+    are kept.
+    """
+    _python, env = _agent_python()
+    if env is None:
+        return None
+    bin_dir = str(_bin_dir(env))
+    path = os.environ.get("PATH", "")
+    return {
+        "PATH": f"{bin_dir}{os.pathsep}{path}" if path else bin_dir,
+        "VIRTUAL_ENV": str(env),
+    }
+
+
+def agent_python() -> str | None:
+    """The ``python`` the agent's shell resolves, or None when it has none."""
+    return _agent_python()[0]
+
+
+# --------------------------------------------------------------------------- #
+# Stage
+# --------------------------------------------------------------------------- #
+def run_stage(emit: Emitter, mirror: str) -> StageResult:
+    def report(fraction: float, message: str) -> None:
+        emit(make_event("research-env", "running", progress=fraction, message=message))
+
+    report(0.0, "Checking for a usable python")
+    system = find_usable_python()
+    if system is not None:
+        return StageResult(
+            f"Using {system}",
+            {"reason": "system_python", "python": system},
+            status="skipped",
+        )
+    version = ensure_research_env(mirror, report)
+    env = env_dir()
+    return StageResult(
+        f"Using Python {version} in {env}",
+        {"source": "venv", "path": str(env), "python": version},
+    )

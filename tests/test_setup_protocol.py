@@ -34,7 +34,13 @@ def _collect():
 
 
 def test_manifest_shape():
-    assert manifest() == {"protocol": 1, "stages": [{"id": "node", "title": "Node.js"}]}
+    assert manifest() == {
+        "protocol": 1,
+        "stages": [
+            {"id": "node", "title": "Node.js"},
+            {"id": "research-env", "title": "Python research environment"},
+        ],
+    }
 
 
 def test_make_event_leaves_out_unset_fields_and_clamps_progress():
