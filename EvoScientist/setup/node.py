@@ -279,9 +279,13 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
         unpack = tmp / "unpack"
         try:
             _extract(archive, unpack)
-        except (tarfile.TarError, zipfile.BadZipFile, OSError) as exc:
+        except (tarfile.TarError, zipfile.BadZipFile) as exc:
             raise StageError(
                 "download_failed", f"Could not unpack {filename}: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise StageError(
+                "install_failed", f"Could not unpack {filename}: {exc}"
             ) from exc
         extracted = unpack / filename.removesuffix(".zip").removesuffix(".tar.xz")
         if not _node_exe(extracted).exists():
@@ -295,7 +299,7 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
             os.replace(extracted, final)
         except OSError as exc:
             raise StageError(
-                "download_failed", f"Could not move Node into {final}: {exc}"
+                "install_failed", f"Could not move Node into {final}: {exc}"
             ) from exc
 
         report(0.96, "Checking the installed Node")
@@ -336,7 +340,7 @@ def ensure_node(
     private Node if it still runs (no network needed); otherwise download,
     verify, unpack, probe and record. Raises :class:`StageError` on failure,
     leaving any previous record in place; file-system errors in the tools dir
-    are reported as ``download_failed``.
+    are reported as ``install_failed``.
 
     ``mirror`` defaults to the configured ``mirror``.
     """
@@ -368,7 +372,7 @@ def ensure_node(
             return _install(mirror or _configured_mirror(), report)
     except OSError as exc:
         raise StageError(
-            "download_failed", f"Could not install Node into {root}: {exc}"
+            "install_failed", f"Could not install Node into {root}: {exc}"
         ) from exc
 
 

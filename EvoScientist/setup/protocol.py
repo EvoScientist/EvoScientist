@@ -25,8 +25,16 @@ from typing import Any, Protocol, TextIO
 
 PROTOCOL = 1
 
+# ``download_failed``: network or archive content; ``install_failed``: the local
+# install step (file system, and later venv / pip).
 ERROR_CODES = frozenset(
-    {"download_failed", "checksum_mismatch", "probe_failed", "unsupported_platform"}
+    {
+        "download_failed",
+        "checksum_mismatch",
+        "probe_failed",
+        "unsupported_platform",
+        "install_failed",
+    }
 )
 
 

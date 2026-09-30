@@ -146,7 +146,18 @@ def test_unwritable_tools_dir_raises_stage_error(env, monkeypatch):
     monkeypatch.setattr(paths, "DATA_DIR", blocker / ".evoscientist")
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
-    assert ei.value.code == "download_failed"
+    assert ei.value.code == "install_failed"
+
+
+def test_disk_error_while_unpacking_is_install_failed(env, monkeypatch):
+    def disk_full(archive, dest):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(node, "_extract", disk_full)
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "install_failed"
+    assert _record(env["data"]) is None
 
 
 def test_record_with_non_string_path_is_ignored(env):
