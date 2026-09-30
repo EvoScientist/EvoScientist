@@ -442,9 +442,15 @@ def test_is_musl_detects_the_musl_loader(monkeypatch, tmp_path):
     real_path = node.Path
     monkeypatch.setattr(node.sys, "platform", "linux")
     monkeypatch.setattr(node, "Path", lambda p: lib if p == "/lib" else real_path(p))
+    # On musl, libc_ver() reports nothing (checked on Alpine 3.22).
+    monkeypatch.setattr(node.platform, "libc_ver", lambda: ("", ""))
     assert node._is_musl() is False
     (lib / "ld-musl-x86_64.so.1").write_text("")
     assert node._is_musl() is True
+    # Debian / Ubuntu with the `musl` package: the loader exists, but the
+    # interpreter runs on glibc, so the glibc build is the right one.
+    monkeypatch.setattr(node.platform, "libc_ver", lambda: ("glibc", "2.41"))
+    assert node._is_musl() is False
 
 
 def test_activate_runtime_prepends_once(env):
@@ -472,6 +478,18 @@ def test_private_node_on_path_is_not_taken_for_system(env):
     env["net"].urls.clear()
     # The private Node is first on PATH, yet it is reported as private.
     assert node.ensure_node("default").source == "private"
+
+
+def test_install_without_a_record_is_used_again_without_a_download(env, monkeypatch):
+    node.ensure_node("default")
+    _system_node(env, monkeypatch, (22, 0, 0))
+    node.ensure_node("default")
+    assert _record(env["data"]) is None
+    monkeypatch.setenv("PATH", str(env["tmp"] / "empty-bin"))
+    env["net"].urls.clear()
+    assert node.ensure_node("default").source == "private"
+    assert env["net"].urls == []
+    assert _record(env["data"])["version"] == V
 
 
 def test_node_child_env_strips_npm_config_and_node_options():

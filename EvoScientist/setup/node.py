@@ -117,8 +117,16 @@ def _node_exe(install_dir: Path) -> Path:
 
 
 def _is_musl() -> bool:
-    """True on a musl-based Linux (e.g. Alpine), detected by its dynamic loader."""
-    return sys.platform == "linux" and any(Path("/lib").glob("ld-musl-*.so.1"))
+    """True on a musl-based Linux (e.g. Alpine).
+
+    Decided by the running interpreter's libc first: Debian and Ubuntu install
+    the musl loader with their ``musl`` package on a glibc system, where the
+    glibc build is the one that runs. The loader check covers the musl side,
+    where ``libc_ver()`` reports nothing.
+    """
+    if sys.platform != "linux" or platform.libc_ver()[0] == "glibc":
+        return False
+    return any(Path("/lib").glob("ld-musl-*.so.1"))
 
 
 def platform_id() -> str:
@@ -355,6 +363,24 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _adopt_installed(root: Path) -> NodeInfo | None:
+    """Record an intact ``node-v<NODE_VERSION>`` again after its record was dropped.
+
+    A system Node drops the record but leaves the install on disk (and
+    ``mcp.yaml`` may point into it); without this the next run with no system
+    Node on PATH would delete and re-download it, or fail offline.
+    """
+    install_dir = root / f"node-v{NODE_VERSION}"
+    exe = _node_exe(install_dir)
+    if not exe.is_file():
+        return None
+    version = _probe(exe)
+    if version is None:
+        return None
+    _write_record(NODE_VERSION, install_dir)
+    return NodeInfo("private", ".".join(map(str, version)), exe)
+
+
 def _remove_stale_temp_dirs(root: Path) -> None:
     """Delete ``.node-*`` temp dirs left by an install that was killed.
 
@@ -406,7 +432,7 @@ def ensure_node(
         root.mkdir(parents=True, exist_ok=True)
         with FileLock(str(root / "node.lock")):
             # Another process may have finished the install while we waited.
-            recorded = _recorded_node()
+            recorded = _recorded_node() or _adopt_installed(root)
             if recorded is not None:
                 return recorded
             _remove_stale_temp_dirs(root)
