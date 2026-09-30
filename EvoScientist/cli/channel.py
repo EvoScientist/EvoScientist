@@ -435,8 +435,7 @@ async def _dispatch_channel_slash_impl(
         agent=agent_for_ctx,
         thread_id=thread_id,
         ui=ui,
-        workspace=dirs.workspace,
-        run_dir=dirs.run_dir,
+        dirs=dirs,
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
         graph_gateway=graph_gateway,
@@ -858,6 +857,12 @@ def channel_hitl_prompt(
 _manager: Any | None = None  # ChannelManager
 _bus_loop: asyncio.AbstractEventLoop | None = None
 _bus_thread: threading.Thread | None = None
+
+
+def _set_channels_media_dir(media_dir: Path) -> None:
+    """Point running channels at the media folder of the session's workspace."""
+    if _manager is not None:
+        _manager.set_media_dir(media_dir)
 
 
 def get_channel_startup_results() -> list[tuple[str, bool, str]]:

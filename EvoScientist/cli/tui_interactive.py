@@ -1010,6 +1010,7 @@ def run_textual_interactive(
                 finally:
                     await sync_widget.cleanup()
                 self._dirs = dirs
+                _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
 
             if thread_id != self._conversation_tid:
                 # Only drop the origin on a real thread change — resuming the
@@ -3465,8 +3466,7 @@ def run_textual_interactive(
                     agent=agent,
                     thread_id=self._conversation_tid,
                     ui=self,
-                    workspace=self._dirs.workspace,
-                    run_dir=self._dirs.run_dir,
+                    dirs=self._dirs,
                     checkpointer=self._checkpointer,
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,

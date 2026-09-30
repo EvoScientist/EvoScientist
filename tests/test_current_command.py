@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from EvoScientist.paths import SessionDirs
 from tests.fakes import TEST_WORKSPACE
 
 
@@ -13,11 +14,10 @@ class TestCurrentCommand:
 
         ui = MagicMock()
         ctx = CommandContext(
-            workspace=TEST_WORKSPACE,
+            dirs=SessionDirs(TEST_WORKSPACE, Path("/tmp/ws/runs/r1")),
             agent=None,
             thread_id="abc123",
             ui=ui,
-            run_dir=Path("/tmp/ws/runs/r1"),
         )
         await CurrentCommand().execute(ctx, [])
         # Four append_system calls: Thread, Workspace, Run folder, Memory dir.
@@ -33,11 +33,10 @@ class TestCurrentCommand:
 
         ui = MagicMock()
         ctx = CommandContext(
-            workspace=TEST_WORKSPACE,
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="abc123",
             ui=ui,
-            run_dir=None,
         )
         await CurrentCommand().execute(ctx, [])
         calls = [c.args[0] for c in ui.append_system.call_args_list]

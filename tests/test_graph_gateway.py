@@ -333,11 +333,10 @@ async def test_resume_command_consumes_context_gateway():
         metadata={"workspace_dir": "/restored"},
     )
     ctx = CommandContext(
-        workspace=TEST_WORKSPACE,
+        dirs=SessionDirs(TEST_WORKSPACE, Path("/old")),
         agent=None,
         thread_id="current",
         ui=ui,
-        run_dir=Path("/old"),
         graph_gateway=FakeGraphGateway(thread_store=thread_store),
     )
 

@@ -2,13 +2,17 @@
 
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+
 
 def _ctx(workspace):
     from EvoScientist.commands.base import CommandContext
 
     ui = MagicMock()
     ui.supports_interactive = True
-    return CommandContext(agent=None, thread_id="tid", ui=ui, workspace=workspace), ui
+    return CommandContext(
+        agent=None, thread_id="tid", ui=ui, dirs=SessionDirs(workspace)
+    ), ui
 
 
 class TestInstallSkill:

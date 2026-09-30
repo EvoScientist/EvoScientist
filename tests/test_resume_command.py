@@ -16,11 +16,10 @@ def _ctx(thread_id="current", run_dir=None, thread_store=None):
     ui.wait_for_thread_pick = AsyncMock()
     ui.handle_session_resume = AsyncMock()
     return CommandContext(
-        workspace=TEST_WORKSPACE,
+        dirs=SessionDirs(TEST_WORKSPACE, run_dir),
         agent=None,
         thread_id=thread_id,
         ui=ui,
-        run_dir=run_dir,
         graph_gateway=FakeGraphGateway(thread_store=store),
     ), ui
 

@@ -2,6 +2,8 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+
 
 def _ctx(workspace, supports_interactive=True):
     from EvoScientist.commands.base import CommandContext
@@ -9,7 +11,9 @@ def _ctx(workspace, supports_interactive=True):
     ui = MagicMock()
     ui.supports_interactive = supports_interactive
     ui.wait_for_skill_browse = AsyncMock()
-    return CommandContext(agent=None, thread_id="tid", ui=ui, workspace=workspace), ui
+    return CommandContext(
+        agent=None, thread_id="tid", ui=ui, dirs=SessionDirs(workspace)
+    ), ui
 
 
 _INDEX = [

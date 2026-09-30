@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+from EvoScientist.paths import SessionDirs
 from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
@@ -12,7 +13,7 @@ def _ctx(thread_id="current", thread_store=None):
     ui = MagicMock()
     ui.supports_interactive = True
     return CommandContext(
-        workspace=TEST_WORKSPACE,
+        dirs=SessionDirs(TEST_WORKSPACE),
         agent=None,
         thread_id=thread_id,
         ui=ui,

@@ -55,6 +55,7 @@ from .channel import (
     _complete_channel_request,
     _message_queue,
     _set_channel_response,
+    _set_channels_media_dir,
     _start_channels_bus_mode,
     channel_ask_user_prompt,
     channel_hitl_prompt,
@@ -1183,6 +1184,7 @@ async def _apply_serve_resume_state(
     if workspace_update is not None:
         updated_dirs, updated_agent = workspace_update
         runtime_state.dirs = updated_dirs
+        _set_channels_media_dir(updated_dirs.workspace.media_dir)
         runtime_state.set_agent(updated_agent, channel_runtime)
 
 

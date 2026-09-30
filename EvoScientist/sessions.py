@@ -1363,6 +1363,41 @@ def _upgraded_dir_fields(values: list[str]) -> dict[str, dict[str, str]]:
     return upgraded
 
 
+async def _apply_dir_upgrade(
+    conn: aiosqlite.Connection, upgraded: dict[str, dict[str, str]]
+) -> None:
+    """Rewrite every upgraded ``workspace_dir`` in one pass over the table."""
+    await conn.execute(
+        "CREATE TEMP TABLE _dir_upgrade "
+        "(old TEXT PRIMARY KEY, workspace_dir TEXT NOT NULL, run_dir TEXT)"
+    )
+    await conn.executemany(
+        "INSERT INTO _dir_upgrade VALUES (?, ?, ?)",
+        [
+            (old, fields["workspace_dir"], fields.get("run_dir"))
+            for old, fields in upgraded.items()
+        ],
+    )
+    # ``metadata`` is stored as a BLOB of JSON text; keep it one. ``run_dir``
+    # is added only for rows that name a run folder.
+    await conn.execute(
+        """
+        UPDATE checkpoints SET metadata = CAST(
+            CASE WHEN u.run_dir IS NULL
+                THEN json_set(CAST(metadata AS TEXT),
+                              '$.workspace_dir', u.workspace_dir)
+                ELSE json_set(CAST(metadata AS TEXT),
+                              '$.workspace_dir', u.workspace_dir,
+                              '$.run_dir', u.run_dir)
+            END AS BLOB)
+        FROM _dir_upgrade AS u
+        WHERE json_extract(checkpoints.metadata, '$.workspace_dir') = u.old
+          AND json_extract(checkpoints.metadata, '$.run_dir') IS NULL
+        """
+    )
+    await conn.execute("DROP TABLE _dir_upgrade")
+
+
 async def _upgrade_stored_dirs_safely() -> None:
     """:func:`_upgrade_stored_dirs`, never blocking startup on failure."""
     try:
@@ -1412,16 +1447,8 @@ async def _upgrade_stored_dirs() -> None:
                         if isinstance(row[0], str) and row[0]
                     ]
                 upgraded = await asyncio.to_thread(_upgraded_dir_fields, values)
-                for old, fields in upgraded.items():
-                    # ``metadata`` is stored as a BLOB of JSON text; keep it one.
-                    assignments = ", ".join(f"'$.{key}', ?" for key in fields)
-                    await conn.execute(
-                        "UPDATE checkpoints SET metadata = CAST(json_set("
-                        f"CAST(metadata AS TEXT), {assignments}) AS BLOB) "
-                        "WHERE json_extract(metadata, '$.workspace_dir') = ? "
-                        "AND json_extract(metadata, '$.run_dir') IS NULL",
-                        (*fields.values(), old),
-                    )
+                if upgraded:
+                    await _apply_dir_upgrade(conn, upgraded)
             await asyncio.to_thread(upgrade_proposal_workspaces, paths.MEMORIES_DIR)
             await _set_user_version(conn, _STORED_DIRS_VERSION)
         except BaseException:

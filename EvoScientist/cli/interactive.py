@@ -872,6 +872,7 @@ def cmd_interactive(
                         # instead of continuing with success/history output.
                         raise RuntimeError(str(exc)) from exc
                     state["dirs"] = dirs
+                    _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
                 if thread_id != state.get("thread_id"):
                     # Only drop the origin on a real thread change — resuming
                     # the already-active thread must keep its live origin so a
@@ -1482,8 +1483,7 @@ def cmd_interactive(
                                 agent=_agent_for_ctx,
                                 thread_id=state["thread_id"],
                                 ui=rich_ui,
-                                workspace=state["dirs"].workspace,
-                                run_dir=state["dirs"].run_dir,
+                                dirs=state["dirs"],
                                 checkpointer=checkpointer,
                                 config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),

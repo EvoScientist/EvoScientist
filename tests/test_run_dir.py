@@ -102,7 +102,10 @@ def _ctx(workspace, ui, run_dir=None):
     from EvoScientist.commands.base import CommandContext
 
     return CommandContext(
-        agent=None, thread_id="t1", ui=ui, workspace=workspace, run_dir=run_dir
+        agent=None,
+        thread_id="t1",
+        ui=ui,
+        dirs=SessionDirs(workspace, run_dir),
     )
 
 
@@ -556,7 +559,6 @@ def test_daemon_sandbox_mounts_nothing_extra(workspace, media_file):
     from EvoScientist.EvoScientist import _get_default_backend
 
     backend = _get_default_backend(workspace)
-    assert "/media/" not in backend.routes
     assert backend.default._media_dir is None
     assert backend.read(str(media_file)).error is None
 
@@ -569,25 +571,26 @@ def test_run_mode_sandbox_reaches_channel_media(run_dirs, media_file):
     backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
 
     assert backend.read(str(media_file)).error is None
-    assert backend.read("/media/paper.pdf").error is None
-    for command in (f"cat {media_file}", "cat /media/paper.pdf"):
-        assert backend.execute(command).output.strip() == "attachment"
+    assert backend.execute(f"cat {media_file}").output.strip() == "attachment"
 
 
 @pytest.mark.usefixtures("_plain_config")
 def test_run_mode_file_tools_cannot_change_channel_media(run_dirs, media_file):
-    """Attachments are shared by the workspace; a run writes in its own folder."""
+    """Attachments are shared by the workspace; a run writes in its own folder,
+    including its own ``/media``."""
     from EvoScientist.EvoScientist import _get_default_backend
 
     run_dirs.run_dir.mkdir(parents=True)
     backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
 
-    for path in (str(media_file), "/media/paper.pdf"):
-        assert backend.write(path.replace("paper", "new"), "x").error
-        assert backend.edit(path, "attachment", "changed").error
+    assert backend.write(str(run_dirs.workspace.media_dir / "new.pdf"), "x").error
+    assert backend.edit(str(media_file), "attachment", "changed").error
     assert backend.delete(str(media_file)).error
     assert media_file.read_text() == "attachment"
     assert not (run_dirs.workspace.media_dir / "new.pdf").exists()
+
+    assert backend.write("/media/plot.png", "x").error is None
+    assert (run_dirs.run_dir / "media" / "plot.png").exists()
 
 
 @pytest.mark.usefixtures("_plain_config")
@@ -602,3 +605,46 @@ def test_run_mode_media_mount_does_not_open_the_rest_of_the_workspace(
 
     with pytest.raises(ValueError, match="outside the media folder"):
         backend.read(f"{run_dirs.workspace.media_dir}/../secret.txt")
+
+
+async def test_channel_attachments_follow_resume_into_another_workspace(
+    workspace, tmp_path, monkeypatch
+):
+    """After ``/resume`` into another workspace, new attachments land where
+    that workspace's sandbox can read them."""
+    from unittest.mock import AsyncMock, patch
+
+    import EvoScientist.cli.channel as channel_mod
+    from EvoScientist.channels.bus import MessageBus
+    from EvoScientist.channels.channel_manager import ChannelManager
+    from EvoScientist.cli.commands import (
+        ServeRuntimeState,
+        _make_serve_handle_session_resume_cb,
+    )
+    from tests.fakes import StubChannel
+
+    other = Workspace(tmp_path / "other")
+    manager = ChannelManager(MessageBus(), media_dir=workspace.media_dir)
+    channel = StubChannel()
+    manager.register(channel)
+    monkeypatch.setattr(channel_mod, "_manager", manager)
+    state = ServeRuntimeState(
+        agent=MagicMock(),
+        thread_id="t1",
+        dirs=SessionDirs(workspace),
+        config=MagicMock(),
+        runtime_gateways=MagicMock(),
+        async_runtime=MagicMock(),
+    )
+    resume = _make_serve_handle_session_resume_cb(state, None, config=state.config)
+
+    with (
+        patch(
+            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            new=AsyncMock(),
+        ),
+        patch("EvoScientist.cli.commands._load_agent", return_value=MagicMock()),
+    ):
+        await resume("t2", SessionDirs(other))
+
+    assert channel._media_path("photo.jpg") == other.media_dir / "photo.jpg"

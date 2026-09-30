@@ -183,8 +183,7 @@ class ResumeCommand(Command):
             metadata.get("workspace_dir"), metadata.get("run_dir")
         )
         if restored is not None:
-            ctx.workspace = restored.workspace
-            ctx.run_dir = restored.run_dir
+            ctx.dirs = restored
 
         switched_thread = resolved != ctx.thread_id
         ctx.thread_id = resolved

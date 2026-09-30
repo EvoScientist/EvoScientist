@@ -1126,8 +1126,8 @@ def _resolve_virtual_mount_path(
     workspace, so a relative form would point at an unrelated location.
 
     ``media_dir`` is set when the sandbox works in a ``--mode=run`` folder,
-    outside the workspace's ``media/``: ``/media/...`` then resolves to it,
-    and its real path (as channel attachments are referenced) is kept as is.
+    outside the workspace's ``media/``: its real path, which is how channel
+    attachments are referenced, is kept as is.
     """
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
@@ -1143,12 +1143,11 @@ def _resolve_virtual_mount_path(
     if rel is not None:
         return _platform_quote(str(Path(paths.MEMORIES_DIR) / rel))
 
-    if media_dir is not None:
-        rel = _subpath_under_mount(token, "/media")
-        if rel is not None:
-            return _platform_quote(str(Path(media_dir) / rel))
-        if _subpath_under_mount(token, Path(media_dir).as_posix()) is not None:
-            return _platform_quote(token)
+    if (
+        media_dir is not None
+        and _subpath_under_mount(token, Path(media_dir).as_posix()) is not None
+    ):
+        return _platform_quote(token)
 
     return None
 
@@ -1716,9 +1715,9 @@ class CustomSandboxBackend(LocalShellBackend):
                 command validation.
             media_dir: The workspace's media folder, when ``root_dir`` is a
                 ``--mode=run`` folder outside it. Channel attachments are
-                referenced by their real path there; file tools and commands
-                reach it by that path or as ``/media/...``. File tools can
-                only read it.
+                referenced by their real path there, and file tools and
+                commands reach them by that path. File tools can only read
+                it; ``/media/...`` stays a path inside the run folder.
         """
         self._dangerous = dangerous
         self._skills_dir = skills_dir

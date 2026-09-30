@@ -20,7 +20,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from langchain.agents.middleware import (
     AgentMiddleware,
@@ -818,25 +818,12 @@ def load_mcp_and_build_kwargs(
 def _run_media_dir(workspace: Workspace, work_dir: str | Path) -> Path | None:
     """The workspace's media folder, when the agent works outside the root.
 
-    Channel attachments land in ``<root>/media``. A ``--mode=run`` sandbox is
-    rooted at its run folder, so the folder is mounted for it; in the root
-    it is already inside the sandbox.
+    Channel attachments land in ``<root>/media`` and are referenced by their
+    real path. A ``--mode=run`` sandbox is rooted at its run folder, so it is
+    told about the folder to reach them; in the root it is already inside
+    the sandbox.
     """
     return None if normalize_path(work_dir) == workspace.root else workspace.media_dir
-
-
-def _media_route(media_dir: Path | None) -> dict[str, Any]:
-    """Read-only ``/media/`` route for a run-mode sandbox (empty in the root).
-
-    Attachments only come in; a run writes its own files in its run folder.
-    """
-    if media_dir is None:
-        return {}
-    from .backends import ReadOnlyFilesystemBackend
-
-    return {
-        "/media/": ReadOnlyFilesystemBackend(root_dir=str(media_dir), virtual_mode=True)
-    }
 
 
 def _get_default_backend(
@@ -851,7 +838,8 @@ def _get_default_backend(
     The sandbox is rooted at ``work_dir`` (the folder the agent works in),
     which defaults to the workspace root; ``/skills/`` merges the
     workspace, global and built-in skill tiers. When ``work_dir`` is a
-    ``--mode=run`` folder, the workspace's ``media/`` is mounted too.
+    ``--mode=run`` folder, channel attachments in the workspace's ``media/``
+    stay readable by their real path.
 
     ``guard_dangerous`` — when ``None`` (default) the backend derives the guard
     per call from the run's HITL-suppression state (``is_hitl_suppressed``): an
@@ -910,7 +898,6 @@ def _get_default_backend(
         routes={
             "/skills/": sk_backend,
             "/memories/": mem_backend,
-            **_media_route(media_dir),
         },
     )
 
@@ -1333,7 +1320,6 @@ def create_cli_agent(
         routes={
             "/skills/": sk_backend,
             "/memories/": mem_backend,
-            **_media_route(media_dir),
         },
     )
 

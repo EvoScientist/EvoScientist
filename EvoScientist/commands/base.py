@@ -119,8 +119,7 @@ class CommandContext:
     ui: CommandUI
     # The session's workspace (skills, experts, AutoSkills), and the run
     # folder it works in under ``--mode=run``.
-    workspace: Workspace
-    run_dir: Path | None = None
+    dirs: SessionDirs
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
@@ -132,10 +131,12 @@ class CommandContext:
     input_tokens_hint: int | None = None
 
     @property
-    def dirs(self) -> SessionDirs:
-        from ..paths import SessionDirs
+    def workspace(self) -> Workspace:
+        return self.dirs.workspace
 
-        return SessionDirs(self.workspace, self.run_dir)
+    @property
+    def run_dir(self) -> Path | None:
+        return self.dirs.run_dir
 
     @property
     def work_dir(self) -> Path:
