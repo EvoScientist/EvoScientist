@@ -2760,3 +2760,21 @@ class TestEnsureNpx:
     def test_cancelled_prompt_raises_keyboard_interrupt(self):
         with pytest.raises(KeyboardInterrupt):
             self._run(npx_after=False, confirm=None)
+
+
+class TestMirrorIsNotAnOnboardingSetting:
+    def test_config_with_only_the_mirror_set_is_a_fresh_config(self):
+        from EvoScientist.config.onboard.wizard import _config_has_meaningful_settings
+
+        assert not _config_has_meaningful_settings(EvoScientistConfig(mirror="cn"))
+        assert _config_has_meaningful_settings(EvoScientistConfig(model="other"))
+
+    def test_reset_keeps_the_mirror(self):
+        from EvoScientist.config.onboard import wizard
+
+        with patch.object(wizard.questionary, "select") as select:
+            select.return_value.ask.return_value = "reset"
+            _sections, config = wizard._open_existing_config_prompt(
+                EvoScientistConfig(mirror="cn", model="other")
+            )
+        assert (config.mirror, config.model) == ("cn", EvoScientistConfig().model)

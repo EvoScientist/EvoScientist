@@ -691,6 +691,7 @@ _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
         "webui_host",
         "langgraph_dev_keepalive",
         "shell_allow_list",
+        "mirror",
     }
 )
 

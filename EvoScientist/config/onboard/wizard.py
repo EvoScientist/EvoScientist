@@ -416,6 +416,8 @@ def _config_has_meaningful_settings(config: EvoScientistConfig) -> bool:
 
     Compares ``config`` against fresh ``EvoScientistConfig()`` defaults — any
     non-default field means the user has customised something previously.
+    ``mirror`` does not count: ``EvoSci setup --cn`` writes it before the first
+    onboarding.
     """
     import dataclasses
 
@@ -423,6 +425,7 @@ def _config_has_meaningful_settings(config: EvoScientistConfig) -> bool:
     return any(
         getattr(config, f.name) != getattr(default, f.name)
         for f in dataclasses.fields(config)
+        if f.name != "mirror"
     )
 
 
@@ -466,7 +469,8 @@ def _open_existing_config_prompt(
     if choice == "reset":
         console.print()
         console.print("[yellow]Resetting to defaults …[/yellow]")
-        return _ALL_SECTIONS, EvoScientistConfig()
+        # No wizard question sets the mirror, so a reset keeps it.
+        return _ALL_SECTIONS, EvoScientistConfig(mirror=config.mirror)
 
     # Modify: ask which sections.
     from .style import _checkbox_ask
