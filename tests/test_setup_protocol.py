@@ -95,6 +95,22 @@ def test_run_stages_skips_other_platforms():
     assert events[0]["status"] == "skipped"
 
 
+def test_run_stages_reports_an_unexpected_exception_as_an_error_event():
+    def crash(emit, mirror):
+        raise RuntimeError("boom")
+
+    events, emit = _collect()
+    assert run_stages([Stage("node", "Node.js", None, crash)], emit, "default") == 1
+    assert [(e["status"], e["code"]) for e in events] == [("error", "install_failed")]
+    assert "boom" in events[0]["message"]
+
+
+def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
+    other = Stage("git", "Git", frozenset({"no-such-platform"}), lambda e, m: ("", {}))
+    monkeypatch.setattr(setup_pkg, "STAGES", (*setup_pkg.STAGES, other))
+    assert [s["id"] for s in manifest()["stages"]] == ["node"]
+
+
 def test_json_emitter_writes_one_line_per_event(tmp_path):
     out = (tmp_path / "out.txt").open("w+", encoding="utf-8")
     emit = JsonEmitter(out)

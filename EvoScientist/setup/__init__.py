@@ -6,6 +6,7 @@ through the event protocol in :mod:`.protocol`.
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from typing import Any
 
 from . import node
 from .protocol import PROTOCOL, Emitter, StageError, make_event
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,17 @@ def run_stages(stages: Iterable[Stage], emit: Emitter, mirror: str) -> int:
             message, detail = stage.run(emit, mirror)
         except StageError as exc:
             emit(make_event(stage.id, "error", message=exc.message, code=exc.code))
+            return 1
+        except Exception as exc:
+            logger.exception(f"Setup stage {stage.id} failed unexpectedly")
+            emit(
+                make_event(
+                    stage.id,
+                    "error",
+                    message=f"Unexpected error: {exc!r}",
+                    code="install_failed",
+                )
+            )
             return 1
         emit(make_event(stage.id, "done", message=message, detail=detail))
     return 0
