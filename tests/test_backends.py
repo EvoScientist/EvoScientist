@@ -284,7 +284,6 @@ class TestConvertVirtualPaths:
         memories_dir = tmp_path / "memories"
         for d in (user_dir, global_dir, builtin_dir, memories_dir):
             d.mkdir()
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
@@ -292,7 +291,7 @@ class TestConvertVirtualPaths:
         (builtin_dir / "find skills" / "tool.py").write_text("print('ok')")
 
         result = convert_virtual_paths_in_command(
-            'python "/skills/find skills/tool.py"'
+            'python "/skills/find skills/tool.py"', skills_dir=user_dir
         )
 
         tokens = shlex.split(result)
@@ -354,14 +353,14 @@ class TestConvertVirtualPaths:
             tmp_path / "memories",
         ):
             d.mkdir()
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
         monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
         monkeypatch.setattr(
             backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
         )
         result = convert_virtual_paths_in_command(
-            'python "/skills/never-installed/foo.py"'
+            'python "/skills/never-installed/foo.py"',
+            skills_dir=tmp_path / "ws_skills",
         )
         assert result == "python ./skills/never-installed/foo.py"
 
@@ -383,8 +382,9 @@ class TestVirtualMountResolution:
 
     def _setup_tiers(self, monkeypatch, tmp_path):
         """Create three skills tiers + a memories dir under tmp_path and
-        monkeypatch the path constants to point at them. Returns the tier
-        directories so tests can populate them.
+        monkeypatch the global/builtin/memories constants to point at them.
+        Returns the tier directories so tests can populate them; the
+        workspace tier (``user_dir``) is passed explicitly as ``skills_dir``.
         """
         user_dir = tmp_path / "ws_skills"
         global_dir = tmp_path / "global_skills"
@@ -392,7 +392,6 @@ class TestVirtualMountResolution:
         memories_dir = tmp_path / "memories"
         for d in (user_dir, global_dir, builtin_dir, memories_dir):
             d.mkdir()
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
@@ -406,7 +405,9 @@ class TestVirtualMountResolution:
         (user_dir / "hello" / "main.py").write_text("print('ws')")
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
-        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/hello/main.py", skills_dir=user_dir
+        )
         # ``_split_cmd`` round-trip is cross-platform: on POSIX it parses
         # shlex.quote-style output; on Windows it preserves the backslashes
         # in bare paths (POSIX shlex would treat ``\`` as an escape char
@@ -416,19 +417,23 @@ class TestVirtualMountResolution:
     def test_skills_path_resolves_to_global_tier_when_workspace_missing(
         self, monkeypatch, tmp_path
     ):
-        _, global_dir, _, _ = self._setup_tiers(monkeypatch, tmp_path)
+        user_dir, global_dir, _, _ = self._setup_tiers(monkeypatch, tmp_path)
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
-        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/hello/main.py", skills_dir=user_dir
+        )
         assert _split_cmd(result) == ["python", str(global_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
         self, monkeypatch, tmp_path
     ):
-        _, _, builtin_dir, _ = self._setup_tiers(monkeypatch, tmp_path)
+        user_dir, _, builtin_dir, _ = self._setup_tiers(monkeypatch, tmp_path)
         (builtin_dir / "find-skills").mkdir()
         (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
-        result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/find-skills/tool.py", skills_dir=user_dir
+        )
         assert _split_cmd(result) == [
             "python",
             str(builtin_dir / "find-skills" / "tool.py"),
@@ -442,9 +447,9 @@ class TestVirtualMountResolution:
         should reference a location it recognises (the workspace tier is also
         where MergedSkillsBackend.write would land a new skill).
         """
-        self._setup_tiers(monkeypatch, tmp_path)
+        user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
         result = convert_virtual_paths_in_command(
-            "python /skills/never-installed/foo.py"
+            "python /skills/never-installed/foo.py", skills_dir=user_dir
         )
         assert result == "python ./skills/never-installed/foo.py"
 
@@ -456,18 +461,16 @@ class TestVirtualMountResolution:
         assert _split_cmd(result) == ["cat", str(memories_dir / "note.md")]
 
     def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
-        """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
-        mirrors the existing `/` → `.` rule but for the mount root.
+        """Bare /skills and /skills/ (no subpath) resolve to the workspace
+        skills dir; mirrors the existing `/` → `.` rule but for the mount root.
         """
         user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
-        assert _split_cmd(convert_virtual_paths_in_command("ls /skills")) == [
-            "ls",
-            str(user_dir),
-        ]
-        assert _split_cmd(convert_virtual_paths_in_command("ls /skills/")) == [
-            "ls",
-            str(user_dir),
-        ]
+        assert _split_cmd(
+            convert_virtual_paths_in_command("ls /skills", skills_dir=user_dir)
+        ) == ["ls", str(user_dir)]
+        assert _split_cmd(
+            convert_virtual_paths_in_command("ls /skills/", skills_dir=user_dir)
+        ) == ["ls", str(user_dir)]
 
     def test_skills_prefix_not_overmatched(self, monkeypatch, tmp_path):
         """Paths starting with /skills but not /skills/ (e.g. /skillset/foo)
@@ -611,14 +614,15 @@ class TestVirtualMountResolution:
         (user_dir / "hello").mkdir()
         (user_dir / "hello" / "main.py").write_text("print('ok')")
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", spacey_root / "global_skills")
         monkeypatch.setattr(paths, "MEMORIES_DIR", spacey_root / "memories")
         monkeypatch.setattr(
             backends, "_BUILTIN_SKILLS_DIR", spacey_root / "builtin_skills"
         )
 
-        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/hello/main.py", skills_dir=user_dir
+        )
 
         tokens = _split_cmd(result)
         assert tokens[0] == "python"
@@ -663,7 +667,7 @@ class TestVirtualMountResolution:
         # Build MergedSkillsBackend wired via _skills_tier_paths positions —
         # the test FAILS if helper return order doesn't align with the
         # constructor's tier-arg semantics.
-        user, global_, builtin = backends._skills_tier_paths()
+        user, global_, builtin = backends._skills_tier_paths(user_dir)
         mb = MergedSkillsBackend(
             primary_dir=str(user),
             secondary_dir=str(builtin),
@@ -680,7 +684,9 @@ class TestVirtualMountResolution:
         assert "USER" in text
 
         # Resolver also returns the USER tier path (the highest-priority hit).
-        resolved = backends._resolve_virtual_mount_path("/skills/probe/main.txt")
+        resolved = backends._resolve_virtual_mount_path(
+            "/skills/probe/main.txt", user_dir
+        )
         assert str(user_dir / "probe" / "main.txt") in resolved
 
         # Remove USER tier file; both should fall through to GLOBAL together.
@@ -692,18 +698,23 @@ class TestVirtualMountResolution:
             else getattr(backend_content, "content", str(backend_content))
         )
         assert "GLOBAL" in text
-        resolved = backends._resolve_virtual_mount_path("/skills/probe/main.txt")
+        resolved = backends._resolve_virtual_mount_path(
+            "/skills/probe/main.txt", user_dir
+        )
         assert str(global_dir / "probe" / "main.txt") in resolved
 
-    def test_skills_tier_paths_helper_returns_canonical_order(self):
+    def test_skills_tier_paths_helper_returns_canonical_order(self, tmp_path):
         """Pin the helper's slot order so calling code (constructor wiring,
         tests like the alignment one above) can rely on it.
         """
-        result = backends._skills_tier_paths()
+        skills_dir = tmp_path / "skills"
+        result = backends._skills_tier_paths(skills_dir)
         assert len(result) == 3
-        assert result[0] == paths.USER_SKILLS_DIR
+        assert result[0] == skills_dir
         assert result[1] == paths.GLOBAL_SKILLS_DIR
         assert result[2] == backends._BUILTIN_SKILLS_DIR
+        # Without a workspace skills dir there is no workspace tier.
+        assert backends._skills_tier_paths(None)[0] is None
 
     def test_merged_skills_read_only_primary_blocks_uploads(self, tmp_path):
         user_dir = tmp_path / "user"
@@ -727,8 +738,8 @@ class TestVirtualMountResolution:
         assert not (user_dir / "new-skill" / "SKILL.md").exists()
 
     def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
-        """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
-        execute successfully. Regression guard: USER_SKILLS_DIR must be in
+        """End-to-end: a skill in the workspace tier (``skills_dir``) must
+        execute successfully. Regression guard: ``skills_dir`` must be in
         execute()'s allow_prefixes — the workspace-literal replace at the
         top of execute() runs BEFORE convert_virtual_paths_in_command, so
         any absolute path the resolver subsequently injects reaches
@@ -751,12 +762,13 @@ class TestVirtualMountResolution:
             "print('workspace-tier-fix-works')"
         )
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
-        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(workspace), virtual_mode=True, skills_dir=user_dir
+        )
         resp = backend.execute("python /skills/hello-ws/main.py")
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
@@ -787,12 +799,13 @@ class TestVirtualMountResolution:
         (global_dir / "shadow-test").mkdir()
         (global_dir / "shadow-test" / "main.py").write_text("print('GLOBAL_TIER_LOST')")
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
-        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(workspace), virtual_mode=True, skills_dir=user_dir
+        )
         resp = backend.execute("python /skills/shadow-test/main.py")
         assert resp.exit_code == 0, resp.output
         assert "WORKSPACE_TIER_WINS" in resp.output
@@ -819,12 +832,13 @@ class TestVirtualMountResolution:
             "print('global-tier-fix-works')"
         )
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
-        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(workspace), virtual_mode=True, skills_dir=user_dir
+        )
         resp = backend.execute("python /skills/hello-e2e/main.py")
         assert resp.exit_code == 0, resp.output
         assert "global-tier-fix-works" in resp.output
@@ -1996,7 +2010,9 @@ def test_autoskill_proposals_route_delete_is_not_backend_blocked(tmp_path):
     (proposals_dir / "some-skill" / "SKILL.md").write_text("x", encoding="utf-8")
 
     backend = build_autoskill_agent_backend(
-        memory_dir=memory_dir, proposals_dir=proposals_dir
+        memory_dir=memory_dir,
+        proposals_dir=proposals_dir,
+        skills_dir=tmp_path / "skills",
     )
     result = backend.delete("/autoskill-proposals/some-skill")
 

@@ -43,7 +43,10 @@ from ..commands.base import ChannelRuntime
 from ..stream.console import console
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ..gateway import GraphGateway
+    from ..paths import Workspace
     from ..runtime import AsyncRuntime
 
 _channel_logger = logging.getLogger(__name__)
@@ -277,6 +280,7 @@ async def dispatch_channel_slash_command(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
+    workspace: Workspace | None = None,
     graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
@@ -342,6 +346,7 @@ async def dispatch_channel_slash_command(
             agent=agent,
             thread_id=thread_id,
             workspace_dir=workspace_dir,
+            workspace=workspace,
             checkpointer=checkpointer,
             append_system=append_system,
             start_new_session_cb=start_new_session_cb,
@@ -381,6 +386,7 @@ async def _dispatch_channel_slash_impl(
     workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
+    workspace: Workspace | None = None,
     graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
@@ -433,6 +439,7 @@ async def _dispatch_channel_slash_impl(
         thread_id=thread_id,
         ui=ui,
         workspace_dir=workspace_dir,
+        workspace=workspace,
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
         graph_gateway=graph_gateway,
@@ -929,6 +936,7 @@ def _start_channels_bus_mode(
     agent,
     thread_id: str,
     *,
+    media_dir: Path,
     send_thinking: bool | None = None,
 ) -> list[tuple[str, bool, str]]:
     """Start all channels in bus mode with MessageBus + ChannelManager.
@@ -940,7 +948,7 @@ def _start_channels_bus_mode(
 
     from ..channels.channel_manager import ChannelManager
 
-    mgr = ChannelManager.from_config(config)
+    mgr = ChannelManager.from_config(config, media_dir=media_dir)
 
     effective_send_thinking = (
         getattr(config, "channel_send_thinking", True)
@@ -1254,6 +1262,7 @@ def _auto_start_channel(
     thread_id: str,
     config,
     *,
+    media_dir: Path,
     send_thinking: bool | None = None,
     runtime: ChannelRuntime | None = None,
 ) -> list[tuple[str, bool, str]]:
@@ -1274,6 +1283,7 @@ def _auto_start_channel(
         config,
         agent,
         thread_id,
+        media_dir=media_dir,
         send_thinking=send_thinking,
     )
     # A channel that is still starting may connect later and needs the runtime

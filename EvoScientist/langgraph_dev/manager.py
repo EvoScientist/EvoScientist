@@ -878,8 +878,9 @@ def start_langgraph_dev(
     Args:
         workspace_dir: Working directory for the subprocess (subprocess ``cwd``).
             Determines where deployed agents' filesystem operations land
-            (``CustomSandboxBackend`` derives its workspace root from cwd via
-            ``paths.WORKSPACE_ROOT``). Defaults to ``Path.cwd()``.
+            (the server builds its graphs for ``paths.process_workspace()``,
+            which reads ``EVOSCIENTIST_WORKSPACE_DIR``). Defaults to
+            ``Path.cwd()``.
         port: TCP port to bind. Defaults to 6174 (Kaprekar's constant).
         host: Network interface to bind. Defaults to loopback. SECURITY:
             widening this exposes an unauthenticated API whose agent can run
@@ -1002,8 +1003,8 @@ def start_langgraph_dev(
     except OSError:
         _LOG_OFFSET_AT_START = 0
 
-    # Propagate workspace to the subprocess so deployed sub-agents resolve
-    # paths.WORKSPACE_ROOT to the same dir as the CLI's main agent. cwd alone
+    # Propagate workspace to the subprocess so deployed sub-agents build their
+    # graphs for the same dir as the CLI's main agent. cwd alone
     # is fragile (relative paths in MCP configs etc.); env var is explicit.
     #
     # Note: ``EVOSCIENTIST_WORKSPACE_DIR`` serves a dual role in this codebase.

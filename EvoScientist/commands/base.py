@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway
+    from ..paths import Workspace
     from ..runtime import AsyncRuntime
 
 
@@ -115,6 +116,9 @@ class CommandContext:
     thread_id: str
     ui: CommandUI
     workspace_dir: str | None = None
+    # The session's workspace (skills, experts, AutoSkills). Commands that
+    # need it call ``require_workspace``.
+    workspace: Workspace | None = None
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
@@ -124,6 +128,12 @@ class CommandContext:
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.
     input_tokens_hint: int | None = None
+
+    def require_workspace(self) -> Workspace:
+        """Return the session's workspace; fail loudly when none was supplied."""
+        if self.workspace is None:
+            raise RuntimeError("This command needs a workspace, but none was set.")
+        return self.workspace
 
 
 class Command(ABC):
@@ -150,11 +160,15 @@ class Command(ABC):
         """
         return self.requires_agent
 
-    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+    def get_completions(
+        self, tokens: list[str], *, workspace: Workspace | None = None
+    ) -> list[tuple[str, str]]:
         """Return completions for args typed after the command name.
 
         Default walks :attr:`subcommands` for the first positional token
         only.  Override for deeper levels (e.g. server names, thread IDs).
+        ``workspace`` is the session's workspace, for completions that list
+        what is installed there.
         """
         if not self.subcommands:
             return []

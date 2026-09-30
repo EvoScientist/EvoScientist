@@ -9,6 +9,7 @@ import questionary
 from rich.panel import Panel
 from rich.text import Text
 
+from ...paths import process_workspace
 from ...runtime import AsyncRuntime
 from ..settings import (
     EvoScientistConfig,
@@ -902,7 +903,7 @@ def run_onboard(
                 _autosave(config)
 
             if "skills" in sections_to_run:
-                _step_skills()
+                _step_skills(process_workspace())
 
             if "mcp" in sections_to_run:
                 _step_mcp_servers()

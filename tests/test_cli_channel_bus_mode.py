@@ -23,12 +23,13 @@ def _restore_channel_globals():
     channel_cli._bus_thread = original["_bus_thread"]
 
 
-def test_auto_start_channel_passes_send_thinking(monkeypatch):
+def test_auto_start_channel_passes_send_thinking(monkeypatch, tmp_path):
     from EvoScientist.commands.base import ChannelRuntime
 
     captured = {}
 
-    def _fake_start(config, agent, thread_id, *, send_thinking=None):
+    def _fake_start(config, agent, thread_id, *, media_dir, send_thinking=None):
+        captured["media_dir"] = media_dir
         captured["send_thinking"] = send_thinking
         captured["thread_id"] = thread_id
         captured["agent"] = agent
@@ -44,10 +45,12 @@ def test_auto_start_channel_passes_send_thinking(monkeypatch):
         agent,
         "thread-1",
         config,
+        media_dir=tmp_path,
         send_thinking=False,
         runtime=runtime,
     )
 
+    assert captured["media_dir"] == tmp_path
     assert captured["send_thinking"] is False
     assert captured["thread_id"] == "thread-1"
     assert captured["agent"] is agent
@@ -55,7 +58,7 @@ def test_auto_start_channel_passes_send_thinking(monkeypatch):
     assert runtime.thread_id == "thread-1"
 
 
-def test_auto_start_channel_reports_startup_failure(monkeypatch):
+def test_auto_start_channel_reports_startup_failure(monkeypatch, tmp_path):
     from EvoScientist.commands.base import ChannelRuntime
 
     rows = [("telegram", False, "failed: dependency missing")]
@@ -72,6 +75,7 @@ def test_auto_start_channel_reports_startup_failure(monkeypatch):
         object(),
         "thread-1",
         SimpleNamespace(channel_enabled="telegram"),
+        media_dir=tmp_path,
         runtime=runtime,
     )
 
@@ -81,7 +85,7 @@ def test_auto_start_channel_reports_startup_failure(monkeypatch):
     assert runtime.thread_id is None
 
 
-def test_auto_start_channel_binds_runtime_while_starting(monkeypatch):
+def test_auto_start_channel_binds_runtime_while_starting(monkeypatch, tmp_path):
     from EvoScientist.channels.channel_manager import CHANNEL_STARTUP_PENDING_DETAIL
     from EvoScientist.commands.base import ChannelRuntime
 
@@ -99,6 +103,7 @@ def test_auto_start_channel_binds_runtime_while_starting(monkeypatch):
         agent,
         "thread-1",
         SimpleNamespace(channel_enabled="telegram"),
+        media_dir=tmp_path,
         runtime=runtime,
     )
 

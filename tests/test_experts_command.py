@@ -14,6 +14,7 @@ from EvoScientist.commands.implementation.experts import (
     ExpertsCommand,
     invalidate_experts_cache,
 )
+from EvoScientist.paths import Workspace
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +65,9 @@ class _FakeSkillInfo:
     expert_body: str = ""
 
 
-def _make_ctx(active_teams: list[str] | None = None) -> tuple[CommandContext, _FakeUI]:
+def _make_ctx(
+    workspace: Workspace, active_teams: list[str] | None = None
+) -> tuple[CommandContext, _FakeUI]:
     ui = _FakeUI()
     runtime = ChannelRuntime()
     if active_teams:
@@ -74,13 +77,14 @@ def _make_ctx(active_teams: list[str] | None = None) -> tuple[CommandContext, _F
         thread_id="t1",
         ui=ui,
         channel_runtime=runtime,
+        workspace=workspace,
     )
     return ctx, ui
 
 
 class TestExpertsList:
-    async def test_lists_installed_experts_in_table(self):
-        ctx, ui = _make_ctx()
+    async def test_lists_installed_experts_in_table(self, workspace):
+        ctx, ui = _make_ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[
@@ -95,8 +99,8 @@ class TestExpertsList:
         assert len(ui.mounted) == 1
         assert any("No experts invited" in text for text, _ in ui.lines)
 
-    async def test_empty_list_prints_help_hint(self):
-        ctx, ui = _make_ctx()
+    async def test_empty_list_prints_help_hint(self, workspace):
+        ctx, ui = _make_ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[],
@@ -105,8 +109,8 @@ class TestExpertsList:
         assert any("No expert skills installed" in text for text, _ in ui.lines)
         assert not ui.mounted
 
-    async def test_active_expert_marked_in_table(self):
-        ctx, ui = _make_ctx(active_teams=["idea-brainstorm"])
+    async def test_active_expert_marked_in_table(self, workspace):
+        ctx, ui = _make_ctx(workspace, active_teams=["idea-brainstorm"])
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[
@@ -121,13 +125,13 @@ class TestExpertsList:
 
 
 class TestExpertToggle:
-    async def test_missing_arg_prints_usage(self):
-        ctx, ui = _make_ctx()
+    async def test_missing_arg_prints_usage(self, workspace):
+        ctx, ui = _make_ctx(workspace)
         await ExpertCommand().execute(ctx, args=[])
         assert any("Usage:" in text for text, _ in ui.lines)
 
-    async def test_unknown_expert_errors(self):
-        ctx, ui = _make_ctx()
+    async def test_unknown_expert_errors(self, workspace):
+        ctx, ui = _make_ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_FakeSkillInfo(name="idea-brainstorm")],
@@ -138,7 +142,7 @@ class TestExpertToggle:
         )
         assert ctx.channel_runtime.active_teams == []
 
-    async def test_async_outage_does_not_block_invite(self):
+    async def test_async_outage_does_not_block_invite(self, workspace):
         """An async outage must not make an installed expert un-invitable.
 
         The old per-skill classification refused here whenever
@@ -146,7 +150,7 @@ class TestExpertToggle:
         Every expert now keeps its in-turn reach, so the outage degrades the
         reach rather than removing the expert.
         """
-        ctx, _ui = _make_ctx()
+        ctx, _ui = _make_ctx(workspace)
         with (
             patch(
                 "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -160,8 +164,8 @@ class TestExpertToggle:
             await ExpertCommand().execute(ctx, args=["literature-review"])
         assert ctx.channel_runtime.active_teams == ["literature-review"]
 
-    async def test_invite_adds_to_active_teams(self):
-        ctx, ui = _make_ctx()
+    async def test_invite_adds_to_active_teams(self, workspace):
+        ctx, ui = _make_ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_FakeSkillInfo(name="idea-brainstorm")],
@@ -170,7 +174,7 @@ class TestExpertToggle:
         assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
         assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
 
-    async def test_invite_hint_states_the_dispatch_boundary(self):
+    async def test_invite_hint_states_the_dispatch_boundary(self, workspace):
         """The invite hint must state the exact boundary, scoped to the
         case where it holds: an expert installed after this session's
         agent was constructed dispatches in the background immediately,
@@ -180,7 +184,7 @@ class TestExpertToggle:
         unconditionally. Pins the scoped wording against the old
         unconditional phrasing and the original "run /new to activate
         it"."""
-        ctx, ui = _make_ctx()
+        ctx, ui = _make_ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_FakeSkillInfo(name="idea-brainstorm")],
@@ -195,9 +199,9 @@ class TestExpertToggle:
         )
         assert not any("run /new to activate it" in text for text in texts)
 
-    async def test_invite_matches_name_case_insensitively(self):
+    async def test_invite_matches_name_case_insensitively(self, workspace):
         """Execute honours the same case-insensitive match as completion."""
-        ctx, ui = _make_ctx()
+        ctx, ui = _make_ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_FakeSkillInfo(name="idea-brainstorm")],
@@ -206,8 +210,8 @@ class TestExpertToggle:
         assert ctx.channel_runtime.active_teams == ["idea-brainstorm"]
         assert any("Invited expert: idea-brainstorm" in text for text, _ in ui.lines)
 
-    async def test_toggle_dismisses_when_already_invited(self):
-        ctx, ui = _make_ctx(active_teams=["idea-brainstorm"])
+    async def test_toggle_dismisses_when_already_invited(self, workspace):
+        ctx, ui = _make_ctx(workspace, active_teams=["idea-brainstorm"])
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_FakeSkillInfo(name="idea-brainstorm")],
@@ -216,16 +220,16 @@ class TestExpertToggle:
         assert ctx.channel_runtime.active_teams == []
         assert any("Dismissed expert: idea-brainstorm" in text for text, _ in ui.lines)
 
-    async def test_clear_dismisses_all(self):
-        ctx, ui = _make_ctx(active_teams=["idea-brainstorm", "second"])
+    async def test_clear_dismisses_all(self, workspace):
+        ctx, ui = _make_ctx(workspace, active_teams=["idea-brainstorm", "second"])
         await ExpertCommand().execute(ctx, args=["clear"])
         assert ctx.channel_runtime.active_teams == []
         assert any(
             "Dismissed experts: idea-brainstorm, second" in text for text, _ in ui.lines
         )
 
-    async def test_clear_on_empty_list_reports_nothing_to_do(self):
-        ctx, ui = _make_ctx()
+    async def test_clear_on_empty_list_reports_nothing_to_do(self, workspace):
+        ctx, ui = _make_ctx(workspace)
         await ExpertCommand().execute(ctx, args=["clear"])
         assert ctx.channel_runtime.active_teams == []
         assert any("No experts invited" in text for text, _ in ui.lines)
@@ -255,40 +259,52 @@ class TestExpertCompletions:
             return_value=[_FakeSkillInfo(name=n) for n in names],
         )
 
-    def test_lists_installed_experts_and_clear(self):
+    def test_lists_installed_experts_and_clear(self, workspace):
         cmd = ExpertCommand()
         with self._patched_experts("smoke-test-sync-expert", "smoke-test-alt-expert"):
-            completions = cmd.get_completions([""])
+            completions = cmd.get_completions([""], workspace=workspace)
         names = {name for name, _ in completions}
         assert names == {"smoke-test-sync-expert", "smoke-test-alt-expert", "clear"}
 
-    def test_case_insensitive_prefix_match(self):
+    def test_case_insensitive_prefix_match(self, workspace):
         # Skill dir names sometimes have uppercase; completion typed
         # lowercase must still surface them.
         cmd = ExpertCommand()
         with self._patched_experts("Smoke-Test-Case-Expert", "smoke-test-sync-expert"):
-            completions = cmd.get_completions(["smoke-test-c"])
+            completions = cmd.get_completions(["smoke-test-c"], workspace=workspace)
         names = {name for name, _ in completions}
         assert names == {"Smoke-Test-Case-Expert"}
 
-    def test_exact_match_hides_popup_same_case(self):
+    def test_exact_match_hides_popup_same_case(self, workspace):
         cmd = ExpertCommand()
         with self._patched_experts("smoke-test-sync-expert"):
-            completions = cmd.get_completions(["smoke-test-sync-expert"])
+            completions = cmd.get_completions(
+                ["smoke-test-sync-expert"], workspace=workspace
+            )
         assert completions == []
 
-    def test_exact_match_hides_popup_different_case(self):
+    def test_exact_match_hides_popup_different_case(self, workspace):
         # Case-insensitive exact-match suppression: typing the name in a
         # different case than the skill dir still fully completes it and
         # hides the popup.
         cmd = ExpertCommand()
         with self._patched_experts("Smoke-Test-Case-Expert"):
-            completions = cmd.get_completions(["smoke-test-case-expert"])
+            completions = cmd.get_completions(
+                ["smoke-test-case-expert"], workspace=workspace
+            )
         assert completions == []
 
-    def test_past_first_arg_returns_empty(self):
+    def test_past_first_arg_returns_empty(self, workspace):
         # /expert takes a single positional. Trailing space -> tokens == ["n", ""].
         cmd = ExpertCommand()
         with self._patched_experts("smoke-test-sync-expert"):
-            assert cmd.get_completions(["smoke-test-sync-expert", ""]) == []
-            assert cmd.get_completions(["smoke-test-sync-expert", "foo"]) == []
+            assert (
+                cmd.get_completions(["smoke-test-sync-expert", ""], workspace=workspace)
+                == []
+            )
+            assert (
+                cmd.get_completions(
+                    ["smoke-test-sync-expert", "foo"], workspace=workspace
+                )
+                == []
+            )

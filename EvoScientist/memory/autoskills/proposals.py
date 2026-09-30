@@ -347,13 +347,8 @@ def _skill_frontmatter_name(skill_dir: Path) -> str | None:
 def _find_installed_user_skill(
     skill_name: str,
     *,
-    skills_dir: str | Path | None = None,
+    roots: list[Path],
 ) -> Path | None:
-    roots = (
-        [Path(skills_dir).expanduser()]
-        if skills_dir is not None
-        else [Path(paths.USER_SKILLS_DIR).expanduser(), Path(paths.GLOBAL_SKILLS_DIR)]
-    )
     for root in roots:
         if not root.exists():
             continue
@@ -400,10 +395,15 @@ def submit_autoskill_proposal(
     rationale: str,
     operation: str = "create",
     target_skill_name: str | None = None,
+    skills_dir: str | Path,
     workspace_dir: str | Path | None = None,
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Validate and register a skill proposal folder written by the agent."""
+    """Validate and register a skill proposal folder written by the agent.
+
+    ``skills_dir`` is the workspace skills tier; an update proposal must
+    target a skill installed there or in the global tier.
+    """
     normalized_name = sanitize_skill_name(skill_name)
     if normalized_name != skill_name:
         return {
@@ -439,7 +439,13 @@ def submit_autoskill_proposal(
                 "skill_name": skill_name,
                 "target_skill_name": target_name,
             }
-        if _find_installed_user_skill(skill_name) is None:
+        if (
+            _find_installed_user_skill(
+                skill_name,
+                roots=[Path(skills_dir).expanduser(), Path(paths.GLOBAL_SKILLS_DIR)],
+            )
+            is None
+        ):
             return {
                 "submitted": False,
                 "error": f"No installed workspace/global skill named {skill_name!r} to update",
@@ -564,10 +570,10 @@ def approve_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
     *,
-    skills_dir: str | Path | None = None,
+    skills_dir: str | Path,
     workspace_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Promote one pending proposal into the workspace-local skills tier."""
+    """Promote one pending proposal into the workspace skills tier (``skills_dir``)."""
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
@@ -606,10 +612,7 @@ def approve_skill_proposal(
             "error": "Proposal skill folder is invalid",
             "errors": errors,
         }
-    if skills_dir is not None:
-        destination_root = Path(skills_dir).expanduser()
-    else:
-        destination_root = Path(paths.USER_SKILLS_DIR).expanduser()
+    destination_root = Path(skills_dir).expanduser()
     destination = destination_root / skill_name
     base_skill_dir: Path | None = None
     if operation == "create" and destination.exists():
@@ -627,12 +630,15 @@ def approve_skill_proposal(
             }
         local_match = _find_installed_user_skill(
             skill_name,
-            skills_dir=destination_root,
+            roots=[destination_root],
         )
         if local_match is not None:
             destination = local_match
         else:
-            existing_global = _find_installed_user_skill(skill_name)
+            existing_global = _find_installed_user_skill(
+                skill_name,
+                roots=[destination_root, Path(paths.GLOBAL_SKILLS_DIR)],
+            )
             if existing_global is None:
                 return {
                     "approved": False,

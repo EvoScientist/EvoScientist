@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..paths import new_run_dir
+from ..paths import Workspace
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -31,12 +31,8 @@ def _shorten_path(path: str) -> str:
         return path
 
 
-def _deduplicate_run_name(name: str, runs_dir: Path | None = None) -> str:
+def _deduplicate_run_name(name: str, runs_dir: Path) -> str:
     """Return *name* if available, otherwise *name_1*, *name_2*, etc."""
-    if runs_dir is None:
-        from ..paths import RUNS_DIR
-
-        runs_dir = RUNS_DIR
     if not (runs_dir / name).exists():
         return name
     i = 1
@@ -45,21 +41,20 @@ def _deduplicate_run_name(name: str, runs_dir: Path | None = None) -> str:
     return f"{name}_{i}"
 
 
-def _create_session_workspace(name: str | None = None) -> str:
-    """Create a per-session workspace directory and return its path.
+def _create_session_workspace(workspace: Workspace, name: str | None = None) -> str:
+    """Create a ``--mode=run`` session folder under ``workspace.runs_dir``.
 
     Args:
+        workspace: The workspace the run folder belongs to.
         name: Optional human-friendly run name.  Duplicates are resolved
               by appending ``_1``, ``_2``, etc.  Falls back to a timestamp
               if *name* is None.
     """
     if name:
-        from ..paths import RUNS_DIR
-
-        session_id = _deduplicate_run_name(name, RUNS_DIR)
+        session_id = _deduplicate_run_name(name, workspace.runs_dir)
     else:
         session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    workspace_dir = str(new_run_dir(session_id))
+    workspace_dir = str(workspace.runs_dir / session_id)
     os.makedirs(workspace_dir, exist_ok=True)
     return workspace_dir
 
@@ -70,6 +65,7 @@ def _load_agent(
     config=None,
     chat_model=None,
     *,
+    workspace: Workspace,
     on_mcp_progress=None,
     events=None,
     runtime: "AsyncRuntime | None" = None,
@@ -77,7 +73,9 @@ def _load_agent(
     """Load the CLI agent with optional persistent checkpointer.
 
     Args:
-        workspace_dir: Optional per-session workspace directory.
+        workspace_dir: The folder the agent works in (defaults to the
+            workspace root).
+        workspace: The session's workspace.
         checkpointer: Optional LangGraph checkpointer (e.g. ``AsyncSqliteSaver``).
             Falls back to ``InMemorySaver`` when ``None``.
         config: Optional pre-loaded ``EvoScientistConfig``.  Forwarded to
@@ -93,6 +91,7 @@ def _load_agent(
 
     return create_cli_agent(
         workspace_dir=workspace_dir,
+        workspace=workspace,
         checkpointer=checkpointer,
         config=config,
         chat_model=chat_model,

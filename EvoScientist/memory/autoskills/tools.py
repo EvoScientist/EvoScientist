@@ -9,6 +9,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
 from ...config import MemorySkillSynthesisMode, get_effective_config
+from ...paths import Workspace
 from ...tools.skills_manager import list_skills
 from .candidates import autoskill_candidates
 from .proposals import approve_skill_proposal, submit_autoskill_proposal
@@ -55,7 +56,9 @@ class SubmitAutoskillProposalArgs(BaseModel):
     )
 
 
-def _installed_skills_for_autoskill_context() -> list[dict[str, str]]:
+def _installed_skills_for_autoskill_context(
+    workspace: Workspace,
+) -> list[dict[str, str]]:
     return [
         {
             "name": skill.name,
@@ -63,7 +66,7 @@ def _installed_skills_for_autoskill_context() -> list[dict[str, str]]:
             "source": skill.source,
             "path": f"/skills/{skill.path.name}",
         }
-        for skill in list_skills(include_system=False)
+        for skill in list_skills(include_system=False, workspace=workspace)
         if skill.source in {"workspace", "global"}
     ]
 
@@ -72,7 +75,7 @@ def create_inspect_autoskill_candidates_tool(
     *,
     memory_dir: str | Path,
     project_id: str,
-    workspace_dir: str | Path,
+    workspace: Workspace,
 ) -> BaseTool:
     """Build the read-only candidate-inspection tool for AutoSkills."""
 
@@ -80,12 +83,12 @@ def create_inspect_autoskill_candidates_tool(
         candidates = autoskill_candidates(
             memory_dir=memory_dir,
             project_id=project_id,
-            workspace_dir=workspace_dir,
+            workspace_dir=workspace.root,
         )
         return json.dumps(
             {
                 "candidates": candidates,
-                "installed_skills": _installed_skills_for_autoskill_context(),
+                "installed_skills": _installed_skills_for_autoskill_context(workspace),
             },
             ensure_ascii=False,
             default=str,
@@ -105,7 +108,7 @@ def create_inspect_autoskill_candidates_tool(
 def create_submit_autoskill_proposal_tool(
     *,
     memory_dir: str | Path,
-    workspace_dir: str | Path,
+    workspace: Workspace,
     project_id: str,
 ) -> BaseTool:
     """Build the proposal-registration tool for AutoSkills."""
@@ -126,7 +129,8 @@ def create_submit_autoskill_proposal_tool(
             rationale=rationale,
             operation=operation,
             target_skill_name=target_skill_name,
-            workspace_dir=workspace_dir,
+            skills_dir=workspace.skills_dir,
+            workspace_dir=workspace.root,
             project_id=project_id,
         )
         if (
@@ -137,7 +141,8 @@ def create_submit_autoskill_proposal_tool(
             approved = approve_skill_proposal(
                 memory_dir,
                 str(proposal["proposal_id"]),
-                workspace_dir=workspace_dir,
+                skills_dir=workspace.skills_dir,
+                workspace_dir=workspace.root,
             )
             proposal["auto_approval"] = approved
         return json.dumps(proposal, ensure_ascii=False, default=str)

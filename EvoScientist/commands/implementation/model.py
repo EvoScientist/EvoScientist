@@ -217,6 +217,7 @@ class ModelCommand(Command):
             new_chat_model = _build_chat_model(temp_cfg)
             load_kwargs = {
                 "workspace_dir": ctx.workspace_dir,
+                "workspace": ctx.require_workspace(),
                 "checkpointer": ctx.checkpointer,
                 "config": temp_cfg,
                 "chat_model": new_chat_model,

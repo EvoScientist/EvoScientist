@@ -853,7 +853,7 @@ class TestExplicitSeeding:
             seed_fallback_chain(cfg)
         assert get_fallback_chain() == [("cfg-a", "prov-a")]
 
-    def test_pure_path_agent_construction_seeds_from_caller_config(self, tmp_path):
+    def test_pure_path_agent_construction_seeds_from_caller_config(self, workspace):
         """create_cli_agent(config=..., chat_model=...) - the pure path -
         seeds the chain from the caller's config via the middleware factory,
         never from disk."""
@@ -900,13 +900,13 @@ class TestExplicitSeeding:
                         ):
                             _reset_chain_initialization()
                             es_mod.create_cli_agent(
-                                workspace_dir=str(tmp_path),
+                                workspace=workspace,
                                 config=cfg,
                                 chat_model=MagicMock(),
                             )
         assert get_fallback_chain() == [("cfg-a", "prov-a")]
 
-    def test_factory_seeds_chain_from_its_cfg(self):
+    def test_factory_seeds_chain_from_its_cfg(self, workspace):
         """_get_default_middleware seeds the chain from its resolved cfg —
         the single seeding site that covers every graph load path (main,
         sync/async subagents) regardless of how the graph is loaded."""
@@ -924,14 +924,14 @@ class TestExplicitSeeding:
                 "EvoScientist.EvoScientist._ensure_chat_model",
                 return_value=MagicMock(profile={"max_input_tokens": 200_000}),
             ):
-                _get_default_middleware(cfg=cfg)
+                _get_default_middleware(workspace=workspace, cfg=cfg)
             never_disk.assert_not_called()
         assert get_fallback_chain() == [
             ("factory-a", "prov-a"),
             ("factory-b", "prov-b"),
         ]
 
-    def test_second_factory_call_does_not_reseed(self):
+    def test_second_factory_call_does_not_reseed(self, workspace):
         """A later graph build through the factory (different cfg) must not
         re-seed: first-touch only, so /model-fallback session edits survive
         every rebuild."""
@@ -954,11 +954,11 @@ class TestExplicitSeeding:
             "EvoScientist.EvoScientist._ensure_chat_model",
             return_value=MagicMock(profile={"max_input_tokens": 200_000}),
         ):
-            _get_default_middleware(cfg=cfg_v1)
+            _get_default_middleware(workspace=workspace, cfg=cfg_v1)
             # Session edit between builds.
             assert add_fallback("session", "prov-s") is True
             # Rebuild with a different config: first-touch guard must hold.
-            _get_default_middleware(cfg=cfg_v2)
+            _get_default_middleware(workspace=workspace, cfg=cfg_v2)
         assert get_fallback_chain() == [
             ("cfg-a", "prov-a"),
             ("session", "prov-s"),

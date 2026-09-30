@@ -82,6 +82,8 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
+from ..paths import Workspace
+
 _logger = logging.getLogger(__name__)
 
 
@@ -221,6 +223,7 @@ def _resolve_merge_validate(
     agent_map: dict[str, AsyncSubAgent],
     watcher_agents: dict[str, AsyncSubAgent] | None,
     cfg: Any | None,
+    workspace: Workspace,
     subagent_type: str,
     lock: Any = None,
 ) -> str | None:
@@ -289,7 +292,7 @@ def _resolve_merge_validate(
     from ..subagents.expert_container_async import build_expert_async_subagent_specs
 
     # The walk is the blocking part — never hold the lock over I/O.
-    specs = build_expert_async_subagent_specs(cfg=cfg)
+    specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
     if lock is not None:
         with lock:
             _merge_expert_specs(agent_map, watcher_agents, specs)
@@ -323,6 +326,8 @@ def _build_expert_start_tool(
     watcher_agents: dict[str, AsyncSubAgent] | None = None,
     cfg: Any | None = None,
     map_lock: Any = None,
+    *,
+    workspace: Workspace,
 ) -> StructuredTool:
     """Build the skill-name-injecting ``start_async_task`` tool.
 
@@ -376,7 +381,7 @@ def _build_expert_start_tool(
         error = _locked_validate(subagent_type)
         if error:
             error = _resolve_merge_validate(
-                agent_map, watcher_agents, cfg, subagent_type, map_lock
+                agent_map, watcher_agents, cfg, workspace, subagent_type, map_lock
             )
             if error:
                 return error
@@ -422,6 +427,7 @@ def _build_expert_start_tool(
                 agent_map,
                 watcher_agents,
                 cfg,
+                workspace,
                 subagent_type,
                 map_lock,
             )
@@ -480,6 +486,7 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         self,
         *,
         async_subagents: list[AsyncSubAgent],
+        workspace: Workspace,
         system_prompt: str | None = None,
         watcher_agents: dict[str, AsyncSubAgent] | None = None,
         cfg: Any | None = None,
@@ -540,6 +547,7 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
                 watcher_agents,
                 cfg,
                 self._resolve_lock,
+                workspace=workspace,
             ),
             _build_check_tool(clients),
             _build_expert_update_tool(agent_map, clients),

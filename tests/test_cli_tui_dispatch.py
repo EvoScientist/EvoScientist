@@ -240,7 +240,7 @@ async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
     assert calls == [(config, "/tmp/resumed-workspace", "langgraph_server")]
 
 
-def test_cmd_interactive_dispatches_to_textual(monkeypatch):
+def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
     captured: dict[str, object] = {}
     captured_kwargs: list[dict[str, object]] = []
     effective_config = SimpleNamespace(langgraph_dev_port=9999)
@@ -274,6 +274,7 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch):
         thread_id="thread-1",
         ui_backend="tui",
         config=effective_config,
+        workspace=workspace,
     )
 
     assert captured["resolved_input"] == "tui"
@@ -289,6 +290,7 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch):
     assert kwargs["run_name"] == "demo-run"
     assert kwargs["thread_id"] == "thread-1"
     assert kwargs["config"] is effective_config
+    assert kwargs["workspace"] is workspace
     assert kwargs["channel_send_thinking"] is True
     assert callable(kwargs["load_agent"])
     assert callable(kwargs["create_session_workspace"])

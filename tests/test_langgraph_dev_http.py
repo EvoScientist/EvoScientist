@@ -286,7 +286,7 @@ def test_get_teams_calls_loader_with_include_system_true():
     workspace with no user-installed experts."""
     calls = []
 
-    def spy(include_system=False):
+    def spy(include_system=False, *, workspace):
         calls.append(include_system)
         return []
 

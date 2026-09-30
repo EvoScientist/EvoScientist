@@ -58,6 +58,7 @@ def test_factory_requests_async_safe_middleware(
     mock_get_mw,
     mock_mcp,
     mock_create,
+    workspace,
 ):
     """``build_async_subagent_graph`` must call ``_get_default_middleware``
     with ``for_async_subagent=True``.
@@ -90,13 +91,14 @@ def test_factory_requests_async_safe_middleware(
 
     from EvoScientist.subagents._factory import build_async_subagent_graph
 
-    build_async_subagent_graph("writing-agent")
+    build_async_subagent_graph("writing-agent", workspace=workspace)
 
     # The contract: factory MUST pass async-safe mode, the source agent name,
     # and its backend — the backend is what makes the per-run
     # SummarizationMiddleware subclass replace the frozen-window built-in in
     # the deployed graph (#466).
     mock_get_mw.assert_called_once_with(
+        workspace=workspace,
         for_async_subagent=True,
         memory_source_agent="writing-agent",
         backend=mock_backend.return_value,
@@ -127,6 +129,7 @@ def test_factory_never_arms_hitl_interrupt_on(
     mock_get_mw,
     mock_mcp,
     mock_create,
+    workspace,
 ):
     """Async sub-agent graphs must NEVER pass ``interrupt_on``.
 
@@ -149,22 +152,20 @@ def test_factory_never_arms_hitl_interrupt_on(
 
     from EvoScientist.subagents._factory import build_async_subagent_graph
 
-    build_async_subagent_graph("writing-agent")
+    build_async_subagent_graph("writing-agent", workspace=workspace)
 
     assert "interrupt_on" not in mock_create.call_args.kwargs
 
 
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
-def test_inject_subagent_adds_memory_middleware(mock_model, tmp_path):
+def test_inject_subagent_adds_memory_middleware(mock_model, workspace):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
 
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
     subs = [{"name": "test-agent"}]
 
-    _inject_subagent_middleware(subs, workspace_dir=workspace)
+    _inject_subagent_middleware(subs, workspace=workspace)
 
     _assert_subagent_memory_middleware(subs[0], source_agent="test-agent")
 
@@ -172,7 +173,7 @@ def test_inject_subagent_adds_memory_middleware(mock_model, tmp_path):
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_inject_subagent_omits_memory_middleware_when_memory_disabled(
-    mock_config, mock_model, tmp_path
+    mock_config, mock_model, workspace
 ):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
@@ -186,11 +187,9 @@ def test_inject_subagent_omits_memory_middleware_when_memory_disabled(
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
 
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
     subs = [{"name": "test-agent"}]
 
-    _inject_subagent_middleware(subs, workspace_dir=workspace)
+    _inject_subagent_middleware(subs, workspace=workspace)
 
     assert not [
         m
@@ -202,7 +201,7 @@ def test_inject_subagent_omits_memory_middleware_when_memory_disabled(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
-    mock_config, mock_model, tmp_path
+    mock_config, mock_model, workspace
 ):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
@@ -216,11 +215,9 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
 
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
     subs = [{"name": "test-agent"}]
 
-    _inject_subagent_middleware(subs, workspace_dir=workspace)
+    _inject_subagent_middleware(subs, workspace=workspace)
 
     memory_middleware = _single_middleware(subs[0], "EvoMemoryMiddleware")
     lifecycle_middleware = _single_middleware(
@@ -241,7 +238,7 @@ def test_inject_subagent_worker_only_observation_writer_keeps_live_tool_off(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
-    mock_config, mock_chat, mock_tool_selector
+    mock_config, mock_chat, mock_tool_selector, workspace
 ):
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -259,7 +256,7 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    middleware = _get_default_middleware()
+    middleware = _get_default_middleware(workspace=workspace)
     memory_middleware = next(
         m for m in middleware if type(m).__name__ == "EvoMemoryMiddleware"
     )
@@ -293,7 +290,7 @@ def test_all_observation_writer_schedules_turn_worker_without_profile_memory(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_async_subagent_mode_filters_ask_user(
-    mock_config, mock_chat, mock_tool_selector
+    mock_config, mock_chat, mock_tool_selector, workspace
 ):
     """``_get_default_middleware(for_async_subagent=True)`` must drop
     ``AskUserMiddleware`` even when ``enable_ask_user`` is on.
@@ -321,14 +318,14 @@ def test_async_subagent_mode_filters_ask_user(
     from EvoScientist.middleware.ask_user import AskUserMiddleware
 
     # CLI / in-process path includes AskUserMiddleware …
-    cli_mw = _get_default_middleware()
+    cli_mw = _get_default_middleware(workspace=workspace)
     assert any(isinstance(m, AskUserMiddleware) for m in cli_mw), (
         "Sanity check: with enable_ask_user=True and CLI mode, "
         "AskUserMiddleware should be present."
     )
 
     # … but the async-subagent path filters it out.
-    async_mw = _get_default_middleware(for_async_subagent=True)
+    async_mw = _get_default_middleware(workspace=workspace, for_async_subagent=True)
     assert not any(isinstance(m, AskUserMiddleware) for m in async_mw), (
         "AskUserMiddleware leaked into async sub-agent middleware — its "
         "interrupt() call deadlocks the deployed graph (no UI to resume)."
@@ -342,7 +339,7 @@ def test_async_subagent_mode_filters_ask_user(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_async_subagent_disables_tool_selector_stream_tracking(
-    mock_config, mock_chat, mock_tool_selector
+    mock_config, mock_chat, mock_tool_selector, workspace
 ):
     """Async subagents still select tools, but must not drive main-agent UI state."""
     cfg = MagicMock()
@@ -362,7 +359,7 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
     from EvoScientist.EvoScientist import _get_default_middleware
     from EvoScientist.middleware.events import NoOpSink
 
-    _get_default_middleware(for_async_subagent=True)
+    _get_default_middleware(workspace=workspace, for_async_subagent=True)
 
     # Async subagents still select tools, but are wired to the silent NoOpSink
     # so they never drive the main-agent tool-selection widget.

@@ -37,6 +37,7 @@ from EvoScientist.memory.observations import (
     link_observation_files,
     record_observation_file,
 )
+from EvoScientist.paths import Workspace
 
 
 def _record(
@@ -257,6 +258,7 @@ def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
         cluster_hash="cluster-1",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Three observations describe the same staged validation practice.",
+        skills_dir=skills_dir,
     )
 
     assert proposal["submitted"] is True
@@ -282,7 +284,6 @@ def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
 def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", skills_dir)
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
     _write_installed_skill(
         skills_dir,
@@ -305,9 +306,12 @@ def test_update_skill_proposal_replaces_workspace_skill(tmp_path, monkeypatch):
         rationale="New observations refine the existing validation skill.",
         operation="update",
         target_skill_name="focused-validation",
+        skills_dir=skills_dir,
     )
     pending = list_skill_proposals(memory_dir, status="pending")
-    approved = approve_skill_proposal(memory_dir, proposal["proposal_id"])
+    approved = approve_skill_proposal(
+        memory_dir, proposal["proposal_id"], skills_dir=skills_dir
+    )
 
     skill_md = skills_dir / "focused-validation" / "SKILL.md"
     saved = skill_md.read_text(encoding="utf-8")
@@ -328,7 +332,6 @@ def test_update_skill_proposal_preserves_existing_workspace_files(
 ):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", skills_dir)
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
     skill_dir = _write_installed_skill(
         skills_dir,
@@ -354,8 +357,11 @@ def test_update_skill_proposal_preserves_existing_workspace_files(
         rationale="New observations refine the existing validation skill.",
         operation="update",
         target_skill_name="focused-validation",
+        skills_dir=skills_dir,
     )
-    approved = approve_skill_proposal(memory_dir, proposal["proposal_id"])
+    approved = approve_skill_proposal(
+        memory_dir, proposal["proposal_id"], skills_dir=skills_dir
+    )
 
     assert approved["approved"] is True
     assert "Updated workflow with caveats." in (skill_dir / "SKILL.md").read_text(
@@ -367,7 +373,6 @@ def test_update_skill_proposal_preserves_existing_workspace_files(
 def test_update_can_reopen_completed_autoskill_proposal(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", skills_dir)
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
     _write_skill_folder(
         memory_dir,
@@ -381,8 +386,11 @@ def test_update_can_reopen_completed_autoskill_proposal(tmp_path, monkeypatch):
         cluster_hash="cluster-initial",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Initial proposal.",
+        skills_dir=skills_dir,
     )
-    approved = approve_skill_proposal(memory_dir, first["proposal_id"])
+    approved = approve_skill_proposal(
+        memory_dir, first["proposal_id"], skills_dir=skills_dir
+    )
     _write_skill_folder(
         memory_dir,
         "reopen-update",
@@ -398,6 +406,7 @@ def test_update_can_reopen_completed_autoskill_proposal(tmp_path, monkeypatch):
         rationale="Later observations refine the existing skill.",
         operation="update",
         target_skill_name="reopen-update",
+        skills_dir=skills_dir,
     )
     proposal = list_skill_proposals(memory_dir, status="pending")[0]
 
@@ -411,7 +420,6 @@ def test_update_can_reopen_completed_autoskill_proposal(tmp_path, monkeypatch):
 def test_update_cannot_reopen_rejected_autoskill_proposal(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", skills_dir)
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
     _write_skill_folder(
         memory_dir,
@@ -425,6 +433,7 @@ def test_update_cannot_reopen_rejected_autoskill_proposal(tmp_path, monkeypatch)
         cluster_hash="cluster-initial",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Initial proposal.",
+        skills_dir=skills_dir,
     )
     rejected = reject_skill_proposal(memory_dir, first["proposal_id"])
     _write_installed_skill(
@@ -448,6 +457,7 @@ def test_update_cannot_reopen_rejected_autoskill_proposal(tmp_path, monkeypatch)
         rationale="Later observations refine the existing skill.",
         operation="update",
         target_skill_name="reject-update",
+        skills_dir=skills_dir,
     )
 
     assert rejected["rejected"] is True
@@ -462,7 +472,6 @@ def test_update_replaces_workspace_skill_matched_by_frontmatter(
 ):
     memory_dir = tmp_path / "memories"
     skills_dir = tmp_path / "skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", skills_dir)
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
     installed_dir = _write_installed_skill_in_dir(
         skills_dir,
@@ -486,8 +495,11 @@ def test_update_replaces_workspace_skill_matched_by_frontmatter(
         rationale="Later observations refine the existing skill.",
         operation="update",
         target_skill_name="frontmatter-match",
+        skills_dir=skills_dir,
     )
-    approved = approve_skill_proposal(memory_dir, proposal["proposal_id"])
+    approved = approve_skill_proposal(
+        memory_dir, proposal["proposal_id"], skills_dir=skills_dir
+    )
 
     assert approved["approved"] is True
     assert approved["path"] == str(installed_dir)
@@ -499,7 +511,6 @@ def test_update_replaces_workspace_skill_matched_by_frontmatter(
 
 def test_update_skill_proposal_requires_existing_skill(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "skills")
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global-skills")
     _write_skill_folder(
         memory_dir,
@@ -516,6 +527,7 @@ def test_update_skill_proposal_requires_existing_skill(tmp_path, monkeypatch):
         rationale="This should not submit without an installed target.",
         operation="update",
         target_skill_name="missing-target",
+        skills_dir=tmp_path / "skills",
     )
 
     assert proposal["submitted"] is False
@@ -527,7 +539,6 @@ def test_update_global_skill_creates_workspace_shadow(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", workspace_skills)
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
     _write_installed_skill(
         global_skills,
@@ -553,8 +564,11 @@ def test_update_global_skill_creates_workspace_shadow(tmp_path, monkeypatch):
         rationale="Observations refine a global skill for this workspace.",
         operation="update",
         target_skill_name="global-validation",
+        skills_dir=workspace_skills,
     )
-    approved = approve_skill_proposal(memory_dir, proposal["proposal_id"])
+    approved = approve_skill_proposal(
+        memory_dir, proposal["proposal_id"], skills_dir=workspace_skills
+    )
 
     assert approved["approved"] is True
     assert approved["operation"] == "update"
@@ -577,7 +591,6 @@ def test_update_global_skill_does_not_overwrite_nonmatching_local_dir(
     memory_dir = tmp_path / "memories"
     workspace_skills = tmp_path / "workspace-skills"
     global_skills = tmp_path / "global-skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", workspace_skills)
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_skills)
     _write_installed_skill_in_dir(
         workspace_skills,
@@ -607,8 +620,11 @@ def test_update_global_skill_does_not_overwrite_nonmatching_local_dir(
         rationale="Observations refine a global skill for this workspace.",
         operation="update",
         target_skill_name="global-validation",
+        skills_dir=workspace_skills,
     )
-    approved = approve_skill_proposal(memory_dir, proposal["proposal_id"])
+    approved = approve_skill_proposal(
+        memory_dir, proposal["proposal_id"], skills_dir=workspace_skills
+    )
 
     assert proposal["submitted"] is True
     assert approved["approved"] is False
@@ -634,6 +650,7 @@ def test_create_proposal_rejects_target_skill_name(tmp_path):
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Create proposals should not name an update target.",
         target_skill_name="target-on-create",
+        skills_dir=tmp_path / "skills",
     )
 
     assert proposal["submitted"] is False
@@ -655,6 +672,7 @@ def test_submit_autoskill_proposal_defaults_missing_created_at(tmp_path):
         cluster_hash="cluster-1",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Initial proposal.",
+        skills_dir=tmp_path / "skills",
     )
     manifest_path = (
         autoskill_proposals_dir(memory_dir) / "timestamp-default" / "manifest.json"
@@ -669,6 +687,7 @@ def test_submit_autoskill_proposal_defaults_missing_created_at(tmp_path):
         cluster_hash="cluster-1",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Resubmitted proposal.",
+        skills_dir=tmp_path / "skills",
     )
     saved = json.loads(manifest_path.read_text(encoding="utf-8"))
     proposal = list_skill_proposals(memory_dir)[0]
@@ -680,15 +699,10 @@ def test_submit_autoskill_proposal_defaults_missing_created_at(tmp_path):
     assert proposal.created_at == saved["created_at"]
 
 
-def test_approve_skill_proposal_is_scoped_to_recorded_workspace(
-    tmp_path,
-    monkeypatch,
-):
+def test_approve_skill_proposal_is_scoped_to_recorded_workspace(tmp_path):
     memory_dir = tmp_path / "memories"
     workspace_a = tmp_path / "workspace-a"
     workspace_b = tmp_path / "workspace-b"
-    active_skills_dir = tmp_path / "active-skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", active_skills_dir)
     workspace_a.mkdir()
     workspace_b.mkdir()
 
@@ -704,6 +718,7 @@ def test_approve_skill_proposal_is_scoped_to_recorded_workspace(
         cluster_hash="cluster-workspace-a",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="This proposal belongs to workspace A.",
+        skills_dir=workspace_a / "skills",
         workspace_dir=workspace_a,
         project_id="P-a",
     )
@@ -713,18 +728,20 @@ def test_approve_skill_proposal_is_scoped_to_recorded_workspace(
     wrong_workspace = approve_skill_proposal(
         memory_dir,
         proposal["proposal_id"],
+        skills_dir=workspace_b / "skills",
         workspace_dir=workspace_b,
     )
     right_workspace = approve_skill_proposal(
         memory_dir,
         proposal["proposal_id"],
+        skills_dir=workspace_a / "skills",
         workspace_dir=workspace_a,
     )
 
     assert wrong_workspace["approved"] is False
     assert not (workspace_b / "skills" / "workspace-owned").exists()
     assert right_workspace["approved"] is True
-    assert (active_skills_dir / "workspace-owned" / "SKILL.md").exists()
+    assert (workspace_a / "skills" / "workspace-owned" / "SKILL.md").exists()
 
 
 def test_submit_autoskill_proposal_does_not_overwrite_other_workspace(tmp_path):
@@ -746,6 +763,7 @@ def test_submit_autoskill_proposal_does_not_overwrite_other_workspace(tmp_path):
         cluster_hash="cluster-a",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Workspace A owns this pending proposal.",
+        skills_dir=workspace_a / "skills",
         workspace_dir=workspace_a,
         project_id="P-a",
     )
@@ -755,6 +773,7 @@ def test_submit_autoskill_proposal_does_not_overwrite_other_workspace(tmp_path):
         cluster_hash="cluster-b",
         source_observation_ids=["O-4", "O-5", "O-6"],
         rationale="Workspace B must not take over the same proposal id.",
+        skills_dir=workspace_b / "skills",
         workspace_dir=workspace_b,
         project_id="P-b",
     )
@@ -782,12 +801,11 @@ def test_submit_tool_reads_live_autoskill_mode_without_rebuild(
     )
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"
-    active_skills_dir = tmp_path / "active-skills"
-    monkeypatch.setattr(paths, "USER_SKILLS_DIR", active_skills_dir)
     workspace_dir.mkdir()
+    workspace = Workspace(workspace_dir)
     tool = create_submit_autoskill_proposal_tool(
         memory_dir=memory_dir,
-        workspace_dir=workspace_dir,
+        workspace=workspace,
         project_id="P-project",
     )
 
@@ -828,7 +846,7 @@ def test_submit_tool_reads_live_autoskill_mode_without_rebuild(
     assert review_payload["status"] == "pending"
     assert "auto_approval" not in review_payload
     assert auto_payload["auto_approval"]["approved"] is True
-    assert (active_skills_dir / "auto-mode-skill" / "SKILL.md").exists()
+    assert (workspace.skills_dir / "auto-mode-skill" / "SKILL.md").exists()
 
 
 def test_submit_autoskill_proposal_rejects_invalid_generated_folder(tmp_path):
@@ -846,6 +864,7 @@ def test_submit_autoskill_proposal_rejects_invalid_generated_folder(tmp_path):
         cluster_hash="cluster-1",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Three observations describe the same staged validation practice.",
+        skills_dir=tmp_path / "skills",
     )
 
     assert proposal["submitted"] is False
@@ -868,6 +887,7 @@ def test_reject_skill_proposal_marks_processed(tmp_path):
         cluster_hash="cluster-rejected",
         source_observation_ids=["O-1", "O-2", "O-3"],
         rationale="Test rejection.",
+        skills_dir=tmp_path / "skills",
     )
 
     rejected = reject_skill_proposal(memory_dir, proposal["proposal_id"])

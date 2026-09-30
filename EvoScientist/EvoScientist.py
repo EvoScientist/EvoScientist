@@ -35,7 +35,7 @@ from .config import (
     get_effective_config,
 )
 from .memory import MemorySourceType
-from .paths import set_active_workspace, set_workspace_root
+from .paths import Workspace, process_workspace, resolve_virtual_path
 from .prompts import get_system_prompt
 
 # Suppress noisy warnings from deepagents skill loader (non-string frontmatter fields, etc.)
@@ -300,10 +300,10 @@ def _load_mcp_tools_cached(
 # =============================================================================
 
 
-def _configured_system_prompt(cfg) -> str:
+def _configured_system_prompt(cfg, work_dir: str | Path) -> str:
     # In dangerous mode the agent works on the real filesystem; give it the real
     # cwd so it can use absolute paths instead of the virtual `/` workspace root.
-    real_cwd = str(_paths_mod.resolve_virtual_path("/")) if cfg.dangerous_mode else None
+    real_cwd = str(resolve_virtual_path(work_dir, "/")) if cfg.dangerous_mode else None
     return get_system_prompt(
         dangerous=cfg.dangerous_mode,
         cwd=real_cwd,
@@ -313,12 +313,16 @@ def _configured_system_prompt(cfg) -> str:
 def _inject_subagent_middleware(
     subs: list[dict],
     *,
-    workspace_dir: str | Path | None = None,
+    workspace: Workspace,
+    work_dir: str | Path | None = None,
     cfg=None,
     chat_model=None,
     backend=None,
 ) -> None:
     """Ensure every subagent gets error handling and context management middleware.
+
+    Memory middleware is keyed to ``work_dir`` (the folder the agent works
+    in), which defaults to the workspace root.
 
     Without this, subagent tool errors are caught by LangGraph's default
     ToolNode handler which produces terse messages without tracebacks or
@@ -354,6 +358,7 @@ def _inject_subagent_middleware(
     memory_controls = MemoryControls.from_config(cfg)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     memory_scheduler = default_memory_scheduler()
+    workspace_dir = work_dir if work_dir is not None else workspace.root
     for sa in subs:
         name = str(sa.get("name") or "sub-agent")
         source_type = MemorySourceType.SUBAGENT
@@ -433,7 +438,9 @@ def _ensure_general_purpose_subagent(subs: list[dict]) -> None:
     )
 
 
-def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
+def _fold_expert_subagents(
+    subs: list[dict], tool_registry: dict, workspace: Workspace
+) -> None:
     """Append expert-skill sub-agent specs to ``subs``, guarding names.
 
     Each installed expert skill becomes an in-process sub-agent entry so
@@ -455,7 +462,9 @@ def _fold_expert_subagents(subs: list[dict], tool_registry: dict) -> None:
 
     logger = logging.getLogger(__name__)
     taken = {s.get("name") for s in subs} | {GENERAL_PURPOSE_SUBAGENT["name"]}
-    for spec in build_expert_subagent_specs(tool_registry=tool_registry):
+    for spec in build_expert_subagent_specs(
+        tool_registry=tool_registry, workspace=workspace
+    ):
         name = spec["name"]
         if name in taken:
             logger.warning(
@@ -576,7 +585,7 @@ def _maybe_swap_async_subagents(
 
 
 def _route_async_specs_through_evo_middleware(
-    subs: list, base_middleware: list, *, cfg=None
+    subs: list, base_middleware: list, *, workspace: Workspace, cfg=None
 ) -> list:
     """Move ``AsyncSubAgent`` specs from ``subs`` into ``EvoAsyncSubAgentMiddleware``.
 
@@ -605,7 +614,7 @@ def _route_async_specs_through_evo_middleware(
 
     async_specs = [s for s in subs if "graph_id" in s]
     sync_subs = [s for s in subs if "graph_id" not in s]
-    expert_specs = build_expert_async_subagent_specs(cfg=cfg)
+    expert_specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
     async_specs.extend(expert_specs)
 
     if async_specs:
@@ -627,6 +636,7 @@ def _route_async_specs_through_evo_middleware(
             0,
             EvoAsyncSubAgentMiddleware(
                 async_subagents=async_specs,
+                workspace=workspace,
                 # The construction cfg, so resolve-on-miss specs the same
                 # langgraph_dev_port the construction-time specs used instead
                 # of re-reading config from disk at dispatch time.
@@ -642,26 +652,34 @@ def _route_async_specs_through_evo_middleware(
 
 
 def _build_base_kwargs(
-    base_backend, base_middleware, *, cfg=None, chat_model=None, workspace_dir=None
+    base_backend,
+    base_middleware,
+    *,
+    workspace: Workspace,
+    work_dir: str | Path | None = None,
+    cfg=None,
+    chat_model=None,
 ):
     """Build agent kwargs *without* MCP (fast, no subprocess spawning)."""
-    from .tools import skill_manager, tavily_search, think_tool
+    from .tools import make_skill_manager_tool, tavily_search, think_tool
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
+    work_dir = work_dir if work_dir is not None else workspace.root
     tool_registry = {"think_tool": think_tool}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
-    base_tools = [think_tool, skill_manager]
+    base_tools = [think_tool, make_skill_manager_tool(workspace, work_dir=work_dir)]
 
     subs = load_subagents(
         SUBAGENTS_CONFIG,
     )
-    _fold_expert_subagents(subs, tool_registry)
+    _fold_expert_subagents(subs, tool_registry, workspace)
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs,
-        workspace_dir=workspace_dir,
+        workspace=workspace,
+        work_dir=work_dir,
         cfg=cfg,
         chat_model=chat_model,
         backend=base_backend,
@@ -674,7 +692,9 @@ def _build_base_kwargs(
     # Route AsyncSubAgent specs (both standard and expert) through
     # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
     # replaces upstream's non-parameterisable one.
-    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
+    subs = _route_async_specs_through_evo_middleware(
+        subs, base_middleware, workspace=workspace, cfg=cfg
+    )
     return {
         "name": "EvoScientist",
         "model": chat_model if chat_model is not None else _ensure_chat_model(),
@@ -682,7 +702,7 @@ def _build_base_kwargs(
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": _configured_system_prompt(cfg),
+        "system_prompt": _configured_system_prompt(cfg, work_dir),
         "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
@@ -691,10 +711,11 @@ def load_mcp_and_build_kwargs(
     base_backend,
     base_middleware,
     *,
+    workspace: Workspace,
+    work_dir: str | Path | None = None,
     on_mcp_progress=None,
     cfg=None,
     chat_model=None,
-    workspace_dir=None,
     runtime: "AsyncRuntime | None" = None,
 ):
     """Load MCP tools (cached by config) and build agent kwargs.
@@ -710,10 +731,11 @@ def load_mcp_and_build_kwargs(
         chat_model: Explicit chat model to bind instead of
             ``_ensure_chat_model()`` (which would write module globals).
     """
-    from .tools import skill_manager, tavily_search, think_tool
+    from .tools import make_skill_manager_tool, tavily_search, think_tool
     from .utils import load_subagents
 
     cfg = cfg if cfg is not None else _ensure_config()
+    work_dir = work_dir if work_dir is not None else workspace.root
     mcp_by_agent = _load_mcp_tools_cached(
         on_progress=on_mcp_progress,
         runtime=runtime,
@@ -722,15 +744,16 @@ def load_mcp_and_build_kwargs(
         return _build_base_kwargs(
             base_backend,
             base_middleware,
+            workspace=workspace,
+            work_dir=work_dir,
             cfg=cfg,
             chat_model=chat_model,
-            workspace_dir=workspace_dir,
         )
 
     tool_registry = {"think_tool": think_tool}
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
-    base_tools = [think_tool, skill_manager]
+    base_tools = [think_tool, make_skill_manager_tool(workspace, work_dir=work_dir)]
 
     # Fresh tool registry — start from base tools + MCP tools
     registry = dict(tool_registry)
@@ -743,12 +766,13 @@ def load_mcp_and_build_kwargs(
     subs = load_subagents(
         SUBAGENTS_CONFIG,
     )
-    _fold_expert_subagents(subs, registry)
+    _fold_expert_subagents(subs, registry, workspace)
 
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs,
-        workspace_dir=workspace_dir,
+        workspace=workspace,
+        work_dir=work_dir,
         cfg=cfg,
         chat_model=chat_model,
         backend=base_backend,
@@ -769,7 +793,9 @@ def load_mcp_and_build_kwargs(
     # Mirror the base path: route AsyncSubAgent specs through
     # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
     # is the one composed into the main agent.
-    subs = _route_async_specs_through_evo_middleware(subs, base_middleware, cfg=cfg)
+    subs = _route_async_specs_through_evo_middleware(
+        subs, base_middleware, workspace=workspace, cfg=cfg
+    )
 
     return {
         "name": "EvoScientist",
@@ -778,7 +804,7 @@ def load_mcp_and_build_kwargs(
         "backend": base_backend,
         "subagents": subs,
         "middleware": base_middleware,
-        "system_prompt": _configured_system_prompt(cfg),
+        "system_prompt": _configured_system_prompt(cfg, work_dir),
         "skills": list(DEFAULT_SKILL_SOURCES),
     }
 
@@ -789,9 +815,17 @@ def load_mcp_and_build_kwargs(
 
 
 def _get_default_backend(
-    *, guard_dangerous: bool | None = None, refuse_delete: bool = False
+    workspace: Workspace,
+    *,
+    work_dir: str | Path | None = None,
+    guard_dangerous: bool | None = None,
+    refuse_delete: bool = False,
 ):
-    """Build the default composite backend from current paths.
+    """Build the default composite backend for ``workspace``.
+
+    The sandbox is rooted at ``work_dir`` (the folder the agent works in),
+    which defaults to the workspace root; ``/skills/`` merges the
+    workspace, global and built-in skill tiers.
 
     ``guard_dangerous`` — when ``None`` (default) the backend derives the guard
     per call from the run's HITL-suppression state (``is_hitl_suppressed``): an
@@ -818,25 +852,24 @@ def _get_default_backend(
         # Not baked from cfg.auto_approve: the backend derives it per call from
         # the run's HITL-suppression state so a mid-session flip can't go stale.
         guard_dangerous = False
-    workspace_dir = str(_paths_mod.WORKSPACE_ROOT)
-    set_active_workspace(workspace_dir)
+    root_dir = str(work_dir if work_dir is not None else workspace.root)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
-    user_skills_dir = str(_paths_mod.USER_SKILLS_DIR)
     global_skills_dir = str(_paths_mod.GLOBAL_SKILLS_DIR)
 
     # Dangerous mode opens the workspace (`/`) route to the real filesystem;
     # the /skills/ and /memories/ routes stay confined (virtual_mode=True).
     ws_backend = CustomSandboxBackend(
-        root_dir=workspace_dir,
+        root_dir=root_dir,
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
         guard_dangerous=guard_dangerous,
         refuse_delete=refuse_delete,
         env=research_env_overrides(),
+        skills_dir=workspace.skills_dir,
     )
     sk_backend = MergedSkillsBackend(
-        primary_dir=user_skills_dir,
+        primary_dir=str(workspace.skills_dir),
         global_dir=global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
@@ -855,8 +888,9 @@ def _get_default_backend(
 
 def _get_default_middleware(
     *,
+    workspace: Workspace,
+    work_dir: str | Path | None = None,
     for_async_subagent: bool = False,
-    workspace_dir: str | Path | None = None,
     cfg=None,
     chat_model=None,
     backend=None,
@@ -866,6 +900,9 @@ def _get_default_middleware(
     """Build the default middleware list.
 
     Args:
+        workspace: The workspace the agent serves (skills, experts).
+        work_dir: The folder the agent works in: background processes start
+            there and memory is keyed to it. Defaults to the workspace root.
         for_async_subagent: When True, omit middleware that would deadlock a
             deployed async sub-agent. Specifically: ``AskUserMiddleware`` uses
             ``interrupt()`` to pause the graph waiting for a user reply, but
@@ -936,6 +973,7 @@ def _get_default_middleware(
     seed_fallback_chain(cfg)
     model = chat_model if chat_model is not None else _ensure_chat_model()
     memory_dir = str(_paths_mod.MEMORIES_DIR)
+    work_dir = work_dir if work_dir is not None else workspace.root
     source_type = (
         MemorySourceType.SUBAGENT if for_async_subagent else MemorySourceType.TURN
     )
@@ -952,7 +990,7 @@ def _get_default_middleware(
     # alternatives instead of re-overriding every retry to the same model.
     memory_middleware = create_memory_middleware(
         memory_dir,
-        workspace_dir=workspace_dir,
+        workspace_dir=work_dir,
         source_type=source_type,
         source_agent=memory_source_agent,
         enable_profile_memory=memory_controls.profile_enabled,
@@ -1016,7 +1054,7 @@ def _get_default_middleware(
         mw.append(
             create_memory_lifecycle_middleware(
                 memory_dir,
-                workspace_dir=workspace_dir,
+                workspace_dir=work_dir,
                 project_id=memory_middleware.project_id,
                 source_type=source_type,
                 source_agent=memory_source_agent,
@@ -1036,7 +1074,7 @@ def _get_default_middleware(
     # Main agent only: a running expert graph must not inject the expert prompt
     # into its own baked-in persona.
     if not for_async_subagent:
-        mw.insert(0, create_active_team_middleware())
+        mw.insert(0, create_active_team_middleware(workspace))
 
     # Background-process tools (run_in_background / check_process / stop_process /
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
@@ -1052,6 +1090,8 @@ def _get_default_middleware(
         # HITL-suppression state, mirroring execute().
         mw.append(
             BackgroundExecutionMiddleware(
+                work_dir=work_dir,
+                skills_dir=workspace.skills_dir,
                 dangerous=cfg.dangerous_mode,
                 guard_dangerous=False,
             )
@@ -1127,14 +1167,11 @@ def _get_default_agent():
         from deepagents import create_deep_agent
 
         cfg = _ensure_config()
-        be = _get_default_backend()
-        mw = _get_default_middleware(backend=be)
+        workspace = process_workspace()
+        be = _get_default_backend(workspace)
+        mw = _get_default_middleware(workspace=workspace, backend=be)
 
-        kwargs = load_mcp_and_build_kwargs(
-            be,
-            mw,
-            workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
-        )
+        kwargs = load_mcp_and_build_kwargs(be, mw, workspace=workspace)
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
@@ -1150,9 +1187,9 @@ def __getattr__(name: str):
     if name == "chat_model":
         return _ensure_chat_model()
     if name == "SYSTEM_PROMPT":
-        return _configured_system_prompt(_ensure_config())
+        return _configured_system_prompt(_ensure_config(), process_workspace().root)
     if name == "backend":
-        return _get_default_backend()
+        return _get_default_backend(process_workspace())
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -1167,15 +1204,15 @@ def create_cli_agent(
     config=None,
     chat_model=None,
     *,
+    workspace: Workspace,
     on_mcp_progress=None,
     events: "MiddlewareEventSink | None" = None,
     runtime: "AsyncRuntime | None" = None,
 ) -> "CompiledStateGraph":
     """Create agent with checkpointer for CLI multi-turn support.
 
-    A fresh backend is constructed on every call using the current
-    ``paths.WORKSPACE_ROOT`` (or the explicit *workspace_dir*), so
-    runtime ``set_workspace_root()`` changes are always respected.
+    A fresh backend is constructed on every call from *workspace* and
+    *workspace_dir*, so the agent always reflects the session's folders.
 
     **Pure path:** when *both* ``config`` and ``chat_model`` are explicit, this
     writes none of the cached config/model module globals (``_config``,
@@ -1186,8 +1223,11 @@ def create_cli_agent(
     dev, notebooks, and CLI startup, which pass ``config=`` only).
 
     Args:
-        workspace_dir: Per-session workspace directory. If ``None``,
-            defaults to the current ``paths.WORKSPACE_ROOT``.
+        workspace_dir: The folder the agent works in (the session's
+            ``--mode=run`` folder, or the workspace root). If ``None``,
+            defaults to ``workspace.root``.
+        workspace: The workspace whose skills, experts and memory the
+            agent uses.
         checkpointer: Optional LangGraph checkpointer. If ``None``,
             falls back to ``InMemorySaver`` (non-persistent).
         config: Optional pre-loaded ``EvoScientistConfig``.  If ``None``,
@@ -1199,8 +1239,6 @@ def create_cli_agent(
         runtime: Optional application-scoped runtime for synchronous MCP tool
             discovery. Direct callers get a scoped runtime when omitted.
     """
-    import os as _os
-
     from deepagents import create_deep_agent
     from deepagents.backends import CompositeBackend
 
@@ -1234,25 +1272,12 @@ def create_cli_agent(
 
         checkpointer = InMemorySaver()
 
-    # When no explicit workspace_dir is provided, apply config.default_workdir
-    # as a fallback.  This covers direct callers (notebooks, iMessage server)
-    # that never call set_workspace_root() themselves.  CLI callers always
-    # pass workspace_dir explicitly, so their --workdir is never overwritten.
     if workspace_dir is None:
-        if cfg.default_workdir:
-            set_workspace_root(
-                _os.path.abspath(_os.path.expanduser(cfg.default_workdir))
-            )
-        workspace_dir = str(_paths.WORKSPACE_ROOT)
+        workspace_dir = str(workspace.root)
 
-    # Read paths dynamically so runtime set_workspace_root() changes are picked up
     _mem_dir = str(_paths.MEMORIES_DIR)
-    _usr_skills_dir = str(_paths.USER_SKILLS_DIR)
     _global_skills_dir = str(_paths.GLOBAL_SKILLS_DIR)
 
-    # Always construct fresh backends from current paths (avoids stale
-    # module-level backend when workspace root changed at runtime).
-    set_active_workspace(workspace_dir)
     ws_backend = CustomSandboxBackend(
         root_dir=workspace_dir,
         virtual_mode=True,
@@ -1262,9 +1287,10 @@ def create_cli_agent(
         # CustomSandboxBackend._effective_guard_dangerous), not baked here.
         guard_dangerous=False,
         env=research_env_overrides(),
+        skills_dir=workspace.skills_dir,
     )
     sk_backend = MergedSkillsBackend(
-        primary_dir=_usr_skills_dir,
+        primary_dir=str(workspace.skills_dir),
         global_dir=_global_skills_dir,
         secondary_dir=SKILLS_DIR,
     )
@@ -1283,7 +1309,8 @@ def create_cli_agent(
     # Delegate middleware construction to the single source of truth so the
     # CLI agent never drifts from the default chain.
     mw: list[AgentMiddleware] = _get_default_middleware(
-        workspace_dir=workspace_dir,
+        workspace=workspace,
+        work_dir=workspace_dir,
         cfg=cfg,
         chat_model=chat_model,
         backend=be,
@@ -1294,10 +1321,11 @@ def create_cli_agent(
     kwargs = load_mcp_and_build_kwargs(
         be,
         mw,
+        workspace=workspace,
+        work_dir=workspace_dir,
         on_mcp_progress=on_mcp_progress,
         cfg=cfg,
         chat_model=chat_model,
-        workspace_dir=workspace_dir,
         runtime=runtime,
     )
 

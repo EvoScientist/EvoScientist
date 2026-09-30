@@ -15,6 +15,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.console import Group
@@ -39,7 +40,7 @@ from ..gateway import (
     RuntimeGateways,
     create_runtime_gateways_for_config,
 )
-from ..paths import DATA_DIR
+from ..paths import DATA_DIR, Workspace
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
@@ -124,6 +125,7 @@ async def _auto_start_channel_in_worker(
     thread_id: str,
     config: Any,
     *,
+    media_dir: Path,
     send_thinking: bool,
     runtime: Any,
     stop_requested: threading.Event,
@@ -136,6 +138,7 @@ async def _auto_start_channel_in_worker(
                 agent,
                 thread_id,
                 config,
+                media_dir=media_dir,
                 send_thinking=send_thinking,
                 runtime=runtime,
             )
@@ -516,8 +519,13 @@ def run_textual_interactive(
     create_session_workspace: Callable[[str | None], str],
     config: Any | None = None,
     async_runtime: AsyncRuntime | None = None,
+    workspace: Workspace,
 ) -> None:
-    """Run full-screen Textual interactive chat loop."""
+    """Run full-screen Textual interactive chat loop.
+
+    ``workspace`` is the session's workspace (skills, experts, run folders);
+    ``workspace_dir`` is the folder the agent works in.
+    """
     if config is None:
         from ..config import get_effective_config
 
@@ -1164,6 +1172,7 @@ def run_textual_interactive(
                         self._agent_loader.agent,
                         self._conversation_tid,
                         cfg,
+                        media_dir=workspace.media_dir,
                         send_thinking=self._channel_send_thinking,
                         runtime=self._channel_runtime,
                         stop_requested=self._channel_start_stop,
@@ -2001,6 +2010,7 @@ def run_textual_interactive(
                                     tool_name,
                                     _media_sent,
                                     on_media_cb,
+                                    self._workspace_dir,
                                 )
 
                         # -- Remove loading spinner on first content event --
@@ -2901,6 +2911,7 @@ def run_textual_interactive(
                     agent=None,  # resolved via await_agent_ready on demand
                     thread_id=self._conversation_tid,
                     workspace_dir=self._workspace_dir,
+                    workspace=workspace,
                     checkpointer=self._checkpointer,
                     append_system=self._append_system,
                     start_new_session_cb=self.start_new_session,
@@ -3030,7 +3041,7 @@ def run_textual_interactive(
             if text.startswith("/"):
                 from ..commands._completion_engine import compute_completions
 
-                result = compute_completions(text, len(text))
+                result = compute_completions(text, len(text), workspace=workspace)
                 if result.kind == "empty" or not result.candidates:
                     self._hide_completions()
                     return
@@ -3299,7 +3310,7 @@ def run_textual_interactive(
                 if text.startswith("/"):
                     from ..commands._completion_engine import compute_completions
 
-                    result = compute_completions(text, len(text))
+                    result = compute_completions(text, len(text), workspace=workspace)
                     if result.kind != "empty" and result.candidates:
                         self._comp_items = result.candidates
                         self._comp_index = -1
@@ -3450,6 +3461,7 @@ def run_textual_interactive(
                     thread_id=self._conversation_tid,
                     ui=self,
                     workspace_dir=self._workspace_dir,
+                    workspace=workspace,
                     checkpointer=self._checkpointer,
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
@@ -3757,7 +3769,9 @@ def run_textual_interactive(
         def _append_pending_skill_proposals_notice(self) -> None:
             from .commands import _pending_skill_proposals_message
 
-            message = _pending_skill_proposals_message(self._workspace_dir)
+            message = _pending_skill_proposals_message(
+                self._workspace_dir or workspace.root
+            )
             if message:
                 self._append_system(message, style="yellow")
 
@@ -3845,8 +3859,13 @@ def run_textual_interactive(
         tool_name: str,
         media_sent: set[str],
         send_fn: Any,
+        work_dir: str | None,
     ) -> None:
-        """Check tool calls for media files and forward to channel."""
+        """Check tool calls for media files and forward to channel.
+
+        Virtual paths resolve against ``work_dir``, the folder the agent
+        works in.
+        """
         import os
 
         from ..paths import resolve_virtual_path
@@ -3860,7 +3879,9 @@ def run_textual_interactive(
                 if p and p not in media_sent:
                     ext = os.path.splitext(p)[1].lower()
                     if ext in _MEDIA_EXTENSIONS:
-                        real_path = str(resolve_virtual_path(p))
+                        real_path = (
+                            str(resolve_virtual_path(work_dir, p)) if work_dir else p
+                        )
                         if not os.path.isfile(real_path) and os.path.isfile(p):
                             real_path = p
                         if os.path.isfile(real_path):

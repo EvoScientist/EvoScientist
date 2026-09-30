@@ -37,16 +37,14 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         self,
         *,
         memory_dir: str | Path,
-        workspace_dir: str | Path | None = None,
+        workspace_dir: str | Path,
         project_id: str,
         source_type: MemorySourceType,
         source_agent: str,
         memory_scheduler: MemoryScheduler | None = None,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
-        self._workspace_dir = Path(
-            _paths.WORKSPACE_ROOT if workspace_dir is None else workspace_dir
-        ).expanduser()
+        self._workspace_dir = Path(workspace_dir).expanduser()
         self._project_id = project_id
         self._source_type = source_type
         self._source_agent = source_agent
@@ -120,7 +118,7 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
 def create_memory_lifecycle_middleware(
     memory_dir: str | None = None,
     *,
-    workspace_dir: str | Path | None = None,
+    workspace_dir: str | Path,
     project_id: str,
     source_type: MemorySourceType,
     source_agent: str,

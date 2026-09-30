@@ -408,7 +408,7 @@ class TestPendingReplyRegistry:
 
 
 class TestConsumerUnrecognizedRefeed:
-    async def test_unrecognized_reply_rejects_and_refeeds(self, monkeypatch):
+    async def test_unrecognized_reply_rejects_and_refeeds(self, monkeypatch, tmp_path):
         from unittest.mock import MagicMock
 
         from EvoScientist.channels.bus.events import (
@@ -423,7 +423,7 @@ class TestConsumerUnrecognizedRefeed:
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
 
         stream_calls = 0

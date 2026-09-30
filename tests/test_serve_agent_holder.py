@@ -29,6 +29,7 @@ from EvoScientist.cli.commands import (
 from EvoScientist.commands.base import ChannelRuntime
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.gateway import RuntimeGateways, ThreadStore
+from EvoScientist.paths import Workspace
 from EvoScientist.runtime import AsyncRuntime
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
@@ -64,6 +65,7 @@ def _runtime_state(
     runtime_gateways: RuntimeGateways | None = None,
     async_runtime: AsyncRuntime | None = None,
     gateway_backend: str | None = None,
+    workspace: Workspace | None = None,
 ) -> ServeRuntimeState:
     store = thread_store or _thread_store()
     return ServeRuntimeState(
@@ -73,6 +75,7 @@ def _runtime_state(
         config=config,
         runtime_gateways=runtime_gateways or _runtime_gateways(store),
         async_runtime=async_runtime or MagicMock(spec=AsyncRuntime),
+        workspace=workspace or Workspace("/startup-ws"),
         gateway_backend=gateway_backend,
     )
 
@@ -226,6 +229,7 @@ async def test_hook_updates_workspace_dir_on_resume():
     )
     load_agent.assert_called_once_with(
         workspace_dir="/restored-ws",
+        workspace=state.workspace,
         config=cfg,
         runtime=state.async_runtime,
     )
@@ -393,6 +397,7 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
     sync_server.assert_awaited_once_with(cfg, workspace_dir="/new-ws", backend=None)
     load_agent.assert_called_once_with(
         workspace_dir="/new-ws",
+        workspace=state.workspace,
         config=cfg,
         runtime=state.async_runtime,
     )
@@ -497,17 +502,16 @@ async def test_serve_resume_callback_preserves_state_when_sync_fails():
             "EvoScientist.cli.commands._load_agent",
             return_value=loaded_but_not_adopted,
         ) as load_agent,
-        patch("EvoScientist.cli.commands.set_active_workspace") as set_active,
         pytest.raises(RuntimeError, match="workspace conflict"),
     ):
         await cb("new-tid", "/new-ws")
 
     load_agent.assert_called_once_with(
         workspace_dir="/new-ws",
+        workspace=state.workspace,
         config=cfg,
         runtime=state.async_runtime,
     )
-    set_active.assert_called_once_with("/old-ws")
     assert state.agent is old_agent
     assert state.resume_warning_thread_id is None
     assert state.thread_id == "old-tid"
@@ -534,7 +538,6 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
             "EvoScientist.cli.commands._load_agent",
             side_effect=RuntimeError("load failed"),
         ) as load_agent,
-        patch("EvoScientist.cli.commands.set_active_workspace") as set_active,
         patch(
             "EvoScientist.cli.commands._sync_background_agent_server_workspace",
             new=AsyncMock(),
@@ -545,10 +548,10 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
 
     load_agent.assert_called_once_with(
         workspace_dir="/new-ws",
+        workspace=state.workspace,
         config=cfg,
         runtime=state.async_runtime,
     )
-    set_active.assert_called_once_with("/old-ws")
     sync_server.assert_not_awaited()
     assert state.resume_warning_thread_id is None
     assert state.agent is old_agent

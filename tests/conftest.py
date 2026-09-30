@@ -85,6 +85,16 @@ def tmp_workspace(tmp_path):
 
 
 @pytest.fixture
+def workspace(tmp_path):
+    """A ``Workspace`` rooted at a fresh temporary folder."""
+    from EvoScientist.paths import Workspace
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    return Workspace(root)
+
+
+@pytest.fixture
 def runtime_paths(tmp_path, monkeypatch):
     """Isolate ``langgraph_dev.manager.RUNTIME`` under a temp directory.
 

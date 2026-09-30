@@ -27,9 +27,11 @@ from ..base import Argument, Command, CommandContext, SubCommand
 from ..manager import manager
 
 if TYPE_CHECKING:
+    from ...paths import Workspace
     from ...tools.skills_manager import SkillInfo
 
-_dispatchable_experts_cache: list[SkillInfo] | None = None
+# Dispatchable experts per workspace, keyed by ``Workspace.key``.
+_dispatchable_experts_cache: dict[str, list[SkillInfo]] = {}
 
 
 def invalidate_experts_cache() -> None:
@@ -39,8 +41,7 @@ def invalidate_experts_cache() -> None:
     freshly installed expert shows up in the /expert popup on the next
     keystroke.
     """
-    global _dispatchable_experts_cache
-    _dispatchable_experts_cache = None
+    _dispatchable_experts_cache.clear()
 
 
 def _subscribe_cache_invalidation() -> None:
@@ -61,7 +62,7 @@ def _subscribe_cache_invalidation() -> None:
 _subscribe_cache_invalidation()
 
 
-def _dispatchable_experts() -> list[SkillInfo]:
+def _dispatchable_experts(workspace: Workspace) -> list[SkillInfo]:
     """Cached list of experts that /expert can safely invite.
 
     Filters ``list_expert_skills`` down to those that pass the same
@@ -70,15 +71,16 @@ def _dispatchable_experts() -> list[SkillInfo]:
     the /expert popup and invite-accept path only ever surface names
     that will actually reach ``ActiveTeamMiddleware``'s cue.
     """
-    global _dispatchable_experts_cache
-    if _dispatchable_experts_cache is None:
+    cached = _dispatchable_experts_cache.get(workspace.key)
+    if cached is None:
         try:
             from ...subagents.expert_container import list_dispatchable_experts
 
-            _dispatchable_experts_cache = list_dispatchable_experts(include_system=True)
+            cached = list_dispatchable_experts(workspace=workspace, include_system=True)
         except Exception:
             return []
-    return _dispatchable_experts_cache
+        _dispatchable_experts_cache[workspace.key] = cached
+    return cached
 
 
 class ExpertsCommand(Command):
@@ -91,7 +93,9 @@ class ExpertsCommand(Command):
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...tools.skills_manager import list_expert_skills
 
-        experts = list_expert_skills(include_system=True)
+        experts = list_expert_skills(
+            include_system=True, workspace=ctx.require_workspace()
+        )
         active = _current_active_teams(ctx)
 
         if not experts:
@@ -145,18 +149,22 @@ class ExpertCommand(Command):
         SubCommand("clear", "Dismiss all invited experts"),
     ]
 
-    def _get_expert_candidates(self) -> list[tuple[str, str]]:
-        return [(s.name, s.role or s.description) for s in _dispatchable_experts()]
+    def _get_expert_candidates(self, workspace: Workspace) -> list[tuple[str, str]]:
+        return [
+            (s.name, s.role or s.description) for s in _dispatchable_experts(workspace)
+        ]
 
-    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
-        """Complete expert names + the ``clear`` subcommand."""
+    def get_completions(
+        self, tokens: list[str], *, workspace: Workspace | None = None
+    ) -> list[tuple[str, str]]:
+        """Complete expert names (for ``workspace``) + the ``clear`` subcommand."""
         # /expert takes a single positional arg; anything past it (including a
         # trailing space that turns tokens into ["name", ""]) has nothing to offer.
         if len(tokens) > 1:
             return []
         prefix = tokens[0].lower() if tokens else ""
         candidates = [
-            *self._get_expert_candidates(),
+            *(self._get_expert_candidates(workspace) if workspace is not None else []),
             ("clear", "Dismiss all invited experts"),
         ]
         matches = [
@@ -201,13 +209,15 @@ class ExpertCommand(Command):
 
         # Completion matches case-insensitively; honour the same here by
         # resolving a case-variant to the on-disk name before membership.
-        by_lower = {s.name.lower(): s.name for s in _dispatchable_experts()}
+        workspace = ctx.require_workspace()
+        by_lower = {s.name.lower(): s.name for s in _dispatchable_experts(workspace)}
         canonical = by_lower.get(target.lower())
         if canonical is None:
             from ...tools.skills_manager import list_expert_skills
 
             installed = {
-                s.name.lower() for s in list_expert_skills(include_system=True)
+                s.name.lower()
+                for s in list_expert_skills(include_system=True, workspace=workspace)
             }
             if target.lower() not in installed:
                 ctx.ui.append_system(

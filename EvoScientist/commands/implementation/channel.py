@@ -149,6 +149,7 @@ class ChannelCommand(Command):
                 config,
                 ctx.agent,
                 ctx.thread_id,
+                media_dir=ctx.require_workspace().media_dir,
                 send_thinking=send_thinking,
             )
             if ctx.channel_runtime is not None:

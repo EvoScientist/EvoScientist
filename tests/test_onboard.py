@@ -1041,7 +1041,7 @@ class TestSetupImessage:
 
 
 class TestStepSkills:
-    def test_returns_empty_when_none_selected(self):
+    def test_returns_empty_when_none_selected(self, workspace):
         """Test skills step returns empty list when user selects nothing."""
         from EvoScientist.config.onboard.steps import _step_skills
 
@@ -1055,11 +1055,11 @@ class TestStepSkills:
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
             mock_q.checkbox.return_value.ask.return_value = []
-            result = _step_skills()
+            result = _step_skills(workspace)
 
         assert result == []
 
-    def test_installs_selected_skills(self):
+    def test_installs_selected_skills(self, workspace):
         """Test skills step installs selected skills and returns sources."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
@@ -1072,12 +1072,12 @@ class TestStepSkills:
         ):
             mock_q.checkbox.return_value.ask.return_value = [source]
             mock_install.return_value = {"success": True, "name": "test"}
-            result = _step_skills()
+            result = _step_skills(workspace)
 
         assert result == [source]
-        mock_install.assert_called_once_with(source)
+        mock_install.assert_called_once_with(source, workspace=workspace)
 
-    def test_handles_install_failure(self):
+    def test_handles_install_failure(self, workspace):
         """Test skills step handles installation errors gracefully."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
@@ -1090,20 +1090,20 @@ class TestStepSkills:
         ):
             mock_q.checkbox.return_value.ask.return_value = [source]
             mock_install.side_effect = Exception("network error")
-            result = _step_skills()
+            result = _step_skills(workspace)
 
         assert result == []
 
-    def test_raises_keyboard_interrupt_on_cancel(self):
+    def test_raises_keyboard_interrupt_on_cancel(self, workspace):
         """Test skills step raises KeyboardInterrupt on cancel."""
         from EvoScientist.config.onboard.steps import _step_skills
 
         with patch("EvoScientist.config.onboard.style.questionary") as mock_q:
             mock_q.checkbox.return_value.ask.return_value = None
             with pytest.raises(KeyboardInterrupt):
-                _step_skills()
+                _step_skills(workspace)
 
-    def test_detects_pack_via_manifest(self, tmp_path):
+    def test_detects_pack_via_manifest(self, tmp_path, workspace):
         """A pack source recorded in the manifest is detected as installed
         even when none of the unpacked child dir names match the source."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
@@ -1123,8 +1123,7 @@ class TestStepSkills:
             f"evo-memory:\n  source: {pack_source}\n"
             f"research-survey:\n  source: {pack_source}\n"
         )
-        empty_user = tmp_path / "user"
-        empty_user.mkdir()
+        workspace.skills_dir.mkdir()
 
         captured: list = []
 
@@ -1134,7 +1133,6 @@ class TestStepSkills:
 
         with (
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
             patch(
                 "EvoScientist.config.onboard.steps._checkbox_ask", side_effect=_capture
             ),
@@ -1143,7 +1141,7 @@ class TestStepSkills:
             # reach the real _ensure_npx — see test_returns_empty_when_none_selected.
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
-            _step_skills()
+            _step_skills(workspace)
 
         pack_choice = next(c for c in captured if c.value == pack_source)
         # Detection signal: an "installed" hint appears in the choice title,
@@ -1158,7 +1156,7 @@ class TestStepSkills:
             "Installed packs must remain selectable so users can re-sync them"
         )
 
-    def test_surfaces_update_available_when_upstream_moved(self, tmp_path):
+    def test_surfaces_update_available_when_upstream_moved(self, tmp_path, workspace):
         """When a pack records an install-time commit and `git ls-remote`
         reports a different SHA, the choice label should call out the update."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
@@ -1174,8 +1172,7 @@ class TestStepSkills:
         (global_dir / ".installed.yaml").write_text(
             f"paper-writing:\n  source: {pack_source}\n  commit: aaa111\n"
         )
-        empty_user = tmp_path / "user"
-        empty_user.mkdir()
+        workspace.skills_dir.mkdir()
 
         captured: list = []
 
@@ -1185,7 +1182,6 @@ class TestStepSkills:
 
         with (
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
             # Upstream moved past the recorded commit.
             patch(
                 "EvoScientist.tools.skills_manager.resolve_remote_head",
@@ -1199,7 +1195,7 @@ class TestStepSkills:
             # reach the real _ensure_npx — see test_returns_empty_when_none_selected.
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
-            _step_skills()
+            _step_skills(workspace)
 
         pack_choice = next(c for c in captured if c.value == pack_source)
         title_text = "".join(seg[1] for seg in pack_choice.title)
@@ -1207,7 +1203,7 @@ class TestStepSkills:
             f"expected an 'update available' hint in the label, got: {title_text!r}"
         )
 
-    def test_no_update_hint_when_remote_check_fails(self, tmp_path):
+    def test_no_update_hint_when_remote_check_fails(self, tmp_path, workspace):
         """If `git ls-remote` returns None (offline, timeout, etc.), the label
         must fall back to plain 'installed' — never falsely claim 'update'."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
@@ -1222,8 +1218,7 @@ class TestStepSkills:
         (global_dir / ".installed.yaml").write_text(
             f"paper-writing:\n  source: {pack_source}\n  commit: aaa111\n"
         )
-        empty_user = tmp_path / "user"
-        empty_user.mkdir()
+        workspace.skills_dir.mkdir()
 
         captured: list = []
 
@@ -1233,7 +1228,6 @@ class TestStepSkills:
 
         with (
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
             patch(
                 "EvoScientist.tools.skills_manager.resolve_remote_head",
                 return_value=None,
@@ -1246,7 +1240,7 @@ class TestStepSkills:
             # reach the real _ensure_npx — see test_returns_empty_when_none_selected.
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
-            _step_skills()
+            _step_skills(workspace)
 
         pack_choice = next(c for c in captured if c.value == pack_source)
         title_text = "".join(seg[1] for seg in pack_choice.title)
