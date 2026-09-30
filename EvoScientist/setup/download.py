@@ -9,11 +9,12 @@ probes elsewhere, which bypass proxies.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import http.client
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from .protocol import StageError
@@ -33,25 +34,45 @@ _TIMEOUT = 120
 ProgressFn = Callable[[float], None]
 
 
+@contextlib.contextmanager
+def _local_io(dest: Path) -> Iterator[None]:
+    """Report a failed write to ``dest`` as ``install_failed``, not as a network error."""
+    try:
+        yield
+    except OSError as exc:
+        raise StageError("install_failed", f"Could not write {dest}: {exc}") from exc
+
+
 def download(url: str, dest: Path, progress: ProgressFn | None = None) -> str:
     """Stream ``url`` into ``dest`` and return the file's SHA-256 hex digest.
 
     ``progress`` receives the downloaded fraction when the server sends a
     ``Content-Length``. Network and HTTP errors raise
-    ``StageError("download_failed")``.
+    ``StageError("download_failed")``; a failed write to ``dest`` raises
+    ``StageError("install_failed")``.
     """
     digest = hashlib.sha256()
     try:
         with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
-            with open(dest, "wb") as fh:
+            with _local_io(dest):
+                fh = open(dest, "wb")
+            with fh:
                 while chunk := resp.read(_CHUNK):
-                    fh.write(chunk)
+                    with _local_io(dest):
+                        fh.write(chunk)
                     digest.update(chunk)
                     done += len(chunk)
                     if progress is not None and total:
                         progress(done / total)
+            # http.client's read(amt) returns b"" at an early end of stream
+            # instead of raising IncompleteRead.
+            if total and done != total:
+                raise StageError(
+                    "download_failed",
+                    f"Download of {url} ended after {done} of {total} bytes.",
+                )
     except _NETWORK_ERRORS as exc:
         raise StageError("download_failed", f"Download of {url} failed: {exc}") from exc
     return digest.hexdigest()

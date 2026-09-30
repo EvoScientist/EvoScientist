@@ -240,6 +240,34 @@ def test_http_client_errors_become_download_failed(tmp_path, monkeypatch, exc):
     assert ei.value.code == "download_failed"
 
 
+def test_download_that_ends_early_is_download_failed(tmp_path, monkeypatch):
+    from EvoScientist.setup import download as dl
+
+    def urlopen(url, timeout):
+        response = io.BytesIO(b"half")
+        response.headers = {"Content-Length": "8"}
+        return response
+
+    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
+    with pytest.raises(StageError) as ei:
+        dl.download("https://example.invalid/x", tmp_path / "x")
+    assert ei.value.code == "download_failed"
+
+
+def test_disk_error_while_downloading_is_install_failed(tmp_path, monkeypatch):
+    from EvoScientist.setup import download as dl
+
+    def urlopen(url, timeout):
+        response = io.BytesIO(b"data")
+        response.headers = {}
+        return response
+
+    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
+    with pytest.raises(StageError) as ei:
+        dl.download("https://example.invalid/x", tmp_path / "missing-dir" / "x")
+    assert ei.value.code == "install_failed"
+
+
 def test_system_node_20_or_newer_wins_without_download(env, monkeypatch):
     exe = _system_node(env, monkeypatch, (22, 11, 0))
     info = node.ensure_node("default")
