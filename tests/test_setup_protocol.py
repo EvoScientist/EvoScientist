@@ -137,7 +137,7 @@ def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
         "git", "Git", frozenset({"no-such-platform"}), lambda e, m: StageResult("", {})
     )
     monkeypatch.setattr(setup_pkg, "STAGES", (*setup_pkg.STAGES, other))
-    assert [s["id"] for s in manifest()["stages"]] == ["node"]
+    assert [s["id"] for s in manifest()["stages"]] == ["node", "research-env"]
 
 
 def test_json_emitter_writes_one_line_per_event(tmp_path):

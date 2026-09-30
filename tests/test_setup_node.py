@@ -313,7 +313,7 @@ def test_stage_reports_download_progress_lines(env, monkeypatch):
     monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(node, "download", dl.download)
     events: list[dict] = []
-    _message, detail = node.run_stage(events.append, "default")
+    detail = node.run_stage(events.append, "default").detail
     assert {(e["stage"], e["status"]) for e in events} == {("node", "running")}
     downloading = [
         e["progress"] for e in events if e["message"].startswith("Downloading")
