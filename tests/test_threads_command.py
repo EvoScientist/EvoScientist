@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from rich.table import Table
 
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(**overrides):
@@ -14,6 +14,7 @@ def _ctx(**overrides):
     ui.supports_interactive = overrides.pop("supports_interactive", True)
     store = overrides.pop("thread_store", FakeThreadStore())
     return CommandContext(
+        workspace=TEST_WORKSPACE,
         agent=None,
         thread_id=overrides.pop("thread_id", "tid-1"),
         ui=ui,

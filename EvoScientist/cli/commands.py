@@ -27,7 +27,7 @@ from ..gateway import (
     RunRequest,
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
-from ..paths import Workspace, ensure_dirs, start_workspace_path
+from ..paths import Workspace, ensure_dirs, reload_env_dirs, start_workspace_path
 from ..runtime import AsyncRuntime
 from ..stream.console import console
 from . import (
@@ -885,7 +885,7 @@ async def compact_conversation(
             "error", f"Compaction requires a working model configuration: {exc}"
         )
 
-    backend = _get_default_backend(workspace)
+    backend = _get_default_backend(workspace, work_dir=target.workspace_dir)
     context_window = _resolve_context_window(model)
 
     defaults = compute_summarization_defaults(model)
@@ -1650,6 +1650,7 @@ def serve(
     os.makedirs(ws_path, exist_ok=True)
     ws = str(ws_path)
     workspace = Workspace(ws_path)
+    reload_env_dirs()
     ensure_dirs()
 
     from ..config import GatewaySurface, resolve_gateway_backend
@@ -2510,6 +2511,8 @@ def _main_callback(
         workspace_dir = str(workspace_root)
         workspace_fixed = True
 
+    # The project .env was merged into os.environ by get_effective_config().
+    reload_env_dirs()
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
 

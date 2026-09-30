@@ -15,6 +15,7 @@ from EvoScientist.commands.implementation.experts import (
     invalidate_experts_cache,
 )
 from EvoScientist.paths import Workspace
+from tests.fakes import TEST_WORKSPACE
 
 
 @pytest.fixture(autouse=True)
@@ -236,7 +237,13 @@ class TestExpertToggle:
 
     async def test_no_channel_runtime_prints_warning(self):
         ui = _FakeUI()
-        ctx = CommandContext(agent=None, thread_id="t1", ui=ui, channel_runtime=None)
+        ctx = CommandContext(
+            workspace=TEST_WORKSPACE,
+            agent=None,
+            thread_id="t1",
+            ui=ui,
+            channel_runtime=None,
+        )
         await ExpertCommand().execute(ctx, args=["idea-brainstorm"])
         assert any("/expert requires a session runtime" in text for text, _ in ui.lines)
 

@@ -23,6 +23,7 @@ from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
 from EvoScientist.gateway.types import DEFAULT_GRAPH_ID
 from EvoScientist.stream import display as display_mod
 from tests.fakes import (
+    TEST_WORKSPACE,
     FakeGraphGateway,
     FakeLangGraphClient,
     FakeLangGraphThreadsClient,
@@ -330,6 +331,7 @@ async def test_resume_command_consumes_context_gateway():
         metadata={"workspace_dir": "/restored"},
     )
     ctx = CommandContext(
+        workspace=TEST_WORKSPACE,
         agent=None,
         thread_id="current",
         ui=ui,

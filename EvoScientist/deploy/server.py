@@ -97,12 +97,9 @@ def deploy(
     apply_config_to_env(config)
 
     # 2. Resolve workspace (CLI > config.default_workdir > cwd)
-    if workdir:
-        ws = os.path.abspath(os.path.expanduser(workdir))
-    elif config.default_workdir:
-        ws = os.path.abspath(os.path.expanduser(config.default_workdir))
-    else:
-        ws = os.getcwd()
+    from ..paths import start_workspace_path
+
+    ws = str(start_workspace_path(workdir, config.default_workdir))
     # Subprocess inherits this path via EVOSCIENTIST_WORKSPACE_DIR (set inside
     # start_langgraph_dev). Ensure the dir exists; do NOT mutate the parent
     # process's paths module state — the deploy parent has no in-process agent.

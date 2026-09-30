@@ -131,6 +131,29 @@ class TestProcessWorkspace:
         monkeypatch.chdir(tmp_path)
         assert process_workspace() == Workspace(tmp_path)
 
+    def test_read_once_per_process(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "first"))
+        first = process_workspace()
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "second"))
+        assert process_workspace() == first
+
+
+class TestReloadEnvDirs:
+    """An override merged into the environment after import (project .env)."""
+
+    def test_picks_up_a_late_memories_override(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_MEMORIES_DIR", str(tmp_path / "mem"))
+        paths.reload_env_dirs()
+        assert paths.MEMORIES_DIR == tmp_path / "mem"
+        assert paths.MEMORY_DIR == paths.MEMORIES_DIR
+
+    def test_falls_back_to_global_memories(self, monkeypatch):
+        monkeypatch.delenv("EVOSCIENTIST_MEMORIES_DIR", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
+        paths.reload_env_dirs()
+        assert paths.MEMORIES_DIR == paths.GLOBAL_MEMORIES_DIR
+
 
 class TestResolveVirtualPath:
     def test_absolute_virtual_path(self, tmp_path):

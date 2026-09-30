@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+from tests.fakes import TEST_WORKSPACE
+
 
 class TestExitCommand:
     async def test_execute_calls_force_quit(self):
@@ -10,6 +12,7 @@ class TestExitCommand:
 
         ui = MagicMock()
         ctx = CommandContext(
+            workspace=TEST_WORKSPACE,
             agent=None,
             thread_id="tid",
             ui=ui,

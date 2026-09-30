@@ -637,7 +637,7 @@ def approve_skill_proposal(
         else:
             existing_global = _find_installed_user_skill(
                 skill_name,
-                roots=[destination_root, Path(paths.GLOBAL_SKILLS_DIR)],
+                roots=[Path(paths.GLOBAL_SKILLS_DIR)],
             )
             if existing_global is None:
                 return {

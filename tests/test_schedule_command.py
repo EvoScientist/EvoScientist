@@ -2,12 +2,16 @@
 
 from unittest.mock import MagicMock, patch
 
+from tests.fakes import TEST_WORKSPACE
+
 
 def _ctx():
     from EvoScientist.commands.base import CommandContext
 
     ui = MagicMock()
-    return CommandContext(agent=None, thread_id="tid", ui=ui), ui
+    return CommandContext(
+        workspace=TEST_WORKSPACE, agent=None, thread_id="tid", ui=ui
+    ), ui
 
 
 async def test_list_when_backend_down():

@@ -20,7 +20,7 @@ class SkillsCommand(Command):
         from ...paths import GLOBAL_SKILLS_DIR
         from ...tools.skills_manager import list_skills
 
-        workspace = ctx.require_workspace()
+        workspace = ctx.workspace
         skills = list_skills(include_system=True, workspace=workspace)
         if not skills:
             ctx.ui.append_system("No skills available.", style="dim")
@@ -103,7 +103,7 @@ class InstallSkill(Command):
 
         from ...paths import GLOBAL_SKILLS_DIR
 
-        workspace = ctx.require_workspace()
+        workspace = ctx.workspace
         dest = workspace.skills_dir if local else GLOBAL_SKILLS_DIR
         ctx.ui.append_system(f"Installing skill from: {source}", style="dim")
         ctx.ui.append_system(
@@ -164,7 +164,7 @@ class InstallSkills(Command):
         from ...git_cli import GitNotFoundError
         from ...tools.skills_manager import fetch_remote_skill_index, install_skill
 
-        workspace = ctx.require_workspace()
+        workspace = ctx.workspace
 
         tag = args[0] if args else ""
         ctx.ui.append_system(
@@ -293,7 +293,7 @@ class UninstallSkill(Command):
             ctx.ui.append_system("Use /skills to see installed skills.", style="dim")
             return
 
-        result = uninstall_skill(name, workspace=ctx.require_workspace())
+        result = uninstall_skill(name, workspace=ctx.workspace)
         if result["success"]:
             ctx.ui.append_system(f"Uninstalled: {name}", style="green")
             ctx.ui.append_system("Reload with /new to apply.", style="dim")

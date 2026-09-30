@@ -50,7 +50,7 @@ class CompactCommand(Command):
                     local_graph=ctx.agent,
                     workspace_dir=ctx.workspace_dir,
                 ),
-                workspace=ctx.require_workspace(),
+                workspace=ctx.workspace,
                 input_tokens_hint=ctx.input_tokens_hint,
             )
         finally:

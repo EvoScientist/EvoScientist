@@ -55,23 +55,36 @@ def test_skill_manager_tool_is_bound_to_its_workspace(two_workspaces):
     assert "only-in-a" not in out_b
 
 
-def test_skill_manager_installs_local_skills_into_its_workspace(
-    two_workspaces, tmp_path
-):
-    from EvoScientist.tools import make_skill_manager_tool
+def test_local_install_goes_into_the_given_workspace(two_workspaces, tmp_path):
+    from EvoScientist.tools.skills_manager import install_skill
 
     a, b = two_workspaces
     source = tmp_path / "incoming"
     _write_skill(source, "fresh")
 
-    from EvoScientist.tools.skills_manager import install_skill
-
-    tool = make_skill_manager_tool(a)
     result = install_skill(str(source / "fresh"), global_install=False, workspace=a)
     assert result["success"], result
     assert (a.skills_dir / "fresh" / "SKILL.md").is_file()
     assert not (b.skills_dir / "fresh").exists()
-    assert "fresh" in tool.invoke({"action": "list"})
+
+
+def test_skill_manager_install_resolves_virtual_source_in_its_work_dir(
+    two_workspaces, tmp_path
+):
+    import EvoScientist.paths as paths
+    from EvoScientist.tools import make_skill_manager_tool
+
+    a, _ = two_workspaces
+    work_dir = a.runs_dir / "r1"
+    _write_skill(work_dir, "from-run")
+    tool = make_skill_manager_tool(a, work_dir=work_dir)
+
+    out = tool.invoke({"action": "install", "source": "/from-run"})
+
+    assert "Successfully installed skill: from-run" in out
+    # The tool installs into the global tier (patched to a temp folder).
+    assert (Path(paths.GLOBAL_SKILLS_DIR) / "from-run" / "SKILL.md").is_file()
+    assert "from-run" in tool.invoke({"action": "list"})
 
 
 def test_install_resolves_virtual_source_against_work_dir(two_workspaces, tmp_path):
@@ -126,3 +139,71 @@ def test_channel_without_media_folder_fails_loudly():
     channel = StubChannel()
     with pytest.raises(RuntimeError, match="no media folder"):
         channel._media_path("photo.jpg")
+
+
+def test_standalone_without_agent_does_not_load_config(tmp_path, monkeypatch):
+    """A headless channel with no agent reads no config (as before)."""
+    import EvoScientist.channels.standalone as standalone
+    import EvoScientist.config as config_mod
+
+    monkeypatch.delenv("EVOSCIENTIST_WORKSPACE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    def _no_config(*_a, **_k):
+        raise AssertionError("config must not be loaded without an agent")
+
+    captured = {}
+
+    async def _fake_main(*_args, workspace, **_kwargs):
+        captured["workspace"] = workspace
+
+    monkeypatch.setattr(config_mod, "get_effective_config", _no_config)
+    monkeypatch.setattr(standalone, "_async_main", _fake_main)
+
+    standalone.run_standalone(StubChannel(), object(), use_agent=False)
+
+    assert captured["workspace"] == Workspace(tmp_path)
+
+
+def test_compact_offloads_into_the_work_dir(two_workspaces, tmp_path, monkeypatch):
+    """/compact's history backend is rooted where the agent works."""
+    import EvoScientist.EvoScientist as evo
+
+    a, _ = two_workspaces
+    work_dir = a.runs_dir / "r1"
+    seen = {}
+
+    def _spy(workspace, *, work_dir=None, **_kwargs):
+        seen["workspace"] = workspace
+        seen["work_dir"] = work_dir
+        raise RuntimeError("stop after capturing")
+
+    monkeypatch.setattr(evo, "_get_default_backend", _spy)
+    monkeypatch.setattr(evo, "_ensure_chat_model", lambda: object())
+
+    import asyncio
+
+    from EvoScientist.cli.commands import compact_conversation
+    from EvoScientist.gateway import GraphTarget
+    from tests.fakes import FakeGraphGateway
+
+    gateway = FakeGraphGateway()
+
+    async def _state(*_a, **_k):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        return {"messages": [HumanMessage("hi"), AIMessage("hello")] * 20}
+
+    monkeypatch.setattr(gateway, "get_state_values", _state, raising=False)
+    try:
+        asyncio.run(
+            compact_conversation(
+                gateway,
+                "tid",
+                GraphTarget(workspace_dir=str(work_dir)),
+                workspace=a,
+            )
+        )
+    except RuntimeError:
+        pass
+    assert seen == {"workspace": a, "work_dir": str(work_dir)}

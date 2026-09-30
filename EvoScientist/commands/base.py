@@ -115,10 +115,9 @@ class CommandContext:
     agent: Any
     thread_id: str
     ui: CommandUI
+    # The session's workspace (skills, experts, AutoSkills).
+    workspace: Workspace
     workspace_dir: str | None = None
-    # The session's workspace (skills, experts, AutoSkills). Commands that
-    # need it call ``require_workspace``.
-    workspace: Workspace | None = None
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
@@ -128,12 +127,6 @@ class CommandContext:
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.
     input_tokens_hint: int | None = None
-
-    def require_workspace(self) -> Workspace:
-        """Return the session's workspace; fail loudly when none was supplied."""
-        if self.workspace is None:
-            raise RuntimeError("This command needs a workspace, but none was set.")
-        return self.workspace
 
 
 class Command(ABC):

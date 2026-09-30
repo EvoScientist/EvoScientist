@@ -203,9 +203,12 @@ def _ensure_standalone_dev_server(
     if backend != "langgraph_server":
         return
 
+    import os
+
     from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
     from ..paths import ensure_dirs
 
+    os.makedirs(workspace_dir, exist_ok=True)
     ensure_dirs()
     logger.info("Starting background agent server (langgraph dev)...")
     try:
@@ -237,29 +240,31 @@ def run_standalone(
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
     """
-    import os
-
-    from ..config import get_effective_config
-    from ..paths import start_workspace_path
-
-    # The workspace this headless channel serves: ``default_workdir``, else
-    # the current directory. Attachments land in its ``media`` folder.
-    ws_path = start_workspace_path(
-        default_workdir=get_effective_config().default_workdir
-    )
-    workspace = Workspace(ws_path)
+    from ..paths import process_workspace
 
     config = None
     backend = None
     if use_agent:
-        from ..config import GatewaySurface, resolve_gateway_backend
+        from ..config import (
+            GatewaySurface,
+            get_effective_config,
+            resolve_gateway_backend,
+        )
+        from ..paths import reload_env_dirs, start_workspace_path
 
         config = get_effective_config()
+        reload_env_dirs()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
-        os.makedirs(ws_path, exist_ok=True)
+        # The agent serves ``default_workdir``, else the current directory.
+        ws_path = start_workspace_path(default_workdir=config.default_workdir)
+        workspace = Workspace(ws_path)
         _ensure_standalone_dev_server(
             config, workspace_dir=str(ws_path), backend=backend
         )
+    else:
+        # Without an agent there is no config to read; attachments go to the
+        # process workspace's ``media`` folder.
+        workspace = process_workspace()
     asyncio.run(
         _async_main(
             channel,

@@ -226,7 +226,7 @@ class AutoSkillsCommand(Command):
             approve_skill_proposal,
             paths.MEMORIES_DIR,
             proposal_id,
-            skills_dir=ctx.require_workspace().skills_dir,
+            skills_dir=ctx.workspace.skills_dir,
             workspace_dir=workspace_dir,
         )
         if result.get("approved"):
@@ -424,7 +424,7 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:
-        return str(ctx.workspace_dir or ctx.require_workspace().root)
+        return str(ctx.workspace_dir or ctx.workspace.root)
 
     @staticmethod
     def _first_arg(args: list[str]) -> str | None:

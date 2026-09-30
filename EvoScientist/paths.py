@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
@@ -69,11 +70,14 @@ def start_workspace_path(
     return Path(os.getcwd())
 
 
+@functools.cache
 def process_workspace() -> Workspace:
     """The workspace of a process that was not given one explicitly.
 
     ``EVOSCIENTIST_WORKSPACE_DIR`` when set (the langgraph dev manager sets it
-    for the server subprocess), otherwise the current directory.
+    for the server subprocess), otherwise the current directory. Read once per
+    process, so every graph the server builds and every route it answers agree
+    on the workspace even if the environment changes later (a ``.env`` merge).
     """
     return Workspace(_env_path("EVOSCIENTIST_WORKSPACE_DIR") or Path.cwd())
 
@@ -123,14 +127,31 @@ GLOBAL_SKILLS_DIR: Path = _global_skills_dir()
 # Global memories: shared across all workspaces (~/.evoscientist/memories/)
 GLOBAL_MEMORIES_DIR: Path = _global_memories_dir()
 
+
 # Memories dir: global by default, overridable via env var.
 # Supports both new (EVOSCIENTIST_MEMORIES_DIR) and old (EVOSCIENTIST_MEMORY_DIR) env vars.
-MEMORIES_DIR: Path = (
-    _env_path("EVOSCIENTIST_MEMORIES_DIR")
-    or _env_path("EVOSCIENTIST_MEMORY_DIR")
-    or GLOBAL_MEMORIES_DIR
-)
+def _memories_dir_from_env() -> Path:
+    return (
+        _env_path("EVOSCIENTIST_MEMORIES_DIR")
+        or _env_path("EVOSCIENTIST_MEMORY_DIR")
+        or GLOBAL_MEMORIES_DIR
+    )
+
+
+MEMORIES_DIR: Path = _memories_dir_from_env()
 MEMORY_DIR = MEMORIES_DIR  # backward compat alias
+
+
+def reload_env_dirs() -> None:
+    """Re-read the memories-folder override from the environment.
+
+    ``paths`` is imported before ``get_effective_config()`` merges the
+    project ``.env`` into ``os.environ``, so entry points call this once
+    after loading their config to pick up an override set there.
+    """
+    global MEMORIES_DIR, MEMORY_DIR
+    MEMORIES_DIR = _memories_dir_from_env()
+    MEMORY_DIR = MEMORIES_DIR
 
 
 # DEPRECATED(0.1.0): remove this migration helper and its call site below.

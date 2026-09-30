@@ -84,6 +84,16 @@ def tmp_workspace(tmp_path):
     return str(ws)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_process_workspace():
+    """``process_workspace()`` is read once per process; tests change env/cwd."""
+    from EvoScientist.paths import process_workspace
+
+    process_workspace.cache_clear()
+    yield
+    process_workspace.cache_clear()
+
+
 @pytest.fixture
 def workspace(tmp_path):
     """A ``Workspace`` rooted at a fresh temporary folder."""

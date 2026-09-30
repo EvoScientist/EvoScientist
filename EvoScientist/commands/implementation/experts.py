@@ -93,9 +93,7 @@ class ExpertsCommand(Command):
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...tools.skills_manager import list_expert_skills
 
-        experts = list_expert_skills(
-            include_system=True, workspace=ctx.require_workspace()
-        )
+        experts = list_expert_skills(include_system=True, workspace=ctx.workspace)
         active = _current_active_teams(ctx)
 
         if not experts:
@@ -209,7 +207,7 @@ class ExpertCommand(Command):
 
         # Completion matches case-insensitively; honour the same here by
         # resolving a case-variant to the on-disk name before membership.
-        workspace = ctx.require_workspace()
+        workspace = ctx.workspace
         by_lower = {s.name.lower(): s.name for s in _dispatchable_experts(workspace)}
         canonical = by_lower.get(target.lower())
         if canonical is None:
