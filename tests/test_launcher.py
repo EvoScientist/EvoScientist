@@ -435,9 +435,9 @@ def test_npx_runner_preflight_installs_node_on_demand(monkeypatch):
     """No npx on PATH: preflight installs the private Node and activates it."""
     from EvoScientist.setup import node as setup_node
 
-    state = {"installed": False}
+    state = {"installed": False, "active": False}
     monkeypatch.setattr(
-        lm.shutil, "which", lambda _n: "/p/npx" if state["installed"] else None
+        lm.shutil, "which", lambda _n: "/p/npx" if state["active"] else None
     )
 
     def ensure(*_a, **kw):
@@ -446,9 +446,11 @@ def test_npx_runner_preflight_installs_node_on_demand(monkeypatch):
         state.update(installed=True)
 
     monkeypatch.setattr(setup_node, "ensure_node", ensure)
-    monkeypatch.setattr(setup_node, "activate_runtime", lambda: None)
+    monkeypatch.setattr(
+        setup_node, "activate_runtime", lambda: state.update(active=True)
+    )
     lm.NpxWebUIRunner().preflight(_cfg())
-    assert state["installed"]
+    assert state == {"installed": True, "active": True}
 
 
 def test_npx_runner_preflight_with_npx_does_not_install(monkeypatch):

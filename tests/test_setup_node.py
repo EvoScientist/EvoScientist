@@ -32,7 +32,12 @@ def _archive_bytes(extra_member: str | None = None) -> bytes:
             zf.writestr(f"{BASE}/npx.cmd", b"fake")
     else:
         with tarfile.open(fileobj=buf, mode="w:xz") as tf:
-            for name in (f"{BASE}/bin/node", extra_member):
+            for name in (
+                f"{BASE}/bin/node",
+                # The target of bin/npx, so shutil.which finds the link.
+                f"{BASE}/lib/node_modules/npm/bin/npx-cli.js",
+                extra_member,
+            ):
                 if name is None:
                     continue
                 info = tarfile.TarInfo(name)
@@ -268,11 +273,35 @@ def test_disk_error_while_downloading_is_install_failed(tmp_path, monkeypatch):
     assert ei.value.code == "install_failed"
 
 
+def test_stage_reports_download_progress_lines(env, monkeypatch):
+    from EvoScientist.setup import download as dl
+
+    data = env["net"].data
+
+    def urlopen(url, timeout):
+        response = io.BytesIO(data)
+        response.headers = {"Content-Length": str(len(data))}
+        return response
+
+    monkeypatch.setattr(dl, "_CHUNK", len(data) // 4)
+    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(node, "download", dl.download)
+    events: list[dict] = []
+    _message, detail = node.run_stage(events.append, "default")
+    assert {(e["stage"], e["status"]) for e in events} == {("node", "running")}
+    downloading = [
+        e["progress"] for e in events if e["message"].startswith("Downloading")
+    ]
+    assert len(downloading) >= 5
+    assert downloading == sorted(downloading)
+    assert detail["source"] == "private"
+
+
 def test_system_node_20_or_newer_wins_without_download(env, monkeypatch):
-    exe = _system_node(env, monkeypatch, (22, 11, 0))
+    exe = _system_node(env, monkeypatch, (20, 0, 0))
     info = node.ensure_node("default")
     detail = info.detail()
-    assert (detail["source"], detail["version"]) == ("system", "22.11.0")
+    assert (detail["source"], detail["version"]) == ("system", "20.0.0")
     # shutil.which may return the PATHEXT spelling (node.EXE) on Windows.
     assert os.path.normcase(detail["path"]) == os.path.normcase(str(exe))
     assert env["net"].urls == []
@@ -294,7 +323,7 @@ def test_no_node_downloads_and_records(env):
 
 
 def test_old_system_node_triggers_download(env, monkeypatch):
-    _system_node(env, monkeypatch, (18, 20, 0))
+    _system_node(env, monkeypatch, (19, 9, 0))
     assert node.ensure_node("default").source == "private"
     assert env["net"].urls
 
@@ -490,6 +519,40 @@ def test_install_without_a_record_is_used_again_without_a_download(env, monkeypa
     assert node.ensure_node("default").source == "private"
     assert env["net"].urls == []
     assert _record(env["data"])["version"] == V
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, "v20.19.2\n", (20, 19, 2)),
+        (1, "v20.19.2\n", None),
+        (0, "not a version\n", None),
+    ],
+)
+def test_probe_reads_the_version_node_prints(monkeypatch, returncode, stdout, expected):
+    def run(args, **_kw):
+        return node.subprocess.CompletedProcess(args, returncode, stdout=stdout)
+
+    monkeypatch.setattr(node.subprocess, "run", run)
+    assert node._probe(Path("node")) == expected
+
+
+def test_install_without_a_mirror_argument_uses_the_saved_mirror(env, monkeypatch):
+    from EvoScientist.config import set_config_value
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(env["tmp"] / "cfg"))
+    set_config_value("mirror", "cn")
+    node.ensure_node()
+    assert env["net"].urls
+    assert all(u.startswith(node.SOURCES["cn"]) for u in env["net"].urls)
+
+
+def test_is_private_tells_the_private_npx_from_a_system_one(env):
+    info = node.ensure_node("default")
+    npx = info.path.parent / ("npx.cmd" if os.name == "nt" else "npx")
+    assert node.is_private(npx)
+    assert not node.is_private(env["tmp"] / "system-bin" / "npx")
+    assert not node.is_private(None)
 
 
 def test_node_child_env_strips_npm_config_and_node_options():
