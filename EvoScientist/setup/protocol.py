@@ -120,9 +120,13 @@ class ConsoleEmitter:
         self._throttle = ProgressThrottle()
 
     def __call__(self, event: dict[str, Any]) -> None:
-        stage = event["stage"]
+        from rich.markup import escape
+
+        # Messages carry paths and exception text: unescaped, `[/x]` raises
+        # MarkupError and a Windows `\[` loses its backslash.
+        stage = escape(event["stage"])
         status = event["status"]
-        message = event.get("message", "")
+        message = escape(event.get("message", ""))
         if status == "running":
             progress = event.get("progress")
             if progress is not None:

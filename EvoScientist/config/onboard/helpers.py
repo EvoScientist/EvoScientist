@@ -330,6 +330,8 @@ def _ensure_npx(reason: str) -> bool:
     if _check_npx():
         return True
 
+    from rich.markup import escape
+
     from ...setup.node import NODE_VERSION, activate_runtime, ensure_node, tools_dir
     from ...setup.protocol import ConsoleEmitter, StageError, make_event
 
@@ -355,7 +357,7 @@ def _ensure_npx(reason: str) -> bool:
             )
         )
     except StageError as exc:
-        console.print(f"  [red]✗ Installation failed: {exc.message}[/red]")
+        console.print(f"  [red]✗ Installation failed: {escape(exc.message)}[/red]")
         console.print("  [dim]Retry with: EvoSci setup[/dim]")
         return False
     activate_runtime()

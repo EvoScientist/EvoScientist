@@ -130,6 +130,18 @@ def test_json_emitter_survives_a_non_utf8_pipe():
     assert json.loads(line)["message"] == r"C:\Users\Jan Kowalski ąę"
 
 
+def test_console_emitter_prints_markup_characters_literally():
+    """Paths and exception text reach the console as written: `[/x]` must not
+    raise MarkupError and a Windows `\\[` must keep its backslash."""
+    from rich.console import Console
+
+    out = io.StringIO()
+    emit = ConsoleEmitter(Console(file=out, width=300, color_system=None))
+    message = r"Could not move Node into C:\Users\[work]\tools: a[/b]"
+    emit(make_event("node", "error", message=message, code="install_failed"))
+    assert message in out.getvalue()
+
+
 def test_console_emitter_shows_every_step_message():
     printed: list[str] = []
 
