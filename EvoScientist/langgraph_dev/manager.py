@@ -704,7 +704,11 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     until restarted. Iterates the full ``EvoScientistConfig`` field list
     minus the explicit exclusion set above — a new config field counts
     toward drift by default — and folds in ``mcp.yaml`` plus the packaged
-    ``subagents/*.yaml``, which are consumed at graph build too. Secrets
+    ``subagents/*.yaml``, which are consumed at graph build too. It also
+    folds in the ``python`` the agent's shell resolves, which the server's
+    backends fix at graph build: a CLI whose PATH picks another interpreter,
+    or a research environment set up after launch, would otherwise leave the
+    async sub-agents on a different Python from the main agent. Secrets
     only feed a truncated one-way digest; nothing recoverable is stored.
     getattr with defaults: deploy/WebUI (and their tests) routinely hand
     this module duck-typed config objects missing dataclass fields.
@@ -732,6 +736,9 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
             digest.update(yaml_path.read_bytes())
     except OSError:
         pass
+    from EvoScientist.setup.research_env import agent_python
+
+    digest.update(f"agent-python:{agent_python()}".encode())
     return digest.hexdigest()[:16]
 
 

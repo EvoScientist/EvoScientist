@@ -373,6 +373,37 @@ def test_reuse_clears_drift_flag_on_matching_fingerprint(
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
+def test_server_config_fingerprint_tracks_the_agent_python(monkeypatch):
+    from EvoScientist.setup import research_env
+
+    cfg = manager.EvoScientistConfig()
+    monkeypatch.setattr(research_env, "agent_python", lambda: None)
+    base = manager._server_config_fingerprint(cfg)
+    monkeypatch.setattr(
+        research_env, "agent_python", lambda: "/data/envs/default/bin/python"
+    )
+    assert manager._server_config_fingerprint(cfg) != base
+
+
+def test_reuse_sets_drift_flag_when_the_agent_python_changed(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A server launched from a shell with conda active, reused from one
+    without: the async sub-agents would run another Python."""
+    from EvoScientist.setup import research_env
+
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/conda/bin/python")
+    fp = manager._server_config_fingerprint(cfg)
+    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
+    monkeypatch.setattr(
+        research_env, "agent_python", lambda: "/data/envs/default/bin/python"
+    )
+    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+
+
 def test_stop_recorded_server_none_when_no_pid_file(
     tmp_path, monkeypatch, runtime_paths
 ):
