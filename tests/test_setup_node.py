@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import re
 import tarfile
 import zipfile
 from pathlib import Path
@@ -187,7 +188,10 @@ def test_brief_access_denied_on_move_is_retried(env, monkeypatch, caplog):
     assert info.source == "private"
     assert denied[0] == 2
     assert _record(env["data"])["version"] == V
-    assert "denied 2 time(s)" in caplog.text
+    # At least the faked denials: on Windows a real scanner lock can add more.
+    match = re.search(r"denied (\d+) time\(s\)", caplog.text)
+    assert match is not None
+    assert int(match.group(1)) >= 2
 
 
 def test_lasting_access_denied_on_move_is_install_failed(env, monkeypatch):
