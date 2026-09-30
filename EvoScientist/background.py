@@ -242,7 +242,15 @@ def launch(
     The caller is responsible for validating ``command`` first.
 
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
+
+    The child gets the same env overrides as the ``execute`` shell
+    (:func:`~EvoScientist.setup.research_env.research_env_overrides`), so a
+    background ``python`` resolves the same interpreter as a foreground one.
     """
+    from .setup.research_env import research_env_overrides
+
+    overrides = research_env_overrides()
+    env = {**os.environ, **overrides} if overrides else None
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +266,7 @@ def launch(
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
     finally:
         # The child inherited its own dup of the fd during spawn; the parent's copy
