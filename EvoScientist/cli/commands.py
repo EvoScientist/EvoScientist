@@ -284,7 +284,14 @@ def setup(
         sys.stdout.write(json.dumps(setup_manifest()) + "\n")
         return
 
-    selected = STAGES
+    if json_output:
+        # The shared console also carries log warnings; stdout belongs to the
+        # event lines.
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+
+    selected = tuple(s for s in STAGES if s.applies())
     if stage is not None:
         found = get_stage(stage)
         if found is None:
@@ -297,12 +304,6 @@ def setup(
         set_config_value("mirror", "cn")
     mirror = "cn" if cn else load_config().mirror
 
-    if json_output:
-        # The shared console also carries log warnings; stdout belongs to the
-        # event lines.
-        from ..stream.json_sink import redirect_console_to_stderr
-
-        redirect_console_to_stderr()
     emit = JsonEmitter() if json_output else ConsoleEmitter(console)
     code = run_stages(selected, emit, mirror)
     if code:

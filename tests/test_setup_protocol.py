@@ -252,3 +252,36 @@ def test_cli_cn_saves_mirror_and_passes_it(cli, monkeypatch):
     # Later runs without --cn keep the saved mirror.
     assert cli().exit_code == 0
     assert seen == ["cn", "cn"]
+
+
+def test_cli_json_keeps_config_warnings_off_stdout(cli, monkeypatch):
+    import EvoScientist.config as config_pkg
+    from EvoScientist.stream.console import console
+
+    real_load = config_pkg.load_config
+
+    def load_with_warning():
+        console.print("config warning that must not reach stdout")
+        return real_load()
+
+    monkeypatch.setattr(config_pkg, "load_config", load_with_warning)
+    _fake_stage(monkeypatch, lambda emit, mirror: ("ok", {}))
+    result = cli("--json")
+    assert [json.loads(line)["status"] for line in result.stdout.splitlines()] == [
+        "done"
+    ]
+
+
+def test_cli_full_run_leaves_out_stages_for_other_platforms(cli, monkeypatch):
+    stages = (
+        Stage("git", "Git", frozenset({"no-such-platform"}), lambda e, m: ("", {})),
+        Stage("node", "Node.js", None, lambda e, m: ("ok", {})),
+    )
+    monkeypatch.setattr(setup_pkg, "STAGES", stages)
+    result = cli("--json")
+    assert [json.loads(line)["stage"] for line in result.stdout.splitlines()] == [
+        "node"
+    ]
+    skipped = cli("--stage", "git", "--json")
+    assert skipped.exit_code == 0
+    assert json.loads(skipped.stdout)["status"] == "skipped"
