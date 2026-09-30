@@ -31,6 +31,12 @@ def _restore_paths():
         setattr(paths, name, value)
 
 
+def _fake_home(monkeypatch, home: Path) -> None:
+    """Point ``~`` at *home* (Windows reads USERPROFILE, not HOME)."""
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+
 class TestWorkspace:
     """The Workspace value object."""
 
@@ -54,7 +60,7 @@ class TestWorkspace:
         assert Workspace(link).root == real.resolve()
 
     def test_expands_user(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _fake_home(monkeypatch, tmp_path)
         assert Workspace("~/proj").root == (tmp_path / "proj").resolve()
 
     def test_does_not_create_the_folder(self, tmp_path):
@@ -107,7 +113,7 @@ class TestStartWorkspacePath:
         assert start_workspace_path() == Path(os.getcwd())
 
     def test_expands_user_and_is_absolute(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _fake_home(monkeypatch, tmp_path)
         got = start_workspace_path("~/proj")
         assert got == tmp_path / "proj"
         assert got.is_absolute()
