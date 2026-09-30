@@ -1721,7 +1721,10 @@ class CustomSandboxBackend(LocalShellBackend):
         """
         self._dangerous = dangerous
         self._skills_dir = skills_dir
-        self._media_dir = Path(media_dir).resolve() if media_dir is not None else None
+        # Attachments are referenced through the configured path; the resolved
+        # one (``media/`` may be a symlink) bounds what the sandbox can reach.
+        self._media_dir = Path(media_dir).absolute() if media_dir is not None else None
+        self._media_real = self._media_dir.resolve() if self._media_dir else None
         self._guard_dangerous = guard_dangerous
         self._refuse_delete = refuse_delete
         if dangerous:
@@ -1812,18 +1815,20 @@ class CustomSandboxBackend(LocalShellBackend):
         path = Path(key)
         if not path.is_absolute():
             return None
-        try:
-            return path.relative_to(self._media_dir)
-        except ValueError:
-            return None
+        for base in (self._media_dir, self._media_real):
+            try:
+                return path.relative_to(base)
+            except ValueError:
+                continue
+        return None
 
     def _media_path(self, key: str) -> Path | None:
         """Real path for *key* if it names a file in the media folder."""
         rel = self._media_relative(key)
         if rel is None:
             return None
-        path = (self._media_dir / rel).resolve()
-        if not path.is_relative_to(self._media_dir):
+        path = (self._media_real / rel).resolve()
+        if not path.is_relative_to(self._media_real):
             raise ValueError(f"Path {key} is outside the media folder")
         return path
 

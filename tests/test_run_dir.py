@@ -580,6 +580,25 @@ def test_run_mode_sandbox_reaches_channel_media(run_dirs, media_file):
 
 
 @pytest.mark.usefixtures("_plain_config")
+def test_run_mode_reaches_media_through_a_symlinked_folder(run_dirs):
+    """Channels reference attachments through ``<root>/media`` even when that
+    folder is a symlink."""
+    from EvoScientist.EvoScientist import _get_default_backend
+
+    uploads = run_dirs.workspace.root / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "paper.pdf").write_text("attachment")
+    run_dirs.workspace.media_dir.symlink_to(uploads, target_is_directory=True)
+    run_dirs.run_dir.mkdir(parents=True)
+    backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
+    referenced = run_dirs.workspace.media_dir / "paper.pdf"
+
+    assert backend.read(str(referenced)).error is None
+    assert backend.execute(_print_file_cmd(referenced)).output.strip() == "attachment"
+    assert backend.write(str(run_dirs.workspace.media_dir / "new.pdf"), "x").error
+
+
+@pytest.mark.usefixtures("_plain_config")
 def test_run_mode_file_tools_cannot_change_channel_media(run_dirs, media_file):
     """Attachments are shared by the workspace; a run writes in its own folder,
     including its own ``/media``."""
