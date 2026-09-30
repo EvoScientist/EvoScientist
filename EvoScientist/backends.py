@@ -1106,7 +1106,9 @@ def _platform_quote(s: str) -> str:
 
 
 def _resolve_virtual_mount_path(
-    token: str, skills_dir: str | Path | None = None
+    token: str,
+    skills_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
 ) -> str | None:
     """Resolve a virtual mount token to a shell-safe token, or ``None`` when
     *token* is not a registered virtual mount.
@@ -1122,6 +1124,10 @@ def _resolve_virtual_mount_path(
     For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
     absolute and :func:`_platform_quote`-wrapped. Memories live outside the
     workspace, so a relative form would point at an unrelated location.
+
+    ``media_dir`` is set when the sandbox works in a ``--mode=run`` folder,
+    outside the workspace's ``media/``: ``/media/...`` then resolves to it,
+    and its real path (as channel attachments are referenced) is kept as is.
     """
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
@@ -1136,6 +1142,13 @@ def _resolve_virtual_mount_path(
     rel = _subpath_under_mount(token, "/memories")
     if rel is not None:
         return _platform_quote(str(Path(paths.MEMORIES_DIR) / rel))
+
+    if media_dir is not None:
+        rel = _subpath_under_mount(token, "/media")
+        if rel is not None:
+            return _platform_quote(str(Path(media_dir) / rel))
+        if _subpath_under_mount(token, Path(media_dir).as_posix()) is not None:
+            return _platform_quote(token)
 
     return None
 
@@ -1152,6 +1165,7 @@ def _rewrite_quoted_path(
     path: str,
     workspace_name: str | None,
     skills_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
 ) -> str | None:
     """Return the shell-quoted replacement for *path* (the decoded
     content of a quoted ``"..."`` or ``'...'`` argument),
@@ -1162,7 +1176,7 @@ def _rewrite_quoted_path(
     if not path.startswith("/"):
         return None
 
-    resolved = _resolve_virtual_mount_path(path, skills_dir)
+    resolved = _resolve_virtual_mount_path(path, skills_dir, media_dir)
     if resolved is not None:
         return _guard_bare_absolute(resolved)  # already shlex.quoted
 
@@ -1188,6 +1202,7 @@ def convert_virtual_paths_in_command(
     command: str,
     workspace_name: str | None = None,
     skills_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
 ) -> str:
     """Convert virtual paths (starting with ``/``) in commands to relative paths.
 
@@ -1211,6 +1226,7 @@ def convert_virtual_paths_in_command(
                 re.sub(r"\\(.)", r"\1", m.group(2)),
                 workspace_name,
                 skills_dir,
+                media_dir,
             )
             or m.group(0)
         ),
@@ -1224,7 +1240,7 @@ def convert_virtual_paths_in_command(
         if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
             return path
 
-        resolved = _resolve_virtual_mount_path(path, skills_dir)
+        resolved = _resolve_virtual_mount_path(path, skills_dir, media_dir)
         if resolved is not None:
             return resolved
 
@@ -1566,6 +1582,7 @@ def prepare_sandbox_command(
     dangerous: bool = False,
     guard_dangerous: bool = False,
     skills_dir: str | Path | None = None,
+    media_dir: str | Path | None = None,
 ) -> tuple[str, str | None]:
     """Normalize workspace paths in ``command`` and validate it for the sandbox.
 
@@ -1607,6 +1624,7 @@ def prepare_sandbox_command(
             command=command,
             workspace_name=Path(cwd_str).name,
             skills_dir=skills_dir,
+            media_dir=media_dir,
         )
     # Skills/memory dirs must be allowlisted: the workspace-literal replace above runs
     # before the resolver, so any absolute path it later injects reaches validate unstripped.
@@ -1617,6 +1635,7 @@ def prepare_sandbox_command(
             paths.GLOBAL_SKILLS_DIR,
             paths.MEMORIES_DIR,
             _BUILTIN_SKILLS_DIR,
+            media_dir,
         )
         if prefix is not None
     )
@@ -1666,6 +1685,7 @@ class CustomSandboxBackend(LocalShellBackend):
         guard_dangerous: bool = False,
         refuse_delete: bool = False,
         skills_dir: str | Path | None = None,
+        media_dir: str | Path | None = None,
     ):
         """
         Initialize custom sandbox backend.
@@ -1694,9 +1714,15 @@ class CustomSandboxBackend(LocalShellBackend):
             skills_dir: The workspace skills tier. ``/skills/...`` paths in
                 commands resolve through it first, and it is allowlisted for
                 command validation.
+            media_dir: The workspace's media folder, when ``root_dir`` is a
+                ``--mode=run`` folder outside it. Channel attachments are
+                referenced by their real path there; file tools and commands
+                reach it by that path or as ``/media/...``. File tools can
+                only read it.
         """
         self._dangerous = dangerous
         self._skills_dir = skills_dir
+        self._media_dir = Path(media_dir).resolve() if media_dir is not None else None
         self._guard_dangerous = guard_dangerous
         self._refuse_delete = refuse_delete
         if dangerous:
@@ -1736,6 +1762,10 @@ class CustomSandboxBackend(LocalShellBackend):
         if self._dangerous:
             return super()._resolve_path(key)
 
+        media_path = self._media_path(key)
+        if media_path is not None:
+            return media_path
+
         cwd_str = str(self.cwd).rstrip("/")
         ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
 
@@ -1772,6 +1802,18 @@ class CustomSandboxBackend(LocalShellBackend):
 
         return super()._resolve_path(key)
 
+    def _media_path(self, key: str) -> Path | None:
+        """Real path for *key* if it names a file in the media folder."""
+        if self._media_dir is None:
+            return None
+        rel = _subpath_under_mount(key, self._media_dir.as_posix())
+        if rel is None:
+            return None
+        path = (self._media_dir / rel).resolve()
+        if not path.is_relative_to(self._media_dir):
+            raise ValueError(f"Path {key} is outside the media folder")
+        return path
+
     _DELETE_APPROVAL_ERROR = (
         "Delete blocked: needs approval. Report it to the orchestrator, which "
         "can re-issue it after approval."
@@ -1786,7 +1828,45 @@ class CustomSandboxBackend(LocalShellBackend):
         """
         if self._refuse_delete and not self._dangerous:
             return DeleteResult(error=self._DELETE_APPROVAL_ERROR)
+        if self._in_media(file_path):
+            return DeleteResult(error=self._MEDIA_READ_ONLY_ERROR)
         return super().delete(file_path)
+
+    _MEDIA_READ_ONLY_ERROR = (
+        "The media folder holds channel attachments and is read-only here. "
+        "Copy a file into the run folder to change it."
+    )
+
+    def _in_media(self, file_path: str) -> bool:
+        return (
+            not self._dangerous
+            and self._media_dir is not None
+            and _subpath_under_mount(file_path, self._media_dir.as_posix()) is not None
+        )
+
+    def write(self, file_path: str, content: str) -> WriteResult:
+        if self._in_media(file_path):
+            return WriteResult(error=self._MEDIA_READ_ONLY_ERROR)
+        return super().write(file_path, content)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        if self._in_media(file_path):
+            return EditResult(error=self._MEDIA_READ_ONLY_ERROR)
+        return super().edit(file_path, old_string, new_string, replace_all)
+
+    def upload_files(self, files: list[tuple[str, bytes]]) -> list[FileUploadResponse]:
+        if any(self._in_media(path) for path, _ in files):
+            return [
+                FileUploadResponse(path=path, error=self._MEDIA_READ_ONLY_ERROR)
+                for path, _ in files
+            ]
+        return super().upload_files(files)
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """
@@ -1818,6 +1898,7 @@ class CustomSandboxBackend(LocalShellBackend):
             dangerous=self._dangerous,
             guard_dangerous=self._effective_guard_dangerous(),
             skills_dir=self._skills_dir,
+            media_dir=self._media_dir,
         )
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)

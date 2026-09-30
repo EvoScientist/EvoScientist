@@ -119,12 +119,35 @@ def _normalize_operation(value: object) -> str | None:
 
 
 def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
+    """The workspace a proposal belongs to, in the stored form."""
     if workspace_dir is None:
         return None
     text = str(workspace_dir).strip()
-    if not text:
-        return None
-    return str(Path(text).expanduser().resolve())
+    return paths.Workspace(text).key if text else None
+
+
+def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
+    """Rewrite the ``workspace_dir`` of proposals stored before ``run_dir``.
+
+    Proposals made by ``--mode=run`` sessions named the run folder; they
+    belong to its workspace. Part of the one-time upgrade of stored values
+    (see ``sessions._upgrade_stored_dirs``). Returns the number rewritten.
+    """
+    root = _proposal_root(memory_dir)
+    if not root.exists():
+        return 0
+    rewritten = 0
+    for manifest_path in sorted(root.glob("*/manifest.json")):
+        manifest = _read_manifest(manifest_path)
+        stored = manifest.get("workspace_dir") if manifest else None
+        if not isinstance(stored, str) or not stored.strip():
+            continue
+        upgraded = paths.SessionDirs.from_legacy(stored.strip()).workspace.key
+        if upgraded != stored:
+            manifest["workspace_dir"] = upgraded
+            _write_manifest(manifest_path, manifest)
+            rewritten += 1
+    return rewritten
 
 
 def _proposal_from_manifest(
@@ -191,7 +214,7 @@ def list_skill_proposals(
             continue
         if (
             normalized_workspace is not None
-            and proposal.workspace_dir != normalized_workspace
+            and _normalize_workspace_dir(proposal.workspace_dir) != normalized_workspace
         ):
             continue
         if status is not None and proposal.status != status:

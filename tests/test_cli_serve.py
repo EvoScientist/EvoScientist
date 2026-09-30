@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from EvoScientist.cli import commands
 from EvoScientist.config import MemoryObservationWriter
-from EvoScientist.paths import Workspace
+from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.runtime import AsyncRuntime
 
 
@@ -75,14 +75,14 @@ def _run_serve_once(
         order.append(("reload_env_dirs", None))
 
     def _fake_load_agent(
-        workspace_dir=None,
+        work_dir=None,
         checkpointer=None,
         config=None,
         *,
         workspace,
         runtime=None,
     ):
-        captured["workspace_dir"] = workspace_dir
+        captured["work_dir"] = work_dir
         captured["workspace"] = workspace
         captured["async_runtime"] = runtime
         return object()
@@ -104,7 +104,8 @@ def _run_serve_once(
         def get(self, timeout=None):
             raise KeyboardInterrupt()
 
-    def _fake_ensure_async_server(cfg, *, workspace_dir, backend=None):
+    def _fake_ensure_async_server(cfg, *, dirs, backend=None):
+        captured["dirs"] = dirs
         captured["ensure_config"] = cfg
         captured["ensure_backend"] = backend
 
@@ -166,8 +167,9 @@ def test_serve_workdir_has_highest_priority(monkeypatch, tmp_path):
     )
 
     expected = str(cli_ws.resolve())
-    assert captured["workspace_dir"] == expected
+    assert captured["work_dir"] is None
     assert captured["workspace"] == Workspace(expected)
+    assert captured["dirs"] == SessionDirs(Workspace(expected))
     assert captured["media_dir"] == Workspace(expected).media_dir
     assert cli_ws.is_dir()
     # The project .env can override the memories folder; it must be re-read
@@ -182,8 +184,9 @@ def test_serve_uses_config_default_workdir_when_no_cli_workdir(monkeypatch, tmp_
     _, captured = _run_serve_once(monkeypatch, config)
 
     expected = str(cfg_ws.resolve())
-    assert captured["workspace_dir"] == expected
+    assert captured["work_dir"] is None
     assert captured["workspace"] == Workspace(expected)
+    assert captured["dirs"] == SessionDirs(Workspace(expected))
 
 
 def test_serve_uses_cwd_when_no_workdir_config(monkeypatch, tmp_path):
@@ -196,8 +199,9 @@ def test_serve_uses_cwd_when_no_workdir_config(monkeypatch, tmp_path):
         cwd=cwd,
     )
 
-    assert captured["workspace_dir"] == cwd
+    assert captured["work_dir"] is None
     assert captured["workspace"] == Workspace(cwd)
+    assert captured["dirs"] == SessionDirs(Workspace(cwd))
 
 
 def test_serve_channel_thinking_respects_config_and_no_thinking(monkeypatch, tmp_path):

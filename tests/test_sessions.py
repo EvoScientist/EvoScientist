@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.sessions import (
     AGENT_NAME,
     _format_relative_time,
@@ -1635,7 +1636,9 @@ class TestMigrationSweep(unittest.IsolatedAsyncioTestCase):
                     return saver is not None
 
             assert await _first()
-            assert await self._user_version() == _MIGRATION_VERSION
+            # The stored-folder upgrade runs right after the sweep and
+            # records the later version.
+            assert await self._user_version() >= _MIGRATION_VERSION
 
             # Second entry: sweep must be skipped — patch _run_migration_sweep
             # to raise so any accidental re-invocation fails the test loudly.
@@ -2241,8 +2244,8 @@ class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
                     {"EVOSCIENTIST_WORKSPACE_DIR": "/tmp/test-workspace"},
                 ),
                 patch(
-                    "EvoScientist.sessions._api_workspace_dir",
-                    return_value="/tmp/test-workspace",
+                    "EvoScientist.sessions._api_session_dirs",
+                    return_value=SessionDirs(Workspace("/tmp/test-workspace")),
                 ),
             ):
                 await _run_inner(db)
@@ -2302,7 +2305,10 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
     def _patch_workspace(self):
         from unittest.mock import patch
 
-        return patch("EvoScientist.sessions._api_workspace_dir", return_value=self._WS)
+        return patch(
+            "EvoScientist.sessions._api_session_dirs",
+            return_value=SessionDirs(Workspace(self._WS)),
+        )
 
     async def test_restores_uuid_threads_into_global_store(self):
         """UUID-format thread IDs from SQLite are injected into GlobalStore."""
@@ -2731,8 +2737,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
                     sys.modules, {"langgraph_runtime_inmem.database": fake_module}
                 ),
                 patch(
-                    "EvoScientist.sessions._api_workspace_dir",
-                    return_value=self._WS,
+                    "EvoScientist.sessions._api_session_dirs",
+                    return_value=SessionDirs(Workspace(self._WS)),
                 ),
             ):
                 await _write_then_restore()

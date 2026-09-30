@@ -424,7 +424,7 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:
-        return str(ctx.workspace_dir or ctx.workspace.root)
+        return str(ctx.workspace.root)
 
     @staticmethod
     def _first_arg(args: list[str]) -> str | None:

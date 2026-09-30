@@ -81,12 +81,13 @@ def _graph_target_for_local_agent(
     agent: "CompiledStateGraph",
     metadata: dict[str, object] | None = None,
 ) -> GraphTarget:
-    workspace = None
+    folders: dict[str, str] = {}
     if metadata is not None:
-        raw_workspace = metadata.get("workspace_dir")
-        if isinstance(raw_workspace, str) and raw_workspace:
-            workspace = raw_workspace
-    return GraphTarget(local_graph=agent, workspace_dir=workspace)
+        for key in ("workspace_dir", "run_dir"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value:
+                folders[key] = value
+    return GraphTarget(local_graph=agent, **folders)
 
 
 # LLM output sometimes omits the CommonMark-required space after `#` (e.g.

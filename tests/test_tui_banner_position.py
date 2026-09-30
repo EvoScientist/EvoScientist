@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -42,6 +41,7 @@ async def _capture_app(monkeypatch, workspace) -> object:
     from textual.app import App
 
     from EvoScientist.cli import tui_interactive as tui_mod
+    from EvoScientist.paths import SessionDirs
 
     captured: dict = {}
 
@@ -77,10 +77,10 @@ async def _capture_app(monkeypatch, workspace) -> object:
     )
 
     monkeypatch.setattr("EvoScientist.cli.tui_interactive.mode", "dev", raising=False)
-    # Note: ``create_session_workspace`` and ``load_agent`` are passed
+    # Note: ``create_run_dir`` and ``load_agent`` are passed
     # as parameters to ``run_textual_interactive`` (the factory), so the
     # closure inside ``EvoTextualInteractiveApp`` uses the fakes directly
-    # and the module-level ``create_session_workspace`` / ``load_agent``
+    # and the module-level ``_create_run_dir`` / ``load_agent``
     # symbols never get a chance to run.
 
     # The factory is synchronous at the outer level and owns its top-level
@@ -90,17 +90,15 @@ async def _capture_app(monkeypatch, workspace) -> object:
             tui_mod.run_textual_interactive,
             show_thinking=False,
             channel_send_thinking=False,
-            workspace_dir=None,
-            workspace_fixed=False,
+            dirs=SessionDirs(workspace),
             mode="dev",
             model=None,
             provider=None,
             run_name="test-run",
             thread_id=None,
             load_agent=fake_load_agent,
-            create_session_workspace=lambda *_a, **_k: str(Path.cwd()),
+            create_run_dir=lambda ws, _name: ws.root,
             config=None,
-            workspace=workspace,
         )
     except SystemExit:
         pass

@@ -17,7 +17,6 @@ class TestNewCommand:
             agent=None,
             thread_id="old-tid",
             ui=ui,
-            workspace_dir="/old/ws",
         )
         await NewCommand().execute(ctx, [])
         ui.start_new_session.assert_awaited_once()

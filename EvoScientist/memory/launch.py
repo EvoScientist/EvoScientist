@@ -17,6 +17,7 @@ from ..gateway.background_runs import (
     launch_background_run,
 )
 from ..langgraph_dev.sdk import messages_input
+from ..paths import Workspace
 from .observations import build_observation_linker_index_context
 from .scheduler import ObservationLinkerContext
 from .source_context import MemorySourceContext, _trajectory_for_prompt
@@ -86,7 +87,7 @@ def _runs_create_kwargs(payload: BackgroundRunPayload) -> BackgroundRunPayload:
 
 
 def _worker_workspace_dir(workspace_dir: str | Path) -> str:
-    return str(Path(workspace_dir).expanduser().resolve())
+    return Workspace(workspace_dir).key
 
 
 def _memory_worker_metadata(context: MemorySourceContext) -> dict[str, str]:
@@ -168,7 +169,7 @@ def _observation_linker_metadata(
         "run_kind": "evomemory_observation_linker",
         "project_id": context.project_id,
         "observation_count": str(len(context.observation_ids)),
-        "workspace_dir": str(context.workspace_dir.expanduser().resolve()),
+        "workspace_dir": _worker_workspace_dir(context.workspace_dir),
     }
 
 

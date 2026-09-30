@@ -6,6 +6,7 @@ import pytest
 
 from EvoScientist.cli.commands import _is_fresh_interactive_session
 from EvoScientist.cli.interactive import cmd_interactive
+from EvoScientist.paths import SessionDirs, Workspace
 
 
 @pytest.mark.parametrize(
@@ -133,7 +134,7 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
     printed: list[str] = []
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
-        lambda config, *, workspace_dir, backend=None: None,
+        lambda config, *, workspace_dir, run_dir=None, backend=None: None,
     )
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
@@ -148,7 +149,9 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
         "status",
         lambda *a, **k: __import__("contextlib").nullcontext(),
     )
-    cmds._ensure_async_subagent_server(config, workspace_dir="/tmp/workspace")
+    cmds._ensure_async_subagent_server(
+        config, dirs=SessionDirs(Workspace("/tmp/workspace"))
+    )
     return printed
 
 
@@ -193,14 +196,14 @@ def test_cli_prints_the_server_python_warning(monkeypatch, drift):
 
 
 def test_background_agent_server_starts_even_when_async_subagents_disabled(
-    monkeypatch,
+    monkeypatch, workspace
 ):
     import EvoScientist.cli.commands as cmds
 
     calls = []
 
-    def fake_ensure(config, *, workspace_dir, backend=None):
-        calls.append((config, workspace_dir, backend))
+    def fake_ensure(config, *, workspace_dir, run_dir=None, backend=None):
+        calls.append((config, workspace_dir, run_dir, backend))
 
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
@@ -209,35 +212,36 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
 
     config = SimpleNamespace(enable_async_subagents=False)
     cmds._ensure_async_subagent_server(
-        config, workspace_dir="/tmp/workspace", backend="langgraph_server"
+        config, dirs=SessionDirs(workspace), backend="langgraph_server"
     )
 
-    assert calls == [(config, "/tmp/workspace", "langgraph_server")]
+    assert calls == [(config, workspace.root, None, "langgraph_server")]
 
 
 async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
-    monkeypatch,
+    monkeypatch, workspace
 ):
     import EvoScientist.cli.commands as cmds
 
     calls = []
 
-    def fake_ensure(config, *, workspace_dir, backend=None):
-        calls.append((config, workspace_dir, backend))
+    def fake_ensure(config, *, workspace_dir, run_dir=None, backend=None):
+        calls.append((config, workspace_dir, run_dir, backend))
 
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
         fake_ensure,
     )
 
+    run_dir = workspace.root / "runs" / "resumed"
     config = SimpleNamespace(enable_async_subagents=False)
     await cmds._sync_background_agent_server_workspace(
         config,
-        workspace_dir="/tmp/resumed-workspace",
+        dirs=SessionDirs(workspace, run_dir),
         backend="langgraph_server",
     )
 
-    assert calls == [(config, "/tmp/resumed-workspace", "langgraph_server")]
+    assert calls == [(config, workspace.root, run_dir, "langgraph_server")]
 
 
 def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
@@ -262,11 +266,10 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
         _fake_run_textual_interactive,
     )
 
+    dirs = SessionDirs(workspace)
     cmd_interactive(
         show_thinking=True,
         channel_send_thinking=True,
-        workspace_dir="/tmp/workspace",
-        workspace_fixed=True,
         mode="daemon",
         model="demo-model",
         provider="demo-provider",
@@ -274,7 +277,7 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
         thread_id="thread-1",
         ui_backend="tui",
         config=effective_config,
-        workspace=workspace,
+        dirs=dirs,
     )
 
     assert captured["resolved_input"] == "tui"
@@ -282,15 +285,13 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch, workspace):
 
     assert len(captured_kwargs) == 1
     kwargs = captured_kwargs[0]
-    assert kwargs["workspace_dir"] == "/tmp/workspace"
-    assert kwargs["workspace_fixed"] is True
+    assert kwargs["dirs"] is dirs
     assert kwargs["mode"] == "daemon"
     assert kwargs["model"] == "demo-model"
     assert kwargs["provider"] == "demo-provider"
     assert kwargs["run_name"] == "demo-run"
     assert kwargs["thread_id"] == "thread-1"
     assert kwargs["config"] is effective_config
-    assert kwargs["workspace"] is workspace
     assert kwargs["channel_send_thinking"] is True
     assert callable(kwargs["load_agent"])
-    assert callable(kwargs["create_session_workspace"])
+    assert callable(kwargs["create_run_dir"])

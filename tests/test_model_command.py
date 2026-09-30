@@ -1,5 +1,6 @@
 """Tests for the /model command and extract_model_and_provider helper."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -160,7 +161,7 @@ class TestModelCommandSwitch:
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -204,7 +205,7 @@ class TestModelCommandSwitch:
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -241,7 +242,7 @@ class TestModelCommandSwitch:
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -278,7 +279,7 @@ class TestModelCommandSwitch:
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
         ctx.graph_gateway = graph_gateway
 
@@ -338,7 +339,7 @@ class TestModelCommandFailure:
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -538,7 +539,7 @@ class TestApplyModelIntegration:
             return sentinels[key]
 
         def _fake_load_agent(
-            workspace_dir=None,
+            work_dir=None,
             checkpointer=None,
             config=None,
             chat_model=None,
@@ -557,7 +558,7 @@ class TestApplyModelIntegration:
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test_integration"
+        ctx.work_dir = Path("/tmp/test_integration")
         ctx.checkpointer = None
 
         # Prime: _chat_model already holds the OLD (default) model —
@@ -632,7 +633,7 @@ class TestApplyModelServerBackend:
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = None
         ctx.graph_gateway = self._server_gateway()
 
@@ -713,7 +714,7 @@ class TestApplyModelPreservesConfigByReference:
             return m
 
         def _fake_load_agent(
-            workspace_dir=None,
+            work_dir=None,
             checkpointer=None,
             config=None,
             chat_model=None,
@@ -737,7 +738,7 @@ class TestApplyModelPreservesConfigByReference:
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test_byref"
+        ctx.work_dir = Path("/tmp/test_byref")
         ctx.checkpointer = None
 
         cmd = ModelCommand()
@@ -784,7 +785,7 @@ class TestModelCommandLoadAgentFailure:
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -848,7 +849,7 @@ class TestApplyModelLoadAgentFailureTransactional:
         mod = evo_module_state
 
         def _fake_load_agent(
-            workspace_dir=None,
+            work_dir=None,
             checkpointer=None,
             config=None,
             chat_model=None,
@@ -873,7 +874,7 @@ class TestApplyModelLoadAgentFailureTransactional:
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test_rollback"
+        ctx.work_dir = Path("/tmp/test_rollback")
         ctx.checkpointer = None
 
         with (
@@ -1070,7 +1071,7 @@ class TestModelCommandOllamaPicker:
         from EvoScientist.commands.implementation.model import ModelCommand
 
         ctx, cfg, ui = self._make_ctx_and_cfg(ollama_base_url="http://localhost:11434")
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
         ui.wait_for_model_pick = AsyncMock(return_value=("llama3.3", "ollama"))
 

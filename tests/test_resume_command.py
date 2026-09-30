@@ -1,11 +1,13 @@
 """Tests for the /resume command."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from EvoScientist.paths import SessionDirs, Workspace
 from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
-def _ctx(thread_id="current", workspace_dir="/ws", thread_store=None):
+def _ctx(thread_id="current", run_dir=None, thread_store=None):
     from EvoScientist.commands.base import CommandContext
 
     store = thread_store or FakeThreadStore()
@@ -18,7 +20,7 @@ def _ctx(thread_id="current", workspace_dir="/ws", thread_store=None):
         agent=None,
         thread_id=thread_id,
         ui=ui,
-        workspace_dir=workspace_dir,
+        run_dir=run_dir,
         graph_gateway=FakeGraphGateway(thread_store=store),
     ), ui
 
@@ -34,10 +36,13 @@ class TestResumeCommand:
             )
         )
         await ResumeCommand().execute(ctx, ["target-tid"])
-        ui.handle_session_resume.assert_awaited_once_with("target-tid", "/restored")
+        ui.handle_session_resume.assert_awaited_once_with(
+            "target-tid", SessionDirs(Workspace("/restored"))
+        )
         # ctx mutations
         assert ctx.thread_id == "target-tid"
-        assert ctx.workspace_dir == "/restored"
+        assert ctx.workspace.key == Workspace("/restored").key
+        assert ctx.run_dir is None
 
     async def test_no_arg_empty_threads_prints_message(self):
         from EvoScientist.commands.implementation.session import ResumeCommand
@@ -103,21 +108,24 @@ class TestResumeCommand:
             )
         )
         await ResumeCommand().execute(ctx, ["abc"])
-        ui.handle_session_resume.assert_awaited_once_with("abc-one", "/ws1")
+        ui.handle_session_resume.assert_awaited_once_with(
+            "abc-one", SessionDirs(Workspace("/ws1"))
+        )
         assert ctx.thread_id == "abc-one"
 
     async def test_empty_workspace_metadata_preserves_ctx_workspace(self):
         from EvoScientist.commands.implementation.session import ResumeCommand
 
         ctx, ui = _ctx(
-            workspace_dir="/keep",
+            run_dir=Path("/keep"),
             thread_store=FakeThreadStore(resolved_thread_id="tid", metadata={}),
         )
         await ResumeCommand().execute(ctx, ["tid"])
-        # ResumeCommand only overwrites ctx.workspace_dir if metadata has one
-        assert ctx.workspace_dir == "/keep"
-        # Callback still fires with the metadata value (empty string)
-        ui.handle_session_resume.assert_awaited_once_with("tid", "")
+        # ResumeCommand only overwrites the session folders if metadata has them
+        assert ctx.workspace is TEST_WORKSPACE
+        assert ctx.run_dir == Path("/keep")
+        # Callback still fires, with no stored folders
+        ui.handle_session_resume.assert_awaited_once_with("tid", None)
 
 
 class TestResumeClearsInvitedExperts:

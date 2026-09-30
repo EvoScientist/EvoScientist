@@ -18,7 +18,6 @@ def _ctx(**overrides):
         agent=None,
         thread_id=overrides.pop("thread_id", "tid-1"),
         ui=ui,
-        workspace_dir=overrides.pop("workspace_dir", "/ws"),
         graph_gateway=FakeGraphGateway(thread_store=store),
     ), ui
 

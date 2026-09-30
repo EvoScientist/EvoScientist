@@ -13,6 +13,7 @@ from ...langgraph_dev.sdk import (
     langgraph_dev_url,
     messages_input,
 )
+from ...paths import Workspace
 
 AUTOSKILL_GRAPH_ID = "evomemory-autoskills"
 AUTOSKILL_RUN_KIND = "evomemory_autoskills"
@@ -51,7 +52,7 @@ def _autoskill_metadata(
     return {
         "run_kind": AUTOSKILL_RUN_KIND,
         "name": "EvoMemory AutoSkills",
-        "workspace_dir": str(Path(workspace_dir).expanduser().resolve()),
+        "workspace_dir": Workspace(workspace_dir).key,
         "mode": config.memory_skill_synthesis_mode.value,
         "cadence": config.memory_skill_synthesis_cadence.value,
         "time": config.memory_skill_synthesis_time,
@@ -84,6 +85,11 @@ async def alist_autoskill_schedules(
         limit=limit,
     )
     return list(rows)
+
+
+def _stored_workspace_key(value: Any) -> str | None:
+    """Workspace a stored AutoSkills tag names, in the stored form."""
+    return Workspace(value).key if isinstance(value, str) and value else None
 
 
 def reconcile_autoskill_schedule(
@@ -121,7 +127,7 @@ def reconcile_autoskill_schedule(
         for row in existing
         if row.get("schedule") == schedule
         and bool(row.get("enabled", True))
-        and (row.get("metadata") or {}).get("workspace_dir")
+        and _stored_workspace_key((row.get("metadata") or {}).get("workspace_dir"))
         == metadata["workspace_dir"]
         and (row.get("metadata") or {}).get("mode") == metadata["mode"]
     ]
@@ -155,7 +161,7 @@ def run_autoskill_now(
         graph_id=AUTOSKILL_GRAPH_ID,
         metadata={
             "run_kind": AUTOSKILL_RUN_KIND,
-            "workspace_dir": str(Path(workspace_dir).expanduser().resolve()),
+            "workspace_dir": Workspace(workspace_dir).key,
         },
     )
     run = client.runs.create(
@@ -183,7 +189,7 @@ async def arun_autoskill_now(
         graph_id=AUTOSKILL_GRAPH_ID,
         metadata={
             "run_kind": AUTOSKILL_RUN_KIND,
-            "workspace_dir": str(Path(workspace_dir).expanduser().resolve()),
+            "workspace_dir": Workspace(workspace_dir).key,
         },
     )
     run = await client.runs.create(

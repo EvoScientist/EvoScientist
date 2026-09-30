@@ -14,7 +14,6 @@ def _ctx(workspace=None):
         agent=object(),
         thread_id="tid-42",
         ui=ui,
-        workspace_dir="/ws",
         channel_runtime=runtime,
         workspace=workspace,
     )
