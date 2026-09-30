@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from EvoScientist.paths import SessionDirs, Workspace
+from EvoScientist.paths import SessionDirs, Workspace, normalize_path
 from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
@@ -122,7 +122,7 @@ class TestResumeCommand:
         await ResumeCommand().execute(ctx, ["tid"])
         # ResumeCommand only overwrites the session folders if metadata has them
         assert ctx.workspace is TEST_WORKSPACE
-        assert ctx.run_dir == Path("/keep")
+        assert ctx.run_dir == normalize_path("/keep")
         # Callback still fires, with no stored folders
         ui.handle_session_resume.assert_awaited_once_with("tid", None)
 

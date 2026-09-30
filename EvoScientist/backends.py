@@ -1801,11 +1801,25 @@ class CustomSandboxBackend(LocalShellBackend):
 
         return super()._resolve_path(key)
 
-    def _media_path(self, key: str) -> Path | None:
-        """Real path for *key* if it names a file in the media folder."""
+    def _media_relative(self, key: str) -> Path | None:
+        """*key* relative to the media folder, if it names a path inside it.
+
+        Compared as paths, not strings, so Windows keys with backslashes or
+        another drive-letter case match too.
+        """
         if self._media_dir is None:
             return None
-        rel = _subpath_under_mount(key, self._media_dir.as_posix())
+        path = Path(key)
+        if not path.is_absolute():
+            return None
+        try:
+            return path.relative_to(self._media_dir)
+        except ValueError:
+            return None
+
+    def _media_path(self, key: str) -> Path | None:
+        """Real path for *key* if it names a file in the media folder."""
+        rel = self._media_relative(key)
         if rel is None:
             return None
         path = (self._media_dir / rel).resolve()
@@ -1837,11 +1851,7 @@ class CustomSandboxBackend(LocalShellBackend):
     )
 
     def _in_media(self, file_path: str) -> bool:
-        return (
-            not self._dangerous
-            and self._media_dir is not None
-            and _subpath_under_mount(file_path, self._media_dir.as_posix()) is not None
-        )
+        return not self._dangerous and self._media_relative(file_path) is not None
 
     def write(self, file_path: str, content: str) -> WriteResult:
         if self._in_media(file_path):

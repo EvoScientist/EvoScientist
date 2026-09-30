@@ -535,6 +535,11 @@ def test_server_stamps_its_run_folder_on_unstamped_rows(run_dirs, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _print_file_cmd(path: Path) -> str:
+    """Cross-platform command that prints the file at *path*."""
+    return f"type {path}" if sys.platform == "win32" else f"cat {path}"
+
+
 @pytest.fixture
 def media_file(workspace) -> Path:
     workspace.media_dir.mkdir(parents=True)
@@ -571,7 +576,7 @@ def test_run_mode_sandbox_reaches_channel_media(run_dirs, media_file):
     backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
 
     assert backend.read(str(media_file)).error is None
-    assert backend.execute(f"cat {media_file}").output.strip() == "attachment"
+    assert backend.execute(_print_file_cmd(media_file)).output.strip() == "attachment"
 
 
 @pytest.mark.usefixtures("_plain_config")

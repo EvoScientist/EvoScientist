@@ -2226,10 +2226,10 @@ class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
             main = rows["11111111-1111-1111-1111-111111111111"]
             worker = rows["22222222-2222-2222-2222-222222222222"]
             assert main.get("agent_name") == AGENT_NAME
-            assert main.get("workspace_dir") == "/tmp/test-workspace"
+            assert main.get("workspace_dir") == Workspace("/tmp/test-workspace").key
             assert main.get("updated_at"), "updated_at drives /threads ordering"
             assert "agent_name" not in worker
-            assert worker.get("workspace_dir") == "/tmp/test-workspace"
+            assert worker.get("workspace_dir") == Workspace("/tmp/test-workspace").key
             assert worker.get("updated_at")
 
         with tempfile.TemporaryDirectory() as td:
@@ -2369,7 +2369,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert added[0]["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(added[0]["metadata"].get("assistant_id"), str)
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
-        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert added[0]["metadata"].get("model") == "test-model"
         # created_at / updated_at must be datetime objects, not ISO strings.
         # Threads.search() sorts by these fields using sorted(); mixing
@@ -2439,7 +2439,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert t["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(t["metadata"].get("assistant_id"), str)
         assert t["metadata"].get("graph_id") == "EvoScientist"
-        assert t["metadata"].get("workspace_dir") == self._WS
+        assert t["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert t["metadata"].get("model") == "test-model"
 
     async def test_restore_includes_current_workspace_graph_threads_only(self):
@@ -2502,14 +2502,14 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
             "EvoScientist"
         )
         assert restored[_uuid_mod.UUID(mine)]["metadata"].get("workspace_dir") == (
-            self._WS
+            Workspace(self._WS).key
         )
         assert restored[_uuid_mod.UUID(mine)]["metadata"].get("model") == ("test-model")
         assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("graph_id") == (
             "writing-agent"
         )
         assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("workspace_dir") == (
-            self._WS
+            Workspace(self._WS).key
         )
 
     async def test_purge_removes_only_evomemory_rows(self):
@@ -2626,7 +2626,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert added[0]["thread_id"] == _uuid_mod.UUID(cli_thread)
         # graph_id backfilled so Threads.State.get works on the CLI stub.
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
-        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert added[0]["metadata"].get("model") == "test-model"
 
     async def test_mixed_cli_webui_rows_keep_assistant_and_graph_id(self):
@@ -2678,7 +2678,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert added[0]["thread_id"] == _uuid_mod.UUID(tid)
         assert added[0]["metadata"].get("assistant_id") == asst
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
-        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert added[0]["metadata"].get("model") == "test-model"
 
     async def test_restored_stub_gets_title_from_first_human_message(self):
