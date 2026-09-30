@@ -319,21 +319,48 @@ def test_zip_extracts_into_path_with_space_and_non_ascii(tmp_path):
 def test_platform_id(monkeypatch, sys_platform, machine, expected):
     monkeypatch.setattr(node.sys, "platform", sys_platform)
     monkeypatch.setattr(node.platform, "machine", lambda: machine)
+    monkeypatch.setattr(node, "_is_musl", lambda: False)
     assert node.platform_id() == expected
     assert node.archive_name(expected).endswith(
         ".zip" if expected.startswith("win") else ".tar.xz"
     )
 
 
+def test_platform_id_musl_x64_uses_the_musl_build(monkeypatch):
+    monkeypatch.setattr(node.sys, "platform", "linux")
+    monkeypatch.setattr(node.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(node, "_is_musl", lambda: True)
+    assert node.platform_id() == "linux-x64-musl"
+    assert node.archive_name("linux-x64-musl") == f"node-v{V}-linux-x64-musl.tar.xz"
+
+
 @pytest.mark.parametrize(
-    ("sys_platform", "machine"), [("linux", "riscv64"), ("freebsd14", "amd64")]
+    ("sys_platform", "machine", "musl"),
+    [
+        ("linux", "riscv64", False),
+        ("freebsd14", "amd64", False),
+        # nodejs.org publishes no musl build for arm64.
+        ("linux", "aarch64", True),
+    ],
 )
-def test_platform_id_unsupported(monkeypatch, sys_platform, machine):
+def test_platform_id_unsupported(monkeypatch, sys_platform, machine, musl):
     monkeypatch.setattr(node.sys, "platform", sys_platform)
     monkeypatch.setattr(node.platform, "machine", lambda: machine)
+    monkeypatch.setattr(node, "_is_musl", lambda: musl)
     with pytest.raises(StageError) as ei:
         node.platform_id()
     assert ei.value.code == "unsupported_platform"
+
+
+def test_is_musl_detects_the_musl_loader(monkeypatch, tmp_path):
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    real_path = node.Path
+    monkeypatch.setattr(node.sys, "platform", "linux")
+    monkeypatch.setattr(node, "Path", lambda p: lib if p == "/lib" else real_path(p))
+    assert node._is_musl() is False
+    (lib / "ld-musl-x86_64.so.1").write_text("")
+    assert node._is_musl() is True
 
 
 def test_activate_runtime_prepends_once(env):

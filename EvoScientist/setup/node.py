@@ -43,12 +43,15 @@ SOURCES = {
 
 _OS = {"darwin": "darwin", "linux": "linux", "win32": "win"}
 _ARCH = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}
-# Node publishes .tar.xz for macOS / Linux and .zip for Windows.
+# Node publishes .tar.xz for macOS / Linux and .zip for Windows. The glibc
+# Linux builds do not run on musl (Alpine); nodejs.org publishes a musl build
+# for x64 only (from 24.20.0).
 _SUPPORTED = {
     "darwin-arm64",
     "darwin-x64",
     "linux-x64",
     "linux-arm64",
+    "linux-x64-musl",
     "win-x64",
     "win-arm64",
 }
@@ -110,15 +113,23 @@ def _node_exe(install_dir: Path) -> Path:
     return _bin_dir(install_dir) / ("node.exe" if os.name == "nt" else "node")
 
 
+def _is_musl() -> bool:
+    """True on a musl-based Linux (e.g. Alpine), detected by its dynamic loader."""
+    return sys.platform == "linux" and any(Path("/lib").glob("ld-musl-*.so.1"))
+
+
 def platform_id() -> str:
     """The Node archive platform for this machine, e.g. ``linux-x64``."""
     os_id = _OS.get(sys.platform)
     arch = _ARCH.get(platform.machine().lower())
     plat = f"{os_id}-{arch}"
+    if os_id == "linux" and _is_musl():
+        plat += "-musl"
     if os_id is None or arch is None or plat not in _SUPPORTED:
+        libc = " (musl)" if plat.endswith("-musl") else ""
         raise StageError(
             "unsupported_platform",
-            f"No Node.js build for {sys.platform} / {platform.machine()}.",
+            f"No Node.js build for {sys.platform} / {platform.machine()}{libc}.",
         )
     return plat
 
