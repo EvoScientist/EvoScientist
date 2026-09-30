@@ -8,7 +8,7 @@ import json
 import pytest
 
 import EvoScientist.setup as setup_pkg
-from EvoScientist.setup import Stage, manifest, run_stages
+from EvoScientist.setup import Stage, StageResult, manifest, run_stages
 from EvoScientist.setup.protocol import (
     PROTOCOL,
     ConsoleEmitter,
@@ -53,7 +53,10 @@ def test_stage_error_rejects_unknown_code():
 
 def test_run_stages_done_carries_detail():
     stage = Stage(
-        "node", "Node.js", None, lambda emit, mirror: ("ok", {"source": "system"})
+        "node",
+        "Node.js",
+        None,
+        lambda emit, mirror: StageResult("ok", {"source": "system"}),
     )
     events, emit = _collect()
     assert run_stages([stage], emit, "default") == 0
@@ -68,11 +71,27 @@ def test_run_stages_done_carries_detail():
     ]
 
 
+def test_run_stages_skipped_result_is_the_only_terminal_event():
+    def run(emit, mirror):
+        emit(make_event("env", "running", message="Checking"))
+        return StageResult("Using x", {"reason": "system_python"}, status="skipped")
+
+    later = Stage("later", "Later", None, lambda emit, mirror: StageResult("ok", {}))
+    events, emit = _collect()
+    assert run_stages([Stage("env", "Env", None, run), later], emit, "default") == 0
+    assert [(e["stage"], e["status"]) for e in events] == [
+        ("env", "running"),
+        ("env", "skipped"),
+        ("later", "done"),
+    ]
+    assert events[1]["detail"] == {"reason": "system_python"}
+
+
 def test_run_stages_error_carries_code_and_stops():
     def fail(emit, mirror):
         raise StageError("checksum_mismatch", "bad sum")
 
-    later = Stage("later", "Later", None, lambda emit, mirror: ("ok", {}))
+    later = Stage("later", "Later", None, lambda emit, mirror: StageResult("ok", {}))
     events, emit = _collect()
     assert (
         run_stages([Stage("node", "Node.js", None, fail), later], emit, "default") == 1
@@ -89,7 +108,9 @@ def test_run_stages_error_carries_code_and_stops():
 
 
 def test_run_stages_skips_other_platforms():
-    stage = Stage("git", "Git", frozenset({"no-such-platform"}), lambda e, m: ("", {}))
+    stage = Stage(
+        "git", "Git", frozenset({"no-such-platform"}), lambda e, m: StageResult("", {})
+    )
     events, emit = _collect()
     assert run_stages([stage], emit, "default") == 0
     assert events[0]["status"] == "skipped"
@@ -106,7 +127,9 @@ def test_run_stages_reports_an_unexpected_exception_as_an_error_event():
 
 
 def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
-    other = Stage("git", "Git", frozenset({"no-such-platform"}), lambda e, m: ("", {}))
+    other = Stage(
+        "git", "Git", frozenset({"no-such-platform"}), lambda e, m: StageResult("", {})
+    )
     monkeypatch.setattr(setup_pkg, "STAGES", (*setup_pkg.STAGES, other))
     assert [s["id"] for s in manifest()["stages"]] == ["node"]
 
@@ -231,7 +254,7 @@ def test_cli_json_stdout_holds_only_json_lines(cli, monkeypatch):
     def run(emit, mirror):
         console.print("human noise that must not reach stdout")
         emit(make_event("node", "running", progress=0.5, message="half"))
-        return "ok", {"source": "private", "version": "24.21.0"}
+        return StageResult("ok", {"source": "private", "version": "24.21.0"})
 
     _fake_stage(monkeypatch, run)
     result = cli("--stage", "node", "--json")
@@ -261,7 +284,10 @@ def test_cli_cn_saves_mirror_and_passes_it(cli, monkeypatch):
     from EvoScientist.config import get_config_value
 
     seen: list[str] = []
-    _fake_stage(monkeypatch, lambda emit, mirror: (seen.append(mirror), ("ok", {}))[1])
+    _fake_stage(
+        monkeypatch,
+        lambda emit, mirror: (seen.append(mirror), StageResult("ok", {}))[1],
+    )
     assert cli("--cn").exit_code == 0
     assert seen == ["cn"]
     assert get_config_value("mirror") == "cn"
@@ -302,7 +328,7 @@ def test_cli_json_keeps_config_warnings_off_stdout(cli, monkeypatch):
         return real_load()
 
     monkeypatch.setattr(config_pkg, "load_config", load_with_warning)
-    _fake_stage(monkeypatch, lambda emit, mirror: ("ok", {}))
+    _fake_stage(monkeypatch, lambda emit, mirror: StageResult("ok", {}))
     result = cli("--json")
     assert [json.loads(line)["status"] for line in result.stdout.splitlines()] == [
         "done"
@@ -311,8 +337,13 @@ def test_cli_json_keeps_config_warnings_off_stdout(cli, monkeypatch):
 
 def test_cli_full_run_leaves_out_stages_for_other_platforms(cli, monkeypatch):
     stages = (
-        Stage("git", "Git", frozenset({"no-such-platform"}), lambda e, m: ("", {})),
-        Stage("node", "Node.js", None, lambda e, m: ("ok", {})),
+        Stage(
+            "git",
+            "Git",
+            frozenset({"no-such-platform"}),
+            lambda e, m: StageResult("", {}),
+        ),
+        Stage("node", "Node.js", None, lambda e, m: StageResult("ok", {})),
     )
     monkeypatch.setattr(setup_pkg, "STAGES", stages)
     result = cli("--json")

@@ -635,3 +635,11 @@ def test_node_child_env_strips_npm_config_and_node_options():
     }
     assert node.node_child_env(env, private=True) == {"PATH": "p"}
     assert node.node_child_env(env, private=False) == env
+
+
+def test_run_stage_returns_done_with_the_node_detail(monkeypatch):
+    info = node.NodeInfo("system", "22.11.0", Path("/usr/bin/node"))
+    monkeypatch.setattr(node, "ensure_node", lambda mirror, report: info)
+    result = node.run_stage(lambda event: None, "default")
+    assert result.status == "done"
+    assert result.detail == info.detail()

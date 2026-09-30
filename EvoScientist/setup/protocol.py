@@ -13,7 +13,8 @@ Event fields:
 - ``status``: ``running``, ``done``, ``skipped`` or ``error``.
 - ``progress``: a float in ``[0, 1]`` on ``running`` events, when known.
 - ``message``: a human-readable line.
-- ``detail``: an object on ``done`` events, e.g. ``{"source": "system", ...}``.
+- ``detail``: an object on ``done`` and ``skipped`` events, e.g.
+  ``{"source": "system", ...}``.
 - ``code``: a stable error code on ``error`` events (see :data:`ERROR_CODES`).
 """
 
@@ -21,7 +22,8 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, Protocol, TextIO
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol, TextIO
 
 PROTOCOL = 1
 
@@ -47,6 +49,17 @@ class StageError(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+@dataclass(frozen=True)
+class StageResult:
+    """How a stage ended without an error: ``done`` when it provided the
+    dependency, ``skipped`` when there was nothing to do. The runner turns it
+    into the stage's one terminal event."""
+
+    message: str
+    detail: dict[str, Any]
+    status: Literal["done", "skipped"] = "done"
 
 
 def make_event(

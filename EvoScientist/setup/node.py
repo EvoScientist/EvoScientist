@@ -32,7 +32,13 @@ from pathlib import Path
 from typing import Any
 
 from .download import download, fetch_text, verify_sha256_from_sums
-from .protocol import Emitter, ProgressThrottle, StageError, make_event
+from .protocol import (
+    Emitter,
+    ProgressThrottle,
+    StageError,
+    StageResult,
+    make_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -521,7 +527,7 @@ def node_child_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 # Stage
 # --------------------------------------------------------------------------- #
-def run_stage(emit: Emitter, mirror: str) -> tuple[str, dict[str, Any]]:
+def run_stage(emit: Emitter, mirror: str) -> StageResult:
     emit(make_event("node", "running", progress=0.0, message="Checking for Node.js"))
 
     def report(fraction: float, message: str) -> None:
@@ -532,4 +538,4 @@ def run_stage(emit: Emitter, mirror: str) -> tuple[str, dict[str, Any]]:
         message = f"Using system Node {info.version}"
     else:
         message = f"Using Node {info.version} from {info.path.parent}"
-    return message, info.detail()
+    return StageResult(message, info.detail())
