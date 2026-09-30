@@ -797,8 +797,13 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     ``npm`` and that command is not on PATH.
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
-    the server then fails to start as it would without Node.
+    the server then fails to start as it would without Node. Never runs inside
+    ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set): a download there would
+    race the server's health deadline with its progress hidden in the server
+    log, so ``start_langgraph_dev`` runs this before spawning instead.
     """
+    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+        return
     missing = [
         name
         for name, server in config.items()
@@ -982,8 +987,8 @@ async def _load_tools(
             "Install with: pip install langchain-mcp-adapters"
         ) from None
 
-    # May download Node; off the event loop so langgraph dev's blocking-call
-    # guard is not tripped.
+    # May download Node (in the CLI process only); off the event loop so the
+    # running session stays responsive.
     await asyncio.to_thread(_ensure_node_for_stdio, config)
     connections = _build_connections(config)
     if not connections:

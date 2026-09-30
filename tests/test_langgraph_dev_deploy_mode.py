@@ -28,6 +28,9 @@ def _patch_start_prereqs(monkeypatch, tmp_path: Path, runtime_paths) -> dict:
     Returns a ``captured`` dict that the test populates from the fake Popen."""
     captured: dict = {}
 
+    from EvoScientist.mcp import client as mcp_client
+
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {})
     monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/usr/bin/langgraph")
 
     fake_config = tmp_path / "langgraph.json"
@@ -347,3 +350,34 @@ def test_tunnel_false_default_omits_flag(monkeypatch, tmp_path, runtime_paths):
         )
 
     assert "--tunnel" not in captured["args"]
+
+
+def test_node_for_mcp_servers_is_installed_before_the_spawn(
+    monkeypatch, tmp_path, runtime_paths
+):
+    from EvoScientist.mcp import client as mcp_client
+
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    servers = {"fs": {"transport": "stdio", "command": "npx"}}
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: servers)
+
+    def install(config):
+        assert config == servers
+        monkeypatch.setenv("PATH", "private-node-bin")
+
+    monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", install)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16176)
+    assert captured["env"]["PATH"] == "private-node-bin"
+
+
+def test_a_failing_node_check_does_not_block_the_spawn(
+    monkeypatch, tmp_path, runtime_paths
+):
+    from EvoScientist.mcp import client as mcp_client
+
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {"fs": None})
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16177)
+    assert "env" in captured

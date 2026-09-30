@@ -1914,6 +1914,7 @@ class TestEnsureNodeForStdio:
         from EvoScientist.setup import node as setup_node
 
         calls = {"ensure": 0, "activate": 0}
+        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
 
         def ensure(*_a, **_k):
             calls["ensure"] += 1
@@ -1961,6 +1962,7 @@ class TestEnsureNodeForStdio:
         def offline(*_a, **_k):
             raise StageError("download_failed", "offline")
 
+        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
@@ -1979,6 +1981,7 @@ class TestEnsureNodeForStdio:
         def broken(*_a, **_k):
             raise NotImplementedError("compression type 99")
 
+        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
@@ -1986,3 +1989,28 @@ class TestEnsureNodeForStdio:
                 {"fs": {"transport": "stdio", "command": "npx"}}
             )
         assert "compression type 99" in caplog.text
+
+    def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls):
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx"}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
+
+    async def test_load_tools_checks_node_before_building_connections(
+        self, monkeypatch
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        order: list[str] = []
+        monkeypatch.setattr(
+            mcp_client, "_ensure_node_for_stdio", lambda _c: order.append("node")
+        )
+        monkeypatch.setattr(
+            mcp_client, "_build_connections", lambda _c: order.append("connect") or {}
+        )
+        await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
+        assert order == ["node", "connect"]
