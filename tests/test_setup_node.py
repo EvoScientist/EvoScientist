@@ -65,6 +65,20 @@ class FakeNet:
         return hashlib.sha256(self.data).hexdigest()
 
 
+class ProbeTable(dict):
+    """Fake ``node --version`` results keyed by executable path.
+
+    Keys compare with ``os.path.normcase``: on Windows ``shutil.which`` returns
+    the ``PATHEXT`` spelling (``node.EXE``) for a file created as ``node.exe``.
+    """
+
+    def __setitem__(self, exe, version) -> None:
+        super().__setitem__(os.path.normcase(str(exe)), version)
+
+    def get(self, exe, default=None):
+        return super().get(os.path.normcase(str(exe)), default)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """Isolated DATA_DIR with a space and non-ASCII characters, no node on PATH."""
@@ -77,12 +91,12 @@ def env(tmp_path, monkeypatch):
     net = FakeNet(_archive_bytes())
     monkeypatch.setattr(node, "fetch_text", net.fetch_text)
     monkeypatch.setattr(node, "download", net.download)
-    probes: dict[str, tuple | None] = {}
+    probes = ProbeTable()
     # Anything under our tools dir probes as the pinned version by default.
     monkeypatch.setattr(
         node,
         "_probe",
-        lambda exe: probes.get(str(exe), tuple(map(int, V.split(".")))),
+        lambda exe: probes.get(exe, tuple(map(int, V.split(".")))),
     )
     return {"data": data, "net": net, "probes": probes, "tmp": tmp_path}
 
@@ -190,7 +204,10 @@ def test_http_client_errors_become_download_failed(tmp_path, monkeypatch, exc):
 def test_system_node_20_or_newer_wins_without_download(env, monkeypatch):
     exe = _system_node(env, monkeypatch, (22, 11, 0))
     info = node.ensure_node("default")
-    assert info.detail() == {"source": "system", "version": "22.11.0", "path": str(exe)}
+    detail = info.detail()
+    assert (detail["source"], detail["version"]) == ("system", "22.11.0")
+    # shutil.which may return the PATHEXT spelling (node.EXE) on Windows.
+    assert os.path.normcase(detail["path"]) == os.path.normcase(str(exe))
     assert env["net"].urls == []
 
 
