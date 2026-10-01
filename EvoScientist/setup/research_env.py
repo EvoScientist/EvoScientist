@@ -260,9 +260,24 @@ def find_usable_python() -> str | None:
 
 
 def _import_check(env: Path) -> str | None:
-    """The environment's Python version when all packages import, else None."""
-    result = _runs([str(_env_python(env)), "-c", _IMPORT_CHECK], _IMPORT_TIMEOUT)
-    return _last_line(result.stdout) if result is not None else None
+    """The environment's Python version when all packages import, else None.
+
+    Isolated (``-I``) like every command that maintains the environment: the
+    caller's cwd and ``PYTHON*`` variables could shadow a package and send a
+    healthy environment to a rebuild. The output is logged on failure, since a
+    shadowing file, a broken wheel and a missing system library look the same
+    from the exit code.
+    """
+    cmd = [str(_env_python(env)), "-I", "-c", _IMPORT_CHECK]
+    try:
+        result = _run(cmd, _IMPORT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(f"Import check in {env} failed: {exc}")
+        return None
+    if result.returncode != 0:
+        logger.warning(f"Import check in {env} failed:\n{result.stdout}")
+        return None
+    return _last_line(result.stdout)
 
 
 # --------------------------------------------------------------------------- #
@@ -294,7 +309,7 @@ def _sync_pip_config(env: Path, mirror: str) -> None:
         if current != CN_INDEX_URL:
             return
         action = ["unset", "global.index-url"]
-    cmd = [str(_env_python(env)), "-m", "pip", "config", "--site", *action]
+    cmd = [str(_env_python(env)), "-I", "-m", "pip", "config", "--site", *action]
     try:
         result = _run(cmd, _PYTHON_PROBE_TIMEOUT * 3)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -309,7 +324,7 @@ def _sync_pip_config(env: Path, mirror: str) -> None:
 
 
 def _create_venv(env: Path) -> None:
-    cmd = [sys.executable, "-m", "venv", str(env)]
+    cmd = [sys.executable, "-I", "-m", "venv", str(env)]
     try:
         result = _run(cmd, _VENV_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -332,6 +347,7 @@ def _pip_install(env: Path, mirror: str) -> None:
     """Install :data:`PACKAGES` without upgrading what is already there."""
     cmd = [
         str(_env_python(env)),
+        "-I",
         "-m",
         "pip",
         "install",
@@ -367,7 +383,7 @@ def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
     mostly working Python.
     """
     python = str(_env_python(env))
-    if _runs([python, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
+    if _runs([python, "-I", "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
         return None
     # Before pip, so the config follows the mirror even when pip fails.
     _sync_pip_config(env, mirror)

@@ -34,6 +34,9 @@ class FakeRunner:
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
+        # Commands as run, with ``-I``; ``calls`` drops it so matching by
+        # position works.
+        self.raw: list[list[str]] = []
         self.venv_ok = True
         self.venv_output = ""
         self.pip_ok = True
@@ -48,6 +51,7 @@ class FakeRunner:
 
     @staticmethod
     def _kind(cmd: list[str]) -> str:
+        cmd = [part for part in cmd if part != "-I"]
         if cmd[1:3] == ["-m", "venv"]:
             return "venv"
         if cmd[1:4] == ["-m", "pip", "install"]:
@@ -59,7 +63,8 @@ class FakeRunner:
         return "starts"
 
     def __call__(self, cmd, timeout):
-        cmd = list(cmd)
+        self.raw.append(list(cmd))
+        cmd = [part for part in cmd if part != "-I"]
         self.calls.append(cmd)
         kind = self._kind(cmd)
         if kind == "venv":
@@ -412,6 +417,38 @@ def test_failed_import_check_is_probe_failed(env):
         re_env.ensure_research_env("default")
     assert exc.value.code == "probe_failed"
     assert not re_env.is_ready(env["env"])
+
+
+def test_failed_import_check_logs_its_output_at_warning(env, monkeypatch, caplog):
+    def run(cmd, timeout):
+        if FakeRunner._kind(list(cmd)) == "imports":
+            return subprocess.CompletedProcess(cmd, 1, "ImportError: libgfortran\n")
+        return env["run"](cmd, timeout)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    with caplog.at_level(logging.WARNING, logger=re_env.__name__):
+        with pytest.raises(StageError):
+            re_env.ensure_research_env("default")
+    assert "ImportError: libgfortran" in caplog.text
+
+
+def test_import_check_ignores_the_callers_cwd_and_pythonpath(tmp_path, monkeypatch):
+    """A real subprocess, with ``json`` standing in for the four packages."""
+    (tmp_path / "json.py").write_text("raise ImportError('shadowed')\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setattr(re_env, "_env_python", lambda _env: Path(sys.executable))
+    monkeypatch.setattr(re_env, "_IMPORT_CHECK", "import json; print('3.12.9')")
+    assert re_env._import_check(tmp_path) == "3.12.9"
+
+
+def test_setup_commands_run_isolated(env):
+    re_env.ensure_research_env("cn")
+    env["run"].imports_script = [False]
+    re_env.ensure_research_env("cn")
+    kinds = {FakeRunner._kind(cmd) for cmd in env["run"].raw}
+    assert kinds == {"venv", "config", "pip", "imports", "starts"}
+    assert all(cmd[1] == "-I" for cmd in env["run"].raw)
 
 
 def test_unwritable_data_dir_is_install_failed(env, monkeypatch):
