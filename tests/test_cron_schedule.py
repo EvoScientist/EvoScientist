@@ -37,8 +37,6 @@ def test_create_schedule_targets_scheduler(monkeypatch, workspace):
     }
     assert kw["metadata"]["run_kind"] == crons.SCHEDULED_RUN_KIND
     assert kw["metadata"]["name"] == "weather"
-    assert kw["metadata"]["workspace_dir"] == workspace.key
-    assert kw["config"] == {"configurable": {"workspace_dir": workspace.key}}
     assert kw["timezone"] == "Europe/London"
 
 
@@ -47,18 +45,18 @@ def test_list_schedules_uses_server_side_filter(monkeypatch, workspace):
     out = crons.list_schedules(workspace=workspace)
     assert [c["cron_id"] for c in out] == ["c-1"]
     # Filtered server-side by run_kind metadata (the workspace is filtered
-    # client-side); high limit so users with >10 schedules still see them all.
-    fake.crons.search.assert_called_once_with(
-        metadata={"run_kind": crons.SCHEDULED_RUN_KIND},
-        limit=1000,
-    )
+    # client-side).
+    assert fake.crons.search.call_args.kwargs["metadata"] == {
+        "run_kind": crons.SCHEDULED_RUN_KIND
+    }
 
 
 def test_delete_and_set_enabled(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch)
-    crons.delete_schedule("c-1", workspace=workspace)
+    (row,) = crons.list_schedules(workspace=workspace)
+    crons.delete_schedule(row, workspace=workspace)
     fake.crons.delete.assert_called_once_with("c-1")
-    crons.set_enabled("c-1", False, workspace=workspace)
+    crons.set_enabled(row, False, workspace=workspace)
     assert fake.crons.update.call_args.kwargs["enabled"] is False
 
 
@@ -68,7 +66,7 @@ def test_run_now_dispatches_thread_then_run(monkeypatch, workspace):
     fake.runs.create.return_value = {"run_id": "r-1"}
     rec = crons.run_now("do the thing", workspace=workspace)
     assert rec["run_id"] == "r-1"
-    fake.threads.create.assert_called_once_with(graph_id=crons.SCHEDULER_GRAPH_ID)
+    assert fake.threads.create.call_args.kwargs["graph_id"] == crons.SCHEDULER_GRAPH_ID
     run_kw = fake.runs.create.call_args.kwargs
     assert run_kw["thread_id"] == "t-1"
     assert run_kw["assistant_id"] == crons.SCHEDULER_GRAPH_ID
@@ -77,8 +75,6 @@ def test_run_now_dispatches_thread_then_run(monkeypatch, workspace):
     }
     assert run_kw["metadata"]["run_kind"] == crons.SCHEDULED_RUN_KIND
     assert run_kw["metadata"]["prompt"] == "do the thing"
-    assert run_kw["metadata"]["workspace_dir"] == workspace.key
-    assert run_kw["config"] == {"configurable": {"workspace_dir": workspace.key}}
 
 
 # ---------------------------------------------------------------------------

@@ -143,7 +143,7 @@ def make_scheduling_tools(workspace: Workspace) -> list:
                 ids = ", ".join(str(r.get("cron_id", ""))[:8] for r in matches)
                 return f"Multiple schedules match '{requested_id}' ({ids}) — use a longer id."
             target = str(matches[0]["cron_id"])
-            crons.delete_schedule(target, workspace=workspace)
+            crons.delete_schedule(matches[0], workspace=workspace)
         except Exception as e:
             return f"Error: {e}"
         return f"Cancelled scheduled task {target}."

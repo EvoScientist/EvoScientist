@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from rich.table import Table
 
+from ...paths import Workspace
 from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
 
@@ -159,7 +160,7 @@ class ScheduleCommand(Command):
     _AMBIGUOUS = object()  # B2: sentinel returned when multiple crons match a prefix
     _BACKEND_ERROR = object()  # sentinel returned when list_schedules() raises
 
-    async def _resolve(self, crons, prefix: str, workspace):
+    async def _resolve(self, crons, prefix: str, workspace: Workspace):
         """Return the unique matching record, _AMBIGUOUS if >1 match, _BACKEND_ERROR on error, or None."""
         # B1: guard SDK call — backend may die after is_available() check.
         try:
@@ -207,7 +208,7 @@ class ScheduleCommand(Command):
         cron_id = str(match.get("cron_id", ""))
         try:
             await asyncio.to_thread(
-                crons.delete_schedule, cron_id, workspace=ctx.workspace
+                crons.delete_schedule, match, workspace=ctx.workspace
             )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
@@ -258,7 +259,7 @@ class ScheduleCommand(Command):
         cron_id = str(match.get("cron_id", ""))
         try:
             await asyncio.to_thread(
-                crons.set_enabled, cron_id, enabled, workspace=ctx.workspace
+                crons.set_enabled, match, enabled, workspace=ctx.workspace
             )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
