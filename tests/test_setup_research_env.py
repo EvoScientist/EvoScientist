@@ -247,6 +247,19 @@ def test_find_usable_python_rejects_a_shim_that_fails_the_probe(env, monkeypatch
     assert re_env.find_usable_python() is None
 
 
+def test_system_python_probe_rejects_python_2(monkeypatch):
+    """The probe that decides "usable" exits non-zero under Python 2."""
+    monkeypatch.setattr(sys, "version_info", (2, 7, 18, "final", 0))
+    with pytest.raises(SystemExit) as exc:
+        exec(re_env._SYSTEM_PYTHON_PROBE, {})
+    assert exc.value.code
+
+
+def test_system_python_probe_accepts_python_3():
+    result = subprocess.run([sys.executable, "-c", re_env._SYSTEM_PYTHON_PROBE])
+    assert result.returncode == 0
+
+
 def _own_env_before_a_system_python(env, monkeypatch) -> Path:
     """Our environment first on PATH (activated by hand, or a nested EvoSci in
     the agent's shell), a working system python after it."""

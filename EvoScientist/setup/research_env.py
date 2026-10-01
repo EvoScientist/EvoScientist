@@ -38,6 +38,9 @@ CN_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 _READY_MARKER = ".evoscientist-ready"
 _PYTHON_PROBE_TIMEOUT = 10
+# Exits non-zero under Python 2, which some systems still install as
+# `python`. Written so Python 2 can parse it.
+_SYSTEM_PYTHON_PROBE = "import sys; sys.exit(sys.version_info[0] < 3)"
 _VENV_TIMEOUT = 300
 _PIP_TIMEOUT = 1800
 # The first matplotlib import builds its font cache.
@@ -228,7 +231,7 @@ def _is_untrusted_alias(path: str) -> bool:
 
 def find_usable_python() -> str | None:
     """The ``python`` the agent's shell would run, as an absolute path, if it
-    runs; else None.
+    runs and is Python 3; else None.
 
     Only the first ``python`` on PATH counts, as in the shell. When it is our
     own environment's (activated by hand, or a nested ``EvoSci`` in the
@@ -247,7 +250,7 @@ def find_usable_python() -> str | None:
     own_bin = os.path.normcase(str(_bin_dir(env_dir())))
     if os.path.normcase(os.path.dirname(found)) == own_bin:
         return None
-    if _runs([found, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
+    if _runs([found, "-c", _SYSTEM_PYTHON_PROBE], _PYTHON_PROBE_TIMEOUT) is None:
         return None
     return found
 
