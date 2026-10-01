@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -45,6 +46,16 @@ _IMPORT_CHECK = (
     f"import platform, {', '.join(PACKAGES)}; print(platform.python_version())"
 )
 _STORE_ALIAS_RE = re.compile(r"[\\/]microsoft[\\/]windowsapps[\\/]", re.IGNORECASE)
+# Package of the Store's "python" alias (App Installer's Python redirector).
+_STORE_PROMPT_PACKAGE = "Microsoft.DesktopAppInstaller_"
+# Win32 constants for reading an app execution alias.
+_APPEXECLINK_TAG = 0x8000001B
+_FSCTL_GET_REPARSE_POINT = 0x000900A8
+_FILE_READ_ATTRIBUTES = 0x80
+_FILE_SHARE_ALL = 0x7
+_OPEN_EXISTING = 3
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 
 ProgressFn = Callable[[float, str], None]
 
@@ -113,12 +124,108 @@ def _last_line(output: str) -> str:
 # --------------------------------------------------------------------------- #
 # Probing
 # --------------------------------------------------------------------------- #
-def find_usable_python() -> str | None:
-    """The ``python`` on PATH if it runs, else None.
+def _parse_app_exec_link(data: bytes) -> str | None:
+    """The package family name from an app execution alias reparse buffer.
 
-    Our own environment is left out of the search, and so is the Microsoft
-    Store alias under ``WindowsApps``, which is never run: without arguments
-    it opens the Store.
+    Layout: ULONG tag, USHORT data length, USHORT reserved, then the data:
+    ULONG version followed by NUL-separated UTF-16 strings, the first being
+    the package family name.
+    """
+    if len(data) < 12:
+        return None
+    tag, length = struct.unpack_from("<IH", data)
+    if tag != _APPEXECLINK_TAG:
+        return None
+    strings = data[12 : 8 + length].decode("utf-16-le", errors="replace")
+    return strings.split("\0", 1)[0] or None
+
+
+def _app_exec_link_package(path: str) -> str | None:
+    """The package behind a Windows app execution alias, read without running it.
+
+    None when ``path`` is not such an alias or cannot be read.
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.DeviceIoControl.restype = wintypes.BOOL
+    kernel32.DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    handle = kernel32.CreateFileW(
+        path,
+        _FILE_READ_ATTRIBUTES,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_OPEN_REPARSE_POINT | _FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return None
+    try:
+        buffer = ctypes.create_string_buffer(16 * 1024)
+        returned = wintypes.DWORD()
+        ok = kernel32.DeviceIoControl(
+            handle,
+            _FSCTL_GET_REPARSE_POINT,
+            None,
+            0,
+            buffer,
+            len(buffer),
+            ctypes.byref(returned),
+            None,
+        )
+    finally:
+        kernel32.CloseHandle(handle)
+    if not ok:
+        return None
+    return _parse_app_exec_link(buffer.raw[: returned.value])
+
+
+def _is_store_prompt(path: str) -> bool:
+    """True for the Microsoft Store's ``python`` alias, which must never run:
+    without arguments it opens the Store.
+
+    Other packages also put aliases under ``WindowsApps``; the Python install
+    manager's ``python.exe`` there is a working Python. An alias whose package
+    cannot be read is treated as the Store's.
+    """
+    if not _STORE_ALIAS_RE.search(path):
+        return False
+    package = _app_exec_link_package(path)
+    return package is None or package.startswith(_STORE_PROMPT_PACKAGE)
+
+
+def find_usable_python() -> str | None:
+    """The ``python`` the agent's shell would run, as an absolute path, if it
+    runs; else None.
+
+    Our own environment is left out of the search. The Store's ``python``
+    alias is never run (see :func:`_is_store_prompt`); when it comes first on
+    PATH the shell would run it too, so there is no usable ``python``.
     """
     own_bin = os.path.normcase(str(_bin_dir(env_dir())))
     search = os.pathsep.join(
@@ -127,8 +234,10 @@ def find_usable_python() -> str | None:
         if p and os.path.normcase(p.rstrip("\\/")) != own_bin
     )
     found = shutil.which("python", path=search)
-    if found is None or _STORE_ALIAS_RE.search(found):
+    if found is None or _is_store_prompt(found):
         return None
+    # A relative PATH entry means another file in the agent's working dir.
+    found = os.path.abspath(found)
     if _runs([found, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
         return None
     return found

@@ -5,6 +5,7 @@ from __future__ import annotations
 import configparser
 import logging
 import os
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -169,8 +170,70 @@ def test_find_usable_python_ignores_the_store_alias_without_running_it(
 ):
     exe = _fake_python(env["tmp"] / "AppData" / "Local" / "Microsoft" / "WindowsApps")
     monkeypatch.setenv("PATH", str(exe.parent))
+    monkeypatch.setattr(
+        re_env,
+        "_app_exec_link_package",
+        lambda _path: "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
+    )
     assert re_env.find_usable_python() is None
     assert env["run"].calls == []
+
+
+def test_find_usable_python_never_runs_an_alias_it_cannot_read(env, monkeypatch):
+    exe = _fake_python(env["tmp"] / "AppData" / "Local" / "Microsoft" / "WindowsApps")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    monkeypatch.setattr(re_env, "_app_exec_link_package", lambda _path: None)
+    assert re_env.find_usable_python() is None
+    assert env["run"].calls == []
+
+
+def test_find_usable_python_uses_the_python_install_manager_alias(env, monkeypatch):
+    """The Python install manager's ``python.exe`` in WindowsApps is a real
+    Python, unlike the Store's."""
+    exe = _fake_python(env["tmp"] / "AppData" / "Local" / "Microsoft" / "WindowsApps")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    monkeypatch.setattr(
+        re_env,
+        "_app_exec_link_package",
+        lambda _path: "PythonSoftwareFoundation.PythonManager_3847v3x7pw1km",
+    )
+    assert _same_path(re_env.find_usable_python(), exe)
+
+
+def test_find_usable_python_returns_an_absolute_path(env, monkeypatch):
+    exe = _fake_python(env["tmp"] / "venv" / "bin")
+    monkeypatch.chdir(env["tmp"])
+    monkeypatch.setenv("PATH", os.path.join("venv", "bin"))
+    found = re_env.find_usable_python()
+    assert os.path.isabs(found)
+    assert _same_path(found, exe)
+
+
+def test_parse_app_exec_link_reads_the_package_family_name():
+    """Bytes as ``fsutil reparsepoint query`` showed them for the Python
+    install manager's ``python.exe`` alias."""
+    family = "PythonSoftwareFoundation.PythonManager_3847v3x7pw1km"
+    strings = "\0".join(
+        [
+            family,
+            f"{family}!Python.Exe",
+            r"C:\Program Files\WindowsApps\PythonSoftwareFoundation.PythonManager"
+            r"_26.3.240.0_x64__3847v3x7pw1km\python.exe",
+            "0",
+            "",
+        ]
+    )
+    payload = struct.pack("<I", 3) + strings.encode("utf-16-le")
+    data = struct.pack("<IHH", 0x8000001B, len(payload), 0) + payload
+    assert len(payload) == 0x1CC
+    assert re_env._parse_app_exec_link(data) == family
+
+
+def test_parse_app_exec_link_rejects_other_reparse_points():
+    payload = struct.pack("<I", 3) + "x\0".encode("utf-16-le")
+    symlink = struct.pack("<IHH", 0xA000000C, len(payload), 0) + payload
+    assert re_env._parse_app_exec_link(symlink) is None
+    assert re_env._parse_app_exec_link(b"") is None
 
 
 def test_find_usable_python_rejects_a_shim_that_fails_the_probe(env, monkeypatch):
