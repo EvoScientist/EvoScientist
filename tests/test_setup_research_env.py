@@ -258,6 +258,15 @@ def test_parse_app_exec_link_rejects_other_reparse_points():
     assert re_env._parse_app_exec_link(b"") is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="runs the real Win32 calls")
+def test_app_exec_link_package_is_none_for_a_regular_file(tmp_path):
+    """Runs the CreateFileW / DeviceIoControl declarations on the Windows CI
+    jobs without needing a Store alias: a regular file is no reparse point."""
+    regular = tmp_path / "python.exe"
+    regular.write_bytes(b"")
+    assert re_env._app_exec_link_package(str(regular)) is None
+
+
 def test_find_usable_python_rejects_a_shim_that_fails_the_probe(env, monkeypatch):
     exe = _fake_python(env["tmp"] / "pyenv" / "shims")
     monkeypatch.setenv("PATH", str(exe.parent))
