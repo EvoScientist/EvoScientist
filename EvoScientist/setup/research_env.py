@@ -308,9 +308,10 @@ def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> str:
 def _agent_python() -> tuple[str | None, Path | None]:
     """The agent shell's ``python`` and the research environment it comes from.
 
-    Decided once per process: ``(system python, None)``, ``(env python, env)``
-    or ``(None, None)``. Logs the result once, and a setup hint when the agent
-    has no Python at all.
+    Decided once per process, the first time it is needed (an agent is built,
+    or a server is started or reused): ``(system python, None)``,
+    ``(env python, env)`` or ``(None, None)``. Logs the result once at INFO,
+    for people reading the log.
     """
     system = find_usable_python()
     if system is not None:
@@ -320,12 +321,32 @@ def _agent_python() -> tuple[str | None, Path | None]:
     if is_ready(env):
         logger.info(f"Agent shell python: research environment {env}")
         return str(_env_python(env)), env
-    logger.warning(
-        "No usable `python` on PATH for the agent's shell. Run "
-        "`EvoSci setup --stage research-env` to give the agent a Python with "
-        f"{', '.join(PACKAGES)}."
-    )
+    logger.info("Agent shell python: none")
     return None, None
+
+
+MISSING_PYTHON_HINT = (
+    "The agent's shell has no usable `python`. Run `EvoSci setup`, then restart "
+    f"EvoScientist, to give it a Python with {', '.join(PACKAGES)}."
+)
+
+
+def missing_python_hint() -> str | None:
+    """The setup hint when the agent's shell has no ``python``, else None.
+
+    For callers that show it themselves (the TUI, the WebUI launcher,
+    ``EvoSci deploy``); it is not logged here.
+    """
+    return MISSING_PYTHON_HINT if agent_python() is None else None
+
+
+@functools.cache
+def _log_missing_python_hint() -> None:
+    """Log the hint once per process where the agent is built, so the Rich
+    CLI, ``-p`` and ``EvoSci serve`` show it."""
+    hint = missing_python_hint()
+    if hint is not None:
+        logger.warning(hint)
 
 
 def research_env_overrides() -> dict[str, str] | None:
@@ -336,6 +357,7 @@ def research_env_overrides() -> dict[str, str] | None:
     made after the decision (e.g. the private Node from ``activate_runtime``)
     are kept.
     """
+    _log_missing_python_hint()
     _python, env = _agent_python()
     if env is None:
         return None

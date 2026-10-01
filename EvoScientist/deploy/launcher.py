@@ -340,8 +340,14 @@ class WebUILauncher:
         stops mid-boot would orphan the backend holding the port.
         """
         from ..langgraph_dev.manager import _is_port_occupied
+        from ..setup.research_env import missing_python_hint
 
         self._runner.preflight(self._cfg)
+        # The agent is built inside the server, so its own hint lands in the
+        # server log; the launching process shows it.
+        hint = missing_python_hint()
+        if hint is not None:
+            self._warnings.append(hint)
 
         try:
             decision = _resolve_backend(self._cfg, self._config)

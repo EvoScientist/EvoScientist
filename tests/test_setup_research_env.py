@@ -98,6 +98,12 @@ class FakeRunner:
         return subprocess.CompletedProcess(cmd, 0, f"Writing to {path}\n")
 
 
+def _forget_decision() -> None:
+    """Start the once-per-process decision and hint over."""
+    re_env._agent_python.cache_clear()
+    re_env._log_missing_python_hint.cache_clear()
+
+
 def _fake_python(directory: Path) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     exe = directory / ("python.exe" if os.name == "nt" else "python")
@@ -116,14 +122,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
     runner = FakeRunner()
     monkeypatch.setattr(re_env, "_run", runner)
-    re_env._agent_python.cache_clear()
+    _forget_decision()
     yield {
         "data": data,
         "run": runner,
         "tmp": tmp_path,
         "env": data / "envs" / "default",
     }
-    re_env._agent_python.cache_clear()
+    _forget_decision()
 
 
 def _events():
@@ -391,14 +397,14 @@ def test_overrides_none_when_a_usable_python_exists(env, monkeypatch):
     re_env.ensure_research_env("default")
     exe = _fake_python(env["tmp"] / "conda" / "bin")
     monkeypatch.setenv("PATH", str(exe.parent))
-    re_env._agent_python.cache_clear()
+    _forget_decision()
     assert re_env.research_env_overrides() is None
     assert re_env.agent_python() == str(exe)
 
 
 def test_overrides_prepend_the_environment_and_follow_path(env, monkeypatch):
     re_env.ensure_research_env("default")
-    re_env._agent_python.cache_clear()
+    _forget_decision()
     overrides = re_env.research_env_overrides()
     bin_dir = str(re_env._bin_dir(env["env"]))
     assert overrides == {
@@ -428,12 +434,21 @@ def test_decision_is_logged_once_with_a_setup_hint(env, caplog):
         assert re_env.research_env_overrides() is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "EvoSci setup --stage research-env" in warnings[0].getMessage()
+    assert "Run `EvoSci setup`, then restart EvoScientist" in warnings[0].getMessage()
+
+
+def test_missing_python_hint_is_returned_but_not_logged(env, caplog):
+    with caplog.at_level(logging.INFO, logger=re_env.__name__):
+        assert re_env.missing_python_hint() == re_env.MISSING_PYTHON_HINT
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+    re_env.ensure_research_env("default")
+    _forget_decision()
+    assert re_env.missing_python_hint() is None
 
 
 def test_python_used_is_logged_once(env, caplog):
     re_env.ensure_research_env("default")
-    re_env._agent_python.cache_clear()
+    _forget_decision()
     with caplog.at_level(logging.INFO, logger=re_env.__name__):
         re_env.research_env_overrides()
         re_env.research_env_overrides()
