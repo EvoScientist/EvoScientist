@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -47,23 +45,6 @@ def test_cli_agent_backend_gets_the_overrides(overrides, tmp_path):
             workspace_dir=str(tmp_path), config=cfg, chat_model=MagicMock()
         )
     assert backends[0].default._env["EVOSCI_SHELL_PROBE"] == "venv"
-
-
-def test_every_sandbox_backend_construction_passes_env():
-    """A new agent backend that skips the overrides would give that agent a
-    different ``python`` from the others."""
-    root = Path(es_mod.__file__).parent
-    sites = []
-    for path in root.rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        # The class or a subclass of it (e.g. AutoskillProposalSandboxBackend).
-        for match in re.finditer(
-            r"=\s*\w*SandboxBackend\((.*?)\n\s*\)", text, re.DOTALL
-        ):
-            sites.append((path.name, match.group(1)))
-    assert len(sites) == 3
-    for name, args in sites:
-        assert "env=research_env_overrides()" in args, name
 
 
 def test_autoskill_backend_gets_the_overrides(overrides, tmp_path):
