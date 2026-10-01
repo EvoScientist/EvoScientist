@@ -4,10 +4,10 @@ EvoScientist scheduled tasks ARE langgraph crons targeting the ``scheduler``
 graph. This module is the single choke-point so the ``/schedule`` command and the
 NL ``schedule_task`` tool share one implementation.
 
-Isolation is **process-level**, not data-level: EvoScientist's manager.py restarts
-langgraph dev when the active workspace changes, so each workspace gets its own
-langgraph-dev process and its own ``.langgraph_api`` cron store. If you point
-multiple clients at one hand-started server they will share the same cron store.
+Every scheduled task belongs to a workspace: it carries the workspace root in
+``config.configurable`` and ``metadata`` (``workspace_dir``), runs in that root,
+and is listed, paused and deleted only from that workspace. Tasks created before
+they were tagged belong to whichever workspace the server serves.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from ..langgraph_dev.sdk import (
     get_langgraph_sync_client,
     messages_input,
 )
+from ..paths import Workspace
 
 SCHEDULER_GRAPH_ID = "scheduler"
 SCHEDULED_RUN_KIND = "scheduled_task"
@@ -47,12 +48,36 @@ def _scheduled_input(prompt: str, rubric: str | None) -> dict[str, Any]:
 
 
 def _scheduled_metadata(
-    *, name: str, prompt: str, rubric: str | None
+    *, name: str, prompt: str, rubric: str | None, workspace: Workspace
 ) -> dict[str, str]:
-    metadata = {"run_kind": SCHEDULED_RUN_KIND, "name": name, "prompt": prompt}
+    metadata = {
+        "run_kind": SCHEDULED_RUN_KIND,
+        "name": name,
+        "prompt": prompt,
+        "workspace_dir": workspace.key,
+    }
     if rubric:
         metadata["rubric"] = rubric
     return metadata
+
+
+def _scheduled_config(workspace: Workspace) -> dict[str, Any]:
+    """Run config of a scheduled task: it works in the workspace root."""
+    return {"configurable": {"workspace_dir": workspace.key}}
+
+
+def belongs_to(cron: Any, workspace: Workspace) -> bool:
+    """True if *cron* is one of *workspace*'s scheduled tasks.
+
+    Tags are compared in the stored form, so tags written before it (an
+    unresolved or Windows path) still match. Untagged crons were created
+    before tasks were tagged; the server only loads the store of the
+    workspace it serves, so they belong to it.
+    """
+    tag = ((cron or {}).get("metadata") or {}).get("workspace_dir")
+    if not isinstance(tag, str) or not tag:
+        return True
+    return Workspace(tag).key == workspace.key
 
 
 def _scheduler_url() -> str:
@@ -81,51 +106,66 @@ def create_schedule(
     prompt: str,
     timezone: str | None = None,
     rubric: str | None = None,
+    workspace: Workspace,
 ) -> Cron:
-    """Create a recurring scheduled task on the scheduler graph.
+    """Create a recurring scheduled task of *workspace* on the scheduler graph.
 
     ``rubric`` is an optional acceptance checklist graded after each run; blank
     means the run is never graded.
     """
     rubric = _normalize_rubric(rubric)
-    # Crons are stored in the langgraph-dev process's .langgraph_api store, not
-    # tagged by workspace. Isolation is process-level (see module docstring).
     return _client().crons.create(
         assistant_id=SCHEDULER_GRAPH_ID,
         schedule=schedule,
         input=_scheduled_input(prompt, rubric),
-        metadata=_scheduled_metadata(name=name, prompt=prompt, rubric=rubric),
+        metadata=_scheduled_metadata(
+            name=name, prompt=prompt, rubric=rubric, workspace=workspace
+        ),
+        config=_scheduled_config(workspace),
         timezone=timezone or _default_timezone(),
     )
 
 
-def list_schedules() -> list[Cron]:
-    """Return only EvoScientist scheduled tasks.
+def list_schedules(*, workspace: Workspace) -> list[Cron]:
+    """Return *workspace*'s EvoScientist scheduled tasks.
 
     Filtered server-side by ``run_kind`` metadata (the cron backend matches by
     metadata containment), so we never page through unrelated crons; ``limit`` is
     a ceiling on OUR schedules (far below 1000 in practice). We filter on metadata
     rather than ``assistant_id`` because the stored ``assistant_id`` is a resolved
-    UUID, not the ``scheduler`` graph name we create with.
+    UUID, not the ``scheduler`` graph name we create with. The workspace is
+    filtered here rather than in the search, which matches values exactly:
+    see :func:`belongs_to`.
     """
-    return _client().crons.search(
+    rows = _client().crons.search(
         metadata={"run_kind": SCHEDULED_RUN_KIND},
         limit=1000,
     )
+    return [row for row in rows if belongs_to(row, workspace)]
 
 
-def delete_schedule(cron_id: str) -> None:
-    """Delete a scheduled task by cron id."""
+def _require_own(cron_id: str, workspace: Workspace) -> None:
+    if not any(
+        str(row.get("cron_id")) == cron_id
+        for row in list_schedules(workspace=workspace)
+    ):
+        raise LookupError(f"No scheduled task {cron_id} in this workspace.")
+
+
+def delete_schedule(cron_id: str, *, workspace: Workspace) -> None:
+    """Delete one of *workspace*'s scheduled tasks by cron id."""
+    _require_own(cron_id, workspace)
     _client().crons.delete(cron_id)
 
 
-def set_enabled(cron_id: str, enabled: bool) -> Cron:
-    """Enable or disable a scheduled task by cron id."""
+def set_enabled(cron_id: str, enabled: bool, *, workspace: Workspace) -> Cron:
+    """Enable or disable one of *workspace*'s scheduled tasks by cron id."""
+    _require_own(cron_id, workspace)
     return _client().crons.update(cron_id, enabled=enabled)
 
 
-def run_now(prompt: str, *, rubric: str | None = None) -> Run:
-    """Fire a one-off scheduler run immediately (for ``/schedule run``).
+def run_now(prompt: str, *, workspace: Workspace, rubric: str | None = None) -> Run:
+    """Fire a one-off scheduler run of *workspace* now (for ``/schedule run``).
 
     Output goes wherever the task's prompt specifies; there is no push notification.
     """
@@ -136,5 +176,8 @@ def run_now(prompt: str, *, rubric: str | None = None) -> Run:
         thread_id=str(thread["thread_id"]),
         assistant_id=SCHEDULER_GRAPH_ID,
         input=_scheduled_input(prompt, rubric),
-        metadata=_scheduled_metadata(name="manual-run", prompt=prompt, rubric=rubric),
+        metadata=_scheduled_metadata(
+            name="manual-run", prompt=prompt, rubric=rubric, workspace=workspace
+        ),
+        config=_scheduled_config(workspace),
     )

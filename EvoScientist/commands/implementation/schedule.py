@@ -112,6 +112,7 @@ class ScheduleCommand(Command):
                 schedule=schedule,
                 prompt=prompt,
                 rubric=rubric,
+                workspace=ctx.workspace,
             )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
@@ -125,7 +126,9 @@ class ScheduleCommand(Command):
     async def _list(self, ctx: CommandContext, crons) -> None:
         # B1: guard SDK call — backend may die after the is_available() check.
         try:
-            rows = await asyncio.to_thread(crons.list_schedules)
+            rows = await asyncio.to_thread(
+                crons.list_schedules, workspace=ctx.workspace
+            )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
             return
@@ -156,11 +159,13 @@ class ScheduleCommand(Command):
     _AMBIGUOUS = object()  # B2: sentinel returned when multiple crons match a prefix
     _BACKEND_ERROR = object()  # sentinel returned when list_schedules() raises
 
-    async def _resolve(self, crons, prefix: str):
+    async def _resolve(self, crons, prefix: str, workspace):
         """Return the unique matching record, _AMBIGUOUS if >1 match, _BACKEND_ERROR on error, or None."""
         # B1: guard SDK call — backend may die after is_available() check.
         try:
-            all_rows = await asyncio.to_thread(crons.list_schedules)
+            all_rows = await asyncio.to_thread(
+                crons.list_schedules, workspace=workspace
+            )
         except Exception as exc:
             # Store the exception text so _resolve_or_report can surface it.
             self._last_backend_exc = exc
@@ -173,7 +178,7 @@ class ScheduleCommand(Command):
 
     async def _resolve_or_report(self, ctx: CommandContext, crons, prefix: str):
         """Resolve prefix → record, emit UI error on ambiguity/miss/error, return None on failure."""
-        match = await self._resolve(crons, prefix)
+        match = await self._resolve(crons, prefix, ctx.workspace)
         if match is self._BACKEND_ERROR:
             exc = getattr(self, "_last_backend_exc", None)
             ctx.ui.append_system(
@@ -201,7 +206,9 @@ class ScheduleCommand(Command):
             return
         cron_id = str(match.get("cron_id", ""))
         try:
-            await asyncio.to_thread(crons.delete_schedule, cron_id)
+            await asyncio.to_thread(
+                crons.delete_schedule, cron_id, workspace=ctx.workspace
+            )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
             return
@@ -224,7 +231,10 @@ class ScheduleCommand(Command):
             return
         try:
             rec = await asyncio.to_thread(
-                crons.run_now, prompt, rubric=meta.get("rubric") or None
+                crons.run_now,
+                prompt,
+                workspace=ctx.workspace,
+                rubric=meta.get("rubric") or None,
             )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
@@ -247,7 +257,9 @@ class ScheduleCommand(Command):
             return
         cron_id = str(match.get("cron_id", ""))
         try:
-            await asyncio.to_thread(crons.set_enabled, cron_id, enabled)
+            await asyncio.to_thread(
+                crons.set_enabled, cron_id, enabled, workspace=ctx.workspace
+            )
         except Exception as exc:
             ctx.ui.append_system(f"Error: {exc}", style="red")
             return

@@ -917,6 +917,8 @@ class _FakeCrons:
             "metadata": kwargs["metadata"],
             "timezone": kwargs["timezone"],
             "enabled": True,
+            # The server keeps the run config in the cron's payload.
+            "payload": {"config": kwargs["config"]},
         }
         self.rows.append(row)
         self.created.append(row)
@@ -938,6 +940,7 @@ class _AsyncFakeCrons:
 
 async def test_alist_autoskill_schedules_uses_async_client_and_explicit_limit(
     monkeypatch,
+    workspace,
 ):
     crons = _AsyncFakeCrons()
     client = SimpleNamespace(crons=crons)
@@ -945,6 +948,7 @@ async def test_alist_autoskill_schedules_uses_async_client_and_explicit_limit(
 
     rows = await alist_autoskill_schedules(
         EvoScientistConfig(),
+        workspace_dir=workspace.root,
         limit=3,
     )
 
@@ -1007,4 +1011,9 @@ def test_reconcile_autoskill_schedule_creates_updates_and_disables(
     assert [row["assistant_id"] for row in crons.created] == [
         AUTOSKILL_GRAPH_ID,
         AUTOSKILL_GRAPH_ID,
+    ]
+    key = Workspace(tmp_path).key
+    assert [row["payload"]["config"] for row in crons.created] == [
+        {"configurable": {"workspace_dir": key}},
+        {"configurable": {"workspace_dir": key}},
     ]

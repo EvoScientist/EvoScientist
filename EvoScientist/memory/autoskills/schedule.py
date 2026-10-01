@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from ...config import EvoScientistConfig
+from ...cron.schedule import belongs_to
 from ...langgraph_dev.sdk import (
     default_scheduler_timezone,
     get_langgraph_async_client,
@@ -63,20 +64,22 @@ def _autoskill_metadata(
 def list_autoskill_schedules(
     config: EvoScientistConfig,
     *,
+    workspace_dir: str | Path,
     limit: int = AUTOSKILL_SCHEDULE_SEARCH_LIMIT,
 ) -> list[dict[str, Any]]:
-    """Return internal AutoSkills cron records."""
-    return list(
-        get_langgraph_sync_client(url=langgraph_dev_url(config)).crons.search(
-            metadata={"run_kind": AUTOSKILL_RUN_KIND},
-            limit=limit,
-        )
+    """Return the workspace's internal AutoSkills cron records."""
+    rows = get_langgraph_sync_client(url=langgraph_dev_url(config)).crons.search(
+        metadata={"run_kind": AUTOSKILL_RUN_KIND},
+        limit=limit,
     )
+    workspace = Workspace(workspace_dir)
+    return [row for row in rows if belongs_to(row, workspace)]
 
 
 async def alist_autoskill_schedules(
     config: EvoScientistConfig,
     *,
+    workspace_dir: str | Path,
     limit: int = AUTOSKILL_SCHEDULE_SEARCH_LIMIT,
 ) -> list[dict[str, Any]]:
     """Async variant of :func:`list_autoskill_schedules`."""
@@ -84,12 +87,15 @@ async def alist_autoskill_schedules(
         metadata={"run_kind": AUTOSKILL_RUN_KIND},
         limit=limit,
     )
-    return list(rows)
+    workspace = Workspace(workspace_dir)
+    return [row for row in rows if belongs_to(row, workspace)]
 
 
-def _stored_workspace_key(value: Any) -> str | None:
-    """Workspace a stored AutoSkills tag names, in the stored form."""
-    return Workspace(value).key if isinstance(value, str) and value else None
+def _forwarded_workspace(cron: dict[str, Any]) -> str | None:
+    """The ``workspace_dir`` a cron's runs forward (its run config)."""
+    payload = cron.get("payload") or {}
+    configurable = (payload.get("config") or {}).get("configurable") or {}
+    return configurable.get("workspace_dir")
 
 
 def reconcile_autoskill_schedule(
@@ -97,7 +103,10 @@ def reconcile_autoskill_schedule(
     *,
     workspace_dir: str | Path,
 ) -> dict[str, Any]:
-    """Ensure the hidden AutoSkills cron matches config."""
+    """Ensure the workspace's hidden AutoSkills cron matches config.
+
+    Only this workspace's AutoSkills crons are listed, replaced or deleted.
+    """
     from ...langgraph_dev.manager import is_langgraph_dev_running
 
     if not is_langgraph_dev_running(base_url=langgraph_dev_url(config)):
@@ -106,6 +115,7 @@ def reconcile_autoskill_schedule(
     client = get_langgraph_sync_client(url=langgraph_dev_url(config))
     existing = list_autoskill_schedules(
         config,
+        workspace_dir=workspace_dir,
         limit=AUTOSKILL_SCHEDULE_SEARCH_LIMIT,
     )
     if not config.memory_skill_synthesis_enabled:
@@ -122,14 +132,15 @@ def reconcile_autoskill_schedule(
         workspace_dir=workspace_dir,
         schedule=schedule,
     )
+    # A cron created before its runs forwarded the workspace is replaced, so
+    # its runs carry ``configurable.workspace_dir`` too.
     matching = [
         row
         for row in existing
         if row.get("schedule") == schedule
         and bool(row.get("enabled", True))
-        and _stored_workspace_key((row.get("metadata") or {}).get("workspace_dir"))
-        == metadata["workspace_dir"]
         and (row.get("metadata") or {}).get("mode") == metadata["mode"]
+        and _forwarded_workspace(row) == metadata["workspace_dir"]
     ]
     if len(matching) == 1 and len(existing) == 1:
         return {"status": "unchanged", "cron_id": matching[0].get("cron_id")}
@@ -141,6 +152,7 @@ def reconcile_autoskill_schedule(
         schedule=schedule,
         input=_autoskill_input(),
         metadata=metadata,
+        config={"configurable": {"workspace_dir": metadata["workspace_dir"]}},
         timezone=default_scheduler_timezone(config),
     )
     return {

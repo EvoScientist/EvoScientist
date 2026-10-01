@@ -136,7 +136,9 @@ class AutoSkillsCommand(Command):
             )
         if cfg.memory_skill_synthesis_enabled:
             try:
-                rows = await alist_autoskill_schedules(cfg, limit=1)
+                rows = await alist_autoskill_schedules(
+                    cfg, workspace_dir=self._workspace_dir(ctx)
+                )
             except Exception:
                 rows = []
             if rows:

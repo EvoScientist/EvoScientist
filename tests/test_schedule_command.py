@@ -42,6 +42,7 @@ async def test_add_parses_five_field_cron_and_prompt():
     kw = mk.call_args.kwargs
     assert kw["schedule"] == "*/10 * * * *"
     assert kw["prompt"] == "search uk weather"
+    assert kw["workspace"] == TEST_WORKSPACE
 
 
 async def test_list_renders_table():
@@ -59,9 +60,10 @@ async def test_list_renders_table():
     ]
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
-        patch("EvoScientist.cron.schedule.list_schedules", return_value=rows),
+        patch("EvoScientist.cron.schedule.list_schedules", return_value=rows) as ls,
     ):
         await ScheduleCommand().execute(ctx, ["list"])
+    ls.assert_called_once_with(workspace=TEST_WORKSPACE)
     ui.mount_renderable.assert_called_once()
 
 
@@ -98,7 +100,7 @@ async def test_run_with_matching_prefix_fires_matched_prompt():
         ) as rn,
     ):
         await ScheduleCommand().execute(ctx, ["run", "c-123"])
-    rn.assert_called_once_with("do the thing", rubric=None)
+    rn.assert_called_once_with("do the thing", workspace=TEST_WORKSPACE, rubric=None)
 
 
 async def test_run_with_no_match_reports():
@@ -128,7 +130,7 @@ async def test_pause_resume_set_enabled_with_resolved_id():
             patch("EvoScientist.cron.schedule.set_enabled") as se,
         ):
             await ScheduleCommand().execute(ctx, [sub, "c-abc"])
-        se.assert_called_once_with("c-abcdef", expected)
+        se.assert_called_once_with("c-abcdef", expected, workspace=TEST_WORKSPACE)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +306,9 @@ async def test_run_forwards_stored_rubric():
         ) as rn,
     ):
         await ScheduleCommand().execute(ctx, ["run", "c-123"])
-    rn.assert_called_once_with("do the thing", rubric="- out.md exists")
+    rn.assert_called_once_with(
+        "do the thing", workspace=TEST_WORKSPACE, rubric="- out.md exists"
+    )
 
 
 async def test_list_table_marks_graded_rows():

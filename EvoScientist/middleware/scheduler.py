@@ -21,6 +21,7 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.tools import tool
 
+from ..paths import Workspace
 from .utils import append_to_system_message
 
 _CACHE_TTL_SECONDS = 15.0
@@ -47,102 +48,107 @@ manage them.
 # ---------------------------------------------------------------------------
 
 
-@tool
-def schedule_task(
-    name: str, cron: str, prompt: str, timezone: str = "", rubric: str = ""
-) -> str:
-    """Create a recurring scheduled task that runs unattended in the background.
+def make_scheduling_tools(workspace: Workspace) -> list:
+    """The scheduling tools of a graph serving *workspace*.
 
-    Translate the user's natural-language timing into a standard 5-field cron
-    expression yourself before calling (e.g. 'every 10 minutes' -> '*/10 * * * *',
-    'every day at 7am' -> '0 7 * * *', 'every Monday 9am' -> '0 9 * * 1').
-
-    Args:
-        name: short human label for the task (e.g. "uk-weather").
-        cron: 5-field cron expression.
-        prompt: the full instruction the background scheduler runs each time.
-        timezone: optional IANA tz (e.g. "Europe/London"); empty = host local zone.
-        rubric: optional acceptance checklist, one "- " bullet per line. A
-            separate reviewer grades each run against it and the task is
-            re-run once with the reviewer's feedback when a bullet fails.
-            Fill it only when the request names checkable outputs (a file
-            that must exist, sections it must contain, a minimum count);
-            leave empty otherwise.
+    Tasks are created in, listed from and cancelled within that workspace.
     """
-    from ..cron import schedule as crons
 
-    if not crons.is_available():
-        return "Scheduler unavailable: the langgraph dev backend is not running."
-    try:
-        rec = crons.create_schedule(
-            name=name,
-            schedule=cron,
-            prompt=prompt,
-            timezone=timezone or None,
-            rubric=rubric or None,
-        )
-    except Exception as e:
-        return f"Error: {e}"
-    return (
-        f"Scheduled '{name}' [{cron}] — id {rec.get('cron_id')}. It runs unattended in the "
-        "background; output goes wherever the task's prompt specifies. Use list_scheduled_tasks to review."
-    )
+    @tool
+    def schedule_task(
+        name: str, cron: str, prompt: str, timezone: str = "", rubric: str = ""
+    ) -> str:
+        """Create a recurring scheduled task that runs unattended in the background.
 
+        Translate the user's natural-language timing into a standard 5-field cron
+        expression yourself before calling (e.g. 'every 10 minutes' -> '*/10 * * * *',
+        'every day at 7am' -> '0 7 * * *', 'every Monday 9am' -> '0 9 * * 1').
 
-@tool
-def list_scheduled_tasks() -> str:
-    """List the user's recurring scheduled tasks (id, name, schedule, enabled)."""
-    from ..cron import schedule as crons
+        Args:
+            name: short human label for the task (e.g. "uk-weather").
+            cron: 5-field cron expression.
+            prompt: the full instruction the background scheduler runs each time.
+            timezone: optional IANA tz (e.g. "Europe/London"); empty = host local zone.
+            rubric: optional acceptance checklist, one "- " bullet per line. A
+                separate reviewer grades each run against it and the task is
+                re-run once with the reviewer's feedback when a bullet fails.
+                Fill it only when the request names checkable outputs (a file
+                that must exist, sections it must contain, a minimum count);
+                leave empty otherwise.
+        """
+        from ..cron import schedule as crons
 
-    if not crons.is_available():
-        return "Scheduler unavailable: the langgraph dev backend is not running."
-    try:
-        rows = crons.list_schedules()
-    except Exception as e:
-        return f"Error: {e}"
-    if not rows:
-        return "No scheduled tasks."
-    lines = []
-    for r in rows:
-        meta = r.get("metadata") or {}
-        line = (
-            f"- {str(r.get('cron_id', ''))[:8]} | {meta.get('name', '')} | "
-            f"{r.get('schedule', '')} | {'on' if r.get('enabled', True) else 'off'}"
-        )
-        if meta.get("rubric"):
-            line += " | rubric"
-        lines.append(line)
-    return "\n".join(lines)
-
-
-@tool
-def cancel_scheduled_task(cron_id: str) -> str:
-    """Cancel (delete) a scheduled task. Pass the id (or its prefix) shown by list_scheduled_tasks."""
-    from ..cron import schedule as crons
-
-    if not crons.is_available():
-        return "Scheduler unavailable: the langgraph dev backend is not running."
-    if not (requested_id := cron_id.strip()):
-        # Empty prefix would match (and delete) the only cron — refuse it.
-        return "Provide the id (or a prefix) of the task to cancel."
-    try:
-        rows = crons.list_schedules()
-        # B2: collect ALL prefix matches before acting to detect ambiguity.
-        matches = [
-            r for r in rows if str(r.get("cron_id", "")).startswith(requested_id)
-        ]
-        if not matches:
-            return f"No scheduled task matching '{requested_id}'."
-        if len(matches) > 1:
-            ids = ", ".join(str(r.get("cron_id", ""))[:8] for r in matches)
-            return (
-                f"Multiple schedules match '{requested_id}' ({ids}) — use a longer id."
+        if not crons.is_available():
+            return "Scheduler unavailable: the langgraph dev backend is not running."
+        try:
+            rec = crons.create_schedule(
+                name=name,
+                schedule=cron,
+                prompt=prompt,
+                timezone=timezone or None,
+                rubric=rubric or None,
+                workspace=workspace,
             )
-        target = str(matches[0]["cron_id"])
-        crons.delete_schedule(target)
-    except Exception as e:
-        return f"Error: {e}"
-    return f"Cancelled scheduled task {target}."
+        except Exception as e:
+            return f"Error: {e}"
+        return (
+            f"Scheduled '{name}' [{cron}] — id {rec.get('cron_id')}. It runs unattended in the "
+            "background; output goes wherever the task's prompt specifies. Use list_scheduled_tasks to review."
+        )
+
+    @tool
+    def list_scheduled_tasks() -> str:
+        """List the user's recurring scheduled tasks (id, name, schedule, enabled)."""
+        from ..cron import schedule as crons
+
+        if not crons.is_available():
+            return "Scheduler unavailable: the langgraph dev backend is not running."
+        try:
+            rows = crons.list_schedules(workspace=workspace)
+        except Exception as e:
+            return f"Error: {e}"
+        if not rows:
+            return "No scheduled tasks."
+        lines = []
+        for r in rows:
+            meta = r.get("metadata") or {}
+            line = (
+                f"- {str(r.get('cron_id', ''))[:8]} | {meta.get('name', '')} | "
+                f"{r.get('schedule', '')} | {'on' if r.get('enabled', True) else 'off'}"
+            )
+            if meta.get("rubric"):
+                line += " | rubric"
+            lines.append(line)
+        return "\n".join(lines)
+
+    @tool
+    def cancel_scheduled_task(cron_id: str) -> str:
+        """Cancel (delete) a scheduled task. Pass the id (or its prefix) shown by list_scheduled_tasks."""
+        from ..cron import schedule as crons
+
+        if not crons.is_available():
+            return "Scheduler unavailable: the langgraph dev backend is not running."
+        if not (requested_id := cron_id.strip()):
+            # Empty prefix would match (and delete) the only cron — refuse it.
+            return "Provide the id (or a prefix) of the task to cancel."
+        try:
+            rows = crons.list_schedules(workspace=workspace)
+            # B2: collect ALL prefix matches before acting to detect ambiguity.
+            matches = [
+                r for r in rows if str(r.get("cron_id", "")).startswith(requested_id)
+            ]
+            if not matches:
+                return f"No scheduled task matching '{requested_id}'."
+            if len(matches) > 1:
+                ids = ", ".join(str(r.get("cron_id", ""))[:8] for r in matches)
+                return f"Multiple schedules match '{requested_id}' ({ids}) — use a longer id."
+            target = str(matches[0]["cron_id"])
+            crons.delete_schedule(target, workspace=workspace)
+        except Exception as e:
+            return f"Error: {e}"
+        return f"Cancelled scheduled task {target}."
+
+    return [schedule_task, list_scheduled_tasks, cancel_scheduled_task]
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +161,12 @@ class SchedulerMiddleware(AgentMiddleware):
 
     name = "scheduler"
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: Workspace) -> None:
         super().__init__()
+        self._workspace = workspace
         self._cache: str | None = None
         self._cache_at: float = 0.0
-        self.tools = [schedule_task, list_scheduled_tasks, cancel_scheduled_task]
+        self.tools = make_scheduling_tools(workspace)
 
     def _schedules_block(self) -> str:
         """Build the dynamic ``<scheduled_tasks>`` block (empty if none / down)."""
@@ -173,7 +180,7 @@ class SchedulerMiddleware(AgentMiddleware):
         try:
             if not crons.is_available():
                 return ""
-            rows = crons.list_schedules()
+            rows = crons.list_schedules(workspace=self._workspace)
         except Exception:
             return ""
         if not rows:
@@ -236,6 +243,6 @@ class SchedulerMiddleware(AgentMiddleware):
         return await handler(request)
 
 
-def create_scheduler_middleware() -> SchedulerMiddleware:
+def create_scheduler_middleware(workspace: Workspace) -> SchedulerMiddleware:
     """Factory for the scheduler middleware (main agent only)."""
-    return SchedulerMiddleware()
+    return SchedulerMiddleware(workspace)
