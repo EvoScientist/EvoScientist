@@ -505,6 +505,16 @@ def test_overrides_none_when_a_usable_python_exists(env, monkeypatch):
     assert _same_path(re_env.agent_python(), exe)
 
 
+def test_ready_environment_whose_python_does_not_start_is_not_injected(env):
+    """On Windows the venv's python.exe survives the removal of its base
+    interpreter; the agent then gets the setup hint instead of a dead python."""
+    re_env.ensure_research_env("default")
+    env["run"].env_starts = False
+    _forget_decision()
+    assert re_env.research_env_overrides() is None
+    assert re_env.missing_python_hint() == re_env.MISSING_PYTHON_HINT
+
+
 def test_overrides_prepend_the_environment_and_follow_path(env, monkeypatch):
     re_env.ensure_research_env("default")
     _forget_decision()

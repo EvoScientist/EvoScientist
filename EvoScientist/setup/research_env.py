@@ -441,9 +441,12 @@ def _agent_python() -> tuple[str | None, Path | None]:
         logger.info(f"Agent shell python: {system}")
         return system, None
     env = env_dir()
-    if is_ready(env):
+    env_python = str(_env_python(env))
+    # The marker alone is not enough: on Windows the venv's python.exe stays
+    # in place when its base interpreter is removed, but no longer starts.
+    if is_ready(env) and _runs([env_python, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT):
         logger.info(f"Agent shell python: research environment {env}")
-        return str(_env_python(env)), env
+        return env_python, env
     logger.info("Agent shell python: none")
     return None, None
 
