@@ -126,8 +126,8 @@ def test_no_host_flag_leaves_config_defaults(monkeypatch):
     assert calls["webui_config"].webui_host == "127.0.0.1"
 
 
-def _run_ensure_backend(monkeypatch, config, *, server_up=True):
-    """Drive ``_ensure_async_subagent_server`` and capture console output."""
+def _run_ensure_backend(monkeypatch, config, *, server_up=True, config_drift=False):
+    """Drive ``_ensure_async_subagent_server`` and capture its warnings."""
     import EvoScientist.cli.commands as cmds
 
     printed: list[str] = []
@@ -139,6 +139,10 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
         "EvoScientist.langgraph_dev.manager.is_async_subagents_available",
         lambda: server_up,
     )
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.manager.CONFIG_DRIFT_SINCE_LAUNCH",
+        config_drift,
+    )
     monkeypatch.setattr(cmds, "_reconcile_autoskill_schedule", lambda *a, **k: None)
     monkeypatch.setattr(
         cmds.console, "print", lambda *a, **k: printed.append(str(a[0]) if a else "")
@@ -148,8 +152,10 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
         "status",
         lambda *a, **k: __import__("contextlib").nullcontext(),
     )
-    cmds._ensure_async_subagent_server(config, workspace_dir="/tmp/workspace")
-    return printed
+    warnings = cmds._ensure_async_subagent_server(
+        config, workspace_dir="/tmp/workspace"
+    )
+    return printed, warnings
 
 
 @pytest.mark.parametrize("exposed", ["0.0.0.0", "192.168.1.5", "::"])
@@ -159,26 +165,55 @@ def test_cli_mode_warns_on_public_backend_bind(monkeypatch, exposed):
     file with it) puts an unauthenticated shell-capable API on the network in
     every mode with no signal."""
     config = SimpleNamespace(langgraph_dev_host=exposed)
-    printed = _run_ensure_backend(monkeypatch, config)
+    printed, warnings = _run_ensure_backend(monkeypatch, config)
 
     assert any("PUBLIC BIND" in line for line in printed)
+    assert any("PUBLIC BIND" in warning for warning in warnings)
 
 
 @pytest.mark.parametrize("loopback", ["127.0.0.1", "::1", "localhost"])
 def test_cli_mode_silent_on_loopback_backend_bind(monkeypatch, loopback):
     config = SimpleNamespace(langgraph_dev_host=loopback)
-    printed = _run_ensure_backend(monkeypatch, config)
+    printed, warnings = _run_ensure_backend(monkeypatch, config)
 
     assert not any("PUBLIC BIND" in line for line in printed)
+    assert not any("PUBLIC BIND" in warning for warning in warnings)
+
+
+def test_cli_mode_returns_config_drift_warning(monkeypatch):
+    config = SimpleNamespace(langgraph_dev_host="127.0.0.1")
+    printed, warnings = _run_ensure_backend(monkeypatch, config, config_drift=True)
+
+    assert any("Config changed since" in line for line in printed)
+    assert any("Config changed since" in warning for warning in warnings)
 
 
 def test_no_warning_when_backend_failed_to_start(monkeypatch):
     """ensure_langgraph_dev fails soft (async degrades to in-process). Warning
     about a bind that never happened is worse than saying nothing."""
     config = SimpleNamespace(langgraph_dev_host="0.0.0.0")
-    printed = _run_ensure_backend(monkeypatch, config, server_up=False)
+    printed, warnings = _run_ensure_backend(monkeypatch, config, server_up=False)
 
     assert not any("PUBLIC BIND" in line for line in printed)
+    assert not warnings
+
+
+def test_server_backend_caveat_is_returned_and_still_printed(monkeypatch):
+    import EvoScientist.cli.commands as cmds
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        cmds.console, "print", lambda *args, **kwargs: printed.append(str(args[0]))
+    )
+
+    warning = cmds.warn_server_backend_hitl_caveats(
+        "langgraph_server", surface_label="TUI"
+    )
+
+    assert warning is not None
+    assert "Server gateway backend active for the TUI" in warning
+    assert warning in printed[0]
+    assert cmds.warn_server_backend_hitl_caveats("other", surface_label="TUI") is None
 
 
 def test_background_agent_server_starts_even_when_async_subagents_disabled(
@@ -263,8 +298,10 @@ def test_cmd_interactive_dispatches_to_textual(monkeypatch):
         thread_id="thread-1",
         ui_backend="tui",
         config=effective_config,
+        startup_warnings=["A startup warning"],
     )
 
+    assert captured_kwargs[0]["startup_warnings"] == ["A startup warning"]
     assert captured["resolved_input"] == "tui"
     assert captured["warn_fallback"] is True
 

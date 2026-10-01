@@ -37,11 +37,22 @@ pytest.importorskip("textual")
 # ---------------------------------------------------------------------------
 
 
-async def _capture_app(monkeypatch) -> object:
+async def _capture_app(
+    monkeypatch, *, startup_warnings=None, gateway_backend=None
+) -> object:
     """Build an ``EvoTextualInteractiveApp`` without entering its main loop."""
     from textual.app import App
 
     from EvoScientist.cli import tui_interactive as tui_mod
+
+    if gateway_backend is not None:
+        import EvoScientist.config as config_mod
+
+        monkeypatch.setattr(
+            config_mod,
+            "resolve_gateway_backend",
+            lambda *_args, **_kwargs: gateway_backend,
+        )
 
     captured: dict = {}
 
@@ -100,6 +111,7 @@ async def _capture_app(monkeypatch) -> object:
             load_agent=fake_load_agent,
             create_session_workspace=lambda *_a, **_k: str(Path.cwd()),
             config=None,
+            startup_warnings=startup_warnings,
         )
     except SystemExit:
         pass
@@ -116,6 +128,40 @@ async def _capture_app(monkeypatch) -> object:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+async def test_startup_warnings_are_shown_in_tui_notifications(monkeypatch):
+    from textual.app import App
+
+    startup_warnings = ["Config changed since launch", "PUBLIC BIND detected"]
+    notifications: list[tuple[str, dict[str, object]]] = []
+
+    def capture_notify(self, message, *args, **kwargs):
+        notifications.append((str(message), dict(kwargs)))
+
+    async def no_update_check(self):
+        return None
+
+    monkeypatch.setattr(App, "notify", capture_notify)
+    app = await _capture_app(
+        monkeypatch,
+        startup_warnings=startup_warnings,
+        gateway_backend="langgraph_server",
+    )
+    monkeypatch.setattr(type(app), "_check_for_updates", no_update_check)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+
+    warnings = {
+        message
+        for message, options in notifications
+        if options.get("severity") == "warning"
+    }
+    assert all(warning in warnings for warning in startup_warnings)
+    assert any(
+        "Server gateway backend active for the TUI" in warning for warning in warnings
+    )
 
 
 async def test_clear_chat_resets_scroll_after_long_anchored_conversation(

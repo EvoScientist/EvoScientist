@@ -503,6 +503,7 @@ def run_textual_interactive(
     create_session_workspace: Callable[[str | None], str],
     config: Any | None = None,
     async_runtime: AsyncRuntime | None = None,
+    startup_warnings: list[str] | None = None,
 ) -> None:
     """Run full-screen Textual interactive chat loop."""
     if config is None:
@@ -520,7 +521,12 @@ def run_textual_interactive(
     from .commands import warn_server_backend_hitl_caveats
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.TUI)
-    warn_server_backend_hitl_caveats(gateway_backend, surface_label="TUI")
+    startup_warnings = list(startup_warnings or ())
+    backend_warning = warn_server_backend_hitl_caveats(
+        gateway_backend, surface_label="TUI"
+    )
+    if backend_warning:
+        startup_warnings.append(backend_warning)
 
     event_sink = SessionEventSink()
     runtime_gateways = create_runtime_gateways_for_config(
@@ -649,6 +655,7 @@ def run_textual_interactive(
             channel_send_thinking_value: bool = True,
             resumed: bool = False,
             resume_warning: str = "",
+            startup_warnings: list[str] | None = None,
         ) -> None:
             super().__init__()
             self._progress_tracker = MCPProgressTracker()
@@ -666,6 +673,7 @@ def run_textual_interactive(
             self._channel_send_thinking = channel_send_thinking_value
             self._resumed = resumed
             self._resume_warning = resume_warning
+            self._startup_warnings = list(startup_warnings or ())
             self._channel_timer: Any = None
             self._channel_start_results: list[tuple[str, bool, str]] = []
             self._channel_start_stop = threading.Event()
@@ -1075,6 +1083,8 @@ def run_textual_interactive(
                 severity="warning",
                 timeout=10,
             )
+            for warning in self._startup_warnings:
+                self.notify(warning, severity="warning", timeout=15)
             self.run_worker(
                 self._check_for_updates, exclusive=True, group="update-check"
             )
@@ -3940,6 +3950,7 @@ def run_textual_interactive(
                 channel_send_thinking_value=channel_send_thinking,
                 resumed=resumed,
                 resume_warning=resume_warning,
+                startup_warnings=startup_warnings,
             )
             try:
                 await app.run_async()

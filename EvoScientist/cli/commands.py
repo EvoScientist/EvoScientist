@@ -568,7 +568,7 @@ class CompactSummaryRenderable:
 
 def _ensure_async_subagent_server(
     config: Any, *, workspace_dir: str, backend: str | None = None
-) -> None:
+) -> list[str]:
     """Start the langgraph dev subprocess for background agent work.
 
     Shared by both the interactive entry and the serve entry so the
@@ -595,6 +595,8 @@ def _ensure_async_subagent_server(
         is_async_subagents_available,
     )
 
+    startup_warnings: list[str] = []
+
     try:
         with console.status(
             "[dim]Starting background agent server (langgraph dev)...[/dim]",
@@ -609,6 +611,11 @@ def _ensure_async_subagent_server(
     from ..langgraph_dev import manager as _lg_manager
 
     if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
+        startup_warnings.append(
+            "⚠ Config changed since the background agent server was launched — "
+            "async sub-agents still use the old settings. Apply them with "
+            "EvoSci server stop, then restart EvoSci."
+        )
         console.print(
             "[yellow]⚠ Config changed since the background agent server was "
             "launched — async sub-agents still use the old settings. Apply "
@@ -625,17 +632,23 @@ def _ensure_async_subagent_server(
         and not _is_loopback_host(bind_host)
         and is_async_subagents_available()
     ):
+        startup_warnings.append(
+            f"⚠ PUBLIC BIND Agent server listening on {bind_host} — no auth, "
+            "and the agent can run shell. Use --host 127.0.0.1 on untrusted "
+            "networks."
+        )
         console.print(
             "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
             f"[bold red]Agent server listening on {bind_host} — no auth, and "
             f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
             f"networks.[/bold red]"
         )
+    return startup_warnings
 
 
 def warn_server_backend_hitl_caveats(
     backend: str | None, *, surface_label: str
-) -> None:
+) -> str | None:
     """Warn that the server gateway backend is lossy for a HITL surface.
 
     The interactive CLI and TUI create a per-session workspace and switch models
@@ -647,14 +660,16 @@ def warn_server_backend_hitl_caveats(
     silently misrouting.
     """
     if backend != "langgraph_server":
-        return
-    console.print(
-        f"[yellow]⚠ Server gateway backend active for the {surface_label}. "
+        return None
+    warning = (
+        f"⚠ Server gateway backend active for the {surface_label}. "
         "Until the remaining gaps close, the per-session workspace is not "
         "applied server-side (execute / write_file run in the server's "
         "workspace), and a model or team switch is dropped for the rest of a "
-        "turn that resumes after a tool approval.[/yellow]"
+        "turn that resumes after a tool approval."
     )
+    console.print(f"[yellow]{warning}[/yellow]")
+    return warning
 
 
 def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
@@ -2593,7 +2608,7 @@ def _main_callback(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    _ensure_async_subagent_server(
+    startup_warnings = _ensure_async_subagent_server(
         config, workspace_dir=workspace_dir, backend=gateway_backend
     )
 
@@ -2727,6 +2742,7 @@ def _main_callback(
             ui_backend=config.ui_backend,
             config=config,
             async_runtime=async_runtime,
+            startup_warnings=startup_warnings,
         )
 
 
