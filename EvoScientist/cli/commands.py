@@ -301,7 +301,14 @@ def setup(
         selected = (found,)
 
     if cn:
-        set_config_value("mirror", "cn")
+        try:
+            set_config_value("mirror", "cn")
+        except OSError as exc:
+            # Saving the choice is secondary; this run still uses the mirror.
+            logging.getLogger(__name__).warning(
+                f"Could not save mirror: cn to the config ({exc}); "
+                "using the mirror for this run only."
+            )
     mirror = "cn" if cn else load_config().mirror
 
     emit = JsonEmitter() if json_output else ConsoleEmitter(console)

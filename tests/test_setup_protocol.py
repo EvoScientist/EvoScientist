@@ -270,6 +270,27 @@ def test_cli_cn_saves_mirror_and_passes_it(cli, monkeypatch):
     assert seen == ["cn", "cn"]
 
 
+def test_cli_cn_with_an_unwritable_config_still_runs_with_the_mirror(
+    cli, monkeypatch, caplog
+):
+    import EvoScientist.config as config_pkg
+
+    def read_only(key, value):
+        raise PermissionError(13, "Read-only file system")
+
+    monkeypatch.setattr(config_pkg, "set_config_value", read_only)
+    seen: list[str] = []
+    _fake_stage(monkeypatch, lambda emit, mirror: (seen.append(mirror), ("ok", {}))[1])
+    with caplog.at_level("WARNING"):
+        result = cli("--cn", "--json")
+    assert result.exit_code == 0
+    assert seen == ["cn"]
+    assert [json.loads(line)["status"] for line in result.stdout.splitlines()] == [
+        "done"
+    ]
+    assert "Could not save mirror" in caplog.text
+
+
 def test_cli_json_keeps_config_warnings_off_stdout(cli, monkeypatch):
     import EvoScientist.config as config_pkg
     from EvoScientist.stream.console import console
