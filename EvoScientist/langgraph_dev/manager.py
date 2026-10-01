@@ -1515,7 +1515,9 @@ def _ensure_langgraph_dev_locked(
 
                 AGENT_PYTHON_DRIFT = python_drift_message(sidecar)
                 if AGENT_PYTHON_DRIFT is not None:
-                    logger.warning(AGENT_PYTHON_DRIFT)
+                    # INFO: the CLI prints it after startup and the TUI shows
+                    # it in the app; a WARNING here would print it twice.
+                    logger.info(AGENT_PYTHON_DRIFT)
                 if ws_path is not None:
                     logger.info(
                         "Reusing externally-managed langgraph dev on %s; sidecar "
