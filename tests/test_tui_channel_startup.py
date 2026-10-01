@@ -83,3 +83,27 @@ async def test_channel_startup_worker_stops_channels_after_exit(monkeypatch):
     )
 
     assert stopped_with == [runtime]
+
+
+@pytest.mark.parametrize(
+    ("hint", "drift", "expected"),
+    [
+        (None, None, []),
+        ("run EvoSci setup", None, ["run EvoSci setup"]),
+        (None, "server python differs", ["server python differs"]),
+        (
+            "run EvoSci setup",
+            "server python differs",
+            ["run EvoSci setup", "server python differs"],
+        ),
+    ],
+)
+def test_agent_python_notices(monkeypatch, hint, drift, expected):
+    """The TUI hides terminal output while it runs, so the hint and the
+    server-python warning become in-app notices."""
+    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.setup import research_env
+
+    monkeypatch.setattr(research_env, "missing_python_hint", lambda: hint)
+    monkeypatch.setattr(manager, "AGENT_PYTHON_DRIFT", drift)
+    assert tui_mod._agent_python_notices() == expected

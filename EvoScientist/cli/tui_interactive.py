@@ -106,6 +106,19 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
+def _agent_python_notices() -> list[str]:
+    """The missing-python hint and the server-python warning, when they apply.
+
+    Both also go to the terminal or the log, which Textual hides while the
+    app runs, so the TUI shows them as notifications.
+    """
+    from ..langgraph_dev import manager as lg_manager
+    from ..setup.research_env import missing_python_hint
+
+    notices = [missing_python_hint(), lg_manager.AGENT_PYTHON_DRIFT]
+    return [n for n in notices if n is not None]
+
+
 async def _auto_start_channel_in_worker(
     agent: Any,
     thread_id: str,
@@ -1078,6 +1091,9 @@ def run_textual_interactive(
             self.run_worker(
                 self._check_for_updates, exclusive=True, group="update-check"
             )
+            self.run_worker(
+                self._check_agent_python, exclusive=True, group="agent-python"
+            )
 
             # Auto-start channels — needs the agent, so defer to after load
             async def _deferred_start_channels():
@@ -1124,6 +1140,16 @@ def run_textual_interactive(
                     )
             except Exception:
                 _channel_logger.debug("Background update check failed", exc_info=True)
+
+        async def _check_agent_python(self) -> None:
+            """Notify the notices from :func:`_agent_python_notices`."""
+            try:
+                notices = await asyncio.to_thread(_agent_python_notices)
+                for message in notices:
+                    # Paths may contain "[", which markup would eat.
+                    self.notify(message, severity="warning", timeout=20, markup=False)
+            except Exception:
+                _channel_logger.debug("Agent python check failed", exc_info=True)
 
         # ── Channel integration ────────────────────────────────
 
