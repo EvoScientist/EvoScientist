@@ -616,6 +616,8 @@ def _ensure_async_subagent_server(
             "them with [bold]EvoSci server stop[/bold], then restart "
             "EvoSci.[/yellow]"
         )
+    if _lg_manager.AGENT_PYTHON_DRIFT is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_PYTHON_DRIFT)}[/yellow]")
 
     # The backend is shared by every UI mode, so the exposure warning lives
     # here, not just in deploy/WebUI. Gated on the server being up: warning

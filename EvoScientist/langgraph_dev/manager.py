@@ -138,6 +138,14 @@ _LOCK = threading.RLock()
 # hint — the server itself is never restarted automatically.
 CONFIG_DRIFT_SINCE_LAUNCH = False
 
+# Set by ``ensure_langgraph_dev`` to the warning text when it reuses a server
+# whose agents got another ``python`` than this session resolves (see
+# ``research_env.python_drift_message``). The CLI prints it after startup.
+AGENT_PYTHON_DRIFT: str | None = None
+
+# Default for sidecar fields that are left out of the record.
+_NOT_RECORDED = object()
+
 
 # Default port (Kaprekar's constant — see config/settings.py for the rationale).
 # Overridable per-call via ``start_langgraph_dev(port=...)`` /
@@ -275,11 +283,15 @@ def _write_workspace_sidecar(
     pid: int,
     config_fingerprint: str | None = None,
     deploy_mode: bool | None = None,
+    agent_python: str | None | object = _NOT_RECORDED,
 ) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
 
     ``config_fingerprint`` (optional) captures the launch-time config subset
     the server consumed; keepalive reuse compares it to detect drift.
+    ``agent_python`` (optional) is the ``python`` the server's agents got,
+    None when they have none; reuse compares it to warn about a session whose
+    PATH resolves another one.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -300,6 +312,10 @@ def _write_workspace_sidecar(
             payload["config_fingerprint"] = config_fingerprint
         if deploy_mode is not None:
             payload["deploy_mode"] = deploy_mode
+        if agent_python is not _NOT_RECORDED:
+            from EvoScientist.setup.research_env import SIDECAR_KEY
+
+            payload[SIDECAR_KEY] = agent_python
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, RUNTIME.workspace_sidecar)
     except OSError as exc:
@@ -704,11 +720,7 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     until restarted. Iterates the full ``EvoScientistConfig`` field list
     minus the explicit exclusion set above — a new config field counts
     toward drift by default — and folds in ``mcp.yaml`` plus the packaged
-    ``subagents/*.yaml``, which are consumed at graph build too. It also
-    folds in the ``python`` the agent's shell resolves, which the server's
-    backends fix at graph build: a CLI whose PATH picks another interpreter,
-    or a research environment set up after launch, would otherwise leave the
-    async sub-agents on a different Python from the main agent. Secrets
+    ``subagents/*.yaml``, which are consumed at graph build too. Secrets
     only feed a truncated one-way digest; nothing recoverable is stored.
     getattr with defaults: deploy/WebUI (and their tests) routinely hand
     this module duck-typed config objects missing dataclass fields.
@@ -736,9 +748,6 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
             digest.update(yaml_path.read_bytes())
     except OSError:
         pass
-    from EvoScientist.setup.research_env import agent_python
-
-    digest.update(f"agent-python:{agent_python()}".encode())
     return digest.hexdigest()[:16]
 
 
@@ -1136,11 +1145,16 @@ def start_langgraph_dev(
         except Exception:
             pass
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
+    from EvoScientist.setup.research_env import agent_python
+
     _write_workspace_sidecar(
         workspace_dir=workspace_dir,
         pid=proc.pid,
         config_fingerprint=config_fingerprint,
         deploy_mode=deploy_mode,
+        # The server inherits this process's environment, so it resolves the
+        # same python.
+        agent_python=agent_python(),
     )
     global _PROCESS_WORKSPACE, _PROCESS_DEPLOY_MODE
     _PROCESS = proc
@@ -1326,8 +1340,9 @@ def ensure_langgraph_dev(
     still chat with sync sub-agents; only async sub-agent calls and EvoMemory
     background workers will fail.
     """
-    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
+    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
     CONFIG_DRIFT_SINCE_LAUNCH = False
+    AGENT_PYTHON_DRIFT = None
 
     if not needs_langgraph_dev(config, backend=backend):
         _ASYNC_SUBAGENTS_AVAILABLE = False
@@ -1367,7 +1382,7 @@ def _ensure_langgraph_dev_locked(
     backend: str | None = None,
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
-    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH
+    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
     config_fp = _server_config_fingerprint(config)
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
@@ -1496,6 +1511,11 @@ def _ensure_langgraph_dev_locked(
                         "settings until the server is restarted "
                         "(EvoSci server stop)."
                     )
+                from EvoScientist.setup.research_env import python_drift_message
+
+                AGENT_PYTHON_DRIFT = python_drift_message(sidecar)
+                if AGENT_PYTHON_DRIFT is not None:
+                    logger.warning(AGENT_PYTHON_DRIFT)
                 if ws_path is not None:
                     logger.info(
                         "Reusing externally-managed langgraph dev on %s; sidecar "

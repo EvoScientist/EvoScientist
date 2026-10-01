@@ -352,6 +352,30 @@ def agent_python() -> str | None:
     return _agent_python()[0]
 
 
+# Sidecar key for the ``python`` a langgraph dev server's agents got at launch.
+SIDECAR_KEY = "agent_python"
+
+
+def python_drift_message(sidecar: dict) -> str | None:
+    """A warning when a reused server's agents run another ``python`` than ours.
+
+    The server's backends fix the agent shell's ``python`` when it starts, so
+    after a reuse its agents (async sub-agents, and the WebUI's main agent)
+    keep it. None when both match, or when the sidecar has no record (a
+    server started by an older version).
+    """
+    if SIDECAR_KEY not in sidecar:
+        return None
+    recorded, current = sidecar[SIDECAR_KEY], agent_python()
+    if recorded == current:
+        return None
+    return (
+        f"The running langgraph dev gives its agents {recorded or 'no python'}, "
+        f"but this session resolves {current or 'no python'}. Its agents keep "
+        "the server's python until 'EvoSci server stop' and a restart."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Stage
 # --------------------------------------------------------------------------- #

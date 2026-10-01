@@ -119,6 +119,27 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
     assert any("Config changed" in w for w in decision.warnings)
 
 
+def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
+    from EvoScientist.setup import research_env
+
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "deploy_mode": True,
+            "config_fingerprint": "fp-now",
+            "agent_python": "/conda/bin/python",
+        },
+    )
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert decision.action == "reuse"
+    assert len(decision.warnings) == 1
+    assert "/conda/bin/python" in decision.warnings[0]
+
+
 def test_resolve_backend_no_sidecar_reuses(monkeypatch):
     """An older subprocess with no sidecar is reused, as before —
     backward-compat for pre-sidecar / externally-managed servers."""

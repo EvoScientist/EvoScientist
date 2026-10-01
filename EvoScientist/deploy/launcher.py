@@ -604,6 +604,11 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
             "serves the old settings. Apply them with 'EvoSci server "
             "stop', then re-run EvoSci."
         )
+    from ..setup.research_env import python_drift_message
+
+    drift = python_drift_message(sidecar)
+    if drift is not None:
+        warnings.append(drift)
     return _BackendDecision(action="reuse", warnings=warnings)
 
 
