@@ -923,17 +923,78 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
+        async def _sync_server_to(
+            self, dirs: SessionDirs, *, degraded_note: str
+        ) -> None:
+            """Move the background agent server to *dirs* before switching.
+
+            Until the server serves several workspaces it is pinned to one
+            workspace and run folder, so background workers and deployed
+            sub-agents would otherwise keep working in the previous ones; the
+            manager restarts it when needed. Runs in a worker thread so the
+            Textual event loop keeps refreshing the UI during the up-to-60s
+            wait, with a live timer widget (like /compact).
+
+            Raises ``RuntimeError`` when another EvoSci process owns the
+            server for other folders, so the caller leaves the session as it
+            is and command UIs (including channels) report the failure. Other
+            sync failures continue locally with *degraded_note* shown.
+            """
+            from ..langgraph_dev.manager import WorkspaceMismatchError
+            from .commands import _sync_background_agent_server_workspace
+            from .widgets.workspace_sync_widget import WorkspaceSyncWidget
+
+            sync_widget = WorkspaceSyncWidget()
+            container = self.query_one("#chat", VerticalScroll)
+            await container.mount(sync_widget)
+            container.scroll_end(animate=False)
+            try:
+                await _sync_background_agent_server_workspace(
+                    config,
+                    dirs=dirs,
+                    backend=gateway_backend,
+                )
+            except WorkspaceMismatchError as exc:
+                raise RuntimeError(str(exc)) from exc
+            except Exception:
+                _channel_logger.warning(
+                    "Failed to sync background agent server to %s; continuing "
+                    "in degraded mode",
+                    dirs.work_dir,
+                    exc_info=True,
+                )
+                self.append_system(degraded_note, style="yellow")
+            finally:
+                await sync_widget.cleanup()
+
         async def start_new_session(self) -> None:
+            # ``--mode=run`` starts every session in a fresh run folder of the
+            # current workspace; daemon mode works in its root.
+            ws = self._dirs.workspace
+            new_dirs = SessionDirs(
+                ws, create_run_dir(ws, run_name) if mode == "run" else None
+            )
+            if new_dirs != self._dirs:
+                try:
+                    await self._sync_server_to(
+                        new_dirs,
+                        degraded_note=(
+                            "Background agent server sync failed; started the "
+                            "new session, but async subagents and EvoMemory "
+                            "workers may be unavailable."
+                        ),
+                    )
+                except RuntimeError:
+                    from .agent import _remove_unused_run_dir
+
+                    _remove_unused_run_dir(new_dirs.run_dir)
+                    raise
+
             # Clear all widgets except #welcome
             self.clear_chat()
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
-            # ``--mode=run`` starts every session in a fresh run folder of the
-            # current workspace; daemon mode works in its root.
-            ws = self._dirs.workspace
-            self._dirs = SessionDirs(
-                ws, create_run_dir(ws, run_name) if mode == "run" else None
-            )
+            self._dirs = new_dirs
             self._conversation_tid = (
                 await self._runtime_gateways.graph_gateway.create_thread(
                     GraphTarget(**self._dirs.metadata())
@@ -958,57 +1019,16 @@ def run_textual_interactive(
             self, thread_id: str, dirs: SessionDirs | None = None
         ) -> None:
             if dirs is not None:
-                # Mirror the Rich CLI fix: when a /resume restores a thread
-                # whose workspace differs from the one the langgraph dev
-                # subprocess was launched with, background workers and
-                # deployed sub-agents would otherwise keep operating on the
-                # previous workspace. Sync the subprocess to the new workspace;
-                # the manager auto-detects the change and restarts when needed.
-                # Run in a worker thread so the Textual event loop keeps
-                # refreshing the UI during the up-to-60s wait, and show a live
-                # timer widget (like /compact) so the user sees progress
-                # instead of a frozen static line.
-                #
-                # ``self._dirs`` is mutated AFTER mismatch checks so
-                # WorkspaceMismatchError leaves the session pointing at the
-                # existing workspace. Other sync failures resume locally in
-                # the TUI while background workers may be unavailable.
-                from ..langgraph_dev.manager import WorkspaceMismatchError
-                from .commands import _sync_background_agent_server_workspace
-                from .widgets.workspace_sync_widget import WorkspaceSyncWidget
-
-                sync_widget = WorkspaceSyncWidget()
-                container = self.query_one("#chat", VerticalScroll)
-                await container.mount(sync_widget)
-                container.scroll_end(animate=False)
-                try:
-                    await _sync_background_agent_server_workspace(
-                        config,
-                        dirs=dirs,
-                        backend=gateway_backend,
-                    )
-                except WorkspaceMismatchError as exc:
-                    # Another EvoSci process owns the langgraph dev for a
-                    # different workspace. Abort the resume without mutating
-                    # session state. Raise so command UIs, including channel
-                    # UI, report failure instead of continuing with
-                    # success/history output.
-                    raise RuntimeError(str(exc)) from exc
-                except Exception:
-                    _channel_logger.warning(
-                        "Failed to sync background agent server for resumed "
-                        "workspace %s; continuing resume in degraded mode",
-                        dirs.work_dir,
-                        exc_info=True,
-                    )
-                    self.append_system(
+                # ``self._dirs`` changes only after the sync succeeds, so a
+                # refused sync leaves the session in its current folders.
+                await self._sync_server_to(
+                    dirs,
+                    degraded_note=(
                         "Background agent server sync failed; resumed local "
                         "session, but async subagents and EvoMemory workers "
-                        "may be unavailable.",
-                        style="yellow",
-                    )
-                finally:
-                    await sync_widget.cleanup()
+                        "may be unavailable."
+                    ),
+                )
                 self._dirs = dirs
                 _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
 

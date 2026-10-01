@@ -59,6 +59,16 @@ def _create_run_dir(workspace: Workspace, name: str | None = None) -> Path:
     return run_dir
 
 
+def _remove_unused_run_dir(run_dir: Path | None) -> None:
+    """Remove a run folder created for a session that did not start."""
+    if run_dir is None:
+        return
+    try:
+        run_dir.rmdir()
+    except OSError:
+        pass
+
+
 def _load_agent(
     work_dir: str | None = None,
     checkpointer=None,

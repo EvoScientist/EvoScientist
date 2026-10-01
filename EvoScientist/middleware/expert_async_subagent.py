@@ -62,6 +62,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, NotRequired
 
 from deepagents.middleware.async_subagents import (
@@ -82,7 +83,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
-from ..paths import Workspace
+from ..paths import SessionDirs, Workspace
 
 _logger = logging.getLogger(__name__)
 
@@ -487,6 +488,7 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         *,
         async_subagents: list[AsyncSubAgent],
         workspace: Workspace,
+        work_dir: str | Path | None = None,
         system_prompt: str | None = None,
         watcher_agents: dict[str, AsyncSubAgent] | None = None,
         cfg: Any | None = None,
@@ -525,7 +527,12 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         # ``configurable.model_provider`` per run. ``_ClientCacheProxy`` exposes
         # the same ``get_sync`` / ``get_async`` surface as ``_ClientCache``, so
         # the upstream tool builders accept it without a type change.
-        clients = _ClientCacheProxy(_ClientCache(agent_map))
+        # Every launched run also carries this graph's folders, so the server
+        # refuses one meant for another workspace or run folder.
+        clients = _ClientCacheProxy(
+            _ClientCache(agent_map),
+            folders=SessionDirs(workspace, work_dir).metadata(),
+        )
         agents_desc = "\n".join(
             f"- {a['name']}: {a['description']}" for a in async_subagents
         )
