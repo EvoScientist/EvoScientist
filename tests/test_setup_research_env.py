@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import configparser
 import logging
 import os
 import subprocess
@@ -37,6 +38,8 @@ class FakeRunner:
             return "venv"
         if cmd[1:4] == ["-m", "pip", "install"]:
             return "pip"
+        if cmd[1:5] == ["-m", "pip", "config", "--site"]:
+            return "config"
         if cmd[1:] == ["-c", re_env._IMPORT_CHECK]:
             return "imports"
         return "starts"
@@ -58,6 +61,8 @@ class FakeRunner:
             return subprocess.CompletedProcess(
                 cmd, 0 if self.pip_ok else 1, "" if self.pip_ok else "ERROR: offline"
             )
+        if kind == "config":
+            return self._pip_config(cmd)
         if kind == "imports":
             scripted = self.imports_script.pop(0) if self.imports_script else None
             ok = self.env_starts and (self.imports_ok if scripted is None else scripted)
@@ -67,6 +72,30 @@ class FakeRunner:
                 cmd, 0 if self.system_ok[cmd[0]] else 1, ""
             )
         return subprocess.CompletedProcess(cmd, 0 if self.env_starts else 1, "")
+
+    @staticmethod
+    def _pip_config(cmd: list[str]) -> subprocess.CompletedProcess:
+        """``pip config --site set|unset global.<key>`` on the environment's file."""
+        env = Path(cmd[0]).parent.parent
+        path = re_env._pip_config(env)
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(path, encoding="utf-8")
+        action, key = cmd[5], cmd[6].removeprefix("global.")
+        if action == "set":
+            if not parser.has_section("global"):
+                parser.add_section("global")
+            parser.set("global", key, cmd[7])
+        else:
+            removed = parser.has_section("global") and parser.remove_option(
+                "global", key
+            )
+            if not removed:
+                return subprocess.CompletedProcess(
+                    cmd, 1, f"ERROR: No such key - {cmd[6]}"
+                )
+        with path.open("w", encoding="utf-8") as fh:
+            parser.write(fh)
+        return subprocess.CompletedProcess(cmd, 0, f"Writing to {path}\n")
 
 
 def _fake_python(directory: Path) -> Path:
@@ -231,20 +260,57 @@ def test_unwritable_data_dir_is_install_failed(env, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_cn_mirror_adds_the_index_and_writes_the_pip_config(env):
     re_env.ensure_research_env("cn")
-    pip_cmd = env["run"].calls[1]
+    assert env["run"].kinds() == ["venv", "config", "pip", "imports"]
+    pip_cmd = env["run"].calls[2]
     assert pip_cmd[pip_cmd.index("--index-url") + 1] == re_env.CN_INDEX_URL
     config = re_env._pip_config(env["env"]).read_text(encoding="utf-8")
     assert f"index-url = {re_env.CN_INDEX_URL}" in config
 
 
-def test_pip_config_follows_the_mirror_on_a_ready_environment(env):
+def test_pip_config_follows_the_mirror_and_keeps_other_entries(env):
     re_env.ensure_research_env("default")
+    config = re_env._pip_config(env["env"])
+    config.write_text("[global]\ntimeout = 60\n", encoding="utf-8")
     env["run"].calls.clear()
     re_env.ensure_research_env("cn")
-    assert re_env._pip_config(env["env"]).exists()
+    assert re_env._site_index_url(env["env"]) == re_env.CN_INDEX_URL
     re_env.ensure_research_env("default")
-    assert not re_env._pip_config(env["env"]).exists()
+    assert re_env._site_index_url(env["env"]) is None
+    assert "timeout = 60" in config.read_text(encoding="utf-8")
+    # A ready environment needs no pip install to follow the mirror.
     assert "pip" not in env["run"].kinds()
+
+
+def test_pip_config_runs_pip_only_when_the_entry_changes(env):
+    re_env.ensure_research_env("cn")
+    env["run"].calls.clear()
+    re_env.ensure_research_env("cn")
+    assert env["run"].kinds() == ["imports"]
+
+
+def test_default_mirror_keeps_an_index_the_user_set(env):
+    re_env.ensure_research_env("default")
+    config = re_env._pip_config(env["env"])
+    config.write_text("[global]\nindex-url = https://corp/simple\n", encoding="utf-8")
+    re_env.ensure_research_env("default")
+    assert re_env._site_index_url(env["env"]) == "https://corp/simple"
+
+
+def test_failed_repair_still_brings_the_pip_config_in_line(env):
+    re_env.ensure_research_env("default")
+    env["run"].imports_ok = False
+    env["run"].pip_ok = False
+    with pytest.raises(StageError):
+        re_env.ensure_research_env("cn")
+    assert re_env._site_index_url(env["env"]) == re_env.CN_INDEX_URL
+
+
+def test_skipped_stage_leaves_the_pip_config_untouched(env, monkeypatch):
+    re_env.ensure_research_env("cn")
+    exe = _fake_python(env["tmp"] / "conda" / "bin")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    assert re_env.run_stage(lambda event: None, "default").status == "skipped"
+    assert re_env._site_index_url(env["env"]) == re_env.CN_INDEX_URL
 
 
 # --------------------------------------------------------------------------- #

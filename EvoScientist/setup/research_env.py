@@ -17,6 +17,7 @@ written only after the import check passed.
 
 from __future__ import annotations
 
+import configparser
 import functools
 import logging
 import os
@@ -142,13 +143,44 @@ def _import_check(env: Path) -> str | None:
 # --------------------------------------------------------------------------- #
 # Install
 # --------------------------------------------------------------------------- #
-def _write_pip_config(env: Path, mirror: str) -> None:
-    """Make the environment's own pip config match ``mirror``."""
-    config = _pip_config(env)
+def _site_index_url(env: Path) -> str | None:
+    """``global.index-url`` from the environment's own pip config, if set."""
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(_pip_config(env), encoding="utf-8")
+    except configparser.Error:
+        return None
+    return parser.get("global", "index-url", fallback=None)
+
+
+def _sync_pip_config(env: Path, mirror: str) -> None:
+    """Bring the environment's ``global.index-url`` in line with ``mirror``.
+
+    Uses ``pip config --site``, which changes only that entry, and runs pip
+    only when the entry has to change. Without ``mirror: cn`` only our own
+    mirror entry is removed; an index the user set there stays.
+    """
+    current = _site_index_url(env)
     if mirror == "cn":
-        config.write_text(f"[global]\nindex-url = {CN_INDEX_URL}\n", encoding="utf-8")
+        if current == CN_INDEX_URL:
+            return
+        action = ["set", "global.index-url", CN_INDEX_URL]
     else:
-        config.unlink(missing_ok=True)
+        if current != CN_INDEX_URL:
+            return
+        action = ["unset", "global.index-url"]
+    cmd = [str(_env_python(env)), "-m", "pip", "config", "--site", *action]
+    try:
+        result = _run(cmd, _PYTHON_PROBE_TIMEOUT * 3)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StageError(
+            "install_failed", f"Could not update the pip config: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        raise StageError(
+            "install_failed",
+            f"Could not update the pip config: {_last_line(result.stdout)}",
+        )
 
 
 def _create_venv(env: Path) -> None:
@@ -206,6 +238,8 @@ def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
     python = str(_env_python(env))
     if _runs([python, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
         return None
+    # Before pip, so the config follows the mirror even when pip fails.
+    _sync_pip_config(env, mirror)
     report(0.2, "Installing missing packages")
     _pip_install(env, mirror)
     report(0.9, "Checking the packages")
@@ -221,7 +255,7 @@ def _build(env: Path, mirror: str, report: ProgressFn) -> str:
         raise StageError("install_failed", f"Could not remove {env}: {exc}") from exc
     report(0.1, "Creating the virtual environment")
     _create_venv(env)
-    _write_pip_config(env, mirror)
+    _sync_pip_config(env, mirror)
     report(0.2, f"Installing {', '.join(PACKAGES)}")
     _pip_install(env, mirror)
     report(0.9, "Checking the packages")
@@ -250,9 +284,12 @@ def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> str:
         env.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(env.parent / f"{env.name}.lock")):
             if is_ready(env):
-                version = _import_check(env) or _repair(env, mirror, report)
+                version = _import_check(env)
                 if version is not None:
-                    _write_pip_config(env, mirror)
+                    _sync_pip_config(env, mirror)
+                    return version
+                version = _repair(env, mirror, report)
+                if version is not None:
                     return version
             version = _build(env, mirror, report)
             (env / _READY_MARKER).write_text(version, encoding="utf-8")
