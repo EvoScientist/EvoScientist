@@ -312,7 +312,10 @@ def test_cli_cn_with_an_unwritable_config_still_runs_with_the_mirror(
 
     monkeypatch.setattr(config_pkg, "set_config_value", read_only)
     seen: list[str] = []
-    _fake_stage(monkeypatch, lambda emit, mirror: (seen.append(mirror), ("ok", {}))[1])
+    _fake_stage(
+        monkeypatch,
+        lambda emit, mirror: (seen.append(mirror), StageResult("ok", {}))[1],
+    )
     with caplog.at_level("WARNING"):
         result = cli("--cn", "--json")
     assert result.exit_code == 0
