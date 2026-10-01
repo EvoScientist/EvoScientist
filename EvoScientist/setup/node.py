@@ -97,10 +97,15 @@ class NodeInfo:
 # Locations
 # --------------------------------------------------------------------------- #
 def tools_dir() -> Path:
-    """``<DATA_DIR>/tools``, read at call time so an overridden DATA_DIR applies."""
+    """``<DATA_DIR>/tools`` as an absolute path, read at call time so an
+    overridden DATA_DIR applies.
+
+    Absolute because the recorded path is put on ``PATH`` for children that run
+    in other working dirs; ``EVOSCIENTIST_DATA_DIR`` may be relative.
+    """
     from .. import paths
 
-    return paths.DATA_DIR / "tools"
+    return (paths.DATA_DIR / "tools").resolve()
 
 
 def _record_path() -> Path:
@@ -473,8 +478,11 @@ def activate_runtime() -> Path | None:
     record = _read_record()
     if record is None:
         return None
-    bin_dir = _bin_dir(Path(record["path"]))
-    if not _node_exe(Path(record["path"])).exists():
+    # Absolute even for a record written from a relative DATA_DIR, so children
+    # in other working dirs resolve the same `node`.
+    install_dir = Path(record["path"]).resolve()
+    bin_dir = _bin_dir(install_dir)
+    if not _node_exe(install_dir).exists():
         return None
     key = os.path.normcase(str(bin_dir))
     parts = [

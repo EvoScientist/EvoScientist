@@ -90,7 +90,9 @@ def env(tmp_path, monkeypatch):
     """Isolated DATA_DIR with a space and non-ASCII characters, no node on PATH."""
     from EvoScientist import paths
 
-    data = tmp_path / "Jan Kowalski ąę" / ".evoscientist"
+    # Resolved like tools_dir() (on Windows this expands 8.3 short names), so
+    # paths compare equal.
+    data = tmp_path.resolve() / "Jan Kowalski ąę" / ".evoscientist"
     monkeypatch.setattr(paths, "DATA_DIR", data)
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
     monkeypatch.setattr(node, "platform_id", lambda: PLAT)
@@ -512,6 +514,31 @@ def test_activate_runtime_prepends_once(env):
     parts = os.environ["PATH"].split(os.pathsep)
     assert parts[0] == str(bin_dir)
     assert parts.count(str(bin_dir)) == 1
+
+
+def test_relative_data_dir_records_and_activates_an_absolute_path(env, monkeypatch):
+    """Children run in other working dirs, so a relative PATH entry would point
+    each of them at a different (missing) node."""
+    from EvoScientist import paths
+
+    monkeypatch.chdir(env["tmp"])
+    monkeypatch.setattr(paths, "DATA_DIR", Path("evo-data"))
+    node.ensure_node("default")
+    record = json.loads((Path("evo-data") / "tools" / "node.json").read_text("utf-8"))
+    assert Path(record["path"]).is_absolute()
+    assert node.activate_runtime().is_absolute()
+
+
+def test_activate_runtime_resolves_a_relative_record(env, monkeypatch):
+    node.ensure_node("default")
+    monkeypatch.chdir(env["data"])
+    record_file = env["data"] / "tools" / "node.json"
+    record = json.loads(record_file.read_text("utf-8"))
+    record["path"] = os.path.relpath(record["path"], env["data"])
+    record_file.write_text(json.dumps(record), "utf-8")
+    bin_dir = node.activate_runtime()
+    assert bin_dir.is_absolute()
+    assert bin_dir == node._bin_dir(env["data"] / "tools" / f"node-v{V}")
 
 
 def test_system_node_drops_private_record(env, monkeypatch):
