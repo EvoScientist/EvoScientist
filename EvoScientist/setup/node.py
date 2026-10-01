@@ -397,6 +397,11 @@ def _configured_mirror() -> str:
     return load_config().mirror
 
 
+# The first failed install in this process; later calls raise it again without
+# retrying. A new process (e.g. `EvoSci setup`) tries again.
+_failed_install: StageError | None = None
+
+
 def ensure_node(
     mirror: str | None = None, progress: ProgressFn | None = None
 ) -> NodeInfo:
@@ -407,7 +412,8 @@ def ensure_node(
     private Node if it still runs (no network needed); otherwise download,
     verify, unpack, probe and record. Raises :class:`StageError` on failure,
     leaving any previous record in place; file-system errors in the tools dir
-    are reported as ``install_failed``.
+    are reported as ``install_failed``. After one failed install, later calls
+    in the same process raise the same error without retrying.
 
     ``mirror`` defaults to the configured ``mirror``.
     """
@@ -425,6 +431,12 @@ def ensure_node(
     if recorded is not None:
         return recorded
 
+    global _failed_install
+    if _failed_install is not None:
+        # One process can ask several times (server spawn, MCP load, WebUI);
+        # on a blocked network each attempt would wait out the timeouts again.
+        raise _failed_install
+
     from filelock import FileLock
 
     root = tools_dir()
@@ -437,10 +449,14 @@ def ensure_node(
                 return recorded
             _remove_stale_temp_dirs(root)
             return _install(mirror or _configured_mirror(), report)
+    except StageError as exc:
+        _failed_install = exc
+        raise
     except OSError as exc:
-        raise StageError(
+        _failed_install = StageError(
             "install_failed", f"Could not install Node into {root}: {exc}"
-        ) from exc
+        )
+        raise _failed_install from exc
 
 
 # --------------------------------------------------------------------------- #

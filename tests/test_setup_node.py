@@ -94,6 +94,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "DATA_DIR", data)
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
     monkeypatch.setattr(node, "platform_id", lambda: PLAT)
+    monkeypatch.setattr(node, "_failed_install", None)
     net = FakeNet(_archive_bytes())
     monkeypatch.setattr(node, "fetch_text", net.fetch_text)
     monkeypatch.setattr(node, "download", net.download)
@@ -395,6 +396,26 @@ def test_download_failure_keeps_current_node(env, monkeypatch):
         node.ensure_node("default")
     assert ei.value.code == "download_failed"
     assert _record(env["data"]) is None
+
+
+def test_failed_install_is_not_retried_in_the_same_process(env, monkeypatch):
+    """Server spawn, MCP load and the WebUI check can each ask for Node in one
+    process; after a failure they must not wait out the network again."""
+    attempts: list[str] = []
+
+    def offline(url):
+        attempts.append(url)
+        raise StageError("download_failed", "offline")
+
+    monkeypatch.setattr(node, "fetch_text", offline)
+    for _ in range(3):
+        with pytest.raises(StageError) as ei:
+            node.ensure_node("default")
+        assert ei.value.code == "download_failed"
+    assert len(attempts) == 1
+    # A system Node that appears later is still used.
+    _system_node(env, monkeypatch, (22, 0, 0))
+    assert node.ensure_node("default").source == "system"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="tar.xz archives are not used on Windows")
