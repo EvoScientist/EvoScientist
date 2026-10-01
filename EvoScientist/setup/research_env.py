@@ -390,9 +390,11 @@ def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
         return None
     # Before pip, so the config follows the mirror even when pip fails.
     _sync_pip_config(env, mirror)
-    report(0.2, "Installing missing packages")
+    # Below the build's first step (0.1): a repair that does not help falls
+    # back to a rebuild, and progress must not jump backwards.
+    report(0.03, "Installing missing packages")
     _pip_install(env, mirror)
-    report(0.9, "Checking the packages")
+    report(0.06, "Checking the packages")
     return _import_check(env)
 
 

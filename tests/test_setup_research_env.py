@@ -361,6 +361,16 @@ def test_stage_reports_progress_per_step_in_order(env):
     ]
 
 
+def test_progress_keeps_going_forward_when_a_repair_falls_back_to_a_rebuild(env):
+    re_env.ensure_research_env("default")
+    env["run"].imports_script = [False, False]
+    events, emit = _events()
+    re_env.run_stage(emit, "default")
+    assert "Creating the virtual environment" in [e["message"] for e in events]
+    progress = [e["progress"] for e in events]
+    assert progress == sorted(progress)
+
+
 def test_failed_pip_leaves_no_ready_marker(env):
     env["run"].pip_ok = False
     with pytest.raises(StageError) as exc:
