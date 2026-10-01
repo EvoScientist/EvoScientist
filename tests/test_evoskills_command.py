@@ -100,3 +100,36 @@ class TestInstallSkills:
             await InstallSkills().execute(ctx, [])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Failed to fetch" in m for m in msgs)
+        assert any("Try: /install-skill" in m for m in msgs)
+
+    async def test_missing_git_prints_the_git_message(self, no_git):
+        from EvoScientist.commands.implementation.skills import InstallSkills
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+        ctx, ui = _ctx()
+        await InstallSkills().execute(ctx, [])
+        msgs = [c.args[0] for c in ui.append_system.call_args_list]
+        assert any(
+            m.startswith("Failed to fetch skill index: git was not found on PATH.")
+            for m in msgs
+        )
+        # The /install-skill hint needs git too, so it is left out.
+        assert not any("Try: /install-skill" in m for m in msgs)
+
+    async def test_install_loop_reports_missing_git(self, tmp_path, no_git):
+        """A git that disappears after the index fetch fails each install cleanly."""
+        from EvoScientist.commands.implementation.skills import InstallSkills
+
+        ctx, ui = _ctx()
+        ui.wait_for_skill_browse.return_value = ["owner/repo@paper-writing"]
+        with (
+            patch(
+                "EvoScientist.tools.skills_manager.fetch_remote_skill_index",
+                return_value=_INDEX,
+            ),
+            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "skills"),
+        ):
+            await InstallSkills().execute(ctx, [])
+        msgs = [c.args[0] for c in ui.append_system.call_args_list]
+        assert any(m.startswith("Failed: git was not found on PATH.") for m in msgs)

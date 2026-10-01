@@ -24,6 +24,8 @@ from pathlib import Path
 
 import yaml
 
+from ..git_cli import clone_repo as _clone_repo
+
 logger = logging.getLogger(__name__)
 
 # Sentinel for function-local caches that legitimately store ``None``.
@@ -385,27 +387,6 @@ def _resolve_command_path(command: str) -> str:
 
 _MARKETPLACE_CACHE: dict[str, tuple[float, list[MCPServerEntry]]] = {}
 _MARKETPLACE_TTL = 600  # 10 minutes
-
-_CLONE_TIMEOUT = 120
-
-
-def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
-    """Shallow-clone a GitHub repo."""
-    clone_url = f"https://github.com/{repo}.git"
-    cmd = ["git", "clone", "--depth", "1"]
-    if ref:
-        cmd += ["--branch", ref]
-    cmd += [clone_url, dest]
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_CLONE_TIMEOUT
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"git clone timed out after {_CLONE_TIMEOUT}s for {repo}"
-        ) from e
-    if result.returncode != 0:
-        raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
 
 
 def parse_marketplace_yaml(path: Path) -> MCPServerEntry:

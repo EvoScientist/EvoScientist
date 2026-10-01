@@ -154,6 +154,7 @@ class InstallSkills(Command):
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from pathlib import Path as _Path
 
+        from ...git_cli import GitNotFoundError
         from ...paths import USER_SKILLS_DIR
         from ...tools.skills_manager import fetch_remote_skill_index, install_skill
 
@@ -166,9 +167,11 @@ class InstallSkills(Command):
             index = fetch_remote_skill_index()
         except Exception as e:
             ctx.ui.append_system(f"Failed to fetch skill index: {e}", style="red")
-            ctx.ui.append_system(
-                "Try: /install-skill EvoScientist/EvoSkills@skills", style="dim"
-            )
+            if not isinstance(e, GitNotFoundError):
+                # The suggested install needs git too.
+                ctx.ui.append_system(
+                    "Try: /install-skill EvoScientist/EvoSkills@skills", style="dim"
+                )
             return
 
         if not index:
