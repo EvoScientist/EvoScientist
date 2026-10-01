@@ -559,6 +559,31 @@ def test_missing_python_hint_is_returned_but_not_logged(env, caplog):
     assert re_env.missing_python_hint() is None
 
 
+@pytest.mark.parametrize(
+    ("recorded", "current", "warns"),
+    [
+        ("/env/bin/python", "/env/bin/python", False),
+        ("/conda/bin/python", "/env/bin/python", True),
+        (None, "/env/bin/python", True),
+        ("/env/bin/python", None, True),
+        (None, None, False),
+        # Windows: the same file spelled with another case.
+        (r"C:\Users\A\python.EXE", r"c:\users\a\python.exe", False),
+    ],
+)
+def test_python_drift_message(monkeypatch, recorded, current, warns):
+    monkeypatch.setattr(re_env, "agent_python", lambda: current)
+    # Windows-style normcase, so the case rule is tested on every platform.
+    monkeypatch.setattr(re_env.os.path, "normcase", str.lower)
+    message = re_env.python_drift_message({re_env.SIDECAR_KEY: recorded})
+    assert (message is not None) is warns
+
+
+def test_python_drift_message_none_without_a_record():
+    """A server started by an older version has no record."""
+    assert re_env.python_drift_message({"workspace": "/w"}) is None
+
+
 def test_python_used_is_logged_once(env, caplog):
     re_env.ensure_research_env("default")
     _forget_decision()

@@ -515,7 +515,12 @@ def python_drift_message(sidecar: dict) -> str | None:
     if SIDECAR_KEY not in sidecar:
         return None
     recorded, current = sidecar[SIDECAR_KEY], agent_python()
-    if recorded == current:
+    # normcase: on Windows two terminals can spell the same path differently.
+    if recorded == current or (
+        isinstance(recorded, str)
+        and current is not None
+        and os.path.normcase(recorded) == os.path.normcase(current)
+    ):
         return None
     return (
         f"The running langgraph dev gives its agents {recorded or 'no python'}, "
