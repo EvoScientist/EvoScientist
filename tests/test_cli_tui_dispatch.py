@@ -181,6 +181,17 @@ def test_no_warning_when_backend_failed_to_start(monkeypatch):
     assert not any("PUBLIC BIND" in line for line in printed)
 
 
+@pytest.mark.parametrize("drift", [None, "its agents keep /conda/bin/python"])
+def test_cli_prints_the_server_python_warning(monkeypatch, drift):
+    from EvoScientist.langgraph_dev import manager
+
+    monkeypatch.setattr(manager, "AGENT_PYTHON_DRIFT", drift)
+    config = SimpleNamespace(langgraph_dev_host="127.0.0.1")
+    printed = _run_ensure_backend(monkeypatch, config)
+
+    assert any("/conda/bin/python" in line for line in printed) is (drift is not None)
+
+
 def test_background_agent_server_starts_even_when_async_subagents_disabled(
     monkeypatch,
 ):
