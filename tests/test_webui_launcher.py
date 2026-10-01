@@ -138,11 +138,6 @@ def _run_webui_once(
     monkeypatch.setattr(webui_mod, "console", console)
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/npx")
-    # The launcher decides the missing-python hint; its python probe would hit
-    # the one-argument ``which`` above and the Popen faked below.
-    from EvoScientist.setup import research_env
-
-    monkeypatch.setattr(research_env, "agent_python", lambda: None)
 
     monkeypatch.setattr(
         lgm, "_is_port_occupied", lambda _p, *_a, **_kw: backend_port_occupied
@@ -361,7 +356,7 @@ def test_teardown_registered_before_output_is_rendered(monkeypatch):
 
 def test_missing_python_hint_is_printed_by_the_launcher(monkeypatch):
     """The agent is built inside the server, so the launching process shows
-    the hint (the fixture stubs the agent's python as missing)."""
+    the hint (conftest pins the agent's python as missing)."""
     from EvoScientist.setup import research_env
 
     captured = _run_webui_once(monkeypatch, _make_config())

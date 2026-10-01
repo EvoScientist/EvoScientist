@@ -15,6 +15,19 @@ import pytest
 from EvoScientist.setup import research_env as re_env
 from EvoScientist.setup.protocol import StageError
 
+# Captured at import, before conftest's autouse stub replaces them per test.
+_REAL_AGENT_PYTHON = re_env._agent_python
+_REAL_LOG_MISSING_PYTHON_HINT = re_env._log_missing_python_hint
+
+
+@pytest.fixture(autouse=True)
+def _real_agent_python_decision(monkeypatch):
+    """This module tests the decision itself; undo conftest's stub."""
+    monkeypatch.setattr(re_env, "_agent_python", _REAL_AGENT_PYTHON)
+    monkeypatch.setattr(
+        re_env, "_log_missing_python_hint", _REAL_LOG_MISSING_PYTHON_HINT
+    )
+
 
 class FakeRunner:
     """Stands in for ``research_env._run``: venv, pip and the probes."""

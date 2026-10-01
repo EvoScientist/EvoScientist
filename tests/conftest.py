@@ -161,3 +161,20 @@ def _isolate_dotenv(monkeypatch):
         "EvoScientist.config.settings.find_dotenv",
         lambda *args, **kwargs: _NONEXISTENT_DOTENV,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_python_probe(monkeypatch):
+    """Keep the agent-shell python decision away from the real machine.
+
+    It is cached per process and, unstubbed, any test that builds a backend,
+    launches a background job or starts a server would run a real ``python``
+    probe against the developer's PATH (or a test's faked ``subprocess`` /
+    ``shutil.which``) and read the real research environment. Pinned to "no
+    python, no environment"; ``tests/test_setup_research_env.py`` restores
+    the real functions for its own tests.
+    """
+    from EvoScientist.setup import research_env
+
+    monkeypatch.setattr(research_env, "_agent_python", lambda: (None, None))
+    monkeypatch.setattr(research_env, "_log_missing_python_hint", lambda: None)
