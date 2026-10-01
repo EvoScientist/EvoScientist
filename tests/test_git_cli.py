@@ -1,6 +1,7 @@
 """Tests for EvoScientist.git_cli."""
 
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -20,8 +21,12 @@ def _proc(returncode=0, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+_NON_INTERACTIVE = ["-c", "credential.helper=", "-c", "core.askPass="]
+
+
 class TestRunGit:
-    def test_missing_git_raises_git_not_found(self):
+    def test_missing_git_raises_git_not_found(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
         missing = FileNotFoundError(2, "No such file or directory", "git")
         with patch(_RUN, side_effect=missing):
             with pytest.raises(GitNotFoundError) as excinfo:
@@ -31,6 +36,14 @@ class TestRunGit:
         message = str(excinfo.value)
         assert message.startswith("git was not found on PATH.")
         assert "https://git-scm.com/downloads" in message
+
+    def test_windows_message_points_to_evosci_setup(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert str(GitNotFoundError()) == (
+            "git was not found on PATH. EvoScientist uses git to download skills "
+            "and the MCP server index; install Git from "
+            "https://git-scm.com/downloads, or run `EvoSci setup`, and try again."
+        )
 
     def test_real_cause_is_logged(self, caplog):
         too_many = OSError(24, "Too many open files")
@@ -79,8 +92,25 @@ class TestRunGit:
             result = run_git(["--version"], timeout=7)
 
         assert result.stdout == "git version 2.43.0\n"
-        assert run.call_args.args[0] == ["git", "--version"]
+        assert run.call_args.args[0] == ["git", *_NON_INTERACTIVE, "--version"]
         assert run.call_args.kwargs["timeout"] == 7
+
+    def test_never_asks_for_credentials(self, monkeypatch):
+        """No credential helper window, no askpass program, no terminal prompt."""
+        monkeypatch.setenv("GIT_ASKPASS", "/usr/lib/ssh/ssh-askpass")
+        monkeypatch.setenv("SSH_ASKPASS", "/usr/lib/ssh/ssh-askpass")
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+        monkeypatch.setenv("KEEP_ME", "yes")
+        with patch(_RUN, return_value=_proc()) as run:
+            run_git(["ls-remote", "https://github.com/o/r.git"], timeout=5)
+
+        argv = run.call_args.args[0]
+        assert argv[1:5] == _NON_INTERACTIVE
+        env = run.call_args.kwargs["env"]
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert "GIT_ASKPASS" not in env
+        assert "SSH_ASKPASS" not in env
+        assert env["KEEP_ME"] == "yes"
 
 
 class TestCloneRepo:
@@ -90,6 +120,10 @@ class TestCloneRepo:
 
         assert run.call_args.args[0] == [
             "git",
+            *_NON_INTERACTIVE,
+            # LF endings stay LF: CRLF breaks shell scripts in skills.
+            "-c",
+            "core.autocrlf=false",
             "clone",
             "--depth",
             "1",
@@ -102,7 +136,8 @@ class TestCloneRepo:
         with patch(_RUN, return_value=_proc()) as run:
             clone_repo("owner/repo", "v1", "/tmp/dest")
 
-        assert run.call_args.args[0][4:6] == ["--branch", "v1"]
+        argv = run.call_args.args[0]
+        assert argv[argv.index("--branch") + 1] == "v1"
 
     def test_missing_git_raises_git_not_found(self):
         with patch(_RUN, side_effect=FileNotFoundError(2, "No such file", "git")):
