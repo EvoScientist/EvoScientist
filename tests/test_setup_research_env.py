@@ -247,10 +247,42 @@ def test_find_usable_python_rejects_a_shim_that_fails_the_probe(env, monkeypatch
     assert re_env.find_usable_python() is None
 
 
-def test_find_usable_python_leaves_out_our_own_environment(env, monkeypatch):
+def _own_env_before_a_system_python(env, monkeypatch) -> Path:
+    """Our environment first on PATH (activated by hand, or a nested EvoSci in
+    the agent's shell), a working system python after it."""
     re_env.ensure_research_env("default")
-    monkeypatch.setenv("PATH", str(re_env._bin_dir(env["env"])))
+    re_env._env_python(env["env"]).chmod(0o755)  # the fake venv wrote a plain file
+    system = _fake_python(env["tmp"] / "conda" / "bin")
+    monkeypatch.setenv(
+        "PATH", f"{re_env._bin_dir(env['env'])}{os.pathsep}{system.parent}"
+    )
+    _forget_decision()
+    return system
+
+
+def test_own_environment_first_on_path_is_not_a_system_python(env, monkeypatch):
+    """The shell runs the first python, so a later system python must not be
+    reported in its place."""
+    _own_env_before_a_system_python(env, monkeypatch)
     assert re_env.find_usable_python() is None
+    assert re_env.run_stage(lambda event: None, "default").status == "done"
+
+
+def test_working_own_environment_first_on_path_is_injected(env, monkeypatch):
+    _own_env_before_a_system_python(env, monkeypatch)
+    overrides = re_env.research_env_overrides()
+    assert overrides is not None
+    assert overrides["VIRTUAL_ENV"] == str(env["env"])
+    assert _same_path(re_env.agent_python(), re_env._env_python(env["env"]))
+
+
+def test_broken_own_environment_first_on_path_gives_the_hint(env, monkeypatch):
+    """A later system python does not hide a broken environment the shell
+    would run first: the hint points at `EvoSci setup`, which rebuilds it."""
+    _own_env_before_a_system_python(env, monkeypatch)
+    env["run"].env_starts = False
+    assert re_env.research_env_overrides() is None
+    assert re_env.missing_python_hint() == re_env.MISSING_PYTHON_HINT
 
 
 # --------------------------------------------------------------------------- #

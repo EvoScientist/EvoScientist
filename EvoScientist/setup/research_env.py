@@ -230,23 +230,23 @@ def find_usable_python() -> str | None:
     """The ``python`` the agent's shell would run, as an absolute path, if it
     runs; else None.
 
-    Our own environment is left out of the search. A ``WindowsApps`` alias
-    that is not a Python Software Foundation package is never run (see
+    Only the first ``python`` on PATH counts, as in the shell. When it is our
+    own environment's (activated by hand, or a nested ``EvoSci`` in the
+    agent's shell), it is not a system python: the environment is then
+    checked, injected or repaired like on any other run. A ``WindowsApps``
+    alias that is not a Python Software Foundation package is never run (see
     :func:`_is_untrusted_alias`); when it comes first on PATH the shell would
     run it too, so there is no usable ``python``.
     """
-    own_bin = os.path.normcase(str(_bin_dir(env_dir())))
-    search = os.pathsep.join(
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and os.path.normcase(p.rstrip("\\/")) != own_bin
-    )
-    found = shutil.which("python", path=search)
+    found = shutil.which("python")
     if found is None or _is_untrusted_alias(found):
         return None
     # Absolute, so the reported and recorded path does not depend on a cwd; a
     # relative PATH entry resolves against this process's working directory.
     found = os.path.abspath(found)
+    own_bin = os.path.normcase(str(_bin_dir(env_dir())))
+    if os.path.normcase(os.path.dirname(found)) == own_bin:
+        return None
     if _runs([found, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
         return None
     return found
