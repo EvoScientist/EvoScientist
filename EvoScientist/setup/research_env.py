@@ -45,9 +45,11 @@ _IMPORT_TIMEOUT = 300
 _IMPORT_CHECK = (
     f"import platform, {', '.join(PACKAGES)}; print(platform.python_version())"
 )
-_STORE_ALIAS_RE = re.compile(r"[\\/]microsoft[\\/]windowsapps[\\/]", re.IGNORECASE)
-# Package of the Store's "python" alias (App Installer's Python redirector).
-_STORE_PROMPT_PACKAGE = "Microsoft.DesktopAppInstaller_"
+_WINDOWSAPPS_RE = re.compile(r"[\\/]microsoft[\\/]windowsapps[\\/]", re.IGNORECASE)
+# Publisher ids of the Python Software Foundation's packages: the Python
+# install manager and the Microsoft Store CPython builds. Windows derives a
+# publisher id from the package's signing certificate.
+_PSF_PUBLISHER_IDS = frozenset({"3847v3x7pw1km", "qbz5n2kfra8p0"})
 # Win32 constants for reading an app execution alias.
 _APPEXECLINK_TAG = 0x8000001B
 _FSCTL_GET_REPARSE_POINT = 0x000900A8
@@ -205,27 +207,33 @@ def _app_exec_link_package(path: str) -> str | None:
     return _parse_app_exec_link(buffer.raw[: returned.value])
 
 
-def _is_store_prompt(path: str) -> bool:
-    """True for the Microsoft Store's ``python`` alias, which must never run:
-    without arguments it opens the Store.
+def _is_untrusted_alias(path: str) -> bool:
+    """True for a ``WindowsApps`` alias that must never run.
 
-    Other packages also put aliases under ``WindowsApps``; the Python install
-    manager's ``python.exe`` there is a working Python. An alias whose package
-    cannot be read is treated as the Store's.
+    Only aliases of Python Software Foundation packages (the Python install
+    manager, Store CPython) are real Pythons. Any other, including the Store's
+    ``python`` alias, which opens the Microsoft Store when run, or an alias
+    whose package cannot be read, is never run.
     """
-    if not _STORE_ALIAS_RE.search(path):
+    if not _WINDOWSAPPS_RE.search(path):
         return False
     package = _app_exec_link_package(path)
-    return package is None or package.startswith(_STORE_PROMPT_PACKAGE)
+    if package is None:
+        return True
+    name, _, publisher = package.rpartition("_")
+    return not (
+        name.startswith("PythonSoftwareFoundation.") and publisher in _PSF_PUBLISHER_IDS
+    )
 
 
 def find_usable_python() -> str | None:
     """The ``python`` the agent's shell would run, as an absolute path, if it
     runs; else None.
 
-    Our own environment is left out of the search. The Store's ``python``
-    alias is never run (see :func:`_is_store_prompt`); when it comes first on
-    PATH the shell would run it too, so there is no usable ``python``.
+    Our own environment is left out of the search. A ``WindowsApps`` alias
+    that is not a Python Software Foundation package is never run (see
+    :func:`_is_untrusted_alias`); when it comes first on PATH the shell would
+    run it too, so there is no usable ``python``.
     """
     own_bin = os.path.normcase(str(_bin_dir(env_dir())))
     search = os.pathsep.join(
@@ -234,7 +242,7 @@ def find_usable_python() -> str | None:
         if p and os.path.normcase(p.rstrip("\\/")) != own_bin
     )
     found = shutil.which("python", path=search)
-    if found is None or _is_store_prompt(found):
+    if found is None or _is_untrusted_alias(found):
         return None
     # A relative PATH entry means another file in the agent's working dir.
     found = os.path.abspath(found)

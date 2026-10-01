@@ -165,39 +165,43 @@ def test_find_usable_python_none_without_python(env):
     assert env["run"].calls == []
 
 
-def test_find_usable_python_ignores_the_store_alias_without_running_it(
-    env, monkeypatch
+@pytest.mark.parametrize(
+    "package",
+    [
+        "PythonSoftwareFoundation.PythonManager_3847v3x7pw1km",
+        "PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0",
+    ],
+)
+def test_find_usable_python_uses_a_python_software_foundation_alias(
+    env, monkeypatch, package
 ):
+    """The Python install manager's and Store CPython's ``python.exe`` in
+    WindowsApps are real Pythons."""
     exe = _fake_python(env["tmp"] / "AppData" / "Local" / "Microsoft" / "WindowsApps")
     monkeypatch.setenv("PATH", str(exe.parent))
-    monkeypatch.setattr(
-        re_env,
-        "_app_exec_link_package",
-        lambda _path: "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
-    )
-    assert re_env.find_usable_python() is None
-    assert env["run"].calls == []
-
-
-def test_find_usable_python_never_runs_an_alias_it_cannot_read(env, monkeypatch):
-    exe = _fake_python(env["tmp"] / "AppData" / "Local" / "Microsoft" / "WindowsApps")
-    monkeypatch.setenv("PATH", str(exe.parent))
-    monkeypatch.setattr(re_env, "_app_exec_link_package", lambda _path: None)
-    assert re_env.find_usable_python() is None
-    assert env["run"].calls == []
-
-
-def test_find_usable_python_uses_the_python_install_manager_alias(env, monkeypatch):
-    """The Python install manager's ``python.exe`` in WindowsApps is a real
-    Python, unlike the Store's."""
-    exe = _fake_python(env["tmp"] / "AppData" / "Local" / "Microsoft" / "WindowsApps")
-    monkeypatch.setenv("PATH", str(exe.parent))
-    monkeypatch.setattr(
-        re_env,
-        "_app_exec_link_package",
-        lambda _path: "PythonSoftwareFoundation.PythonManager_3847v3x7pw1km",
-    )
+    monkeypatch.setattr(re_env, "_app_exec_link_package", lambda _path: package)
     assert _same_path(re_env.find_usable_python(), exe)
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        # The Store's prompt: opens the Microsoft Store when run.
+        "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
+        # Another publisher's alias named python.exe.
+        "Contoso.Tools_1a2b3c4d5e6f7",
+        # The right name with another publisher id.
+        "PythonSoftwareFoundation.PythonManager_1a2b3c4d5e6f7",
+        # An alias whose package cannot be read.
+        None,
+    ],
+)
+def test_find_usable_python_never_runs_any_other_alias(env, monkeypatch, package):
+    exe = _fake_python(env["tmp"] / "AppData" / "Local" / "Microsoft" / "WindowsApps")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    monkeypatch.setattr(re_env, "_app_exec_link_package", lambda _path: package)
+    assert re_env.find_usable_python() is None
+    assert env["run"].calls == []
 
 
 def test_find_usable_python_returns_an_absolute_path(env, monkeypatch):
