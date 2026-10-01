@@ -43,6 +43,9 @@ SOURCES = {
     "default": "https://nodejs.org/dist",
     "cn": "https://cdn.npmmirror.com/binaries/node",
 }
+# npm registry for packages fetched with our `npx` under a mirror; the default
+# mirror leaves npm's own setting alone.
+NPM_REGISTRIES = {"cn": "https://registry.npmmirror.com"}
 
 _OS = {"darwin": "darwin", "linux": "linux", "win32": "win"}
 _ARCH = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}
@@ -396,7 +399,7 @@ def _remove_stale_temp_dirs(root: Path) -> None:
             shutil.rmtree(stale, ignore_errors=True)
 
 
-def _configured_mirror() -> str:
+def configured_mirror() -> str:
     from ..config import load_config
 
     return load_config().mirror
@@ -453,7 +456,7 @@ def ensure_node(
             if recorded is not None:
                 return recorded
             _remove_stale_temp_dirs(root)
-            return _install(mirror or _configured_mirror(), report)
+            return _install(mirror or configured_mirror(), report)
     except StageError as exc:
         _failed_install = exc
         raise

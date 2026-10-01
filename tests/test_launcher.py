@@ -476,6 +476,7 @@ def test_npx_runner_start_cleans_env_only_for_private_node(monkeypatch, private)
 
     monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
     monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
+    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "default")
     monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
     env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
     lm.NpxWebUIRunner().start(_cfg(), env)
@@ -483,6 +484,36 @@ def test_npx_runner_start_cleans_env_only_for_private_node(monkeypatch, private)
         assert captured["env"] == {"PATH": "p"}
     else:
         assert captured["env"] == env
+
+
+@pytest.mark.parametrize(
+    ("private", "user_registry", "expected"),
+    [
+        (True, "r", "https://registry.npmmirror.com"),  # user's npm_config_* stripped
+        (False, None, "https://registry.npmmirror.com"),
+        (False, "r", "r"),  # a registry the user set in the environment wins
+    ],
+)
+def test_npx_runner_start_uses_npmmirror_under_the_cn_mirror(
+    monkeypatch, private, user_registry, expected
+):
+    from EvoScientist.setup import node as setup_node
+
+    captured = {}
+
+    def fake_popen(argv, env, **_kw):
+        captured["env"] = env
+        return object()
+
+    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
+    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "cn")
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    env = {"PATH": "p"}
+    if user_registry:
+        env["npm_config_registry"] = user_registry
+    lm.NpxWebUIRunner().start(_cfg(), env)
+    assert captured["env"]["npm_config_registry"] == expected
 
 
 def test_bundled_runner_preflight_missing_node(tmp_path):

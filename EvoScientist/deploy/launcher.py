@@ -153,15 +153,26 @@ class NpxWebUIRunner:
             )
 
     def start(self, cfg: LauncherConfig, env: dict[str, str]) -> subprocess.Popen:
-        from ..setup.node import is_private, node_child_env
+        from ..setup.node import (
+            NPM_REGISTRIES,
+            configured_mirror,
+            is_private,
+            node_child_env,
+        )
 
         npx = shutil.which("npx")
         if npx is None:  # narrowed for type-checkers; preflight already ran
             raise LauncherError("node_missing", "npx disappeared after preflight.")
+        run_env = node_child_env(env, private=is_private(npx))
+        registry = NPM_REGISTRIES.get(configured_mirror())
+        if registry:
+            # `--cn` downloads Node from npmmirror; fetch the WebUI package from
+            # there too. A registry the user set in the environment wins.
+            run_env.setdefault("npm_config_registry", registry)
         try:
             return subprocess.Popen(
                 [npx, "--yes", _WEBUI_PACKAGE, "--port", str(cfg.webui_port)],
-                env=node_child_env(env, private=is_private(npx)),
+                env=run_env,
                 **_popen_group_kwargs(),
             )
         except Exception as exc:  # pragma: no cover - OS-level failure
