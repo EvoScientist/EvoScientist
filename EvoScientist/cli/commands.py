@@ -567,7 +567,11 @@ class CompactSummaryRenderable:
 
 
 def _ensure_async_subagent_server(
-    config: Any, *, workspace_dir: str, backend: str | None = None
+    config: Any,
+    *,
+    workspace_dir: str,
+    backend: str | None = None,
+    print_warnings: bool = True,
 ) -> list[str]:
     """Start the langgraph dev subprocess for background agent work.
 
@@ -616,12 +620,13 @@ def _ensure_async_subagent_server(
             "async sub-agents still use the old settings. Apply them with "
             "EvoSci server stop, then restart EvoSci."
         )
-        console.print(
-            "[yellow]⚠ Config changed since the background agent server was "
-            "launched — async sub-agents still use the old settings. Apply "
-            "them with [bold]EvoSci server stop[/bold], then restart "
-            "EvoSci.[/yellow]"
-        )
+        if print_warnings:
+            console.print(
+                "[yellow]⚠ Config changed since the background agent server was "
+                "launched — async sub-agents still use the old settings. Apply "
+                "them with [bold]EvoSci server stop[/bold], then restart "
+                "EvoSci.[/yellow]"
+            )
 
     # The backend is shared by every UI mode, so the exposure warning lives
     # here, not just in deploy/WebUI. Gated on the server being up: warning
@@ -637,17 +642,18 @@ def _ensure_async_subagent_server(
             "and the agent can run shell. Use --host 127.0.0.1 on untrusted "
             "networks."
         )
-        console.print(
-            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
-            f"[bold red]Agent server listening on {bind_host} — no auth, and "
-            f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
-            f"networks.[/bold red]"
-        )
+        if print_warnings:
+            console.print(
+                "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+                f"[bold red]Agent server listening on {bind_host} — no auth, and "
+                f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
+                f"networks.[/bold red]"
+            )
     return startup_warnings
 
 
 def warn_server_backend_hitl_caveats(
-    backend: str | None, *, surface_label: str
+    backend: str | None, *, surface_label: str, print_warning: bool = True
 ) -> str | None:
     """Warn that the server gateway backend is lossy for a HITL surface.
 
@@ -668,7 +674,8 @@ def warn_server_backend_hitl_caveats(
         "workspace), and a model or team switch is dropped for the rest of a "
         "turn that resumes after a tool approval."
     )
-    console.print(f"[yellow]{warning}[/yellow]")
+    if print_warning:
+        console.print(f"[yellow]{warning}[/yellow]")
     return warning
 
 
@@ -2582,7 +2589,7 @@ def _main_callback(
     # `-p` (one-shot) or `--resume`/`--thread-id` (continue a specific
     # conversation), there is concrete terminal output to render, so fall back
     # to the Rich CLI instead of opening the browser UI.
-    from .tui_runtime import normalize_ui_backend
+    from .tui_runtime import normalize_ui_backend, resolve_ui_backend
 
     if normalize_ui_backend(config.ui_backend) == "webui":
         if _is_fresh_interactive_session(prompt, thread_id):
@@ -2608,8 +2615,15 @@ def _main_callback(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
+    will_use_tui = (
+        not prompt
+        and resolve_ui_backend(config.ui_backend, warn_fallback=False) == "tui"
+    )
     startup_warnings = _ensure_async_subagent_server(
-        config, workspace_dir=workspace_dir, backend=gateway_backend
+        config,
+        workspace_dir=workspace_dir,
+        backend=gateway_backend,
+        print_warnings=not will_use_tui,
     )
 
     if prompt:

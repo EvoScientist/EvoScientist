@@ -523,7 +523,7 @@ def run_textual_interactive(
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.TUI)
     startup_warnings = list(startup_warnings or ())
     backend_warning = warn_server_backend_hitl_caveats(
-        gateway_backend, surface_label="TUI"
+        gateway_backend, surface_label="TUI", print_warning=False
     )
     if backend_warning:
         startup_warnings.append(backend_warning)

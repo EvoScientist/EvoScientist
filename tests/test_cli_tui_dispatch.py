@@ -57,13 +57,18 @@ def _invoke_main(monkeypatch, argv):
     monkeypatch.setattr(cfg_mod, "get_effective_config", _fake_config)
     monkeypatch.setattr(cfg_mod, "apply_config_to_env", lambda cfg: None)
     monkeypatch.setattr(cmds, "ensure_dirs", lambda: None)
-    monkeypatch.setattr(cmds, "_ensure_async_subagent_server", lambda *a, **k: None)
+
+    def _fake_ensure(*args, **kwargs):
+        calls["ensure_kwargs"] = kwargs
+        return ["startup warning"]
+
+    def _fake_cmd_interactive(**kwargs):
+        calls["dispatch"] = ("cli", kwargs.get("ui_backend"))
+        calls["interactive_kwargs"] = kwargs
+
+    monkeypatch.setattr(cmds, "_ensure_async_subagent_server", _fake_ensure)
     monkeypatch.setattr(webui_mod, "run_webui", _fake_run_webui)
-    monkeypatch.setattr(
-        interactive_mod,
-        "cmd_interactive",
-        lambda **kw: calls.__setitem__("dispatch", ("cli", kw.get("ui_backend"))),
-    )
+    monkeypatch.setattr(interactive_mod, "cmd_interactive", _fake_cmd_interactive)
 
     result = CliRunner().invoke(app, argv, catch_exceptions=False)
     return calls, result
@@ -74,6 +79,14 @@ def test_main_callback_launches_webui_for_fresh_session(monkeypatch):
     calls, result = _invoke_main(monkeypatch, [])
     assert result.exit_code == 0
     assert calls.get("dispatch") == "webui"
+
+
+def test_main_callback_collects_warnings_for_tui(monkeypatch):
+    calls, result = _invoke_main(monkeypatch, ["--ui", "tui"])
+
+    assert result.exit_code == 0
+    assert calls["ensure_kwargs"]["print_warnings"] is False
+    assert calls["interactive_kwargs"]["startup_warnings"] == ["startup warning"]
 
 
 def test_main_callback_resume_falls_back_to_cli(monkeypatch):
@@ -126,7 +139,9 @@ def test_no_host_flag_leaves_config_defaults(monkeypatch):
     assert calls["webui_config"].webui_host == "127.0.0.1"
 
 
-def _run_ensure_backend(monkeypatch, config, *, server_up=True, config_drift=False):
+def _run_ensure_backend(
+    monkeypatch, config, *, server_up=True, config_drift=False, print_warnings=True
+):
     """Drive ``_ensure_async_subagent_server`` and capture its warnings."""
     import EvoScientist.cli.commands as cmds
 
@@ -153,7 +168,9 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True, config_drift=Fal
         lambda *a, **k: __import__("contextlib").nullcontext(),
     )
     warnings = cmds._ensure_async_subagent_server(
-        config, workspace_dir="/tmp/workspace"
+        config,
+        workspace_dir="/tmp/workspace",
+        print_warnings=print_warnings,
     )
     return printed, warnings
 
@@ -188,6 +205,17 @@ def test_cli_mode_returns_config_drift_warning(monkeypatch):
     assert any("Config changed since" in warning for warning in warnings)
 
 
+def test_tui_collects_startup_warnings_without_printing(monkeypatch):
+    config = SimpleNamespace(langgraph_dev_host="0.0.0.0")
+    printed, warnings = _run_ensure_backend(
+        monkeypatch, config, config_drift=True, print_warnings=False
+    )
+
+    assert not printed
+    assert any("Config changed since" in warning for warning in warnings)
+    assert any("PUBLIC BIND" in warning for warning in warnings)
+
+
 def test_no_warning_when_backend_failed_to_start(monkeypatch):
     """ensure_langgraph_dev fails soft (async degrades to in-process). Warning
     about a bind that never happened is worse than saying nothing."""
@@ -213,6 +241,13 @@ def test_server_backend_caveat_is_returned_and_still_printed(monkeypatch):
     assert warning is not None
     assert "Server gateway backend active for the TUI" in warning
     assert warning in printed[0]
+
+    printed.clear()
+    tui_warning = cmds.warn_server_backend_hitl_caveats(
+        "langgraph_server", surface_label="TUI", print_warning=False
+    )
+    assert tui_warning == warning
+    assert not printed
     assert cmds.warn_server_backend_hitl_caveats("other", surface_label="TUI") is None
 
 
