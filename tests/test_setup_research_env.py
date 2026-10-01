@@ -67,10 +67,11 @@ class FakeRunner:
             scripted = self.imports_script.pop(0) if self.imports_script else None
             ok = self.env_starts and (self.imports_ok if scripted is None else scripted)
             return subprocess.CompletedProcess(cmd, 0 if ok else 1, "3.12.9\n")
-        if cmd[0] in self.system_ok:
-            return subprocess.CompletedProcess(
-                cmd, 0 if self.system_ok[cmd[0]] else 1, ""
-            )
+        # Keyed by normcase: on Windows shutil.which returns the PATHEXT
+        # spelling (python.EXE).
+        system_ok = self.system_ok.get(os.path.normcase(cmd[0]))
+        if system_ok is not None:
+            return subprocess.CompletedProcess(cmd, 0 if system_ok else 1, "")
         return subprocess.CompletedProcess(cmd, 0 if self.env_starts else 1, "")
 
     @staticmethod
@@ -96,6 +97,11 @@ class FakeRunner:
         with path.open("w", encoding="utf-8") as fh:
             parser.write(fh)
         return subprocess.CompletedProcess(cmd, 0, f"Writing to {path}\n")
+
+
+def _same_path(found: str | None, exe: Path) -> bool:
+    """On Windows shutil.which returns the PATHEXT spelling (python.EXE)."""
+    return found is not None and os.path.normcase(found) == os.path.normcase(str(exe))
 
 
 def _forget_decision() -> None:
@@ -150,7 +156,7 @@ def _extra_package(env_path: Path) -> Path:
 def test_find_usable_python_uses_a_working_python(env, monkeypatch):
     exe = _fake_python(env["tmp"] / "conda" / "bin")
     monkeypatch.setenv("PATH", str(exe.parent))
-    assert re_env.find_usable_python() == str(exe)
+    assert _same_path(re_env.find_usable_python(), exe)
 
 
 def test_find_usable_python_none_without_python(env):
@@ -170,7 +176,7 @@ def test_find_usable_python_ignores_the_store_alias_without_running_it(
 def test_find_usable_python_rejects_a_shim_that_fails_the_probe(env, monkeypatch):
     exe = _fake_python(env["tmp"] / "pyenv" / "shims")
     monkeypatch.setenv("PATH", str(exe.parent))
-    env["run"].system_ok[str(exe)] = False
+    env["run"].system_ok[os.path.normcase(str(exe))] = False
     assert re_env.find_usable_python() is None
 
 
@@ -188,7 +194,8 @@ def test_stage_skipped_when_a_usable_python_exists(env, monkeypatch):
     monkeypatch.setenv("PATH", str(exe.parent))
     result = re_env.run_stage(lambda event: None, "default")
     assert result.status == "skipped"
-    assert result.detail == {"reason": "system_python", "python": str(exe)}
+    assert result.detail["reason"] == "system_python"
+    assert _same_path(result.detail["python"], exe)
     assert not env["env"].exists()
 
 
@@ -399,7 +406,7 @@ def test_overrides_none_when_a_usable_python_exists(env, monkeypatch):
     monkeypatch.setenv("PATH", str(exe.parent))
     _forget_decision()
     assert re_env.research_env_overrides() is None
-    assert re_env.agent_python() == str(exe)
+    assert _same_path(re_env.agent_python(), exe)
 
 
 def test_overrides_prepend_the_environment_and_follow_path(env, monkeypatch):
