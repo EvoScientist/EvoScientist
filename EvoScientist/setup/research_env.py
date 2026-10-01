@@ -466,6 +466,18 @@ def missing_python_hint() -> str | None:
     return MISSING_PYTHON_HINT if agent_python() is None else None
 
 
+def server_missing_python_hint(sidecar: dict | None) -> str | None:
+    """The setup hint for the agents of a server this process reuses.
+
+    Those agents got the ``python`` recorded in the server's sidecar, not
+    ours. Without a reused server, or without a record (a server started by
+    an older version), falls back to :func:`missing_python_hint`.
+    """
+    if sidecar is not None and SIDECAR_KEY in sidecar:
+        return MISSING_PYTHON_HINT if sidecar[SIDECAR_KEY] is None else None
+    return missing_python_hint()
+
+
 @functools.cache
 def _log_missing_python_hint() -> None:
     """Log the hint once per process where the agent is built, so the Rich

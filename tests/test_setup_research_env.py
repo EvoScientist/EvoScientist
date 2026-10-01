@@ -550,6 +550,24 @@ def test_decision_is_logged_once_with_a_setup_hint(env, caplog):
     assert "Run `EvoSci setup`, then restart EvoScientist" in warnings[0].getMessage()
 
 
+@pytest.mark.parametrize(
+    ("sidecar", "own", "shown"),
+    [
+        # A reused server whose agents have a python: no hint, even if we lack one.
+        ({re_env.SIDECAR_KEY: "/conda/bin/python"}, None, False),
+        # A reused server whose agents have none: hint, even if we have one.
+        ({re_env.SIDECAR_KEY: None}, "/usr/bin/python", True),
+        # No record (older server) or no reuse: our own decision.
+        ({"workspace": "/w"}, None, True),
+        (None, None, True),
+        (None, "/usr/bin/python", False),
+    ],
+)
+def test_server_missing_python_hint(monkeypatch, sidecar, own, shown):
+    monkeypatch.setattr(re_env, "agent_python", lambda: own)
+    assert (re_env.server_missing_python_hint(sidecar) is not None) is shown
+
+
 def test_missing_python_hint_is_returned_but_not_logged(env, caplog):
     with caplog.at_level(logging.INFO, logger=re_env.__name__):
         assert re_env.missing_python_hint() == re_env.MISSING_PYTHON_HINT
