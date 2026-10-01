@@ -31,6 +31,18 @@ def is_under(path: Path, root: Path) -> bool:
     return True
 
 
+def prepend_to_path(directory: Path) -> None:
+    """Put ``directory`` first on this process's ``PATH``, dropping any other
+    entry for it, so child processes inherit it."""
+    key = os.path.normcase(str(directory))
+    parts = [
+        p
+        for p in os.environ.get("PATH", "").split(os.pathsep)
+        if p and os.path.normcase(p) != key
+    ]
+    os.environ["PATH"] = os.pathsep.join([str(directory), *parts])
+
+
 # Pauses between attempts to move an unpacked tool into place (about 4 s).
 _MOVE_RETRY_DELAYS = (0.1, 0.2, 0.5, 1.0, 2.0)
 

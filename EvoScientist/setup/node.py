@@ -31,7 +31,12 @@ from pathlib import Path
 from typing import Any
 
 from ._install import is_under as _is_under
-from ._install import move_into_place, remove_stale_temp_dirs, tools_dir
+from ._install import (
+    move_into_place,
+    prepend_to_path,
+    remove_stale_temp_dirs,
+    tools_dir,
+)
 from .download import download, fetch_text, verify_sha256_from_sums
 from .protocol import (
     Emitter,
@@ -437,13 +442,7 @@ def activate_runtime() -> Path | None:
     bin_dir = _bin_dir(install_dir)
     if not _node_exe(install_dir).exists():
         return None
-    key = os.path.normcase(str(bin_dir))
-    parts = [
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and os.path.normcase(p) != key
-    ]
-    os.environ["PATH"] = os.pathsep.join([str(bin_dir), *parts])
+    prepend_to_path(bin_dir)
     return bin_dir
 
 

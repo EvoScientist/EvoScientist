@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 
 import pytest
 
@@ -33,7 +34,9 @@ def _collect():
     return events, events.append
 
 
-def test_manifest_shape():
+@pytest.mark.parametrize("plat", ["linux", "darwin"])
+def test_manifest_shape(monkeypatch, plat):
+    monkeypatch.setattr(sys, "platform", plat)
     assert manifest() == {
         "protocol": 1,
         "stages": [
@@ -41,6 +44,15 @@ def test_manifest_shape():
             {"id": "research-env", "title": "Python research environment"},
         ],
     }
+
+
+def test_manifest_lists_git_on_windows_only(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert manifest()["stages"] == [
+        {"id": "node", "title": "Node.js"},
+        {"id": "git", "title": "Git for Windows"},
+        {"id": "research-env", "title": "Python research environment"},
+    ]
 
 
 def test_make_event_leaves_out_unset_fields_and_clamps_progress():
@@ -153,8 +165,12 @@ def test_run_stages_reports_an_unexpected_exception_as_an_error_event():
 
 def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
     other = Stage(
-        "git", "Git", frozenset({"no-such-platform"}), lambda e, m: StageResult("", {})
+        "other",
+        "Other",
+        frozenset({"no-such-platform"}),
+        lambda e, m: StageResult("", {}),
     )
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(setup_pkg, "STAGES", (*setup_pkg.STAGES, other))
     assert [s["id"] for s in manifest()["stages"]] == ["node", "research-env"]
 
@@ -229,21 +245,21 @@ def test_console_emitter_shows_every_step_message():
     ]
 
 
-def test_main_activates_the_private_node(tmp_path, monkeypatch):
-    """cli.main() must put the private Node on PATH before the app runs."""
+def test_main_activates_the_private_tools(tmp_path, monkeypatch):
+    """cli.main() must put the private Node and Git on PATH before the app runs."""
     import EvoScientist.cli as cli_pkg
     from EvoScientist.cli import commands
+    from EvoScientist.setup import git as setup_git
     from EvoScientist.setup import node as setup_node
 
     order: list[str] = []
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        setup_node, "activate_runtime", lambda: order.append("activate")
-    )
+    monkeypatch.setattr(setup_node, "activate_runtime", lambda: order.append("node"))
+    monkeypatch.setattr(setup_git, "activate_runtime", lambda: order.append("git"))
     monkeypatch.setattr(commands, "_configure_logging", lambda: None)
     monkeypatch.setattr(cli_pkg, "app", lambda: order.append("app"))
     cli_pkg.main()
-    assert order == ["activate", "app"]
+    assert order == ["node", "git", "app"]
 
 
 # --------------------------------------------------------------------------- #
