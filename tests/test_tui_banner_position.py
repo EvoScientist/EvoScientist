@@ -162,6 +162,13 @@ async def test_startup_warnings_are_shown_in_tui_notifications(monkeypatch):
     assert any(
         "Server gateway backend active for the TUI" in warning for warning in warnings
     )
+    warning_list = [
+        message
+        for message, options in notifications
+        if options.get("severity") == "warning"
+    ]
+    for expected in startup_warnings:
+        assert warning_list.count(expected) == 1
 
 
 async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
