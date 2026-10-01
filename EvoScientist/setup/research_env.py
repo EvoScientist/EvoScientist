@@ -306,9 +306,11 @@ def _create_venv(env: Path) -> None:
         result = _run(cmd, _VENV_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         raise StageError("install_failed", f"Could not create {env}: {exc}") from exc
-    logger.info(f"python -m venv output:\n{result.stdout}")
     if result.returncode == 0:
+        logger.info(f"python -m venv output:\n{result.stdout}")
         return
+    # The error event keeps one line; the cause can be earlier in the output.
+    logger.warning(f"python -m venv failed:\n{result.stdout}")
     message = f"Could not create {env}: {_last_line(result.stdout)}"
     if "ensurepip" in result.stdout:
         message += (
@@ -337,8 +339,12 @@ def _pip_install(env: Path, mirror: str) -> None:
         result = _run(cmd, _PIP_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         raise StageError("install_failed", f"pip install failed: {exc}") from exc
-    logger.info(f"pip install output:\n{result.stdout}")
-    if result.returncode != 0:
+    if result.returncode == 0:
+        logger.info(f"pip install output:\n{result.stdout}")
+    else:
+        # The error event keeps pip's last line; network errors (offline, a
+        # blocked index) come earlier in the output.
+        logger.warning(f"pip install failed:\n{result.stdout}")
         raise StageError(
             "install_failed", f"pip install failed: {_last_line(result.stdout)}"
         )

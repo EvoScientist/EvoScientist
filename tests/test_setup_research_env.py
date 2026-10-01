@@ -307,6 +307,35 @@ def test_failed_pip_leaves_no_ready_marker(env):
     assert not re_env.is_ready(env["env"])
 
 
+def test_failed_pip_logs_its_whole_output_at_warning(env, monkeypatch, caplog):
+    """Offline, pip's last line reads like a packaging problem; the network
+    errors before it must reach the user (WARNING is shown by default)."""
+    pip_output = (
+        "WARNING: Retrying ... NewConnectionError: Connection refused\n"
+        "ERROR: No matching distribution found for numpy\n"
+    )
+
+    def run(cmd, timeout):
+        if FakeRunner._kind(list(cmd)) == "pip":
+            return subprocess.CompletedProcess(cmd, 1, pip_output)
+        return env["run"](cmd, timeout)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    with caplog.at_level(logging.WARNING, logger=re_env.__name__):
+        with pytest.raises(StageError):
+            re_env.ensure_research_env("default")
+    assert "NewConnectionError" in caplog.text
+
+
+def test_failed_venv_logs_its_whole_output_at_warning(env, caplog):
+    env["run"].venv_ok = False
+    env["run"].venv_output = "first cause line\nError: last line\n"
+    with caplog.at_level(logging.WARNING, logger=re_env.__name__):
+        with pytest.raises(StageError):
+            re_env.ensure_research_env("default")
+    assert "first cause line" in caplog.text
+
+
 def test_missing_ensurepip_names_python3_venv(env):
     env["run"].venv_ok = False
     env["run"].venv_output = (
