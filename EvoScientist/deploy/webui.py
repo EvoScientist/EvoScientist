@@ -36,6 +36,7 @@ import threading
 from typing import Any
 
 import typer  # type: ignore[import-untyped]
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -150,7 +151,8 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             f"port {cfg.backend_port}"
         )
     for warning in result.warnings:
-        console.print(f"[yellow]⚠ {warning}[/yellow]")
+        # Warnings can carry paths; a segment like "[lab]" is not markup.
+        console.print(f"[yellow]⚠ {escape(warning)}[/yellow]")
 
     # The UI reaches the backend from the BROWSER; when only the front-end is
     # exposed, remote pages load but every request fails — say so.

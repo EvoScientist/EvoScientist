@@ -140,6 +140,24 @@ def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
     assert "/conda/bin/python" in decision.warnings[0]
 
 
+@pytest.mark.parametrize(
+    ("recorded", "own", "hinted"),
+    [
+        ("/conda/bin/python", None, False),
+        (None, None, True),
+        (None, "/usr/bin/python", False),
+    ],
+)
+def test_start_hint_follows_the_reused_server(monkeypatch, recorded, own, hinted):
+    from EvoScientist.setup import research_env
+
+    sidecar = {"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 1}
+    _patch_for_evosci_occupant(monkeypatch, {**sidecar, "agent_python": recorded})
+    monkeypatch.setattr(research_env, "agent_python", lambda: own)
+    result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert (research_env.MISSING_PYTHON_HINT in result.warnings) is hinted
+
+
 def test_resolve_backend_no_sidecar_reuses(monkeypatch):
     """An older subprocess with no sidecar is reused, as before —
     backward-compat for pre-sidecar / externally-managed servers."""

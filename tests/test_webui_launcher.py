@@ -361,3 +361,13 @@ def test_missing_python_hint_is_printed_by_the_launcher(monkeypatch):
 
     captured = _run_webui_once(monkeypatch, _make_config())
     assert any(research_env.MISSING_PYTHON_HINT in line for line in captured["printed"])
+
+
+def test_warnings_with_brackets_print_as_they_are(monkeypatch):
+    """Warnings can carry paths; Rich markup must not eat or choke on them."""
+    from EvoScientist.setup import research_env
+
+    warning = "gives its agents /home/u/[lab]/[/x]/bin/python"
+    monkeypatch.setattr(research_env, "server_missing_python_hint", lambda _s: warning)
+    captured = _run_webui_once(monkeypatch, _make_config())
+    assert any(warning in line for line in captured["printed"])

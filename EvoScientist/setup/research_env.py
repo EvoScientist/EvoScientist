@@ -507,12 +507,15 @@ def missing_python_hint() -> str | None:
 def server_missing_python_hint(sidecar: dict | None) -> str | None:
     """The setup hint for the agents of a server this process reuses.
 
-    Those agents got the ``python`` recorded in the server's sidecar, not
-    ours. Without a reused server, or without a record (a server started by
-    an older version), falls back to :func:`missing_python_hint`.
+    Those agents got the ``python`` recorded in the server's sidecar: None
+    when it records one, else :func:`missing_python_hint`. When the server
+    recorded none but this session has a python, ``EvoSci setup`` and a
+    restart would not help; :func:`python_drift_message` names the fix.
+    Without a reused server, or without a record (a server started by an
+    older version), this is :func:`missing_python_hint` too.
     """
-    if sidecar is not None and SIDECAR_KEY in sidecar:
-        return MISSING_PYTHON_HINT if sidecar[SIDECAR_KEY] is None else None
+    if sidecar is not None and sidecar.get(SIDECAR_KEY) is not None:
+        return None
     return missing_python_hint()
 
 

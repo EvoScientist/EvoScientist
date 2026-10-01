@@ -713,8 +713,10 @@ def test_decision_is_logged_once_with_a_setup_hint(env, caplog):
     [
         # A reused server whose agents have a python: no hint, even if we lack one.
         ({re_env.SIDECAR_KEY: "/conda/bin/python"}, None, False),
-        # A reused server whose agents have none: hint, even if we have one.
-        ({re_env.SIDECAR_KEY: None}, "/usr/bin/python", True),
+        # A reused server whose agents have none: hint when we have none too;
+        # when we have one, the drift warning names the fix.
+        ({re_env.SIDECAR_KEY: None}, None, True),
+        ({re_env.SIDECAR_KEY: None}, "/usr/bin/python", False),
         # No record (older server) or no reuse: our own decision.
         ({"workspace": "/w"}, None, True),
         (None, None, True),
