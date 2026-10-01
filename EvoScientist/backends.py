@@ -1393,10 +1393,15 @@ def build_autoskill_agent_backend(
     """
     from deepagents.backends import CompositeBackend
 
+    from .setup.research_env import research_env_overrides
+
     return CompositeBackend(
         default=AutoskillProposalSandboxBackend(
             root_dir=str(proposals_dir),
             timeout=sandbox_timeout,
+            # Its prompt validates proposals with `execute`; same python as
+            # the other agents.
+            env=research_env_overrides(),
         ),
         routes={
             "/memories/": ReadOnlyFilesystemBackend(

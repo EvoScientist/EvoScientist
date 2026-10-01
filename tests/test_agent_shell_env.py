@@ -56,10 +56,20 @@ def test_every_sandbox_backend_construction_passes_env():
     sites = []
     for path in root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
+        # The class or a subclass of it (e.g. AutoskillProposalSandboxBackend).
         for match in re.finditer(
-            r"=\s*CustomSandboxBackend\((.*?)\n\s*\)", text, re.DOTALL
+            r"=\s*\w*SandboxBackend\((.*?)\n\s*\)", text, re.DOTALL
         ):
             sites.append((path.name, match.group(1)))
-    assert len(sites) == 2
+    assert len(sites) == 3
     for name, args in sites:
         assert "env=research_env_overrides()" in args, name
+
+
+def test_autoskill_backend_gets_the_overrides(overrides, tmp_path):
+    from EvoScientist.backends import build_autoskill_agent_backend
+
+    backend = build_autoskill_agent_backend(
+        memory_dir=tmp_path / "memories", proposals_dir=tmp_path / "proposals"
+    )
+    assert backend.default._env["EVOSCI_SHELL_PROBE"] == "venv"
