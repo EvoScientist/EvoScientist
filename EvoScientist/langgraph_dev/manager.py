@@ -283,7 +283,7 @@ def _write_workspace_sidecar(
     pid: int,
     config_fingerprint: str | None = None,
     deploy_mode: bool | None = None,
-    agent_python: str | None | object = _NOT_RECORDED,
+    agent_python: str | object | None = _NOT_RECORDED,
 ) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
 
