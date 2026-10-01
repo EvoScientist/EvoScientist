@@ -39,8 +39,16 @@ CN_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 _READY_MARKER = ".evoscientist-ready"
 _PYTHON_PROBE_TIMEOUT = 10
 # Exits non-zero under Python 2, which some systems still install as
-# `python`. Written so Python 2 can parse it.
-_SYSTEM_PYTHON_PROBE = "import sys; sys.exit(sys.version_info[0] < 3)"
+# `python`, and for an EXTERNALLY-MANAGED (PEP 668) interpreter outside a venv
+# (Debian/Ubuntu `python-is-python3`, Arch, Homebrew's unversioned `python`):
+# pip refuses the agent's `pip install` there. Environments people create
+# (conda, venv, pyenv, uv venvs) carry no marker. Written so Python 2 can
+# parse it.
+_SYSTEM_PYTHON_PROBE = (
+    "import os, sys, sysconfig; sys.exit(sys.version_info[0] < 3 or ("
+    "sys.prefix == getattr(sys, 'base_prefix', sys.prefix) and os.path.isfile("
+    "os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED'))))"
+)
 _VENV_TIMEOUT = 300
 _PIP_TIMEOUT = 1800
 # The first matplotlib import builds its font cache.
@@ -235,7 +243,8 @@ def _is_untrusted_alias(path: str) -> bool:
 
 def find_usable_python() -> str | None:
     """The ``python`` the agent's shell would run, as an absolute path, if it
-    runs and is Python 3; else None.
+    runs, is Python 3 and lets pip install into it (no PEP 668 marker outside
+    a venv); else None.
 
     Only the first ``python`` on PATH counts, as in the shell. When it is our
     own environment's (activated by hand, or a nested ``EvoSci`` in the

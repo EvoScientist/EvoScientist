@@ -274,8 +274,43 @@ def test_system_python_probe_rejects_python_2(monkeypatch):
 
 
 def test_system_python_probe_accepts_python_3():
+    """The test interpreter is a venv, so a marker on its base does not count."""
     result = subprocess.run([sys.executable, "-c", re_env._SYSTEM_PYTHON_PROBE])
     assert result.returncode == 0
+
+
+def _run_probe_with_marker(monkeypatch, tmp_path, *, in_venv: bool):
+    import sysconfig
+
+    (tmp_path / "EXTERNALLY-MANAGED").write_text("[externally-managed]\n")
+    monkeypatch.setattr(sysconfig, "get_path", lambda _name: str(tmp_path))
+    monkeypatch.setattr(sys, "prefix", "/usr")
+    monkeypatch.setattr(sys, "base_prefix", "/opt/base" if in_venv else "/usr")
+    with pytest.raises(SystemExit) as exc:
+        exec(re_env._SYSTEM_PYTHON_PROBE, {})
+    return exc.value.code
+
+
+def test_system_python_probe_rejects_an_externally_managed_python(
+    monkeypatch, tmp_path
+):
+    """pip refuses installs into a PEP 668 interpreter, so the agent's first
+    `pip install` would fail."""
+    assert _run_probe_with_marker(monkeypatch, tmp_path, in_venv=False)
+
+
+def test_system_python_probe_accepts_a_venv_of_an_externally_managed_python(
+    monkeypatch, tmp_path
+):
+    """PEP 668 only applies outside a venv."""
+    assert not _run_probe_with_marker(monkeypatch, tmp_path, in_venv=True)
+
+
+def test_find_usable_python_runs_the_python_3_probe(env, monkeypatch):
+    exe = _fake_python(env["tmp"] / "conda" / "bin")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    found = re_env.find_usable_python()
+    assert env["run"].calls == [[found, "-c", re_env._SYSTEM_PYTHON_PROBE]]
 
 
 def _own_env_before_a_system_python(env, monkeypatch) -> Path:
