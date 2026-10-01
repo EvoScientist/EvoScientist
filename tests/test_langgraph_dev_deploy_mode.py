@@ -381,3 +381,35 @@ def test_a_failing_node_check_does_not_block_the_spawn(
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16177)
     assert "env" in captured
+
+
+def test_start_records_the_agent_python_in_the_sidecar(
+    monkeypatch, tmp_path, runtime_paths
+):
+    """Reuse compares this record; without it the python warning never fires."""
+    import json
+    from types import SimpleNamespace
+
+    from EvoScientist.setup import research_env
+
+    _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            manager.RUNTIME, workspace_sidecar=tmp_path / "workspace.json"
+        ),
+    )
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+
+    def _poll():
+        # Called by the health loop, after the sidecar is written.
+        raise _PopenAbort("sidecar written")
+
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(pid=4242, poll=_poll)
+    )
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
+    sidecar = json.loads((tmp_path / "workspace.json").read_text())
+    assert sidecar["agent_python"] == "/env/bin/python"
