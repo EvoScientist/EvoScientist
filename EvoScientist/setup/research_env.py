@@ -335,10 +335,13 @@ def _create_venv(env: Path) -> None:
     # The error event keeps one line; the cause can be earlier in the output.
     logger.warning(f"python -m venv failed:\n{result.stdout}")
     message = f"Could not create {env}: {_last_line(result.stdout)}"
-    if "ensurepip" in result.stdout:
+    # Debian's venv prints this when ensurepip is missing; other failures of
+    # the pip bootstrap also mention ensurepip, but on any OS.
+    if "ensurepip is not" in result.stdout:
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
         message += (
             " This Python has no ensurepip; on Debian and Ubuntu install the"
-            " python3-venv package."
+            f" python{version}-venv package."
         )
     raise StageError("install_failed", message)
 

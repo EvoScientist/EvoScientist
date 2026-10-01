@@ -399,7 +399,26 @@ def test_failed_venv_logs_its_whole_output_at_warning(env, caplog):
     assert "first cause line" in caplog.text
 
 
-def test_missing_ensurepip_names_python3_venv(env):
+def test_missing_ensurepip_names_the_venv_package(env):
+    """The output Debian's venv prints when ensurepip is missing."""
+    env["run"].venv_ok = False
+    env["run"].venv_output = (
+        "The virtual environment was not created successfully because ensurepip"
+        " is not\navailable.  On Debian/Ubuntu systems, you need to install the"
+        " python3-venv\npackage using the following command.\n\n"
+        "    apt install python3.12-venv\n\n"
+        "Failing command: /x/bin/python3\n"
+    )
+    with pytest.raises(StageError) as exc:
+        re_env.ensure_research_env("default")
+    assert exc.value.code == "install_failed"
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert f"python{version}-venv" in exc.value.message
+
+
+def test_other_ensurepip_failures_get_no_debian_hint(env):
+    """Any failed pip bootstrap names ensurepip, e.g. a read-only
+    site-packages on macOS."""
     env["run"].venv_ok = False
     env["run"].venv_output = (
         "Error: Command '['/x/bin/python3', '-m', 'ensurepip', '--upgrade', "
@@ -407,8 +426,7 @@ def test_missing_ensurepip_names_python3_venv(env):
     )
     with pytest.raises(StageError) as exc:
         re_env.ensure_research_env("default")
-    assert exc.value.code == "install_failed"
-    assert "python3-venv" in exc.value.message
+    assert "Debian" not in exc.value.message
 
 
 def test_failed_import_check_is_probe_failed(env):
