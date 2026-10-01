@@ -93,7 +93,9 @@ def test_run_stages_skipped_result_is_the_only_terminal_event():
     assert events[1]["detail"] == {"reason": "system_python"}
 
 
-def test_run_stages_error_carries_code_and_stops():
+def test_run_stages_error_carries_code_and_later_stages_still_run():
+    """A blocked Node download must not keep the Python stage from running."""
+
     def fail(emit, mirror):
         raise StageError("checksum_mismatch", "bad sum")
 
@@ -109,8 +111,25 @@ def test_run_stages_error_carries_code_and_stops():
             "status": "error",
             "message": "bad sum",
             "code": "checksum_mismatch",
-        }
+        },
+        {
+            "protocol": 1,
+            "stage": "later",
+            "status": "done",
+            "message": "ok",
+            "detail": {},
+        },
     ]
+
+
+def test_run_stages_exit_code_is_one_when_any_stage_failed():
+    def boom(emit, mirror):
+        raise RuntimeError("boom")
+
+    ok = Stage("ok", "Ok", None, lambda emit, mirror: StageResult("ok", {}))
+    _events, emit = _collect()
+    assert run_stages([ok, Stage("x", "X", None, boom), ok], emit, "default") == 1
+    assert run_stages([ok, ok], emit, "default") == 0
 
 
 def test_run_stages_skips_other_platforms():
