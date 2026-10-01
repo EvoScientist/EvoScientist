@@ -262,6 +262,29 @@ def test_download_that_ends_early_is_download_failed(tmp_path, monkeypatch):
     assert ei.value.code == "download_failed"
 
 
+def test_checksum_file_uses_the_short_timeout_and_the_archive_the_long_one(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.setup import download as dl
+
+    timeouts: dict[str, float] = {}
+
+    def urlopen(url, timeout):
+        timeouts[url] = timeout
+        response = io.BytesIO(b"data")
+        response.headers = {}
+        return response
+
+    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
+    dl.fetch_text("https://example.invalid/SHASUMS256.txt")
+    dl.download("https://example.invalid/node.tar.xz", tmp_path / "x")
+    assert timeouts == {
+        "https://example.invalid/SHASUMS256.txt": dl._TEXT_TIMEOUT,
+        "https://example.invalid/node.tar.xz": dl._ARCHIVE_TIMEOUT,
+    }
+    assert dl._TEXT_TIMEOUT < dl._ARCHIVE_TIMEOUT
+
+
 def test_disk_error_while_downloading_is_install_failed(tmp_path, monkeypatch):
     from EvoScientist.setup import download as dl
 

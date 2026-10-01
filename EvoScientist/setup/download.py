@@ -29,7 +29,11 @@ _NETWORK_ERRORS = (
     OSError,
     ValueError,
 )
-_TIMEOUT = 120
+# Socket timeouts, per operation (connect, each read), not per download. The
+# small checksum file is fetched first with the short one, so a blocked
+# network fails fast; the archive keeps the long one for slow reads.
+_TEXT_TIMEOUT = 30
+_ARCHIVE_TIMEOUT = 120
 
 ProgressFn = Callable[[float], None]
 
@@ -53,7 +57,7 @@ def download(url: str, dest: Path, progress: ProgressFn | None = None) -> str:
     """
     digest = hashlib.sha256()
     try:
-        with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(url, timeout=_ARCHIVE_TIMEOUT) as resp:
             total = int(resp.headers.get("Content-Length") or 0)
             done = 0
             with _local_io(dest):
@@ -81,7 +85,7 @@ def download(url: str, dest: Path, progress: ProgressFn | None = None) -> str:
 def fetch_text(url: str) -> str:
     """GET a small text resource, e.g. ``SHASUMS256.txt``."""
     try:
-        with urllib.request.urlopen(url, timeout=_TIMEOUT) as resp:
+        with urllib.request.urlopen(url, timeout=_TEXT_TIMEOUT) as resp:
             return resp.read().decode("utf-8")
     except _NETWORK_ERRORS as exc:
         raise StageError("download_failed", f"Download of {url} failed: {exc}") from exc
