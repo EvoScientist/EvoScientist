@@ -69,10 +69,14 @@ ProgressFn = Callable[[float, str], None]
 # Locations
 # --------------------------------------------------------------------------- #
 def env_dir() -> Path:
-    """``<DATA_DIR>/envs/default``, read at call time so an overridden DATA_DIR applies."""
+    """``<DATA_DIR>/envs/default``, read at call time so an overridden DATA_DIR applies.
+
+    Absolute: it goes onto PATH for shells that run in the workspace, not where
+    EvoScientist started, and ``EVOSCIENTIST_DATA_DIR`` may be relative.
+    """
     from .. import paths
 
-    return paths.DATA_DIR / "envs" / "default"
+    return Path(os.path.abspath(paths.DATA_DIR / "envs" / "default"))
 
 
 def _bin_dir(env: Path) -> Path:

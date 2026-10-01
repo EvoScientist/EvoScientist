@@ -655,6 +655,18 @@ def test_python_drift_message(monkeypatch, recorded, current, warns):
     assert (message is not None) is warns
 
 
+def test_relative_data_dir_puts_an_absolute_path_on_path(env, monkeypatch):
+    from EvoScientist import paths
+
+    monkeypatch.chdir(env["tmp"])
+    monkeypatch.setattr(paths, "DATA_DIR", Path("rel-data"))
+    re_env.ensure_research_env("default")
+    _forget_decision()
+    overrides = re_env.research_env_overrides()
+    assert os.path.isabs(overrides["PATH"].split(os.pathsep)[0])
+    assert os.path.isabs(overrides["VIRTUAL_ENV"])
+
+
 def test_python_drift_message_none_without_a_record():
     """A server started by an older version has no record."""
     assert re_env.python_drift_message({"workspace": "/w"}) is None
