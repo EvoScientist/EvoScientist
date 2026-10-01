@@ -403,6 +403,7 @@ def cmd_interactive(
     ui_backend: str = "cli",
     config=None,
     async_runtime: "AsyncRuntime | None" = None,
+    startup_warnings: list[str] | None = None,
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -444,6 +445,7 @@ def cmd_interactive(
             create_session_workspace=_create_session_workspace,
             config=config,
             async_runtime=async_runtime,
+            startup_warnings=startup_warnings,
         )
         return
 

@@ -12,7 +12,8 @@ import queue
 import random
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -488,6 +489,71 @@ def _session_auto_approve_decisions(action_requests: list) -> list[dict]:
     return [{"type": "approve"} for _ in action_requests]
 
 
+class TUIWarningLogHandler(logging.Handler):
+    """Logging handler that routes runtime warnings to TUI notifications.
+
+    When the Textual TUI is active, stdout is redirected and standard Rich
+    console logging output is hidden from the user. This handler captures
+    log records at WARNING level or above and forwards them as visible
+    toast notifications via the active Textual application.
+    """
+
+    def __init__(self, app: Any, *, min_level: int = logging.WARNING) -> None:
+        """Initialize handler bound to a Textual application.
+
+        Args:
+            app: The active Textual application instance.
+            min_level: Minimum logging level to capture (defaults to WARNING).
+        """
+        super().__init__(level=min_level)
+        self.app = app
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Post a notification for records at or above the configured level.
+
+        Thread-safe via Textual's ``App.notify`` implementation.
+
+        Args:
+            record: The Python logging record to process.
+        """
+        try:
+            if record.levelno < self.level:
+                return
+            try:
+                msg = record.getMessage()
+            except Exception:
+                msg = str(record.msg)
+            if not msg:
+                return
+            # Prevent re-notifying warnings that were already shown as startup warnings
+            if msg in getattr(self.app, "_startup_warnings", ()):
+                return
+            severity = "error" if record.levelno >= logging.ERROR else "warning"
+            self.app.notify(msg, severity=severity, timeout=15)
+        except Exception:
+            # Never let logging failures crash the application or cause recursion
+            pass
+
+
+@contextmanager
+def tui_warning_logger(app: Any) -> Iterator[TUIWarningLogHandler]:
+    """Context manager installing a TUIWarningLogHandler on the root logger.
+
+    Args:
+        app: The active Textual application to receive notifications.
+
+    Yields:
+        The installed TUIWarningLogHandler instance.
+    """
+    handler = TUIWarningLogHandler(app)
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        root.removeHandler(handler)
+
+
 def run_textual_interactive(
     *,
     show_thinking: bool,
@@ -503,6 +569,7 @@ def run_textual_interactive(
     create_session_workspace: Callable[[str | None], str],
     config: Any | None = None,
     async_runtime: AsyncRuntime | None = None,
+    startup_warnings: list[str] | None = None,
 ) -> None:
     """Run full-screen Textual interactive chat loop."""
     if config is None:
@@ -520,7 +587,12 @@ def run_textual_interactive(
     from .commands import warn_server_backend_hitl_caveats
 
     gateway_backend = resolve_gateway_backend(config, GatewaySurface.TUI)
-    warn_server_backend_hitl_caveats(gateway_backend, surface_label="TUI")
+    startup_warnings = list(startup_warnings or ())
+    backend_warning = warn_server_backend_hitl_caveats(
+        gateway_backend, surface_label="TUI", print_warning=False
+    )
+    if backend_warning:
+        startup_warnings.append(backend_warning)
 
     event_sink = SessionEventSink()
     runtime_gateways = create_runtime_gateways_for_config(
@@ -649,6 +721,7 @@ def run_textual_interactive(
             channel_send_thinking_value: bool = True,
             resumed: bool = False,
             resume_warning: str = "",
+            startup_warnings: list[str] | None = None,
         ) -> None:
             super().__init__()
             self._progress_tracker = MCPProgressTracker()
@@ -666,6 +739,7 @@ def run_textual_interactive(
             self._channel_send_thinking = channel_send_thinking_value
             self._resumed = resumed
             self._resume_warning = resume_warning
+            self._startup_warnings = list(startup_warnings or ())
             self._channel_timer: Any = None
             self._channel_start_results: list[tuple[str, bool, str]] = []
             self._channel_start_stop = threading.Event()
@@ -1075,6 +1149,15 @@ def run_textual_interactive(
                 severity="warning",
                 timeout=10,
             )
+            for warning in self._startup_warnings:
+                self.notify(warning, severity="warning", timeout=15)
+            root = logging.getLogger()
+            if not hasattr(self, "_log_handler") and not any(
+                isinstance(h, TUIWarningLogHandler) and getattr(h, "app", None) is self
+                for h in root.handlers
+            ):
+                self._log_handler = TUIWarningLogHandler(self)
+                root.addHandler(self._log_handler)
             self.run_worker(
                 self._check_for_updates, exclusive=True, group="update-check"
             )
@@ -1094,6 +1177,13 @@ def run_textual_interactive(
             ch_task = asyncio.create_task(_deferred_start_channels())
             self._background_tasks.add(ch_task)
             ch_task.add_done_callback(self._background_tasks.discard)
+
+        def on_unmount(self) -> None:
+            """Clean up the runtime warning log handler when exiting the TUI."""
+            handler = getattr(self, "_log_handler", None)
+            if handler is not None:
+                logging.getLogger().removeHandler(handler)
+                self._log_handler = None
 
         def on_resize(self, event: Any) -> None:
             """Re-window the completion popup for the new terminal height."""
@@ -3940,10 +4030,16 @@ def run_textual_interactive(
                 channel_send_thinking_value=channel_send_thinking,
                 resumed=resumed,
                 resume_warning=resume_warning,
+                startup_warnings=startup_warnings,
             )
             try:
                 await app.run_async()
             finally:
+                handler = getattr(app, "_log_handler", None)
+                if handler is not None:
+                    logging.getLogger().removeHandler(handler)
+                    app._log_handler = None
+
                 from .resume_hint import print_resume_hint
 
                 try:
