@@ -138,7 +138,8 @@ def _run_webui_once(
     monkeypatch.setattr(webui_mod, "console", console)
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/npx")
-    # The server config fingerprint probes the agent's python; Popen is faked below.
+    # The launcher decides the missing-python hint; its python probe would hit
+    # the one-argument ``which`` above and the Popen faked below.
     from EvoScientist.setup import research_env
 
     monkeypatch.setattr(research_env, "agent_python", lambda: None)

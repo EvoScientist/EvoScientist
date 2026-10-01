@@ -27,8 +27,10 @@ from typing import Any, Literal, Protocol, TextIO
 
 PROTOCOL = 1
 
-# ``download_failed``: network or archive content; ``install_failed``: the local
-# install step (file system, and later venv / pip).
+# ``download_failed``: a download EvoScientist makes itself, or its archive
+# content; ``install_failed``: the local install step (file system, venv, pip).
+# A pip that cannot reach its index is ``install_failed`` too: its failure does
+# not tell network errors from others.
 ERROR_CODES = frozenset(
     {
         "download_failed",

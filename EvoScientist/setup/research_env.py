@@ -244,7 +244,8 @@ def find_usable_python() -> str | None:
     found = shutil.which("python", path=search)
     if found is None or _is_untrusted_alias(found):
         return None
-    # A relative PATH entry means another file in the agent's working dir.
+    # Absolute, so the reported and recorded path does not depend on a cwd; a
+    # relative PATH entry resolves against this process's working directory.
     found = os.path.abspath(found)
     if _runs([found, "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
         return None
