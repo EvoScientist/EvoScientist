@@ -50,9 +50,10 @@ def check_run_folders(config: dict[str, Any], *, works_in_folder: bool) -> None:
     raise RunFolderMismatchError(
         f"This EvoScientist server serves "
         f"{_describe(served, with_run_dir=works_in_folder)}, but the run is for "
-        f"{_describe(requested, with_run_dir=works_in_folder)}. Another EvoSci "
-        f"session may have moved the server: restart this session once that "
-        f"one is done, or stop it with 'EvoSci server stop'."
+        f"{_describe(requested, with_run_dir=works_in_folder)}: the server did "
+        f"not follow the session that started this run (another EvoSci session "
+        f"moved it, or moving it failed). Restart that session; if another "
+        f"session holds the server, stop that one first."
     )
 
 

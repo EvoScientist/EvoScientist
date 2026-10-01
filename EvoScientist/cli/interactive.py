@@ -831,6 +831,18 @@ def cmd_interactive(
                     except WorkspaceMismatchError as exc:
                         _remove_unused_run_dir(new_dirs.run_dir)
                         raise RuntimeError(str(exc)) from exc
+                    except Exception:
+                        _channel_logger.warning(
+                            "Failed to sync background agent server to %s; "
+                            "continuing in degraded mode",
+                            new_dirs.work_dir,
+                            exc_info=True,
+                        )
+                        console.print(
+                            "[yellow]Background agent server sync failed; "
+                            "started the new session, but async subagents and "
+                            "EvoMemory workers may be unavailable.[/yellow]"
+                        )
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 state["dirs"] = new_dirs
                 state["thread_id"] = await graph_gateway.create_thread(

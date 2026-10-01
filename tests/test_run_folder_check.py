@@ -283,17 +283,60 @@ def test_async_task_check_reports_why_a_run_was_refused(workspace):
         "last_checked_at": "2026-10-01T00:00:00Z",
         "last_updated_at": "2026-10-01T00:00:00Z",
     }
+    runtime = SimpleNamespace(state={"async_tasks": {"t1": task}}, tool_call_id="tc1")
     with patch(
         "EvoScientist.middleware.expert_async_subagent._ClientCache.get_sync",
         return_value=client,
     ):
-        command = check.func(
-            task_id="t1",
-            runtime=SimpleNamespace(
-                state={"async_tasks": {"t1": task}}, tool_call_id="tc1"
-            ),
+        first = check.func(task_id="t1", runtime=runtime)
+        second = check.func(task_id="t1", runtime=runtime)
+
+    for command in (first, second):
+        result = json.loads(command.update["messages"][0].content)
+        assert result["status"] == "error"
+        assert "serves workspace /a" in result["error"]
+    # A failed run's reason does not change; it is looked up once.
+    client.threads.get.assert_called_once_with("t1")
+
+
+def test_new_run_folders_never_reuse_an_existing_one(workspace, monkeypatch):
+    """Two sessions starting in the same second get different run folders."""
+    from datetime import datetime
+
+    import EvoScientist.cli.agent as agent
+
+    class _SameSecond(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 1, 12, 0, 0)
+
+    monkeypatch.setattr(agent, "datetime", _SameSecond)
+    first = agent._create_run_dir(workspace)
+    second = agent._create_run_dir(workspace)
+
+    assert first != second
+    assert first.is_dir()
+    assert second.is_dir()
+
+
+async def test_moving_the_server_lets_memory_work_finish_first(workspace):
+    """Moving the pinned server stops runs in flight, so the previous
+    session's memory work finishes before it moves."""
+    from EvoScientist.cli import commands
+
+    order: list[str] = []
+    with (
+        patch.object(
+            commands, "_let_memory_work_finish", lambda: order.append("memory")
+        ),
+        patch(
+            "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
+            lambda *a, **k: order.append("move"),
+        ),
+        patch.object(commands, "_reconcile_autoskill_schedule", lambda *a, **k: None),
+    ):
+        await commands._sync_background_agent_server_workspace(
+            MagicMock(), dirs=SessionDirs(workspace)
         )
 
-    result = json.loads(command.update["messages"][0].content)
-    assert result["status"] == "error"
-    assert "serves workspace /a" in result["error"]
+    assert order == ["memory", "move"]

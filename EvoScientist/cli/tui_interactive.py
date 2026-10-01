@@ -923,9 +923,7 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
-        async def _sync_server_to(
-            self, dirs: SessionDirs, *, degraded_note: str
-        ) -> None:
+        async def _sync_server_to(self, dirs: SessionDirs) -> bool:
             """Move the background agent server to *dirs* before switching.
 
             Until the server serves several workspaces it is pinned to one
@@ -937,8 +935,9 @@ def run_textual_interactive(
 
             Raises ``RuntimeError`` when another EvoSci process owns the
             server for other folders, so the caller leaves the session as it
-            is and command UIs (including channels) report the failure. Other
-            sync failures continue locally with *degraded_note* shown.
+            is and command UIs (including channels) report the failure.
+            Returns False when the sync failed otherwise: the session can
+            continue locally, but background work may be unavailable.
             """
             from ..langgraph_dev.manager import WorkspaceMismatchError
             from .commands import _sync_background_agent_server_workspace
@@ -963,9 +962,10 @@ def run_textual_interactive(
                     dirs.work_dir,
                     exc_info=True,
                 )
-                self.append_system(degraded_note, style="yellow")
+                return False
             finally:
                 await sync_widget.cleanup()
+            return True
 
         async def start_new_session(self) -> None:
             # ``--mode=run`` starts every session in a fresh run folder of the
@@ -974,16 +974,10 @@ def run_textual_interactive(
             new_dirs = SessionDirs(
                 ws, create_run_dir(ws, run_name) if mode == "run" else None
             )
+            synced = True
             if new_dirs != self._dirs:
                 try:
-                    await self._sync_server_to(
-                        new_dirs,
-                        degraded_note=(
-                            "Background agent server sync failed; started the "
-                            "new session, but async subagents and EvoMemory "
-                            "workers may be unavailable."
-                        ),
-                    )
+                    synced = await self._sync_server_to(new_dirs)
                 except RuntimeError:
                     from .agent import _remove_unused_run_dir
 
@@ -992,6 +986,13 @@ def run_textual_interactive(
 
             # Clear all widgets except #welcome
             self.clear_chat()
+            if not synced:
+                self.append_system(
+                    "Background agent server sync failed; started the new "
+                    "session, but async subagents and EvoMemory workers may "
+                    "be unavailable.",
+                    style="yellow",
+                )
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
             self._dirs = new_dirs
@@ -1021,14 +1022,13 @@ def run_textual_interactive(
             if dirs is not None:
                 # ``self._dirs`` changes only after the sync succeeds, so a
                 # refused sync leaves the session in its current folders.
-                await self._sync_server_to(
-                    dirs,
-                    degraded_note=(
+                if not await self._sync_server_to(dirs):
+                    self.append_system(
                         "Background agent server sync failed; resumed local "
                         "session, but async subagents and EvoMemory workers "
-                        "may be unavailable."
-                    ),
-                )
+                        "may be unavailable.",
+                        style="yellow",
+                    )
                 self._dirs = dirs
                 _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
 

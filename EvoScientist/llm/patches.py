@@ -1207,6 +1207,38 @@ def _thread_error_message(thread: Any) -> str | None:
     return str(error) if error else None
 
 
+class _RunErrors:
+    """Why failed runs failed, looked up once from their thread.
+
+    langgraph-api records a failed run's error on its thread, not on the run,
+    so the async-task check would otherwise report no reason. A failed run's
+    error never changes, so each is looked up once.
+    """
+
+    def __init__(self) -> None:
+        self._by_run: dict[str, str] = {}
+
+    @staticmethod
+    def _missing(run: Any) -> bool:
+        return (
+            isinstance(run, dict)
+            and run.get("status") == "error"
+            and not run.get("error")
+        )
+
+    def needs_lookup(self, run: Any) -> bool:
+        return self._missing(run) and run.get("run_id") not in self._by_run
+
+    def attach(self, run: Any, thread: Any = None) -> Any:
+        if not self._missing(run):
+            return run
+        message = _thread_error_message(thread)
+        if message:
+            self._by_run[run["run_id"]] = message
+        message = self._by_run.get(run.get("run_id"))
+        return {**run, "error": message} if message else run
+
+
 class _SyncRunsProxy:
     """Wraps a sync ``RunsClient``: injects config into ``create`` and adds
     the failure reason to failed runs returned by ``get``."""
@@ -1216,10 +1248,12 @@ class _SyncRunsProxy:
         real: Any,
         folders: dict[str, str] | None = None,
         threads: Any = None,
+        errors: _RunErrors | None = None,
     ) -> None:
         object.__setattr__(self, "_real", real)
         object.__setattr__(self, "_folders", folders)
         object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
@@ -1229,21 +1263,13 @@ class _SyncRunsProxy:
 
     def get(self, *args: Any, **kwargs: Any) -> Any:
         run = self._real.get(*args, **kwargs)
-        # langgraph-api records a failed run's error on its thread, not on the
-        # run, so the async-task check would otherwise report no reason.
-        if (
-            isinstance(run, dict)
-            and run.get("status") == "error"
-            and not run.get("error")
-            and self._threads is not None
-        ):
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
             try:
-                message = _thread_error_message(self._threads.get(run["thread_id"]))
+                thread = self._threads.get(run["thread_id"])
             except Exception:
-                message = None
-            if message:
-                run = {**run, "error": message}
-        return run
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _AsyncRunsProxy:
@@ -1255,10 +1281,12 @@ class _AsyncRunsProxy:
         real: Any,
         folders: dict[str, str] | None = None,
         threads: Any = None,
+        errors: _RunErrors | None = None,
     ) -> None:
         object.__setattr__(self, "_real", real)
         object.__setattr__(self, "_folders", folders)
         object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
@@ -1270,21 +1298,13 @@ class _AsyncRunsProxy:
 
     async def get(self, *args: Any, **kwargs: Any) -> Any:
         run = await self._real.get(*args, **kwargs)
-        if (
-            isinstance(run, dict)
-            and run.get("status") == "error"
-            and not run.get("error")
-            and self._threads is not None
-        ):
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
             try:
-                message = _thread_error_message(
-                    await self._threads.get(run["thread_id"])
-                )
+                thread = await self._threads.get(run["thread_id"])
             except Exception:
-                message = None
-            if message:
-                run = {**run, "error": message}
-        return run
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _ClientProxy:
@@ -1312,11 +1332,14 @@ class _ClientProxy:
         *,
         is_async: bool,
         folders: dict[str, str] | None = None,
+        errors: _RunErrors | None = None,
     ) -> None:
         runs_proxy_cls = _AsyncRunsProxy if is_async else _SyncRunsProxy
         object.__setattr__(self, "_real", real)
         object.__setattr__(
-            self, "_runs_proxy", runs_proxy_cls(real.runs, folders, real.threads)
+            self,
+            "_runs_proxy",
+            runs_proxy_cls(real.runs, folders, real.threads, errors),
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -1335,15 +1358,22 @@ class _ClientCacheProxy:
     def __init__(self, real: Any, folders: dict[str, str] | None = None) -> None:
         self._real = real
         self._folders = folders
+        self._errors = _RunErrors()
 
     def get_sync(self, name: str) -> Any:
         return _ClientProxy(
-            self._real.get_sync(name), is_async=False, folders=self._folders
+            self._real.get_sync(name),
+            is_async=False,
+            folders=self._folders,
+            errors=self._errors,
         )
 
     def get_async(self, name: str) -> Any:
         return _ClientProxy(
-            self._real.get_async(name), is_async=True, folders=self._folders
+            self._real.get_async(name),
+            is_async=True,
+            folders=self._folders,
+            errors=self._errors,
         )
 
 
