@@ -287,7 +287,9 @@ def _same_path(a: str, b: str) -> bool:
 
 def _unusable_reason(probe_output: str) -> str | None:
     """Why a probed ``python`` is not usable for the agent, or None if it is."""
-    lines = probe_output.splitlines()
+    # The probe's own three lines come last: stderr shares the pipe, and a
+    # working interpreter can print warnings at startup (a broken .pth line).
+    lines = probe_output.splitlines()[-3:]
     try:
         major, minor = (int(part) for part in lines[0].split("."))
         prefix, managed = lines[1], lines[2].strip() == "1"

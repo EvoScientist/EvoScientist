@@ -384,6 +384,14 @@ def test_system_python_probe_flags_an_externally_managed_python(
         ("3.12\n/usr\n1\n", False),  # PEP 668 outside a venv
         ("", False),
         ("Python 3.12\n", False),
+        # Startup warnings on stderr share the pipe and come first.
+        (
+            "Error processing line 1 of /env/site-packages/broken.pth:\n"
+            "  ModuleNotFoundError: No module named 'gone'\n"
+            "Remainder of file ignored\n"
+            "3.12\n/opt/conda\n0\n",
+            True,
+        ),
     ],
 )
 def test_unusable_reason(output, usable):
