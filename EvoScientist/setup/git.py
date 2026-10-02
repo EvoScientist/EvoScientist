@@ -111,12 +111,46 @@ def _no_window() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+# Windows errors for a program blocked by a code-integrity policy:
+# ERROR_ACCESS_DISABLED_BY_POLICY (AppLocker) and
+# ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION (WDAC).
+_POLICY_WINERRORS = frozenset({1260, 4551})
+
+
+class _PolicyBlocked(Exception):
+    """A Windows policy refused to start ``path``."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.path = path
+
+
+def _is_policy_block(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) in _POLICY_WINERRORS
+
+
+def _policy_error(path: str | Path) -> StageError:
+    """The readable error for a program of ours that a Windows policy blocked.
+
+    ``probe_failed``, and no new download: the same program would be blocked
+    again.
+    """
+    return StageError(
+        "probe_failed",
+        f"A Windows policy (AppLocker or WDAC) blocked {path}. Ask your "
+        f"administrator to allow programs under {tools_dir()}, or install Git "
+        "for Windows and run `EvoSci setup` again.",
+    )
+
+
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
     """Run a probe without a console window; None if it could not run or failed.
 
     ``GIT_EXEC_PATH`` is dropped so ``git --exec-path`` reports the binary's own
     install, not an inherited override. A failure is logged at INFO with its
-    reason, so "why was my Git for Windows not used?" has an answer.
+    reason, so "why was my Git for Windows not used?" has an answer. A program
+    blocked by a Windows policy raises :class:`_PolicyBlocked` instead, so the
+    caller can fall back (a system Git) or report it (our PortableGit).
     """
     env = {k: v for k, v in os.environ.items() if k.upper() != "GIT_EXEC_PATH"}
     command = " ".join(argv)
@@ -132,7 +166,12 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
     except subprocess.TimeoutExpired:
         logger.info(f"{command} did not finish within {_PROBE_TIMEOUT} s")
         return None
-    except (OSError, subprocess.SubprocessError) as exc:
+    except OSError as exc:
+        logger.info(f"{command} could not run: {exc}")
+        if _is_policy_block(exc):
+            raise _PolicyBlocked(argv[0]) from exc
+        return None
+    except subprocess.SubprocessError as exc:
         logger.info(f"{command} could not run: {exc}")
         return None
     if result.returncode != 0:
@@ -205,15 +244,19 @@ def _system_git() -> GitInfo | None:
     found = shutil.which("git", path=search)
     if found is None:
         return None
-    version = _git_version(Path(found))
-    if version is None:
-        logger.info(f"Not using {found}: not a Git for Windows build")
+    try:
+        version = _git_version(Path(found))
+        if version is None:
+            logger.info(f"Not using {found}: not a Git for Windows build")
+            return None
+        install = _root_from_exec_path(Path(found))
+        if install is None or is_under(install, root):
+            logger.info(f"Not using {found}: no Git for Windows install found from it")
+            return None
+        info = _probe_root(install, "system", version)
+    except _PolicyBlocked as exc:
+        logger.info(f"Not using {found}: a Windows policy blocked {exc.path}")
         return None
-    install = _root_from_exec_path(Path(found))
-    if install is None or is_under(install, root):
-        logger.info(f"Not using {found}: no Git for Windows install found from it")
-        return None
-    info = _probe_root(install, "system", version)
     if info is None:
         logger.info(
             f"Not using {found}: {install} has no cmd\\git.exe or no working "
@@ -480,6 +523,8 @@ def _run_sfx(exe: Path, out: Path, beat: Callable[[], None]) -> None:
     try:
         proc = _launch(argv)
     except OSError as exc:
+        if _is_policy_block(exc):
+            raise _policy_error(exe) from exc
         raise StageError("install_failed", f"Could not run {exe.name}: {exc}") from exc
     try:
         try:
@@ -571,6 +616,9 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
             ) from exc
 
         report(0.95, "Checking the installed Git")
+        # A policy block propagates (see ensure_git) and leaves the install on
+        # disk unrecorded: the next run finds it, is blocked again and reports
+        # it without a new download.
         info = _probe_root(final, "portablegit")
         if info is None:
             shutil.rmtree(final, ignore_errors=True)
@@ -619,6 +667,10 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
                 return recorded
             remove_stale_temp_dirs(root, ".git-")
             return _install(mirror, report)
+    except _PolicyBlocked as exc:
+        # Our recorded, left-over or fresh PortableGit is blocked: report it
+        # instead of downloading the same blocked program again.
+        raise _policy_error(exc.path) from exc
     except OSError as exc:
         raise StageError(
             "install_failed", f"Could not set up Git in {root}: {exc}"

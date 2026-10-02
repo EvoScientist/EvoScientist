@@ -40,19 +40,26 @@ class FakeRun:
     """Fake probe results keyed by (executable, first argument).
 
     Anything under the tools dir answers like a working PortableGit unless a
-    result is set for it explicitly; a value of None makes the probe fail.
+    result is set for it explicitly; a value of None makes the probe fail, and
+    :data:`BLOCKED` makes it behave as if a Windows policy refused to start it.
     """
 
     def __init__(self, tools: Path) -> None:
         self.tools = tools
         self.results: dict[tuple[str, str], str | None] = {}
         self.calls: list[list[str]] = []
+        self.blocked: set[str] = set()
 
     def set(self, exe: Path, arg: str, stdout: str | None) -> None:
         self.results[(os.path.normcase(str(exe)), arg)] = stdout
 
+    def block(self, exe: Path) -> None:
+        self.blocked.add(os.path.normcase(str(exe)))
+
     def __call__(self, argv: list[str]):
         self.calls.append(argv)
+        if os.path.normcase(argv[0]) in self.blocked:
+            raise git._PolicyBlocked(argv[0])
         key = (os.path.normcase(argv[0]), argv[1])
         if key in self.results:
             stdout = self.results[key]
@@ -496,6 +503,81 @@ def test_arm64_still_uses_a_system_git(env, monkeypatch):
     monkeypatch.setattr(git.platform, "machine", lambda: "ARM64")
     _system_git(env, monkeypatch)
     assert git.ensure_git().source == "system"
+
+
+# --------------------------------------------------------------------------- #
+# Blocked by a Windows policy (AppLocker / WDAC)
+# --------------------------------------------------------------------------- #
+def _policy_oserror(winerror: int) -> OSError:
+    exc = OSError(13, "This program is blocked by group policy")
+    exc.winerror = winerror
+    return exc
+
+
+@pytest.mark.parametrize("winerror", [1260, 4551])
+def test_run_reports_a_policy_block(monkeypatch, winerror):
+    def fake(argv, **kwargs):
+        raise _policy_oserror(winerror)
+
+    monkeypatch.setattr(git.subprocess, "run", fake)
+    with pytest.raises(git._PolicyBlocked) as ei:
+        git._run(["C:/pg/bin/bash.exe", "--version"])
+    assert ei.value.path == "C:/pg/bin/bash.exe"
+
+
+def test_run_treats_other_start_errors_as_a_failed_probe(monkeypatch):
+    def fake(argv, **kwargs):
+        raise _policy_oserror(2)  # ERROR_FILE_NOT_FOUND
+
+    monkeypatch.setattr(git.subprocess, "run", fake)
+    assert git._run(["C:/pg/bin/bash.exe", "--version"]) is None
+
+
+def test_blocked_system_git_falls_back_to_portablegit(env, monkeypatch):
+    root = _system_git(env, monkeypatch)
+    env["run"].block(root / "bin" / "bash.exe")
+    assert git.ensure_git().source == "portablegit"
+
+
+def test_blocked_fresh_portablegit_is_probe_failed_without_a_new_download(env):
+    final = env["tools"] / f"git-{git.GIT_VERSION}"
+    env["run"].block(final / "bin" / "bash.exe")
+    with pytest.raises(StageError) as ei:
+        git.ensure_git()
+    assert ei.value.code == "probe_failed"
+    assert "Windows policy (AppLocker or WDAC) blocked" in ei.value.message
+    assert "bash.exe" in ei.value.message
+    assert _record(env) is None
+    assert final.is_dir()  # kept, so the next run does not download it again
+
+    env["net"].urls.clear()
+    with pytest.raises(StageError) as ei:
+        git.ensure_git()
+    assert ei.value.code == "probe_failed"
+    assert env["net"].urls == []
+
+
+def test_blocked_recorded_portablegit_is_probe_failed_without_a_new_download(env):
+    git.ensure_git()
+    env["run"].block(env["tools"] / f"git-{git.GIT_VERSION}" / "cmd" / "git.exe")
+    env["net"].urls.clear()
+    with pytest.raises(StageError) as ei:
+        git.ensure_git()
+    assert ei.value.code == "probe_failed"
+    assert env["net"].urls == []
+    assert len(env["sfx"].calls) == 1
+
+
+def test_blocked_sfx_is_probe_failed(env, monkeypatch):
+    def blocked_launch(argv):
+        raise _policy_oserror(1260)
+
+    monkeypatch.setattr(git, "_launch", blocked_launch)
+    with pytest.raises(StageError) as ei:
+        git.ensure_git()
+    assert ei.value.code == "probe_failed"
+    assert ASSET in ei.value.message
+    assert _record(env) is None
 
 
 # --------------------------------------------------------------------------- #
