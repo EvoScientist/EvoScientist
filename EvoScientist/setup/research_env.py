@@ -88,12 +88,16 @@ _IMPORT_CHECK = (
     "sys.exit(1 if failed else 0)\n"
 )
 _FAILED_LINE_RE = re.compile(r"^failed (\w+):", re.MULTILINE)
-# pip's last words when no candidate matches a requirement; "from versions"
-# lists what the index offers ("none" when it was not reached).
+# pip's last words when no candidate matches a requirement, pinned or not;
+# "from versions" lists the compatible versions the index offers ("none" when
+# it was not reached, or has no wheel for this interpreter).
 _NO_MATCH_RE = re.compile(
-    r"satisfies the requirement (?P<name>[A-Za-z0-9_.-]+)==\S+ "
+    r"satisfies the requirement (?P<name>[A-Za-z0-9_.-]+)(?:==\S+)? "
     r"\(from versions: (?P<versions>[^)]*)\)"
 )
+# pip's warning for each failed connection to the index (DNS failure,
+# timeout, refusal), printed before it gives up.
+_CONNECTION_FAILED = "after connection broken by"
 _WINDOWSAPPS_RE = re.compile(r"[\\/]microsoft[\\/]windowsapps[\\/]", re.IGNORECASE)
 # Publisher ids of the Python Software Foundation's packages: the Python
 # install manager and the Microsoft Store CPython builds. Windows derives a
@@ -501,15 +505,16 @@ def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
             requirements[name] = name
             unpinned.append(name)
             continue
-        message = f"pip install failed: {_last_line(result.stdout)}"
-        if match is not None and match["versions"].strip() == "none":
-            message += (
-                " The package index was not reached, or has no wheel of it for"
-                " this Python."
-            )
+        sentences = [f"pip install failed: {_last_line(result.stdout).rstrip('.')}."]
+        if _CONNECTION_FAILED in result.stdout:
+            sentences.append("The package index could not be reached.")
             if mirror != "cn":
-                message += f" {CN_MIRROR_HINT}"
-        raise StageError("install_failed", message)
+                sentences.append(CN_MIRROR_HINT)
+        elif match is not None and match["versions"].strip() == "none":
+            sentences.append(
+                f"The package index has no wheel of {match['name']} for this Python."
+            )
+        raise StageError("install_failed", " ".join(sentences))
 
 
 class EnvResult(NamedTuple):

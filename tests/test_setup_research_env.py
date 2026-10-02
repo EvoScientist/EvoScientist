@@ -48,8 +48,12 @@ class FakeRunner:
         self.failed_packages: list[str] = []
         # Packages whose pinned version has no wheel for this interpreter.
         self.no_wheel: set[str] = set()
-        # The index is not reached: every pin reports "from versions: none".
+        # The index is not reached: pip warns about the connection, then
+        # every requirement reports "from versions: none".
         self.index_down = False
+        # Packages with no wheel at all for this interpreter: "from versions:
+        # none" without a connection warning.
+        self.no_wheel_at_all: set[str] = set()
         # Keyed by normcase(exe): False makes the system probe fail.
         self.system_ok: dict[str, bool] = {}
         # Keyed by normcase(exe): the system probe's output (version, prefix,
@@ -119,25 +123,36 @@ class FakeRunner:
         return subprocess.CompletedProcess(cmd, 0 if self.env_starts else 1, "")
 
     def _pip_install(self, cmd: list[str]) -> subprocess.CompletedProcess:
-        """pip's real wording for a pin without a wheel and an unreachable
-        index (pip 24.3); it stops at the first requirement it cannot match."""
+        """pip's real wording (checked with pip 24.3 and 26.2) for a pin
+        without a wheel, a package without any wheel for this interpreter and
+        an unreachable https index; it stops at the first requirement it
+        cannot match."""
         if not self.pip_ok:
             return subprocess.CompletedProcess(cmd, 1, "ERROR: offline")
         for req in cmd[cmd.index("--no-input") + 1 :]:
-            if "==" not in req:
+            if req.startswith("--") or "://" in req:
                 continue
             name = req.split("==")[0]
+            warning = ""
             if self.index_down:
                 versions = "none"
-            elif name in self.no_wheel:
+                warning = (
+                    "WARNING: Retrying (Retry(total=4, connect=None, read=None,"
+                    " redirect=None, status=None)) after connection broken by"
+                    " 'NewConnectionError(...: Failed to resolve host)': /simple/"
+                    f"{name}/\n"
+                )
+            elif "==" in req and name in self.no_wheel:
                 versions = "1.18.0, 1.18.1"
+            elif name in self.no_wheel_at_all:
+                versions = "none"
             else:
                 continue
             return subprocess.CompletedProcess(
                 cmd,
                 1,
-                "ERROR: Could not find a version that satisfies the requirement"
-                f" {req} (from versions: {versions})\n"
+                f"{warning}ERROR: Could not find a version that satisfies the"
+                f" requirement {req} (from versions: {versions})\n"
                 f"ERROR: No matching distribution found for {req}\n",
             )
         return subprocess.CompletedProcess(cmd, 0, "")
@@ -540,14 +555,40 @@ def test_stage_without_a_fallback_has_no_unpinned_detail(env):
 
 @pytest.mark.parametrize(("mirror", "hinted"), [("default", True), ("cn", False)])
 def test_unreachable_index_is_install_failed_without_a_fallback(env, mirror, hinted):
-    """pip says "from versions: none": the index was not reached."""
+    """pip warns about the connection, then says "from versions: none"."""
     env["run"].index_down = True
     with pytest.raises(StageError) as exc:
         re_env.ensure_research_env(mirror)
     assert exc.value.code == "install_failed"
+    assert "could not be reached" in exc.value.message
     assert (re_env.CN_MIRROR_HINT in exc.value.message) is hinted
     assert len(env["run"].pip_requirements()) == 1
     assert not re_env.is_ready(env["env"])
+
+
+def test_no_wheel_for_this_python_gets_no_mirror_hint(env):
+    """ "from versions: none" without a connection warning: the index was
+    reached but has no wheel for this interpreter (e.g. a brand-new Python),
+    which the mirror does not change."""
+    env["run"].no_wheel_at_all = {"numpy"}
+    with pytest.raises(StageError) as exc:
+        re_env.ensure_research_env("default")
+    assert exc.value.code == "install_failed"
+    assert "no wheel of numpy for this Python" in exc.value.message
+    assert re_env.CN_MIRROR_HINT not in exc.value.message
+
+
+def test_no_wheel_at_all_after_the_unpinned_fallback_is_named(env):
+    """The second "none" is for the bare name, without ``==version``."""
+    env["run"].no_wheel = {"scipy"}  # the pinned request lists other versions
+    env["run"].no_wheel_at_all = {"scipy"}  # the bare one finds none
+    with pytest.raises(StageError) as exc:
+        re_env.ensure_research_env("default")
+    assert "no wheel of scipy for this Python" in exc.value.message
+    assert [reqs[-1] for reqs in env["run"].pip_requirements()] == [
+        f"scipy=={re_env.PINS['scipy']}",
+        "scipy",
+    ]
 
 
 def test_import_check_script_reports_each_failed_package():
