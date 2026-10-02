@@ -3,7 +3,10 @@
 When no usable ``python`` is on PATH, the agent's shell gets a virtual
 environment under ``<DATA_DIR>/envs/default`` with numpy, pandas, matplotlib
 and scipy, so ``python script.py`` and ``pip install`` work as the prompts
-teach. A user's own ``python`` (conda, venv, system) always wins.
+teach. A user's own ``python`` (conda, venv, system) wins whenever it is
+usable: Python 3.9 or newer, not EXTERNALLY-MANAGED (PEP 668) outside a venv,
+and not the environment EvoScientist's installer made (see
+:func:`find_usable_python`).
 
 The environment reaches only the agent's ``execute`` and ``run_in_background``
 commands, through :func:`research_env_overrides`; EvoScientist's own child
@@ -64,7 +67,9 @@ _SYSTEM_PYTHON_PROBE = (
     "sys.stdout.write('%d.%d\\n%s\\n%d\\n'"
     " % (sys.version_info[0], sys.version_info[1], sys.prefix, managed))\n"
 )
-# Older interpreters cannot install the pinned packages.
+# The oldest `python` of the user's own that the agent keeps: older ones
+# (Python 2.7 on CentOS 7 or early macOS, 3.8) fail the agent's `pip install`
+# of current packages.
 _MIN_PYTHON = (3, 9)
 # Files that mark an environment EvoScientist's installer made (uv tool
 # install; the Docker image's /opt/venv). uv builds both without pip.
@@ -349,7 +354,8 @@ def find_usable_python() -> str | None:
 class ImportCheck(NamedTuple):
     """The result of :func:`_import_check`."""
 
-    version: str | None  # None when the check did not run
+    # None when the check did not run, or Python failed before the imports
+    version: str | None
     failed: tuple[str, ...]  # the packages that do not import
 
     @property

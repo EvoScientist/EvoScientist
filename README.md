@@ -333,7 +333,7 @@ What the mounts are for:
 | `./workspace:/workspace` | The agent's working directory |
 | `evosci-data:/home/evosci/.evoscientist` | Persistent app state: sessions DB, global skills, memories, and `config.yaml`/`mcp.yaml` |
 
-The image does not include the agent's research Python; run `EvoSci setup` once inside the container, and it builds the environment in the `evosci-data` volume, where it survives image upgrades.
+The image does not include the agent's research Python; run `EvoSci setup` once inside the container (`docker compose run --rm evoscientist setup`, since the image's entrypoint is `evosci`), and it builds the environment in the `evosci-data` volume, where it survives image upgrades.
 
 > [!IMPORTANT]
 > The image runs as a non-root user (`evosci`, UID `1000`). For the `./workspace` bind mount, the host directory must be writable by that UID. If your host user ID differs, either `chown -R 1000:1000 ./workspace` once, or pass `--user "$(id -u):$(id -g)"` on every `docker run` so the container takes on your UID.
