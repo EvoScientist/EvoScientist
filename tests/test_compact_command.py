@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import GraphTarget
-from EvoScientist.paths import Workspace
+from EvoScientist.paths import SessionDirs, Workspace
 from tests.fakes import FakeCommandUI, FakeGraphGateway
 
 _TARGET = GraphTarget()
@@ -471,7 +471,7 @@ class TestCompactCommandUI:
             ui=ui,
             graph_gateway=FakeGraphGateway(),
             input_tokens_hint=5000,
-            workspace=workspace,
+            dirs=SessionDirs(workspace),
         )
         result = CompactResult(
             "ok",

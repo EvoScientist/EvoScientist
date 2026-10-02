@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ..gateway import GraphGateway
-    from ..paths import Workspace
+    from ..paths import SessionDirs
     from ..runtime import AsyncRuntime
 
 _channel_logger = logging.getLogger(__name__)
@@ -277,10 +277,9 @@ async def dispatch_channel_slash_command(
     *,
     agent: Any,
     thread_id: str,
-    workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
-    workspace: Workspace,
+    dirs: SessionDirs,
     graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
@@ -304,7 +303,7 @@ async def dispatch_channel_slash_command(
     agent:
         Default agent handle for the ``CommandContext``.  Commands that
         do not need the agent use this value directly.
-    thread_id, workspace_dir, checkpointer:
+    thread_id, dirs, checkpointer:
         Populate ``CommandContext``.
     append_system:
         ``(text, style)`` callback for local CLI/TUI log output.  Used
@@ -345,8 +344,7 @@ async def dispatch_channel_slash_command(
             msg,
             agent=agent,
             thread_id=thread_id,
-            workspace_dir=workspace_dir,
-            workspace=workspace,
+            dirs=dirs,
             checkpointer=checkpointer,
             append_system=append_system,
             start_new_session_cb=start_new_session_cb,
@@ -383,10 +381,9 @@ async def _dispatch_channel_slash_impl(
     *,
     agent: Any,
     thread_id: str,
-    workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
-    workspace: Workspace,
+    dirs: SessionDirs,
     graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
@@ -438,8 +435,7 @@ async def _dispatch_channel_slash_impl(
         agent=agent_for_ctx,
         thread_id=thread_id,
         ui=ui,
-        workspace_dir=workspace_dir,
-        workspace=workspace,
+        dirs=dirs,
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
         graph_gateway=graph_gateway,
@@ -861,6 +857,12 @@ def channel_hitl_prompt(
 _manager: Any | None = None  # ChannelManager
 _bus_loop: asyncio.AbstractEventLoop | None = None
 _bus_thread: threading.Thread | None = None
+
+
+def _set_channels_media_dir(media_dir: Path) -> None:
+    """Point running channels at the media folder of the session's workspace."""
+    if _manager is not None:
+        _manager.set_media_dir(media_dir)
 
 
 def get_channel_startup_results() -> list[tuple[str, bool, str]]:

@@ -25,6 +25,7 @@ from textual.containers import Container
 from textual.message import Message
 from textual.widgets import Static
 
+from ...paths import SessionDirs
 from .picker_base import PickerWidgetBase, first_selectable_index, move_selection
 
 if TYPE_CHECKING:
@@ -74,11 +75,6 @@ def _common_prefix_depth(p1: str, p2: str) -> int:
         else:
             break
     return depth
-
-
-def _is_run_path(rel: str) -> bool:
-    """Return True if *rel* (relative to group ancestor) is a run-mode dir."""
-    return "runs" in rel.split("/")
 
 
 def _group_by_ancestor(norm_paths: list[str]) -> dict[str, list[str]]:
@@ -141,12 +137,18 @@ def _build_items(threads: list[dict]) -> list[dict]:
     if not threads:
         return []
 
-    # Map normalized path -> list[thread dicts], preserving first-seen order
+    # Map normalized work folder -> list[thread dicts], preserving first-seen
+    # order. Run-mode threads sit under their run folder, next to the
+    # workspace's other threads.
     raw_to_threads: dict[str, list[dict]] = {}
     seen_order: list[str] = []
+    run_paths: set[str] = set()
     for t in threads:
-        raw = t.get("workspace_dir", "") or ""
+        dirs = SessionDirs.from_stored(t.get("workspace_dir"), t.get("run_dir"))
+        raw = dirs.work_dir.as_posix() if dirs is not None else ""
         norm = _normalize_path(raw) or raw
+        if dirs is not None and dirs.run_dir is not None:
+            run_paths.add(norm)
         if norm not in raw_to_threads:
             raw_to_threads[norm] = []
             seen_order.append(norm)
@@ -169,7 +171,7 @@ def _build_items(threads: list[dict]) -> list[dict]:
                     # norm_path IS the ancestor (standalone group of 1 that shares
                     # an ancestor with others); show just the last path component
                     rel = norm_path.split("/")[-1] or norm_path
-                icon = "🔁" if _is_run_path(rel) else "📁"
+                icon = "🔁" if norm_path in run_paths else "📁"
                 items.append({"type": "subheader", "label": f"{icon} {rel}"})
 
             for t in raw_to_threads[norm_path]:

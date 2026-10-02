@@ -3,8 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+from tests.fakes import TEST_WORKSPACE
 
-def _ctx(workspace=None):
+
+def _ctx(workspace=TEST_WORKSPACE):
     from EvoScientist.commands.base import ChannelRuntime, CommandContext
 
     ui = MagicMock()
@@ -14,9 +17,8 @@ def _ctx(workspace=None):
         agent=object(),
         thread_id="tid-42",
         ui=ui,
-        workspace_dir="/ws",
         channel_runtime=runtime,
-        workspace=workspace,
+        dirs=SessionDirs(workspace),
     )
     return ctx, ui
 

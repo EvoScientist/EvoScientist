@@ -112,11 +112,13 @@ def _make_run_in_background(
     skills_dir: str | Path | None,
     dangerous: bool,
     guard_dangerous: bool = False,
+    media_dir: str | Path | None = None,
 ):
     """Build the ``run_in_background`` tool bound to a work directory and sandbox policy.
 
     Processes start in ``work_dir``; ``/skills/...`` paths resolve through
-    ``skills_dir`` first, as they do for ``execute``.
+    ``skills_dir`` first, and ``media_dir`` (set for a ``--mode=run`` folder)
+    is reachable, as they are for ``execute``.
 
     ``dangerous`` is captured from ``cfg.dangerous_mode`` at assembly (the agent is
     rebuilt when config changes, so the captured value never goes stale).
@@ -152,6 +154,7 @@ def _make_run_in_background(
             dangerous=dangerous,
             guard_dangerous=guard_dangerous or is_hitl_suppressed(),
             skills_dir=skills_dir,
+            media_dir=media_dir,
         )
         if error:
             return error
@@ -255,6 +258,7 @@ class BackgroundExecutionMiddleware(AgentMiddleware):
         skills_dir: str | Path | None,
         dangerous: bool = False,
         guard_dangerous: bool = False,
+        media_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
         self.tools = [
@@ -263,6 +267,7 @@ class BackgroundExecutionMiddleware(AgentMiddleware):
                 skills_dir=skills_dir,
                 dangerous=dangerous,
                 guard_dangerous=guard_dangerous,
+                media_dir=media_dir,
             ),
             check_process,
             stop_process,

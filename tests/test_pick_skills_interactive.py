@@ -6,6 +6,8 @@ can distinguish "picker handled the no-op case" from "user cancelled".
 
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+
 _INDEX = [
     {
         "name": "paper-writing",
@@ -90,7 +92,9 @@ class TestInstallSkillsHandlesEmpty:
         ui = MagicMock()
         ui.supports_interactive = True
         ui.wait_for_skill_browse = AsyncMock(return_value=[])
-        ctx = CommandContext(agent=None, thread_id="tid", ui=ui, workspace=workspace)
+        ctx = CommandContext(
+            agent=None, thread_id="tid", ui=ui, dirs=SessionDirs(workspace)
+        )
 
         with patch(
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index",
@@ -111,7 +115,9 @@ class TestInstallSkillsHandlesEmpty:
         ui = MagicMock()
         ui.supports_interactive = True
         ui.wait_for_skill_browse = AsyncMock(return_value=None)
-        ctx = CommandContext(agent=None, thread_id="tid", ui=ui, workspace=workspace)
+        ctx = CommandContext(
+            agent=None, thread_id="tid", ui=ui, dirs=SessionDirs(workspace)
+        )
 
         with patch(
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index",

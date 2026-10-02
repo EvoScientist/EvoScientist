@@ -637,6 +637,15 @@ class ChannelManager:
             manager.register(channel, config=config)
         return manager
 
+    def set_media_dir(self, media_dir: Path) -> None:
+        """Store inbound attachments of every channel in *media_dir* from now on.
+
+        Called when the session moves to another workspace (``/resume``).
+        """
+        self._media_dir = media_dir
+        for channel in self._channels.values():
+            channel.set_media_dir(media_dir)
+
     # ── registration ──
 
     def register(

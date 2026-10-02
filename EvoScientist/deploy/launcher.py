@@ -595,6 +595,15 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
             f"Stop that EvoSci session, or launch from that workspace "
             f"(--workdir {sidecar['workspace']}).",
         )
+    # The WebUI works in the workspace root; a server started for a
+    # ``--mode=run`` session works in one of its run folders.
+    if sidecar.get("run_dir"):
+        raise LauncherError(
+            "workspace_mismatch",
+            f"Port {cfg.backend_port} is already serving a langgraph dev "
+            f"for a run folder of this workspace ({sidecar['run_dir']}).",
+            "Stop that EvoSci --mode=run session, then launch again.",
+        )
     if sidecar.get("deploy_mode") is False:
         raise LauncherError(
             "stripped_backend",

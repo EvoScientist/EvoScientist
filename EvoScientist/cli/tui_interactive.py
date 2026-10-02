@@ -40,7 +40,7 @@ from ..gateway import (
     RuntimeGateways,
     create_runtime_gateways_for_config,
 )
-from ..paths import DATA_DIR, Workspace
+from ..paths import DATA_DIR, SessionDirs, Workspace
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
@@ -508,23 +508,22 @@ def run_textual_interactive(
     *,
     show_thinking: bool,
     channel_send_thinking: bool = True,
-    workspace_dir: str | None,
-    workspace_fixed: bool,
+    dirs: SessionDirs,
     mode: str | None,
     model: str | None,
     provider: str | None,
     run_name: str | None,
     thread_id: str | None,
     load_agent: Callable[..., Any],
-    create_session_workspace: Callable[[str | None], str],
+    create_run_dir: Callable[[Workspace, str | None], Path],
     config: Any | None = None,
     async_runtime: AsyncRuntime | None = None,
-    workspace: Workspace,
 ) -> None:
     """Run full-screen Textual interactive chat loop.
 
-    ``workspace`` is the session's workspace (skills, experts, run folders);
-    ``workspace_dir`` is the folder the agent works in.
+    ``dirs`` holds the session's workspace (skills, experts, memory) and, in
+    ``--mode=run``, the run folder the agent works in; ``/new`` then moves
+    to a fresh run folder from ``create_run_dir``.
     """
     if config is None:
         from ..config import get_effective_config
@@ -664,7 +663,7 @@ def run_textual_interactive(
             self,
             *,
             thread_id_value: str,
-            workspace: str | None,
+            dirs: SessionDirs,
             checkpointer: Any,
             runtime_gateways: RuntimeGateways,
             channel_send_thinking_value: bool = True,
@@ -681,7 +680,7 @@ def run_textual_interactive(
             )
             self._mcp_loader_widget: Any = None
             self._conversation_tid = thread_id_value
-            self._workspace_dir = workspace
+            self._dirs = dirs
             self._checkpointer = checkpointer
             self._runtime_gateways = runtime_gateways
             self._channel_send_thinking = channel_send_thinking_value
@@ -766,11 +765,12 @@ def run_textual_interactive(
             self._append_system(f"Agent failed to load: {exc}", style="red")
             self._finish_loader_widget()
 
-        def _start_background_agent_load(self, workspace: str | None) -> None:
+        def _start_background_agent_load(self, dirs: SessionDirs) -> None:
             self._progress_tracker.prime()
             self._mount_mcp_loader_widget()
             self._agent_loader.start(
-                workspace_dir=workspace,
+                workspace=dirs.workspace,
+                work_dir=str(dirs.work_dir),
                 checkpointer=self._checkpointer,
                 events=self._runtime_gateways.graph_gateway.events,
             )
@@ -813,7 +813,7 @@ def run_textual_interactive(
         async def _await_agent_ready(self) -> CompiledStateGraph:
             """Await the agent load, auto-retrying on cold-start or failure."""
             if self._agent_loader.needs_restart:
-                self._start_background_agent_load(self._workspace_dir)
+                self._start_background_agent_load(self._dirs)
             return await self._agent_loader.await_ready()
 
         def _graph_gateway(self) -> GraphGateway:
@@ -928,15 +928,19 @@ def run_textual_interactive(
             self.clear_chat()
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
-            if not workspace_fixed:
-                self._workspace_dir = create_session_workspace(run_name)
+            # ``--mode=run`` starts every session in a fresh run folder of the
+            # current workspace; daemon mode works in its root.
+            ws = self._dirs.workspace
+            self._dirs = SessionDirs(
+                ws, create_run_dir(ws, run_name) if mode == "run" else None
+            )
             self._conversation_tid = (
                 await self._runtime_gateways.graph_gateway.create_thread(
-                    GraphTarget(workspace_dir=self._workspace_dir)
+                    GraphTarget(**self._dirs.metadata())
                 )
             )
             # Background reload: next user message awaits it.
-            self._start_background_agent_load(self._workspace_dir)
+            self._start_background_agent_load(self._dirs)
             self._status_started_at = datetime.now()
             self._status_base_snapshot = make_empty_status_snapshot(self._current_model)
             self._status_snapshot = self._status_base_snapshot
@@ -951,9 +955,9 @@ def run_textual_interactive(
             self._append_pending_skill_proposals_notice()
 
         async def handle_session_resume(
-            self, thread_id: str, workspace_dir: str | None = None
+            self, thread_id: str, dirs: SessionDirs | None = None
         ) -> None:
-            if workspace_dir:
+            if dirs is not None:
                 # Mirror the Rich CLI fix: when a /resume restores a thread
                 # whose workspace differs from the one the langgraph dev
                 # subprocess was launched with, background workers and
@@ -965,7 +969,7 @@ def run_textual_interactive(
                 # timer widget (like /compact) so the user sees progress
                 # instead of a frozen static line.
                 #
-                # ``self._workspace_dir`` is mutated AFTER mismatch checks so
+                # ``self._dirs`` is mutated AFTER mismatch checks so
                 # WorkspaceMismatchError leaves the session pointing at the
                 # existing workspace. Other sync failures resume locally in
                 # the TUI while background workers may be unavailable.
@@ -980,7 +984,7 @@ def run_textual_interactive(
                 try:
                     await _sync_background_agent_server_workspace(
                         config,
-                        workspace_dir=workspace_dir,
+                        dirs=dirs,
                         backend=gateway_backend,
                     )
                 except WorkspaceMismatchError as exc:
@@ -994,7 +998,7 @@ def run_textual_interactive(
                     _channel_logger.warning(
                         "Failed to sync background agent server for resumed "
                         "workspace %s; continuing resume in degraded mode",
-                        workspace_dir,
+                        dirs.work_dir,
                         exc_info=True,
                     )
                     self.append_system(
@@ -1005,7 +1009,8 @@ def run_textual_interactive(
                     )
                 finally:
                     await sync_widget.cleanup()
-                self._workspace_dir = workspace_dir
+                self._dirs = dirs
+                _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
 
             if thread_id != self._conversation_tid:
                 # Only drop the origin on a real thread change — resuming the
@@ -1014,7 +1019,7 @@ def run_textual_interactive(
                 _ch_mod.forget_channel_origin(self._conversation_tid)
             self._conversation_tid = thread_id
             # Background reload: history renders immediately; next turn awaits.
-            self._start_background_agent_load(self._workspace_dir)
+            self._start_background_agent_load(self._dirs)
             self._status_started_at = datetime.now()
             self._status_base_snapshot = make_empty_status_snapshot(self._current_model)
             self._status_snapshot = self._status_base_snapshot
@@ -1066,7 +1071,7 @@ def run_textual_interactive(
             # Kick off agent construction in the background so the TUI
             # appears instantly; MCP progress shows up in the status bar.
             if self._agent_loader.agent is None and self._agent_loader.task is None:
-                self._start_background_agent_load(self._workspace_dir)
+                self._start_background_agent_load(self._dirs)
             refresh_task = asyncio.create_task(self._refresh_status_snapshot())
             self._background_tasks.add(refresh_task)
             refresh_task.add_done_callback(self._background_tasks.discard)
@@ -1172,7 +1177,7 @@ def run_textual_interactive(
                         self._agent_loader.agent,
                         self._conversation_tid,
                         cfg,
-                        media_dir=workspace.media_dir,
+                        media_dir=self._dirs.workspace.media_dir,
                         send_thinking=self._channel_send_thinking,
                         runtime=self._channel_runtime,
                         stop_requested=self._channel_start_stop,
@@ -1287,7 +1292,7 @@ def run_textual_interactive(
                 if agent is not None and tid:
                     target = GraphTarget(
                         local_graph=agent,
-                        workspace_dir=self._workspace_dir,
+                        **self._dirs.metadata(),
                     )
                     await enqueue_completions_from_state_throttled(
                         self._graph_gateway(), target, tid
@@ -1372,7 +1377,7 @@ def run_textual_interactive(
                     self._graph_gateway(),
                     GraphTarget(
                         local_graph=agent,
-                        workspace_dir=self._workspace_dir,
+                        **self._dirs.metadata(),
                     ),
                     target_thread_id,
                 )
@@ -1713,7 +1718,7 @@ def run_textual_interactive(
             _media_sent: set[str] = set()
             _MIN_THINKING_LEN = 200
 
-            metadata = build_metadata(self._workspace_dir, self._current_model)
+            metadata = build_metadata(self._dirs, self._current_model)
             response = ""
             agent = await self._await_agent_ready()
 
@@ -1924,7 +1929,7 @@ def run_textual_interactive(
                                 metadata=metadata,
                                 target=GraphTarget(
                                     local_graph=agent,
-                                    workspace_dir=self._workspace_dir,
+                                    **self._dirs.metadata(),
                                 ),
                                 configurable_extra=_configurable_extra,
                             )
@@ -2010,7 +2015,7 @@ def run_textual_interactive(
                                     tool_name,
                                     _media_sent,
                                     on_media_cb,
-                                    self._workspace_dir,
+                                    str(self._dirs.work_dir),
                                 )
 
                         # -- Remove loading spinner on first content event --
@@ -2648,9 +2653,7 @@ def run_textual_interactive(
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
 
-            _close_target = GraphTarget(
-                local_graph=agent, workspace_dir=self._workspace_dir
-            )
+            _close_target = GraphTarget(local_graph=agent, **self._dirs.metadata())
             _close_tid = thread_id_override or self._conversation_tid
 
             # Round budget exhausted. Close the parked checkpoint without
@@ -2747,11 +2750,11 @@ def run_textual_interactive(
                 self._render_status()
 
                 # Resolve @file mentions — inject file contents before sending to agent.
-                # Use self._workspace_dir (current session) not the startup-captured
-                # workspace_dir closure, which becomes stale after /new or /resume.
+                # Use self._dirs (current session) not a startup-captured
+                # folder, which becomes stale after /new or /resume.
                 if resolve_mentions:
                     _, message_to_send, file_warnings = await asyncio.to_thread(
-                        resolve_file_mentions, user_text, self._workspace_dir
+                        resolve_file_mentions, user_text, str(self._dirs.work_dir)
                     )
                 else:
                     message_to_send = user_text
@@ -2910,8 +2913,7 @@ def run_textual_interactive(
                     msg,
                     agent=None,  # resolved via await_agent_ready on demand
                     thread_id=self._conversation_tid,
-                    workspace_dir=self._workspace_dir,
-                    workspace=workspace,
+                    dirs=self._dirs,
                     checkpointer=self._checkpointer,
                     append_system=self._append_system,
                     start_new_session_cb=self.start_new_session,
@@ -3017,7 +3019,7 @@ def run_textual_interactive(
 
             from ..commands._completion_engine import CompletionCandidate
 
-            candidates = complete_file_mention(text, self._workspace_dir)
+            candidates = complete_file_mention(text, str(self._dirs.work_dir))
             if not candidates:
                 return []
             m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', text)
@@ -3041,7 +3043,9 @@ def run_textual_interactive(
             if text.startswith("/"):
                 from ..commands._completion_engine import compute_completions
 
-                result = compute_completions(text, len(text), workspace=workspace)
+                result = compute_completions(
+                    text, len(text), workspace=self._dirs.workspace
+                )
                 if result.kind == "empty" or not result.candidates:
                     self._hide_completions()
                     return
@@ -3310,7 +3314,9 @@ def run_textual_interactive(
                 if text.startswith("/"):
                     from ..commands._completion_engine import compute_completions
 
-                    result = compute_completions(text, len(text), workspace=workspace)
+                    result = compute_completions(
+                        text, len(text), workspace=self._dirs.workspace
+                    )
                     if result.kind != "empty" and result.candidates:
                         self._comp_items = result.candidates
                         self._comp_index = -1
@@ -3460,8 +3466,7 @@ def run_textual_interactive(
                     agent=agent,
                     thread_id=self._conversation_tid,
                     ui=self,
-                    workspace_dir=self._workspace_dir,
-                    workspace=workspace,
+                    dirs=self._dirs,
                     checkpointer=self._checkpointer,
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
@@ -3753,7 +3758,7 @@ def run_textual_interactive(
             welcome.update(
                 _build_welcome_banner(
                     thread_id=self._conversation_tid,
-                    workspace_dir=self._workspace_dir,
+                    workspace_dir=str(self._dirs.work_dir),
                     mode=mode,
                     model=self._current_model,
                     provider=self._current_provider,
@@ -3769,9 +3774,7 @@ def run_textual_interactive(
         def _append_pending_skill_proposals_notice(self) -> None:
             from .commands import _pending_skill_proposals_message
 
-            message = _pending_skill_proposals_message(
-                self._workspace_dir or workspace.root
-            )
+            message = _pending_skill_proposals_message(self._dirs.workspace.root)
             if message:
                 self._append_system(message, style="yellow")
 
@@ -3893,18 +3896,23 @@ def run_textual_interactive(
 
     async def _amain() -> None:
         async with get_checkpointer() as checkpointer:
-            effective_workspace = workspace_dir
+            effective_dirs = dirs
             effective_thread_id: str | None = None
             resumed = False
             resume_warning = ""
             if thread_id:
                 resolution = await graph_gateway.resolve_thread(thread_id)
                 if resolution.thread_id:
-                    meta = await graph_gateway.get_thread_metadata(resolution.thread_id)
-                    ws = (meta or {}).get("workspace_dir", "")
+                    meta = (
+                        await graph_gateway.get_thread_metadata(resolution.thread_id)
+                        or {}
+                    )
+                    stored = SessionDirs.from_stored(
+                        meta.get("workspace_dir"), meta.get("run_dir")
+                    )
                     mismatch_aborted = False
-                    if ws:
-                        effective_workspace = ws
+                    if stored is not None:
+                        effective_dirs = stored
                         # Sync langgraph dev subprocess to the resumed
                         # workspace BEFORE the Textual app takes over the
                         # terminal. Mirrors interactive.py's Rich-CLI fix.
@@ -3922,7 +3930,7 @@ def run_textual_interactive(
 
                             await _sync_background_agent_server_workspace(
                                 config,
-                                workspace_dir=ws,
+                                dirs=stored,
                                 backend=gateway_backend,
                             )
                         except WorkspaceMismatchError as _ws_mismatch_exc:
@@ -3954,7 +3962,7 @@ def run_textual_interactive(
                         # generates a fresh thread in the original launch
                         # workspace. User keeps the TUI session; the requested
                         # ``--thread-id`` resume is what we refuse.
-                        effective_workspace = workspace_dir
+                        effective_dirs = dirs
                         resume_warning = (
                             f"Resume of thread '{thread_id}' aborted due to "
                             "workspace conflict. Starting new session."
@@ -3973,7 +3981,7 @@ def run_textual_interactive(
                     )
             if not effective_thread_id:
                 effective_thread_id = await graph_gateway.create_thread(
-                    GraphTarget(workspace_dir=effective_workspace)
+                    GraphTarget(**effective_dirs.metadata())
                 )
 
             # The TUI opens instantly and starts MCP loading in the
@@ -3981,7 +3989,7 @@ def run_textual_interactive(
             # ``load_agent`` call and awaits it before the first turn.
             app = EvoTextualInteractiveApp(
                 thread_id_value=effective_thread_id,
-                workspace=effective_workspace,
+                dirs=effective_dirs,
                 checkpointer=checkpointer,
                 runtime_gateways=runtime_gateways,
                 channel_send_thinking_value=channel_send_thinking,

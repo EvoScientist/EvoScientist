@@ -87,11 +87,13 @@ def tmp_workspace(tmp_path):
 @pytest.fixture(autouse=True)
 def _fresh_process_workspace():
     """``process_workspace()`` is read once per process; tests change env/cwd."""
-    from EvoScientist.paths import process_workspace
+    from EvoScientist.paths import process_session_dirs, process_workspace
 
     process_workspace.cache_clear()
+    process_session_dirs.cache_clear()
     yield
     process_workspace.cache_clear()
+    process_session_dirs.cache_clear()
 
 
 @pytest.fixture

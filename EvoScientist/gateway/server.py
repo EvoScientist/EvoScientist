@@ -67,6 +67,7 @@ def _build_thread_metadata(
     *,
     graph_id: str,
     workspace_dir: str | None,
+    run_dir: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     merged = dict(metadata or {})
@@ -77,6 +78,8 @@ def _build_thread_metadata(
         merged["agent_name"] = None
     if workspace_dir is not None:
         merged["workspace_dir"] = workspace_dir
+    if run_dir is not None:
+        merged["run_dir"] = run_dir
     merged.setdefault("updated_at", datetime.now(UTC).isoformat())
     return merged
 
@@ -229,6 +232,7 @@ class LangGraphServerThreadStore(ThreadStore):
         *,
         metadata: Mapping[str, Any] | None = None,
         workspace_dir: str | None = None,
+        run_dir: str | None = None,
     ) -> str:
         target_graph_id = self._target_graph_id(graph_id)
         thread = await self.client.threads.create(
@@ -236,6 +240,7 @@ class LangGraphServerThreadStore(ThreadStore):
             metadata=_build_thread_metadata(
                 graph_id=target_graph_id,
                 workspace_dir=workspace_dir,
+                run_dir=run_dir,
                 metadata=metadata,
             ),
         )
@@ -248,6 +253,7 @@ class LangGraphServerThreadStore(ThreadStore):
         *,
         metadata: Mapping[str, Any] | None = None,
         workspace_dir: str | None = None,
+        run_dir: str | None = None,
     ) -> None:
         target_graph_id = self._target_graph_id(graph_id)
         await self.client.threads.create(
@@ -256,6 +262,7 @@ class LangGraphServerThreadStore(ThreadStore):
             metadata=_build_thread_metadata(
                 graph_id=target_graph_id,
                 workspace_dir=workspace_dir,
+                run_dir=run_dir,
                 metadata=metadata,
             ),
             if_exists="do_nothing",
@@ -284,6 +291,7 @@ class LangGraphServerThreadStore(ThreadStore):
                 "created_at": thread.get("created_at"),
                 "updated_at": thread.get("updated_at"),
                 "workspace_dir": metadata.get("workspace_dir"),
+                "run_dir": metadata.get("run_dir"),
                 "model": metadata.get("model"),
                 "metadata": metadata,
             }
@@ -542,6 +550,7 @@ class LangGraphServerGateway:
             graph_id=self._target_graph_id(target),
             metadata=metadata,
             workspace_dir=target.workspace_dir if target is not None else None,
+            run_dir=target.run_dir if target is not None else None,
         )
 
     async def list_threads(
@@ -657,6 +666,7 @@ class LangGraphServerGateway:
             workspace_dir=(
                 request.target.workspace_dir if request.target is not None else None
             ),
+            run_dir=request.target.run_dir if request.target is not None else None,
         )
 
     async def _start_or_resume(
@@ -682,6 +692,9 @@ class LangGraphServerGateway:
                 graph_id=self._target_graph_id(request.target),
                 workspace_dir=(
                     request.target.workspace_dir if request.target is not None else None
+                ),
+                run_dir=(
+                    request.target.run_dir if request.target is not None else None
                 ),
                 metadata=request.metadata,
             ),

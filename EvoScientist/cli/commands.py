@@ -27,7 +27,13 @@ from ..gateway import (
     RunRequest,
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
-from ..paths import Workspace, ensure_dirs, reload_env_dirs, start_workspace_path
+from ..paths import (
+    SessionDirs,
+    Workspace,
+    ensure_dirs,
+    reload_env_dirs,
+    start_workspace_path,
+)
 from ..runtime import AsyncRuntime
 from ..stream.console import console
 from . import (
@@ -37,7 +43,7 @@ from . import (
 from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions_app
 from ._constants import build_metadata
 from .agent import (
-    _create_session_workspace,
+    _create_run_dir,
     _load_agent,
     _shorten_path,
 )
@@ -49,6 +55,7 @@ from .channel import (
     _complete_channel_request,
     _message_queue,
     _set_channel_response,
+    _set_channels_media_dir,
     _start_channels_bus_mode,
     channel_ask_user_prompt,
     channel_hitl_prompt,
@@ -566,7 +573,7 @@ class CompactSummaryRenderable:
 
 
 def _ensure_async_subagent_server(
-    config: Any, *, workspace_dir: str, backend: str | None = None
+    config: Any, *, dirs: SessionDirs, backend: str | None = None
 ) -> None:
     """Start the langgraph dev subprocess for background agent work.
 
@@ -599,8 +606,13 @@ def _ensure_async_subagent_server(
             "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
-            ensure_langgraph_dev(config, workspace_dir=workspace_dir, backend=backend)
-            _reconcile_autoskill_schedule(config, workspace_dir=workspace_dir)
+            ensure_langgraph_dev(
+                config,
+                workspace_dir=dirs.workspace.root,
+                run_dir=dirs.run_dir,
+                backend=backend,
+            )
+            _reconcile_autoskill_schedule(config, workspace=dirs.workspace)
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -658,12 +670,16 @@ def warn_server_backend_hitl_caveats(
     )
 
 
-def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
-    """Best-effort reconciliation for EvoMemory's hidden AutoSkills cron."""
+def _reconcile_autoskill_schedule(config: Any, *, workspace: Workspace) -> None:
+    """Best-effort reconciliation for EvoMemory's hidden AutoSkills cron.
+
+    The cron belongs to the workspace, whichever run folder the session
+    works in.
+    """
     try:
         from ..memory.autoskills.schedule import reconcile_autoskill_schedule
 
-        reconcile_autoskill_schedule(config, workspace_dir=workspace_dir)
+        reconcile_autoskill_schedule(config, workspace_dir=workspace.root)
     except Exception:
         logging.getLogger(__name__).warning(
             "Failed to reconcile EvoMemory AutoSkills schedule", exc_info=True
@@ -693,7 +709,7 @@ def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
 async def _sync_background_agent_server_workspace(
     config: Any,
     *,
-    workspace_dir: str,
+    dirs: SessionDirs,
     backend: str | None = None,
     status_message: str = (
         "[dim]Syncing background agent server to resumed workspace...[/dim]"
@@ -718,14 +734,46 @@ async def _sync_background_agent_server_workspace(
         await asyncio.to_thread(
             ensure_langgraph_dev,
             config,
-            workspace_dir=workspace_dir,
+            workspace_dir=dirs.workspace.root,
+            run_dir=dirs.run_dir,
             backend=backend,
         )
         await asyncio.to_thread(
             _reconcile_autoskill_schedule,
             config,
-            workspace_dir=workspace_dir,
+            workspace=dirs.workspace,
         )
+
+
+async def _restore_thread_dirs(
+    thread_id: str,
+    *,
+    dirs: SessionDirs,
+    graph_gateway: GraphGateway,
+    config: Any,
+    backend: str | None = None,
+) -> SessionDirs:
+    """Return the folders to resume *thread_id* in, with the server moved there.
+
+    A thread resumes in the workspace and run folder it was stored with,
+    wherever the CLI was started; a thread stored without folders resumes in
+    *dirs*. Raises ``typer.Exit(1)`` when another session holds the server.
+    """
+    from ..langgraph_dev.manager import WorkspaceMismatchError
+
+    metadata = await graph_gateway.get_thread_metadata(thread_id) or {}
+    restored = (
+        SessionDirs.from_stored(metadata.get("workspace_dir"), metadata.get("run_dir"))
+        or dirs
+    )
+    try:
+        await _sync_background_agent_server_workspace(
+            config, dirs=restored, backend=backend
+        )
+    except WorkspaceMismatchError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    return restored
 
 
 def _resolve_context_window(
@@ -884,7 +932,9 @@ async def compact_conversation(
             "error", f"Compaction requires a working model configuration: {exc}"
         )
 
-    backend = _get_default_backend(workspace, work_dir=target.workspace_dir)
+    backend = _get_default_backend(
+        workspace, work_dir=target.run_dir or target.workspace_dir
+    )
     context_window = _resolve_context_window(model)
 
     defaults = compute_summarization_defaults(model)
@@ -1050,11 +1100,11 @@ class ServeRuntimeState:
 
     agent: "CompiledStateGraph"
     thread_id: str
-    workspace_dir: str | None
+    # The session's workspace and, after resuming a run-mode thread, its run folder.
+    dirs: SessionDirs
     config: "EvoScientistConfig | None"
     runtime_gateways: "RuntimeGateways"
     async_runtime: AsyncRuntime
-    workspace: Workspace
     resume_warning_thread_id: str | None = None
     gateway_backend: str | None = None
 
@@ -1100,7 +1150,7 @@ def _make_serve_start_new_session_cb(
 
     async def _cb() -> None:
         new_tid = await runtime_state.runtime_gateways.graph_gateway.create_thread(
-            GraphTarget(workspace_dir=runtime_state.workspace_dir)
+            GraphTarget(**runtime_state.dirs.metadata())
         )
         runtime_state.set_thread_id(new_tid, channel_runtime)
         console.print(f"[dim][serve] New thread: {new_tid}[/dim]")
@@ -1121,7 +1171,7 @@ async def _apply_serve_resume_state(
     channel_runtime: ChannelRuntime | None,
     *,
     thread_id: str,
-    workspace_dir: str | None,
+    dirs: SessionDirs | None,
     config: "EvoScientistConfig | None" = None,
 ) -> None:
     """Adopt a resumed thread/workspace into serve-mode runtime state.
@@ -1132,13 +1182,10 @@ async def _apply_serve_resume_state(
     """
     import asyncio
 
-    old_workspace = runtime_state.workspace_dir
-    new_workspace = (
-        workspace_dir if workspace_dir and workspace_dir != old_workspace else None
-    )
-    workspace_update: tuple[str, CompiledStateGraph] | None = None
+    new_dirs = dirs if dirs is not None and dirs != runtime_state.dirs else None
+    workspace_update: tuple[SessionDirs, CompiledStateGraph] | None = None
 
-    if new_workspace is not None:
+    if new_dirs is not None:
         effective_config = _serve_resume_config(runtime_state, config)
         if effective_config is None:
             raise RuntimeError(
@@ -1147,17 +1194,17 @@ async def _apply_serve_resume_state(
             )
         new_agent = await asyncio.to_thread(
             _load_agent,
-            workspace_dir=new_workspace,
-            workspace=runtime_state.workspace,
+            work_dir=str(new_dirs.work_dir),
+            workspace=new_dirs.workspace,
             config=effective_config,
             runtime=runtime_state.async_runtime,
         )
         await _sync_background_agent_server_workspace(
             effective_config,
-            workspace_dir=new_workspace,
+            dirs=new_dirs,
             backend=runtime_state.gateway_backend,
         )
-        workspace_update = (new_workspace, new_agent)
+        workspace_update = (new_dirs, new_agent)
 
     old_thread_id = runtime_state.thread_id
     thread_changed = thread_id != old_thread_id
@@ -1165,8 +1212,9 @@ async def _apply_serve_resume_state(
         runtime_state.set_thread_id(thread_id, channel_runtime)
 
     if workspace_update is not None:
-        updated_workspace, updated_agent = workspace_update
-        runtime_state.workspace_dir = updated_workspace
+        updated_dirs, updated_agent = workspace_update
+        runtime_state.dirs = updated_dirs
+        _set_channels_media_dir(updated_dirs.workspace.media_dir)
         runtime_state.set_agent(updated_agent, channel_runtime)
 
 
@@ -1178,13 +1226,13 @@ def _make_serve_handle_session_resume_cb(
 ):
     """Build the ChannelCommandUI resume callback for serve mode."""
 
-    async def _cb(thread_id: str, workspace_dir: str | None = None) -> None:
+    async def _cb(thread_id: str, dirs: SessionDirs | None = None) -> None:
         old_thread_id = runtime_state.thread_id
         await _apply_serve_resume_state(
             runtime_state,
             channel_runtime,
             thread_id=thread_id,
-            workspace_dir=workspace_dir,
+            dirs=dirs,
             config=config,
         )
         if thread_id != old_thread_id:
@@ -1243,7 +1291,7 @@ def _make_serve_cmd_completed_hook(
                 runtime_state,
                 channel_runtime,
                 thread_id=new_tid,
-                workspace_dir=ctx.workspace_dir,
+                dirs=ctx.dirs,
                 config=config,
             )
         else:
@@ -1278,7 +1326,6 @@ def _serve_process_message(
     *,
     runtime_state: ServeRuntimeState,
     model: str | None,
-    workspace_dir: str,
     show_thinking: bool,
     on_cmd_completed: Callable[..., Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
@@ -1296,7 +1343,7 @@ def _serve_process_message(
     constructed once in ``serve()`` — if omitted, they're rebuilt per
     message (backward compat for existing tests).  ``/resume`` lands
     via the ``on_cmd_completed`` hook because the command mutates
-    ``ctx.thread_id`` / ``ctx.workspace_dir`` directly.
+    ``ctx.thread_id`` / ``ctx.workspace`` / ``ctx.run_dir`` directly.
     """
     from .channel import _bus_loop
     from .tui_runtime import run_streaming
@@ -1308,7 +1355,7 @@ def _serve_process_message(
 
     remember_channel_origin(runtime_state.thread_id, msg)
 
-    runtime_workspace = runtime_state.workspace_dir or workspace_dir
+    dirs = runtime_state.dirs
 
     console.print(
         f"[dim][{msg.channel_type}] {msg.sender}: {escape(msg.content[:80])}[/dim]"
@@ -1383,8 +1430,7 @@ def _serve_process_message(
                     msg,
                     agent=runtime_state.agent,
                     thread_id=runtime_state.thread_id,
-                    workspace_dir=runtime_workspace,
-                    workspace=runtime_state.workspace,
+                    dirs=dirs,
                     checkpointer=None,
                     append_system=lambda t, s="dim": console.print(t, style=s),
                     start_new_session_cb=start_new_session_cb
@@ -1427,7 +1473,7 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(runtime_workspace, model)
+        meta = build_metadata(dirs, model)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1441,7 +1487,7 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
-                work_dir=runtime_workspace,
+                work_dir=str(dirs.work_dir),
                 hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
@@ -1468,7 +1514,6 @@ def _serve_drain_notifications(
     *,
     runtime_state: ServeRuntimeState,
     model: str | None,
-    workspace_dir: str,
     show_thinking: bool,
     channel_runtime: ChannelRuntime | None = None,
 ) -> None:
@@ -1488,10 +1533,9 @@ def _serve_drain_notifications(
 
         for line_text, line_style in format_notification_lines(notifs):
             console.print(line_text, style=line_style, markup=False)
-        # Use the current workspace from runtime_state (updated by /resume's
-        # session-rebind callback), falling back to the startup value.
-        runtime_workspace = runtime_state.workspace_dir or workspace_dir
-        meta = build_metadata(runtime_workspace, model)
+        # Use the current folders from runtime_state (updated by /resume's
+        # session-rebind callback).
+        meta = build_metadata(runtime_state.dirs, model)
         tid = runtime_state.thread_id
         try:
             response = run_streaming(
@@ -1530,7 +1574,7 @@ def _serve_drain_notifications(
             runtime_state.runtime_gateways.graph_gateway,
             GraphTarget(
                 local_graph=runtime_state.agent,
-                workspace_dir=runtime_state.workspace_dir,
+                **runtime_state.dirs.metadata(),
             ),
             thread_id,
         )
@@ -1647,8 +1691,7 @@ def serve(
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)
     ws_path = start_workspace_path(workdir, config.default_workdir)
     os.makedirs(ws_path, exist_ok=True)
-    ws = str(ws_path)
-    workspace = Workspace(ws_path)
+    dirs = SessionDirs(Workspace(ws_path))
     reload_env_dirs()
     ensure_dirs()
 
@@ -1658,7 +1701,7 @@ def serve(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    _ensure_async_subagent_server(config, workspace_dir=ws, backend=gateway_backend)
+    _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
 
     if config.dangerous_mode:
         from ._constants import DANGEROUS_BANNER_LABEL, DANGEROUS_BANNER_MESSAGE
@@ -1668,9 +1711,7 @@ def serve(
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
     console.print("[dim]Loading agent...[/dim]")
-    agent = _load_agent(
-        workspace_dir=ws, workspace=workspace, config=config, runtime=async_runtime
-    )
+    agent = _load_agent(workspace=dirs.workspace, config=config, runtime=async_runtime)
 
     from ..gateway import create_runtime_gateways_for_config
 
@@ -1679,7 +1720,7 @@ def serve(
     )
     tid = async_runtime.run_sync(
         lambda: runtime_gateways.graph_gateway.create_thread(
-            GraphTarget(workspace_dir=ws)
+            GraphTarget(**dirs.metadata())
         )
     )
 
@@ -1689,11 +1730,10 @@ def serve(
     runtime_state = ServeRuntimeState(
         agent=agent,
         thread_id=tid,
-        workspace_dir=ws,
+        dirs=dirs,
         config=config,
         runtime_gateways=runtime_gateways,
         async_runtime=async_runtime,
-        workspace=workspace,
         gateway_backend=gateway_backend,
     )
 
@@ -1716,13 +1756,13 @@ def serve(
         config,
         agent,
         tid,
-        media_dir=workspace.media_dir,
+        media_dir=dirs.workspace.media_dir,
         send_thinking=effective_channel_thinking,
     )
     console.print("[green]Serve mode started (bus mode).[/green]")
 
     console.print(f"[dim]Thread: {tid}[/dim]")
-    console.print(f"[dim]Workspace: {_shorten_path(ws)}[/dim]")
+    console.print(f"[dim]Workspace: {_shorten_path(str(dirs.workspace.root))}[/dim]")
     console.print("[dim]Press Ctrl+C to stop.[/dim]\n")
 
     # Explicit SIGINT/SIGTERM handlers.  Python's default SIGINT raises
@@ -1765,7 +1805,7 @@ def serve(
     def _serve_reader_target() -> GraphTarget:
         return GraphTarget(
             local_graph=runtime_state.agent,
-            workspace_dir=runtime_state.workspace_dir,
+            **runtime_state.dirs.metadata(),
         )
 
     async def _serve_enqueue_completions() -> None:
@@ -1816,7 +1856,6 @@ def serve(
                         msg,
                         runtime_state=runtime_state,
                         model=config.model,
-                        workspace_dir=ws,
                         show_thinking=effective_channel_thinking,
                         on_cmd_completed=_serve_on_cmd_completed,
                         handle_session_resume_cb=_serve_handle_session_resume_cb,
@@ -1840,7 +1879,6 @@ def serve(
                     _serve_drain_notifications(
                         runtime_state=runtime_state,
                         model=config.model,
-                        workspace_dir=ws,
                         show_thinking=effective_channel_thinking,
                         channel_runtime=channel_runtime,
                     )
@@ -2503,12 +2541,6 @@ def _main_callback(
         workspace_root = start_workspace_path(default_workdir=config.default_workdir)
         effective_mode = mode or config.default_mode
     workspace = Workspace(workspace_root)
-    if effective_mode == "run":
-        workspace_dir = _create_session_workspace(workspace, name)
-        workspace_fixed = False
-    else:
-        workspace_dir = str(workspace_root)
-        workspace_fixed = True
 
     # The project .env was merged into os.environ by get_effective_config().
     reload_env_dirs()
@@ -2531,9 +2563,20 @@ def _main_callback(
         if _is_fresh_interactive_session(prompt, thread_id):
             from ..deploy.webui import run_webui
 
-            run_webui(config, workspace_dir=workspace_dir)
+            # Run mode is a CLI and TUI feature: the WebUI works in the workspace root.
+            if effective_mode == "run":
+                console.print(
+                    "[dim]The WebUI works in the workspace root; --mode run "
+                    "applies to the CLI and TUI.[/dim]"
+                )
+            run_webui(config, workspace_dir=str(workspace.root))
             return
         config.ui_backend = "cli"
+
+    # ``--mode=run`` works in a fresh ``runs/<name>`` folder of the workspace;
+    # ``/new`` then moves to another one.
+    run_dir = _create_run_dir(workspace, name) if effective_mode == "run" else None
+    dirs = SessionDirs(workspace, run_dir)
 
     # Resolve the gateway backend for whichever surface this callback launches:
     # single-shot when a prompt is given, else the interactive CLI / TUI (the
@@ -2551,9 +2594,7 @@ def _main_callback(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    _ensure_async_subagent_server(
-        config, workspace_dir=workspace_dir, backend=gateway_backend
-    )
+    _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer
@@ -2578,6 +2619,13 @@ def _main_callback(
                     resolution = await graph_gateway.resolve_thread(thread_id)
                     if resolution.thread_id:
                         tid = resolution.thread_id
+                        session_dirs = await _restore_thread_dirs(
+                            tid,
+                            dirs=dirs,
+                            graph_gateway=graph_gateway,
+                            config=config,
+                            backend=gateway_backend,
+                        )
                     elif resolution.matches:
                         console.print(
                             f"[yellow]Ambiguous thread ID '{escape(thread_id)}'. Matches:[/yellow]"
@@ -2592,11 +2640,12 @@ def _main_callback(
                         raise typer.Exit(1)
                 else:
                     tid = await graph_gateway.create_thread()
+                    session_dirs = dirs
                 console.print("[dim]Loading agent...[/dim]")
                 agent = await asyncio.to_thread(
                     _load_agent,
-                    workspace_dir=workspace_dir,
-                    workspace=workspace,
+                    work_dir=str(session_dirs.work_dir),
+                    workspace=session_dirs.workspace,
                     checkpointer=checkpointer,
                     config=config,
                     runtime=async_runtime,
@@ -2610,9 +2659,9 @@ def _main_callback(
                         request = RunRequest(
                             message=prompt,
                             thread_id=tid,
-                            metadata=build_metadata(workspace_dir, config.model),
+                            metadata=build_metadata(session_dirs, config.model),
                             target=GraphTarget(
-                                local_graph=agent, workspace_dir=workspace_dir
+                                local_graph=agent, **session_dirs.metadata()
                             ),
                         )
                         try:
@@ -2635,7 +2684,7 @@ def _main_callback(
                                 prompt,
                                 thread_id=tid,
                                 show_thinking=show_thinking,
-                                workspace_dir=workspace_dir,
+                                dirs=session_dirs,
                                 model=config.model,
                                 ui_backend=config.ui_backend,
                                 runtime_gateways=runtime_gateways,
@@ -2676,8 +2725,7 @@ def _main_callback(
         cmd_interactive(
             show_thinking=show_thinking,
             channel_send_thinking=effective_channel_thinking,
-            workspace_dir=workspace_dir,
-            workspace_fixed=workspace_fixed,
+            dirs=dirs,
             mode=effective_mode,
             model=config.model,
             provider=config.provider,
@@ -2686,7 +2734,6 @@ def _main_callback(
             ui_backend=config.ui_backend,
             config=config,
             async_runtime=async_runtime,
-            workspace=workspace,
         )
 
 

@@ -11,7 +11,7 @@ To add a new async sub-agent:
   1. Set ``async: true`` in ``EvoScientist/subagents/<name>.yaml``.
   2. Add a one-line binding here::
 
-         <snake_name> = build_async_subagent_graph("<name>", workspace=_workspace)
+         <snake_name> = build_async_subagent_graph("<name>", **_session)
 
   3. Register it in ``EvoScientist/langgraph_dev/langgraph.json``::
 
@@ -28,27 +28,31 @@ from EvoScientist.memory.agents import (
     build_observation_linker_graph,
 )
 from EvoScientist.memory.types import MemorySourceType
-from EvoScientist.paths import process_workspace
+from EvoScientist.paths import process_session_dirs
 from EvoScientist.subagents._factory import build_async_subagent_graph
 from EvoScientist.subagents.expert_container_async import (
     build_expert_container_async_graph,
 )
 
-# The server serves the workspace it was started for (the manager sets
-# ``EVOSCIENTIST_WORKSPACE_DIR`` on the subprocess).
-_workspace = process_workspace()
+# The server serves the workspace it was started for, and works in the run
+# folder of a ``--mode=run`` session (the manager sets
+# ``EVOSCIENTIST_WORKSPACE_DIR`` and ``EVOSCIENTIST_RUN_DIR`` on the
+# subprocess). Memory graphs only need the workspace.
+_dirs = process_session_dirs()
+_workspace = _dirs.workspace
+_session = {"workspace": _workspace, "work_dir": _dirs.work_dir}
 
-writing_agent = build_async_subagent_graph("writing-agent", workspace=_workspace)
-data_analysis_agent = build_async_subagent_graph(
-    "data-analysis-agent", workspace=_workspace
-)
+writing_agent = build_async_subagent_graph("writing-agent", **_session)
+data_analysis_agent = build_async_subagent_graph("data-analysis-agent", **_session)
+# Scheduled tasks belong to the workspace, not to one run, so they always
+# work in the workspace root.
 scheduler = build_async_subagent_graph("scheduler", workspace=_workspace)
 # Generic async container for expert-skill dispatch. One graph, parameterised
 # per invocation by the ``skill_name`` payload the main agent passes through
 # ``EvoAsyncSubAgentMiddleware.start_async_task``. Any installed expert skill
 # dispatches through this graph; the loader middleware resolves the skill
 # body at model-call time.
-expert_container_async = build_expert_container_async_graph(_workspace)
+expert_container_async = build_expert_container_async_graph(**_session)
 evomemory_subagent_worker = build_memory_worker_graph(
     MemorySourceType.SUBAGENT, workspace=_workspace
 )

@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
 from tests.fakes import TEST_WORKSPACE
 
 
@@ -10,7 +11,7 @@ def _ctx():
 
     ui = MagicMock()
     return CommandContext(
-        workspace=TEST_WORKSPACE, agent=None, thread_id="tid", ui=ui
+        dirs=SessionDirs(TEST_WORKSPACE), agent=None, thread_id="tid", ui=ui
     ), ui
 
 

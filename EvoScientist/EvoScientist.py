@@ -35,7 +35,12 @@ from .config import (
     get_effective_config,
 )
 from .memory import MemorySourceType
-from .paths import Workspace, process_workspace, resolve_virtual_path
+from .paths import (
+    Workspace,
+    normalize_path,
+    process_session_dirs,
+    resolve_virtual_path,
+)
 from .prompts import get_system_prompt
 
 # Suppress noisy warnings from deepagents skill loader (non-string frontmatter fields, etc.)
@@ -314,15 +319,14 @@ def _inject_subagent_middleware(
     subs: list[dict],
     *,
     workspace: Workspace,
-    work_dir: str | Path | None = None,
     cfg=None,
     chat_model=None,
     backend=None,
 ) -> None:
     """Ensure every subagent gets error handling and context management middleware.
 
-    Memory middleware is keyed to ``work_dir`` (the folder the agent works
-    in), which defaults to the workspace root.
+    Memory middleware is keyed to the workspace root, so a ``--mode=run``
+    session shares its project's memory.
 
     Without this, subagent tool errors are caught by LangGraph's default
     ToolNode handler which produces terse messages without tracebacks or
@@ -358,13 +362,12 @@ def _inject_subagent_middleware(
     memory_controls = MemoryControls.from_config(cfg)
     memory_dir = str(_paths_mod.MEMORIES_DIR)
     memory_scheduler = default_memory_scheduler()
-    workspace_dir = work_dir if work_dir is not None else workspace.root
     for sa in subs:
         name = str(sa.get("name") or "sub-agent")
         source_type = MemorySourceType.SUBAGENT
         memory_middleware = create_memory_middleware(
             memory_dir,
-            workspace_dir=workspace_dir,
+            workspace_dir=workspace.root,
             source_type=source_type,
             source_agent=name,
             enable_profile_memory=memory_controls.profile_enabled,
@@ -404,7 +407,7 @@ def _inject_subagent_middleware(
             middleware.append(
                 create_memory_lifecycle_middleware(
                     memory_dir,
-                    workspace_dir=workspace_dir,
+                    workspace_dir=workspace.root,
                     project_id=memory_middleware.project_id,
                     source_type=MemorySourceType.SUBAGENT,
                     source_agent=name,
@@ -679,7 +682,6 @@ def _build_base_kwargs(
     _inject_subagent_middleware(
         subs,
         workspace=workspace,
-        work_dir=work_dir,
         cfg=cfg,
         chat_model=chat_model,
         backend=base_backend,
@@ -772,7 +774,6 @@ def load_mcp_and_build_kwargs(
     _inject_subagent_middleware(
         subs,
         workspace=workspace,
-        work_dir=work_dir,
         cfg=cfg,
         chat_model=chat_model,
         backend=base_backend,
@@ -814,6 +815,17 @@ def load_mcp_and_build_kwargs(
 # =============================================================================
 
 
+def _run_media_dir(workspace: Workspace, work_dir: str | Path) -> Path | None:
+    """The workspace's media folder, when the agent works outside the root.
+
+    Channel attachments land in ``<root>/media`` and are referenced by their
+    real path. A ``--mode=run`` sandbox is rooted at its run folder, so it is
+    told about the folder to reach them; in the root it is already inside
+    the sandbox.
+    """
+    return None if normalize_path(work_dir) == workspace.root else workspace.media_dir
+
+
 def _get_default_backend(
     workspace: Workspace,
     *,
@@ -825,7 +837,9 @@ def _get_default_backend(
 
     The sandbox is rooted at ``work_dir`` (the folder the agent works in),
     which defaults to the workspace root; ``/skills/`` merges the
-    workspace, global and built-in skill tiers.
+    workspace, global and built-in skill tiers. When ``work_dir`` is a
+    ``--mode=run`` folder, channel attachments in the workspace's ``media/``
+    stay readable by their real path.
 
     ``guard_dangerous`` — when ``None`` (default) the backend derives the guard
     per call from the run's HITL-suppression state (``is_hitl_suppressed``): an
@@ -858,6 +872,7 @@ def _get_default_backend(
 
     # Dangerous mode opens the workspace (`/`) route to the real filesystem;
     # the /skills/ and /memories/ routes stay confined (virtual_mode=True).
+    media_dir = _run_media_dir(workspace, root_dir)
     ws_backend = CustomSandboxBackend(
         root_dir=root_dir,
         virtual_mode=True,
@@ -867,6 +882,7 @@ def _get_default_backend(
         refuse_delete=refuse_delete,
         env=research_env_overrides(),
         skills_dir=workspace.skills_dir,
+        media_dir=media_dir,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=str(workspace.skills_dir),
@@ -990,7 +1006,7 @@ def _get_default_middleware(
     # alternatives instead of re-overriding every retry to the same model.
     memory_middleware = create_memory_middleware(
         memory_dir,
-        workspace_dir=work_dir,
+        workspace_dir=workspace.root,
         source_type=source_type,
         source_agent=memory_source_agent,
         enable_profile_memory=memory_controls.profile_enabled,
@@ -1054,7 +1070,7 @@ def _get_default_middleware(
         mw.append(
             create_memory_lifecycle_middleware(
                 memory_dir,
-                workspace_dir=work_dir,
+                workspace_dir=workspace.root,
                 project_id=memory_middleware.project_id,
                 source_type=source_type,
                 source_agent=memory_source_agent,
@@ -1094,6 +1110,7 @@ def _get_default_middleware(
                 skills_dir=workspace.skills_dir,
                 dangerous=cfg.dangerous_mode,
                 guard_dangerous=False,
+                media_dir=_run_media_dir(workspace, work_dir),
             )
         )
 
@@ -1181,14 +1198,17 @@ def _get_default_agent():
         from deepagents import create_deep_agent
 
         cfg = _ensure_config()
-        workspace = process_workspace()
-        be = _get_default_backend(workspace)
-        mw = _get_default_middleware(workspace=workspace, backend=be)
+        dirs = process_session_dirs()
+        workspace, work_dir = dirs.workspace, dirs.work_dir
+        be = _get_default_backend(workspace, work_dir=work_dir)
+        mw = _get_default_middleware(workspace=workspace, work_dir=work_dir, backend=be)
 
         if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
-            kwargs = _build_base_kwargs(be, mw, workspace=workspace)
+            kwargs = _build_base_kwargs(be, mw, workspace=workspace, work_dir=work_dir)
         else:
-            kwargs = load_mcp_and_build_kwargs(be, mw, workspace=workspace)
+            kwargs = load_mcp_and_build_kwargs(
+                be, mw, workspace=workspace, work_dir=work_dir
+            )
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
@@ -1204,9 +1224,12 @@ def __getattr__(name: str):
     if name == "chat_model":
         return _ensure_chat_model()
     if name == "SYSTEM_PROMPT":
-        return _configured_system_prompt(_ensure_config(), process_workspace().root)
+        return _configured_system_prompt(
+            _ensure_config(), process_session_dirs().work_dir
+        )
     if name == "backend":
-        return _get_default_backend(process_workspace())
+        dirs = process_session_dirs()
+        return _get_default_backend(dirs.workspace, work_dir=dirs.work_dir)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -1216,7 +1239,7 @@ def __getattr__(name: str):
 
 
 def create_cli_agent(
-    workspace_dir: str | None = None,
+    work_dir: str | Path | None = None,
     checkpointer=None,
     config=None,
     chat_model=None,
@@ -1229,7 +1252,7 @@ def create_cli_agent(
     """Create agent with checkpointer for CLI multi-turn support.
 
     A fresh backend is constructed on every call from *workspace* and
-    *workspace_dir*, so the agent always reflects the session's folders.
+    *work_dir*, so the agent always reflects the session's folders.
 
     **Pure path:** when *both* ``config`` and ``chat_model`` are explicit, this
     writes none of the cached config/model module globals (``_config``,
@@ -1240,7 +1263,7 @@ def create_cli_agent(
     dev, notebooks, and CLI startup, which pass ``config=`` only).
 
     Args:
-        workspace_dir: The folder the agent works in (the session's
+        work_dir: The folder the agent works in (the session's
             ``--mode=run`` folder, or the workspace root). If ``None``,
             defaults to ``workspace.root``.
         workspace: The workspace whose skills, experts and memory the
@@ -1289,14 +1312,14 @@ def create_cli_agent(
 
         checkpointer = InMemorySaver()
 
-    if workspace_dir is None:
-        workspace_dir = str(workspace.root)
+    work_dir = str(work_dir if work_dir is not None else workspace.root)
 
     _mem_dir = str(_paths.MEMORIES_DIR)
     _global_skills_dir = str(_paths.GLOBAL_SKILLS_DIR)
 
+    media_dir = _run_media_dir(workspace, work_dir)
     ws_backend = CustomSandboxBackend(
-        root_dir=workspace_dir,
+        root_dir=work_dir,
         virtual_mode=True,
         timeout=cfg.sandbox_execute_timeout,
         dangerous=cfg.dangerous_mode,
@@ -1305,6 +1328,7 @@ def create_cli_agent(
         guard_dangerous=False,
         env=research_env_overrides(),
         skills_dir=workspace.skills_dir,
+        media_dir=media_dir,
     )
     sk_backend = MergedSkillsBackend(
         primary_dir=str(workspace.skills_dir),
@@ -1327,7 +1351,7 @@ def create_cli_agent(
     # CLI agent never drifts from the default chain.
     mw: list[AgentMiddleware] = _get_default_middleware(
         workspace=workspace,
-        work_dir=workspace_dir,
+        work_dir=work_dir,
         cfg=cfg,
         chat_model=chat_model,
         backend=be,
@@ -1339,7 +1363,7 @@ def create_cli_agent(
         be,
         mw,
         workspace=workspace,
-        work_dir=workspace_dir,
+        work_dir=work_dir,
         on_mcp_progress=on_mcp_progress,
         cfg=cfg,
         chat_model=chat_model,

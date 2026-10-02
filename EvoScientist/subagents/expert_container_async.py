@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, NotRequired
 
 from deepagents.graph import DeepAgentState
@@ -323,8 +324,12 @@ def build_expert_async_subagent_specs(
     return specs
 
 
-def build_expert_container_async_graph(workspace: Workspace) -> Any:
+def build_expert_container_async_graph(
+    workspace: Workspace, *, work_dir: str | Path | None = None
+) -> Any:
     """Build the async expert container graph.
+
+    The sandbox works in ``work_dir`` (default: the workspace root).
 
     Called once at langgraph dev startup. The returned graph accepts
     ``{messages, skill_name}`` as initial state; the
@@ -371,11 +376,14 @@ def build_expert_container_async_graph(workspace: Workspace) -> Any:
     # (#466) — the replacement must also offload history to this backend.
     # Built before subagent injection so general-purpose (an explicit spec,
     # not deepagents' auto-GP) gets the same subclass and the same model.
-    backend = _get_default_backend(workspace)
+    backend = _get_default_backend(workspace, work_dir=work_dir)
     model = _ensure_chat_model()
     _ensure_general_purpose_subagent(subagents)
     _inject_subagent_middleware(
-        subagents, workspace=workspace, chat_model=model, backend=backend
+        subagents,
+        workspace=workspace,
+        chat_model=model,
+        backend=backend,
     )
 
     middleware = [
@@ -386,6 +394,7 @@ def build_expert_container_async_graph(workspace: Workspace) -> Any:
         ExpertSkillLoaderMiddleware(workspace),
         *_get_default_middleware(
             workspace=workspace,
+            work_dir=work_dir,
             for_async_subagent=True,
             memory_source_agent="expert-container-async",
             backend=backend,

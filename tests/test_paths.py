@@ -8,8 +8,10 @@ import pytest
 
 from EvoScientist import paths
 from EvoScientist.paths import (
+    SessionDirs,
     Workspace,
     normalize_path,
+    process_session_dirs,
     process_workspace,
     resolve_virtual_path,
     start_workspace_path,
@@ -142,6 +144,87 @@ class TestProcessWorkspace:
         first = process_workspace()
         monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "second"))
         assert process_workspace() == first
+
+
+class TestSessionDirs:
+    def test_daemon_session_works_in_the_root(self, tmp_path):
+        dirs = SessionDirs(Workspace(tmp_path))
+        assert dirs.run_dir is None
+        assert dirs.work_dir == tmp_path.resolve()
+        assert dirs.metadata() == {"workspace_dir": tmp_path.resolve().as_posix()}
+
+    def test_run_session_works_in_its_run_folder(self, tmp_path):
+        ws = Workspace(tmp_path)
+        dirs = SessionDirs(ws, ws.runs_dir / "exp")
+        assert dirs.work_dir == ws.runs_dir / "exp"
+        assert dirs.metadata() == {
+            "workspace_dir": ws.key,
+            "run_dir": (ws.runs_dir / "exp").as_posix(),
+        }
+
+    def test_run_dir_equal_to_root_is_no_run_dir(self, tmp_path):
+        dirs = SessionDirs(Workspace(tmp_path), tmp_path / "." / "")
+        assert dirs.run_dir is None
+        assert "run_dir" not in dirs.metadata()
+
+
+class TestSessionDirsFromStored:
+    def test_nothing_stored(self):
+        assert SessionDirs.from_stored(None) is None
+        assert SessionDirs.from_stored("") is None
+
+    def test_a_timestamp_named_root_stays_a_root(self, tmp_path):
+        """New rows carry ``run_dir`` themselves; reading never guesses."""
+        folder = tmp_path / "runs" / "20260930_120000"
+        assert SessionDirs.from_stored(str(folder)) == SessionDirs(Workspace(folder))
+
+    def test_unresolved_values_are_normalised(self, tmp_path, monkeypatch):
+        _fake_home(monkeypatch, tmp_path)
+        assert SessionDirs.from_stored("~/proj/") == SessionDirs(
+            Workspace(tmp_path / "proj")
+        )
+
+
+class TestSessionDirsFromLegacy:
+    def test_generated_run_folder_is_split_into_workspace_and_run_dir(self, tmp_path):
+        run = tmp_path / "runs" / "20260930_120000"
+        assert SessionDirs.from_legacy(str(run)) == SessionDirs(
+            Workspace(tmp_path), run
+        )
+
+    def test_named_run_folder_is_left_as_its_own_workspace(self, tmp_path):
+        """A project can live in a folder called ``runs``; only generated
+        names are known to be run folders."""
+        folder = tmp_path / "runs" / "exp"
+        assert SessionDirs.from_legacy(str(folder)) == SessionDirs(Workspace(folder))
+
+    def test_names_the_cli_does_not_generate_are_not_split(self, tmp_path):
+        for name in (
+            "20260930_120000_1",
+            "2026093_120000",
+            "x20260930_120000",
+            "99999999_999999",
+        ):
+            folder = tmp_path / "runs" / name
+            assert SessionDirs.from_legacy(str(folder)).run_dir is None, name
+
+    def test_timestamp_folder_outside_runs_is_not_split(self, tmp_path):
+        folder = tmp_path / "other" / "20260930_120000"
+        assert SessionDirs.from_legacy(str(folder)) == SessionDirs(Workspace(folder))
+
+    def test_generated_names_round_trip(self):
+        from datetime import datetime
+
+        name = datetime(2026, 9, 30, 12, 0, 0).strftime(paths.RUN_NAME_FORMAT)
+        assert paths.is_generated_run_name(name)
+
+
+class TestProcessSessionDirs:
+    def test_with_run_dir(self, tmp_path, monkeypatch):
+        run = tmp_path / "runs" / "exp"
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", str(run))
+        assert process_session_dirs() == SessionDirs(Workspace(tmp_path), run)
 
 
 class TestReloadEnvDirs:

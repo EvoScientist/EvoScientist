@@ -42,7 +42,7 @@ def test_cli_agent_backend_gets_the_overrides(overrides, tmp_path, workspace):
         ),
     ):
         es_mod.create_cli_agent(
-            workspace_dir=str(tmp_path),
+            work_dir=str(tmp_path),
             config=cfg,
             chat_model=MagicMock(),
             workspace=workspace,

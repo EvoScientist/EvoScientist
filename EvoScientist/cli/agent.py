@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..paths import Workspace
+from ..paths import RUN_NAME_FORMAT, Workspace
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -41,7 +41,7 @@ def _deduplicate_run_name(name: str, runs_dir: Path) -> str:
     return f"{name}_{i}"
 
 
-def _create_session_workspace(workspace: Workspace, name: str | None = None) -> str:
+def _create_run_dir(workspace: Workspace, name: str | None = None) -> Path:
     """Create a ``--mode=run`` session folder under ``workspace.runs_dir``.
 
     Args:
@@ -53,14 +53,14 @@ def _create_session_workspace(workspace: Workspace, name: str | None = None) -> 
     if name:
         session_id = _deduplicate_run_name(name, workspace.runs_dir)
     else:
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    workspace_dir = str(workspace.runs_dir / session_id)
-    os.makedirs(workspace_dir, exist_ok=True)
-    return workspace_dir
+        session_id = datetime.now().strftime(RUN_NAME_FORMAT)
+    run_dir = workspace.runs_dir / session_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
 
 
 def _load_agent(
-    workspace_dir: str | None = None,
+    work_dir: str | None = None,
     checkpointer=None,
     config=None,
     chat_model=None,
@@ -73,7 +73,7 @@ def _load_agent(
     """Load the CLI agent with optional persistent checkpointer.
 
     Args:
-        workspace_dir: The folder the agent works in (defaults to the
+        work_dir: The folder the agent works in (defaults to the
             workspace root).
         workspace: The session's workspace.
         checkpointer: Optional LangGraph checkpointer (e.g. ``AsyncSqliteSaver``).
@@ -90,7 +90,7 @@ def _load_agent(
     from ..EvoScientist import create_cli_agent
 
     return create_cli_agent(
-        workspace_dir=workspace_dir,
+        work_dir=work_dir,
         workspace=workspace,
         checkpointer=checkpointer,
         config=config,

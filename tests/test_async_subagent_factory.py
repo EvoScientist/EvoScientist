@@ -99,6 +99,7 @@ def test_factory_requests_async_safe_middleware(
     # the deployed graph (#466).
     mock_get_mw.assert_called_once_with(
         workspace=workspace,
+        work_dir=None,
         for_async_subagent=True,
         memory_source_agent="writing-agent",
         backend=mock_backend.return_value,

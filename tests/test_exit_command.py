@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+from EvoScientist.paths import SessionDirs
 from tests.fakes import TEST_WORKSPACE
 
 
@@ -12,7 +13,7 @@ class TestExitCommand:
 
         ui = MagicMock()
         ctx = CommandContext(
-            workspace=TEST_WORKSPACE,
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="tid",
             ui=ui,

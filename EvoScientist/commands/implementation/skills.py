@@ -115,7 +115,7 @@ class InstallSkill(Command):
             source,
             global_install=not local,
             workspace=workspace,
-            work_dir=ctx.workspace_dir,
+            work_dir=ctx.work_dir,
         )
         if result.get("batch"):
             for item in result.get("installed", []):
@@ -243,7 +243,7 @@ class InstallSkills(Command):
                 source,
                 global_install=True,
                 workspace=workspace,
-                work_dir=ctx.workspace_dir,
+                work_dir=ctx.work_dir,
             )
             if result.get("batch"):
                 for item in result.get("installed", []):

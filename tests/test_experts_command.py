@@ -14,7 +14,7 @@ from EvoScientist.commands.implementation.experts import (
     ExpertsCommand,
     invalidate_experts_cache,
 )
-from EvoScientist.paths import Workspace
+from EvoScientist.paths import SessionDirs, Workspace
 from tests.fakes import TEST_WORKSPACE
 
 
@@ -78,7 +78,7 @@ def _make_ctx(
         thread_id="t1",
         ui=ui,
         channel_runtime=runtime,
-        workspace=workspace,
+        dirs=SessionDirs(workspace),
     )
     return ctx, ui
 
@@ -238,7 +238,7 @@ class TestExpertToggle:
     async def test_no_channel_runtime_prints_warning(self):
         ui = _FakeUI()
         ctx = CommandContext(
-            workspace=TEST_WORKSPACE,
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="t1",
             ui=ui,
