@@ -2,8 +2,8 @@
 
 Every git command for skills and the MCP index goes through :func:`run_git`,
 so a missing git binary surfaces as one readable :class:`GitNotFoundError` on
-every path instead of a raw ``FileNotFoundError``, and no command ever waits
-for credentials.
+every path instead of a raw ``FileNotFoundError``, and no command waits for
+HTTPS credentials.
 """
 
 from __future__ import annotations
@@ -21,7 +21,10 @@ CLONE_TIMEOUT = 120  # seconds
 # then open a credential helper window (Git for Windows ships a picker) or wait
 # for a username on the terminal. An empty ``credential.helper`` resets the
 # helper list; askpass programs run before git checks GIT_TERMINAL_PROMPT, so
-# they are cleared too.
+# they are cleared too. This covers HTTPS, the only scheme our URLs use. A
+# user's ``url.<ssh>.insteadOf`` rule turns them into SSH, whose own prompts
+# (key passphrase, host key) these settings do not reach; ``core.sshCommand``
+# is left alone so the user's ssh setup keeps working.
 _NON_INTERACTIVE = ["-c", "credential.helper=", "-c", "core.askPass="]
 _ASKPASS_VARS = ("GIT_ASKPASS", "SSH_ASKPASS")
 
@@ -60,26 +63,51 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *_NON_INTERACTIVE, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=_git_env(),
+    )
+
+
+def _activate_private_git() -> bool:
+    """On Windows, put a PortableGit recorded since start-up on ``PATH``.
+
+    The missing-git message tells Windows users to run ``EvoSci setup``; when
+    they do that in another terminal, this process only learns about the new
+    Git here. Returns True when a recorded PortableGit was put on ``PATH``.
+    """
+    if sys.platform != "win32":
+        return False
+    from .setup import git as setup_git
+
+    return setup_git.activate_runtime() is not None
+
+
 def run_git(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
     """Run ``git <args>`` non-interactively and capture its text output.
 
-    Raises :class:`GitNotFoundError` when git cannot be started.
+    Raises :class:`GitNotFoundError` when git cannot be started (on Windows
+    after one retry with a PortableGit recorded since start-up).
     ``subprocess.TimeoutExpired`` propagates; a non-zero exit is returned for
     the caller to judge.
     """
     try:
-        return subprocess.run(
-            ["git", *_NON_INTERACTIVE, *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=_git_env(),
-        )
+        return _run(args, timeout)
     except OSError as exc:
         logger.debug("could not start git", exc_info=True)
+        missing = isinstance(exc, FileNotFoundError)
+        if missing and _activate_private_git():
+            try:
+                return _run(args, timeout)
+            except OSError:
+                logger.debug("could not start the private git either", exc_info=True)
         # Only a missing binary gets the install hint; anything else (EACCES,
         # EMFILE, a Windows policy block) names its cause, because git is there.
-        if isinstance(exc, FileNotFoundError):
+        if missing:
             raise GitNotFoundError() from exc
         raise GitNotFoundError(
             f"git could not be started: {exc.strerror or exc}"

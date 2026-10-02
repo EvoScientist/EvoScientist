@@ -24,6 +24,15 @@ def _proc(returncode=0, stdout="", stderr=""):
 _NON_INTERACTIVE = ["-c", "credential.helper=", "-c", "core.askPass="]
 
 
+@pytest.fixture(autouse=True)
+def _no_recorded_git(tmp_path, monkeypatch):
+    """On Windows a missing git triggers a retry with a recorded PortableGit;
+    an empty DATA_DIR keeps the developer's real record out of these tests."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+
 class TestRunGit:
     def test_missing_git_raises_git_not_found(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "linux")
@@ -94,6 +103,75 @@ class TestRunGit:
         assert result.stdout == "git version 2.43.0\n"
         assert run.call_args.args[0] == ["git", *_NON_INTERACTIVE, "--version"]
         assert run.call_args.kwargs["timeout"] == 7
+
+    def test_windows_retries_with_a_portablegit_set_up_since_start(self, monkeypatch):
+        """`EvoSci setup` run in another terminal records PortableGit; the
+        running process puts it on PATH and retries once."""
+        from pathlib import Path
+
+        from EvoScientist.setup import git as setup_git
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "activate_runtime", lambda: Path("C:/pg/cmd"))
+        missing = FileNotFoundError(2, "No such file or directory", "git")
+        with patch(_RUN, side_effect=[missing, _proc(stdout="ok")]) as run:
+            result = run_git(["--version"], timeout=5)
+
+        assert result.stdout == "ok"
+        assert run.call_count == 2
+
+    def test_windows_without_portablegit_raises_after_one_attempt(self, monkeypatch):
+        from EvoScientist.setup import git as setup_git
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "activate_runtime", lambda: None)
+        with patch(
+            _RUN, side_effect=FileNotFoundError(2, "No such file", "git")
+        ) as run:
+            with pytest.raises(GitNotFoundError):
+                run_git(["--version"], timeout=5)
+        assert run.call_count == 1
+
+    def test_windows_private_git_missing_too_raises(self, monkeypatch):
+        from pathlib import Path
+
+        from EvoScientist.setup import git as setup_git
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "activate_runtime", lambda: Path("C:/pg/cmd"))
+        with patch(
+            _RUN, side_effect=FileNotFoundError(2, "No such file", "git")
+        ) as run:
+            with pytest.raises(GitNotFoundError):
+                run_git(["--version"], timeout=5)
+        assert run.call_count == 2
+
+    def test_windows_retries_only_for_a_missing_git(self, monkeypatch):
+        """A git that is there but cannot start is not replaced by PortableGit."""
+        from EvoScientist.setup import git as setup_git
+
+        def boom():
+            raise AssertionError("activate_runtime must not run")
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "activate_runtime", boom)
+        with patch(_RUN, side_effect=PermissionError(13, "Permission denied")) as run:
+            with pytest.raises(GitNotFoundError) as excinfo:
+                run_git(["--version"], timeout=5)
+        assert run.call_count == 1
+        assert str(excinfo.value) == "git could not be started: Permission denied"
+
+    def test_other_platforms_do_not_look_for_portablegit(self, monkeypatch):
+        from EvoScientist.setup import git as setup_git
+
+        def boom():
+            raise AssertionError("activate_runtime must not run")
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(setup_git, "activate_runtime", boom)
+        with patch(_RUN, side_effect=FileNotFoundError(2, "No such file", "git")):
+            with pytest.raises(GitNotFoundError):
+                run_git(["--version"], timeout=5)
 
     def test_never_asks_for_credentials(self, monkeypatch):
         """No credential helper window, no askpass program, no terminal prompt."""
