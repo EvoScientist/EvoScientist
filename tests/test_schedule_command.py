@@ -98,7 +98,7 @@ async def test_run_with_matching_prefix_fires_matched_prompt():
         ) as rn,
     ):
         await ScheduleCommand().execute(ctx, ["run", "c-123"])
-    rn.assert_called_once_with("do the thing", rubric=None)
+    rn.assert_called_once_with("do the thing", workspace=TEST_WORKSPACE, rubric=None)
 
 
 async def test_run_with_no_match_reports():
@@ -128,7 +128,7 @@ async def test_pause_resume_set_enabled_with_resolved_id():
             patch("EvoScientist.cron.schedule.set_enabled") as se,
         ):
             await ScheduleCommand().execute(ctx, [sub, "c-abc"])
-        se.assert_called_once_with("c-abcdef", expected)
+        se.assert_called_once_with(rows[0], expected, workspace=TEST_WORKSPACE)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +304,9 @@ async def test_run_forwards_stored_rubric():
         ) as rn,
     ):
         await ScheduleCommand().execute(ctx, ["run", "c-123"])
-    rn.assert_called_once_with("do the thing", rubric="- out.md exists")
+    rn.assert_called_once_with(
+        "do the thing", workspace=TEST_WORKSPACE, rubric="- out.md exists"
+    )
 
 
 async def test_list_table_marks_graded_rows():

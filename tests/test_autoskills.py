@@ -22,8 +22,6 @@ from EvoScientist.memory.autoskills.proposals import (
 )
 from EvoScientist.memory.autoskills.schedule import (
     AUTOSKILL_GRAPH_ID,
-    AUTOSKILL_RUN_KIND,
-    AUTOSKILL_SCHEDULE_SEARCH_LIMIT,
     alist_autoskill_schedules,
     autoskill_cron,
     reconcile_autoskill_schedule,
@@ -902,10 +900,8 @@ class _FakeCrons:
         self.rows: list[dict] = []
         self.created: list[dict] = []
         self.deleted: list[str] = []
-        self.searches: list[dict] = []
 
-    def search(self, **kwargs):
-        self.searches.append(kwargs)
+    def search(self, **_kwargs):
         return list(self.rows)
 
     def create(self, **kwargs):
@@ -917,6 +913,8 @@ class _FakeCrons:
             "metadata": kwargs["metadata"],
             "timezone": kwargs["timezone"],
             "enabled": True,
+            # The server keeps the run config in the cron's payload.
+            "payload": {"config": kwargs["config"]},
         }
         self.rows.append(row)
         self.created.append(row)
@@ -928,33 +926,21 @@ class _FakeCrons:
 
 
 class _AsyncFakeCrons:
-    def __init__(self):
-        self.searches: list[dict] = []
-
-    async def search(self, **kwargs):
-        self.searches.append(kwargs)
+    async def search(self, **_kwargs):
         return [{"cron_id": "cron-async"}]
 
 
-async def test_alist_autoskill_schedules_uses_async_client_and_explicit_limit(
-    monkeypatch,
-):
+async def test_alist_autoskill_schedules_uses_async_client(monkeypatch, workspace):
     crons = _AsyncFakeCrons()
     client = SimpleNamespace(crons=crons)
     monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: client)
 
     rows = await alist_autoskill_schedules(
         EvoScientistConfig(),
-        limit=3,
+        workspace_dir=workspace.root,
     )
 
     assert rows == [{"cron_id": "cron-async"}]
-    assert crons.searches == [
-        {
-            "metadata": {"run_kind": AUTOSKILL_RUN_KIND},
-            "limit": 3,
-        }
-    ]
 
 
 def test_reconcile_autoskill_schedule_creates_updates_and_disables(
@@ -1001,9 +987,6 @@ def test_reconcile_autoskill_schedule_creates_updates_and_disables(
     assert created["schedule"] == "0 3 * * 0"
     assert updated["schedule"] == "0 3 * * *"
     assert created["cron_id"] == "cron-1"
-    assert all(
-        search["limit"] == AUTOSKILL_SCHEDULE_SEARCH_LIMIT for search in crons.searches
-    )
     assert [row["assistant_id"] for row in crons.created] == [
         AUTOSKILL_GRAPH_ID,
         AUTOSKILL_GRAPH_ID,

@@ -1068,7 +1068,7 @@ def _get_default_middleware(
         ),
     ]
     if cfg.enable_scheduler and not for_async_subagent:
-        mw.append(create_scheduler_middleware())
+        mw.append(create_scheduler_middleware(workspace))
     mw.append(create_runtime_context_middleware())
     if memory_controls.memory_enabled:
         mw.append(memory_middleware)
