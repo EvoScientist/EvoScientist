@@ -115,6 +115,8 @@ def _memory_worker_run_payload(
         "config": {
             "configurable": {
                 "thread_id": thread_id,
+                # Memory belongs to the workspace; the server checks the root.
+                "workspace_dir": metadata["workspace_dir"],
                 "evomemory_source_session_id": context.session_id,
                 "evomemory_source_agent": context.source_agent,
                 "evomemory_project_id": context.project_id,
@@ -178,13 +180,15 @@ def _observation_linker_run_payload(
     context: ObservationLinkerContext,
     thread_id: str,
 ) -> BackgroundRunPayload:
+    metadata = _observation_linker_metadata(context)
     payload: BackgroundRunPayload = {
         "assistant_id": OBSERVATION_LINKER_GRAPH_ID,
         "input": messages_input(_observation_linker_user_prompt(context)),
-        "metadata": _observation_linker_metadata(context),
+        "metadata": metadata,
         "config": {
             "configurable": {
                 "thread_id": thread_id,
+                "workspace_dir": metadata["workspace_dir"],
                 "evomemory_project_id": context.project_id,
                 "evomemory_observation_ids": json.dumps(
                     list(context.observation_ids),

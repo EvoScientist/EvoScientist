@@ -173,7 +173,12 @@ def run_autoskill_now(
             workspace_dir=workspace_dir,
             schedule="manual",
         ),
-        config={"configurable": {"thread_id": str(thread["thread_id"])}},
+        config={
+            "configurable": {
+                "thread_id": str(thread["thread_id"]),
+                "workspace_dir": Workspace(workspace_dir).key,
+            }
+        },
     )
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}
 
@@ -201,6 +206,11 @@ async def arun_autoskill_now(
             workspace_dir=workspace_dir,
             schedule="manual",
         ),
-        config={"configurable": {"thread_id": str(thread["thread_id"])}},
+        config={
+            "configurable": {
+                "thread_id": str(thread["thread_id"]),
+                "workspace_dir": Workspace(workspace_dir).key,
+            }
+        },
     )
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}

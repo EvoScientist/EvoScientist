@@ -588,7 +588,12 @@ def _maybe_swap_async_subagents(
 
 
 def _route_async_specs_through_evo_middleware(
-    subs: list, base_middleware: list, *, workspace: Workspace, cfg=None
+    subs: list,
+    base_middleware: list,
+    *,
+    workspace: Workspace,
+    work_dir: str | Path | None = None,
+    cfg=None,
 ) -> list:
     """Move ``AsyncSubAgent`` specs from ``subs`` into ``EvoAsyncSubAgentMiddleware``.
 
@@ -640,6 +645,7 @@ def _route_async_specs_through_evo_middleware(
             EvoAsyncSubAgentMiddleware(
                 async_subagents=async_specs,
                 workspace=workspace,
+                work_dir=work_dir,
                 # The construction cfg, so resolve-on-miss specs the same
                 # langgraph_dev_port the construction-time specs used instead
                 # of re-reading config from disk at dispatch time.
@@ -695,7 +701,7 @@ def _build_base_kwargs(
     # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
     # replaces upstream's non-parameterisable one.
     subs = _route_async_specs_through_evo_middleware(
-        subs, base_middleware, workspace=workspace, cfg=cfg
+        subs, base_middleware, workspace=workspace, work_dir=work_dir, cfg=cfg
     )
     return {
         "name": "EvoScientist",
@@ -795,7 +801,7 @@ def load_mcp_and_build_kwargs(
     # EvoAsyncSubAgentMiddleware so the payload-aware start_async_task tool
     # is the one composed into the main agent.
     subs = _route_async_specs_through_evo_middleware(
-        subs, base_middleware, workspace=workspace, cfg=cfg
+        subs, base_middleware, workspace=workspace, work_dir=work_dir, cfg=cfg
     )
 
     return {

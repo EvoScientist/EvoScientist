@@ -1157,8 +1157,14 @@ def _read_cfg_configurable() -> dict[str, str]:
     return out
 
 
-def _merge_runs_config_kwargs(kwargs: dict) -> dict:
+def _merge_runs_config_kwargs(
+    kwargs: dict, folders: dict[str, str] | None = None
+) -> dict:
     """Merge the live model override into ``kwargs`` for ``runs.create``.
+
+    ``folders`` are the launching graph's ``workspace_dir`` / ``run_dir``;
+    they are always forwarded so the server can refuse a run meant for other
+    folders.
 
     Model source, in increasing precedence:
 
@@ -1174,7 +1180,11 @@ def _merge_runs_config_kwargs(kwargs: dict) -> dict:
 
     Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
-    overrides = {**_read_cfg_configurable(), **(_caller_configurable.get() or {})}
+    overrides = {
+        **(folders or {}),
+        **_read_cfg_configurable(),
+        **(_caller_configurable.get() or {}),
+    }
     if not overrides:
         return kwargs
     existing = kwargs.get("config")
@@ -1189,30 +1199,112 @@ def _merge_runs_config_kwargs(kwargs: dict) -> dict:
     return kwargs
 
 
-class _SyncRunsProxy:
-    """Wraps a sync ``RunsClient`` and injects config into ``create`` only."""
+def _thread_error_message(thread: Any) -> str | None:
+    """The error message langgraph-api records on a thread whose run failed."""
+    error = thread.get("error") if isinstance(thread, dict) else None
+    if isinstance(error, dict):
+        error = error.get("message") or error.get("error")
+    return str(error) if error else None
 
-    def __init__(self, real: Any) -> None:
+
+class _RunErrors:
+    """Why failed runs failed, looked up once from their thread.
+
+    langgraph-api records a failed run's error on its thread, not on the run,
+    so the async-task check would otherwise report no reason. A failed run's
+    error never changes, so each is looked up once.
+    """
+
+    def __init__(self) -> None:
+        self._by_run: dict[str, str] = {}
+
+    @staticmethod
+    def _missing(run: Any) -> bool:
+        return (
+            isinstance(run, dict)
+            and run.get("status") == "error"
+            and not run.get("error")
+        )
+
+    def needs_lookup(self, run: Any) -> bool:
+        return self._missing(run) and run.get("run_id") not in self._by_run
+
+    def attach(self, run: Any, thread: Any = None) -> Any:
+        if not self._missing(run):
+            return run
+        message = _thread_error_message(thread)
+        if message:
+            self._by_run[run["run_id"]] = message
+        message = self._by_run.get(run.get("run_id"))
+        return {**run, "error": message} if message else run
+
+
+class _SyncRunsProxy:
+    """Wraps a sync ``RunsClient``: injects config into ``create`` and adds
+    the failure reason to failed runs returned by ``get``."""
+
+    def __init__(
+        self,
+        real: Any,
+        folders: dict[str, str] | None = None,
+        threads: Any = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_folders", folders)
+        object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     def create(self, **kwargs: Any) -> Any:
-        return self._real.create(**_merge_runs_config_kwargs(kwargs))
+        return self._real.create(**_merge_runs_config_kwargs(kwargs, self._folders))
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        run = self._real.get(*args, **kwargs)
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
+            try:
+                thread = self._threads.get(run["thread_id"])
+            except Exception:
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _AsyncRunsProxy:
-    """Wraps an async ``RunsClient`` and injects config into ``create`` only."""
+    """Wraps an async ``RunsClient``: injects config into ``create`` and adds
+    the failure reason to failed runs returned by ``get``."""
 
-    def __init__(self, real: Any) -> None:
+    def __init__(
+        self,
+        real: Any,
+        folders: dict[str, str] | None = None,
+        threads: Any = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_folders", folders)
+        object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     async def create(self, **kwargs: Any) -> Any:
-        return await self._real.create(**_merge_runs_config_kwargs(kwargs))
+        return await self._real.create(
+            **_merge_runs_config_kwargs(kwargs, self._folders)
+        )
+
+    async def get(self, *args: Any, **kwargs: Any) -> Any:
+        run = await self._real.get(*args, **kwargs)
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
+            try:
+                thread = await self._threads.get(run["thread_id"])
+            except Exception:
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _ClientProxy:
@@ -1234,10 +1326,21 @@ class _ClientProxy:
     sync/async and instantiating a new ``_RunsProxy`` per attribute access.
     """
 
-    def __init__(self, real: Any, *, is_async: bool) -> None:
+    def __init__(
+        self,
+        real: Any,
+        *,
+        is_async: bool,
+        folders: dict[str, str] | None = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         runs_proxy_cls = _AsyncRunsProxy if is_async else _SyncRunsProxy
         object.__setattr__(self, "_real", real)
-        object.__setattr__(self, "_runs_proxy", runs_proxy_cls(real.runs))
+        object.__setattr__(
+            self,
+            "_runs_proxy",
+            runs_proxy_cls(real.runs, folders, real.threads, errors),
+        )
 
     def __getattr__(self, name: str) -> Any:
         if name == "runs":
@@ -1246,16 +1349,32 @@ class _ClientProxy:
 
 
 class _ClientCacheProxy:
-    """Proxy a ``_ClientCache`` so callers receive config-injecting clients."""
+    """Proxy a ``_ClientCache`` so callers receive config-injecting clients.
 
-    def __init__(self, real: Any) -> None:
+    ``folders`` (``SessionDirs.metadata()`` of the launching graph) go into the
+    ``configurable`` of every run these clients create.
+    """
+
+    def __init__(self, real: Any, folders: dict[str, str] | None = None) -> None:
         self._real = real
+        self._folders = folders
+        self._errors = _RunErrors()
 
     def get_sync(self, name: str) -> Any:
-        return _ClientProxy(self._real.get_sync(name), is_async=False)
+        return _ClientProxy(
+            self._real.get_sync(name),
+            is_async=False,
+            folders=self._folders,
+            errors=self._errors,
+        )
 
     def get_async(self, name: str) -> Any:
-        return _ClientProxy(self._real.get_async(name), is_async=True)
+        return _ClientProxy(
+            self._real.get_async(name),
+            is_async=True,
+            folders=self._folders,
+            errors=self._errors,
+        )
 
 
 def _patch_deepagents_model_passthrough() -> None:

@@ -57,7 +57,12 @@ from ._constants import (
     WELCOME_SLOGANS,
     build_metadata,
 )
-from .agent import _create_run_dir, _load_agent, _shorten_path
+from .agent import (
+    _create_run_dir,
+    _load_agent,
+    _remove_unused_run_dir,
+    _shorten_path,
+)
 from .channel import (
     ChannelMessage,
     _auto_start_channel,
@@ -800,14 +805,46 @@ def cmd_interactive(
                 and kick off background agent reload. The dispatch block
                 refreshes the status bar post-execute (symmetric with
                 /compact)."""
-                _ch_mod.forget_channel_origin(state.get("thread_id"))
                 # ``--mode=run`` starts every session in a fresh run folder of
                 # the current workspace; daemon mode works in its root.
                 workspace = state["dirs"].workspace
-                state["dirs"] = SessionDirs(
+                new_dirs = SessionDirs(
                     workspace,
                     _create_run_dir(workspace, run_name) if mode == "run" else None,
                 )
+                if new_dirs != state["dirs"]:
+                    # Move the background agent server first, so the new
+                    # session's background work lands in its folder.
+                    from ..langgraph_dev.manager import WorkspaceMismatchError
+                    from .commands import _sync_background_agent_server_workspace
+
+                    try:
+                        await _sync_background_agent_server_workspace(
+                            config,
+                            dirs=new_dirs,
+                            backend=gateway_backend,
+                            status_message=(
+                                "[dim]Moving background agent server to the "
+                                "new session...[/dim]"
+                            ),
+                        )
+                    except WorkspaceMismatchError as exc:
+                        _remove_unused_run_dir(new_dirs.run_dir)
+                        raise RuntimeError(str(exc)) from exc
+                    except Exception:
+                        _channel_logger.warning(
+                            "Failed to sync background agent server to %s; "
+                            "continuing in degraded mode",
+                            new_dirs.work_dir,
+                            exc_info=True,
+                        )
+                        console.print(
+                            "[yellow]Background agent server sync failed; "
+                            "started the new session, but async subagents and "
+                            "EvoMemory workers may be unavailable.[/yellow]"
+                        )
+                _ch_mod.forget_channel_origin(state.get("thread_id"))
+                state["dirs"] = new_dirs
                 state["thread_id"] = await graph_gateway.create_thread(
                     GraphTarget(**state["dirs"].metadata())
                 )

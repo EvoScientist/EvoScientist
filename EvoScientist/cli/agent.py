@@ -50,13 +50,27 @@ def _create_run_dir(workspace: Workspace, name: str | None = None) -> Path:
               by appending ``_1``, ``_2``, etc.  Falls back to a timestamp
               if *name* is None.
     """
-    if name:
-        session_id = _deduplicate_run_name(name, workspace.runs_dir)
-    else:
-        session_id = datetime.now().strftime(RUN_NAME_FORMAT)
-    run_dir = workspace.runs_dir / session_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    base = name or datetime.now().strftime(RUN_NAME_FORMAT)
+    workspace.runs_dir.mkdir(parents=True, exist_ok=True)
+    # Never hand out a folder that exists: another session may work there
+    # (two sessions started in the same second share a timestamp).
+    while True:
+        run_dir = workspace.runs_dir / _deduplicate_run_name(base, workspace.runs_dir)
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            continue
+        return run_dir
+
+
+def _remove_unused_run_dir(run_dir: Path | None) -> None:
+    """Remove a run folder created for a session that did not start."""
+    if run_dir is None:
+        return
+    try:
+        run_dir.rmdir()
+    except OSError:
+        pass
 
 
 def _load_agent(

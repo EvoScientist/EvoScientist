@@ -706,6 +706,28 @@ def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
     )
 
 
+# How long moving the server waits for the previous session's EvoMemory work.
+_MEMORY_WAIT_BEFORE_SERVER_MOVE_SECONDS = 120.0
+
+
+def _let_memory_work_finish() -> None:
+    """Wait, bounded, for queued EvoMemory work before the server moves.
+
+    The server is pinned to one workspace and run folder until it serves
+    several; moving it stops runs in flight, such as the memory worker for
+    the previous session's last turn. Returns at once when nothing runs.
+    """
+    try:
+        from ..memory.worker_activity import wait_for_memory_pipeline_idle
+    except Exception:
+        return
+    wait_for_memory_pipeline_idle(
+        timeout_seconds=_MEMORY_WAIT_BEFORE_SERVER_MOVE_SECONDS,
+        poll_seconds=0.5,
+        output_grace_seconds=3.0,
+    )
+
+
 async def _sync_background_agent_server_workspace(
     config: Any,
     *,
@@ -731,6 +753,7 @@ async def _sync_background_agent_server_workspace(
     from ..langgraph_dev.manager import ensure_langgraph_dev
 
     with console.status(status_message, spinner="dots"):
+        await asyncio.to_thread(_let_memory_work_finish)
         await asyncio.to_thread(
             ensure_langgraph_dev,
             config,
