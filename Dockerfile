@@ -47,6 +47,10 @@ RUN groupadd --gid ${GID} evosci \
     && useradd  --uid ${UID} --gid ${GID} --create-home --shell /bin/bash evosci
 
 COPY --from=builder /opt/venv /opt/venv
+# Marks /opt/venv as EvoScientist's own environment: uv builds it without pip,
+# so the agent's shell does not use it as its `python` and `EvoSci setup`
+# builds the research environment instead.
+RUN touch /opt/venv/.evoscientist-managed
 
 ENV PATH="/opt/venv/bin:/home/evosci/.evoscientist/.local/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
