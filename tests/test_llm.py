@@ -559,6 +559,86 @@ class TestThirdPartyRouting:
         assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
 
     @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_forwards_explicit_reasoning_effort(self, mock_init, monkeypatch):
+        """An explicit effort reaches Opper's compat request unchanged."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
+        assert call_kwargs["reasoning_effort"] == "low"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_omits_unconfigured_reasoning_effort(self, mock_init, monkeypatch):
+        """Opper's pools mix reasoning and non-reasoning models, so no default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        assert "reasoning_effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_anthropic_prompt_cache_enabled_by_default(
+        self, mock_init, monkeypatch
+    ):
+        """Opper takes the same top-level cache_control for Claude pool ids."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_prompt_cache_covers_route_pinned_claude(
+        self, mock_init, monkeypatch
+    ):
+        """A provider/claude-... id pins a route and is still a Claude model."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("aws/claude-sonnet-4-6-eu", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "aws/claude-sonnet-4-6-eu"
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_anthropic_prompt_cache_opt_out(self, mock_init, monkeypatch):
+        """The opt-out flag should skip caching for Opper Claude models."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", "false")
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_prompt_cache_skips_non_claude(self, mock_init, monkeypatch):
+        """Opper caching should not touch non-Claude pools."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("gpt-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
     def test_deepseek_uses_copy_safe_native_model(self, mock_init, monkeypatch):
         from EvoScientist.llm.deepseek import EvoChatDeepSeek
 
