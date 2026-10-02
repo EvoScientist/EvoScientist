@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from EvoScientist.setup import git
-from EvoScientist.setup.protocol import StageError
+from EvoScientist.setup.protocol import HEARTBEAT_INTERVAL, StageError
 
 # The env fixture pins _arch() to x64; the platform tests restore this one.
 _REAL_ARCH = git._arch
@@ -90,7 +90,9 @@ class FakeSfx:
         self.calls: list[list[str]] = []
         self.exit_code = 0
         self.leftovers: list[str] = []
-        self.hang = False
+        self.hang = False  # never finishes on its own
+        self.busy_polls = 0  # polls that report "still running" before it ends
+        self.wait_timeouts: list[float] = []
         self.extract = True
         self.closed = 0
 
@@ -106,8 +108,9 @@ class FakeSfx:
 
             def wait(self, timeout):
                 self.waited += 1
-                if sfx.hang and self.waited == 1:
-                    return None
+                sfx.wait_timeouts.append(timeout)
+                if sfx.hang or self.waited <= sfx.busy_polls:
+                    return None  # still running
                 return sfx.exit_code
 
             def close(self) -> None:
@@ -400,14 +403,39 @@ def test_sfx_exit_code_is_install_failed(env):
     assert _record(env) is None
 
 
-def test_sfx_timeout_kills_the_tree_and_is_install_failed(env):
+def test_stalled_sfx_is_stopped_and_is_install_failed(env, monkeypatch):
+    """No growth of the extraction dir for the silence limit stops the tree."""
+    monkeypatch.setattr(git, "SFX_SILENCE_LIMIT", 0)
     env["sfx"].hang = True
     with pytest.raises(StageError) as ei:
         git.ensure_git()
     assert ei.value.code == "install_failed"
+    assert "made no progress" in ei.value.message
     assert env["killed"] == [4242]
     assert env["sfx"].closed == 1  # process handle and desktop released
     assert not list(env["tools"].glob(".git-*"))
+
+
+def test_silent_sfx_emits_heartbeats_until_it_ends(env):
+    env["sfx"].busy_polls = 3
+    events: list[dict] = []
+    git.run_stage(events.append, "default")
+    unpacking = [e for e in events if e.get("message") == "Unpacking"]
+    # The first "Unpacking" line plus one heartbeat per empty poll.
+    assert len(unpacking) == 1 + 3
+    assert all(e["status"] == "running" and e["progress"] == 0.8 for e in unpacking)
+    assert set(env["sfx"].wait_timeouts[:3]) == {HEARTBEAT_INTERVAL}
+
+
+def test_tree_signature_changes_as_files_are_written(tmp_path):
+    root = tmp_path / "out"
+    assert git._tree_signature(root) == (0, 0)  # not created yet
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "f").write_bytes(b"123")
+    first = git._tree_signature(root)
+    (root / "a" / "g").write_bytes(b"45")
+    assert first == (1, 3)
+    assert git._tree_signature(root) == (2, 5)
 
 
 def test_too_little_disk_space_is_install_failed_before_download(env, monkeypatch):

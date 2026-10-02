@@ -10,9 +10,10 @@ its pinned SHA-256, the self-extractor finished its post-install step, and
 The archive is a 7-Zip self-extracting ``.exe`` that Python cannot unpack (it
 uses LZMA ``lc=8``), so the verified file is run: on a desktop that is never
 shown, because ``-y`` alone still shows a progress window and that window takes
-keyboard focus even when hidden, and under our own timeout, because the
-self-extractor waits for its post-install step without one and always exits 0.
-Success is therefore judged on disk.
+keyboard focus even when hidden; with heartbeats and a silence limit (a growing
+extraction dir counts as progress), because it prints nothing for the whole
+extraction and waits for its post-install step without a timeout of its own;
+and judged on disk, because it always exits 0.
 
 EvoScientist never edits the user's ``PATH`` or registry and never touches a
 system Git for Windows: the private Git reaches child processes only through
@@ -44,7 +45,14 @@ from ._install import (
     tools_dir,
 )
 from .download import download
-from .protocol import Emitter, StageError, StageResult, make_event
+from .protocol import (
+    Emitter,
+    StageError,
+    StageResult,
+    StepStalled,
+    make_event,
+    wait_with_heartbeat,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +79,10 @@ _ARCH = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "aarch64": "arm64"}
 
 # 2.56 x64 unpacks to about 406 MB in 9611 files, next to the 60 MB archive.
 MIN_FREE_BYTES = 600 * 1024 * 1024
-# The extraction plus post-install took 19-28 s with antivirus; a post-install
-# can hang (git-for-windows#3636).
-SFX_TIMEOUT = 600
+# Seconds without the extraction dir growing before the self-extractor is
+# stopped. Extraction plus post-install took 19-28 s with antivirus, writing
+# all the time; a post-install can hang (git-for-windows#3636).
+SFX_SILENCE_LIMIT = 300
 _PROBE_TIMEOUT = 30
 
 _VERSION_RE = re.compile(r"^git version (\S+)")
@@ -434,12 +443,41 @@ def _launch(argv: list[str]) -> _HiddenDesktopProcess:
     return _HiddenDesktopProcess(argv)
 
 
-def _run_sfx(exe: Path, out: Path) -> None:
-    """Run the verified self-extractor into ``out``, unseen and time-limited.
+def _tree_signature(root: Path) -> tuple[int, int]:
+    """(file count, total bytes) under ``root``; changes while files are written.
 
-    It parses exactly ``-y`` and ``-o<dir>``: anything after them is appended
-    to its post-install command, and a trailing backslash on the directory is
-    kept doubled, so neither is passed.
+    Files that vanish or cannot be read mid-walk are skipped: the value only
+    has to differ while the extractor makes progress.
+    """
+    files = size = 0
+    stack = [root]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                else:
+                    files += 1
+                    size += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return files, size
+
+
+def _run_sfx(exe: Path, out: Path, beat: Callable[[], None]) -> None:
+    """Run the verified self-extractor into ``out``, unseen, with heartbeats.
+
+    It prints nothing, so a growing ``out`` counts as progress: ``beat()``
+    re-emits the last ``running`` event every few seconds, and the process tree
+    is stopped after :data:`SFX_SILENCE_LIMIT` seconds without growth (this
+    also ends a hanging post-install step). It parses exactly ``-y`` and
+    ``-o<dir>``: anything after them is appended to its post-install command,
+    and a trailing backslash on the directory is kept doubled, so neither is
+    passed.
     """
     argv = [str(exe), "-y", f"-o{str(out).rstrip(os.sep)}"]
     try:
@@ -447,14 +485,21 @@ def _run_sfx(exe: Path, out: Path) -> None:
     except OSError as exc:
         raise StageError("install_failed", f"Could not run {exe.name}: {exc}") from exc
     try:
-        code = proc.wait(SFX_TIMEOUT)
-        if code is None:
+        try:
+            code = wait_with_heartbeat(
+                proc.wait,
+                beat,
+                lambda: _tree_signature(out),
+                silence_limit=SFX_SILENCE_LIMIT,
+            )
+        except StepStalled as exc:
             _kill_tree(proc.pid)
             proc.wait(30)
             raise StageError(
                 "install_failed",
-                f"{exe.name} did not finish within {SFX_TIMEOUT} s and was stopped.",
-            )
+                f"{exe.name} made no progress for {SFX_SILENCE_LIMIT} s and was "
+                "stopped.",
+            ) from exc
     except OSError as exc:
         raise StageError(
             "install_failed", f"Could not wait for {exe.name}: {exc}"
@@ -516,7 +561,7 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
 
         report(0.8, "Unpacking")
         out = tmp / "PortableGit"
-        _run_sfx(exe, out)
+        _run_sfx(exe, out, lambda: report(0.8, "Unpacking"))
         _check_post_install(out)
         try:
             if final.exists():

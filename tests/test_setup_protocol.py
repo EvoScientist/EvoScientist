@@ -15,7 +15,9 @@ from EvoScientist.setup.protocol import (
     ConsoleEmitter,
     JsonEmitter,
     StageError,
+    StepStalled,
     make_event,
+    wait_with_heartbeat,
 )
 
 _ALLOWED_FIELDS = {
@@ -397,3 +399,67 @@ def test_cli_full_run_leaves_out_stages_for_other_platforms(cli, monkeypatch):
     skipped = cli("--stage", "git", "--json")
     assert skipped.exit_code == 0
     assert json.loads(skipped.stdout)["status"] == "skipped"
+
+
+# --------------------------------------------------------------------------- #
+# Heartbeats for silent steps
+# --------------------------------------------------------------------------- #
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_wait_with_heartbeat_beats_on_each_empty_poll_and_returns_the_result():
+    results = iter([None, None, 7])
+    beats: list[int] = []
+    timeouts: list[float] = []
+
+    def poll(timeout):
+        timeouts.append(timeout)
+        return next(results)
+
+    assert (
+        wait_with_heartbeat(
+            poll, lambda: beats.append(1), lambda: 0, silence_limit=60, interval=2.5
+        )
+        == 7
+    )
+    assert len(beats) == 2
+    assert timeouts == [2.5, 2.5, 2.5]
+
+
+def test_wait_with_heartbeat_stops_after_the_silence_limit():
+    clock = _FakeClock()
+
+    def poll(timeout):
+        clock.now += timeout
+        return None
+
+    with pytest.raises(StepStalled):
+        wait_with_heartbeat(
+            poll, lambda: None, lambda: "same", silence_limit=12, clock=clock
+        )
+    # 5 s slices: stalled at the first check at or past 12 s, heartbeats included.
+    assert clock.now == 15
+
+
+def test_wait_with_heartbeat_activity_resets_the_silence_limit():
+    clock = _FakeClock()
+    signature = iter(range(100))
+    polls = iter([None] * 10 + [0])
+
+    def poll(timeout):
+        clock.now += timeout
+        return next(polls)
+
+    # Growing activity on every check: 50 s of polls never hit the 12 s limit.
+    assert (
+        wait_with_heartbeat(
+            poll, lambda: None, lambda: next(signature), silence_limit=12, clock=clock
+        )
+        == 0
+    )
+    assert clock.now == 55
