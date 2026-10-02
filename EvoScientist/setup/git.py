@@ -52,17 +52,15 @@ GIT_TAG = "v2.56.0.windows.1"
 GIT_VERSION = "2.56.0.windows.1"
 
 # Asset names are pinned in full: first builds drop the ".1" from them.
-# Values: (asset, SHA-256, the architecture's internal prefix directory).
+# Values: (asset, SHA-256).
 ASSETS = {
     "x64": (
         "PortableGit-2.56.0-64-bit.7z.exe",
         "eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1",
-        "ucrt64",
     ),
     "arm64": (
         "PortableGit-2.56.0-arm64.7z.exe",
         "edd9bd32aefa5d2bd4b938c38c18ceca306a7f6b29a6951cd6a4bb16d9d28d8f",
-        "clangarm64",
     ),
 }
 
@@ -109,9 +107,11 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
     """Run a probe without a console window; None if it could not run or failed.
 
     ``GIT_EXEC_PATH`` is dropped so ``git --exec-path`` reports the binary's own
-    install, not an inherited override.
+    install, not an inherited override. A failure is logged at INFO with its
+    reason, so "why was my Git for Windows not used?" has an answer.
     """
     env = {k: v for k, v in os.environ.items() if k.upper() != "GIT_EXEC_PATH"}
+    command = " ".join(argv)
     try:
         result = subprocess.run(
             argv,
@@ -121,9 +121,20 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
             env=env,
             creationflags=_no_window(),
         )
-    except (OSError, subprocess.SubprocessError):
+    except subprocess.TimeoutExpired:
+        logger.info(f"{command} did not finish within {_PROBE_TIMEOUT} s")
         return None
-    return result if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.info(f"{command} could not run: {exc}")
+        return None
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip().splitlines()
+        logger.info(
+            f"{command} exited with code {result.returncode}"
+            + (f": {stderr[0]}" if stderr else "")
+        )
+        return None
+    return result
 
 
 def _git_version(git: Path) -> str | None:
@@ -188,11 +199,19 @@ def _system_git() -> GitInfo | None:
         return None
     version = _git_version(Path(found))
     if version is None:
+        logger.info(f"Not using {found}: not a Git for Windows build")
         return None
     install = _root_from_exec_path(Path(found))
     if install is None or is_under(install, root):
+        logger.info(f"Not using {found}: no Git for Windows install found from it")
         return None
-    return _probe_root(install, "system", version)
+    info = _probe_root(install, "system", version)
+    if info is None:
+        logger.info(
+            f"Not using {found}: {install} has no cmd\\git.exe or no working "
+            "bin\\bash.exe"
+        )
+    return info
 
 
 # --------------------------------------------------------------------------- #
@@ -452,7 +471,7 @@ def _check_post_install(out: Path) -> None:
 
 
 def _install(mirror: str, report: ProgressFn) -> GitInfo:
-    asset, sha256, _prefix = ASSETS[_arch()]
+    asset, sha256 = ASSETS[_arch()]
     root = tools_dir()
     free = shutil.disk_usage(root).free
     if free < MIN_FREE_BYTES:
@@ -526,17 +545,21 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
     """
     report = progress or (lambda _f, _m: None)
     root = tools_dir()
+    from filelock import FileLock
+
     try:
         system = _system_git()
         if system is not None:
-            _write_record(system)
+            root.mkdir(parents=True, exist_ok=True)
+            # Under the lock: a concurrent setup (CLI and desktop app) writes
+            # the same record.
+            with FileLock(str(root / "git.lock")):
+                _write_record(system)
             return system
 
         recorded = _recorded_portablegit()
         if recorded is not None:
             return recorded
-
-        from filelock import FileLock
 
         root.mkdir(parents=True, exist_ok=True)
         with FileLock(str(root / "git.lock")):
@@ -563,6 +586,11 @@ def activate_runtime() -> Path | None:
     suggests: ``usr\\bin`` would shadow Windows commands such as ``find`` and
     ``sort`` for the agent's ``cmd.exe`` shell. Reads ``tools/git.json`` only
     (no subprocess). Returns the directory put on PATH, or None.
+
+    A Git for Windows installed after PortableGit was recorded therefore stays
+    behind it until the next ``EvoSci setup``, which picks the system Git and
+    records it instead (the same trade-off as the private Node: checking for a
+    system Git here would add a subprocess to every start).
     """
     if sys.platform != "win32":
         return None

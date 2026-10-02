@@ -85,7 +85,7 @@ class FakeSfx:
     self-extractor."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], dict]] = []
+        self.calls: list[list[str]] = []
         self.exit_code = 0
         self.leftovers: list[str] = []
         self.hang = False
@@ -93,7 +93,7 @@ class FakeSfx:
         self.closed = 0
 
     def __call__(self, argv):
-        self.calls.append((argv, {}))
+        self.calls.append(argv)
         sfx = self
 
         class Proc:
@@ -133,7 +133,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "DATA_DIR", data)
     monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
     monkeypatch.setattr(git, "_arch", lambda: "x64")
-    monkeypatch.setitem(git.ASSETS, "x64", (ASSET, PINNED, "ucrt64"))
+    monkeypatch.setitem(git.ASSETS, "x64", (ASSET, PINNED))
     net = FakeNet()
     monkeypatch.setattr(git, "download", net.download)
     run = FakeRun(tools)
@@ -199,10 +199,13 @@ def test_system_git_for_windows_is_used_without_download(env, monkeypatch):
     }
 
 
-def test_system_git_without_bash_leads_to_portablegit(env, monkeypatch):
-    _system_git(env, monkeypatch, bash=False)
-    assert git.ensure_git().source == "portablegit"
+def test_system_git_without_bash_leads_to_portablegit(env, monkeypatch, caplog):
+    root = _system_git(env, monkeypatch, bash=False)
+    with caplog.at_level("INFO", logger=git.__name__):
+        assert git.ensure_git().source == "portablegit"
     assert env["net"].urls
+    # Says why the system Git was not used, before 60 MB are downloaded.
+    assert f"{root} has no cmd\\git.exe or no working bin\\bash.exe" in caplog.text
 
 
 def test_no_git_leads_to_portablegit(env):
@@ -211,10 +214,59 @@ def test_no_git_leads_to_portablegit(env):
     assert info.git == env["tools"] / f"git-{git.GIT_VERSION}" / "cmd" / "git.exe"
 
 
-def test_non_windows_git_does_not_count(env, monkeypatch):
+def test_non_windows_git_does_not_count(env, monkeypatch, caplog):
     """MSYS2's and Cygwin's own git report no .windows.N."""
     _system_git(env, monkeypatch, version="git version 2.56.0\n")
-    assert git.ensure_git().source == "portablegit"
+    with caplog.at_level("INFO", logger=git.__name__):
+        assert git.ensure_git().source == "portablegit"
+    assert "not a Git for Windows build" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (subprocess.TimeoutExpired("git", 30), "did not finish within 30 s"),
+        (OSError(13, "Access is denied"), "could not run: [Errno 13] Access is denied"),
+        (
+            subprocess.CompletedProcess([], 128, "", "fatal: broken\nmore\n"),
+            "exited with code 128: fatal: broken",
+        ),
+    ],
+)
+def test_failed_probe_logs_why(monkeypatch, caplog, outcome, expected):
+    def fake(argv, **kwargs):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(git.subprocess, "run", fake)
+    with caplog.at_level("INFO", logger=git.__name__):
+        assert git._run(["C:/Git/cmd/git.exe", "--version"]) is None
+    assert f"C:/Git/cmd/git.exe --version {expected}" in caplog.text
+
+
+def test_system_record_is_written_under_the_install_lock(env, monkeypatch):
+    _system_git(env, monkeypatch)
+    held: list[bool] = []
+    real_write = git._write_record
+
+    def write(info):
+        from filelock import FileLock, Timeout
+
+        # A second lock on the same file cannot be taken while ensure_git holds it.
+        other = FileLock(str(env["tools"] / "git.lock"), timeout=0)
+        try:
+            other.acquire()
+        except Timeout:
+            held.append(True)
+        else:
+            other.release()
+            held.append(False)
+        real_write(info)
+
+    monkeypatch.setattr(git, "_write_record", write)
+    git.ensure_git()
+    assert held == [True]
 
 
 def test_shim_on_path_resolves_the_real_install(env, monkeypatch):
@@ -266,7 +318,7 @@ def test_download_and_sfx_switches(env):
     assert env["net"].urls == [
         f"{git.SOURCES['default']}/{git.GIT_TAG}/{ASSET}",
     ]
-    ((argv, _kwargs),) = env["sfx"].calls
+    (argv,) = env["sfx"].calls
     assert Path(argv[0]).name == ASSET  # renamed to .exe only after the check
     assert argv[1] == "-y"
     assert argv[2].startswith("-o")
@@ -352,6 +404,7 @@ def test_sfx_timeout_kills_the_tree_and_is_install_failed(env):
         git.ensure_git()
     assert ei.value.code == "install_failed"
     assert env["killed"] == [4242]
+    assert env["sfx"].closed == 1  # process handle and desktop released
     assert not list(env["tools"].glob(".git-*"))
 
 
