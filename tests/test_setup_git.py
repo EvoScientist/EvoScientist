@@ -81,7 +81,8 @@ class FakeNet:
 
 
 class FakeSfx:
-    """Stands in for ``subprocess.Popen`` of the self-extractor."""
+    """Stands in for ``git._launch`` (the hidden-desktop process) of the
+    self-extractor."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[str], dict]] = []
@@ -89,9 +90,10 @@ class FakeSfx:
         self.leftovers: list[str] = []
         self.hang = False
         self.extract = True
+        self.closed = 0
 
-    def __call__(self, argv, **kwargs):
-        self.calls.append((argv, kwargs))
+    def __call__(self, argv):
+        self.calls.append((argv, {}))
         sfx = self
 
         class Proc:
@@ -100,11 +102,14 @@ class FakeSfx:
             def __init__(self) -> None:
                 self.waited = 0
 
-            def wait(self, timeout=None):
+            def wait(self, timeout):
                 self.waited += 1
                 if sfx.hang and self.waited == 1:
-                    raise subprocess.TimeoutExpired(argv, timeout)
+                    return None
                 return sfx.exit_code
+
+            def close(self) -> None:
+                sfx.closed += 1
 
         if self.extract:
             out = Path(argv[2][2:])
@@ -134,7 +139,7 @@ def env(tmp_path, monkeypatch):
     run = FakeRun(tools)
     monkeypatch.setattr(git, "_run", run)
     sfx = FakeSfx()
-    monkeypatch.setattr(git.subprocess, "Popen", sfx)
+    monkeypatch.setattr(git, "_launch", sfx)
     killed: list[int] = []
     monkeypatch.setattr(git, "_kill_tree", killed.append)
     # The real check would read the test host's free space.
@@ -278,13 +283,36 @@ def test_cn_mirror_downloads_from_npmmirror(env):
     ]
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="STARTUPINFO is Windows-only")
-def test_sfx_starts_hidden(env):
-    git.ensure_git()
-    ((_argv, kwargs),) = env["sfx"].calls
-    assert kwargs["startupinfo"].wShowWindow == 0
-    assert kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW
-    assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+def test_sfx_process_is_always_closed(env):
+    env["sfx"].exit_code = 1
+    with pytest.raises(StageError):
+        git.ensure_git()
+    assert env["sfx"].closed == 1
+
+
+_windows_only = pytest.mark.skipif(
+    sys.platform != "win32", reason="the hidden desktop is a Windows API"
+)
+
+
+@_windows_only
+def test_hidden_desktop_process_reports_the_exit_code():
+    proc = git._HiddenDesktopProcess(["cmd.exe", "/c", "exit 3"])
+    try:
+        assert proc.wait(30) == 3
+    finally:
+        proc.close()
+
+
+@_windows_only
+def test_hidden_desktop_process_wait_times_out_and_can_be_killed():
+    proc = git._HiddenDesktopProcess(["ping.exe", "-n", "30", "127.0.0.1"])
+    try:
+        assert proc.wait(0.5) is None
+        git._kill_tree(proc.pid)
+        assert proc.wait(10) is not None
+    finally:
+        proc.close()
 
 
 def test_checksum_mismatch_deletes_the_file_without_running_it(env):

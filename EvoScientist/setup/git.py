@@ -8,8 +8,9 @@ its pinned SHA-256, the self-extractor finished its post-install step, and
 ``git --version`` and ``bash --version`` ran.
 
 The archive is a 7-Zip self-extracting ``.exe`` that Python cannot unpack (it
-uses LZMA ``lc=8``), so the verified file is run: hidden, because ``-y`` alone
-still shows a progress window, and under our own timeout, because the
+uses LZMA ``lc=8``), so the verified file is run: on a desktop that is never
+shown, because ``-y`` alone still shows a progress window and that window takes
+keyboard focus even when hidden, and under our own timeout, because the
 self-extractor waits for its post-install step without one and always exits 0.
 Success is therefore judged on disk.
 
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -282,33 +284,156 @@ def _kill_tree(pid: int) -> None:
             pass
 
 
+class _HiddenDesktopProcess:
+    """A process started on its own desktop, which is never shown.
+
+    The self-extractor's progress dialog takes keyboard focus even when started
+    with ``SW_HIDE``, so a key typed during extraction reaches it (Esc opens its
+    "Are you sure you want to cancel?" prompt). No input reaches a desktop that
+    is never switched to, and its windows stay invisible. Children (the
+    post-install step) inherit the desktop.
+    """
+
+    def __init__(self, argv: list[str]) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.CreateDesktopW.restype = wintypes.HANDLE
+        user32.CreateDesktopW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.LPCWSTR,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.GetExitCodeProcess.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+
+        class StartupInfo(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR),
+                ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD),
+                ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD),
+                ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD),
+                ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD),
+                ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.c_void_p),
+                ("hStdInput", wintypes.HANDLE),
+                ("hStdOutput", wintypes.HANDLE),
+                ("hStdError", wintypes.HANDLE),
+            ]
+
+        class ProcessInformation(ctypes.Structure):
+            _fields_ = [
+                ("hProcess", wintypes.HANDLE),
+                ("hThread", wintypes.HANDLE),
+                ("dwProcessId", wintypes.DWORD),
+                ("dwThreadId", wintypes.DWORD),
+            ]
+
+        self._ctypes, self._wintypes = ctypes, wintypes
+        self._user32, self._kernel32 = user32, kernel32
+        name = f"evoscientist-setup-{os.getpid()}-{time.monotonic_ns()}"
+        self._desktop = user32.CreateDesktopW(name, None, None, 0, _GENERIC_ALL, None)
+        if not self._desktop:
+            raise ctypes.WinError(ctypes.get_last_error())
+        startup = StartupInfo()
+        startup.cb = ctypes.sizeof(startup)
+        startup.lpDesktop = name
+        startup.dwFlags = _STARTF_USESHOWWINDOW
+        startup.wShowWindow = _SW_HIDE
+        info = ProcessInformation()
+        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+        if not kernel32.CreateProcessW(
+            None,
+            cmdline,
+            None,
+            None,
+            False,
+            _no_window(),
+            None,
+            None,
+            ctypes.byref(startup),
+            ctypes.byref(info),
+        ):
+            error = ctypes.get_last_error()
+            user32.CloseDesktop(self._desktop)
+            raise ctypes.WinError(error)
+        kernel32.CloseHandle(info.hThread)
+        self._process = info.hProcess
+        self.pid = info.dwProcessId
+
+    def wait(self, timeout: float) -> int | None:
+        """The exit code, or None if the process still runs after ``timeout``."""
+        result = self._kernel32.WaitForSingleObject(self._process, int(timeout * 1000))
+        if result == _WAIT_TIMEOUT:
+            return None
+        if result != _WAIT_OBJECT_0:
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        code = self._wintypes.DWORD()
+        self._kernel32.GetExitCodeProcess(self._process, self._ctypes.byref(code))
+        return code.value
+
+    def close(self) -> None:
+        self._kernel32.CloseHandle(self._process)
+        self._user32.CloseDesktop(self._desktop)
+
+
+_GENERIC_ALL = 0x10000000
+_STARTF_USESHOWWINDOW = 0x1
+_SW_HIDE = 0
+_WAIT_OBJECT_0 = 0x0
+_WAIT_TIMEOUT = 0x102
+
+
+def _launch(argv: list[str]) -> _HiddenDesktopProcess:
+    return _HiddenDesktopProcess(argv)
+
+
 def _run_sfx(exe: Path, out: Path) -> None:
-    """Run the verified self-extractor into ``out``, hidden and time-limited.
+    """Run the verified self-extractor into ``out``, unseen and time-limited.
 
     It parses exactly ``-y`` and ``-o<dir>``: anything after them is appended
     to its post-install command, and a trailing backslash on the directory is
     kept doubled, so neither is passed.
     """
     argv = [str(exe), "-y", f"-o{str(out).rstrip(os.sep)}"]
-    kwargs: dict[str, Any] = {}
-    if sys.platform == "win32":
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 0  # SW_HIDE: also hides the progress window
-        kwargs = {"startupinfo": startup, "creationflags": _no_window()}
     try:
-        proc = subprocess.Popen(argv, **kwargs)
+        proc = _launch(argv)
     except OSError as exc:
         raise StageError("install_failed", f"Could not run {exe.name}: {exc}") from exc
     try:
-        code = proc.wait(timeout=SFX_TIMEOUT)
-    except subprocess.TimeoutExpired as exc:
-        _kill_tree(proc.pid)
-        proc.wait()
+        code = proc.wait(SFX_TIMEOUT)
+        if code is None:
+            _kill_tree(proc.pid)
+            proc.wait(30)
+            raise StageError(
+                "install_failed",
+                f"{exe.name} did not finish within {SFX_TIMEOUT} s and was stopped.",
+            )
+    except OSError as exc:
         raise StageError(
-            "install_failed",
-            f"{exe.name} did not finish within {SFX_TIMEOUT} s and was stopped.",
+            "install_failed", f"Could not wait for {exe.name}: {exc}"
         ) from exc
+    finally:
+        proc.close()
     if code != 0:
         raise StageError("install_failed", f"{exe.name} exited with code {code}.")
 
