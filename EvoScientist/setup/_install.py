@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -69,6 +71,26 @@ def move_into_place(src: Path, dst: Path, *, what: str) -> None:
                 "succeeded (likely a file scanner holding one of its files)."
             )
         return
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so a reader sees the old or the new content.
+
+    A temporary file with a unique name in the same directory (so concurrent
+    writers never share one), then :func:`move_into_place`, which retries a
+    Windows ``PermissionError`` for a moment (a virus scanner reading the new
+    file). A failed write removes the temporary file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        move_into_place(Path(tmp), path, what=path.name)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def remove_stale_temp_dirs(root: Path, prefix: str) -> None:

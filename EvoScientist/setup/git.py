@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from ._install import (
+    atomic_write_text,
     is_under,
     move_into_place,
     prepend_to_path,
@@ -244,10 +245,8 @@ def _read_record() -> dict[str, str] | None:
 
 
 def _write_record(info: GitInfo) -> None:
-    record = _record_path()
-    record.parent.mkdir(parents=True, exist_ok=True)
-    tmp = record.with_name(record.name + ".tmp")
-    tmp.write_text(
+    atomic_write_text(
+        _record_path(),
         json.dumps(
             {
                 "version": info.version,
@@ -256,9 +255,7 @@ def _write_record(info: GitInfo) -> None:
                 "source": info.source,
             }
         ),
-        encoding="utf-8",
     )
-    os.replace(tmp, record)
 
 
 def _recorded_portablegit() -> GitInfo | None:
