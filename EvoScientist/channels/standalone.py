@@ -1,0 +1,255 @@
+"""Shared standalone runner for channel servers.
+
+Provides the channel-agnostic agent loop that any channel can use to
+run headless — consuming inbound messages from the bus, streaming
+agent events, and dispatching outbound replies.
+
+Usage from a channel's ``main()``::
+
+    from EvoScientist.channels.standalone import run_standalone
+
+    channel = SomeChannel(config)
+    bus = MessageBus()
+    run_standalone(channel, bus, use_agent=True, send_thinking=True)
+"""
+
+import asyncio
+import logging
+import signal
+from typing import Any
+
+from .base import Channel
+from .bus import MessageBus
+from .bus.events import OutboundMessage
+from .consumer import InboundConsumer
+from .debug import emit_debug_event
+
+logger = logging.getLogger(__name__)
+
+
+async def _create_standalone_agent():
+    """Construct the synchronous agent without blocking the channel loop."""
+    from ..EvoScientist import create_cli_agent
+
+    return await asyncio.to_thread(create_cli_agent)
+
+
+def _channel_trace_enabled(channel: Channel) -> bool:
+    """Check if debug tracing is enabled on the channel."""
+    try:
+        return channel.is_debug_trace_enabled()
+    except Exception:
+        return False
+
+
+async def _deliver_outbound(channel: Channel, msg: OutboundMessage) -> None:
+    """Deliver an outbound message, including any media attachments."""
+    if msg.content:
+        sent = await channel.send(msg)
+        if not sent:
+            raise RuntimeError("send() returned False")
+    for media_path in msg.media:
+        media_ok = await channel.send_media(
+            recipient=msg.chat_id,
+            file_path=media_path,
+            metadata=msg.metadata,
+        )
+        if not media_ok:
+            raise RuntimeError(f"send_media() returned False for {media_path}")
+
+
+async def standalone_outbound_dispatcher(
+    bus: MessageBus,
+    channel: Channel,
+) -> None:
+    """Consume outbound messages from the bus and send via channel."""
+    while True:
+        try:
+            msg: OutboundMessage = await asyncio.wait_for(
+                bus.consume_outbound(),
+                timeout=1.0,
+            )
+        except TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            break
+
+        try:
+            await _deliver_outbound(channel, msg)
+        except Exception as e:
+            emit_debug_event(
+                logger,
+                "standalone_dispatch_error",
+                channel=channel.name,
+                enabled=_channel_trace_enabled(channel),
+                recipient=msg.recipient,
+                error=str(e),
+            )
+            logger.error(f"Error sending outbound: {e}")
+
+
+async def _async_main(
+    channel: Channel,
+    bus: MessageBus,
+    use_agent: bool,
+    send_thinking: bool,
+    config: Any = None,
+    backend: str | None = None,
+) -> None:
+    """Async entry point — gather channel, dispatcher and optional consumer."""
+    from .channel_manager import ChannelManager
+
+    channel.set_bus(bus)
+    if send_thinking:
+        channel.send_thinking = True
+
+    # Create a lightweight manager for the consumer to use
+    manager = ChannelManager(bus)
+    manager._channels[channel.name] = channel
+
+    await manager.start_health()
+
+    tasks = [channel.run()]
+
+    dispatcher = standalone_outbound_dispatcher(bus, channel)
+    tasks.append(dispatcher)
+
+    consumer: InboundConsumer | None = None
+    if use_agent:
+        logger.info("Loading EvoScientist agent...")
+        from ..gateway import create_runtime_gateways_for_config
+
+        # Agent construction performs synchronous MCP discovery through the
+        # owned-runtime bridge.  Keep it off this already-running channel loop
+        # (and avoid blocking channel health/startup work while it loads).
+        agent = await _create_standalone_agent()
+        runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
+        logger.info("Agent loaded")
+
+        consumer = InboundConsumer(
+            bus=bus,
+            manager=manager,
+            agent=agent,
+            thread_id="",
+            graph_gateway=runtime_gateways.graph_gateway,
+            send_thinking=send_thinking,
+        )
+        manager.register_health_provider("consumer", lambda: consumer.metrics)
+        tasks.append(consumer.run())
+        if send_thinking:
+            logger.info("Thinking messages enabled")
+
+    async def _graceful_shutdown() -> None:
+        """Graceful shutdown: drain consumer, flush outbound, stop channel."""
+        logger.info("Graceful shutdown initiated...")
+        if consumer is not None:
+            await consumer.stop()
+        # Drain outbound queue before stopping the channel
+        drained = 0
+        while True:
+            try:
+                msg = bus.outbound.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
+                if msg.content or msg.media:
+                    drained += 1
+            except Exception:
+                pass
+        if drained:
+            logger.info(f"Outbound drain: {drained} sent")
+        channel._running = False
+        await channel.stop()
+        await manager.stop_health()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(
+            sig,
+            lambda s=sig: asyncio.create_task(_graceful_shutdown()),
+        )
+
+    await asyncio.gather(*tasks)
+
+
+def _ensure_standalone_dev_server(config: Any, *, backend: str | None = None) -> None:
+    """Spawn the langgraph dev server for a server-backed standalone runner.
+
+    Spawns the same dev server serve uses so a headless channel running on the
+    ``langgraph_server`` gateway backend has a live dev server for execution,
+    async sub-agents, and memory workers — the one production surface that never
+    spawned it before. On the default ``local`` backend this is a no-op, keeping
+    headless channels byte-identical to prior behavior. Runs headless: no
+    console/typer UI, progress goes to the log.
+
+    Called synchronously before the asyncio loop starts (like serve), so the
+    cold-start poll never blocks the channel event loop. Unlike serve, there is
+    no console to render serve's red mismatch banner + ``typer.Exit``: a
+    workspace/deploy-mode mismatch from :func:`ensure_langgraph_dev` is logged as
+    a single error line and re-raised to abort startup; a generic start failure
+    does not raise here — ``ensure_langgraph_dev`` leaves the dev server
+    unavailable, and ``create_runtime_gateways_for_config`` then falls back to the
+    in-process gateway for the run. serve's autoskill-schedule reconciliation and
+    config-drift hint are intentionally not mirrored here (no console, and
+    channels do not reconcile schedules).
+    """
+    if backend != "langgraph_server":
+        return
+
+    import os
+
+    from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
+    from ..paths import ensure_dirs, set_workspace_root
+
+    ws = (
+        os.path.abspath(os.path.expanduser(config.default_workdir))
+        if config.default_workdir
+        else os.getcwd()
+    )
+    os.makedirs(ws, exist_ok=True)
+    set_workspace_root(ws)
+    ensure_dirs()
+    logger.info("Starting background agent server (langgraph dev)...")
+    try:
+        ensure_langgraph_dev(config, workspace_dir=ws, backend=backend)
+    except WorkspaceMismatchError as exc:
+        logger.error("Cannot start server-backed standalone channel: %s", exc)
+        raise
+
+
+def run_standalone(
+    channel: Channel,
+    bus: MessageBus,
+    *,
+    use_agent: bool = False,
+    send_thinking: bool = False,
+) -> None:
+    """Synchronous entry point that spins up the standalone runner.
+
+    Parameters
+    ----------
+    channel:
+        A fully-configured :class:`Channel` instance.
+    bus:
+        The :class:`MessageBus` shared with *channel*.
+    use_agent:
+        When ``True``, load the EvoScientist agent and process inbound
+        messages through it.
+    send_thinking:
+        When ``True`` **and** *use_agent* is set, forward intermediate
+        thinking messages to the channel.
+    """
+    config = None
+    backend = None
+    if use_agent:
+        from ..config import (
+            GatewaySurface,
+            get_effective_config,
+            resolve_gateway_backend,
+        )
+
+        config = get_effective_config()
+        backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
+        _ensure_standalone_dev_server(config, backend=backend)
+    asyncio.run(_async_main(channel, bus, use_agent, send_thinking, config, backend))

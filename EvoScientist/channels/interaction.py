@@ -1,0 +1,755 @@
+"""Transport-agnostic HITL and ask_user interaction engine.
+
+The module defines the channel-side protocol shared by serve mode and the
+CLI/TUI bridge: prompt formatting, reply grammar, stop handling, approval
+policy, pending-reply routing, and the async engine coroutines for approval
+and ask_user flows. Drivers provide transport-specific IO through
+:class:`InteractionIO`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from .capabilities import ChannelCapabilities
+
+# ── timeout constants ──────────────────────────────────────────────────
+# Per-flow defaults.  HITL approval is short (a yes/no gate); ask_user is
+# longer because the human may need thinking time.
+HITL_APPROVAL_TIMEOUT = 120.0  # seconds to wait for a HITL approval reply
+ASK_USER_TIMEOUT = 300.0  # seconds to wait for an ask_user reply
+
+# ── stop-command grammar ──────────────────────────────────────────
+# Checked before reply parsing in *both* flows so a `/stop` mid-prompt
+# always cancels instead of being captured as a literal answer.
+_STOP_COMMANDS = frozenset(("/stop", "/cancel"))
+
+# ── feedback strings ─────────────────────────────────────────
+# Visible confirmations so a click/reply registers on channels without a
+# message-recall API (e.g. QQ C2C).
+APPROVED_FEEDBACK = "✅ Approved"
+APPROVED_AUTO_FEEDBACK = "✅ Approved (auto-approving future actions)"
+REJECTED_FEEDBACK = "❌ Rejected"
+UNRECOGNIZED_FEEDBACK = "Unrecognized reply. Action rejected."
+APPROVAL_TIMEOUT_FEEDBACK = "⏰ Approval timed out. Action rejected."
+ASK_USER_TIMEOUT_FEEDBACK = "⏰ Response timed out."
+OTHER_PROMPT = "Please type your answer:"
+
+# ── stop / cancel helpers ──────────────────────────────────────────────
+
+
+def is_slash_command(text: str | None) -> bool:
+    """Whether inbound content is a slash command (a control message, not a
+    prompt fragment)."""
+    return (text or "").lstrip().startswith("/")
+
+
+def is_stop_command(content: str | None) -> bool:
+    """Whether incoming content is a stop/cancel slash command."""
+    return (content or "").strip().lower() in _STOP_COMMANDS
+
+
+def is_cancel_reply(content: str | None) -> bool:
+    """Whether a reply is the literal ``cancel`` sentinel (case-insensitive)."""
+    return (content or "").strip().lower() == "cancel"
+
+
+# ── approval reply grammar ─────────────────────────────────────────────
+
+
+def parse_approval_reply(text: str) -> str | None:
+    """Parse a channel user's reply as an approval decision.
+
+    Returns "approve", "reject", "auto", or None if not recognized.
+    """
+    t = text.strip().lower()
+    if t in ("1", "y", "yes", "approve", "ok"):
+        return "approve"
+    if t in ("2", "n", "no", "reject"):
+        return "reject"
+    if t in ("3", "a", "auto", "approve all"):
+        return "auto"
+    return None
+
+
+def approve_decisions(action_requests: list) -> list[dict]:
+    """Build the ``decisions`` payload that approves every action request.
+
+    Length matches ``action_requests`` (with a floor of 1, matching the
+    consumer's historical ``len(...) or 1`` so an empty request list still
+    yields a single approve — the shape ``Command(resume=...)`` expects).
+    """
+    n = len(action_requests) or 1
+    return [{"type": "approve"} for _ in range(n)]
+
+
+def config_policy_snapshot(
+    action_requests: list[dict],
+) -> tuple[list[dict] | None, dict[int, dict]]:
+    """One config load → ``(decisions, rejections)`` for an approval operation.
+
+    The single evaluation point of the config policy: one ``_ensure_config()``
+    produces both views an approval operation needs, so the policy verdicts
+    the operation acts on are immutable for its whole duration — prompt,
+    human wait, and reply. Re-loading config after the human replies would
+    let a mid-wait ``auto_approve`` toggle flip a prompt-time REJECT into a
+    PROMPT (no rejection), so a blanket approval would run the refused
+    command (CWE-367 time-of-check/time-of-use).
+
+    Returns ``(decisions, rejections)``:
+
+    * ``decisions`` — the full per-request list when config clears every
+      request, ``None`` when any request needs a human (the caller prompts).
+      Same contract as :func:`resolve_config_decisions`, which is this
+      snapshot's collapsed view. Empty requests yield ``([], {})``: a
+      one-per-request decisions list would break ``HumanInTheLoopMiddleware``,
+      which requires the counts to match.
+    * ``rejections`` — per-index REJECT decisions (with their reasons),
+      preserved even when the list collapses to ``None``: a batch that
+      mixes a REJECT with a prompt-needed request still reports the REJECT
+      here. The reply branches after a human approval consume these — see
+      :func:`decisions_after_human_approval`.
+
+    Config-load errors return ``(None, {})``: the auto path fails closed
+    (the human is prompted), and the reply path fails open (when the policy
+    cannot speak, the human's interactive approval stands).
+    """
+    try:
+        from ..EvoScientist import _ensure_config
+
+        # Session-effective config, not the file: --auto-approve / --dangerous
+        # and EVOSCIENTIST_* overrides live here (the same object
+        # ``hitl_suppressed_for_run`` reads); the graph is armed on the runs that
+        # reach this resolver, so this snapshot is the only gate for them.
+        cfg = _ensure_config()
+    except Exception:
+        return None, {}
+
+    shell_allow_list = (
+        [s.strip() for s in cfg.shell_allow_list.split(",") if s.strip()]
+        if cfg.shell_allow_list
+        else []
+    )
+
+    decisions: list[dict] = []
+    rejections: dict[int, dict] = {}
+    needs_human = False
+    for i, req in enumerate(action_requests):
+        decision = _resolve_one_action_request(req, cfg, shell_allow_list)
+        if decision is None:
+            # Keep scanning: REJECTs later in a mixed batch must survive the
+            # collapse to None (the reply branches consume them).
+            needs_human = True
+            continue
+        decisions.append(decision)
+        if decision.get("type") == "reject":
+            rejections[i] = decision
+    if needs_human:
+        return None, rejections
+    return decisions, rejections
+
+
+def decisions_after_human_approval(
+    action_requests: list[dict], policy_rejections: dict[int, dict]
+) -> list[dict]:
+    """Decisions to resume with after a human chose "approve"/"approve all".
+
+    An interactive approval must not override the config policy's REJECTs:
+    when a mixed batch reaches the prompt (a policy-rejected dangerous
+    command plus a request that needed a human), approving the batch keeps
+    the rejection — with its reason, so the model still gets the actionable
+    refusal feedback — and approves only the rest. Without this, a single
+    blanket "1" would run the dangerous command the policy just refused.
+
+    *policy_rejections* are the per-index REJECT decisions from the
+    prompt-time :func:`config_policy_snapshot` — the same single config
+    load that decided to prompt. The function is pure (no config IO), so a
+    config toggle while the human was deciding cannot change what the
+    approval operation does with the reply.
+
+    Requests the policy does not REJECT (approve, prompt — the human just
+    decided those — or no verdict) are approved. The session-grant fast-path
+    in :meth:`ApprovalPolicy.decision_snapshot` never prompts, so an
+    explicit "Approve all" grant keeps its blanket semantics and does not
+    come through here.
+    """
+    if not policy_rejections:
+        return approve_decisions(action_requests)
+    return [
+        policy_rejections.get(i, {"type": "approve"})
+        for i in range(len(action_requests))
+    ]
+
+
+# ── approval prompt formatting ─────────────────────────────────────────
+
+
+def format_approval_prompt(
+    action_requests: list[dict], *, with_buttons: bool = False
+) -> str:
+    """Format an approval prompt as a text message for channel users.
+
+    When *with_buttons* is True, the trailing "Reply: 1=Approve..."
+    instruction is dropped — the buttons replace the textual cue.
+    """
+    lines = ["⚠️ Approval Required\n"]
+    for i, req in enumerate(action_requests, 1):
+        name = req.get("name", "")
+        args = req.get("args", {})
+        if isinstance(args, dict):
+            # deepagents 0.7.0's `delete` tool uses `file_path`, not
+            # `command`/`path` — without this fallback the prompt shows
+            # only "delete" with no target.
+            command = args.get("command", args.get("path", args.get("file_path", "")))
+        else:
+            command = ""
+        if command:
+            lines.append(f"  {i}. {name}: {command}")
+        else:
+            lines.append(f"  {i}. {name}")
+    if not with_buttons:
+        lines.append("")
+        lines.append("Reply: 1=Approve, 2=Reject, 3=Approve all")
+        lines.append("(Auto-reject in 2 min if no reply)")
+    return "\n".join(lines)
+
+
+def approval_prompt_metadata(base_metadata: dict | None, *, with_buttons: bool) -> dict:
+    """Outbound metadata for the HITL approval prompt.
+
+    When *with_buttons* is True, attaches Approve/Reject/Auto buttons whose
+    values match ``parse_approval_reply`` so a click flows through the same
+    path as a typed ``"1"``/``"2"``/``"3"`` reply.
+    """
+    metadata = dict(base_metadata or {})
+    if with_buttons:
+        metadata["buttons"] = [
+            {"text": "Approve", "value": "1", "type": "primary"},
+            {"text": "Reject", "value": "2", "type": "danger"},
+            {"text": "Approve all", "value": "3"},
+        ]
+    return metadata
+
+
+# ── ask_user question formatting & answer grammar ──────────────────────
+
+
+def _choice_value(choice: object, fallback: str = "") -> str:
+    """Normalize one ask_user choice to its display/answer string.
+
+    Choices arrive from model-produced tool args; the schema says dicts with
+    a ``value`` key, but nothing enforces that at runtime, so plain strings
+    (or anything else) must not crash the prompt.
+    """
+    if isinstance(choice, dict):
+        return str(choice.get("value", fallback or choice))
+    return str(choice)
+
+
+def format_question_prompt(question: dict, index: int, total: int) -> str:
+    """Format one ask_user *question* as a channel message.
+
+    *index* is 0-based; *total* is the number of questions in the batch.
+    """
+    q_text = question.get("question", "")
+    q_type = question.get("type", "text")
+    required = question.get("required", True)
+
+    if total == 1:
+        header = "❓ Quick check-in from EvoScientist\n"
+    else:
+        header = f"❓ Question {index + 1}/{total}\n"
+
+    lines: list[str] = [header, f"{index + 1}. {q_text}"]
+    if not required:
+        lines[-1] += " (optional)"
+
+    if q_type == "multiple_choice":
+        choices = question.get("choices", [])
+        for j, choice in enumerate(choices):
+            label = _choice_value(choice)
+            letter = chr(ord("A") + j)
+            lines.append(f"   {letter}. {label}")
+        other_letter = chr(ord("A") + len(choices))
+        lines.append(f"   {other_letter}. Other")
+        letters = "/".join(chr(ord("A") + k) for k in range(len(choices) + 1))
+        lines.append(f"\nReply with a letter ({letters}), or 'cancel'.")
+    else:
+        skip_hint = " Leave empty to skip." if not required else ""
+        lines.append(f"\nReply with your answer, or 'cancel'.{skip_hint}")
+    return "\n".join(lines)
+
+
+def parse_choice_answer(raw: str, choices: list) -> tuple[str, str | None]:
+    """Classify a multiple-choice reply.
+
+    Returns ``(kind, value)``:
+
+    * ``("other", None)`` — the "Other" letter was chosen; the caller must
+      run the free-form sub-flow (send :data:`OTHER_PROMPT`, wait again).
+    * ``("answer", value)`` — a resolved answer string (the chosen
+      choice's ``value``, or the raw text when it isn't a valid letter).
+    """
+    other_letter = chr(ord("A") + len(choices))
+    if len(raw) == 1 and raw.upper() == other_letter:
+        return ("other", None)
+    if len(raw) == 1 and raw.upper().isalpha():
+        idx = ord(raw.upper()) - ord("A")
+        if 0 <= idx < len(choices):
+            return ("answer", _choice_value(choices[idx], raw))
+        return ("answer", raw)
+    return ("answer", raw)
+
+
+# ── approval policy ────────────────────────────────────────────────────
+
+
+def _resolve_one_action_request(
+    req: dict, cfg: Any, shell_allow_list: list[str]
+) -> dict | None:
+    """One action request → its config decision, or ``None`` if a human must decide.
+
+    Shared per-request core of the config policy. Malformed requests fail
+    closed to ``None`` (prompt the human). Non-shell tools auto-approve.
+    Shell tools go through
+    :func:`~EvoScientist.backends.resolve_action_decision`: allow-list
+    token-boundary match, dangerous commands rejected with a reason under
+    ``auto_approve``. ``None`` covers PROMPT verdicts, always-prompt tools,
+    and malformed requests.
+    """
+    from ..config.settings import HITL_ALWAYS_PROMPT_TOOLS, HITL_SHELL_TOOLS
+
+    if not isinstance(req, dict):
+        return None
+    name = req.get("name", "")
+    if not isinstance(name, str) or not name:
+        return None
+    # dangerous_mode keeps its "trust everything" meaning: it must approve
+    # ahead of the always-prompt set, or a --dangerous session is interrupted
+    # on every delete / schedule_task while execute stays silent.
+    if cfg.dangerous_mode:
+        return {"type": "approve"}
+    if name in HITL_ALWAYS_PROMPT_TOOLS:
+        return None
+    if name not in HITL_SHELL_TOOLS:
+        return {"type": "approve"}
+    args = req.get("args", {})
+    command = args.get("command", "") if isinstance(args, dict) else ""
+    if not isinstance(command, str) or not command:
+        # Malformed shell request (missing/dict-typed/empty command):
+        # an empty string would sail through auto-approve, so fail closed
+        # to a human decision instead.
+        return None
+    from ..backends import ActionDecision, resolve_action_decision
+
+    verdict = resolve_action_decision(
+        command,
+        auto_approve=cfg.auto_approve,
+        dangerous_mode=cfg.dangerous_mode,
+        allow_list=shell_allow_list,
+    )
+    if verdict.decision is ActionDecision.APPROVE:
+        return {"type": "approve"}
+    if verdict.decision is ActionDecision.REJECT:
+        return {"type": "reject", "message": verdict.reason}
+    return None
+
+
+def resolve_config_decisions(action_requests: list[dict]) -> list[dict] | None:
+    """Resolve HITL decisions from config rules alone, or ``None`` to prompt.
+
+    Per-request policy chokepoint shared by every attended UI (CLI display, TUI):
+    non-shell tools auto-approve; shell tools go through
+    :func:`~EvoScientist.backends.resolve_action_decision` (``shell_allow_list``
+    token-boundary match, dangerous commands rejected with a reason under
+    ``auto_approve``). Returns a full ``decisions`` list when config clears every
+    request, or ``None`` when any request needs a human — the caller then prompts
+    (mounts a widget, calls ``input()``, routes to a channel). Fail-closed to
+    ``None`` on config-load errors and malformed requests. The evaluation is
+    :func:`config_policy_snapshot` (one config load); this collapsed view is
+    what the attended UIs and the channel auto-decision path
+    (:meth:`ApprovalPolicy.auto_decision`) consume, so an ``auto_approve``
+    dangerous command is a REJECT with a reason everywhere, never a silent
+    collapse to "needs a human".
+    """
+    return config_policy_snapshot(action_requests)[0]
+
+
+class ApprovalPolicy:
+    """Auto-approve policy backed by config rules and session grants.
+
+    One instance is owned per process. The consumer keeps one on its event
+    loop; the CLI bridge keeps one on the bus loop.
+    """
+
+    def __init__(self) -> None:
+        self._granted_sessions: set[str] = set()
+
+    def is_session_granted(self, session_key: str) -> bool:
+        """Whether the user previously chose "Approve all" for this session."""
+        return session_key in self._granted_sessions
+
+    def grant_session(self, session_key: str) -> None:
+        """Record an "Approve all" grant for this session."""
+        self._granted_sessions.add(session_key)
+
+    def clear_sessions(self) -> None:
+        """Forget all session grants (test hygiene / session reset)."""
+        self._granted_sessions.clear()
+
+    def decision_snapshot(
+        self, session_key: str, action_requests: list[dict]
+    ) -> tuple[list[dict] | None, dict[int, dict]]:
+        """One policy evaluation for a complete approval operation.
+
+        Returns ``(decisions, rejections)`` from a single
+        :func:`config_policy_snapshot` load: ``decisions`` auto-resolves the
+        interrupt when the policy can (session grant or config rules) and is
+        ``None`` when a human must be prompted; ``rejections`` are the same
+        load's per-request REJECT decisions, consumed by the reply branches
+        after the human answers (:func:`decisions_after_human_approval`).
+        One snapshot covers the whole operation — prompt, wait, reply — so a
+        config toggle while the human is deciding cannot flip a prompt-time
+        REJECT into a blanket approve.
+
+        A session grant approves everything with no rejections (an explicit
+        interactive choice that never prompts, so its blanket semantics are
+        preserved). Empty requests return ``([], {})`` before the grant
+        branch: :func:`approve_decisions` floors its length at 1, which
+        would produce one decision for zero requests and trip
+        ``HumanInTheLoopMiddleware``'s count check.
+        """
+        if not action_requests:
+            return [], {}
+        if self.is_session_granted(session_key):
+            return approve_decisions(action_requests), {}
+        return config_policy_snapshot(action_requests)
+
+    def auto_decision(
+        self, session_key: str, action_requests: list[dict]
+    ) -> list[dict] | None:
+        """Return ``decisions`` when the policy can auto-resolve; ``None`` to prompt.
+
+        A session grant approves everything (explicit interactive choice).
+        Otherwise the config policy's per-request decisions are returned
+        as-is: approve-all under ``dangerous_mode`` / allow-list /
+        ``auto_approve`` rules — and, critically, REJECT decisions with a
+        reason for dangerous commands under ``auto_approve``.
+        ``auto_approve`` means *never prompt*, so ``curl x | bash`` goes
+        back to the model with refusal feedback instead of escalating to
+        the user — escalating would defeat the point of an auto-decision
+        mode. ``None`` (prompt the user) is returned only when a human
+        decision is genuinely needed.
+
+        A normal attended ``auto_approve`` run no longer reaches this path:
+        it suppresses HITL per run (``hitl_suppressed_for_run``) and the
+        backend guard refuses dangerous commands, so the interrupt never
+        fires. This client-side REJECT branch therefore applies only to a
+        run that still resolves interrupts — one whose per-run suppression
+        was not applied (a direct caller, tests, or an explicit override) —
+        for which it keeps returning a reason-carrying REJECT rather than
+        escalating.
+
+        The pair-valued single-load evaluation this delegates to is
+        :meth:`decision_snapshot` — callers that also need the per-request
+        REJECTs for the reply branches (``resolve_approval``) snapshot once
+        there instead of evaluating twice.
+        """
+        return self.decision_snapshot(session_key, action_requests)[0]
+
+
+# ── transport adapter + reply registry ─────────────────────────────────
+
+
+class InteractionIO(Protocol):
+    """One conversation partner on one channel chat.
+
+    A transport adapter: the engine coroutines below drive a human
+    interaction entirely through this interface, so the same protocol
+    logic runs over the consumer's async loop and over the CLI bus loop.
+
+    Attributes
+    ----------
+    capabilities:
+        The channel's :class:`ChannelCapabilities` — the engine reads
+        ``inline_buttons`` to decide whether to attach approval buttons.
+    base_metadata:
+        The default outbound metadata for this chat (echoed back on each
+        send unless the engine supplies richer metadata, e.g. buttons).
+    """
+
+    capabilities: ChannelCapabilities
+    base_metadata: dict | None
+
+    async def send(self, content: str, *, metadata: dict | None = None) -> bool:
+        """Send *content* to the user; return True on success."""
+        ...
+
+    async def wait_reply(self, *, timeout: float) -> str | None:
+        """Wait for the user's next reply; return None on timeout."""
+        ...
+
+
+@dataclass(frozen=True)
+class PendingReply:
+    """A pending prompt reply plus optional transport-specific context."""
+
+    content: str
+    context: object | None = None
+
+
+class PendingReplyRegistry:
+    """Route "the next message from this chat" into a waiting coroutine.
+
+    One instance per process (the consumer owns one on its loop; the CLI
+    bridge owns one on the bus loop).  ``register`` / ``wait`` are used by
+    an :class:`InteractionIO` adapter to block for a reply; the inbound
+    interception point calls ``try_resolve`` to hand a message to that
+    waiter instead of enqueuing it as a fresh turn.
+
+    Asyncio-based: register/resolve must happen on the same event loop.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, asyncio.Future[PendingReply]] = {}
+
+    def register(self, session_key: str) -> asyncio.Future[PendingReply]:
+        """Create and store a future awaiting the next reply for *session_key*."""
+        loop = asyncio.get_running_loop()
+        # A stale waiter for the same chat should never linger; cancel it
+        # so its coroutine unwinds instead of hanging until timeout.
+        stale = self._pending.get(session_key)
+        if stale is not None and not stale.done():
+            stale.cancel()
+        fut: asyncio.Future[PendingReply] = loop.create_future()
+        self._pending[session_key] = fut
+        return fut
+
+    def try_resolve(
+        self,
+        session_key: str,
+        content: str,
+        *,
+        context: object | None = None,
+    ) -> bool:
+        """Deliver *content* to a pending waiter.  Returns True if consumed."""
+        fut = self._pending.get(session_key)
+        if fut is not None and not fut.done():
+            fut.set_result(PendingReply(content=content, context=context))
+            return True
+        return False
+
+    def discard(self, session_key: str) -> None:
+        """Drop any pending waiter for *session_key* (idempotent)."""
+        self._pending.pop(session_key, None)
+
+    async def wait(self, session_key: str, timeout: float) -> str | None:
+        """Register, await a reply for *timeout* seconds, then clean up.
+
+        Returns the reply text, or ``None`` on timeout / cancellation.
+        """
+        reply = await self.wait_event(session_key, timeout)
+        return reply.content if reply is not None else None
+
+    async def wait_event(self, session_key: str, timeout: float) -> PendingReply | None:
+        """Register, await a reply event, then clean up.
+
+        Returns the full reply envelope, or ``None`` on timeout / registry
+        cancellation. Cancellation of the task awaiting this method propagates.
+        """
+        fut = self.register(session_key)
+        try:
+            done, _pending = await asyncio.wait({fut}, timeout=timeout)
+            if not done:
+                fut.cancel()
+                return None
+            try:
+                return fut.result()
+            except asyncio.CancelledError:
+                return None
+        finally:
+            # Identity-safe: only drop *our* slot, never a newer waiter that
+            # re-registered on the same chat while we were unwinding.
+            if self._pending.get(session_key) is fut:
+                self._pending.pop(session_key, None)
+
+    def clear(self) -> None:
+        """Cancel and forget every pending waiter (shutdown / test hygiene)."""
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+
+    def __contains__(self, session_key: str) -> bool:
+        return session_key in self._pending
+
+
+# ── engine coroutines ──────────────────────────────────────────────────
+
+
+async def resolve_ask_user(
+    questions: list[dict], io: InteractionIO, *, timeout: float = ASK_USER_TIMEOUT
+) -> dict:
+    """Drive an ask_user interrupt to a resume payload.
+
+    Sends each question in turn, collects answers, and handles the choice
+    grammar (letters + the "Other" free-form sub-flow).  ``/stop`` and
+    ``cancel`` are checked *before* parsing every reply.
+
+    Returns a dict suitable for ``Command(resume=...)``:
+    ``{"answers": [...], "status": "answered"}`` or ``{"status": "cancelled"}``.
+    """
+    if not questions:
+        return {"answers": [], "status": "answered"}
+
+    total = len(questions)
+    answers: list[str] = []
+
+    for i, q in enumerate(questions):
+        if not await io.send(format_question_prompt(q, i, total)):
+            return {"status": "cancelled"}
+
+        reply = await io.wait_reply(timeout=timeout)
+        if reply is None:
+            await io.send(ASK_USER_TIMEOUT_FEEDBACK)
+            return {"status": "cancelled"}
+
+        raw = reply.strip()
+        required = q.get("required", True) is not False
+        if raw == "":
+            if required:
+                return {"status": "cancelled"}
+            answers.append("")
+            continue
+
+        if is_stop_command(raw) or is_cancel_reply(raw):
+            return {"status": "cancelled"}
+
+        if q.get("type", "text") == "multiple_choice":
+            choices = q.get("choices", [])
+            kind, value = parse_choice_answer(raw, choices)
+            if kind == "other":
+                if not await io.send(OTHER_PROMPT):
+                    return {"status": "cancelled"}
+                other = await io.wait_reply(timeout=timeout)
+                if other is None:
+                    await io.send(ASK_USER_TIMEOUT_FEEDBACK)
+                    return {"status": "cancelled"}
+                other_raw = other.strip()
+                if other_raw == "":
+                    if required:
+                        return {"status": "cancelled"}
+                    answers.append("")
+                    continue
+                if is_stop_command(other_raw) or is_cancel_reply(other_raw):
+                    return {"status": "cancelled"}
+                answers.append(other_raw)
+            else:
+                answers.append(value)
+        else:
+            answers.append(raw)
+
+    return {"answers": answers, "status": "answered"}
+
+
+@dataclass
+class ApprovalOutcome:
+    """Result of :func:`resolve_approval`.
+
+    ``decisions`` is the approve-all payload on approve/auto, or ``None``
+    when the action was declined (reject / timeout / stop / unrecognized).
+
+    ``unrecognized_reply`` carries the raw reply text when parsing failed.
+    The engine centralizes *parsing* but does not decide the transport
+    policy for unparseable text — the drivers do: the consumer rejects the
+    pending action and refeeds the text as a new agent turn (a channel user
+    who ignores the prompt and types a fresh instruction must not lose it);
+    the CLI bridge sends :data:`UNRECOGNIZED_FEEDBACK` and declines.
+
+    ``prompted`` is False only when the policy auto-resolved the interrupt
+    without asking a human. The consumer's HITL loop counts only prompted
+    rounds against its round budget (issue #469).
+    """
+
+    decisions: list[dict] | None = None
+    unrecognized_reply: str | None = None
+    prompted: bool = False
+    # True only when a human prompt was skipped because the caller's human
+    # budget was already spent. Auto fast paths leave this False.
+    budget_exhausted: bool = False
+
+
+async def resolve_approval(
+    action_requests: list,
+    io: InteractionIO,
+    policy: ApprovalPolicy,
+    session_key: str,
+    *,
+    timeout: float = HITL_APPROVAL_TIMEOUT,
+    human_budget_exhausted: bool = False,
+) -> ApprovalOutcome:
+    """Drive a HITL approval interrupt to an :class:`ApprovalOutcome`.
+
+    Auto-resolves via *policy* (session grant or config rule) without
+    prompting.  Otherwise sends the approval prompt (with capability-driven
+    buttons), waits for a reply, and parses it.  The policy is evaluated
+    exactly once, at prompt time (:meth:`ApprovalPolicy.decision_snapshot`);
+    the reply branches consume that snapshot's REJECTs, so config changes
+    while the human is deciding cannot alter what the approval operation
+    does with the reply.  ``/stop`` cancels silently (it already got its own
+    ack from the transport's stop fast-path).  An unrecognized reply declines
+    *without feedback* and hands the raw text back to the driver via
+    ``unrecognized_reply`` (see
+    :class:`ApprovalOutcome` for the per-driver policy).
+    """
+    auto, policy_rejections = policy.decision_snapshot(session_key, action_requests)
+    if auto is not None:
+        return ApprovalOutcome(decisions=auto)
+
+    # After the session/config fast path, before any prompt. A spent human
+    # budget must not ask, and must not have blocked the auto return above.
+    if human_budget_exhausted:
+        return ApprovalOutcome(budget_exhausted=True)
+
+    has_buttons = bool(io.capabilities.inline_buttons)
+    prompt = format_approval_prompt(action_requests, with_buttons=has_buttons)
+    metadata = approval_prompt_metadata(io.base_metadata, with_buttons=has_buttons)
+    if not await io.send(prompt, metadata=metadata):
+        return ApprovalOutcome(prompted=True)
+
+    reply = await io.wait_reply(timeout=timeout)
+    if reply is None:
+        await io.send(APPROVAL_TIMEOUT_FEEDBACK)
+        return ApprovalOutcome(prompted=True)
+
+    if is_stop_command(reply):
+        return ApprovalOutcome(prompted=True)
+
+    decision = parse_approval_reply(reply)
+    if decision == "auto":
+        policy.grant_session(session_key)
+        await io.send(APPROVED_AUTO_FEEDBACK)
+        return ApprovalOutcome(
+            decisions=decisions_after_human_approval(
+                action_requests, policy_rejections
+            ),
+            prompted=True,
+        )
+    if decision == "approve":
+        await io.send(APPROVED_FEEDBACK)
+        return ApprovalOutcome(
+            decisions=decisions_after_human_approval(
+                action_requests, policy_rejections
+            ),
+            prompted=True,
+        )
+    if decision == "reject":
+        await io.send(REJECTED_FEEDBACK)
+        return ApprovalOutcome(prompted=True)
+
+    # Unrecognized — decline and report the raw text; the driver chooses
+    # the feedback / refeed policy.
+    return ApprovalOutcome(unrecognized_reply=reply, prompted=True)

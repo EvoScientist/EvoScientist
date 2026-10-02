@@ -1,0 +1,347 @@
+from __future__ import annotations
+
+import inspect
+from typing import ClassVar
+
+from rich.table import Table
+
+from ...gateway import GraphGateway, GraphTarget
+from ..base import Argument, Command, CommandContext
+from ..manager import manager
+
+
+def _graph_gateway(ctx: CommandContext) -> GraphGateway:
+    if ctx.graph_gateway is None:
+        raise RuntimeError("Session commands require a graph_gateway")
+    return ctx.graph_gateway
+
+
+class CompactCommand(Command):
+    """Compact conversation to free context."""
+
+    name = "/compact"
+    description = "Compact conversation to free context"
+    requires_agent = True
+    category = "Session"
+
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        from ...cli.commands import (
+            build_compact_summary_renderable,
+            compact_conversation,
+            render_compact_result,
+        )
+
+        start_indicator = getattr(ctx.ui, "start_compacting_indicator", None)
+        stop_indicator = getattr(ctx.ui, "stop_compacting_indicator", None)
+        using_indicator = callable(start_indicator) and callable(stop_indicator)
+
+        if using_indicator:
+            maybe = start_indicator()
+            if inspect.isawaitable(maybe):
+                await maybe
+        else:
+            ctx.ui.append_system("Compacting conversation...")
+
+        try:
+            result = await compact_conversation(
+                graph_gateway=_graph_gateway(ctx),
+                thread_id=ctx.thread_id,
+                target=GraphTarget(
+                    local_graph=ctx.agent,
+                    workspace_dir=ctx.workspace_dir,
+                ),
+                input_tokens_hint=ctx.input_tokens_hint,
+            )
+        finally:
+            if using_indicator:
+                maybe = stop_indicator()
+                if inspect.isawaitable(maybe):
+                    await maybe
+
+        ctx.ui.mount_renderable(render_compact_result(result))
+        summary_renderable = build_compact_summary_renderable(result)
+        if summary_renderable is not None:
+            ctx.ui.mount_renderable(summary_renderable)
+        # Push the reduced token count to the status bar immediately so it
+        # reflects the new context without waiting for the next LLM call.
+        # Only when input_tokens_hint was available: tokens_after is then
+        # LLM-level (includes system + tool overhead), matching the unit that
+        # _status_last_input_tokens expects. Without a hint, tokens_after is
+        # message-level only and would produce a misleadingly low reading.
+        if (
+            result.status == "ok"
+            and result.tokens_after > 0
+            and ctx.input_tokens_hint is not None
+        ):
+            update_fn = getattr(ctx.ui, "update_status_after_compact", None)
+            if callable(update_fn):
+                update_fn(result.tokens_after)
+
+
+class ThreadsCommand(Command):
+    """List recent sessions."""
+
+    name = "/threads"
+    description = "List recent sessions"
+    category = "Session"
+
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        from ...sessions import _format_relative_time, short_thread_id
+
+        gateway = _graph_gateway(ctx)
+        threads = await gateway.list_threads(
+            limit=0,
+            include_message_count=True,
+            include_preview=True,
+        )
+
+        if not threads:
+            ctx.ui.append_system("No saved sessions.", style="yellow")
+            return
+
+        # Use protocol property to adapt output for non-interactive UIs (channels)
+        is_channel = not ctx.ui.supports_interactive
+
+        table = Table(title="Sessions", show_header=True, header_style="bold cyan")
+        table.add_column("ID", style="bold")
+        table.add_column(
+            "Preview", style="dim", max_width=40 if is_channel else 50, no_wrap=True
+        )
+        table.add_column("Msgs" if is_channel else "Messages", justify="right")
+        if not is_channel:
+            table.add_column("Model", style="dim")
+        table.add_column("Last Used", style="dim")
+
+        for thread in threads:
+            thread_id_value = thread["thread_id"]
+            marker = " *" if thread_id_value == ctx.thread_id else ""
+
+            row = [
+                f"{short_thread_id(thread_id_value)}{marker}",
+                thread.get("preview", "") or "",
+                str(thread.get("message_count", 0)),
+            ]
+            if not is_channel:
+                row.append(thread.get("model", "") or "")
+            row.append(_format_relative_time(thread.get("updated_at")))
+
+            table.add_row(*row)
+        ctx.ui.mount_renderable(table)
+        if not is_channel:
+            ctx.ui.append_system(
+                "  /resume to continue a session  "
+                "/delete <id> to remove  /new to start fresh",
+            )
+
+
+class ResumeCommand(Command):
+    """Resume a previous session."""
+
+    name = "/resume"
+    description = "Resume a previous session"
+    category = "Session"
+    arguments: ClassVar[list[Argument]] = [
+        Argument(
+            name="thread_id",
+            type=str,
+            description="Thread ID or prefix to resume",
+            required=False,
+        )
+    ]
+
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        gateway = _graph_gateway(ctx)
+        arg = args[0] if args else ""
+        if not arg:
+            threads = await gateway.list_threads(
+                limit=0,
+                include_message_count=True,
+                include_preview=True,
+            )
+            if not threads:
+                ctx.ui.append_system("No sessions to resume.", style="yellow")
+                return
+
+            # Interactive pick
+            selected = await ctx.ui.wait_for_thread_pick(
+                threads,
+                current_thread=ctx.thread_id,
+                title=">>> Select session to resume <<<",
+            )
+            if selected is None:
+                return
+            arg = selected
+
+        # Resolve thread_id
+        resolved = await self._resolve_thread_id(arg, ctx)
+        if not resolved:
+            return
+
+        metadata = await gateway.get_thread_metadata(resolved)
+        restored_workspace = (metadata or {}).get("workspace_dir", "")
+        if restored_workspace:
+            ctx.workspace_dir = restored_workspace
+
+        switched_thread = resolved != ctx.thread_id
+        ctx.thread_id = resolved
+
+        # Invitations are session-scoped (see ChannelRuntime.active_teams);
+        # resuming a different thread is a session switch, so release them —
+        # uniform with /new. Resuming the current thread keeps them.
+        runtime = ctx.channel_runtime
+        if switched_thread and runtime is not None and runtime.active_teams:
+            dismissed = list(runtime.active_teams)
+            runtime.active_teams = []
+            ctx.ui.append_system(
+                f"Dismissed experts on session switch: {', '.join(dismissed)}",
+                style="dim",
+            )
+
+        # Signal session change to UI
+        if hasattr(ctx.ui, "handle_session_resume"):
+            await ctx.ui.handle_session_resume(resolved, restored_workspace)
+
+    async def _resolve_thread_id(self, prefix: str, ctx: CommandContext) -> str | None:
+        resolution = await _graph_gateway(ctx).resolve_thread(prefix)
+        if resolution.thread_id:
+            return resolution.thread_id
+
+        if resolution.matches:
+            ctx.ui.append_system(
+                f"Ambiguous thread ID '{prefix}'. Use a longer prefix.",
+                style="yellow",
+            )
+            for thread in resolution.matches:
+                ctx.ui.append_system(f"  - {thread}", style="dim")
+            return None
+
+        ctx.ui.append_system(f"Thread '{prefix}' not found.", style="red")
+        return None
+
+
+class NewCommand(Command):
+    """Start a new session."""
+
+    name = "/new"
+    description = "Start a new session"
+    category = "Session"
+
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        # ``/new`` means fresh state — release any invited experts. Uniform
+        # with the explicit ``/expert clear`` path; avoids
+        # the "why is idea-brainstorm still active in my new thread?"
+        # surprise. Users who want to reuse an invite in the next thread can
+        # re-invite explicitly. Cleared only after the new session actually
+        # exists, so a failed start leaves the current session intact.
+        runtime = ctx.channel_runtime
+        dismissed: list[str] = []
+        if runtime is not None and runtime.active_teams:
+            dismissed = list(runtime.active_teams)
+        await ctx.ui.start_new_session()
+        if dismissed:
+            runtime.active_teams = []
+            ctx.ui.append_system(
+                f"Dismissed experts on new session: {', '.join(dismissed)}",
+                style="dim",
+            )
+
+
+class ClearCommand(Command):
+    """Clear chat history."""
+
+    name = "/clear"
+    description = "Clear chat history"
+    category = "Session"
+
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        ctx.ui.clear_chat()
+
+
+class DeleteCommand(Command):
+    """Delete a saved session."""
+
+    name = "/delete"
+    description = "Delete a saved session"
+    category = "Session"
+    arguments: ClassVar[list[Argument]] = [
+        Argument(
+            name="thread_id",
+            type=str,
+            description="Thread ID or prefix to delete",
+            required=False,
+        )
+    ]
+
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        gateway = _graph_gateway(ctx)
+        arg = args[0] if args else ""
+        if not arg:
+            threads = await gateway.list_threads(
+                limit=0,
+                include_message_count=True,
+                include_preview=True,
+            )
+            if not threads:
+                ctx.ui.append_system("No sessions to delete.", style="yellow")
+                return
+
+            # Interactive pick
+            selected = await ctx.ui.wait_for_thread_pick(
+                threads,
+                current_thread=ctx.thread_id,
+                title=">>> Select session to delete <<<",
+            )
+            if selected is None:
+                return
+            arg = selected
+
+        # Resolve thread_id
+        resolution = await gateway.resolve_thread(arg)
+        if resolution.matches:
+            ctx.ui.append_system(
+                f"Ambiguous thread ID '{arg}'. Use a longer prefix.",
+                style="yellow",
+            )
+            for thread in resolution.matches:
+                ctx.ui.append_system(f"  - {thread}", style="dim")
+            return
+
+        resolved = resolution.thread_id
+        if not resolved:
+            ctx.ui.append_system(f"Session '{arg}' not found.", style="red")
+            return
+
+        if resolved == ctx.thread_id:
+            ctx.ui.append_system(
+                "Cannot delete the current session.",
+                style="yellow",
+            )
+            return
+
+        deleted = await gateway.delete_thread(resolved)
+        if deleted:
+            ctx.ui.append_system(f"Deleted session {resolved}.", style="green")
+        else:
+            ctx.ui.append_system(f"Session {resolved} not found.", style="red")
+
+
+class ExitCommand(Command):
+    """Quit EvoScientist."""
+
+    name = "/exit"
+    alias: ClassVar[list[str]] = ["/quit", "/q"]
+    description = "Quit EvoScientist"
+    category = "Session"
+
+    async def execute(self, ctx: CommandContext, args: list[str]) -> None:
+        ctx.ui.force_quit()
+
+
+# Register session commands
+manager.register(CompactCommand())
+manager.register(ThreadsCommand())
+manager.register(ResumeCommand())
+manager.register(NewCommand())
+manager.register(ClearCommand())
+manager.register(DeleteCommand())
+manager.register(ExitCommand())

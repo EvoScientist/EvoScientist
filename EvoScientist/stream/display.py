@@ -1,0 +1,2018 @@
+"""Rich display functions for streaming CLI output.
+
+Contains all rendering logic: tool call lines, sub-agent sections,
+todo panels, streaming display layout, and final results display.
+Also provides the shared console and formatter globals.
+"""
+
+import asyncio
+import concurrent.futures
+import inspect
+import logging
+import os
+import re
+import threading
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from rich.console import Group  # type: ignore[import-untyped]
+from rich.live import Live  # type: ignore[import-untyped]
+from rich.markdown import Markdown  # type: ignore[import-untyped]
+from rich.panel import Panel  # type: ignore[import-untyped]
+from rich.spinner import Spinner  # type: ignore[import-untyped]
+from rich.text import Text  # type: ignore[import-untyped]
+
+from ..cancellation import bind_cancel_event
+from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
+from ..paths import resolve_virtual_path
+from ..runtime import AsyncRuntime, RuntimeHandle
+from .console import console
+from .diff_format import build_edit_diff
+from .formatter import ToolResultFormatter
+from .state import (
+    StreamState,
+    SubAgentState,
+    _build_todo_stats,
+    _parse_todo_items,
+)
+from .utils import (
+    DisplayLimits,
+    ToolStatus,
+    format_tool_compact,
+    format_tool_compact_with_result,
+    is_success,
+)
+
+if TYPE_CHECKING:
+    from langgraph.graph.state import CompiledStateGraph
+
+    from ..channels.interaction import ApprovalOutcome
+
+# ---------------------------------------------------------------------------
+# Shared globals
+# ---------------------------------------------------------------------------
+
+# Media file extensions that should trigger on_file_write callback
+_MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
+_T = TypeVar("_T")
+_QuestionRunner = Callable[[Any], Any]
+
+
+class _StreamPromptCancelled(Exception):
+    """Internal control flow for an owned terminal prompt cancellation."""
+
+
+def _update_final_live_frame(
+    live: Any,
+    final_display: Any,
+    stream_handle: RuntimeHandle[Any] | None,
+) -> None:
+    """Render the final frame unless this owned stream was cancelled."""
+    if stream_handle is not None and stream_handle.cancelled():
+        return
+    live.update(final_display)
+    live.refresh()
+
+
+def _graph_target_for_local_agent(
+    agent: "CompiledStateGraph",
+    metadata: dict[str, object] | None = None,
+) -> GraphTarget:
+    workspace = None
+    if metadata is not None:
+        raw_workspace = metadata.get("workspace_dir")
+        if isinstance(raw_workspace, str) and raw_workspace:
+            workspace = raw_workspace
+    return GraphTarget(local_graph=agent, workspace_dir=workspace)
+
+
+# LLM output sometimes omits the CommonMark-required space after `#` (e.g.
+# "###文件系统"), which makes Rich render the line as raw text. The lookahead
+# `(?=[^ \t#\r\n])` requires a real non-excluded next char, so the helper is
+# idempotent and leaves bare `#` at EOS / CRLF boundaries alone.
+_HEADING_FIX_RE = re.compile(r"^(#{1,6})(?=[^ \t#\r\n])", flags=re.MULTILINE)
+
+
+def _fix_markdown_heading_spacing(text: str) -> str:
+    """Insert a space after `#`+ ATX heading markers missing one.
+
+    Apply to a display copy only — never write the result back into the
+    streaming buffer. Known limitation: `###define` at column zero inside
+    a fenced code block still gets a space (context-free regex).
+    """
+    return _HEADING_FIX_RE.sub(r"\1 ", text)
+
+
+def _split_response_for_display(
+    response_text: str,
+    narrated_response_end: int,
+) -> tuple[str, str]:
+    """Split cumulative response text into narrated prefix and answer suffix."""
+    boundary = max(0, min(len(response_text), narrated_response_end))
+    return response_text[:boundary], response_text[boundary:]
+
+
+def _clean_response_text(text: str) -> str:
+    """Trim a streamed response copy for display."""
+    clean = text.strip()
+    while clean.endswith("\n...") or clean.rstrip() == "...":
+        clean = clean.rstrip().removesuffix("...").rstrip()
+    return clean
+
+
+def _response_markdown_for_display(
+    text: str,
+    *,
+    response_markdown: Any = None,
+    full_response_text: str = "",
+) -> Any | None:
+    """Build Markdown for the answer text, reusing the full-response cache if valid."""
+    clean = _clean_response_text(text)
+    if not clean:
+        return None
+    if response_markdown is not None and text == full_response_text:
+        return response_markdown
+    return Markdown(_fix_markdown_heading_spacing(clean))
+
+
+formatter = ToolResultFormatter()
+
+
+# Stream-cancel events keyed by logical stream scope. Channel messages pass a
+# per-message scope so `/stop` only affects that message's run; scope-less
+# callers retain the legacy process-wide default event.
+_DEFAULT_STREAM_CANCEL_SCOPE = "__default__"
+# Serve signal handlers may request cancellation while the main thread is in a
+# scoped cancellation lookup.  Re-entrancy prevents the Python signal callback
+# from deadlocking if it interrupts one of these short registry sections.
+_stream_cancel_lock = threading.RLock()
+_stream_cancel_events: dict[str, threading.Event] = {
+    _DEFAULT_STREAM_CANCEL_SCOPE: threading.Event()
+}
+# The flag remains useful for cancellation requested before a stream starts and
+# at synchronous HITL boundaries.  Active Rich streams additionally register
+# their owned-runtime handle so a request can interrupt a blocked ``__anext__``
+# immediately instead of waiting for the model to emit another event.
+_stream_cancel_handles: dict[str, set[RuntimeHandle[Any]]] = {}
+# Backward-compat alias used by older tests and direct imports.
+_stream_cancel_event = _stream_cancel_events[_DEFAULT_STREAM_CANCEL_SCOPE]
+
+
+def _stream_cancel_scope_key(cancel_scope: str | None) -> str:
+    return cancel_scope or _DEFAULT_STREAM_CANCEL_SCOPE
+
+
+def _get_stream_cancel_event(
+    cancel_scope: str | None,
+    *,
+    create: bool = False,
+) -> threading.Event | None:
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        event = _stream_cancel_events.get(scope_key)
+        if event is None and create:
+            event = threading.Event()
+            _stream_cancel_events[scope_key] = event
+        return event
+
+
+def request_stream_cancel(cancel_scope: str | None = None) -> bool:
+    """Signal a stream and directly cancel any active owned coroutine."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        event = _stream_cancel_events.get(scope_key)
+        if event is None:
+            event = threading.Event()
+            _stream_cancel_events[scope_key] = event
+        already_requested = event.is_set()
+        event.set()
+        handles = tuple(_stream_cancel_handles.get(scope_key, ()))
+
+    # Future.cancel() is thread-safe.  Do it outside the registry lock because
+    # cancellation callbacks may settle quickly and unregister the handle.
+    for handle in handles:
+        handle.cancel()
+    # Sync tools may remain active in an executor after their awaiting graph
+    # task is cancelled, so stop their owned subprocesses explicitly.
+    from ..backends import cancel_active_shell_processes
+
+    cancel_active_shell_processes(event)
+    return not already_requested
+
+
+def _register_stream_cancel_handle(
+    cancel_scope: str | None,
+    handle: RuntimeHandle[Any],
+) -> None:
+    """Register an active owned task, honoring a pre-start stop request."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        handles = _stream_cancel_handles.setdefault(scope_key, set())
+        handles.add(handle)
+        event = _stream_cancel_events.get(scope_key)
+        cancel_now = event is not None and event.is_set()
+    if cancel_now:
+        handle.cancel()
+
+
+def _unregister_stream_cancel_handle(
+    cancel_scope: str | None,
+    handle: RuntimeHandle[Any],
+) -> None:
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        handles = _stream_cancel_handles.get(scope_key)
+        if handles is None:
+            return
+        handles.discard(handle)
+        if not handles:
+            _stream_cancel_handles.pop(scope_key, None)
+
+
+def _run_owned_questionary_prompt(
+    question: Any,
+    *,
+    runtime: AsyncRuntime,
+    cancel_scope: str | None,
+) -> Any:
+    """Run a terminal prompt as owned async work so stop can cancel it."""
+    prompt_handle: RuntimeHandle[Any] | None = None
+
+    def _register(handle: RuntimeHandle[Any]) -> None:
+        nonlocal prompt_handle
+        prompt_handle = handle
+        _register_stream_cancel_handle(cancel_scope, handle)
+
+    try:
+        return runtime.run_sync(question.ask_async, on_submitted=_register)
+    except concurrent.futures.CancelledError as exc:
+        if is_stream_cancel_requested(cancel_scope):
+            raise _StreamPromptCancelled from exc
+        raise
+    finally:
+        if prompt_handle is not None:
+            _unregister_stream_cancel_handle(cancel_scope, prompt_handle)
+
+
+def is_stream_cancel_requested(cancel_scope: str | None = None) -> bool:
+    event = _get_stream_cancel_event(cancel_scope)
+    return event.is_set() if event is not None else False
+
+
+def clear_stream_cancel(cancel_scope: str | None = None) -> None:
+    """Clear a scope's stop signal without dropping the scope entry."""
+    event = _get_stream_cancel_event(cancel_scope)
+    if event is not None:
+        event.clear()
+
+
+@contextmanager
+def bind_stream_cancel(cancel_scope: str | None = None) -> Iterator[None]:
+    """Bind a stream's stop event for cancellation-aware blocking tools."""
+    event = _get_stream_cancel_event(cancel_scope, create=True)
+    assert event is not None
+    with bind_cancel_event(event):
+        yield
+
+
+async def iter_with_stream_cancel(
+    events: AsyncIterator[_T],
+    cancel_scope: str | None = None,
+) -> AsyncIterator[_T]:
+    """Iterate graph events with the matching blocking-tool cancel context."""
+    iterator = aiter(events)
+    try:
+        while True:
+            try:
+                # ContextVar tokens cannot safely straddle ``yield``: async
+                # generator finalization may run in a different task/context.
+                # The cancellation binding is only needed while requesting the
+                # next graph event, which includes any nested tool execution.
+                with bind_stream_cancel(cancel_scope):
+                    event = await anext(iterator)
+            except StopAsyncIteration:
+                return
+            yield event
+    finally:
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            with bind_stream_cancel(cancel_scope):
+                await aclose()
+
+
+def discard_stream_cancel(cancel_scope: str | None = None) -> None:
+    """Drop a scope's stop signal after the owning request is fully done."""
+    scope_key = _stream_cancel_scope_key(cancel_scope)
+    with _stream_cancel_lock:
+        if scope_key == _DEFAULT_STREAM_CANCEL_SCOPE:
+            _stream_cancel_events[scope_key].clear()
+        else:
+            _stream_cancel_events.pop(scope_key, None)
+
+
+def build_stopped_response_text(previous_text: str | None) -> tuple[str, str]:
+    """Normalize a cancelled response and return `(trimmed_previous, final_text)`."""
+    marker = "[Stopped.]"
+    current = (previous_text or "").rstrip()
+    if not current:
+        final_text = marker
+    elif current.endswith(marker):
+        final_text = current
+    else:
+        final_text = f"{current}\n{marker}"
+    return current, final_text
+
+
+# ---------------------------------------------------------------------------
+# Todo formatting
+# ---------------------------------------------------------------------------
+
+
+def _format_single_todo(item: dict) -> Text:
+    """Format a single todo item with status symbol."""
+    status = str(item.get("status", "todo")).lower()
+    content_text = str(item.get("content", item.get("task", item.get("title", ""))))
+
+    if status in ("done", "completed", "complete"):
+        symbol = "\u2713"
+        label = "done  "
+        style = "green dim"
+    elif status in ("active", "in_progress", "in-progress", "working"):
+        symbol = "\u25cf"
+        label = "active"
+        style = "yellow"
+    else:
+        symbol = "\u25cb"
+        label = "todo  "
+        style = "dim"
+
+    line = Text()
+    line.append(f"    {symbol} ", style=style)
+    line.append(label, style=style)
+    line.append(" ", style="dim")
+    # Truncate long content
+    if len(content_text) > 60:
+        content_text = content_text[:57] + "\u2026"
+    line.append(content_text, style=style)
+    return line
+
+
+# ---------------------------------------------------------------------------
+# Tool result formatting
+# ---------------------------------------------------------------------------
+
+
+def format_tool_result_compact(
+    _name: str,
+    content: str,
+    max_lines: int = 5,
+    tool_args: dict | None = None,
+) -> list:
+    """Format tool result as tree output.
+
+    Special handling for write_todos: shows formatted checklist with status symbols.
+    Special handling for edit_file: shows color-coded unified diff.
+    """
+    elements = []
+
+    if not content.strip():
+        elements.append(Text("  \u2514 (empty)", style="dim"))
+        return elements
+
+    # Special handling for edit_file: show diff
+    if _name == "edit_file" and tool_args and is_success(content):
+        old_str = tool_args.get("old_string", "")
+        new_str = tool_args.get("new_string", "")
+        path = tool_args.get("path", tool_args.get("file_path", ""))
+        if old_str and new_str and old_str != new_str:
+            diff_markup = build_edit_diff(path, old_str, new_str)
+            if diff_markup:
+                elements.append(Text.from_markup(diff_markup))
+                return elements
+
+    # Special handling for write_todos
+    if _name == "write_todos":
+        items = _parse_todo_items(content)
+        if items:
+            stats = _build_todo_stats(items)
+            stats_line = Text()
+            stats_line.append("  \u2514 ", style="dim")
+            stats_line.append(stats, style="dim")
+            elements.append(stats_line)
+            elements.append(Text("", style="dim"))  # blank line
+
+            max_preview = 4
+            for item in items[:max_preview]:
+                elements.append(_format_single_todo(item))
+
+            remaining = len(items) - max_preview
+            if remaining > 0:
+                elements.append(Text(f"    ... {remaining} more", style="dim italic"))
+
+            return elements
+
+    lines = content.strip().split("\n")
+    total_lines = len(lines)
+
+    display_lines = lines[:max_lines]
+    for i, line in enumerate(display_lines):
+        prefix = "\u2514" if i == 0 else " "
+        if len(line) > 80:
+            line = line[:77] + "\u2026"
+        style = "dim" if is_success(content) else "red dim"
+        elements.append(Text(f"  {prefix} {line}", style=style))
+
+    remaining = total_lines - max_lines
+    if remaining > 0:
+        elements.append(Text(f"    ... +{remaining} lines", style="dim italic"))
+
+    return elements
+
+
+# ---------------------------------------------------------------------------
+# Tool call line rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_tool_call_line(tc: dict, tr: dict | None) -> Text:
+    """Render a single tool call line with status indicator."""
+    is_task = tc.get("name", "").lower() == "task"
+
+    if tr is not None:
+        content = tr.get("content", "")
+        if is_success(content):
+            style = "bold green"
+            indicator = "\u2713" if is_task else ToolStatus.SUCCESS.value
+        else:
+            style = "bold red"
+            indicator = "\u2717" if is_task else ToolStatus.ERROR.value
+    else:
+        style = "bold yellow" if not is_task else "bold cyan"
+        indicator = "\u25b6" if is_task else ToolStatus.RUNNING.value
+
+    tool_compact = format_tool_compact_with_result(
+        tc["name"],
+        tc.get("args"),
+        tr.get("content", "") if tr is not None else "",
+    )
+
+    tool_text = Text()
+    tool_text.append(f"{indicator} ", style=style)
+    tool_text.append(tool_compact, style=style)
+    return tool_text
+
+
+def _tool_result_for_call(
+    tool_results: list,
+    tool_call: dict,
+) -> dict | None:
+    """Match root tool results by DeepAgents tool_call_id."""
+    tool_id = tool_call["id"]
+    return next(
+        (result for result in tool_results if result["id"] == tool_id),
+        None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent section rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_subagent_section(sa: "SubAgentState", compact: bool = False) -> list:
+    """Render a sub-agent's activity as a bordered section.
+
+    Args:
+        sa: Sub-agent state to render
+        compact: If True, render minimal 1-line summary (completed sub-agents)
+
+    Header uses "Cooking with {name}" style matching task tool format.
+    Active sub-agents show bordered tool list; completed ones collapse to 1 line.
+    """
+    elements = []
+    BORDER = "dim cyan" if sa.is_active else "dim"
+
+    # Filter out tool calls with empty names
+    valid_calls = [tc for tc in sa.tool_calls if tc.get("name")]
+
+    # Split into completed and pending
+    completed = []
+    pending = []
+    for tc in valid_calls:
+        tr = sa.get_result_for(tc)
+        if tr is not None:
+            completed.append((tc, tr))
+        else:
+            pending.append(tc)
+
+    # Build display name
+    display_name = f"Cooking with {sa.name}"
+    if sa.description:
+        desc = sa.description.split("\n")[0].strip()
+        desc = desc[:50] + "\u2026" if len(desc) > 50 else desc
+        display_name += f" \u2014 {desc}"
+
+    # --- Compact mode: 1-line summary for completed sub-agents ---
+    if compact:
+        line = Text()
+        if not sa.is_active:
+            line.append("\u2713 ", style="green")
+            line.append(display_name, style="green dim")
+            total = len(valid_calls)
+            line.append(f" ({total} tools)", style="dim")
+        else:
+            line.append("\u25b6 ", style="cyan")
+            line.append(display_name, style="bold cyan")
+        elements.append(line)
+        return elements
+
+    # --- Full mode: bordered section for Live streaming ---
+    MAX_SA_VISIBLE = 3  # max completed tools shown
+    MAX_SA_RUNNING = 2  # max running tools shown
+
+    # Header
+    header = Text()
+    header.append("\u250c ", style=BORDER)
+    if sa.is_active:
+        header.append(f"\u25b6 {display_name}", style="bold cyan")
+    else:
+        header.append(f"\u2713 {display_name}", style="bold green")
+    elements.append(header)
+
+    # Completed tools — collapse older ones into a summary
+    slots = max(0, MAX_SA_VISIBLE - len(pending))
+    hidden = (
+        completed[:-slots]
+        if slots and len(completed) > slots
+        else (completed if not slots else [])
+    )
+    visible = completed[-slots:] if slots else []
+
+    if hidden:
+        ok = sum(1 for _, tr in hidden if tr.get("success", True))
+        fail = len(hidden) - ok
+        summary = Text("\u2502 ", style=BORDER)
+        summary.append(f"\u2713 {ok} completed", style="dim green")
+        if fail > 0:
+            summary.append(f" | {fail} failed", style="dim red")
+        elements.append(summary)
+
+    for tc, tr in visible:
+        tc_line = Text("\u2502 ", style=BORDER)
+        tc_name = format_tool_compact(tc["name"], tc.get("args"))
+        if tr.get("success", True):
+            tc_line.append(f"\u2713 {tc_name}", style="green")
+        else:
+            tc_line.append(f"\u2717 {tc_name}", style="red")
+            content = tr.get("content", "")
+            first_line = content.strip().split("\n")[0][:70]
+            if first_line:
+                err_line = Text("\u2502   ", style=BORDER)
+                err_line.append(f"\u2514 {first_line}", style="red dim")
+                elements.append(tc_line)
+                elements.append(err_line)
+                continue
+        elements.append(tc_line)
+
+    # Pending/running tools — limit visible
+    hidden_running = len(pending) - MAX_SA_RUNNING
+    if hidden_running > 0:
+        run_summary = Text("\u2502 ", style=BORDER)
+        run_summary.append(
+            f"\u25cf {hidden_running} more running...", style="dim yellow"
+        )
+        elements.append(run_summary)
+        pending = pending[-MAX_SA_RUNNING:]
+
+    for tc in pending:
+        tc_line = Text("\u2502 ", style=BORDER)
+        tc_name = format_tool_compact(tc["name"], tc.get("args"))
+        tc_line.append(f"\u25cf {tc_name}", style="bold yellow")
+        elements.append(tc_line)
+        spinner_line = Text("\u2502   ", style=BORDER)
+        spinner_line.append("\u21bb running...", style="yellow dim")
+        elements.append(spinner_line)
+
+    # Footer
+    if not sa.is_active:
+        total = len(valid_calls)
+        footer = Text(f"\u2514 done ({total} tools)", style="dim green")
+        elements.append(footer)
+    elif valid_calls:
+        footer = Text("\u2514 running...", style="dim cyan")
+        elements.append(footer)
+
+    return elements
+
+
+# ---------------------------------------------------------------------------
+# Todo panel
+# ---------------------------------------------------------------------------
+
+
+def _render_todo_panel(todo_items: list[dict]) -> Panel:
+    """Render a bordered Task List panel from todo items.
+
+    Matches the style: cyan border, status icons per item.
+    """
+    lines = Text()
+    for i, item in enumerate(todo_items):
+        if i > 0:
+            lines.append("\n")
+        status = str(item.get("status", "todo")).lower()
+        content_text = str(item.get("content", item.get("task", item.get("title", ""))))
+
+        if status in ("done", "completed", "complete"):
+            symbol = "\u2713"  # checkmark
+            style = "green dim"
+        elif status in ("active", "in_progress", "in-progress", "working"):
+            symbol = "\u23f3"  # hourglass
+            style = "yellow"
+        else:
+            symbol = "\u25a1"  # empty square
+            style = "dim"
+
+        lines.append(f"{symbol} ", style=style)
+        lines.append(content_text, style=style)
+
+    return Panel(
+        lines,
+        title="Task List",
+        title_align="center",
+        border_style="cyan",
+        padding=(0, 1),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Streaming display layout
+# ---------------------------------------------------------------------------
+
+
+def create_streaming_display(
+    thinking_text: str = "",
+    response_text: str = "",
+    latest_text: str = "",
+    tool_calls: list | None = None,
+    tool_results: list | None = None,
+    is_thinking: bool = False,
+    is_responding: bool = False,
+    is_waiting: bool = False,
+    is_processing: bool = False,
+    show_thinking: bool = True,
+    subagents: list | None = None,
+    todo_items: list | None = None,
+    is_final: bool = False,
+    final_show_thinking: bool = False,
+    final_thinking_max_length: int = DisplayLimits.THINKING_FINAL,
+    response_markdown: Any = None,
+    narrated_response_end: int = 0,
+    narration_segments: list[tuple[int, str]] | None = None,
+    total_input_tokens: int = 0,
+    total_output_tokens: int = 0,
+    summarization_text: str = "",
+    is_summarizing: bool = False,
+    selected_tools: list | None = None,
+    status_footer: Any | None = None,
+) -> Any:
+    """Create Rich display layout for streaming output.
+
+    Returns:
+        Rich Group for Live display
+    """
+    elements = []
+    tool_calls = tool_calls or []
+    tool_results = tool_results or []
+    subagents = subagents or []
+
+    # Initial waiting state
+    if is_waiting and not thinking_text and not response_text and not tool_calls:
+        elements.append(Spinner("dots", text=" Thinking...", style="cyan"))
+        if status_footer is not None:
+            elements.append(status_footer)
+        return Group(*elements)
+
+    # Thinking panel
+    # ``final_show_thinking`` controls the final-frame layout, but it must
+    # never override the caller's user-level visibility setting.
+    _show_thinking = show_thinking and (final_show_thinking if is_final else True)
+    if _show_thinking and thinking_text:
+        thinking_title = "Thinking"
+        display_thinking = thinking_text.rstrip()
+        if is_final:
+            # Final frame: middle-elision truncation
+            if len(display_thinking) > final_thinking_max_length:
+                half = final_thinking_max_length // 2
+                display_thinking = (
+                    display_thinking[:half]
+                    + "\n\n... (truncated) ...\n\n"
+                    + display_thinking[-half:]
+                )
+        else:
+            if is_thinking:
+                thinking_title += " ..."
+            if len(display_thinking) > DisplayLimits.THINKING_STREAM:
+                display_thinking = (
+                    "..." + display_thinking[-DisplayLimits.THINKING_STREAM :]
+                )
+        elements.append(
+            Panel(
+                Text(display_thinking, style="dim"),
+                title=thinking_title,
+                border_style="blue",
+                padding=(0, 1),
+            )
+        )
+
+    # Selected tools panel (from LLMToolSelectorMiddleware)
+    if selected_tools:
+        tools_str = ", ".join(selected_tools)
+        elements.append(
+            Panel(
+                Text(tools_str, style="cyan"),
+                title=f"Adaptive Selected Tools ({len(selected_tools)})",
+                border_style="#2d7d46",
+                padding=(0, 1),
+            )
+        )
+
+    # Summarization panel (context was compressed by LangGraph middleware)
+    if is_summarizing and not summarization_text:
+        elements.append(
+            Panel(
+                Text("Summarizing...", style="dim italic"),
+                title="Context Summarizing...",
+                border_style="#f59e0b",
+                padding=(0, 1),
+            )
+        )
+    elif summarization_text:
+        summary_display = summarization_text.rstrip()
+        n = len(summary_display)
+        char_label = f"{n / 1000:.1f}k chars" if n >= 1000 else f"{n:,} chars"
+        if n > 300:
+            summary_display = summary_display[:300] + " ..."
+        title = (
+            f"Context Summarizing... ({char_label})"
+            if is_summarizing
+            else f"Context Summarized ({char_label})"
+        )
+        elements.append(
+            Panel(
+                Text(summary_display, style="dim italic"),
+                title=title,
+                border_style="#f59e0b",
+                padding=(0, 1),
+            )
+        )
+
+    # Response text handling: keep the final answer behind pending tool calls.
+    _n_tools = len(tool_calls)
+    _n_done = min(len(tool_results), _n_tools)
+    has_pending_tools = _n_tools > _n_done
+    any_active_subagent = any(sa.is_active for sa in subagents)
+    is_processing_blocking = is_processing
+    all_done = (
+        not has_pending_tools and not any_active_subagent and not is_processing_blocking
+    )
+    _, answer_text = _split_response_for_display(
+        response_text,
+        narrated_response_end,
+    )
+    narration_by_tool: dict[int, list[str]] = {}
+    for tool_index, text in narration_segments or []:
+        if text.strip():
+            narration_by_tool.setdefault(tool_index, []).append(text)
+
+    def _append_narration_before_tool(tool_index: int) -> None:
+        for text in narration_by_tool.get(tool_index, []):
+            narration_markdown = _response_markdown_for_display(text)
+            if narration_markdown is not None:
+                elements.append(Text(""))  # blank separator
+                elements.append(narration_markdown)
+
+    def _find_task_subagent(tc: dict, shown_sa_ids: set[str]) -> SubAgentState | None:
+        tool_id = tc["id"]
+        for sa in subagents:
+            if sa.instance_id in shown_sa_ids:
+                continue
+            if sa.parent_tool_call_id == tool_id:
+                return sa
+        return None
+
+    def _append_task_entry(
+        tool_index: int,
+        tc: dict,
+        tr: dict | None,
+        *,
+        shown_sa_ids: set[str],
+        compact: bool,
+    ) -> None:
+        _append_narration_before_tool(tool_index)
+        elements.append(_render_tool_call_line(tc, tr))
+        matched_sa = _find_task_subagent(tc, shown_sa_ids)
+        if matched_sa is not None:
+            shown_sa_ids.add(matched_sa.instance_id)
+            elements.extend(_render_subagent_section(matched_sa, compact=compact))
+
+    # Tool calls and results paired display
+    # Collapse older completed tools to prevent overflow in Live mode
+    # Task tool calls are ALWAYS visible (they represent sub-agent delegations)
+    MAX_VISIBLE_TOOLS = 4
+    MAX_VISIBLE_RUNNING = 3
+    shown_sa_ids: set[str] = set()
+
+    if tool_calls:
+        # Split into categories
+        completed_regular = []  # completed non-task tools
+        task_tools = []  # task tools (always visible)
+        running_regular = []  # running non-task tools
+
+        for i, tc in enumerate(tool_calls):
+            tr = _tool_result_for_call(tool_results, tc)
+            has_result = tr is not None
+            is_task = tc.get("name") == "task"
+
+            if is_task:
+                task_tools.append((i, tc, tr))
+            elif has_result:
+                completed_regular.append((i, tc, tr))
+            else:
+                running_regular.append((i, tc, None))
+
+        if is_final:
+            # Final frame: show ALL tools expanded, no spinners, no collapsing
+            for tool_index, tc, tr in sorted(
+                completed_regular + running_regular + task_tools,
+                key=lambda item: item[0],
+            ):
+                if tc.get("name") == "task":
+                    _append_task_entry(
+                        tool_index,
+                        tc,
+                        tr,
+                        shown_sa_ids=shown_sa_ids,
+                        compact=True,
+                    )
+                    continue
+
+                _append_narration_before_tool(tool_index)
+                elements.append(_render_tool_call_line(tc, tr))
+                content = tr.get("content", "") if tr else ""
+                if tr and (not is_success(content) or tc.get("name") == "edit_file"):
+                    result_elements = format_tool_result_compact(
+                        tr["name"],
+                        content,
+                        max_lines=10,
+                        tool_args=tc.get("args"),
+                    )
+                    elements.extend(result_elements)
+
+            # Render any sub-agents not already shown via task tool calls
+            for sa in subagents:
+                if sa.instance_id not in shown_sa_ids and (
+                    sa.tool_calls or sa.is_active
+                ):
+                    elements.extend(_render_subagent_section(sa, compact=True))
+
+        else:
+            # Streaming mode: collapse older tools, show spinners
+            # --- Completed regular tools (collapsible) ---
+            slots = max(0, MAX_VISIBLE_TOOLS - len(running_regular))
+            hidden = (
+                completed_regular[:-slots]
+                if slots and len(completed_regular) > slots
+                else (completed_regular if not slots else [])
+            )
+            visible = completed_regular[-slots:] if slots else []
+
+            if hidden:
+                for tool_index, _, _ in hidden:
+                    _append_narration_before_tool(tool_index)
+                ok = sum(1 for _, _, tr in hidden if is_success(tr.get("content", "")))
+                fail = len(hidden) - ok
+                summary = Text()
+                summary.append(f"\u2713 {ok} completed", style="dim green")
+                if fail > 0:
+                    summary.append(f" | {fail} failed", style="dim red")
+                elements.append(summary)
+
+            # --- Running regular tools (limit visible) ---
+            hidden_running = len(running_regular) - MAX_VISIBLE_RUNNING
+            if hidden_running > 0:
+                hidden_running_tools = running_regular[:-MAX_VISIBLE_RUNNING]
+                for tool_index, _, _ in hidden_running_tools:
+                    _append_narration_before_tool(tool_index)
+                summary = Text()
+                summary.append(
+                    f"\u25cf {hidden_running} more running...", style="dim yellow"
+                )
+                elements.append(summary)
+                running_regular = running_regular[-MAX_VISIBLE_RUNNING:]
+
+            for tool_index, tc, tr in sorted(
+                visible + running_regular + task_tools,
+                key=lambda item: item[0],
+            ):
+                if tc.get("name") == "task":
+                    matched_sa = _find_task_subagent(tc, shown_sa_ids)
+                    _append_task_entry(
+                        tool_index,
+                        tc,
+                        tr,
+                        shown_sa_ids=shown_sa_ids,
+                        compact=not matched_sa.is_active if matched_sa else True,
+                    )
+                    continue
+
+                _append_narration_before_tool(tool_index)
+                elements.append(_render_tool_call_line(tc, tr))
+                if tr is None:
+                    elements.append(Spinner("dots", text=" Running...", style="yellow"))
+                    continue
+
+                content = tr.get("content", "")
+                if not is_success(content) or tc.get("name") == "edit_file":
+                    result_elements = format_tool_result_compact(
+                        tr["name"],
+                        content,
+                        max_lines=5,
+                        tool_args=tc.get("args"),
+                    )
+                    elements.extend(result_elements)
+
+            # Remaining sub-agent sections are rendered below.
+
+    if is_final:
+        # Final frame: render todo panel + response (tools/subagents handled above).
+        # Skip narration, spinners — but KEEP response so it persists on screen
+        # when Live exits (transient=False).
+        todo_items = todo_items or []
+        if todo_items:
+            elements.append(Text(""))  # blank separator
+            elements.append(_render_todo_panel(todo_items))
+
+        answer_markdown = _response_markdown_for_display(
+            answer_text,
+            response_markdown=response_markdown,
+            full_response_text=response_text,
+        )
+        if answer_markdown is not None:
+            elements.append(Text(""))  # blank separator
+            elements.append(answer_markdown)
+
+        # Token usage stats (right-aligned)
+        if total_input_tokens or total_output_tokens:
+            stats = Text(justify="right")
+            stats.append("[", style="dim italic")
+            stats.append("Usage: ", style="dim italic")
+            stats.append(f"{total_input_tokens:,}", style="cyan italic")
+            stats.append(" in · ", style="dim italic")
+            stats.append(f"{total_output_tokens:,}", style="green italic")
+            stats.append(" out", style="dim italic")
+            stats.append("]", style="dim italic")
+            elements.append(stats)
+    else:
+        # Task List panel (persistent, updates on write_todos / read_todos)
+        todo_items = todo_items or []
+        if todo_items:
+            elements.append(Text(""))  # blank separator
+            elements.append(_render_todo_panel(todo_items))
+
+        # Sub-agent activity sections
+        # Active: full bordered view; Completed: compact 1-line summary
+        for sa in subagents:
+            if sa.instance_id not in shown_sa_ids and (sa.tool_calls or sa.is_active):
+                elements.extend(_render_subagent_section(sa, compact=not sa.is_active))
+
+        # Processing state after tool execution
+        if is_processing and not is_thinking and not is_responding:
+            # Check if any sub-agent is active
+            any_active = any(sa.is_active for sa in subagents)
+            if not any_active:
+                elements.append(
+                    Spinner("dots", text=" Analyzing results...", style="cyan")
+                )
+
+        # Stream response in real-time as tokens arrive (all tools done)
+        if response_text and all_done:
+            answer_markdown = _response_markdown_for_display(
+                answer_text,
+                response_markdown=response_markdown,
+                full_response_text=response_text,
+            )
+            if answer_markdown is not None:
+                elements.append(Text(""))  # blank separator
+                elements.append(answer_markdown)
+
+    if not elements:
+        elements.append(Spinner("dots", text=" Processing...", style="cyan"))
+    if status_footer is not None:
+        elements.append(status_footer)
+
+    return Group(*elements)
+
+
+def resolve_final_status_footer(
+    interactive: bool,
+    status_footer_builder: Callable[[], Any] | None,
+) -> Any | None:
+    """Resolve the footer to keep in the last Live frame.
+
+    Interactive CLI sessions redraw prompt_toolkit's own bottom toolbar as soon
+    as Rich Live exits, so keeping the Rich footer in that final frame causes a
+    duplicate status bar.
+    """
+    if interactive:
+        return None
+    return status_footer_builder() if status_footer_builder else None
+
+
+# ---------------------------------------------------------------------------
+# Final results display
+# ---------------------------------------------------------------------------
+
+
+def display_final_results(
+    state: StreamState,
+    thinking_max_length: int = DisplayLimits.THINKING_FINAL,
+    show_thinking: bool = True,
+    show_tools: bool = True,
+) -> None:
+    """Display final results after streaming completes."""
+    if show_thinking and state.thinking_text:
+        display_thinking = state.thinking_text.rstrip()
+        if len(display_thinking) > thinking_max_length:
+            half = thinking_max_length // 2
+            display_thinking = (
+                display_thinking[:half]
+                + "\n\n... (truncated) ...\n\n"
+                + display_thinking[-half:]
+            )
+        console.print(
+            Panel(
+                Text(display_thinking, style="dim"),
+                title="Thinking",
+                border_style="blue",
+            )
+        )
+
+    if state.summarization_text:
+        summary_display = state.summarization_text.rstrip()
+        if len(summary_display) > 500:
+            summary_display = summary_display[:500] + " ..."
+        console.print(
+            Panel(
+                Text(summary_display, style="dim italic"),
+                title="Context Summarized",
+                border_style="#f59e0b",
+            )
+        )
+
+    if show_tools and state.tool_calls:
+        shown_sa_ids: set[str] = set()
+
+        for tc in state.tool_calls:
+            tr = _tool_result_for_call(state.tool_results, tc)
+            has_result = tr is not None
+            content = tr.get("content", "") if tr is not None else ""
+            tool_name = tc.get("name", "")
+            is_task = tool_name.lower() == "task"
+
+            # Task tools: show delegation line + compact sub-agent summary
+            if is_task:
+                console.print(_render_tool_call_line(tc, tr))
+                matched_sa = None
+                for sa in state.subagents:
+                    if sa.parent_tool_call_id == tc["id"]:
+                        matched_sa = sa
+                        break
+                if matched_sa:
+                    shown_sa_ids.add(matched_sa.instance_id)
+                    for elem in _render_subagent_section(matched_sa, compact=True):
+                        console.print(elem)
+                continue
+
+            # Regular tools: show tool call line + result
+            console.print(_render_tool_call_line(tc, tr))
+            if has_result and tr is not None:
+                result_elements = format_tool_result_compact(
+                    tr["name"],
+                    content,
+                    max_lines=10,
+                    tool_args=tc.get("args"),
+                )
+                for elem in result_elements:
+                    console.print(elem)
+
+        # Render any sub-agents not already shown via task tool calls
+        for sa in state.subagents:
+            if sa.instance_id not in shown_sa_ids and (sa.tool_calls or sa.is_active):
+                for elem in _render_subagent_section(sa, compact=True):
+                    console.print(elem)
+
+        console.print()
+
+    # Task List panel in final output
+    if state.todo_items:
+        console.print(_render_todo_panel(state.todo_items))
+        console.print()
+
+    if state.response_text:
+        # Strip trailing standalone "..." lines
+        clean_response = state.response_text.strip()
+        while clean_response.endswith("\n...") or clean_response.rstrip() == "...":
+            clean_response = clean_response.rstrip().removesuffix("...").rstrip()
+        console.print()
+        console.print(
+            Markdown(
+                _fix_markdown_heading_spacing(clean_response or state.response_text)
+            )
+        )
+
+    # Token usage stats (right-aligned)
+    if state.total_input_tokens or state.total_output_tokens:
+        stats = Text(justify="right")
+        stats.append("[", style="dim italic")
+        stats.append("Usage: ", style="dim italic")
+        stats.append(f"{state.total_input_tokens:,}", style="cyan italic")
+        stats.append(" in · ", style="dim italic")
+        stats.append(f"{state.total_output_tokens:,}", style="green italic")
+        stats.append(" out", style="dim italic")
+        stats.append("]", style="dim italic")
+        console.print(stats)
+
+
+# ---------------------------------------------------------------------------
+# HITL (Human-in-the-Loop) approval helpers
+# ---------------------------------------------------------------------------
+
+_logger = logging.getLogger(__name__)
+_session_auto_approve = False
+
+
+@dataclass(frozen=True)
+class _HitlResolution:
+    """Result of :func:`_resolve_hitl_approval`.
+
+    ``decisions`` is the resume payload (``None`` when rejected or when the
+    human budget is spent). ``human_prompted`` says whether a human was
+    asked this round. ``budget_exhausted`` is set only when a human prompt
+    was skipped because the human-round budget was already spent; auto
+    fast paths never set it (issue #469).
+    """
+
+    decisions: list[dict] | None
+    human_prompted: bool
+    budget_exhausted: bool = False
+
+
+def _resolve_hitl_approval(
+    interrupt_data: dict,
+    prompt_fn: Callable[[list], list[dict] | None] | None = None,
+    *,
+    outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
+    question_runner: _QuestionRunner | None = None,
+    human_budget_exhausted: bool = False,
+) -> _HitlResolution:
+    """Resolve HITL approval for an interrupt.
+
+    Returns a :class:`_HitlResolution` carrying the decisions (``None`` if
+    rejected) and whether a human was prompted. Auto-approves based on
+    config and session state.
+
+    Args:
+        interrupt_data: The interrupt event data.
+        prompt_fn: Optional custom prompt function (e.g. channel-based).
+            If provided and manual approval is needed, this is called
+            instead of the default CLI ``input()`` prompt.
+    """
+    global _session_auto_approve
+
+    from ..channels.interaction import (
+        config_policy_snapshot,
+        decisions_after_human_approval,
+    )
+
+    action_requests = interrupt_data.get("action_requests", [])
+    if not action_requests:
+        return _HitlResolution([{"type": "approve"}], human_prompted=False)
+
+    # Session "approve all" is an explicit human opt-in → blanket-approve
+    # everything (dangerous set included), unlike unattended auto_approve below.
+    if _session_auto_approve:
+        return _HitlResolution(
+            [{"type": "approve"} for _ in action_requests], human_prompted=False
+        )
+
+    # Config-rule fast path (shared with the TUI). Returns full decisions when
+    # config clears every request, or None when a human decision is needed;
+    # the rejections are kept so a human "approve all" cannot override a policy
+    # REJECT in a mixed batch.
+    decisions, rejections = config_policy_snapshot(action_requests)
+    if decisions is not None:
+        return _HitlResolution(decisions, human_prompted=False)
+
+    # A channel bridge owns a further fast path (its session grant), so it
+    # gets the budget flag and reports whether it actually prompted.
+    if outcome_fn is not None:
+        outcome = outcome_fn(action_requests, human_budget_exhausted)
+        if outcome.budget_exhausted:
+            return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
+        return _HitlResolution(outcome.decisions, human_prompted=outcome.prompted)
+
+    # After the auto fast paths: a spent human budget must not prompt, but
+    # it also must not have blocked the session grant / allow-list above.
+    if human_budget_exhausted:
+        return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
+
+    human = (
+        prompt_fn(action_requests)
+        if prompt_fn is not None
+        else _prompt_hitl_approval(action_requests, question_runner=question_runner)
+    )
+    if human is None or any(d.get("type") != "approve" for d in human):
+        return _HitlResolution(human, human_prompted=True)
+    return _HitlResolution(
+        decisions_after_human_approval(action_requests, rejections),
+        human_prompted=True,
+    )
+
+
+def _prompt_hitl_approval(
+    action_requests: list,
+    *,
+    question_runner: _QuestionRunner | None = None,
+) -> list[dict] | None:
+    """Display approval prompt and get user decision.
+
+    Returns list of decisions if approved, None if rejected.
+
+    Uses ``questionary.select()`` for arrow-key navigation, matching the
+    style used by ``_resolve_ask_user_prompt``. Imports are lazy so the
+    auto-approve / shell-allow-list fast paths in ``_resolve_hitl_approval``
+    don't pay for them.
+    """
+    global _session_auto_approve
+
+    import questionary  # type: ignore[import-untyped]
+
+    from ..cli.widgets.thread_selector import PICKER_STYLE as _PICKER_STYLE
+
+    console.print()
+    panel_text = Text()
+    for i, req in enumerate(action_requests):
+        name = req.get("name", "")
+        args = req.get("args", {})
+        desc = format_tool_compact(name, args if isinstance(args, dict) else {})
+        if panel_text.plain:
+            panel_text.append("\n")
+        panel_text.append(f"  {i + 1}. {desc}", style="yellow")
+
+    console.print(
+        Panel(
+            panel_text,
+            title="Approval Required",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+    )
+
+    n = len(action_requests)
+    if n <= 1:
+        approve_label = "Approve"
+        reject_label = "Reject"
+    else:
+        approve_label = f"Approve all {n}"
+        reject_label = f"Reject all {n}"
+    auto_label = "Approve all (session)"
+
+    try:
+        question = questionary.select(
+            "Approval required",
+            choices=[approve_label, reject_label, auto_label],
+            style=_PICKER_STYLE,
+        )
+        selected = (
+            question_runner(question) if question_runner is not None else question.ask()
+        )
+    except (EOFError, KeyboardInterrupt):
+        console.print("[dim]  Rejected.[/dim]")
+        return None
+
+    if selected is None:  # Ctrl+C inside questionary
+        console.print("[dim]  Rejected.[/dim]")
+        return None
+
+    if selected == approve_label:
+        return [{"type": "approve"} for _ in action_requests]
+    if selected == auto_label:
+        _session_auto_approve = True
+        return [{"type": "approve"} for _ in action_requests]
+    console.print("[dim]  Rejected.[/dim]")
+    return None
+
+
+def _resolve_ask_user_prompt(
+    ask_user_data: dict,
+    *,
+    question_runner: _QuestionRunner | None = None,
+) -> dict:
+    """Interactive console Q&A for ask_user events.
+
+    Presents multiple-choice questions with arrow-key navigation via
+    ``questionary.select()`` and free-text questions via
+    ``questionary.text()`` with required-field validation.  Matches the
+    questionary style used throughout the rest of the CLI.
+    """
+    import questionary  # type: ignore[import-untyped]
+
+    from ..cli.widgets.thread_selector import PICKER_STYLE as _PICKER_STYLE
+
+    questions = ask_user_data.get("questions", [])
+    if not questions:
+        return {"answers": [], "status": "answered"}
+
+    total = len(questions)
+    console.print()
+    console.print(
+        Panel(
+            Text("Quick check-in from EvoScientist", style="bold"),
+            border_style="cyan",
+            padding=(0, 1),
+        )
+    )
+    console.print()
+
+    answers: list[str] = []
+    try:
+        for i, q in enumerate(questions):
+            q_text = q.get("question", "")
+            q_type = q.get("type", "text")
+            required = q.get("required", True)
+            optional_suffix = " (optional)" if not required else ""
+            prompt_text = f"({i + 1}/{total}) {q_text}{optional_suffix}"
+
+            def _make_validator(is_required: bool):
+                def _validate(v: str) -> bool | str:
+                    if is_required and not v.strip():
+                        return "This field is required."
+                    return True
+
+                return _validate
+
+            if q_type == "multiple_choice":
+                choices = q.get("choices", [])
+                choice_labels = [c.get("value", str(c)) for c in choices]
+                skip_label = "Skip"
+                if not required:
+                    choice_labels.append(skip_label)
+                other_label = "Other (type your answer)"
+                choice_labels.append(other_label)
+
+                question = questionary.select(
+                    prompt_text,
+                    choices=choice_labels,
+                    style=_PICKER_STYLE,
+                )
+                selected = (
+                    question_runner(question)
+                    if question_runner is not None
+                    else question.ask()
+                )
+
+                if selected is None:  # Ctrl+C
+                    raise KeyboardInterrupt
+
+                if selected == skip_label:
+                    answers.append("")
+                    console.print()
+                    continue
+
+                if selected == other_label:
+                    question = questionary.text(
+                        "Your answer:",
+                        validate=_make_validator(required),
+                        style=_PICKER_STYLE,
+                    )
+                    selected = (
+                        question_runner(question)
+                        if question_runner is not None
+                        else question.ask()
+                    )
+                    if selected is None:
+                        raise KeyboardInterrupt
+
+                answers.append(selected)
+
+            else:
+                question = questionary.text(
+                    prompt_text,
+                    validate=_make_validator(required),
+                    style=_PICKER_STYLE,
+                )
+                answer = (
+                    question_runner(question)
+                    if question_runner is not None
+                    else question.ask()
+                )
+
+                if answer is None:  # Ctrl+C
+                    raise KeyboardInterrupt
+
+                answers.append(answer)
+
+            console.print()
+
+    except (EOFError, KeyboardInterrupt):
+        console.print("[dim]  Cancelled.[/dim]")
+        return {"status": "cancelled"}
+
+    return {"answers": answers, "status": "answered"}
+
+
+def _run_streaming(
+    agent: "CompiledStateGraph",
+    message: GraphRunInput,
+    thread_id: str,
+    show_thinking: bool,
+    interactive: bool,
+    on_thinking: Callable[[str], None] | None = None,
+    on_todo: Callable[[list[dict]], None] | None = None,
+    on_file_write: Callable[[str], None] | None = None,
+    on_stream_event: Callable[[str, Any], Any] | None = None,
+    status_footer_builder: Callable[[], Any] | None = None,
+    metadata: dict[str, object] | None = None,
+    configurable_extra: dict[str, Any] | None = None,
+    hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
+    ask_user_prompt_fn: Callable[[dict], dict] | None = None,
+    cancel_scope: str | None = None,
+    *,
+    hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
+    gateway: GraphGateway,
+    runtime: AsyncRuntime | None = None,
+    _state: StreamState | None = None,
+    _media_sent: set[str] | None = None,
+    _sent_thinking_text: str | None = None,
+) -> str:
+    """Run async streaming and render with Rich Live display.
+
+    Bridges the async stream_agent_events() into synchronous Rich Live rendering.
+
+    Args:
+        agent: Compiled agent graph
+        message: User message
+        thread_id: Thread ID
+        show_thinking: Whether to show thinking panel
+        interactive: If True, use simplified final display (no panel)
+        on_thinking: Optional sync callback receiving full thinking text.
+            Called when thinking ends (transitions to tool/text) and
+            accumulated thinking >= 200 chars. Uses content-based
+            deduplication across resume/HITL cycles so the same thinking
+            is not replayed, but genuinely new thinking is still sent.
+        on_todo: Optional sync callback receiving todo items list.
+            Called once when write_todos tool_call is detected.
+        on_file_write: Optional sync callback receiving the real filesystem path
+            when the agent writes a media file (image/pdf) via write_file.
+        metadata: Optional metadata dict forwarded to ``stream_agent_events``
+            for LangGraph checkpoint persistence.
+        gateway: Graph/thread gateway supplied by the active runtime.
+
+    Returns:
+        The final response text.
+    """
+    if runtime is None:
+        with AsyncRuntime(thread_name="evosci-stream-runtime") as owned_runtime:
+            return _run_streaming(
+                agent=agent,
+                message=message,
+                thread_id=thread_id,
+                show_thinking=show_thinking,
+                interactive=interactive,
+                on_thinking=on_thinking,
+                on_todo=on_todo,
+                on_file_write=on_file_write,
+                on_stream_event=on_stream_event,
+                status_footer_builder=status_footer_builder,
+                metadata=metadata,
+                configurable_extra=configurable_extra,
+                hitl_prompt_fn=hitl_prompt_fn,
+                ask_user_prompt_fn=ask_user_prompt_fn,
+                cancel_scope=cancel_scope,
+                hitl_outcome_fn=hitl_outcome_fn,
+                gateway=gateway,
+                runtime=owned_runtime,
+                _state=_state,
+                _media_sent=_media_sent,
+                _sent_thinking_text=_sent_thinking_text,
+            )
+
+    # Scope-less callers keep the legacy single-event semantics. Scoped
+    # callers use unique per-request scopes, so pre-start `/stop` must
+    # remain armed until this run consumes it.
+    if _state is None and cancel_scope is None:
+        clear_stream_cancel()
+
+    state = _state if _state is not None else StreamState()
+    if _media_sent is None:
+        _media_sent = set()
+    _MIN_THINKING_LEN = 200
+
+    def _stopped_response() -> str:
+        _, final_text = build_stopped_response_text(state.response_text)
+        state.response_text = final_text
+        return final_text
+
+    async def _consume() -> None:
+        nonlocal _sent_thinking_text, _todo_sent
+        event_stream = gateway.stream_events(
+            RunRequest(
+                message=message,
+                thread_id=thread_id,
+                metadata=metadata,
+                configurable_extra=configurable_extra,
+                target=_graph_target_for_local_agent(agent, metadata),
+            )
+        )
+        try:
+            async for event in event_stream:
+                if is_stream_cancel_requested(cancel_scope):
+                    _stopped_response()
+                    return
+                event_type = state.handle_event(event)
+
+                # Relay thinking to channel when transitioning away from
+                # thinking phase.  Uses content comparison so that replayed
+                # thinking after resume is skipped, but genuinely new
+                # thinking is still delivered.
+                if (
+                    on_thinking
+                    and event_type != "thinking"
+                    and state.thinking_text
+                    and len(state.thinking_text) >= _MIN_THINKING_LEN
+                ):
+                    current = state.thinking_text.rstrip()
+                    if current != _sent_thinking_text:
+                        on_thinking(current)
+                        _sent_thinking_text = current
+
+                # Send todo list to channel on first write_todos tool_call
+                if (
+                    on_todo
+                    and not _todo_sent
+                    and event_type == "tool_call"
+                    and event.get("name") == "write_todos"
+                    and state.todo_items
+                ):
+                    on_todo(state.todo_items)
+                    _todo_sent = True
+
+                # Send media file to channel when write_file succeeds
+                if (
+                    on_file_write
+                    and event_type == "tool_result"
+                    and event.get("name") == "write_file"
+                    and event.get("success")
+                ):
+                    wf_path = ""
+                    for tc in reversed(state.tool_calls):
+                        if tc.get("name") == "write_file":
+                            p = tc.get("args", {}).get("path", "")
+                            if p and p not in _media_sent:
+                                wf_path = p
+                                break
+                    if wf_path:
+                        ext = os.path.splitext(wf_path)[1].lower()
+                        if ext in _MEDIA_EXTENSIONS:
+                            real_path = str(resolve_virtual_path(wf_path))
+                            if os.path.isfile(real_path):
+                                _media_sent.add(wf_path)
+                                on_file_write(real_path)
+
+                # Send media file to channel when read_file returns an image
+                if (
+                    on_file_write
+                    and event_type == "tool_result"
+                    and event.get("name") == "read_file"
+                    and event.get("success")
+                ):
+                    rf_path = ""
+                    for tc in reversed(state.tool_calls):
+                        if tc.get("name") == "read_file":
+                            p = tc.get("args", {}).get("file_path", "") or tc.get(
+                                "args", {}
+                            ).get("path", "")
+                            if p and p not in _media_sent:
+                                rf_path = p
+                                break
+                    if rf_path:
+                        ext = os.path.splitext(rf_path)[1].lower()
+                        if ext in _MEDIA_EXTENSIONS:
+                            real_path = rf_path
+                            if not os.path.isfile(real_path):
+                                real_path = str(resolve_virtual_path(rf_path))
+                            if os.path.isfile(real_path):
+                                _media_sent.add(rf_path)
+                                on_file_write(real_path)
+
+                if on_stream_event is not None:
+                    callback_result = on_stream_event(event_type, state)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
+
+                live.update(
+                    create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=(
+                            status_footer_builder() if status_footer_builder else None
+                        ),
+                    )
+                )
+        finally:
+            aclose = getattr(event_stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+    def _stop_on_hitl_round_limit() -> str:
+        """Stop an exhausted HITL resume loop visibly (issue #469).
+
+        Prints a notice, closes the parked interrupt without resuming the
+        agent (a rejecting resume would run another invisible model step),
+        and returns the partial response gathered so far. Channel callers
+        (``hitl_outcome_fn``) also get the notice in the returned text,
+        because the console line never reaches the channel user.
+        """
+        from ..channels.hitl_budget import (
+            HITL_BUDGET_STOP_NOTICE,
+            MAX_HITL_TOTAL_ROUNDS,
+            MAX_HUMAN_HITL_ROUNDS,
+        )
+
+        limit = (
+            MAX_HITL_TOTAL_ROUNDS
+            if total_rounds >= MAX_HITL_TOTAL_ROUNDS
+            else MAX_HUMAN_HITL_ROUNDS
+        )
+        console.print(f"[yellow]{HITL_BUDGET_STOP_NOTICE}[/yellow]")
+        _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
+        state.pending_interrupt = None
+        state.pending_ask_user = None
+
+        async def _run_close() -> None:
+            from ..backends import close_parked_checkpoint
+
+            await close_parked_checkpoint(
+                gateway,
+                _graph_target_for_local_agent(agent, metadata),
+                thread_id,
+            )
+
+        try:
+            runtime.run_sync(_run_close)
+        except concurrent.futures.CancelledError:
+            if not is_stream_cancel_requested(cancel_scope):
+                raise
+            _stopped_response()
+        except Exception:
+            _logger.warning(
+                "Failed to close parked HITL checkpoint on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+        text = (state.response_text or "").strip()
+        if hitl_outcome_fn is None:
+            return text
+        from ..channels.hitl_budget import channel_response_with_budget_stop
+
+        return channel_response_with_budget_stop(text)
+
+    try:
+        # Iterative HITL resume loop (converted from recursion so a long
+        # unattended turn cannot exhaust the frame stack). Only rounds that
+        # prompted a human count toward the human budget in
+        # ``channels.hitl_budget``; auto-resolved rounds are free (issue #469).
+        human_rounds = 0
+        total_rounds = 0
+
+        stream_handle: RuntimeHandle[None] | None = None
+
+        def _register(handle: RuntimeHandle[None]) -> None:
+            nonlocal stream_handle
+            stream_handle = handle
+            _register_stream_cancel_handle(cancel_scope, handle)
+
+        async def _run_with_refresh() -> None:
+            async def _periodic_refresh() -> None:
+                try:
+                    while True:
+                        await asyncio.sleep(0.05)
+                        live.refresh()
+                except asyncio.CancelledError:
+                    pass
+
+            refresh_task = asyncio.ensure_future(_periodic_refresh())
+            try:
+                with bind_stream_cancel(cancel_scope):
+                    await _consume()
+            finally:
+                refresh_task.cancel()
+                try:
+                    await refresh_task
+                except asyncio.CancelledError:
+                    pass
+                # Render clean final frame before Live exits (no spinners, expanded tools)
+                if (
+                    state.pending_interrupt is not None
+                    or state.pending_ask_user is not None
+                ):
+                    # Interrupted: render current state (not final) so it
+                    # looks continuous when prompt appears.
+                    final_display = create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
+                    )
+                elif interactive:
+                    final_display = create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        is_final=True,
+                        final_show_thinking=False,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
+                    )
+                else:
+                    final_display = create_streaming_display(
+                        **state.get_display_args(),
+                        show_thinking=show_thinking,
+                        is_final=True,
+                        final_show_thinking=True,
+                        final_thinking_max_length=DisplayLimits.THINKING_FINAL,
+                        response_markdown=state.get_response_markdown(),
+                        status_footer=resolve_final_status_footer(
+                            interactive, status_footer_builder
+                        ),
+                    )
+                _update_final_live_frame(live, final_display, stream_handle)
+
+        while True:
+            total_rounds += 1
+            _todo_sent = False
+            if is_stream_cancel_requested(cancel_scope):
+                return _stopped_response()
+
+            with Live(
+                console=console,
+                auto_refresh=False,
+                transient=False,
+                vertical_overflow="visible",
+            ) as live:
+                live.update(
+                    create_streaming_display(
+                        is_waiting=True,
+                        status_footer=(
+                            status_footer_builder() if status_footer_builder else None
+                        ),
+                    )
+                )
+
+                stream_handle = None
+                try:
+                    runtime.run_sync(_run_with_refresh, on_submitted=_register)
+                except concurrent.futures.CancelledError:
+                    if not is_stream_cancel_requested(cancel_scope):
+                        raise
+                    _stopped_response()
+                finally:
+                    if stream_handle is not None:
+                        _unregister_stream_cancel_handle(cancel_scope, stream_handle)
+
+            # Flush any remaining thinking that wasn't sent during streaming.
+            if on_thinking and state.thinking_text:
+                current = state.thinking_text.rstrip()
+                if len(current) >= _MIN_THINKING_LEN and current != _sent_thinking_text:
+                    on_thinking(current)
+                    _sent_thinking_text = current
+
+            # Total cap applies even to auto-resolved pendings. The human
+            # budget is applied later, only when a prompt would actually be
+            # shown, so a session grant still auto-resolves after 50 human
+            # rounds (issue #469).
+            from ..channels.hitl_budget import hitl_budget_stop
+
+            if (
+                state.pending_ask_user is not None
+                or state.pending_interrupt is not None
+            ) and hitl_budget_stop(
+                human_rounds=human_rounds,
+                total_rounds=total_rounds,
+                needs_human=False,
+            ):
+                return _stop_on_hitl_round_limit()
+
+            # ask_user: check before HITL (ask_user uses the same resume loop)
+            if state.pending_ask_user is not None:
+                if hitl_budget_stop(
+                    human_rounds=human_rounds,
+                    total_rounds=total_rounds,
+                    needs_human=True,
+                ):
+                    return _stop_on_hitl_round_limit()
+                human_rounds += 1  # ask_user always prompts a human
+                if is_stream_cancel_requested(cancel_scope):
+                    return _stopped_response()
+                if ask_user_prompt_fn is not None:
+                    result = ask_user_prompt_fn(state.pending_ask_user)
+                else:
+                    try:
+                        result = _resolve_ask_user_prompt(
+                            state.pending_ask_user,
+                            question_runner=lambda question: (
+                                _run_owned_questionary_prompt(
+                                    question,
+                                    runtime=runtime,
+                                    cancel_scope=cancel_scope,
+                                )
+                            ),
+                        )
+                    except _StreamPromptCancelled:
+                        return _stopped_response()
+                from langgraph.types import Command  # type: ignore[import-untyped]
+
+                state.pending_ask_user = None
+                state.thinking_text = ""  # reset accumulation for fresh round
+                if is_stream_cancel_requested(cancel_scope):
+                    return _stopped_response()
+                message = Command(resume=result)
+                continue
+
+            # HITL: check for pending interrupt and handle approval
+            if state.pending_interrupt is not None:
+                if is_stream_cancel_requested(cancel_scope):
+                    return _stopped_response()
+                try:
+                    resolution = _resolve_hitl_approval(
+                        state.pending_interrupt,
+                        prompt_fn=hitl_prompt_fn,
+                        outcome_fn=hitl_outcome_fn,
+                        question_runner=(
+                            None
+                            if hitl_prompt_fn is not None or hitl_outcome_fn is not None
+                            else lambda question: _run_owned_questionary_prompt(
+                                question,
+                                runtime=runtime,
+                                cancel_scope=cancel_scope,
+                            )
+                        ),
+                        human_budget_exhausted=hitl_budget_stop(
+                            human_rounds=human_rounds,
+                            total_rounds=total_rounds,
+                            needs_human=True,
+                        ),
+                    )
+                except _StreamPromptCancelled:
+                    return _stopped_response()
+                if resolution.budget_exhausted:
+                    return _stop_on_hitl_round_limit()
+                if resolution.human_prompted:
+                    human_rounds += 1
+                if is_stream_cancel_requested(cancel_scope):
+                    return _stopped_response()
+                if resolution.decisions is not None:
+                    from ..backends import build_hitl_resume
+
+                    interrupt_id = state.pending_interrupt.get("interrupt_id")
+                    state.pending_interrupt = None
+                    state.thinking_text = ""  # reset accumulation for fresh round
+                    if is_stream_cancel_requested(cancel_scope):
+                        return _stopped_response()
+                    message = build_hitl_resume(interrupt_id, resolution.decisions)
+                    continue
+
+            # Everything (tools, thinking, todos, response) is already on screen
+            # from Live's final frame (transient=False). No need to re-print.
+
+            return (state.response_text or "").strip()
+    finally:
+        discard_stream_cancel(cancel_scope)
+
+
+# ---------------------------------------------------------------------------
+# Thread-safe static streaming (for background channels)
+# ---------------------------------------------------------------------------
+
+
+async def _astream_to_console(
+    agent: "CompiledStateGraph",
+    message: str,
+    thread_id: str,
+    show_thinking: bool = True,
+    *,
+    gateway: GraphGateway,
+) -> str:
+    """Stream agent events to console using static prints (thread-safe, no Live).
+
+    Used by the background iMessage channel to show streaming output in the CLI
+    without conflicting with prompt_toolkit's terminal handling in the main thread.
+
+    Rich console.print() is thread-safe (internal lock), unlike Live which is not.
+
+    Args:
+        agent: Compiled agent graph
+        message: User message
+        thread_id: Thread ID for conversation persistence
+        show_thinking: Whether to display thinking panel
+
+    Returns:
+        The final response text.
+    """
+    state = StreamState()
+
+    async for event in gateway.stream_events(
+        RunRequest(
+            message=message,
+            thread_id=thread_id,
+            target=_graph_target_for_local_agent(agent),
+        )
+    ):
+        etype = state.handle_event(event)
+
+        # Only show subagent starts as real-time progress.
+        # Full results rendered by display_final_results() after streaming.
+        if etype == "subagent_start":
+            name = event["name"]
+            desc = event.get("description", "")
+            line = Text()
+            line.append("\u25b6 ", style="cyan bold")
+            line.append(f"Cooking with {name}", style="cyan bold")
+            if desc:
+                short = desc[:50] + "\u2026" if len(desc) > 50 else desc
+                line.append(f" \u2014 {short}", style="dim")
+            console.print(line)
+
+    # Final output (streaming layout: tools → Task List → subagents → response)
+
+    # Thinking
+    if show_thinking and state.thinking_text:
+        dt = state.thinking_text.rstrip()
+        if len(dt) > 500:
+            dt = dt[:250] + "\n\u2026truncated\u2026\n" + dt[-250:]
+        console.print(
+            Panel(Text(dt, style="dim"), title="Thinking", border_style="blue")
+        )
+
+    # Summarization
+    if state.summarization_text:
+        st = state.summarization_text.rstrip()
+        if len(st) > 500:
+            st = st[:500] + " ..."
+        console.print(
+            Panel(
+                Text(st, style="dim italic"),
+                title="Context Summarized",
+                border_style="#f59e0b",
+            )
+        )
+
+    # 1) Regular (non-task) tools — above Task List
+    for tc in state.tool_calls:
+        if tc.get("name", "").lower() == "task":
+            continue
+        tr = _tool_result_for_call(state.tool_results, tc)
+        console.print(_render_tool_call_line(tc, tr))
+        if tr and not is_success(tr.get("content", "")):
+            for elem in format_tool_result_compact(tr["name"], tr.get("content", "")):
+                console.print(elem)
+
+    # 2) Task List panel — middle
+    if state.todo_items:
+        console.print(_render_todo_panel(state.todo_items))
+        console.print()
+
+    # 3) Subagent sections (compact) — below Task List
+    for sa in state.subagents:
+        if sa.tool_calls or not sa.is_active:
+            for elem in _render_subagent_section(sa, compact=True):
+                console.print(elem)
+
+    # 4) Response
+    if state.response_text:
+        clean = state.response_text.strip()
+        while clean.endswith("\n...") or clean.rstrip() == "...":
+            clean = clean.rstrip().removesuffix("...").rstrip()
+        console.print()
+        console.print(
+            Markdown(_fix_markdown_heading_spacing(clean or state.response_text))
+        )
+        console.print()
+
+    return (state.response_text or "").strip()

@@ -1,0 +1,812 @@
+ > [!WARNING]
+ > 这是社区翻译版本，欢迎修正！
+
+---
+
+<div align="center">
+    <picture>
+      <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-dark.svg">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-light.svg">
+      <img alt="EvoScientist Logo" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/logo-dark.svg" width="80%">
+    </picture>
+</div>
+
+<div align="center">
+<a href="https://pypi.org/project/EvoScientist/"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
+  <img alt="PyPI v0.3.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+</picture></a><a href="https://EvoScientist.github.io/"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
+  <img alt="Website" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg" height="28">
+</picture></a><a href="https://github.com/langchain-ai/deepagents"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-framework-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-framework-dark.svg">
+  <img alt="Framework DeepAgents" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-framework-light.svg" height="28">
+</picture></a><a href="https://github.com/EvoScientist/EvoScientist/blob/main/LICENSE"><picture>
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-license-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-license-dark.svg">
+  <img alt="License Apache 2.0" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-license-light.svg" height="28">
+</picture></a>
+</div>
+
+---
+
+<div align="center">
+<a href="https://github.com/EvoScientist/EvoScientist"><img src="https://readme-typing-svg.demolab.com?font=Sans-Serif&pause=1000&color=64B5F6&center=true&vCenter=true&width=435&lines=Towards+Self-Evolving+AI+Scientists;Harness+Vibe+Research" alt="Typing SVG" /></a>
+</div>
+
+<div align="center">
+
+**[English](./README.md) | 简体中文**
+
+
+
+</div>
+
+**EvoScientist 旨在通过构建自我进化的 AI 科学家来驱动 Vibe Research——让 AI 自主探索、生成洞见并持续迭代优化。
+它以开箱即用为设计理念，提供一个伴随智能体技能、工具集和记忆库共同成长的活跃研究系统。
+EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采用人在环上（Human-on-the-Loop）范式——AI 作为研究伙伴，与人类研究者共同进化，逐步内化学术品味与科学判断力。**
+
+<h3>🏆 荣誉与认可</h3>
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="33%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_awards.JPG" height="180" alt="ICAIS 2025 Awards"/>
+      <br />
+      <sub><b>最佳论文与评审奖</b></sub>
+    </td>
+    <td align="center" valign="top" width="33%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/ICAIS_best_paper.png" height="180" alt="Best Paper"/>
+      <br />
+      <sub><b>AI 生成最佳论文</b></sub>
+    </td>
+    <td align="center" valign="top" width="33%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/deepresearch_bench_2.png" height="180" alt="DeepResearch Bench II #1"/>
+      <br />
+      <sub><b>DeepResearch Bench II 第一名</b></sub>
+    </td>
+  </tr>
+</table>
+
+<br />
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="33%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/DeepResearch_Bench.png" height="180" alt="DeepResearch Bench #1"/>
+      <br />
+      <sub><b>DeepResearch Bench 第一名</b></sub>
+    </td>
+    <td align="center" valign="top" width="33%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_code.png" height="180" alt="AstaBench Code & Execution #1"/>
+      <br />
+      <sub><b>AstaBench 代码与执行榜第一名</b></sub>
+    </td>
+    <td align="center" valign="top" width="33%">
+      <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/asta_bench_data.png" height="180" alt="AstaBench Data Analysis #1"/>
+      <br />
+      <sub><b>AstaBench 数据分析榜第一名</b></sub>
+    </td>
+  </tr>
+</table>
+
+<h3>⚡ 统一入口，多端体验</h3>
+
+<table>
+  <tr>
+    <th><p align="center">🌐 Desktop WebUI</p></th>
+  </tr>
+  <tr>
+    <td align="center">
+      <video src="https://github.com/user-attachments/assets/b977f2d5-488a-428d-9c02-b6b27c1521f8" autoplay loop muted playsinline width="100%">
+        <a href="https://github.com/user-attachments/assets/b977f2d5-488a-428d-9c02-b6b27c1521f8">观看 WebUI 演示</a>
+      </video>
+    </td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <th width="75%"><p align="center">🖥️ CLI / TUI</p></th>
+    <th width="25%"><p align="center">📱 移动端</p></th>
+  </tr>
+  <tr>
+    <td align="center">
+      <video src="https://github.com/user-attachments/assets/a40ba429-bb07-4663-b5b1-77aed1a833b9" autoplay loop muted playsinline width="100%">
+        <a href="https://github.com/user-attachments/assets/a40ba429-bb07-4663-b5b1-77aed1a833b9">观看演示视频</a>
+      </video>
+    </td>
+    <td align="center">
+      <video src="https://github.com/user-attachments/assets/4919e6f4-e434-46c9-98c7-35d7482868a6" width="100%" autoplay loop muted playsinline>
+        <a href="https://github.com/user-attachments/assets/4919e6f4-e434-46c9-98c7-35d7482868a6">观看移动端演示</a>
+      </video>
+    </td>
+  </tr>
+</table>
+
+## ✨ 特性
+
+- **🤖 多智能体协作** — 6 个子智能体（规划、调研、编码、调试、分析、写作）协同工作。
+- **🧠 自进化记忆** — 每轮自动提炼并连成知识图谱，跨会话持续进化。
+- **🛠️ AutoSkills 自建技能** — 定期从自身记忆中提炼重复模式，起草为可复用技能——通过 `/autoskills` 供你审核。
+- **🌐 多模型供应商** — Anthropic、OpenAI、Google、MiniMax、NVIDIA——一处配置，随时切换。
+- **📱 多渠道接入** — CLI 为中心；Telegram、Slack、飞书、微信等——共享同一智能体会话。
+- **🖥️ Desktop WebUI** — 单终端 `--ui webui` 启动带工作区面板的 Web 应用。
+- **🔬 科学工作流** — 需求采集 → 规划 → 执行 → 评估 → 撰写 → 验证。
+- **⏰ 定时任务** — 以 cron 风格的计划自动执行重复性研究——自行运行并回报结果。
+- **🔄 代码生成模式** — More Effort（迭代精修），持续迭代提升代码生成质量。
+- **⚡ 自适应工具** — 每轮对话智能筛选相关工具，减少干扰提升效率。
+- **✂️ 上下文编辑** — 根据对话状态动态改写系统提示词。
+- **🔌 MCP 与 Skills** — 即插即用 MCP 服务器，或从 GitHub 一键安装技能包。
+
+> [!TIP]
+> 寻找开箱即用的研究技能？查看 [**EvoSkills**](https://github.com/EvoScientist/EvoSkills) — 由 **EvoScientist** 引擎驱动，结合可安装技能，端到端研究全流程一步到位。EvoSkills 同样兼容各类 CLI 编程智能体。
+
+## 🔥 动态
+
+- **[2026 年 6 月 3 日]** 在 [ResearchClawBench](https://github.com/InternScience/ResearchClawBench)（Agent 模式）中，🥈 总体排名第 2 —— 同时 🥇 在基于 `GPT-5.4` 的智能体中排名第 1！[**排行榜**](https://internscience.github.io/ResearchClawBench-Home/) 👈
+- **[2026 年 4 月 18 日]** 🥇 提交时在 [DeepResearch Bench](https://deepresearch-bench.github.io/) 排名第一！[**排行榜**](https://huggingface.co/spaces/muset-ai/DeepResearch-Bench-Leaderboard) 👈
+- **[2026 年 4 月 13 日]** 🥇 再度登顶！提交时在 [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 重回第一！[**排行榜**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
+- **[2026 年 3 月 26 日]** 🥇 提交时在 [AstaBench 数据分析](https://allenai-asta-bench-leaderboard.hf.space/home) 排名第一！[**排行榜**](https://allenai-asta-bench-leaderboard.hf.space/data-analysis) 👈
+- **[2026 年 3 月 25 日]** 🥇 提交时在 [AstaBench 代码与执行](https://allenai-asta-bench-leaderboard.hf.space/home) 排名第一！[**排行榜**](https://allenai-asta-bench-leaderboard.hf.space/code-execution) 👈
+- **[2026 年 3 月 13 日]** 🚀 [**EvoScientist**](https://github.com/EvoScientist/EvoScientist) 正式亮相！
+- **[2026 年 3 月 11 日]** ⛳ 技术报告已上线！[**查看详情**](https://arxiv.org/abs/2603.08127) 👈
+- **[2026 年 3 月 6 日]** 🥇 提交时在 [DeepResearch Bench II](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 排名第一！[**排行榜**](https://agentresearchlab.com/benchmarks/deepresearch-bench-ii/index.html#leaderboard) 👈
+- **[2025 年 11 月 24 日]** 🏆 [ICAIS 2025](https://icais.ai/) AI Scientist Track 6/6 全部中稿 — Best Paper & AI Reviewer's Appraisal Award！[**详情**](https://airaxiv.com/papers/?q=zacharyzhang2022%40gmail.com) 👈
+
+<details>
+<summary>📦 版本更新摘要（changelog）</summary>
+
+- **[2026 年 9 月 29 日]** **[v0.3.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.4)** — 新增模型：Claude Sonnet 5.5（Anthropic 与 OpenRouter）；桌面端铺垫：WebUI 启动器重构为与 shell 无关的核心，并提供后台任务检测；Windows 修复：系统代理下能正确识别本地服务、langgraph dev 服务不再被终端 Ctrl+C 波及、`EvoSci server stop` 命令可用；修复原生 DeepSeek 下的记忆 worker 与定时任务验收评分。
+- **[2026 年 9 月 26 日]** **[v0.3.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.3)** — Codex OAuth（ChatGPT Plus/Pro）端到端可用，并能捕获 vLLM 风格端点返回的推理内容；HITL 恢复轮次上限只统计真正提示过人的轮次；上下文压缩按实际运行的模型计算上下文窗口；各入口可单独选择网关后端（默认关闭）；修复异步 expert 调度；deepagents 0.7.19。
+- **[2026 年 9 月 23 日]** **[v0.3.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.2)** — 新增模型：Claude Opus 5.5、GPT-6 Sol/Luna、MiMo-V2.6-Pro/Flash（新增小米 provider）与 Grok 4.7；修复 Anthropic 协议请求报错与工具运行中 Ctrl+C 的问题；deepagents 0.7.18。
+- **[2026 年 9 月 19 日]** **[v0.3.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.1)** — 新增模型：GLM-5.3-FlashX（智谱与 OpenRouter）、DeepSeek-V4.1-Flash（DeepSeek 与 OpenRouter）；记忆检索支持中文等不以空格分词的语言；可选的 LangGraph server 网关后端（`gateway_backend`，默认关闭）；HITL 审批统一走同一套策略；修复模型 fallback 链；deepagents 0.7.15。
+- **[2026 年 9 月 11 日]** **[v0.3.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.0)** — 异步子智能体跟随调用方模型；expert 安装即用，无需 `/new`；修复 MiniMax 多轮崩溃、渠道重试与 OpenRouter 归因问题。
+- **[2026 年 9 月 5 日]** **[v0.2.10](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.10)** — 新增模型：Claude Fable 5.1、GPT-6 Astra、Gemini 3.8 Flash、Meta Muse Spark 1.3；主动性第一阶段：首次对话建立用户档案，缓解冷启动；定时任务可附加验收清单；工具选择器仅在工具超过 42 个时启用；升级 deepagents 0.7.13。
+- **[2026 年 8 月 29 日]** **[v0.2.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.9)** — 新增模型：GLM-5.3-Flash（智谱与 OpenRouter）、Qwen3.8-Flash（DashScope 与 OpenRouter）、腾讯 HY4 preview（OpenRouter），均为 1M 上下文；升级 deepagents 0.7.11。
+- **[2026 年 8 月 21 日]** **[v0.2.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.8)** — deploy 模式图重建从约 15 秒降至 1 秒内；resume 命令不再崩溃清空会话历史；新增 Novita AI provider；onboard 推荐技能包新增 NVIDIA BioNeMo Agent Toolkit；路由 reasoning 参数收敛、空截断显式报错；文档新增订阅 OAuth 配置指南；升级 deepagents 0.7.8。
+- **[2026 年 8 月 14 日]** **[v0.2.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.7)** — 启动更快（依赖延迟加载、langgraph dev 服务保活复用、会话列表索引查询）；新增模型：Gemini 3.7 Flash（Google 与 OpenRouter）、DeepSeek V4 Pro 0813、Grok 4.6、GLM-5.3（智谱与 OpenRouter）；配置加密 webhook 的渠道拒绝未签名 POST；MCP stdio 服务在重定向流下可正常启动（修复 Windows 报错）；子 agent 工具改在派发时解析；`/compact` 历史 offload 适配 deepagents 0.7.6。
+- **[2026 年 8 月 7 日]** **[v0.2.6](https://github.com/EvoScientist/EvoScientist/releases/tag/V0.2.6)** — Agent teams：可将已安装的专家技能邀请进会话（`/expert <name>`），支持轮内咨询、并行面板与后台任务；langgraph dev 后端与 WebUI 绑定地址可配置（默认仅回环）；新增火山引擎代码计划 provider（`glm-5.2`、`kimi-k2.5`）；Qwen3.8-Max 可在 DashScope 与 OpenRouter 选用（1M 上下文）；deepagents 0.7.5，不支持的媒体改为占位符、不再触发 provider 400；修复 Kimi/Zhipu 会话的空白 tool-call ID 问题。
+- **[2026 年 8 月 1 日]** **[v0.2.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.5)** — 主 agent 与同步/异步子 agent 统一 human-in-the-loop 审批；升级 deepagents 0.7.0，内置 prompt 更精简，新增递归 `delete` 工具、与 `execute` 同级审批；新增 Requesty 与 Atlas Cloud 两个 LLM provider；修复无名工具调用、同步子 agent 的中断工具历史，以及 deploy 模式端口传播。
+- **[2026 年 7 月 26 日]** **[v0.2.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.4)** — Claude Opus 5 可在 Anthropic 与 OpenRouter 中选用（含 fast），Google 与 OpenRouter 另新增 Gemini 3.6 Flash 与 3.5 Flash Lite；Kimi K3 打通 Anthropic 协议通道（Kimi For Coding、自定义端点），结构化输出、历史回放、多轮 thinking 均可用；修复中断的工具调用历史、技能安装路径泄漏，以及 OpenRouter SSE 流式回归（固定到 0.11 以下）。
+- **[2026 年 7 月 18 日]** **[v0.2.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.3)** — Kimi K3 可在 Moonshot 与 OpenRouter 中选用（1M 上下文）；清理孤儿运行后，异步子代理不再卡在 pending 状态；Telegram 斜杠命令；provider 修复（DeepSeek 原生 SDK、ChatGPT OAuth 下的 GPT-5.x、OpenAI `reasoning_effort`）；tool-selector 流式输出更安静，checkpoint 体积更小。
+- **[2026 年 7 月 11 日]** **[v0.2.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.2)** — onboarding 与 `/model` 新增可选模型：OpenAI 与 OpenRouter 的 GPT-5.6（sol、terra、luna），以及 OpenRouter 上的 Grok 4.5 与腾讯混元 HY3；收紧配置文件权限，并重做了辅助模型的 onboarding OAuth 流程。
+- **[2026 年 7 月 5 日]** **[v0.2.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.1)** — AutoSkills：EvoMemory 从自身的观察记录聚类中起草可复用技能，供你用 `/autoskills` 审核；新增面向无头 / SDK 客户端的 `--output-format stream-json`；更丰富的斜杠命令补全；修复 Windows UTF-8 配置读取；TUI 欢迎横幅修复；langchain-openrouter 升级到 0.2.5。
+- **[2026 年 6 月 26 日]** **[v0.2.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.2.0)** — 定时任务：用 `/schedule` 或自然语言设置 cron 风格的重复运行，无人值守并对 shell 访问做门控；记忆自连成图：将观察记录连成知识图谱（互补 / 矛盾 / 取代）；新增只读 `GET /api/models` 端点，供 WebUI 模型选择器使用。
+- **[2026 年 6 月 23 日]** **[v0.1.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.9)** — 新安装热修复：deepagents 0.6.11 / langchain-quickjs 0.3 将 `task` 保留为 REPL 全局后,首次对话即崩溃（`The subagent `task` tool cannot be exposed via `ptc``）。从 code-interpreter 的 PTC 白名单移除 `task`（`task()` 仍作为 REPL 全局可用,异步分发工具继续保留在 PTC 中），并将 deepagents pin 升级到 `~=0.6.11`。
+- **[2026 年 6 月 22 日]** **[v0.1.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.8)** — LangGraph gateway 层：CLI / TUI / serve / channel 共用、UI 无关的图与线程访问；OpenRouter Anthropic prompt caching **默认开启**（通过 `openrouter_anthropic_prompt_cache=false` 关闭）；命令名互为前缀时 Enter 现在能正确提交斜杠命令；pre-commit ruff 升级。
+- **[2026 年 6 月 16 日]** **[v0.1.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.7)** — 记忆检索：agent 在每个任务开始前对历史 observation 做 preflight 检索（`search_observations` 关键词排序检索 + `read_memory`）；多级斜杠命令补全（带子命令感知）；Windows 稳定性修复（async MCP 工具执行 + 中断后图状态恢复、`cmd.exe` 路径转义）；含空格的虚拟路径处理；deepagents 0.6.10。
+- **[2026 年 6 月 11 日]** **[v0.1.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.6)** — 会话持久化修复：重启后 WebUI / `langgraph dev` 线程不再丢失（SQLite checkpoint + 线程恢复作用域控制）、memory worker checkpoint 自动清理（完成即删 + 启动时清扫残留）、`/threads` 与 resume 提示改用短线程 ID。
+- **[2026 年 6 月 11 日]** **[v0.1.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.5)** — Dangerous 模式（带安全检查的真实文件系统访问）、LangGraph streaming v3 流水线、OpenRouter Anthropic prompt caching（可选启用）、claude-fable-5、TUI 自由滚动、Windows CI 支持，以及 `EvoSci deploy` 公网 Cloudflare 隧道（`--tunnel`）。
+- **[2026 年 6 月 7 日]** **[v0.1.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.4)** — 辅助模型（后台任务与工具选择）、observation 记忆生命周期、Qwen3.7-Max/Plus（DashScope）、UI 后端选择，以及 OpenRouter 多轮推理修复。
+- **[2026 年 6 月 3 日]** **[v0.1.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.3)** — 多模态处理（图片 + PDF/文档 flatten/hoisting、纯文本模型回退）、runtime-context 中间件、memory 中间件迁移至 profile 文件 + stream 时间线叙述、textual 中文输入修复。
+- **[2026 年 6 月 2 日]** **[v0.1.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.2)** — 浏览器 WebUI 模式（beta）、`EvoSci deploy` 独立 LangGraph 服务器、默认模型 → claude-sonnet-4-6、MiniMax M3，以及 sandbox 超时与 async-notifier 渠道路由修复。
+- **[2026 年 5 月 19 日]** **[v0.1.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.1)** — deepagents 0.6.2 DeltaChannel 升级、tier-aware skill mounts、状态/耗时栏、QQ 内联按钮。
+- **[2026 年 5 月 8 日]** **[v0.1.0](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.1.0)** — 异步子智能体（langgraph dev）、官方 Docker 镜像、个人微信、sessions DB 压缩。
+- **[2026 年 4 月 26 日]** **[v0.0.9](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.9)** — 启动加速、会话内换模型、统一斜杠命令、DeepSeek V4 thinking 修复。
+- **[2026 年 4 月 21 日]** **[v0.0.8](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.8)** — 统一数据目录、状态栏、增强 ask-user & auto-mode。
+- **[2026 年 4 月 10 日]** **[v0.0.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.7)** — 全局 skills 目录、Moonshot/Kimi 供应商、ccproxy 修复、渠道改进。
+- **[2026 年 4 月 3 日]** **[v0.0.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.6)** — 动态上下文管理、OpenRouter reasoning、More Effort 模式、GLM-5.1。
+- **[2026 年 3 月 27 日]** **[v0.0.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.5)** — 上下文重试中间件、OpenAI relay 配置、飞书事件循环修复、`/compact`。
+- **[2026 年 3 月 24 日]** **[v0.0.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.4)** — `@file` 引用、resume 历史、飞书 WebSocket、LaTeX 安装。
+- **[2026 年 3 月 20 日]** **[v0.0.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.3)** — 语音输入（STT）、MiniMax/DeepSeek 供应商、MCP & skill 浏览器。
+- **[2026 年 3 月 17 日]** **[v0.0.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.2)** — OAuth 登录、human-in-the-loop & `ask_user`、headless serve。
+- **[2026 年 3 月 13 日]** **[v0.0.1](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.0.1)** — 首个公开版本——自进化 AI Scientist。
+
+</details>
+
+## 📖 目录
+
+- [📦 安装](#-安装)
+- [🔑 配置](#-配置)
+- [⚡ 快速上手](#-快速上手)
+- [⏰ 定时任务](#-定时任务)
+- [🍪 示例与实践](#-示例与实践)
+- [🔌 MCP 集成](#-mcp-集成)
+- [📱 渠道接入](#-渠道接入)
+- [📚 致谢](#-致谢)
+- [🎯 路线图](#-ᯓ-路线图)
+- [🌍 项目角色](#-项目角色)
+- [🤝 贡献](#-贡献)
+- [📝 引用](#-引用)
+
+## 📦 安装
+
+> [!TIP]
+> 需要 **Python 3.11+**（**< 3.14**）。推荐使用 [**uv**](https://docs.astral.sh/uv/) 或 **conda** 进行依赖管理和虚拟环境管理。想完全跳过本地 Python 安装？直接跳转到 [🐳 Docker](#-docker)。
+
+<details>
+<summary>🪛 安装 uv（如果尚未安装）</summary>
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+</details>
+
+### 快速安装
+
+```bash
+uv tool install EvoScientist
+```
+
+> [!NOTE]
+> 更新已安装的版本到最新，请使用 `uv tool upgrade`：
+> ```bash
+> uv tool upgrade EvoScientist
+> ```
+
+或安装到当前环境：
+
+```bash
+uv pip install EvoScientist
+```
+
+### 从 GitHub 安装最新版本
+
+获取 [PyPI](https://pypi.org/project/EvoScientist/) 发布前的最新补丁：
+
+```bash
+uv pip install git+https://github.com/EvoScientist/EvoScientist.git
+```
+
+### 开发安装
+
+```bash
+git clone https://github.com/EvoScientist/EvoScientist.git
+cd EvoScientist
+uv sync --dev
+```
+
+enable pre-commit hooks:
+```bash
+uv run pre-commit install
+```
+
+<details>
+<summary> 使用 conda</summary>
+
+```bash
+conda create -n EvoSci python=3.11 -y
+conda activate EvoSci
+pip install -e ".[dev]"
+```
+
+</details>
+
+<details>
+<summary> 使用 PyPi</summary>
+
+```bash
+pip install EvoScientist          # quick install
+pip install -e ".[dev]"           # development install
+```
+
+</details>
+
+<details>
+<summary> 可选：渠道依赖</summary>
+
+消息渠道集成需要额外依赖，按需安装即可：
+
+```bash
+uv pip install "EvoScientist[telegram]"     # Telegram
+uv pip install "EvoScientist[discord]"      # Discord
+uv pip install "EvoScientist[slack]"        # Slack
+uv pip install "EvoScientist[wechat]"       # 微信
+uv pip install "EvoScientist[qq]"           # QQ
+uv pip install "EvoScientist[feishu]"       # 飞书
+uv pip install "EvoScientist[all-channels]" # 全部
+```
+
+</details>
+
+<details>
+<summary> 升级到最新代码库</summary>
+
+```bash
+git pull && uv sync --dev
+```
+
+</details>
+
+### 🐳 Docker
+
+我们在 [GitHub Container Registry](https://github.com/EvoScientist/EvoScientist/pkgs/container/evoscientist) 上发布了一份预构建镜像，已经包含 `evosci onboard` 通常会为你安装的所有内容：
+
+- Python 3.11、EvoScientist 以及全部跨平台消息渠道（即 `EvoScientist[all-channels]`）
+- **`uv`** —— 用于 MCP 注册表按需安装 Python 类 MCP 服务器
+- **Node.js 24 LTS + `npx`** —— 大多数 MCP 服务器依赖此运行时
+
+容器中**无法使用 iMessage 渠道**——它需要 `imsg` CLI 与 macOS 的 Messages.app 通信，仅限宿主操作系统。如需 iMessage，请直接在 macOS 上运行 EvoScientist。
+
+在容器中运行 EvoScientist 还会**沙箱化智能体的 Shell 访问**——文件编辑和 Shell 命令仅限于你显式挂载的卷。
+
+```bash
+docker run -it --rm \
+  --env-file .env \
+  -v "$(pwd)/workspace:/workspace" \
+  -v evosci-data:/home/evosci/.evoscientist \
+  ghcr.io/evoscientist/evoscientist:latest
+```
+
+各挂载的用途：
+
+| 挂载 | 用途 |
+| --- | --- |
+| `--env-file .env` | API 密钥（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等） |
+| `./workspace:/workspace` | 智能体的工作目录 |
+| `evosci-data:/home/evosci/.evoscientist` | 持久化应用状态：会话数据库、全局技能、记忆，以及 `config.yaml` / `mcp.yaml` |
+
+> [!IMPORTANT]
+> 镜像以非 root 用户运行（`evosci`，UID `1000`）。`./workspace` bind 挂载的宿主目录必须可被该 UID 写入。如果你的宿主用户 ID 不同，可以一次性 `chown -R 1000:1000 ./workspace`，或在每次 `docker run` 时加上 `--user "$(id -u):$(id -g)"`，让容器使用你的 UID。
+
+也可使用 `docker compose`（仓库自带一个起步用的 [`docker-compose.yml`](./docker-compose.yml)）：
+
+```bash
+docker compose run --rm evoscientist
+```
+
+如果想本地构建而不是拉取镜像：
+
+```bash
+docker build -t evoscientist:dev .
+```
+
+> [!NOTE]
+> 镜像中**未捆绑**以下内容，需要时基于镜像派生安装：
+> - **`stt`**（基于 `faster-whisper` 的语音转文字）和 **`oauth`**（`ccproxy-api`）
+> - **TinyTeX / LaTeX**（`pdflatex`、`latexmk`），供论文写作类技能使用
+>
+> ```dockerfile
+> FROM ghcr.io/evoscientist/evoscientist:latest
+>
+> # Python 额外组件
+> USER root
+> RUN uv pip install --python /opt/venv/bin/python "EvoScientist[stt,oauth]"
+> USER evosci
+>
+> # TinyTeX
+> # 官方安装方式是 `curl | sh`；如果你不想把未固定版本的远程脚本
+> # 直接管入 shell，可以从 https://github.com/rstudio/tinytex-releases
+> # 下载特定版本的 TinyTeX 发布包，校验校验和后解压到
+> # /home/evosci/.TinyTeX。
+> RUN curl -sL https://yihui.org/tinytex/install-bin-unix.sh | sh \
+>  && /home/evosci/.TinyTeX/bin/*/tlmgr install latexmk
+> ```
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 🔑 配置
+
+最简单的方式是使用交互式配置向导：
+
+```bash
+EvoSci onboard
+```
+
+> [!TIP]
+> 向导将引导你完成供应商选择、密钥验证、模型选择和工作区模式设置。
+> 支持 CLI 编程智能体订阅用户通过 OAuth 直连——无需 API Key。
+
+![onboard](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_onboard.png)
+
+<details>
+<summary> 📟 通过环境变量手动配置</summary>
+
+至少设置一个 LLM 供应商密钥，搜索密钥为可选项：
+
+```bash
+# 选择一个 LLM 供应商
+export ANTHROPIC_API_KEY="sk-..."   # Claude  — console.anthropic.com
+export OPENAI_API_KEY="sk-..."      # GPT    — platform.openai.com
+export GOOGLE_API_KEY="AI..."       # Gemini  — aistudio.google.com/api-keys
+export MINIMAX_API_KEY="sk-..."     # MiniMax — platform.minimaxi.com（默认，中国大陆）或 platform.minimax.io（国际版）
+export MINIMAX_BASE_URL="https://api.minimax.io/anthropic"  # 仅国际版需要设置（默认: https://api.minimaxi.com/anthropic）
+export NVIDIA_API_KEY="nvapi-..."   # NIM    — build.nvidia.com
+
+# 网络搜索（可选）
+export TAVILY_API_KEY="tvly-..."    # app.tavily.com
+```
+
+也可以使用 `EvoSci config set` 将密钥持久化到 `~/.config/evoscientist/config.yaml`。
+
+或者复制示例 `.env` 文件用于项目级配置：
+
+```bash
+cp .env.example .env  # 填入你的密钥
+```
+
+> ⚠️ 切勿将包含真实密钥的 `.env` 文件提交到版本库。该文件已在 `.gitignore` 中。
+
+</details>
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## ⚡ 快速上手
+
+```bash
+EvoSci  # 或 EvoScientist — 交互模式（默认 TUI）
+```
+
+![demo](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_cli.png)
+
+> 运行 `EvoSci -h` 查看全部 CLI 选项。
+
+![cli help](https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_cli_help.png)
+
+> [!TIP]
+> 想用浏览器？运行 `EvoSci --ui webui` 打开 Web 工作区界面。需要复制长输出？使用 `--ui cli` 切换到经典模式，即可使用终端原生复制。macOS [iTerm2](https://iterm2.com/) 用户也可以按住 `⌥ Option` 拖选文字，再 `⌘+C` 复制。
+
+<details>
+<summary>常用示例</summary>
+
+```bash
+EvoSci                            # 交互模式（默认 TUI）
+EvoSci -p "你的问题"              # 单次查询模式
+EvoSci --workdir /path/to/project # 在指定目录下启动
+EvoSci -m run                     # 隔离的会话级工作区
+EvoSci --ui cli                   # 经典 CLI（轻量）
+EvoSci --ui webui                 # 浏览器工作区界面（需 Node/npx）
+EvoSci serve                      # 无头模式——仅渠道，无交互提示符
+EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI / SDK 客户端使用
+```
+
+</details>
+
+<details>
+<summary>Desktop WebUI</summary>
+
+将 UI 后端设为 `webui`，全新的 `EvoSci` 会话便会在单个终端里同时启动 deploy 式 LangGraph 服务器**和** [`@evoscientist/webui`](https://www.npmjs.com/package/@evoscientist/webui) 前端，无需管理第二个进程：
+
+```bash
+EvoSci config set ui_backend webui   # 持久化；或用 `EvoSci --ui webui` 临时启用
+EvoSci                               # 打开 http://localhost:4716
+EvoSci config set webui_port 4800    # 修改前端端口（须与 langgraph dev 端口不同）
+```
+
+需要 **Node.js 24 LTS**（提供 `npx`）；首次启动会下载 `@evoscientist/webui`，需要联网。注意：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
+
+**从其他机器访问。** 两个服务默认都绑定回环地址（`127.0.0.1`），WebUI 开箱即为仅本机可用。要在局域网使用，需把两者一并放开——UI 是**从浏览器**直连后端的，因此还要把 UI 里的部署地址填成 `http://<本机IP>:6174`，而不是保留 localhost：
+
+```bash
+EvoSci --host 0.0.0.0                          # 仅本次会话，两个服务一起
+EvoSci config set webui_host 0.0.0.0           # 持久化，前端（4716 端口）
+EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端口）
+```
+
+`EvoSci deploy` 与 `EvoSci serve` 也支持同名参数：`EvoSci deploy --host 0.0.0.0`。
+
+> 🚨 **警告**
+>
+> 后端是**无鉴权、且 agent 能执行 shell 的 API**。任何能访问 6174 端口的人都能完全控制它，因此只应在可信网络里放开；暴露期间 EvoSci 每次启动都会打印红色 `⚠ PUBLIC BIND` 横幅。
+>
+> **这不是 WebUI 独有的问题。** `tui`、`cli`、`serve`、`deploy` 都会自动启动同一个 langgraph dev 后端，因此 `--host` 会让 6174 端口在所有模式下都暴露到网络上。前端端口 4716 虽然只在 WebUI 模式下存在，但同样不是无害的：它的 API 可以读写、上传工作区文件并安装 skill，因此同样会打印横幅、同样只应在可信网络放开。
+>
+> 网络不可信时，请让后端留在回环地址，改用 SSH 隧道访问：`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <主机>`。
+
+</details>
+
+<details>
+<summary>操作审批</summary>
+
+默认情况下，Shell 命令（`execute` 工具）执行前需要人工审批。跳过审批提示的方式：
+
+```bash
+# 单次会话：通过 CLI 参数启用自动审批
+EvoSci --auto-approve
+EvoSci -p "query" --auto-approve
+
+# 持久化：写入配置（对所有后续会话生效）
+EvoSci config set auto_approve true
+
+# 或仅放行特定命令前缀
+EvoSci config set shell_allow_list "python,pip,pytest,ruff,git"
+```
+
+会话中也可以在审批提示时回复 **3**（Approve all），仅对当次会话自动审批后续所有操作。
+
+> [!CAUTION]
+> **危险模式（Dangerous mode）** 会完全解除工作区沙箱——智能体可以读写、删除**真实文件系统上任意位置**的文件（`sudo`/`rm -rf /` 等高危命令仍被拦截）。它隐含 `--auto-approve`（不再提示审批）。请仅在你完全信任该任务时使用。
+>
+> ```bash
+> EvoSci --dangerous                       # 单次会话
+> EvoSci config set dangerous_mode true    # 持久化
+> ```
+
+</details>
+
+<details>
+<summary>智能体提问</summary>
+
+智能体可以在需要澄清时主动向你提问（例如数据集选择、实验方向等）。此功能默认开启。关闭方式：
+
+```bash
+# 持久化：写入配置
+EvoSci config set enable_ask_user false
+
+# 重新开启
+EvoSci config set enable_ask_user true
+```
+
+</details>
+
+<details>
+<summary>会话内命令</summary>
+
+| 命令 | 说明 |
+| ---- | ---- |
+| `/current` | 显示当前会话信息 |
+| `/threads` | 列出最近的会话 |
+| `/resume` | 恢复之前的会话 |
+| `/delete` | 删除已保存的会话 |
+| `/new` | 开始新会话 |
+| `/clear` | 清除聊天记录 |
+| `/skills` | 列出已安装的技能包 |
+| `/install-skill <src>` | 从本地路径或 GitHub 安装技能包 |
+| `/uninstall-skill <name>` | 卸载已安装的技能包 |
+| `/mcp` | 管理 MCP 服务器 |
+| `/channel` | 配置消息渠道 |
+| `/help` | 显示可用命令 |
+| `/exit` | 退出 |
+
+</details>
+
+<details>
+<summary>脚本调用</summary>
+
+```python
+from EvoScientist import EvoScientist_agent
+from langchain_core.messages import HumanMessage
+from EvoScientist.utils import format_messages
+
+thread = {"configurable": {"thread_id": "1"}}
+last_len = 0
+
+for state in EvoScientist_agent.stream(
+    {"messages": [HumanMessage(content="Hi?")]},
+    config=thread,
+    stream_mode="values",
+):
+    msgs = state["messages"]
+    if len(msgs) > last_len:
+        format_messages(msgs[last_len:])
+        last_len = len(msgs)
+```
+
+</details>
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## ⏰ 定时任务
+
+用 cron 风格的计划任务自动化重复性研究工作。
+
+```bash
+# 添加计划任务（/schedule add 需要 cron 表达式）
+/schedule add "0 9 * * 1-5" "用 paper-navigator 技能总结 arXiv 上最新的 ML 论文，并把摘要保存到 /memories/daily-papers.md"
+/schedule add "*/10 * * * *" "检查我正在运行的实验状态，并把结果追加到 experiment_log.json"
+
+# 管理计划任务
+/schedule list           # 列出活跃的计划任务
+/schedule remove <id>    # 删除一个计划任务
+/schedule run <id>       # 立即触发一次
+/schedule pause <id>     # 暂停但不删除
+/schedule resume <id>    # 恢复已暂停的计划任务
+```
+
+说明：`/schedule add` 需要 cron 表达式（5 字段，例如 `*/10 * * * *`）。想用自然语言（"每 10 分钟"）排程，直接在对话里说即可——智能体会通过 `schedule_task` 工具自动翻译。
+
+输出写到任务 prompt 指定的位置——没有强制的输出目录，所以请在 prompt 里写明文件位置。用 `/schedule list` 查看计划任务；智能体也会通过 `<scheduled_tasks>` 上下文块感知当前的计划任务，所以你也可以直接问它有哪些任务。
+
+> **成本提示：** 每次计划任务运行都会消耗 LLM token。不用的任务请用 `/schedule remove` 删除，避免持续计费。
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 🍪 示例与实践
+
+收集了一些官方示例、进阶用法和社区贡献的实践方案，帮助你更好地使用 EvoScientist。
+
+👉 **[浏览全部示例与实践 →](docs/README.md)**
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 🔌 MCP 集成
+
+通过 [MCP](https://modelcontextprotocol.io/) 服务器一条命令即可添加外部工具：
+
+```bash
+# 用法
+EvoSci mcp add <name> <command> [-- args...]
+
+# 示例
+EvoSci mcp add sequential-thinking npx -- -y @modelcontextprotocol/server-sequential-thinking
+```
+
+> [!TIP]
+> 关于命令选项、配置字段、工具路由、通配符过滤和故障排查，请参阅 **[MCP 集成指南](https://github.com/EvoScientist/EvoScientist/tree/main/EvoScientist/mcp#model-context-protocol-integration)**。
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 📱 渠道接入
+
+连接消息平台，使其与 CLI 共享同一智能体会话：
+
+```bash
+# 用法
+EvoSci channel setup <channel>
+
+# 示例
+EvoSci channel setup telegram
+```
+
+多个渠道可同时运行——在配置中用逗号分隔：
+
+```yaml
+channel_enabled: "telegram,slack,feishu,qq"
+```
+
+也可以在 CLI 会话中通过 `/channel` 交互式启动渠道。
+
+> [!TIP]
+> 关于各渠道设置指南、功能矩阵、架构详情和故障排查，请参阅 **[渠道集成指南](https://github.com/EvoScientist/EvoScientist/tree/main/EvoScientist/channels#channels)**。
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 📚 致谢
+
+本项目基于以下优秀的开源项目构建：
+
+- [**LangChain**](https://github.com/langchain-ai/langchain) — 构建智能体和 LLM 驱动应用的框架。
+- [**DeepAgents**](https://github.com/langchain-ai/deepagents) — 开箱即用的智能体编排框架。
+- [**jiuwenswarm**](https://github.com/openJiuwen-ai/jiuwenswarm) — 一个协调智能体峰群处理复杂任务的框架。
+
+感谢以上项目作者对开源社区的宝贵贡献。
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 🎯 ᯓ➤ 路线图
+
+即将推出：
+- [x] 🖥️ 全屏 TUI 和经典 CLI 双界面
+- [x] 📻 EvoMemory v1.0 已上线
+- [x] ⚒️ 200+ 预置技能已内置
+- [x] 🧩 内置研究全流程技能已上线
+- [x] 👋 Human-in-the-loop 操作审批
+- [x] 🦾 智能体主动向人类澄清确认
+- [x] 📑 技术报告已发布
+- [x] 🔐 OAuth 登录（CLI 编程智能体订阅用户）
+- [x] 📺 带工作区的 Web 应用界面（beta）
+- [x] ⏰ 定时任务（cron 风格，通过 /schedule）
+- [ ] 📹 Demo 与教程正在制作中
+- [ ] 📊 基准测试套件即将推出
+
+敬请期待——更多功能正在路上！
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 🌍 项目角色
+
+#### Core Contributors
+
+<table>
+  <tbody>
+    <tr>
+      <td align="center">
+        <a href="https://x-izhang.github.io/">
+          <img src="https://x-izhang.github.io/author/xi-zhang/avatar.jpg"
+               width="100" height="100"
+               style="object-fit: cover; border-radius: 20%;" alt="Xi Zhang"/>
+          <br />
+          <sub><b>Xi Zhang</b></sub>
+        </a>
+      </td>
+      <td align="center">
+        <a href="https://youganglyu.github.io/">
+          <img src="https://youganglyu.github.io/images/profile.png"
+               width="100" height="100"
+               style="object-fit: cover; border-radius: 20%;" alt="Yougang Lyu"/>
+          <br />
+          <sub><b>Yougang Lyu</b></sub>
+        </a>
+      </td>
+      <td align="center">
+        <a href="https://din0s.me/">
+          <img src="https://din0s.me/images/pk.jpg"
+               width="100" height="100"
+               style="object-fit: cover; border-radius: 20%;" alt="Dinos Papakostas"/>
+          <br />
+          <sub><b>Dinos Papakostas</b></sub>
+        </a>
+      </td>
+      <td align="center">
+        <a href="https://www.linkedin.com/in/qianru-meng-410311100/">
+          <img src="https://media.licdn.com/dms/image/v2/D5603AQG1mEbWDSoUbw/profile-displayphoto-shrink_400_400/B56ZsFaQWsHIAo-/0/1765322328104?e=1791417600&v=beta&t=SaQs5BM3h0WtCorTO1JXcR8xHb4GQCXrbBG1Unj__wg"
+               width="100" height="100"
+               style="object-fit: cover; border-radius: 20%;" alt="Yuyue Zhao"/>
+          <br />
+          <sub><b>Qianru Meng</b></sub>
+        </a>
+      </td>
+      <td align="center">
+        <a href="https://muxincg2004.github.io/">
+          <img src="https://muxincg2004.github.io/resume_avatar.jpg"
+               width="100" height="100"
+               style="object-fit: cover; border-radius: 20%;" alt="Ziheng Zhang"/>
+          <br />
+          <sub><b>Ziheng Zhang</b></sub>
+        </a>
+      </td>
+      <td align="center">
+        <a href="https://xiaohuiyan.github.io/">
+          <img src="https://xiaohuiyan.github.io/img/me.jpg"
+               width="100" height="100"
+               style="object-fit: cover; border-radius: 20%;" alt="Xiaohui Yan"/>
+          <br />
+          <sub><b>Xiaohui Yan</b></sub>
+        </a>
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+#### Contributors
+
+Jakub Kaliski, Jakub Filipiuk, Yuyue Zhao, Jan Piotrowski, Wiktor Cupiał, Xinhao Yi, Shuyu Guo, Andreas Sauter, Wenxiang Hu, Jacopo Urbani, Zaiqiao Meng, Jun Luo, Lun Zhou
+
+> <a href="https://xiaoyi.huawei.com/chat/research"><img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/xiaoyi-deepresearch.webp" height="16" alt="Xiaoyi DeepResearch" align="center" /></a> [*Xiaoyi DeepResearch*](https://xiaoyi.huawei.com/chat/research) *Team* 及更广泛的开源社区共同为本项目做出贡献。
+
+如有任何咨询或合作意向，请联系：[**EvoScientist.ai@gmail.com**](mailto:evoscientist.ai@gmail.com)
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 🤝 贡献
+
+<img align="right" alt="EvoScientist Team" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/EvoScientist_team.png" width="20%" />
+
+我们欢迎各层次的开发者、研究者以及 AI 编程助手参与贡献。我们的 [贡献指南](./CONTRIBUTING.md) 同时面向人类和 AI Agent 编写，涵盖架构说明、设计模式、扩展指南和代码规范，帮助你安全高效地参与项目开发。
+
+### 👥 社区贡献者
+
+⚗️ 加入 EvoScientist 社区，探讨 AI 驱动的科研前沿，分享实验成果，共同推动自动化科学发现的未来。
+
+- [Discord](https://discord.gg/AZ9ZMXkunY) — 实时提问、分享发现，与研究者和开发者协作交流。
+- [微信](https://github.com/EvoScientist/EvoScientist/blob/main/.github/assets/cn_info.md) — 加入中文社区，与国内研究者和开发者交流。
+
+  <img src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/wechat_group.jpeg" alt="微信群二维码" width="200"/>
+
+每一份贡献，都让我们离 AI 驱动科学突破、造福全人类的未来更近一步。
+
+<a href="https://github.com/EvoScientist/EvoScientist/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=EvoScientist/EvoScientist" />
+</a>
+
+### 📈 Star 趋势
+
+[![Star History Chart](https://api.star-history.com/chart?repos=EvoScientist/EvoScientist&type=date&legend=top-left&sealed_token=-XivKBib6Pb_YTJjMxBwUghZaRWxGqr5HYBKsa5jyiCgVMWfHmmkLyCYbT0uUvJJdUQsza9mRnlk1-QVQzm-s0UExQ_8DIBSrWKIrPQz5WzNlRURsUoHSA)](https://www.star-history.com/?repos=EvoScientist%2FEvoScientist&type=date&legend=top-left)
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 📝 引用
+
+如果您觉得我们的论文和代码对您的研究有帮助，请使用以下 BibTeX 引用：
+
+```bibtex
+@article{evoscientist2026,
+  title={EvoScientist: Towards Multi-Agent Evolving AI Scientists for End-to-End Scientific Discovery},
+  author={Yougang Lyu and Xi Zhang and Xinhao Yi and Yuyue Zhao and Shuyu Guo and Wenxiang Hu and Jan Piotrowski and Jakub Kaliski and Jacopo Urbani and Zaiqiao Meng and Lun Zhou and Xiaohui Yan},
+  journal={arXiv preprint arXiv:2603.08127},
+  year={2026}
+}
+```
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>
+
+## 📜 许可证
+
+本项目基于 Apache License 2.0 开源——详情请见 [LICENSE](./LICENSE) 文件。
+
+<p align="right"><a href="#top">🔝回到顶部</a></p>

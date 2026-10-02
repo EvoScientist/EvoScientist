@@ -1,0 +1,1331 @@
+"""Skill installation and management for EvoScientist.
+
+This module provides functions for installing, listing, and uninstalling user skills.
+Skills are installed to GLOBAL_SKILLS_DIR by default (~/.evoscientist/skills/).
+Pass global_install=False to install to USER_SKILLS_DIR (<workspace>/skills/) instead.
+
+Supported installation sources:
+- Local directory paths
+- GitHub URLs (https://github.com/owner/repo or .../tree/branch/path)
+- GitHub shorthand (owner/repo@skill-name)
+
+Usage:
+    from EvoScientist.tools.skills_manager import install_skill, list_skills, uninstall_skill
+
+    # Install from local path (global by default)
+    install_skill("./my-skill")
+
+    # Install to workspace only
+    install_skill("./my-skill", global_install=False)
+
+    # Install from GitHub
+    install_skill("https://github.com/user/repo/tree/main/my-skill")
+
+    # List installed skills (source: "workspace", "global", or "builtin")
+    for skill in list_skills():
+        print(skill.name, skill.source, skill.description)
+
+    # Uninstall a skill
+    uninstall_skill("my-skill")
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+from .. import paths
+
+_logger = logging.getLogger(__name__)
+
+
+# --- skills-changed publish primitive ---------------------------------------
+#
+# ``install_skill`` and ``uninstall_skill`` are called from six places today:
+# three slash commands, two paths in the agent's ``skill_manager`` @tool, and
+# the onboarding step. Consumers that cache skill data (currently the
+# /expert completion popup) need to invalidate on every mutation, and wiring
+# that at each caller site was the "vibes and hope" pattern reviewers rightly
+# called out on PR #371 — the next caller silently reintroduces staleness.
+#
+# The invariant lives here instead: any subscriber registered via
+# ``register_skills_changed_callback`` is fired after every install / uninstall
+# call, so no caller has to remember.
+
+_skills_changed_callbacks: list[Callable[[], None]] = []
+
+
+def register_skills_changed_callback(callback: Callable[[], None]) -> None:
+    """Register a callback fired after every ``install_skill`` /
+    ``uninstall_skill`` call.
+
+    Consumers that cache skill data — e.g. the ``/expert`` completion
+    popup — subscribe once at import time so every mutation path
+    (commands, agent ``skill_manager`` @tool, onboarding) invalidates
+    their view. Callbacks are process-scoped and never unregistered
+    automatically; tests should call ``_reset_skills_changed_callbacks``
+    from a fixture to isolate state.
+    """
+    _skills_changed_callbacks.append(callback)
+
+
+def _reset_skills_changed_callbacks() -> None:
+    """Test hook: clear the callback list."""
+    _skills_changed_callbacks.clear()
+
+
+def _notify_skills_changed() -> None:
+    """Fire every registered callback.
+
+    Exceptions are logged but swallowed so a misbehaving subscriber can't
+    break the install/uninstall return path.
+    """
+    for cb in _skills_changed_callbacks:
+        try:
+            cb()
+        except Exception:
+            _logger.warning(
+                "skills-changed callback %r raised; continuing.",
+                getattr(cb, "__qualname__", cb),
+                exc_info=True,
+            )
+
+
+@dataclass
+class SkillInfo:
+    """Information about an installed skill."""
+
+    name: str
+    description: str
+    path: Path
+    source: str  # "workspace", "global", or "builtin"
+    tags: list[str] = field(default_factory=list)
+    # Expert-skill fields for the v1 agent-teams feature. All default
+    # to utility-skill values so existing skills stay unchanged and their
+    # SKILL.md files need no edits.
+    type: str = "utility"  # "utility" (default) or "expert"
+    role: str = ""  # one-line role summary shown to the orchestrator LLM
+    byline: str = ""  # WebUI gallery byline
+    capability_tags: list[str] = field(default_factory=list)  # WebUI chips
+    avatar_hint: str = ""  # WebUI icon hint
+    # SKILL.md body (post-frontmatter). Populated by ``_parse_skill_md`` so
+    # the expert-container factory doesn't have to re-read the file on every
+    # main-agent construction. Empty for skills built by hand or when the
+    # source SKILL.md has no body content.
+    body: str = ""
+    # How this skill came to be classified as an expert:
+    #   "expert_md"   — a sibling EXPERT.md is present (current contract)
+    #   "frontmatter" — legacy ``type: expert`` in SKILL.md (deprecated)
+    #   ""            — not an expert
+    expert_source: str = ""
+    # EXPERT.md body — the actor definition (persona + result envelope) that
+    # becomes the expert's runtime prompt. Empty for non-experts and for
+    # experts still on the legacy frontmatter path, whose runtime prompt is
+    # still sourced from ``body``.
+    expert_body: str = ""
+
+
+# Shared frontmatter split regex. Captures three parts:
+#   1. leading fence (``^---\s*\n``)
+#   2. frontmatter YAML (``.*?``)
+#   3. trailing fence + optional newline (``\n---\s*\n?``)
+# Used by both ``_parse_skill_md`` (needs the YAML) and the expert-container
+# factory (needs the body); a single source of truth for "what is the
+# frontmatter block" so schema extensions don't drift across call sites.
+_FRONTMATTER_SPLIT_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+
+def _split_frontmatter_and_body(content: str) -> tuple[str, str]:
+    """Return ``(frontmatter_yaml, body)`` for a SKILL.md text.
+
+    ``frontmatter_yaml`` is the raw YAML block between the ``---`` fences
+    (still a string, not parsed). ``body`` is the post-fence content with
+    leading whitespace stripped. When there is no valid frontmatter block,
+    ``frontmatter_yaml`` is ``""`` and the whole content becomes the body —
+    matches the legacy expert-container behaviour of passing plain-body
+    files through unchanged.
+    """
+    match = _FRONTMATTER_SPLIT_RE.match(content)
+    if not match:
+        return "", content.lstrip()
+    body = content[match.end() :].lstrip()
+    return match.group(1), body
+
+
+# --- expert declaration -----------------------------------------------------
+#
+# A skill directory declares itself an expert by containing this file. The
+# rule the skill system already lives by, applied one level down: a directory
+# is a package, a contract file is a capability, presence is the declaration,
+# content is the contract. SKILL.md's presence makes a directory a skill;
+# EXPERT.md's presence makes it an actor.
+#
+# The file carries no frontmatter — the directory name is the expert's
+# identity, its presence is the declaration, and its body (persona + result
+# envelope) is the runtime prompt. Nothing about it is machine-read beyond
+# "does it exist" and "what does it say".
+#
+# ``metadata.type: [skill, expert]`` in SKILL.md frontmatter is deliberately
+# NOT consulted here. That field is a projection of this declaration for
+# index-facing consumers (the remote skill index, gallery chips) which can't
+# cheaply stat the directory; the runtime resolves presence directly, so
+# reading it would create a second classifier that can drift from the file.
+_EXPERT_FILENAME = "EXPERT.md"
+
+# Legacy ``type: expert`` frontmatter is a deprecated fallback, so the warning
+# is one-shot per skill name — ``_parse_skill_md`` runs on every ``list_skills``
+# call (main-agent construction, /expert completion, GET /api/teams), and a
+# per-parse warning would bury real diagnostics under repeats.
+_legacy_expert_warned: set[str] = set()
+
+
+def _warn_once(key: str, message: str, *args: object) -> None:
+    """Emit *message* at WARNING the first time *key* is seen this process."""
+    if key in _legacy_expert_warned:
+        return
+    _legacy_expert_warned.add(key)
+    _logger.warning(message, *args)
+
+
+def _read_expert_md(skill_dir: Path) -> str | None:
+    """Return the EXPERT.md body for *skill_dir*, or None when absent.
+
+    Returns a string (possibly empty) whenever the file exists, so callers
+    can distinguish "not an expert" (None) from "declared expert with an
+    empty actor definition" (""). The latter is a skill-authoring bug the
+    container paths refuse loudly rather than papering over.
+
+    Frontmatter is stripped if present. The contract says EXPERT.md carries
+    none, but an author who adds some should not have raw YAML leak into the
+    expert's system prompt.
+    """
+    expert_path = skill_dir / _EXPERT_FILENAME
+    try:
+        if not expert_path.is_file():
+            return None
+        content = expert_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Presence was the declaration, so an unreadable EXPERT.md is a
+        # broken expert, not a plain skill. Return "" to keep the expert
+        # classification and let the empty-body guards in the container
+        # factories refuse it with a skill-name-bearing warning.
+        _logger.warning(
+            "Skill %r: could not read %s (%s); treating actor definition as empty.",
+            skill_dir.name,
+            expert_path,
+            exc,
+        )
+        return ""
+    _, body = _split_frontmatter_and_body(content)
+    return body
+
+
+def _normalize_tags(raw: object) -> list[str]:
+    """Normalize a tags value to a list of strings."""
+    if isinstance(raw, list):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    if isinstance(raw, str):
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    return []
+
+
+_MANIFEST_FILENAME = ".installed.yaml"
+
+# Per-tier sidecar at ``<dest_dir>/.installed.yaml``. Each entry records the
+# install source plus optional provenance (the upstream commit SHA at install
+# time, omitted for non-git sources). Schema:
+#
+#     <skill-dir-name>:
+#       source: <URL | shorthand | local path>
+#       commit: <git SHA>
+_ManifestEntry = dict[str, str]
+
+
+def _manifest_path(dest_dir: str | Path) -> Path:
+    return Path(dest_dir) / _MANIFEST_FILENAME
+
+
+def _load_manifest(dest_dir: str | Path) -> dict[str, _ManifestEntry]:
+    """Read the install manifest from *dest_dir*. Malformed entries are
+    skipped, and any read error returns ``{}`` so a corrupt file never breaks
+    installation or detection.
+    """
+    path = _manifest_path(dest_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        _logger.warning("Failed to read skills manifest at %s: %s", path, exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, _ManifestEntry] = {}
+    for k, v in data.items():
+        if not isinstance(v, dict) or not isinstance(v.get("source"), str):
+            continue
+        entry: _ManifestEntry = {"source": v["source"]}
+        commit = v.get("commit")
+        if isinstance(commit, str) and commit:
+            entry["commit"] = commit
+        out[str(k)] = entry
+    return out
+
+
+def _save_manifest(dest_dir: str | Path, manifest: dict[str, _ManifestEntry]) -> None:
+    path = _manifest_path(dest_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _logger.warning("Failed to update skills manifest at %s: %s", path, exc)
+        return
+
+    # Atomic write: stage to a sibling temp file, fsync, then os.replace into
+    # place. Prevents a half-written manifest from breaking detection if the
+    # process dies mid-write.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(manifest, f, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        _logger.warning("Failed to update skills manifest at %s: %s", path, exc)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _record_install(
+    dest_dir: str | Path,
+    name: str,
+    source: str | None,
+    *,
+    commit: str | None = None,
+) -> None:
+    """Add or update a manifest entry. No-op when *source* is empty.
+
+    *commit*, when provided, is recorded alongside the source so onboarding
+    can detect when an upstream version has moved past what's installed.
+    """
+    if not source:
+        return
+    manifest = _load_manifest(dest_dir)
+    new_entry: _ManifestEntry = {"source": source}
+    if commit:
+        new_entry["commit"] = commit
+    if manifest.get(name) == new_entry:
+        return
+    manifest[name] = new_entry
+    _save_manifest(dest_dir, manifest)
+
+
+def _record_uninstall(dest_dir: str | Path, name: str) -> None:
+    manifest = _load_manifest(dest_dir)
+    if name in manifest:
+        del manifest[name]
+        _save_manifest(dest_dir, manifest)
+
+
+def installed_sources() -> set[str]:
+    """Return install sources recorded for currently-installed skills.
+
+    Reads the manifest in both ``USER_SKILLS_DIR`` and ``GLOBAL_SKILLS_DIR``
+    and only returns entries whose target directories still exist on disk —
+    so a manually-removed skill stops appearing as installed.
+    """
+    return set(installed_provenance())
+
+
+def installed_provenance() -> dict[str, dict[str, str | None]]:
+    """Per-source provenance for currently-installed skills.
+
+    Maps source URL/shorthand → ``{"commit": <sha or None>}``. When several
+    children share a source (a pack), the first observed commit is returned —
+    packs install all children from a single clone so this is unambiguous in
+    practice. Used by onboarding to surface "update available" when the
+    recorded commit no longer matches upstream.
+    """
+    out: dict[str, dict[str, str | None]] = {}
+    for dest_dir in (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR):
+        dest = Path(dest_dir)
+        if not dest.exists():
+            continue
+        for name, entry in _load_manifest(dest).items():
+            if not (dest / name).is_dir():
+                continue
+            source = entry["source"]
+            if source in out:
+                continue
+            out[source] = {"commit": entry.get("commit")}
+    return out
+
+
+def _parse_skill_md(skill_md_path: Path, *, source: str = "") -> SkillInfo:
+    """Parse a skill directory into a :class:`SkillInfo`.
+
+    Reads name / description / tags from SKILL.md frontmatter, and resolves
+    whether the skill is also an **expert** — an actor with a persona and a
+    result-envelope contract, dispatchable as its own agent.
+
+    Expert classification is structural: a sibling ``EXPERT.md`` in the same
+    directory declares the skill an expert, and that file's body is the
+    expert's runtime prompt. SKILL.md stays pure knowledge — portable to any
+    harness, and readable in-turn off the ``/skills/`` mount whether or not
+    the skill also acts::
+
+        my-expert/
+          SKILL.md     # knowledge: when to use, workflow, references
+          EXPERT.md    # actor: persona + result envelope  <- the declaration
+          scripts/
+          references/
+
+    Skills predating that convention declare ``type: expert`` in SKILL.md
+    frontmatter, alongside actor fields (``role`` / ``byline`` /
+    ``capability_tags`` / ``avatar_hint`` / ``default_dispatch``). That path
+    still resolves, with a deprecation warning, and is still the source of
+    the WebUI gallery's decoration fields. New experts declare via EXPERT.md
+    and set none of those fields; their gallery cards carry name and
+    description only.
+
+    ``default_dispatch`` is read from neither contract. Every expert is
+    reachable both in-turn and in the background, and the orchestrator picks
+    per task — a skill does not declare one dispatch shape for all time.
+
+    When both are present, EXPERT.md wins on every axis (prompt source,
+    dispatch) and the frontmatter actor fields are reported as ignored — a
+    skill mid-migration must not behave as a blend of the two contracts.
+
+    SKILL.md format::
+
+        ---
+        name: skill-name
+        description: A brief description...
+        allowed-tools: "read_file write_file think_tool"
+        tags: [tag1, tag2]
+        metadata:
+          tags: [tag1, tag2]        # fallback location
+          type: [skill, expert]     # index-facing only; never read here
+        ---
+        # Skill Title
+        ...
+
+    Args:
+        skill_md_path: Path to the SKILL.md file.
+        source: Origin label (e.g. "workspace", "global", "builtin").
+
+    Returns:
+        SkillInfo with path set to the skill's parent directory.
+    """
+    parent = skill_md_path.parent
+    expert_body = _read_expert_md(parent)
+    declares_actor = expert_body is not None
+    try:
+        content = skill_md_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # ``_parse_skill_md`` runs during agent construction (via
+        # ``_fold_expert_subagents`` → ``list_skills``), so an unreadable
+        # SKILL.md in any tier must not abort the whole main-agent build or
+        # ``GET /api/teams``. Degrade to an "(unreadable)" placeholder so
+        # the entry stays visible in ``skill_manager list`` for debugging
+        # but never advances into expert registration (empty body →
+        # ``build_expert_subagent_specs`` skips it).
+        _logger.warning(
+            "Skill %r: could not read %s (%s); skipping.",
+            parent.name,
+            skill_md_path,
+            exc,
+        )
+        # An unreadable SKILL.md doesn't undo an EXPERT.md declaration — the
+        # actor definition is a separate file and may be perfectly intact —
+        # so the expert classification is applied here too.
+        return SkillInfo(
+            name=parent.name,
+            description="(unreadable)",
+            path=parent,
+            source=source,
+            type="expert" if declares_actor else "utility",
+            expert_source="expert_md" if declares_actor else "",
+            expert_body=expert_body or "",
+        )
+
+    def _info(
+        name: str,
+        description: str,
+        tags: list[str] | None = None,
+        *,
+        type_: str = "utility",
+        role: str = "",
+        byline: str = "",
+        capability_tags: list[str] | None = None,
+        avatar_hint: str = "",
+        legacy_dispatch: str = "",
+        body: str = "",
+    ) -> SkillInfo:
+        # EXPERT.md presence overrides whatever the frontmatter says about
+        # actor-hood: the declaration is the file, and a skill mid-migration
+        # (both present) must resolve to exactly one contract.
+        if declares_actor:
+            if (
+                type_ == "expert"
+                or role
+                or byline
+                or capability_tags
+                or avatar_hint
+                or legacy_dispatch
+            ):
+                _warn_once(
+                    f"{parent}:mixed",
+                    "Skill %r: %s is present, so the skill is an expert and its "
+                    "actor definition comes from that file; legacy actor "
+                    "frontmatter in SKILL.md (type / role / byline / "
+                    "capability_tags / avatar_hint / default_dispatch) is "
+                    "ignored and should be removed.",
+                    name,
+                    _EXPERT_FILENAME,
+                )
+            type_ = "expert"
+            expert_source = "expert_md"
+            # EXPERT.md is authoritative on every axis: the actor definition is
+            # that file, so legacy decoration from SKILL.md frontmatter must not
+            # leak onto SkillInfo. ``role`` would otherwise be prepended to the
+            # EXPERT.md prompt (``_compose_system_prompt`` / the async head), and
+            # a mismatched frontmatter ``name`` would desync the registry
+            # identity from the skill directory.
+            name = parent.name
+            role = ""
+            byline = ""
+            capability_tags = []
+            avatar_hint = ""
+        elif type_ == "expert":
+            _warn_once(
+                f"{parent}:legacy",
+                "Skill %r declares `type: expert` in SKILL.md frontmatter. That "
+                "is deprecated: add a sibling %s carrying the persona and "
+                "result envelope instead, and drop the actor fields from "
+                "frontmatter. The frontmatter path still works for now.",
+                name,
+                _EXPERT_FILENAME,
+            )
+            expert_source = "frontmatter"
+        else:
+            expert_source = ""
+
+        return SkillInfo(
+            name=name,
+            description=description,
+            path=parent,
+            source=source,
+            tags=tags or [],
+            type=type_,
+            role=role,
+            byline=byline,
+            capability_tags=capability_tags or [],
+            avatar_hint=avatar_hint,
+            body=body,
+            expert_source=expert_source,
+            expert_body=expert_body or "",
+        )
+
+    frontmatter_yaml, body = _split_frontmatter_and_body(content)
+    if not frontmatter_yaml:
+        # No frontmatter, use directory name; still cache the body so
+        # the expert-container factory doesn't have to re-read.
+        return _info(parent.name, "(no description)", body=body)
+
+    try:
+        frontmatter = yaml.safe_load(frontmatter_yaml)
+        if not isinstance(frontmatter, dict):
+            return _info(parent.name, "(empty frontmatter)", body=body)
+        # Tags: check top-level first, fall back to metadata.tags
+        tags = _normalize_tags(frontmatter.get("tags"))
+        if not tags:
+            metadata = frontmatter.get("metadata")
+            if isinstance(metadata, dict):
+                tags = _normalize_tags(metadata.get("tags"))
+        # Expert-skill fields. Only trusted when explicit; unknown
+        # ``type`` values fall back to "utility" so a typo doesn't
+        # accidentally register a skill as an expert. Log the fallback
+        # so authors can debug a "why isn't my expert appearing" case.
+        raw_type = frontmatter.get("type")
+        type_ = raw_type if raw_type in ("expert", "utility") else "utility"
+        if raw_type is not None and raw_type != type_:
+            _logger.warning(
+                "Skill %r: unrecognized type %r in frontmatter; treating as utility.",
+                frontmatter.get("name") or parent.name,
+                raw_type,
+            )
+        role = frontmatter.get("role") or ""
+        byline = frontmatter.get("byline") or ""
+        capability_tags = _normalize_tags(frontmatter.get("capability_tags"))
+        avatar_hint = frontmatter.get("avatar_hint") or ""
+        # ``default_dispatch`` is no longer read: an expert is reachable both
+        # in-turn and in the background, and the orchestrator picks per task
+        # rather than the skill declaring one shape for all time. Still
+        # detected here so the mixed-contract warning can name it among the
+        # legacy actor fields an EXPERT.md skill should drop.
+        legacy_dispatch = str(frontmatter.get("default_dispatch") or "")
+        # ``.get("name", parent.name)`` only defaults on missing key; a
+        # present-but-empty ``name:`` yields None, which would flow into
+        # ``SkillInfo.name`` and slip past the ``_fold_expert_subagents``
+        # collision guard. Coerce to the parent dir name in both cases.
+        return _info(
+            frontmatter.get("name") or parent.name,
+            frontmatter.get("description") or "(no description)",
+            tags,
+            type_=type_,
+            role=str(role),
+            byline=str(byline),
+            capability_tags=capability_tags,
+            avatar_hint=str(avatar_hint),
+            legacy_dispatch=legacy_dispatch,
+            body=body,
+        )
+    except yaml.YAMLError as exc:
+        _logger.warning(
+            "Skill %r: invalid frontmatter YAML in %s (%s); using placeholder.",
+            parent.name,
+            skill_md_path,
+            exc,
+        )
+        return _info(parent.name, "(invalid frontmatter)", body=body)
+
+
+def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
+    """Parse a GitHub URL into (repo, ref, path).
+
+    Supports formats:
+        https://github.com/owner/repo
+        https://github.com/owner/repo/tree/main/path/to/skill
+        github.com/owner/repo/tree/branch/path
+        owner/repo@skill-name  (shorthand from skills.sh)
+
+    Returns:
+        (repo, ref_or_none, path_or_none)
+    """
+    # Shorthand: owner/repo@path
+    if "@" in url and "://" not in url:
+        repo, path = url.split("@", 1)
+        return repo.strip(), None, path.strip()
+
+    # Strip protocol and github.com prefix
+    cleaned = re.sub(r"^https?://", "", url)
+    cleaned = re.sub(r"^github\.com/", "", cleaned)
+    cleaned = cleaned.rstrip("/")
+
+    # Match: owner/repo/tree/ref/path...
+    m = re.match(r"^([^/]+/[^/]+)/tree/([^/]+)(?:/(.+))?$", cleaned)
+    if m:
+        return m.group(1), m.group(2), m.group(3)
+
+    # Match: owner/repo (no tree)
+    m = re.match(r"^([^/]+/[^/]+)$", cleaned)
+    if m:
+        return m.group(1), None, None
+
+    raise ValueError(f"Cannot parse GitHub URL: {url}")
+
+
+_CLONE_TIMEOUT = 120  # seconds
+_LS_REMOTE_TIMEOUT = 5  # seconds — bounded, runs once per recommended pack
+
+
+def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
+    """Shallow-clone a GitHub repo."""
+    clone_url = f"https://github.com/{repo}.git"
+    cmd = ["git", "clone", "--depth", "1"]
+    if ref:
+        cmd += ["--branch", ref]
+    cmd += [clone_url, dest]
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_CLONE_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"git clone timed out after {_CLONE_TIMEOUT}s for {repo}"
+        ) from e
+    if result.returncode != 0:
+        raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
+
+
+def _resolve_local_head(clone_dir: str) -> str | None:
+    """Return the HEAD commit SHA of a freshly cloned working tree, or None
+    when ``git rev-parse`` is unavailable or the call fails."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", clone_dir, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    return sha or None
+
+
+def resolve_remote_head(
+    source: str, *, timeout: float = _LS_REMOTE_TIMEOUT
+) -> str | None:
+    """Resolve the upstream commit SHA for *source* via ``git ls-remote``.
+
+    Returns ``None`` for non-git sources, parse failures, network errors, or
+    timeouts — callers should treat ``None`` as "unknown" and never infer
+    "out of date" from it. Used by onboarding to detect upstream updates
+    without re-cloning the repo.
+    """
+    if not _is_github_url(source):
+        return None
+    try:
+        repo, ref, _ = _parse_github_url(source)
+    except ValueError:
+        return None
+
+    target = ref or "HEAD"
+    repo_url = f"https://github.com/{repo}.git"
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--exit-code", repo_url, target],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    # Output: "<sha>\t<refname>" lines. Take the first SHA.
+    for line in proc.stdout.splitlines():
+        sha, _, _ = line.partition("\t")
+        sha = sha.strip()
+        if sha:
+            return sha
+    return None
+
+
+def _is_github_url(source: str) -> bool:
+    """Check if the source looks like a GitHub URL or shorthand."""
+    if "github.com" in source.lower():
+        return True
+    if "://" in source:
+        return False  # Non-GitHub URL
+    # Check for owner/repo@skill shorthand
+    if "@" in source and "/" in source.split("@")[0]:
+        return True
+    # Check for owner/repo format (but not local paths like ./foo or /foo)
+    if "/" in source and not source.startswith((".", "/")):
+        parts = source.split("/")
+        # GitHub shorthand: exactly 2 parts, both non-empty, no extensions
+        if len(parts) == 2 and all(parts) and "." not in parts[0]:
+            return True
+    return False
+
+
+def _validate_skill_dir(path: Path) -> bool:
+    """Check if a directory contains a valid skill (has SKILL.md)."""
+    return (path / "SKILL.md").is_file()
+
+
+def _scan_skill_dirs(root: Path) -> list[Path]:
+    """Scan *root* up to 2 levels deep for directories containing SKILL.md.
+
+    Level 1: direct children of *root*.
+    Level 2: grandchildren inside non-skill child directories.
+
+    Both levels are always scanned so mixed-depth repos are fully discovered.
+    """
+    found: list[Path] = []
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        if _validate_skill_dir(child):
+            found.append(child)
+        else:
+            # Non-skill directory — scan its children (level 2)
+            found.extend(
+                gc
+                for gc in sorted(child.iterdir())
+                if gc.is_dir() and _validate_skill_dir(gc)
+            )
+    return found
+
+
+def _find_skill_in_tree(root: str, skill_name: str) -> Path | None:
+    """Walk a directory tree to find a subdirectory named *skill_name* containing SKILL.md.
+
+    Skips hidden directories (starting with '.').
+
+    Returns:
+        The absolute Path to the skill directory, or None.
+    """
+    for dirpath, dirnames, _files in os.walk(root):
+        # Prune hidden directories
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if os.path.basename(dirpath) == skill_name:
+            candidate = Path(dirpath)
+            if _validate_skill_dir(candidate):
+                return candidate
+    return None
+
+
+# Allowed pattern for skill names: alphanumeric, hyphens, underscores
+_VALID_SKILL_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def _sanitize_name(name: str) -> str | None:
+    """Validate and sanitize a skill name.
+
+    Returns the cleaned name, or None if invalid.
+    """
+    name = name.strip()
+    if not name or not _VALID_SKILL_NAME.match(name):
+        return None
+    # Block path traversal components
+    if ".." in name or "/" in name or "\\" in name:
+        return None
+    return name
+
+
+def install_skill(
+    source: str,
+    dest_dir: str | None = None,
+    global_install: bool = True,
+) -> dict:
+    """Install a skill from a local path or GitHub URL.
+
+    Args:
+        source: Local directory path or GitHub URL/shorthand.
+        dest_dir: Explicit destination directory (overrides global_install).
+        global_install: If True (default), install to GLOBAL_SKILLS_DIR
+            (~/.evoscientist/skills/). If False, install to the
+            workspace-local USER_SKILLS_DIR.
+
+    Returns:
+        Dictionary with installation result:
+        - success: bool
+        - name: skill name (if successful)
+        - path: installed path (if successful)
+        - error: error message (if failed)
+    """
+    try:
+        return _install_skill_impl(source, dest_dir, global_install)
+    finally:
+        _notify_skills_changed()
+
+
+def _install_skill_impl(
+    source: str,
+    dest_dir: str | None = None,
+    global_install: bool = True,
+) -> dict:
+    dest_dir = dest_dir or (
+        str(paths.GLOBAL_SKILLS_DIR) if global_install else str(paths.USER_SKILLS_DIR)
+    )
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        return {
+            "success": False,
+            "error": f"Cannot create install directory '{dest_dir}': {e}",
+        }
+
+    if _is_github_url(source):
+        return _install_from_github(source, dest_dir)
+    else:
+        # Check if local path exists
+        source_path = Path(source).expanduser().resolve()
+        if not source_path.exists():
+            # Fallback: try resolving as a virtual workspace path
+            from ..paths import resolve_virtual_path
+
+            try:
+                if resolve_virtual_path(source).exists():
+                    return _install_from_local(source, dest_dir)
+            except Exception:
+                pass
+
+            # If not local and not a GitHub URL, try remote lookup in EvoSkills
+            # This handles /install-skill skill-name shorthand
+            try:
+                index = fetch_remote_skill_index()
+                for skill in index:
+                    if skill["name"].lower() == source.lower():
+                        _logger.info(
+                            f"Skill '{source}' found in remote index. Installing..."
+                        )
+                        # Record under the user-facing source (the shorthand
+                        # name they typed) so detection works on re-runs.
+                        return _install_from_github(
+                            skill["install_source"], dest_dir, record_as=source
+                        )
+            except Exception as e:
+                _logger.warning(f"Failed to fetch remote index for fallback: {e}")
+
+        return _install_from_local(source, dest_dir)
+
+
+def _install_from_local(source: str, dest_dir: str) -> dict:
+    """Install a skill from a local directory path."""
+    source_path = Path(source).expanduser().resolve()
+
+    if not source_path.exists():
+        # Fallback: try resolving as a virtual workspace path
+        from ..paths import resolve_virtual_path
+
+        try:
+            source_path = resolve_virtual_path(source)
+        except Exception:
+            pass
+        if not source_path.exists():
+            return {"success": False, "error": f"Path does not exist: {source}"}
+
+    if not source_path.is_dir():
+        return {"success": False, "error": f"Not a directory: {source}"}
+
+    if not _validate_skill_dir(source_path):
+        found = _scan_skill_dirs(source_path)
+        if len(found) == 1:
+            return _install_single_local(found[0], dest_dir, record_as=source)
+        if found:
+            return _batch_install_local(found, dest_dir, record_as=source)
+        return {"success": False, "error": f"No SKILL.md found in: {source}"}
+
+    return _install_single_local(source_path, dest_dir, record_as=source)
+
+
+def _install_single_local(
+    source_path: Path,
+    dest_dir: str,
+    *,
+    ignore_fn=None,
+    record_as: str | None = None,
+    record_commit: str | None = None,
+) -> dict:
+    """Install one skill directory into *dest_dir*.
+
+    *record_as*, when provided, is recorded in the install manifest so later
+    detection can match against the user-facing source string (URL, shorthand,
+    or path) — important for packs where the installed dir name doesn't
+    resemble the source.
+
+    *record_commit*, when provided, captures the upstream git SHA at install
+    time so onboarding can compare against the current upstream and surface
+    "update available" without re-cloning.
+    """
+    skill_info = _parse_skill_md(source_path / "SKILL.md")
+    skill_name = _sanitize_name(skill_info.name)
+    if not skill_name:
+        return {
+            "success": False,
+            "error": f"Invalid skill name in SKILL.md: {skill_info.name!r}",
+        }
+
+    target_path = (Path(dest_dir) / skill_name).resolve()
+    if not target_path.is_relative_to(Path(dest_dir).resolve()):
+        return {
+            "success": False,
+            "error": f"Skill name escapes destination: {skill_info.name!r}",
+        }
+
+    if target_path.exists():
+        shutil.rmtree(target_path)
+
+    shutil.copytree(source_path, target_path, ignore=ignore_fn)
+    _record_install(dest_dir, skill_name, record_as, commit=record_commit)
+
+    return {
+        "success": True,
+        "name": skill_name,
+        "path": str(target_path),
+        "description": skill_info.description,
+    }
+
+
+def _batch_install_local(
+    skill_dirs: list[Path],
+    dest_dir: str,
+    *,
+    ignore_fn=None,
+    record_as: str | None = None,
+    record_commit: str | None = None,
+) -> dict:
+    """Install multiple skill directories and return a batch result."""
+    installed: list[dict] = []
+    failed: list[dict] = []
+
+    for sd in skill_dirs:
+        result = _install_single_local(
+            sd,
+            dest_dir,
+            ignore_fn=ignore_fn,
+            record_as=record_as,
+            record_commit=record_commit,
+        )
+        if result["success"]:
+            installed.append(result)
+        else:
+            failed.append({"name": sd.name, "error": result["error"]})
+
+    return {
+        "success": len(installed) > 0,
+        "batch": True,
+        "installed": installed,
+        "failed": failed,
+    }
+
+
+def _install_from_github(
+    source: str, dest_dir: str, *, record_as: str | None = None
+) -> dict:
+    """Install a skill from a GitHub URL or shorthand.
+
+    *record_as* overrides what gets written to the install manifest. By default
+    we record the same URL/shorthand the caller passed as *source* so detection
+    works against the user-facing string.
+    """
+    record_as = record_as or source
+    try:
+        repo, ref, path = _parse_github_url(source)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    with tempfile.TemporaryDirectory(prefix="evoscientist-skill-") as tmp:
+        clone_dir = os.path.join(tmp, "repo")
+
+        try:
+            _clone_repo(repo, ref, clone_dir)
+        except RuntimeError as e:
+            return {"success": False, "error": str(e)}
+
+        # Capture HEAD now, before any fallback paths might re-enter — every
+        # child of a pack share the same upstream SHA so we record it once.
+        commit = _resolve_local_head(clone_dir)
+
+        # Exclude .git from copies
+        def ignore_git(dir_name: str, files: list[str]) -> list[str]:
+            return [f for f in files if f == ".git"]
+
+        # Determine the skill source directory
+        if path:
+            skill_source = Path(clone_dir) / path
+        else:
+            skill_source = Path(clone_dir)
+
+        # Validate — if the direct path doesn't have SKILL.md, try auto-resolve
+        if not skill_source.exists() or not _validate_skill_dir(skill_source):
+            if skill_source.is_dir():
+                found_dirs = _scan_skill_dirs(skill_source)
+                if len(found_dirs) == 1:
+                    skill_source = found_dirs[0]
+                elif found_dirs:
+                    return _batch_install_local(
+                        found_dirs,
+                        dest_dir,
+                        ignore_fn=ignore_git,
+                        record_as=record_as,
+                        record_commit=commit,
+                    )
+
+            # Still not resolved — try tree search by name hint
+            if not _validate_skill_dir(skill_source):
+                if path:
+                    skill_name_hint = path.rstrip("/").rsplit("/", 1)[-1]
+                    resolved = _find_skill_in_tree(clone_dir, skill_name_hint)
+                    if resolved:
+                        skill_source = resolved
+                    else:
+                        return {
+                            "success": False,
+                            "error": f"No SKILL.md found at '{path}' (also searched subdirectories) in: {source}",
+                        }
+                else:
+                    return {
+                        "success": False,
+                        "error": f"No SKILL.md found in: {source}",
+                    }
+
+        # Single skill — install it
+        result = _install_single_local(
+            skill_source,
+            dest_dir,
+            ignore_fn=ignore_git,
+            record_as=record_as,
+            record_commit=commit,
+        )
+        if result.get("success"):
+            result["source"] = source
+        return result
+
+
+def list_skills(include_system: bool = False) -> list[SkillInfo]:
+    """List all installed skills across all tiers.
+
+    Priority order: workspace > global > builtin.
+    Higher-priority skills shadow lower-priority skills with the same name.
+
+    Args:
+        include_system: If True, also include built-in (PyPI) skills.
+
+    Returns:
+        List of SkillInfo objects for each skill, deduplicated by name.
+    """
+    skills: list[SkillInfo] = []
+    seen: set[str] = set()  # dedup by parsed skill name (not directory name)
+
+    def _add_tier(skill_dir: Path, source: str, check_seen: bool = True) -> None:
+        if not skill_dir.exists():
+            return
+        for entry in sorted(skill_dir.iterdir()):
+            if entry.is_dir() and _validate_skill_dir(entry):
+                info = _parse_skill_md(entry / "SKILL.md", source=source)
+                if check_seen and info.name in seen:
+                    continue
+                skills.append(info)
+                seen.add(info.name)
+
+    # Tier 1: workspace-local skills (always highest priority, no dedup needed)
+    _add_tier(Path(paths.USER_SKILLS_DIR), source="workspace", check_seen=False)
+
+    # Tier 2: global skills (~/.evoscientist/skills/)
+    _add_tier(Path(paths.GLOBAL_SKILLS_DIR), source="global")
+
+    # Tier 3: built-in skills (optional)
+    if include_system:
+        from ..EvoScientist import SKILLS_DIR
+
+        _add_tier(Path(SKILLS_DIR), source="builtin")
+
+    return skills
+
+
+def list_expert_skills(include_system: bool = True) -> list[SkillInfo]:
+    """List installed expert skills.
+
+    Filters ``list_skills()`` output to entries classified as experts by
+    ``_parse_skill_md`` — a sibling ``EXPERT.md`` (current contract), or
+    legacy ``type: expert`` SKILL.md frontmatter. Read ``expert_source`` on
+    the returned entries to tell the two apart; use
+    ``expert_container.expert_prompt_body`` rather than ``.body`` to get an
+    expert's runtime prompt, since the two contracts source it from
+    different files.
+
+    Defaults ``include_system=True`` because first-party experts ship under
+    the builtin skills tier; user-installed experts still surface from the
+    workspace and global tiers alongside them.
+
+    Consumed by:
+      - ``GET /api/teams`` (WebUI gallery listing).
+      - Main-agent construction (folds expert skills into the
+        ``subagents=[...]`` list so the ``task`` tool can dispatch to
+        them for sync consult).
+      - The ``skill_manager`` @tool's ``type=expert`` filter.
+
+    Returns:
+        List of ``SkillInfo`` for each expert skill.
+    """
+    return [s for s in list_skills(include_system=include_system) if s.type == "expert"]
+
+
+def uninstall_skill(name: str) -> dict:
+    """Uninstall a skill from workspace or global tier.
+
+    Searches workspace first, then global. Built-in skills cannot be uninstalled.
+
+    Args:
+        name: Name of the skill to uninstall.
+
+    Returns:
+        Dictionary with result:
+        - success: bool
+        - error: error message (if failed)
+    """
+    try:
+        return _uninstall_skill_impl(name)
+    finally:
+        _notify_skills_changed()
+
+
+def _uninstall_skill_impl(name: str) -> dict:
+    # Validate name to prevent path traversal
+    clean_name = _sanitize_name(name)
+    if not clean_name:
+        return {"success": False, "error": f"Invalid skill name: {name!r}"}
+
+    # Search workspace tier first, then global tier
+    search_dirs = [
+        Path(paths.USER_SKILLS_DIR).resolve(),
+        Path(paths.GLOBAL_SKILLS_DIR).resolve(),
+    ]
+
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+
+        target_path = (search_dir / clean_name).resolve()
+
+        if not target_path.exists() or not _validate_skill_dir(target_path):
+            # Try to find by skill name in SKILL.md (dir name may differ)
+            for entry in search_dir.iterdir():
+                if entry.is_dir() and _validate_skill_dir(entry):
+                    info = _parse_skill_md(entry / "SKILL.md")
+                    if info.name == clean_name:
+                        target_path = entry.resolve()
+                        break
+            else:
+                continue
+
+        # Safety: resolved path must still be inside the search dir
+        if not target_path.is_relative_to(search_dir):
+            return {"success": False, "error": f"Invalid skill path: {name}"}
+
+        shutil.rmtree(target_path)
+        _record_uninstall(search_dir, target_path.name)
+        return {"success": True, "name": name}
+
+    # Check if it's a built-in skill (read-only, cannot be uninstalled)
+    from ..EvoScientist import SKILLS_DIR
+
+    builtin_dir = Path(SKILLS_DIR)
+    if builtin_dir.exists():
+        for entry in builtin_dir.iterdir():
+            if entry.is_dir() and _validate_skill_dir(entry):
+                info = _parse_skill_md(entry / "SKILL.md")
+                if info.name == clean_name or entry.name == clean_name:
+                    return {
+                        "success": False,
+                        "error": f"'{name}' is a built-in skill and cannot be uninstalled.",
+                    }
+
+    return {"success": False, "error": f"Skill not found: {name}"}
+
+
+def get_skill_info(name: str) -> SkillInfo | None:
+    """Get information about a specific skill.
+
+    Args:
+        name: Name of the skill.
+
+    Returns:
+        SkillInfo if found, None otherwise.
+    """
+    for skill in list_skills(include_system=True):
+        if skill.name == name:
+            return skill
+    return None
+
+
+def list_skills_by_tag(
+    tag: str,
+    include_system: bool = False,
+) -> list[SkillInfo]:
+    """Filter installed skills by tag (case-insensitive).
+
+    Args:
+        tag: Tag to filter by.
+        include_system: If True, also include system skills.
+
+    Returns:
+        List of matching SkillInfo objects.
+    """
+    tag_lower = tag.lower()
+    return [
+        s
+        for s in list_skills(include_system=include_system)
+        if tag_lower in [t.lower() for t in s.tags]
+    ]
+
+
+def get_all_tags(include_system: bool = False) -> list[tuple[str, int]]:
+    """Return all tags and their counts, sorted by frequency then alphabetically.
+
+    Args:
+        include_system: If True, also include system skills.
+
+    Returns:
+        List of (tag, count) tuples sorted by count descending, then name ascending.
+    """
+    from collections import Counter
+
+    counter: Counter[str] = Counter()
+    for skill in list_skills(include_system=include_system):
+        for tag in skill.tags:
+            counter[tag.lower()] += 1
+    return sorted(counter.items(), key=lambda x: (-x[1], x[0]))
+
+
+# ── Remote skill index ──────────────────────────────────────────────
+
+_REMOTE_INDEX_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_REMOTE_INDEX_TTL = 600  # 10 minutes
+
+
+def fetch_remote_skill_index(
+    repo: str = "EvoScientist/EvoSkills",
+    ref: str | None = None,
+    path: str = "skills",
+) -> list[dict]:
+    """Fetch skill metadata from a GitHub repo via shallow clone.
+
+    Clones the repo to a temp directory, scans for SKILL.md files,
+    parses their frontmatter, and returns an index of available skills.
+    Results are cached for 10 minutes.
+
+    Args:
+        repo: GitHub repo in owner/repo format.
+        ref: Branch or tag (None for default branch).
+        path: Subdirectory containing skills.
+
+    Returns:
+        List of dicts with keys: name, description, tags, install_source.
+    """
+    cache_key = f"{repo}:{ref or 'default'}:{path}"
+    now = time.monotonic()
+    cached = _REMOTE_INDEX_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _REMOTE_INDEX_TTL:
+        return cached[1]
+
+    index: list[dict] = []
+    with tempfile.TemporaryDirectory(prefix="evoscientist-browse-") as tmp:
+        clone_dir = os.path.join(tmp, "repo")
+        _clone_repo(repo, ref, clone_dir)
+
+        skills_root = Path(clone_dir) / path if path else Path(clone_dir)
+        if not skills_root.is_dir():
+            return index
+
+        found = _scan_skill_dirs(skills_root)
+        for skill_dir in found:
+            info = _parse_skill_md(skill_dir / "SKILL.md")
+            # Compute relative path from clone root for install source
+            rel = skill_dir.relative_to(Path(clone_dir))
+            install_source = f"{repo}@{rel}"
+            index.append(
+                {
+                    "name": info.name,
+                    "description": info.description,
+                    "tags": info.tags,
+                    "install_source": install_source,
+                }
+            )
+
+    _REMOTE_INDEX_CACHE[cache_key] = (now, index)
+    return index

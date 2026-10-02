@@ -1,0 +1,33 @@
+name: Test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  pytest:
+    timeout-minutes: 15
+    # ``fail-fast: false`` so a single failing (os, python-version) cell
+    # doesn't cancel the rest of the matrix. Useful while the Windows
+    # leg is being brought up — we want to see every cell result
+    # in one CI run instead of playing whack-a-mole one failure at a
+    # time. See #207.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      # Full tag required — setup-uv dropped major/minor tags in v8.0.0, so
+      # `@v9` does not resolve. See the note in lint.yml.
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-dependency-glob: "**/pyproject.toml"
+      - name: Install dependencies
+        run: uv sync --dev --extra all-channels
+      - name: Run pytest
+        run: uv run pytest -v --timeout=30

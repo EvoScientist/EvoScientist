@@ -1,0 +1,93 @@
+"""TUI backend abstractions for streaming output."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
+
+from ..gateway import GraphGateway
+from ..stream.display import _run_streaming
+
+if TYPE_CHECKING:
+    from ..runtime import AsyncRuntime
+
+
+class StreamingTUIBackend(Protocol):
+    """Protocol for TUI backends that can render agent streaming output."""
+
+    name: str
+
+    def run_streaming(
+        self,
+        *,
+        agent: Any,
+        message: str,
+        thread_id: str,
+        show_thinking: bool,
+        interactive: bool,
+        on_thinking: Callable[[str], None] | None = None,
+        on_todo: Callable[[list[dict]], None] | None = None,
+        on_file_write: Callable[[str], None] | None = None,
+        on_stream_event: Callable[[str, Any], Any] | None = None,
+        status_footer_builder: Callable[[], Any] | None = None,
+        metadata: dict | None = None,
+        configurable_extra: dict[str, Any] | None = None,
+        hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
+        hitl_outcome_fn: Callable[[list, bool], Any] | None = None,
+        ask_user_prompt_fn: Callable[[dict], dict] | None = None,
+        cancel_scope: str | None = None,
+        gateway: GraphGateway,
+        runtime: AsyncRuntime | None = None,
+    ) -> str:
+        """Run streaming and return final response text."""
+
+
+@dataclass(slots=True)
+class RichStreamingBackend:
+    """Default Rich backend wrapper around the existing streaming renderer."""
+
+    name: str = "cli"
+
+    def run_streaming(
+        self,
+        *,
+        agent: Any,
+        message: str,
+        thread_id: str,
+        show_thinking: bool,
+        interactive: bool,
+        on_thinking: Callable[[str], None] | None = None,
+        on_todo: Callable[[list[dict]], None] | None = None,
+        on_file_write: Callable[[str], None] | None = None,
+        on_stream_event: Callable[[str, Any], Any] | None = None,
+        status_footer_builder: Callable[[], Any] | None = None,
+        metadata: dict | None = None,
+        configurable_extra: dict[str, Any] | None = None,
+        hitl_prompt_fn: Callable[[list], list[dict] | None] | None = None,
+        hitl_outcome_fn: Callable[[list, bool], Any] | None = None,
+        ask_user_prompt_fn: Callable[[dict], dict] | None = None,
+        cancel_scope: str | None = None,
+        gateway: GraphGateway,
+        runtime: AsyncRuntime | None = None,
+    ) -> str:
+        return _run_streaming(
+            agent=agent,
+            message=message,
+            thread_id=thread_id,
+            show_thinking=show_thinking,
+            interactive=interactive,
+            on_thinking=on_thinking,
+            on_todo=on_todo,
+            on_file_write=on_file_write,
+            on_stream_event=on_stream_event,
+            status_footer_builder=status_footer_builder,
+            metadata=metadata,
+            configurable_extra=configurable_extra,
+            hitl_prompt_fn=hitl_prompt_fn,
+            hitl_outcome_fn=hitl_outcome_fn,
+            ask_user_prompt_fn=ask_user_prompt_fn,
+            cancel_scope=cancel_scope,
+            gateway=gateway,
+            runtime=runtime,
+        )

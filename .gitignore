@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+*.pytest_cache/
+.benchmarks/
+.coverage
+.ipynb_checkpoints/
+
+# Environment
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+bridge/node_modules/
+bridge/package-lock.json
+
+# IDE / Tools
+.vscode/
+.idea/
+.agents/
+.claude/
+.cursor/
+.codex/
+.cursorrules
+.ruff_cache/
+
+# Project specific
+.langgraph_api/
+workspace/
+skills/
+!EvoScientist/skills/
+memory/
+!EvoScientist/memory/
+media/
+conversation_history/
+.deno_cache/
+*.ipynb
+*CLAUDE.md
+*AGENTS.md
+*meals/
+botpy.log
+large_tool_results/

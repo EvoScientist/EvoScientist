@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="168" height="34">
+  <rect x="0.5" y="0.5" width="167" height="33" rx="8" fill="#1e293b" stroke="#334155"/>
+  <text x="15" y="22" font-family="Inter, -apple-system, system-ui, sans-serif"
+        font-size="13" font-weight="500" fill="#94a3b8">License</text>
+  <rect x="71" y="5" width="89" height="24" rx="6" fill="#10b981"/>
+  <text x="115.5" y="22" text-anchor="middle"
+        font-family="Inter, -apple-system, system-ui, sans-serif"
+        font-size="13" font-weight="700" fill="#ffffff">Apache 2.0</text>
+</svg>

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="188" height="34">
+  <rect x="0.5" y="0.5" width="187" height="33" rx="8" fill="#ffffff" stroke="#e5e7eb"/>
+  <text x="15" y="22" font-family="Inter, -apple-system, system-ui, sans-serif"
+        font-size="13" font-weight="500" fill="#6b7280">Built with</text>
+  <rect x="84" y="5" width="96" height="24" rx="6" fill="#7c3aed"/>
+  <text x="132" y="22" text-anchor="middle"
+        font-family="Inter, -apple-system, system-ui, sans-serif"
+        font-size="13" font-weight="700" fill="#ffffff">DeepAgents</text>
+</svg>
