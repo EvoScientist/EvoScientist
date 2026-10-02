@@ -548,6 +548,36 @@ def test_pin_without_a_wheel_falls_back_to_the_newest_wheel(env):
     assert f"numpy=={re_env.PINS['numpy']}" in second
 
 
+def test_unpinned_packages_are_reported_on_every_later_run(env):
+    """Untested versions are a fact about the environment, not one run."""
+    env["run"].no_wheel = {"scipy"}
+    re_env.run_stage(lambda event: None, "default")
+    env["run"].calls.clear()
+    result = re_env.run_stage(lambda event: None, "default")
+    assert result.detail["unpinned"] == ["scipy"]
+    assert env["run"].kinds() == ["imports"]  # nothing installed
+
+
+def test_repair_at_the_pin_clears_an_unpinned_package(env):
+    env["run"].no_wheel = {"scipy"}
+    re_env.ensure_research_env("default")
+    env["run"].no_wheel = set()  # e.g. after a pin update
+    env["run"].imports_script = [False]
+    env["run"].failed_packages = ["scipy"]
+    assert re_env.ensure_research_env("default").unpinned == []
+    assert re_env.ensure_research_env("default").unpinned == []
+
+
+def test_marker_from_an_older_version_still_counts_as_ready(env):
+    """#542 wrote only the Python version into the marker."""
+    re_env.ensure_research_env("default")
+    (env["env"] / re_env._READY_MARKER).write_text("3.12.9", encoding="utf-8")
+    env["run"].calls.clear()
+    result = re_env.ensure_research_env("default")
+    assert result == re_env.EnvResult("3.12.9", [])
+    assert env["run"].kinds() == ["imports"]
+
+
 def test_stage_without_a_fallback_has_no_unpinned_detail(env):
     result = re_env.run_stage(lambda event: None, "default")
     assert "unpinned" not in result.detail

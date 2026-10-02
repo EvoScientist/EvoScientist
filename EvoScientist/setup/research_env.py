@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import configparser
 import functools
+import json
 import logging
 import os
 import re
@@ -518,11 +519,36 @@ def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
 
 
 class EnvResult(NamedTuple):
-    """A ready research environment: its Python version, and the packages
-    this run installed without their pin (see :func:`_pip_install`)."""
+    """A ready research environment: its Python version, and the packages it
+    has without their pin (see :func:`_pip_install`), which were never tested
+    together with the pins."""
 
     version: str
     unpinned: list[str]
+
+
+def _read_unpinned(env: Path) -> list[str]:
+    """The unpinned packages recorded in the ready marker.
+
+    A marker written by an older version holds only the Python version, and
+    counts as none.
+    """
+    try:
+        data = json.loads((env / _READY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    unpinned = data.get("unpinned") if isinstance(data, dict) else None
+    if not isinstance(unpinned, list):
+        return []
+    return [name for name in unpinned if name in PINS]
+
+
+def _write_ready_marker(env: Path, result: EnvResult) -> None:
+    """Mark the environment ready, after its import check passed."""
+    (env / _READY_MARKER).write_text(
+        json.dumps({"python": result.version, "unpinned": result.unpinned}),
+        encoding="utf-8",
+    )
 
 
 def _repair(
@@ -544,10 +570,14 @@ def _repair(
     # Below the build's first step (0.1): a repair that does not help falls
     # back to a rebuild, and progress must not jump backwards.
     report(0.03, f"Installing {', '.join(failed)}")
+    still_unpinned = [name for name in _read_unpinned(env) if name not in failed]
     unpinned = _pip_install(env, mirror, failed)
     report(0.06, "Checking the packages")
     check = _import_check(env)
-    return EnvResult(check.version, unpinned) if check.ok else None
+    if not check.ok:
+        return None
+    # A package reinstalled at its pin is no longer unpinned.
+    return EnvResult(check.version, still_unpinned + unpinned)
 
 
 def _build(env: Path, mirror: str, report: ProgressFn) -> EnvResult:
@@ -590,12 +620,13 @@ def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> EnvR
                 check = _import_check(env)
                 if check.ok:
                     _sync_pip_config(env, mirror)
-                    return EnvResult(check.version, [])
+                    return EnvResult(check.version, _read_unpinned(env))
                 result = _repair(env, mirror, check.failed, report)
                 if result is not None:
+                    _write_ready_marker(env, result)
                     return result
             result = _build(env, mirror, report)
-            (env / _READY_MARKER).write_text(result.version, encoding="utf-8")
+            _write_ready_marker(env, result)
             return result
     except OSError as exc:
         raise StageError(
