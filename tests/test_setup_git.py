@@ -18,6 +18,8 @@ import pytest
 from EvoScientist.setup import git
 from EvoScientist.setup.protocol import StageError
 
+# The env fixture pins _arch() to x64; the platform tests restore this one.
+_REAL_ARCH = git._arch
 DATA = b"fake PortableGit archive"
 ASSET = git.ASSETS["x64"][0]
 PINNED = hashlib.sha256(DATA).hexdigest()
@@ -448,6 +450,24 @@ def test_unsupported_architecture(monkeypatch):
     with pytest.raises(StageError) as ei:
         git._arch()
     assert ei.value.code == "unsupported_platform"
+
+
+def test_arm64_without_system_git_is_refused_before_any_download(env, monkeypatch):
+    monkeypatch.setattr(git, "_arch", _REAL_ARCH)
+    monkeypatch.setattr(git.platform, "machine", lambda: "ARM64")
+    with pytest.raises(StageError) as ei:
+        git.ensure_git()
+    assert ei.value.code == "unsupported_platform"
+    assert "Windows on arm64 is not supported" in ei.value.message
+    assert env["net"].urls == []
+    assert _record(env) is None
+
+
+def test_arm64_still_uses_a_system_git(env, monkeypatch):
+    monkeypatch.setattr(git, "_arch", _REAL_ARCH)
+    monkeypatch.setattr(git.platform, "machine", lambda: "ARM64")
+    _system_git(env, monkeypatch)
+    assert git.ensure_git().source == "system"
 
 
 # --------------------------------------------------------------------------- #

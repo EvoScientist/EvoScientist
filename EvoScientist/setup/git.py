@@ -53,14 +53,12 @@ GIT_VERSION = "2.56.0.windows.1"
 
 # Asset names are pinned in full: first builds drop the ".1" from them.
 # Values: (asset, SHA-256).
+# x64 only: Windows on arm64 is not a supported platform (#512), so its
+# PortableGit is not used even though it is published.
 ASSETS = {
     "x64": (
         "PortableGit-2.56.0-64-bit.7z.exe",
         "eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1",
-    ),
-    "arm64": (
-        "PortableGit-2.56.0-arm64.7z.exe",
-        "edd9bd32aefa5d2bd4b938c38c18ceca306a7f6b29a6951cd6a4bb16d9d28d8f",
     ),
 }
 
@@ -279,11 +277,21 @@ def _adopt_installed(root: Path) -> GitInfo | None:
 # Install
 # --------------------------------------------------------------------------- #
 def _arch() -> str:
-    arch = _ARCH.get(platform.machine().lower())
-    if arch is None:
+    """The PortableGit architecture to download; raises before any download
+    when the platform is not supported. A system Git for Windows is looked for
+    first, so it is still used on these platforms."""
+    machine = platform.machine()
+    arch = _ARCH.get(machine.lower())
+    if arch == "arm64":
         raise StageError(
             "unsupported_platform",
-            f"No PortableGit build for Windows on {platform.machine()}.",
+            "Windows on arm64 is not supported: no Git for Windows was found on "
+            "PATH, and PortableGit is installed for x64 only. Install Git for "
+            "Windows and run `EvoSci setup` again.",
+        )
+    if arch not in ASSETS:
+        raise StageError(
+            "unsupported_platform", f"No PortableGit build for Windows on {machine}."
         )
     return arch
 
