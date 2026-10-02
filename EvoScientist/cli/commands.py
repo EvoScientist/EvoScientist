@@ -746,6 +746,37 @@ async def _sync_background_agent_server_workspace(
         )
 
 
+async def _restore_thread_dirs(
+    thread_id: str,
+    *,
+    dirs: SessionDirs,
+    graph_gateway: GraphGateway,
+    config: Any,
+    backend: str | None = None,
+) -> SessionDirs:
+    """Return the folders to resume *thread_id* in, with the server moved there.
+
+    A thread resumes in the workspace and run folder it was stored with,
+    wherever the CLI was started; a thread stored without folders resumes in
+    *dirs*. Raises ``typer.Exit(1)`` when another session holds the server.
+    """
+    from ..langgraph_dev.manager import WorkspaceMismatchError
+
+    metadata = await graph_gateway.get_thread_metadata(thread_id) or {}
+    restored = (
+        SessionDirs.from_stored(metadata.get("workspace_dir"), metadata.get("run_dir"))
+        or dirs
+    )
+    try:
+        await _sync_background_agent_server_workspace(
+            config, dirs=restored, backend=backend
+        )
+    except WorkspaceMismatchError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    return restored
+
+
 def _resolve_context_window(
     model: Any, fallback: int = _COMPACT_CONTEXT_WINDOW_FALLBACK
 ) -> int:
@@ -2589,6 +2620,13 @@ def _main_callback(
                     resolution = await graph_gateway.resolve_thread(thread_id)
                     if resolution.thread_id:
                         tid = resolution.thread_id
+                        session_dirs = await _restore_thread_dirs(
+                            tid,
+                            dirs=dirs,
+                            graph_gateway=graph_gateway,
+                            config=config,
+                            backend=gateway_backend,
+                        )
                     elif resolution.matches:
                         console.print(
                             f"[yellow]Ambiguous thread ID '{escape(thread_id)}'. Matches:[/yellow]"
@@ -2603,11 +2641,12 @@ def _main_callback(
                         raise typer.Exit(1)
                 else:
                     tid = await graph_gateway.create_thread()
+                    session_dirs = dirs
                 console.print("[dim]Loading agent...[/dim]")
                 agent = await asyncio.to_thread(
                     _load_agent,
-                    work_dir=str(dirs.work_dir),
-                    workspace=workspace,
+                    work_dir=str(session_dirs.work_dir),
+                    workspace=session_dirs.workspace,
                     checkpointer=checkpointer,
                     config=config,
                     runtime=async_runtime,
@@ -2621,8 +2660,10 @@ def _main_callback(
                         request = RunRequest(
                             message=prompt,
                             thread_id=tid,
-                            metadata=build_metadata(dirs, config.model),
-                            target=GraphTarget(local_graph=agent, **dirs.metadata()),
+                            metadata=build_metadata(session_dirs, config.model),
+                            target=GraphTarget(
+                                local_graph=agent, **session_dirs.metadata()
+                            ),
                         )
                         try:
                             await stream_json(graph_gateway, request)
@@ -2644,7 +2685,7 @@ def _main_callback(
                                 prompt,
                                 thread_id=tid,
                                 show_thinking=show_thinking,
-                                dirs=dirs,
+                                dirs=session_dirs,
                                 model=config.model,
                                 ui_backend=config.ui_backend,
                                 runtime_gateways=runtime_gateways,

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from EvoScientist.cli import commands
-from EvoScientist.paths import Workspace
+from EvoScientist.paths import SessionDirs, Workspace
+from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 
 def _config(
@@ -87,7 +91,7 @@ def _run(
     return captured
 
 
-def test_cwd_is_the_default_workspace(monkeypatch, tmp_path):
+def test_cwd_is_default_workspace(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     got = _run(monkeypatch, _config())
     assert got["dirs"].workspace == Workspace(tmp_path)
@@ -138,7 +142,7 @@ def test_default_workdir_from_config(monkeypatch, tmp_path):
     assert got["mode"] == "daemon"
 
 
-def test_run_mode_works_in_a_run_folder_of_the_workspace(monkeypatch, tmp_path):
+def test_run_mode_uses_run_dir_under_workspace(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     got = _run(monkeypatch, _config(), mode="run", name="exp")
     workspace = got["dirs"].workspace
@@ -170,3 +174,140 @@ def test_mode_cannot_combine_with_workdir(monkeypatch, tmp_path):
 
     with pytest.raises(typer.BadParameter):
         _run(monkeypatch, _config(), mode="run", workdir=str(tmp_path))
+
+
+def _run_prompt(
+    monkeypatch,
+    config,
+    *,
+    thread_id: str | None,
+    stored: dict | None,
+) -> dict:
+    """Drive the main callback through a ``-p`` run and capture its folders."""
+    import EvoScientist.cli.interactive as interactive_mod
+    import EvoScientist.config as config_mod
+    import EvoScientist.gateway as gateway_mod
+    import EvoScientist.sessions as sessions_mod
+
+    captured: dict = {"synced": []}
+    gateway = FakeGraphGateway(
+        generated_thread_ids=["new-thread"],
+        thread_store=FakeThreadStore(resolved_thread_id=thread_id, metadata=stored),
+    )
+
+    def _fake_get_effective_config(cli_overrides=None):
+        merged = vars(config).copy()
+        merged.update(cli_overrides or {})
+        return SimpleNamespace(**merged)
+
+    @asynccontextmanager
+    async def _fake_checkpointer():
+        yield None
+
+    async def _fake_sync(_config, *, dirs, backend=None, **_kwargs):
+        captured["synced"].append(dirs)
+
+    def _fake_load_agent(**kwargs):
+        captured["agent_workspace"] = kwargs["workspace"]
+        captured["agent_work_dir"] = kwargs["work_dir"]
+        return object()
+
+    def _fake_cmd_run(_agent, _prompt, *, thread_id, dirs, **_kwargs):
+        captured["thread_id"] = thread_id
+        captured["run_dirs"] = dirs
+
+    monkeypatch.setattr(config_mod, "get_effective_config", _fake_get_effective_config)
+    monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
+    monkeypatch.setattr(config_mod, "resolve_gateway_backend", lambda *_a: "local")
+    monkeypatch.setattr(
+        commands,
+        "_get_cli_async_runtime",
+        lambda _ctx: SimpleNamespace(run_sync=lambda fn: asyncio.run(fn())),
+    )
+    monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(
+        commands, "_ensure_async_subagent_server", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(commands, "_sync_background_agent_server_workspace", _fake_sync)
+    monkeypatch.setattr(commands, "_load_agent", _fake_load_agent)
+    monkeypatch.setattr(
+        gateway_mod,
+        "create_runtime_gateways_for_config",
+        lambda *_a, **_k: SimpleNamespace(graph_gateway=gateway),
+    )
+    monkeypatch.setattr(sessions_mod, "get_checkpointer", _fake_checkpointer)
+    monkeypatch.setattr(interactive_mod, "cmd_run", _fake_cmd_run)
+
+    commands._main_callback(
+        SimpleNamespace(invoked_subcommand=None),
+        version=None,
+        mode=None,
+        name=None,
+        prompt="hello",
+        thread_id=thread_id,
+        workdir=None,
+        use_cwd=False,
+        no_thinking=False,
+        auto_approve=False,
+        auto_mode=None,
+        ask_user=False,
+        dangerous=False,
+        auth_mode=None,
+        ui=None,
+        host=None,
+        output_format=None,
+    )
+    return captured
+
+
+def test_one_shot_resume_uses_thread_workspace(monkeypatch, tmp_path):
+    launch, other = tmp_path / "launch", tmp_path / "other"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+
+    got = _run_prompt(
+        monkeypatch,
+        _config(),
+        thread_id="t-other",
+        stored={"workspace_dir": other.as_posix()},
+    )
+
+    restored = SessionDirs(Workspace(other))
+    assert got["thread_id"] == "t-other"
+    assert got["agent_workspace"] == Workspace(other)
+    assert Path(got["agent_work_dir"]) == other.resolve()
+    assert got["run_dirs"] == restored
+    assert got["synced"] == [restored]
+
+
+def test_one_shot_resume_uses_thread_run_dir(monkeypatch, tmp_path):
+    root, launch = tmp_path / "proj", tmp_path / "launch"
+    run = root / "runs" / "exp"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+
+    got = _run_prompt(
+        monkeypatch,
+        _config(),
+        thread_id="t-run",
+        stored={"workspace_dir": root.as_posix(), "run_dir": run.as_posix()},
+    )
+
+    assert got["agent_workspace"] == Workspace(root)
+    assert Path(got["agent_work_dir"]) == run.resolve()
+    assert got["run_dirs"] == SessionDirs(Workspace(root), run)
+
+
+def test_one_shot_resume_without_stored_dirs_keeps_launch_dirs(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    got = _run_prompt(monkeypatch, _config(), thread_id="t-bare", stored=None)
+    assert got["agent_workspace"] == Workspace(tmp_path)
+    assert got["run_dirs"] == SessionDirs(Workspace(tmp_path))
+
+
+def test_one_shot_new_thread_keeps_launch_dirs(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    got = _run_prompt(monkeypatch, _config(), thread_id=None, stored=None)
+    assert got["thread_id"] == "new-thread"
+    assert got["run_dirs"] == SessionDirs(Workspace(tmp_path))
+    assert got["synced"] == []

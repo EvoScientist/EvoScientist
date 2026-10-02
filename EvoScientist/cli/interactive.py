@@ -324,28 +324,17 @@ async def _resolve_startup_session(
             resumed=False,
         )
 
-    resolved_thread_id = resolution.thread_id
-    metadata = await graph_gateway.get_thread_metadata(resolved_thread_id) or {}
-    resolved = (
-        SessionDirs.from_stored(metadata.get("workspace_dir"), metadata.get("run_dir"))
-        or dirs
-    )
-    from ..langgraph_dev.manager import WorkspaceMismatchError
-    from .commands import _sync_background_agent_server_workspace
-
-    try:
-        await _sync_background_agent_server_workspace(
-            config,
-            dirs=resolved,
-            backend=backend,
-        )
-    except WorkspaceMismatchError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
+    from .commands import _restore_thread_dirs
 
     return _StartupSession(
-        thread_id=resolved_thread_id,
-        dirs=resolved,
+        thread_id=resolution.thread_id,
+        dirs=await _restore_thread_dirs(
+            resolution.thread_id,
+            dirs=dirs,
+            graph_gateway=graph_gateway,
+            config=config,
+            backend=backend,
+        ),
         resumed=True,
     )
 
