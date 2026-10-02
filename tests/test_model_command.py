@@ -543,6 +543,7 @@ class TestApplyModelIntegration:
             config=None,
             chat_model=None,
             *,
+            workspace=None,
             on_mcp_progress=None,
             events=None,
         ):
@@ -717,6 +718,7 @@ class TestApplyModelPreservesConfigByReference:
             config=None,
             chat_model=None,
             *,
+            workspace=None,
             on_mcp_progress=None,
             events=None,
         ):
@@ -851,6 +853,7 @@ class TestApplyModelLoadAgentFailureTransactional:
             config=None,
             chat_model=None,
             *,
+            workspace=None,
             on_mcp_progress=None,
             events=None,
         ):

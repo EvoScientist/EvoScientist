@@ -40,6 +40,8 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.messages import SystemMessage
 
+from ..paths import Workspace
+
 _logger = logging.getLogger(__name__)
 
 # Sentinel token embedded in ``_FALLBACK_SYSTEM_PROMPT`` so
@@ -98,6 +100,10 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
 
     name = "expert_skill_loader"
 
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__()
+        self._workspace = workspace
+
     def _compose_prompt(self, state: dict[str, Any]) -> str:
         """Look up the skill and compose its system prompt.
 
@@ -124,7 +130,7 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         # Lazy import — the loader is a per-turn call, so this stays cheap.
         from ..tools.skills_manager import list_expert_skills
 
-        experts = list_expert_skills(include_system=True)
+        experts = list_expert_skills(include_system=True, workspace=self._workspace)
         match = next((s for s in experts if s.name == skill_name), None)
         if match is None:
             installed = ", ".join(sorted(s.name for s in experts)) or "(none)"
@@ -220,7 +226,9 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         return await handler(request.override(system_message=system_message))
 
 
-def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
+def build_expert_async_subagent_specs(
+    cfg: Any | None = None, *, workspace: Workspace
+) -> list[dict[str, Any]]:
     """Build ``AsyncSubAgent``-shaped specs for every installed expert skill.
 
     Called from two places: agent construction (fold-in via
@@ -273,7 +281,7 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
     # uses ``check_seen=False``, so both survive to this point).
     taken = set(_reserved_subagent_names())
     specs: list[dict[str, Any]] = []
-    for skill in list_expert_skills(include_system=True):
+    for skill in list_expert_skills(include_system=True, workspace=workspace):
         # Same empty-body skip the sync fold-in enforces in
         # ``expert_container.py::build_expert_subagent_specs``. Advertising
         # a body-less expert in ``start_async_task``'s tool schema, then
@@ -315,7 +323,7 @@ def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, 
     return specs
 
 
-def build_expert_container_async_graph() -> Any:
+def build_expert_container_async_graph(workspace: Workspace) -> Any:
     """Build the async expert container graph.
 
     Called once at langgraph dev startup. The returned graph accepts
@@ -363,18 +371,21 @@ def build_expert_container_async_graph() -> Any:
     # (#466) — the replacement must also offload history to this backend.
     # Built before subagent injection so general-purpose (an explicit spec,
     # not deepagents' auto-GP) gets the same subclass and the same model.
-    backend = _get_default_backend()
+    backend = _get_default_backend(workspace)
     model = _ensure_chat_model()
     _ensure_general_purpose_subagent(subagents)
-    _inject_subagent_middleware(subagents, chat_model=model, backend=backend)
+    _inject_subagent_middleware(
+        subagents, workspace=workspace, chat_model=model, backend=backend
+    )
 
     middleware = [
         # Loader runs FIRST so downstream middleware sees the composed
         # system_message. Ordering matters — put ExpertSkillLoaderMiddleware
         # before context editing / error normalisation so they operate on
         # the already-composed prompt.
-        ExpertSkillLoaderMiddleware(),
+        ExpertSkillLoaderMiddleware(workspace),
         *_get_default_middleware(
+            workspace=workspace,
             for_async_subagent=True,
             memory_source_agent="expert-container-async",
             backend=backend,

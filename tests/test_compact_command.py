@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import GraphTarget
+from EvoScientist.paths import Workspace
 from tests.fakes import FakeCommandUI, FakeGraphGateway
 
 _TARGET = GraphTarget()
@@ -11,6 +12,7 @@ _TARGET = GraphTarget()
 
 async def _compact(
     graph_gateway: FakeGraphGateway,
+    workspace: Workspace,
     *,
     thread_id: str = "tid-1",
     input_tokens_hint: int | None = None,
@@ -21,6 +23,7 @@ async def _compact(
         graph_gateway=graph_gateway,
         thread_id=thread_id,
         target=_TARGET,
+        workspace=workspace,
         input_tokens_hint=input_tokens_hint,
     )
 
@@ -28,17 +31,17 @@ async def _compact(
 class TestCompactGuards:
     """Guard conditions that return early without touching the middleware."""
 
-    async def test_empty_messages(self):
+    async def test_empty_messages(self, workspace):
         graph_gateway = FakeGraphGateway(state_values={"messages": []})
 
-        result = await _compact(graph_gateway)
+        result = await _compact(graph_gateway, workspace)
         assert result.status == "noop"
         assert "no messages" in result.message
 
-    async def test_state_read_failure(self):
+    async def test_state_read_failure(self, workspace):
         graph_gateway = FakeGraphGateway(state_error=RuntimeError("DB gone"))
 
-        result = await _compact(graph_gateway)
+        result = await _compact(graph_gateway, workspace)
         assert result.status == "error"
         assert "Failed to read state" in result.message
 
@@ -46,7 +49,7 @@ class TestCompactGuards:
 class TestCompactCutoffZero:
     """When cutoff == 0, conversation is within retention budget."""
 
-    async def test_nothing_to_compact_short_conversation(self):
+    async def test_nothing_to_compact_short_conversation(self, workspace):
         msgs = [MagicMock() for _ in range(3)]
         graph_gateway = FakeGraphGateway(state_values={"messages": msgs})
 
@@ -76,7 +79,7 @@ class TestCompactCutoffZero:
                 return_value=500,
             ),
         ):
-            result = await _compact(graph_gateway)
+            result = await _compact(graph_gateway, workspace)
 
         assert result.status == "noop"
         assert "within the retention budget" in result.message
@@ -86,7 +89,7 @@ class TestCompactCutoffZero:
 class TestCompactNegligibleSavings:
     """When cutoff > 0 but savings are too small to be worth it."""
 
-    async def test_skip_when_few_messages_and_low_tokens(self):
+    async def test_skip_when_few_messages_and_low_tokens(self, workspace):
         msgs = [MagicMock() for _ in range(15)]
         graph_gateway = FakeGraphGateway(
             state_values={"messages": msgs, "_summarization_event": None}
@@ -123,14 +126,14 @@ class TestCompactNegligibleSavings:
                 side_effect=lambda x: next(token_values),
             ),
         ):
-            result = await _compact(graph_gateway)
+            result = await _compact(graph_gateway, workspace)
 
         assert result.status == "noop"
         assert "not worth" in result.message
         # No LLM call should have been made
         mock_middleware_inst._acreate_summary.assert_not_called()
 
-    async def test_still_compacts_when_few_messages_but_high_tokens(self):
+    async def test_still_compacts_when_few_messages_but_high_tokens(self, workspace):
         """2 messages but they account for >2% of tokens — should compact."""
         from langchain_core.messages import HumanMessage
 
@@ -175,7 +178,7 @@ class TestCompactNegligibleSavings:
                 side_effect=lambda x: next(token_values),
             ),
         ):
-            result = await _compact(graph_gateway)
+            result = await _compact(graph_gateway, workspace)
 
         assert result.status == "ok"
         assert len(graph_gateway.updated_states) == 1
@@ -184,7 +187,7 @@ class TestCompactNegligibleSavings:
 class TestCompactSuccess:
     """Normal compaction flow."""
 
-    async def test_manual_threshold_blocks_low_context_compaction(self):
+    async def test_manual_threshold_blocks_low_context_compaction(self, workspace):
         msgs = [MagicMock() for _ in range(20)]
         graph_gateway = FakeGraphGateway(
             state_values={"messages": msgs, "_summarization_event": None}
@@ -214,7 +217,7 @@ class TestCompactSuccess:
                 return_value=30_000,
             ),
         ):
-            result = await _compact(graph_gateway)
+            result = await _compact(graph_gateway, workspace)
 
         assert result.status == "noop"
         assert "40%" in result.message
@@ -222,7 +225,7 @@ class TestCompactSuccess:
         mock_middleware_inst._determine_cutoff_index.assert_not_called()
         mock_middleware_inst._acreate_summary.assert_not_called()
 
-    async def test_successful_compaction(self):
+    async def test_successful_compaction(self, workspace):
         from langchain_core.messages import HumanMessage
 
         msgs = [MagicMock() for _ in range(20)]
@@ -270,7 +273,7 @@ class TestCompactSuccess:
                 side_effect=lambda x: next(token_values),
             ),
         ):
-            result = await _compact(graph_gateway)
+            result = await _compact(graph_gateway, workspace)
 
         assert result.status == "ok"
         assert result.messages_compacted == 15
@@ -288,7 +291,7 @@ class TestCompactSuccess:
         assert "_summarization_event" in event_data
         assert event_data["_summarization_event"]["cutoff_index"] == 15
 
-    async def test_offload_failure_non_fatal(self):
+    async def test_offload_failure_non_fatal(self, workspace):
         """Offload failure should not prevent compaction."""
         from langchain_core.messages import HumanMessage
 
@@ -332,7 +335,7 @@ class TestCompactSuccess:
                 return_value=1000,
             ),
         ):
-            result = await _compact(graph_gateway)
+            result = await _compact(graph_gateway, workspace)
 
         assert result.status == "ok"
         assert len(graph_gateway.updated_states) == 1
@@ -361,7 +364,7 @@ class TestCompactOffloadWire:
             msgs.append(AIMessage(content=f"answer {i} " * 50))
         return msgs
 
-    async def _compact_real(self, graph_gateway, tmp_path):
+    async def _compact_real(self, graph_gateway, workspace, tmp_path):
         from deepagents.backends import FilesystemBackend
         from langchain_core.language_models import FakeListChatModel
 
@@ -379,9 +382,11 @@ class TestCompactOffloadWire:
                 return_value={"keep": ("messages", 2)},
             ),
         ):
-            return await _compact(graph_gateway, input_tokens_hint=150_000)
+            return await _compact(graph_gateway, workspace, input_tokens_hint=150_000)
 
-    async def test_offload_writes_history_and_persists_session_id(self, tmp_path):
+    async def test_offload_writes_history_and_persists_session_id(
+        self, workspace, tmp_path
+    ):
         graph_gateway = FakeGraphGateway(
             state_values={
                 "messages": self._build_messages(),
@@ -389,7 +394,7 @@ class TestCompactOffloadWire:
             }
         )
 
-        result = await self._compact_real(graph_gateway, tmp_path)
+        result = await self._compact_real(graph_gateway, workspace, tmp_path)
 
         assert result.status == "ok"
         history_files = list((tmp_path / "conversation_history").glob("*.md"))
@@ -402,7 +407,7 @@ class TestCompactOffloadWire:
         event = update["_summarization_event"]
         assert event["file_path"] == f"/conversation_history/{session_id}.md"
 
-    async def test_offload_reuses_persisted_session_id(self, tmp_path):
+    async def test_offload_reuses_persisted_session_id(self, workspace, tmp_path):
         graph_gateway = FakeGraphGateway(
             state_values={
                 "messages": self._build_messages(),
@@ -411,7 +416,7 @@ class TestCompactOffloadWire:
             }
         )
 
-        result = await self._compact_real(graph_gateway, tmp_path)
+        result = await self._compact_real(graph_gateway, workspace, tmp_path)
 
         assert result.status == "ok"
         history_file = tmp_path / "conversation_history" / "session_deadbeef.md"
@@ -452,7 +457,7 @@ class TestRenderCompactResult:
 class TestCompactCommandUI:
     """TUI-specific compact progress indicator behavior."""
 
-    async def test_command_uses_tui_indicator_when_available(self):
+    async def test_command_uses_tui_indicator_when_available(self, workspace):
         from EvoScientist.cli.commands import CompactResult
         from EvoScientist.commands.base import CommandContext
         from EvoScientist.commands.implementation.session import CompactCommand
@@ -466,6 +471,7 @@ class TestCompactCommandUI:
             ui=ui,
             graph_gateway=FakeGraphGateway(),
             input_tokens_hint=5000,
+            workspace=workspace,
         )
         result = CompactResult(
             "ok",
@@ -478,7 +484,7 @@ class TestCompactCommandUI:
             patch(
                 "EvoScientist.cli.commands.compact_conversation",
                 AsyncMock(return_value=result),
-            ),
+            ) as compact_mock,
             patch(
                 "EvoScientist.cli.commands.render_compact_result",
                 return_value="result-panel",
@@ -490,6 +496,7 @@ class TestCompactCommandUI:
         ):
             await CompactCommand().execute(ctx, [])
 
+        assert compact_mock.await_args.kwargs["workspace"] is workspace
         assert ui.started == 1
         assert ui.stopped == 1
         assert ui.system_messages == []

@@ -16,7 +16,7 @@ from EvoScientist.cli.channel import (
 from EvoScientist.cli.channel import (
     dispatch_channel_slash_command as _dispatch_channel_slash_command,
 )
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _thread_store() -> FakeThreadStore:
@@ -25,6 +25,7 @@ def _thread_store() -> FakeThreadStore:
 
 def dispatch_channel_slash_command(*args, **kwargs):
     kwargs.setdefault("graph_gateway", FakeGraphGateway())
+    kwargs.setdefault("workspace", TEST_WORKSPACE)
     return _dispatch_channel_slash_command(*args, **kwargs)
 
 

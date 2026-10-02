@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(thread_id="current", workspace_dir="/ws", thread_store=None):
@@ -14,6 +14,7 @@ def _ctx(thread_id="current", workspace_dir="/ws", thread_store=None):
     ui.wait_for_thread_pick = AsyncMock()
     ui.handle_session_resume = AsyncMock()
     return CommandContext(
+        workspace=TEST_WORKSPACE,
         agent=None,
         thread_id=thread_id,
         ui=ui,

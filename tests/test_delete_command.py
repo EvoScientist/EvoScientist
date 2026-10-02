@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(thread_id="current", thread_store=None):
@@ -12,6 +12,7 @@ def _ctx(thread_id="current", thread_store=None):
     ui = MagicMock()
     ui.supports_interactive = True
     return CommandContext(
+        workspace=TEST_WORKSPACE,
         agent=None,
         thread_id=thread_id,
         ui=ui,

@@ -84,6 +84,26 @@ def tmp_workspace(tmp_path):
     return str(ws)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_process_workspace():
+    """``process_workspace()`` is read once per process; tests change env/cwd."""
+    from EvoScientist.paths import process_workspace
+
+    process_workspace.cache_clear()
+    yield
+    process_workspace.cache_clear()
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    """A ``Workspace`` rooted at a fresh temporary folder."""
+    from EvoScientist.paths import Workspace
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    return Workspace(root)
+
+
 @pytest.fixture
 def runtime_paths(tmp_path, monkeypatch):
     """Isolate ``langgraph_dev.manager.RUNTIME`` under a temp directory.

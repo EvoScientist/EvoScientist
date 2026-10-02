@@ -456,7 +456,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self,
         *,
         memory_dir: str | Path,
-        workspace_dir: str | Path | None = None,
+        workspace_dir: str | Path,
         max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
         source_type: MemorySourceType = MemorySourceType.TURN,
         source_agent: str = "EvoScientist",
@@ -467,7 +467,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_profile_bootstrap: bool = False,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
-        workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
+        workspace = Path(workspace_dir).expanduser()
         self._workspace_dir = workspace
         self._project_id = resolve_project_id(workspace)
         self._enable_profile_memory = enable_profile_memory
@@ -932,7 +932,8 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
 def create_memory_middleware(
     memory_dir: str | None = None,
-    workspace_dir: str | Path | None = None,
+    *,
+    workspace_dir: str | Path,
     max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
     source_type: MemorySourceType = MemorySourceType.TURN,
     source_agent: str = "EvoScientist",

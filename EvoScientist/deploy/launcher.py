@@ -751,13 +751,11 @@ def build_launcher_config(
     """Resolve a :class:`LauncherConfig` from an ``EvoScientistConfig`` the
     same way ``run_webui`` does, so every entrypoint agrees."""
     from ..langgraph_dev.manager import _DEFAULT_HOST, _DEFAULT_PORT
+    from ..paths import start_workspace_path
 
-    if workspace_dir:
-        ws = os.path.abspath(os.path.expanduser(workspace_dir))
-    elif getattr(config, "default_workdir", ""):
-        ws = os.path.abspath(os.path.expanduser(config.default_workdir))
-    else:
-        ws = os.getcwd()
+    ws = str(
+        start_workspace_path(workspace_dir, getattr(config, "default_workdir", ""))
+    )
     os.makedirs(ws, exist_ok=True)
 
     backend_port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))

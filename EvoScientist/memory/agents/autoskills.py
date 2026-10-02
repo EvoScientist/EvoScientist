@@ -9,6 +9,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from ...backends import build_autoskill_agent_backend
 from ...config import get_effective_config
+from ...paths import Workspace
 from ..autoskills.proposals import autoskill_proposals_dir
 from ..autoskills.tools import (
     create_inspect_autoskill_candidates_tool,
@@ -78,18 +79,18 @@ def _autoskills_system_prompt() -> str:
 def _autoskills_tools(
     *,
     memory_dir: str | Path,
-    workspace_dir: str | Path,
+    workspace: Workspace,
 ) -> list[BaseTool]:
-    project_id = resolve_project_id(workspace_dir)
+    project_id = resolve_project_id(workspace.root)
     return [
         create_inspect_autoskill_candidates_tool(
             memory_dir=memory_dir,
             project_id=project_id,
-            workspace_dir=workspace_dir,
+            workspace=workspace,
         ),
         create_submit_autoskill_proposal_tool(
             memory_dir=memory_dir,
-            workspace_dir=workspace_dir,
+            workspace=workspace,
             project_id=project_id,
         ),
     ]
@@ -97,14 +98,14 @@ def _autoskills_tools(
 
 def build_autoskills_graph(
     *,
+    workspace: Workspace,
     memory_dir: str | Path | None = None,
-    workspace_dir: str | Path | None = None,
 ) -> CompiledStateGraph:
     """Build the registered LangGraph AutoSkills agent."""
     cfg = get_effective_config()
     agent_paths = resolve_memory_agent_paths(
+        workspace=workspace,
         memory_dir=memory_dir,
-        workspace_dir=workspace_dir,
     )
     proposals_dir = autoskill_proposals_dir(agent_paths.memory_dir)
     return build_memory_agent_graph(
@@ -112,7 +113,7 @@ def build_autoskills_graph(
         system_prompt=_autoskills_system_prompt(),
         tools=_autoskills_tools(
             memory_dir=agent_paths.memory_dir,
-            workspace_dir=agent_paths.workspace_dir,
+            workspace=workspace,
         ),
         memory_dir=agent_paths.memory_dir,
         workspace_dir=agent_paths.workspace_dir,
@@ -123,6 +124,7 @@ def build_autoskills_graph(
         backend=build_autoskill_agent_backend(
             memory_dir=agent_paths.memory_dir,
             proposals_dir=proposals_dir,
+            skills_dir=workspace.skills_dir,
             sandbox_timeout=cfg.sandbox_execute_timeout,
         ),
     )

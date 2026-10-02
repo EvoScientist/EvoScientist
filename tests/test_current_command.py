@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+from tests.fakes import TEST_WORKSPACE
+
 
 class TestCurrentCommand:
     async def test_prints_thread_workspace_and_memory(self):
@@ -10,6 +12,7 @@ class TestCurrentCommand:
 
         ui = MagicMock()
         ctx = CommandContext(
+            workspace=TEST_WORKSPACE,
             agent=None,
             thread_id="abc123",
             ui=ui,
@@ -28,6 +31,7 @@ class TestCurrentCommand:
 
         ui = MagicMock()
         ctx = CommandContext(
+            workspace=TEST_WORKSPACE,
             agent=None,
             thread_id="abc123",
             ui=ui,

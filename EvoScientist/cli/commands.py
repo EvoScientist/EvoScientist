@@ -6,7 +6,6 @@ import queue
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -28,7 +27,7 @@ from ..gateway import (
     RunRequest,
 )
 from ..llm.context_window import DEFAULT_CONTEXT_WINDOW_FALLBACK, resolve_context_window
-from ..paths import ensure_dirs, set_active_workspace, set_workspace_root
+from ..paths import Workspace, ensure_dirs, reload_env_dirs, start_workspace_path
 from ..runtime import AsyncRuntime
 from ..stream.console import console
 from . import (
@@ -39,7 +38,6 @@ from ._app import app, channel_app, config_app, configure_app, mcp_app, sessions
 from ._constants import build_metadata
 from .agent import (
     _create_session_workspace,
-    _deduplicate_run_name,
     _load_agent,
     _shorten_path,
 )
@@ -672,9 +670,7 @@ def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
         )
 
 
-def _pending_skill_proposals_message(
-    workspace_dir: str | Path | None = None,
-) -> str | None:
+def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
     """Return a concise review reminder when autoskill proposals are waiting."""
     try:
         from .. import paths
@@ -682,7 +678,7 @@ def _pending_skill_proposals_message(
 
         count = pending_skill_proposal_count(
             paths.MEMORIES_DIR,
-            workspace_dir=workspace_dir or paths.WORKSPACE_ROOT,
+            workspace_dir=workspace_dir,
         )
     except Exception:
         return None
@@ -843,6 +839,7 @@ async def compact_conversation(
     thread_id: str,
     target: GraphTarget,
     *,
+    workspace: Workspace,
     input_tokens_hint: int | None = None,
 ) -> CompactResult:
     """Compact the conversation by summarizing old messages.
@@ -887,7 +884,7 @@ async def compact_conversation(
             "error", f"Compaction requires a working model configuration: {exc}"
         )
 
-    backend = _get_default_backend()
+    backend = _get_default_backend(workspace, work_dir=target.workspace_dir)
     context_window = _resolve_context_window(model)
 
     defaults = compute_summarization_defaults(model)
@@ -1057,6 +1054,7 @@ class ServeRuntimeState:
     config: "EvoScientistConfig | None"
     runtime_gateways: "RuntimeGateways"
     async_runtime: AsyncRuntime
+    workspace: Workspace
     resume_warning_thread_id: str | None = None
     gateway_backend: str | None = None
 
@@ -1147,23 +1145,19 @@ async def _apply_serve_resume_state(
                 "Cannot resume into a different workspace in serve mode without "
                 "the effective configuration."
             )
-        try:
-            new_agent = await asyncio.to_thread(
-                _load_agent,
-                workspace_dir=new_workspace,
-                config=effective_config,
-                runtime=runtime_state.async_runtime,
-            )
-            await _sync_background_agent_server_workspace(
-                effective_config,
-                workspace_dir=new_workspace,
-                backend=runtime_state.gateway_backend,
-            )
-            workspace_update = (new_workspace, new_agent)
-        except Exception:
-            if old_workspace:
-                set_active_workspace(old_workspace)
-            raise
+        new_agent = await asyncio.to_thread(
+            _load_agent,
+            workspace_dir=new_workspace,
+            workspace=runtime_state.workspace,
+            config=effective_config,
+            runtime=runtime_state.async_runtime,
+        )
+        await _sync_background_agent_server_workspace(
+            effective_config,
+            workspace_dir=new_workspace,
+            backend=runtime_state.gateway_backend,
+        )
+        workspace_update = (new_workspace, new_agent)
 
     old_thread_id = runtime_state.thread_id
     thread_changed = thread_id != old_thread_id
@@ -1390,6 +1384,7 @@ def _serve_process_message(
                     agent=runtime_state.agent,
                     thread_id=runtime_state.thread_id,
                     workspace_dir=runtime_workspace,
+                    workspace=runtime_state.workspace,
                     checkpointer=None,
                     append_system=lambda t, s="dim": console.print(t, style=s),
                     start_new_session_cb=start_new_session_cb
@@ -1446,6 +1441,7 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
+                work_dir=runtime_workspace,
                 hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
@@ -1649,14 +1645,11 @@ def serve(
         raise typer.Exit(1)
 
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)
-    if workdir:
-        ws = os.path.abspath(os.path.expanduser(workdir))
-    elif config.default_workdir:
-        ws = os.path.abspath(os.path.expanduser(config.default_workdir))
-    else:
-        ws = os.getcwd()
-    os.makedirs(ws, exist_ok=True)
-    set_workspace_root(ws)
+    ws_path = start_workspace_path(workdir, config.default_workdir)
+    os.makedirs(ws_path, exist_ok=True)
+    ws = str(ws_path)
+    workspace = Workspace(ws_path)
+    reload_env_dirs()
     ensure_dirs()
 
     from ..config import GatewaySurface, resolve_gateway_backend
@@ -1675,7 +1668,9 @@ def serve(
             f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
         )
     console.print("[dim]Loading agent...[/dim]")
-    agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
+    agent = _load_agent(
+        workspace_dir=ws, workspace=workspace, config=config, runtime=async_runtime
+    )
 
     from ..gateway import create_runtime_gateways_for_config
 
@@ -1698,6 +1693,7 @@ def serve(
         config=config,
         runtime_gateways=runtime_gateways,
         async_runtime=async_runtime,
+        workspace=workspace,
         gateway_backend=gateway_backend,
     )
 
@@ -1720,6 +1716,7 @@ def serve(
         config,
         agent,
         tid,
+        media_dir=workspace.media_dir,
         send_thinking=effective_channel_thinking,
     )
     console.print("[green]Serve mode started (bus mode).[/green]")
@@ -2492,71 +2489,29 @@ def _main_callback(
                 "--name may only contain letters, digits, hyphens, and underscores"
             )
 
-    # Resolve effective mode from config (CLI mode already applied via overrides)
-    effective_mode: str | None = (
-        None  # None means explicit --workdir/--use-cwd was used
-    )
-
-    # Resolve workspace directory for this session
-    # Priority: --workdir > --mode (explicit) > default_workdir > default_mode > cwd
-    # --use-cwd is kept for backward compat but is now the default behavior
+    # Resolve the session's workspace and the folder the agent works in.
+    # Priority: --use-cwd / --workdir > default_workdir > cwd. ``--mode``
+    # (or ``default_mode``) only decides whether the agent works in the
+    # workspace root (daemon) or in a fresh ``runs/<name>`` folder (run).
+    effective_mode: str | None = None  # None means explicit --workdir/--use-cwd
     if use_cwd:
-        workspace_dir = os.getcwd()
-        set_workspace_root(workspace_dir)
-        workspace_fixed = True
+        workspace_root = start_workspace_path()
     elif workdir:
-        workspace_dir = os.path.abspath(os.path.expanduser(workdir))
-        os.makedirs(workspace_dir, exist_ok=True)
-        set_workspace_root(workspace_dir)
-        workspace_fixed = True
-    elif mode:
-        # Explicit --mode overrides default_workdir
-        effective_mode = mode
-        workspace_root = config.default_workdir or os.getcwd()
-        workspace_root = os.path.abspath(os.path.expanduser(workspace_root))
-        set_workspace_root(workspace_root)
-        if effective_mode == "run":
-            runs_dir = Path(workspace_root, "runs")
-            session_id = (
-                _deduplicate_run_name(name, runs_dir)
-                if name
-                else datetime.now().strftime("%Y%m%d_%H%M%S")
-            )
-            workspace_dir = os.path.join(runs_dir, session_id)
-            os.makedirs(workspace_dir, exist_ok=True)
-            workspace_fixed = False
-        else:  # daemon
-            workspace_dir = workspace_root
-            workspace_fixed = True
-    elif config.default_workdir:
-        # Use configured default workdir with configured mode
-        workspace_root = os.path.abspath(os.path.expanduser(config.default_workdir))
-        set_workspace_root(workspace_root)
-        effective_mode = config.default_mode
-        if effective_mode == "run":
-            runs_dir = Path(workspace_root, "runs")
-            session_id = (
-                _deduplicate_run_name(name, runs_dir)
-                if name
-                else datetime.now().strftime("%Y%m%d_%H%M%S")
-            )
-            workspace_dir = os.path.join(runs_dir, session_id)
-            os.makedirs(workspace_dir, exist_ok=True)
-            workspace_fixed = False
-        else:  # daemon
-            workspace_dir = workspace_root
-            workspace_fixed = True
+        workspace_root = start_workspace_path(workdir)
+        os.makedirs(workspace_root, exist_ok=True)
     else:
-        effective_mode = config.default_mode
-        workspace_root = os.getcwd()
-        set_workspace_root(workspace_root)
-        if effective_mode == "run":
-            workspace_dir = _create_session_workspace(name)
-            workspace_fixed = False
-        else:  # daemon mode (default) — use current directory
-            workspace_dir = workspace_root
-            workspace_fixed = True
+        workspace_root = start_workspace_path(default_workdir=config.default_workdir)
+        effective_mode = mode or config.default_mode
+    workspace = Workspace(workspace_root)
+    if effective_mode == "run":
+        workspace_dir = _create_session_workspace(workspace, name)
+        workspace_fixed = False
+    else:
+        workspace_dir = str(workspace_root)
+        workspace_fixed = True
 
+    # The project .env was merged into os.environ by get_effective_config().
+    reload_env_dirs()
     # Ensure memory and skills subdirs exist in workspace
     ensure_dirs()
 
@@ -2641,6 +2596,7 @@ def _main_callback(
                 agent = await asyncio.to_thread(
                     _load_agent,
                     workspace_dir=workspace_dir,
+                    workspace=workspace,
                     checkpointer=checkpointer,
                     config=config,
                     runtime=async_runtime,
@@ -2730,6 +2686,7 @@ def _main_callback(
             ui_backend=config.ui_backend,
             config=config,
             async_runtime=async_runtime,
+            workspace=workspace,
         )
 
 

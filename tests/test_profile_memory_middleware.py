@@ -17,6 +17,7 @@ from EvoScientist.memory.observations import (
     list_observation_documents,
     record_observation_file,
 )
+from EvoScientist.paths import Workspace
 
 
 def _request():
@@ -56,9 +57,10 @@ def test_profile_memory_bootstraps_profiles_without_observation_project_dirs(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert (
@@ -96,10 +98,10 @@ def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories),
+        workspace_dir=workspace,
         enable_observation_tool=False,
     )
     middleware.modify_request(_request())
@@ -115,10 +117,10 @@ def test_memory_middleware_can_disable_all_memory_injection(tmp_path, monkeypatc
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories),
+        workspace_dir=workspace,
         enable_profile_memory=False,
         enable_observation_memory=False,
     )
@@ -135,10 +137,10 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories),
+        workspace_dir=workspace,
         enable_profile_memory=False,
         enable_observation_memory=True,
         enable_observation_tool=False,
@@ -162,7 +164,6 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     project_id = _path_project_id(workspace)
     global_result = record_observation_file(
         memory_dir=memories,
@@ -205,7 +206,9 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     indexed = {
         document.observation_id: (
             document.memory_type,
@@ -260,8 +263,7 @@ def test_observation_index_omits_summaries_when_budget_exceeded(tmp_path, monkey
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    memory_module.create_memory_middleware(str(memories))
+    memory_module.create_memory_middleware(str(memories), workspace_dir=workspace)
     record_observation_file(
         memory_dir=memories,
         project_id=_path_project_id(workspace),
@@ -288,7 +290,6 @@ def test_observation_index_over_budget_keeps_entries_that_fit(tmp_path, monkeypa
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     project_id = _path_project_id(workspace)
     record_observation_file(
         memory_dir=memories,
@@ -341,7 +342,6 @@ def test_construction_defers_observation_index_read_to_first_request(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     record_observation_file(
         memory_dir=memories,
@@ -367,7 +367,9 @@ def test_construction_defers_observation_index_read_to_first_request(
         memory_module, "build_observation_index_context", _counting_build
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
 
     # Construction must not read the observation store ...
     assert calls == []
@@ -401,7 +403,6 @@ def test_two_middlewares_share_the_observation_cache(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     record_observation_file(
         memory_dir=memories,
@@ -459,10 +460,9 @@ def test_profile_memory_uses_path_pointers_when_profiles_exceed_budget(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(
-        str(memories), max_inline_profile_chars=10
+        str(memories), workspace_dir=workspace, max_inline_profile_chars=10
     )
     middleware.modify_request(_request())
     records = middleware._read_profile_records()
@@ -476,12 +476,13 @@ async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkey
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     async def _handler(request):
         return request
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     await middleware.awrap_model_call(_request(), _handler)
 
     assert (memories / "profile" / "USER_PROFILE.md").exists()
@@ -491,14 +492,15 @@ def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     monkeypatch.setattr(
         memory_module.EvoMemoryMiddleware,
         "_write_text",
         lambda _self, _path, _content: False,
     )
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
 
     middleware.modify_request(_request())
 
@@ -511,7 +513,6 @@ def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
@@ -519,7 +520,9 @@ def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     original_bytes = b"\xff\xfe\xfa existing profile bytes"
     soul_path.write_bytes(original_bytes)
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert soul_path.read_bytes() == original_bytes
@@ -531,9 +534,10 @@ async def test_profile_memory_async_path_inlines_content_under_blockbuster(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
     user_profile = memories / "profile" / "USER_PROFILE.md"
     user_profile.write_text(
@@ -571,7 +575,6 @@ def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     (memories / "MEMORY.md").write_text(
         "\n".join(
             [
@@ -594,7 +597,9 @@ def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
     middleware.modify_request(_request())
 
@@ -620,25 +625,21 @@ def test_profile_memory_deletes_blank_legacy_memory(tmp_path, monkeypatch):
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     legacy_path = memories / "MEMORY.md"
     legacy_path.write_text("  \n\n", encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert not legacy_path.exists()
 
 
-def test_profile_memory_uses_explicit_workspace_for_project_profile(
-    tmp_path, monkeypatch
-):
+def test_profile_memory_uses_explicit_workspace_for_project_profile(tmp_path):
     memories = tmp_path / "memories"
-    global_workspace = tmp_path / "global-workspace"
     active_workspace = tmp_path / "active-workspace"
-    global_workspace.mkdir()
     active_workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", global_workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories), workspace_dir=str(active_workspace)
@@ -646,13 +647,9 @@ def test_profile_memory_uses_explicit_workspace_for_project_profile(
     middleware.modify_request(_request())
 
     expected_project_id = _path_project_id(active_workspace)
-    wrong_project_id = _path_project_id(global_workspace)
 
     assert (
         memories / "profile" / "projects" / expected_project_id / "PROJECT_PROFILE.md"
-    ).exists()
-    assert not (
-        memories / "profile" / "projects" / wrong_project_id / "PROJECT_PROFILE.md"
     ).exists()
 
 
@@ -689,7 +686,6 @@ def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     legacy_path = memories / "MEMORY.md"
     custom_note = "Keep this custom deployment note."
     legacy_path.write_text(
@@ -707,7 +703,9 @@ def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
@@ -722,7 +720,6 @@ def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch)
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     (memories / "MEMORY.md").write_text(
         "\n".join(
             [
@@ -746,7 +743,9 @@ def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch)
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     migrated_profile_text = "\n".join(_profile_texts(memories))
@@ -813,8 +812,9 @@ def test_write_text_is_atomic_and_leaves_no_tmp_sibling(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     target = memories / "profile" / "SOUL.md"
 
     assert middleware._write_text(target, "content") is True
@@ -829,8 +829,9 @@ def test_write_text_failure_leaves_original_untouched_and_no_tmp_sibling(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     target = memories / "profile" / "SOUL.md"
     target.parent.mkdir(parents=True)
     target.write_text("original", encoding="utf-8")
@@ -860,13 +861,14 @@ def test_existing_user_profile_without_frontmatter_gets_one_with_body_verbatim(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
     body = "# User profile\n\n## Preferences\n- Likes short reports\n"
     (profile_dir / "USER_PROFILE.md").write_text(body, encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     meta, parsed_body = _user_profile_meta(memories)
@@ -878,13 +880,14 @@ def test_existing_user_profile_with_frontmatter_is_left_alone(tmp_path, monkeypa
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
     original = "---\nname: Ada\nintro: pending\n---\n# User profile\n"
     (profile_dir / "USER_PROFILE.md").write_text(original, encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert (profile_dir / "USER_PROFILE.md").read_text(encoding="utf-8") == original
@@ -894,8 +897,9 @@ def test_write_text_swallows_cleanup_errors_and_returns_false(tmp_path, monkeypa
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     target = memories / "profile" / "USER_PROFILE.md"
     target.parent.mkdir(parents=True)
     target.write_text("original", encoding="utf-8")
@@ -929,12 +933,13 @@ def test_ensure_profile_files_does_not_migrate_empty_user_profile(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
     (profile_dir / "USER_PROFILE.md").write_text("", encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert (profile_dir / "USER_PROFILE.md").read_text(encoding="utf-8") == ""
@@ -1093,10 +1098,11 @@ def _bootstrap_middleware(tmp_path, monkeypatch, *, thread_id="t1", **kwargs):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(memory_module, "_current_thread_id", lambda: thread_id)
     kwargs.setdefault("enable_profile_bootstrap", True)
-    return memories, memory_module.create_memory_middleware(str(memories), **kwargs)
+    return memories, memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace, **kwargs
+    )
 
 
 def _system(modified) -> str:
@@ -1372,7 +1378,6 @@ def _assemble(tmp_path, monkeypatch, *, auto_mode: bool, for_async_subagent=Fals
 
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
     with (
         patch(
@@ -1383,7 +1388,9 @@ def _assemble(tmp_path, monkeypatch, *, auto_mode: bool, for_async_subagent=Fals
     ):
         mock_config.return_value = _assembly_cfg(auto_mode=auto_mode)
         mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
-        middleware = _get_default_middleware(for_async_subagent=for_async_subagent)
+        middleware = _get_default_middleware(
+            workspace=Workspace(workspace), for_async_subagent=for_async_subagent
+        )
     return next(
         m for m in middleware if isinstance(m, memory_module.EvoMemoryMiddleware)
     )
@@ -1411,7 +1418,6 @@ def test_sync_subagent_site_does_not_pass_profile_bootstrap(tmp_path, monkeypatc
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
     sub = {"name": "research"}
     with (
@@ -1420,7 +1426,7 @@ def test_sync_subagent_site_does_not_pass_profile_bootstrap(tmp_path, monkeypatc
     ):
         mock_config.return_value = _assembly_cfg(auto_mode=False)
         mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
-        _inject_subagent_middleware([sub], workspace_dir=workspace)
+        _inject_subagent_middleware([sub], workspace=Workspace(workspace))
 
     instance = next(
         m for m in sub["middleware"] if isinstance(m, memory_module.EvoMemoryMiddleware)

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from EvoScientist.cli import commands
 from EvoScientist.config import MemoryObservationWriter
+from EvoScientist.paths import Workspace
 from EvoScientist.runtime import AsyncRuntime
 
 
@@ -67,21 +68,27 @@ def _run_serve_once(
     order: list[tuple[str, str | None]] = []
     captured: dict[str, object] = {}
 
-    def _fake_set_workspace_root(path):
-        order.append(("set_workspace_root", str(path)))
-
     def _fake_ensure_dirs():
         order.append(("ensure_dirs", None))
 
     def _fake_load_agent(
-        workspace_dir=None, checkpointer=None, config=None, *, runtime=None
+        workspace_dir=None,
+        checkpointer=None,
+        config=None,
+        *,
+        workspace,
+        runtime=None,
     ):
         captured["workspace_dir"] = workspace_dir
+        captured["workspace"] = workspace
         captured["async_runtime"] = runtime
         return object()
 
-    def _fake_start_channels_bus_mode(cfg, agent, thread_id, *, send_thinking=None):
+    def _fake_start_channels_bus_mode(
+        cfg, agent, thread_id, *, media_dir, send_thinking=None
+    ):
         captured["started"] = True
+        captured["media_dir"] = media_dir
         captured["send_thinking"] = send_thinking
         captured["thread_id"] = thread_id
 
@@ -98,7 +105,6 @@ def _run_serve_once(
         captured["ensure_config"] = cfg
         captured["ensure_backend"] = backend
 
-    monkeypatch.setattr(commands, "set_workspace_root", _fake_set_workspace_root)
     monkeypatch.setattr(commands, "ensure_dirs", _fake_ensure_dirs)
     monkeypatch.setattr(
         commands, "_ensure_async_subagent_server", _fake_ensure_async_server
@@ -144,9 +150,7 @@ def _run_serve_once(
     return order, captured
 
 
-def test_serve_workdir_has_highest_priority_and_sets_root_before_ensure(
-    monkeypatch, tmp_path
-):
+def test_serve_workdir_has_highest_priority(monkeypatch, tmp_path):
     cfg_ws = tmp_path / "cfg_ws"
     cli_ws = tmp_path / "cli_ws"
     config = _make_config(default_workdir=str(cfg_ws), channel_send_thinking=True)
@@ -159,35 +163,35 @@ def test_serve_workdir_has_highest_priority_and_sets_root_before_ensure(
 
     expected = str(cli_ws.resolve())
     assert captured["workspace_dir"] == expected
-    assert any(step == ("set_workspace_root", expected) for step in order)
-    set_idx = next(i for i, step in enumerate(order) if step[0] == "set_workspace_root")
-    ensure_idx = next(i for i, step in enumerate(order) if step[0] == "ensure_dirs")
-    assert set_idx < ensure_idx
+    assert captured["workspace"] == Workspace(expected)
+    assert captured["media_dir"] == Workspace(expected).media_dir
+    assert cli_ws.is_dir()
+    assert ("ensure_dirs", None) in order
 
 
 def test_serve_uses_config_default_workdir_when_no_cli_workdir(monkeypatch, tmp_path):
     cfg_ws = tmp_path / "cfg_ws"
     config = _make_config(default_workdir=str(cfg_ws), channel_send_thinking=True)
 
-    order, captured = _run_serve_once(monkeypatch, config)
+    _, captured = _run_serve_once(monkeypatch, config)
 
     expected = str(cfg_ws.resolve())
     assert captured["workspace_dir"] == expected
-    assert ("set_workspace_root", expected) in order
+    assert captured["workspace"] == Workspace(expected)
 
 
 def test_serve_uses_cwd_when_no_workdir_config(monkeypatch, tmp_path):
     cwd = str(tmp_path.resolve())
     config = _make_config(default_workdir="", channel_send_thinking=True)
 
-    order, captured = _run_serve_once(
+    _, captured = _run_serve_once(
         monkeypatch,
         config,
         cwd=cwd,
     )
 
     assert captured["workspace_dir"] == cwd
-    assert ("set_workspace_root", cwd) in order
+    assert captured["workspace"] == Workspace(cwd)
 
 
 def test_serve_channel_thinking_respects_config_and_no_thinking(monkeypatch, tmp_path):

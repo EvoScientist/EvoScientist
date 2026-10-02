@@ -10,6 +10,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import typer  # type: ignore[import-untyped]
@@ -42,6 +43,7 @@ from ..gateway import (
     RuntimeGateways,
     create_runtime_gateways_for_config,
 )
+from ..paths import Workspace
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
@@ -238,6 +240,7 @@ class SlashCommandCompleter(Completer):
     def __init__(
         self,
         workspace_getter: Callable[[], str | None] | None = None,
+        workspace: Workspace | None = None,
     ) -> None:
         """Initialise the completer.
 
@@ -245,8 +248,11 @@ class SlashCommandCompleter(Completer):
             workspace_getter: Callable returning the current workspace
                 directory for ``@file`` completions.  Called on every
                 keystroke so suggestions stay in sync after ``/new``.
+            workspace: The session's workspace, for slash-command
+                completions that list installed skills or experts.
         """
         self._workspace_getter = workspace_getter or (lambda: None)
+        self._workspace = workspace
 
     def get_completions(self, document, complete_event):
         """Yield prompt_toolkit completions for slash commands and ``@file``."""
@@ -257,7 +263,7 @@ class SlashCommandCompleter(Completer):
         if text.startswith("/"):
             from ..commands._completion_engine import compute_completions
 
-            result = compute_completions(text, len(text))
+            result = compute_completions(text, len(text), workspace=self._workspace)
             if result.kind != "empty" and result.candidates:
                 for c in result.candidates:
                     start_pos = c.replace_start - len(text)
@@ -403,6 +409,8 @@ def cmd_interactive(
     ui_backend: str = "cli",
     config=None,
     async_runtime: "AsyncRuntime | None" = None,
+    *,
+    workspace: Workspace,
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -412,7 +420,8 @@ def cmd_interactive(
     Args:
         show_thinking: Whether to display thinking panels
         channel_send_thinking: Whether channels should receive thinking messages
-        workspace_dir: Per-session workspace directory path
+        workspace_dir: The folder the agent works in (the ``--mode=run``
+            session folder, or the workspace root)
         workspace_fixed: If True, /new keeps the same workspace directory
         mode: Workspace mode ('daemon' or 'run'), displayed in banner
         model: Model name to display in banner
@@ -420,13 +429,13 @@ def cmd_interactive(
         run_name: Optional run name for /new session deduplication
         thread_id: Optional thread ID to resume a previous session
         ui_backend: UI backend ('cli' or 'tui')
+        workspace: The session's workspace (skills, experts, run folders)
     """
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
-        from functools import partial
-
         load_agent = partial(
             _load_agent,
+            workspace=workspace,
             config=config,
             runtime=async_runtime,
         )
@@ -441,9 +450,10 @@ def cmd_interactive(
             run_name=run_name,
             thread_id=thread_id,
             load_agent=load_agent,
-            create_session_workspace=_create_session_workspace,
+            create_session_workspace=partial(_create_session_workspace, workspace),
             config=config,
             async_runtime=async_runtime,
+            workspace=workspace,
         )
         return
 
@@ -476,6 +486,7 @@ def cmd_interactive(
         auto_suggest=AutoSuggestFromHistory(),
         completer=SlashCommandCompleter(
             workspace_getter=lambda: state["workspace_dir"],
+            workspace=workspace,
         ),
         complete_style=CompleteStyle.COLUMN,
         complete_while_typing=True,
@@ -514,7 +525,7 @@ def cmd_interactive(
             )
 
     agent_loader = BackgroundAgentLoader(
-        _load_agent,
+        partial(_load_agent, workspace=workspace),
         on_progress=_on_mcp_progress,
     )
 
@@ -799,7 +810,9 @@ def cmd_interactive(
             def _print_pending_skill_proposals_notice() -> None:
                 from .commands import _pending_skill_proposals_message
 
-                message = _pending_skill_proposals_message(state.get("workspace_dir"))
+                message = _pending_skill_proposals_message(
+                    state.get("workspace_dir") or workspace.root
+                )
                 if message:
                     console.print(message, style="yellow")
 
@@ -811,7 +824,9 @@ def cmd_interactive(
                 /compact)."""
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 if not workspace_fixed:
-                    state["workspace_dir"] = _create_session_workspace(run_name)
+                    state["workspace_dir"] = _create_session_workspace(
+                        workspace, run_name
+                    )
                 state["thread_id"] = await graph_gateway.create_thread(
                     GraphTarget(workspace_dir=state["workspace_dir"])
                 )
@@ -1097,6 +1112,7 @@ def cmd_interactive(
                         agent=agent_loader.agent,
                         thread_id=state["thread_id"],
                         workspace_dir=state["workspace_dir"],
+                        workspace=workspace,
                         checkpointer=checkpointer,
                         append_system=lambda t, s="dim": console.print(t, style=s),
                         start_new_session_cb=_on_start_new_session,
@@ -1138,6 +1154,7 @@ def cmd_interactive(
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
+                            work_dir=state["workspace_dir"],
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,
@@ -1397,6 +1414,7 @@ def cmd_interactive(
                             agent,
                             state["thread_id"],
                             cfg,
+                            media_dir=workspace.media_dir,
                             send_thinking=channel_send_thinking,
                             runtime=channel_runtime,
                         )
@@ -1476,6 +1494,7 @@ def cmd_interactive(
                                 thread_id=state["thread_id"],
                                 ui=rich_ui,
                                 workspace_dir=state["workspace_dir"],
+                                workspace=workspace,
                                 checkpointer=checkpointer,
                                 config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),

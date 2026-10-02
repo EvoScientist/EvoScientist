@@ -1049,12 +1049,15 @@ def _subpath_under_mount(token: str, mount: str) -> str | None:
     return None
 
 
-def _skills_tier_paths() -> tuple[Path, Path | None, Path]:
-    """``(USER, GLOBAL or None, BUILTIN)`` — the tier priority chain that
-    ``MergedSkillsBackend._backends()`` honors. Single source of truth so
-    the resolver and the backend can't silently drift out of order.
+def _skills_tier_paths(
+    skills_dir: str | Path | None,
+) -> tuple[Path | None, Path | None, Path]:
+    """``(WORKSPACE or None, GLOBAL or None, BUILTIN)`` — the tier priority
+    chain that ``MergedSkillsBackend._backends()`` honors. Single source of
+    truth so the resolver and the backend can't silently drift out of order.
     """
-    return (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR, _BUILTIN_SKILLS_DIR)
+    workspace_tier = Path(skills_dir) if skills_dir is not None else None
+    return (workspace_tier, paths.GLOBAL_SKILLS_DIR, _BUILTIN_SKILLS_DIR)
 
 
 def _is_windows() -> bool:
@@ -1102,17 +1105,19 @@ def _platform_quote(s: str) -> str:
     return shlex.quote(s)
 
 
-def _resolve_virtual_mount_path(token: str) -> str | None:
+def _resolve_virtual_mount_path(
+    token: str, skills_dir: str | Path | None = None
+) -> str | None:
     """Resolve a virtual mount token to a shell-safe token, or ``None`` when
     *token* is not a registered virtual mount.
 
-    For ``/skills/...``: walks ``_skills_tier_paths()`` priority (USER →
-    GLOBAL → BUILTIN), returning :func:`_platform_quote` of the first tier
-    where the path exists. On miss, returns a workspace-relative
+    For ``/skills/...``: walks ``_skills_tier_paths(skills_dir)`` priority
+    (WORKSPACE → GLOBAL → BUILTIN), returning :func:`_platform_quote` of the
+    first tier where the path exists. On miss, returns a workspace-relative
     ``./skills/<rel>`` form — agent typed a virtual path, so the shell error
-    should reference a location they recognise (`USER_SKILLS_DIR` defaults to
-    ``WORKSPACE_ROOT / "skills"``, which is also where ``MergedSkillsBackend``
-    would write a new skill).
+    should reference a location they recognise (the workspace tier is
+    ``<workspace>/skills``, which is also where ``MergedSkillsBackend`` would
+    write a new skill).
 
     For ``/memories/...``: single tier (``paths.MEMORIES_DIR``), always
     absolute and :func:`_platform_quote`-wrapped. Memories live outside the
@@ -1120,7 +1125,7 @@ def _resolve_virtual_mount_path(token: str) -> str | None:
     """
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
-        for tier in _skills_tier_paths():
+        for tier in _skills_tier_paths(skills_dir):
             if tier is None:
                 continue
             candidate = Path(tier) / rel
@@ -1146,6 +1151,7 @@ def _guard_bare_absolute(result: str | None) -> str | None:
 def _rewrite_quoted_path(
     path: str,
     workspace_name: str | None,
+    skills_dir: str | Path | None = None,
 ) -> str | None:
     """Return the shell-quoted replacement for *path* (the decoded
     content of a quoted ``"..."`` or ``'...'`` argument),
@@ -1156,7 +1162,7 @@ def _rewrite_quoted_path(
     if not path.startswith("/"):
         return None
 
-    resolved = _resolve_virtual_mount_path(path)
+    resolved = _resolve_virtual_mount_path(path, skills_dir)
     if resolved is not None:
         return _guard_bare_absolute(resolved)  # already shlex.quoted
 
@@ -1181,6 +1187,7 @@ def _rewrite_quoted_path(
 def convert_virtual_paths_in_command(
     command: str,
     workspace_name: str | None = None,
+    skills_dir: str | Path | None = None,
 ) -> str:
     """Convert virtual paths (starting with ``/``) in commands to relative paths.
 
@@ -1203,6 +1210,7 @@ def convert_virtual_paths_in_command(
             _rewrite_quoted_path(
                 re.sub(r"\\(.)", r"\1", m.group(2)),
                 workspace_name,
+                skills_dir,
             )
             or m.group(0)
         ),
@@ -1216,7 +1224,7 @@ def convert_virtual_paths_in_command(
         if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
             return path
 
-        resolved = _resolve_virtual_mount_path(path)
+        resolved = _resolve_virtual_mount_path(path, skills_dir)
         if resolved is not None:
             return resolved
 
@@ -1383,6 +1391,7 @@ def build_autoskill_agent_backend(
     *,
     memory_dir: str | Path,
     proposals_dir: str | Path,
+    skills_dir: str | Path,
     sandbox_timeout: int = 300,
 ):
     """Build the AutoSkills backend.
@@ -1402,6 +1411,7 @@ def build_autoskill_agent_backend(
             # Its prompt validates proposals with `execute`; same python as
             # the other agents.
             env=research_env_overrides(),
+            skills_dir=skills_dir,
         ),
         routes={
             "/memories/": ReadOnlyFilesystemBackend(
@@ -1409,7 +1419,7 @@ def build_autoskill_agent_backend(
                 virtual_mode=True,
             ),
             "/skills/": MergedSkillsBackend(
-                primary_dir=str(paths.USER_SKILLS_DIR),
+                primary_dir=str(skills_dir),
                 global_dir=str(paths.GLOBAL_SKILLS_DIR),
                 secondary_dir=str(_BUILTIN_SKILLS_DIR),
                 writable_primary=False,
@@ -1555,6 +1565,7 @@ def prepare_sandbox_command(
     virtual_mode: bool = True,
     dangerous: bool = False,
     guard_dangerous: bool = False,
+    skills_dir: str | Path | None = None,
 ) -> tuple[str, str | None]:
     """Normalize workspace paths in ``command`` and validate it for the sandbox.
 
@@ -1595,14 +1606,19 @@ def prepare_sandbox_command(
         command = convert_virtual_paths_in_command(
             command=command,
             workspace_name=Path(cwd_str).name,
+            skills_dir=skills_dir,
         )
     # Skills/memory dirs must be allowlisted: the workspace-literal replace above runs
     # before the resolver, so any absolute path it later injects reaches validate unstripped.
-    allow_prefixes = (
-        str(paths.USER_SKILLS_DIR),
-        str(paths.GLOBAL_SKILLS_DIR),
-        str(paths.MEMORIES_DIR),
-        str(_BUILTIN_SKILLS_DIR),
+    allow_prefixes = tuple(
+        str(prefix)
+        for prefix in (
+            skills_dir,
+            paths.GLOBAL_SKILLS_DIR,
+            paths.MEMORIES_DIR,
+            _BUILTIN_SKILLS_DIR,
+        )
+        if prefix is not None
     )
     error = validate_command(
         command, allow_prefixes=allow_prefixes, dangerous=dangerous
@@ -1649,6 +1665,7 @@ class CustomSandboxBackend(LocalShellBackend):
         dangerous: bool = False,
         guard_dangerous: bool = False,
         refuse_delete: bool = False,
+        skills_dir: str | Path | None = None,
     ):
         """
         Initialize custom sandbox backend.
@@ -1674,8 +1691,12 @@ class CustomSandboxBackend(LocalShellBackend):
                 research sub-agents (writing / data-analysis) that have no
                 interactive approval path. Bypassed when ``dangerous=True``.
                 Defaults to False.
+            skills_dir: The workspace skills tier. ``/skills/...`` paths in
+                commands resolve through it first, and it is allowlisted for
+                command validation.
         """
         self._dangerous = dangerous
+        self._skills_dir = skills_dir
         self._guard_dangerous = guard_dangerous
         self._refuse_delete = refuse_delete
         if dangerous:
@@ -1792,6 +1813,7 @@ class CustomSandboxBackend(LocalShellBackend):
             virtual_mode=self.virtual_mode,
             dangerous=self._dangerous,
             guard_dangerous=self._effective_guard_dangerous(),
+            skills_dir=self._skills_dir,
         )
         if error:
             return ExecuteResponse(output=error, exit_code=1, truncated=False)

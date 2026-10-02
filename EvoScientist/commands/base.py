@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway
+    from ..paths import Workspace
     from ..runtime import AsyncRuntime
 
 
@@ -114,6 +115,8 @@ class CommandContext:
     agent: Any
     thread_id: str
     ui: CommandUI
+    # The session's workspace (skills, experts, AutoSkills).
+    workspace: Workspace
     workspace_dir: str | None = None
     checkpointer: Any = None
     config: Any = None
@@ -150,11 +153,15 @@ class Command(ABC):
         """
         return self.requires_agent
 
-    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+    def get_completions(
+        self, tokens: list[str], *, workspace: Workspace | None = None
+    ) -> list[tuple[str, str]]:
         """Return completions for args typed after the command name.
 
         Default walks :attr:`subcommands` for the first positional token
         only.  Override for deeper levels (e.g. server names, thread IDs).
+        ``workspace`` is the session's workspace, for completions that list
+        what is installed there.
         """
         if not self.subcommands:
             return []

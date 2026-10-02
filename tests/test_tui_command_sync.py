@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
+from tests.fakes import TEST_WORKSPACE
 
 pytest.importorskip("textual")
 
@@ -49,6 +50,7 @@ async def test_sync_tui_command_completion_adopts_agent_swap(monkeypatch):
 
     app = _StubApp()
     ctx = CommandContext(
+        workspace=TEST_WORKSPACE,
         agent="new-agent",
         thread_id="thread-1",
         ui=SimpleNamespace(),
@@ -77,6 +79,7 @@ async def test_sync_tui_command_completion_refreshes_without_agent_swap(monkeypa
 
     app = _StubApp()
     ctx = CommandContext(
+        workspace=TEST_WORKSPACE,
         agent="same-agent",
         thread_id="thread-1",
         ui=SimpleNamespace(),
@@ -98,6 +101,7 @@ async def test_sync_tui_command_completion_skips_unmounted_app(monkeypatch):
     app = _StubApp()
     app._exiting = True
     ctx = CommandContext(
+        workspace=TEST_WORKSPACE,
         agent="new-agent",
         thread_id="thread-1",
         ui=SimpleNamespace(),
@@ -128,6 +132,7 @@ async def test_sync_tui_rebinds_runtime_on_thread_rotation_without_agent_swap(
     app._agent_loader.agent = "same-agent"
     app._channel_runtime.bind("same-agent", "old-thread")
     ctx = CommandContext(
+        workspace=TEST_WORKSPACE,
         agent="same-agent",
         thread_id="rotated-thread",
         ui=SimpleNamespace(),

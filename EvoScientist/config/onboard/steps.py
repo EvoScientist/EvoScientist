@@ -16,6 +16,7 @@ from questionary import Choice
 
 from ...llm import get_models_for_provider
 from ...llm.ollama_discovery import validate_ollama_connection
+from ...paths import Workspace
 from ..settings import EvoScientistConfig
 from .helpers import (
     _auto_install_latexmk,
@@ -1152,7 +1153,7 @@ def _step_tinytex() -> None:
         _print_step_result("LaTeX", "installation failed", success=False)
 
 
-def _step_skills() -> list[str]:
+def _step_skills(workspace: Workspace) -> list[str]:
     """Step 7: Optionally install recommended skills.
 
     Shows checkbox first. Already-installed skills are shown as disabled
@@ -1165,7 +1166,7 @@ def _step_skills() -> list[str]:
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from ...paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
+    from ...paths import GLOBAL_SKILLS_DIR
     from ...tools.skills_manager import installed_provenance, resolve_remote_head
 
     # Collect installed-skill dir names across both tiers. The dir-name match
@@ -1173,10 +1174,10 @@ def _step_skills() -> list[str]:
     # provenance map below is the authoritative signal (handles packs that
     # explode into many child directories with unrelated names).
     installed_names: set[str] = set()
-    for skills_dir in (Path(USER_SKILLS_DIR), Path(GLOBAL_SKILLS_DIR)):
+    for skills_dir in (workspace.skills_dir, Path(GLOBAL_SKILLS_DIR)):
         if skills_dir.exists():
             installed_names.update(e.name for e in skills_dir.iterdir() if e.is_dir())
-    provenance = installed_provenance()
+    provenance = installed_provenance(workspace=workspace)
     installed_src = set(provenance)
 
     def _hint_name(source: str) -> str:
@@ -1284,7 +1285,7 @@ def _step_skills() -> list[str]:
     for source in selected:
         label = next(s["label"] for s in _RECOMMENDED_SKILLS if s["source"] == source)
         try:
-            result = install_skill(source)
+            result = install_skill(source, workspace=workspace)
             if result.get("success"):
                 _print_step_result("Skill", label)
                 installed.append(source)

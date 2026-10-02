@@ -53,8 +53,8 @@ def _skill_info(
 
 
 class TestComposePrompt:
-    def test_returns_role_and_body_for_known_skill(self):
-        mw = ExpertSkillLoaderMiddleware()
+    def test_returns_role_and_body_for_known_skill(self, workspace):
+        mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill_info()],
@@ -65,8 +65,8 @@ class TestComposePrompt:
         assert "You produce manuscript-quality surveys." in composed
         assert composed.endswith("\n")
 
-    def test_omits_role_line_when_absent(self):
-        mw = ExpertSkillLoaderMiddleware()
+    def test_omits_role_line_when_absent(self, workspace):
+        mw = ExpertSkillLoaderMiddleware(workspace)
         info = _skill_info(role="", body="Second-person persona body.\n")
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -76,15 +76,15 @@ class TestComposePrompt:
         assert not composed.startswith("You are ")
         assert "Second-person persona body." in composed
 
-    def test_missing_skill_name_returns_error_cue(self):
-        mw = ExpertSkillLoaderMiddleware()
+    def test_missing_skill_name_returns_error_cue(self, workspace):
+        mw = ExpertSkillLoaderMiddleware(workspace)
         composed = mw._compose_prompt({})
         assert composed.startswith("ERROR:")
         assert "skill_name" in composed
         assert "wiring bug" in composed
 
-    def test_unknown_skill_returns_error_cue_with_installed_list(self):
-        mw = ExpertSkillLoaderMiddleware()
+    def test_unknown_skill_returns_error_cue_with_installed_list(self, workspace):
+        mw = ExpertSkillLoaderMiddleware(workspace)
         installed = [_skill_info(name="literature-review"), _skill_info(name="other")]
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
@@ -98,8 +98,8 @@ class TestComposePrompt:
         assert "literature-review" in composed
         assert "other" in composed
 
-    def test_no_installed_experts_reports_none(self):
-        mw = ExpertSkillLoaderMiddleware()
+    def test_no_installed_experts_reports_none(self, workspace):
+        mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills", return_value=[]
         ):
@@ -107,12 +107,12 @@ class TestComposePrompt:
         assert composed.startswith("ERROR:")
         assert "(none)" in composed
 
-    def test_empty_body_returns_error_cue(self):
+    def test_empty_body_returns_error_cue(self, workspace):
         """A skill with an empty SKILL.md body would otherwise run against a
         persona-less system prompt (just the role line). Mirror the sync
         fold-in's policy: refuse to compose a prompt at all and surface the
         skill-authoring bug through the LLM's error envelope."""
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill_info(body="")],
@@ -122,10 +122,10 @@ class TestComposePrompt:
         assert "empty SKILL.md body" in composed
         assert "literature-review" in composed  # names the offending skill
 
-    def test_whitespace_only_body_returns_error_cue(self):
+    def test_whitespace_only_body_returns_error_cue(self, workspace):
         """A body that's just whitespace (`   \\n\\n`) is still empty in the
         sense that matters — no persona, no pipeline. Same error cue."""
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill_info(body="   \n\n  \n")],
@@ -134,14 +134,14 @@ class TestComposePrompt:
         assert composed.startswith("ERROR:")
         assert "empty SKILL.md body" in composed
 
-    def test_expert_md_expert_prompted_from_actor_definition(self):
+    def test_expert_md_expert_prompted_from_actor_definition(self, workspace):
         """EXPERT.md experts are prompted from EXPERT.md, not SKILL.md.
 
         Both files exist for these skills, so composing from ``.body`` would
         silently work — and hand the expert a knowledge document written for
         a different reader in place of its persona.
         """
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         info = _skill_info(
             name="paper-review",
             role="",
@@ -157,13 +157,13 @@ class TestComposePrompt:
         assert "You are an adversarial reviewer." in composed
         assert "5-aspect checklist" not in composed
 
-    def test_empty_actor_definition_names_expert_md_in_error(self):
+    def test_empty_actor_definition_names_expert_md_in_error(self, workspace):
         """The error cue names the file the author has to fix.
 
         An EXPERT.md expert with a healthy SKILL.md would otherwise be told
         its SKILL.md body is empty, sending the author to the wrong file.
         """
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         info = _skill_info(
             name="paper-review",
             role="",
@@ -180,13 +180,13 @@ class TestComposePrompt:
         assert "empty EXPERT.md body" in composed
         assert "paper-review" in composed
 
-    def test_runtime_context_tail_surfaces_skill_name(self):
+    def test_runtime_context_tail_surfaces_skill_name(self, workspace):
         """The tail block re-asserts ``skill_name`` on every model call so the
         expert knows its own persona name after summarization. Since
         ``output_path`` moved to the task description (payload dropped in
         PR #391 review X-4), the tail carries no path — the LLM pins it into
         its own todo list per SKILL.md contract."""
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill_info()],
@@ -265,13 +265,13 @@ def _mock_request(system_message: SystemMessage):
 
 
 class TestWrapModelCall:
-    def test_wrap_composes_persona_into_base_stack_system_message(self):
+    def test_wrap_composes_persona_into_base_stack_system_message(self, workspace):
         """Persona swaps for the sentinel block; base-stack witness blocks
         stay in place. The whole point of the fix — replacing the whole
         system_message (the pre-fix behaviour) dropped every base-stack
         section (measured live: 9,608 → 382 chars) and broke ``task()``
         for async experts."""
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         request, seen, handler = _mock_request(
             _system_message_with_sentinel_and_witnesses()
         )
@@ -295,13 +295,13 @@ class TestWrapModelCall:
         # Block count unchanged — replace, not append.
         assert len(block_texts) == 3
 
-    def test_wrap_appends_persona_when_sentinel_missing(self, caplog):
+    def test_wrap_appends_persona_when_sentinel_missing(self, caplog, workspace):
         """When the sentinel block isn't found (e.g. deepagents refactors
         how ``system_prompt=`` reaches ``content_blocks``), the persona is
         appended instead of silently dropped, and the drift is logged."""
         import logging
 
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         # No sentinel block — only witnesses.
         request, seen, handler = _mock_request(
             SystemMessage(
@@ -342,11 +342,11 @@ class TestWrapModelCall:
 
 
 class TestAsyncWrapModelCall:
-    async def test_awrap_scans_skills_off_the_event_loop(self):
+    async def test_awrap_scans_skills_off_the_event_loop(self, workspace):
         """langgraph dev's blockbuster rejects skill-dir scans on the event loop
         (``os.scandir`` on 3.13+, ``os.listdir`` guarded too so 3.11/3.12 catch it)."""
         blockbuster = pytest.importorskip("blockbuster")
-        mw = ExpertSkillLoaderMiddleware()
+        mw = ExpertSkillLoaderMiddleware(workspace)
         request, seen, handler = _mock_request(
             _system_message_with_sentinel_and_witnesses()
         )
@@ -380,7 +380,7 @@ class TestSpecWalkSkipsWarnOnce:
     every miss for the rest of the session while the broken skill stays
     broken."""
 
-    def _walk(self, skills):
+    def _walk(self, skills, workspace):
         from EvoScientist.subagents.expert_container_async import (
             build_expert_async_subagent_specs,
         )
@@ -396,9 +396,9 @@ class TestSpecWalkSkipsWarnOnce:
                 return_value=True,
             ),
         ):
-            return build_expert_async_subagent_specs(cfg=cfg)
+            return build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
 
-    def test_empty_body_warns_once_across_walks(self, tmp_path, caplog):
+    def test_empty_body_warns_once_across_walks(self, tmp_path, caplog, workspace):
         """Two walks over a body-less expert register nothing and warn
         exactly once. Without ``_warn_once`` the second walk re-warns and
         the count assertion fails."""
@@ -417,15 +417,15 @@ class TestSpecWalkSkipsWarnOnce:
         with caplog.at_level(
             logging.WARNING, logger="EvoScientist.tools.skills_manager"
         ):
-            first = self._walk([broken])
-            second = self._walk([broken])
+            first = self._walk([broken], workspace)
+            second = self._walk([broken], workspace)
 
         assert first == []
         assert second == []
         warnings_ = [r for r in caplog.records if "body is empty" in r.getMessage()]
         assert len(warnings_) == 1
 
-    def test_name_collision_warns_once_across_walks(self, tmp_path, caplog):
+    def test_name_collision_warns_once_across_walks(self, tmp_path, caplog, workspace):
         """Two walks over an expert named after a reserved async sub-agent
         register nothing and warn exactly once. Without ``_warn_once`` the
         second walk re-warns and the count assertion fails.
@@ -456,8 +456,8 @@ class TestSpecWalkSkipsWarnOnce:
                 logging.WARNING, logger="EvoScientist.tools.skills_manager"
             ),
         ):
-            first = self._walk([colliding])
-            second = self._walk([colliding])
+            first = self._walk([colliding], workspace)
+            second = self._walk([colliding], workspace)
 
         assert first == []
         assert second == []

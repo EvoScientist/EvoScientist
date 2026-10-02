@@ -11,7 +11,7 @@ To add a new async sub-agent:
   1. Set ``async: true`` in ``EvoScientist/subagents/<name>.yaml``.
   2. Add a one-line binding here::
 
-         <snake_name> = build_async_subagent_graph("<name>")
+         <snake_name> = build_async_subagent_graph("<name>", workspace=_workspace)
 
   3. Register it in ``EvoScientist/langgraph_dev/langgraph.json``::
 
@@ -28,21 +28,32 @@ from EvoScientist.memory.agents import (
     build_observation_linker_graph,
 )
 from EvoScientist.memory.types import MemorySourceType
+from EvoScientist.paths import process_workspace
 from EvoScientist.subagents._factory import build_async_subagent_graph
 from EvoScientist.subagents.expert_container_async import (
     build_expert_container_async_graph,
 )
 
-writing_agent = build_async_subagent_graph("writing-agent")
-data_analysis_agent = build_async_subagent_graph("data-analysis-agent")
-scheduler = build_async_subagent_graph("scheduler")
+# The server serves the workspace it was started for (the manager sets
+# ``EVOSCIENTIST_WORKSPACE_DIR`` on the subprocess).
+_workspace = process_workspace()
+
+writing_agent = build_async_subagent_graph("writing-agent", workspace=_workspace)
+data_analysis_agent = build_async_subagent_graph(
+    "data-analysis-agent", workspace=_workspace
+)
+scheduler = build_async_subagent_graph("scheduler", workspace=_workspace)
 # Generic async container for expert-skill dispatch. One graph, parameterised
 # per invocation by the ``skill_name`` payload the main agent passes through
 # ``EvoAsyncSubAgentMiddleware.start_async_task``. Any installed expert skill
 # dispatches through this graph; the loader middleware resolves the skill
 # body at model-call time.
-expert_container_async = build_expert_container_async_graph()
-evomemory_subagent_worker = build_memory_worker_graph(MemorySourceType.SUBAGENT)
-evomemory_turn_worker = build_memory_worker_graph(MemorySourceType.TURN)
-evomemory_observation_linker = build_observation_linker_graph()
-evomemory_autoskills = build_autoskills_graph()
+expert_container_async = build_expert_container_async_graph(_workspace)
+evomemory_subagent_worker = build_memory_worker_graph(
+    MemorySourceType.SUBAGENT, workspace=_workspace
+)
+evomemory_turn_worker = build_memory_worker_graph(
+    MemorySourceType.TURN, workspace=_workspace
+)
+evomemory_observation_linker = build_observation_linker_graph(workspace=_workspace)
+evomemory_autoskills = build_autoskills_graph(workspace=_workspace)
