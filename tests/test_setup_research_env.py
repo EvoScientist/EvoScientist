@@ -50,7 +50,11 @@ class FakeRunner:
         self.no_wheel: set[str] = set()
         # The index is not reached: every pin reports "from versions: none".
         self.index_down = False
+        # Keyed by normcase(exe): False makes the system probe fail.
         self.system_ok: dict[str, bool] = {}
+        # Keyed by normcase(exe): the system probe's output (version, prefix,
+        # PEP 668 flag); a usable Python 3.12 by default.
+        self.system_output: dict[str, str] = {}
 
     def pip_requirements(self) -> list[list[str]]:
         """The requirements of each ``pip install`` call, in order."""
@@ -106,9 +110,12 @@ class FakeRunner:
             return subprocess.CompletedProcess(cmd, 0 if ok else 1, output)
         # Keyed by normcase: on Windows shutil.which returns the PATHEXT
         # spelling (python.EXE).
-        system_ok = self.system_ok.get(os.path.normcase(cmd[0]))
-        if system_ok is not None:
-            return subprocess.CompletedProcess(cmd, 0 if system_ok else 1, "")
+        if cmd[1:] == ["-c", re_env._SYSTEM_PYTHON_PROBE]:
+            exe = os.path.normcase(cmd[0])
+            if not self.system_ok.get(exe, True):
+                return subprocess.CompletedProcess(cmd, 1, "")
+            output = self.system_output.get(exe, "3.12\n/opt/conda\n0\n")
+            return subprocess.CompletedProcess(cmd, 0, output)
         return subprocess.CompletedProcess(cmd, 0 if self.env_starts else 1, "")
 
     def _pip_install(self, cmd: list[str]) -> subprocess.CompletedProcess:
@@ -316,45 +323,92 @@ def test_find_usable_python_rejects_a_shim_that_fails_the_probe(env, monkeypatch
     assert re_env.find_usable_python() is None
 
 
-def test_system_python_probe_rejects_python_2(monkeypatch):
-    """The probe that decides "usable" exits non-zero under Python 2."""
+def _exec_probe(capsys) -> list[str]:
+    exec(re_env._SYSTEM_PYTHON_PROBE, {})
+    return capsys.readouterr().out.splitlines()
+
+
+def test_system_python_probe_reports_python_2_without_python_3_calls(
+    monkeypatch, capsys
+):
+    """Under Python 2 the probe prints its version and skips the PEP 668 check,
+    whose sysconfig call differs there; the 3.9 floor then rejects it."""
+    import sysconfig
+
+    def python_3_only(_name):
+        raise AssertionError("PEP 668 check ran under Python 2")
+
     monkeypatch.setattr(sys, "version_info", (2, 7, 18, "final", 0))
-    with pytest.raises(SystemExit) as exc:
-        exec(re_env._SYSTEM_PYTHON_PROBE, {})
-    assert exc.value.code
+    monkeypatch.setattr(sysconfig, "get_path", python_3_only)
+    lines = _exec_probe(capsys)
+    assert lines == ["2.7", sys.prefix, "0"]
 
 
-def test_system_python_probe_accepts_python_3():
-    """The test interpreter is a venv, so a marker on its base does not count."""
-    result = subprocess.run([sys.executable, "-c", re_env._SYSTEM_PYTHON_PROBE])
+def test_system_python_probe_runs_on_python_3():
+    """A real subprocess; the test interpreter is a venv, so a PEP 668 marker
+    on its base does not count."""
+    result = subprocess.run(
+        [sys.executable, "-c", re_env._SYSTEM_PYTHON_PROBE],
+        capture_output=True,
+        text=True,
+    )
     assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        f"{sys.version_info[0]}.{sys.version_info[1]}",
+        sys.prefix,
+        "0",
+    ]
 
 
-def _run_probe_with_marker(monkeypatch, tmp_path, *, in_venv: bool):
+@pytest.mark.parametrize(("in_venv", "flag"), [(False, "1"), (True, "0")])
+def test_system_python_probe_flags_an_externally_managed_python(
+    monkeypatch, tmp_path, capsys, in_venv, flag
+):
+    """PEP 668 applies only outside a venv."""
     import sysconfig
 
     (tmp_path / "EXTERNALLY-MANAGED").write_text("[externally-managed]\n")
     monkeypatch.setattr(sysconfig, "get_path", lambda _name: str(tmp_path))
     monkeypatch.setattr(sys, "prefix", "/usr")
     monkeypatch.setattr(sys, "base_prefix", "/opt/base" if in_venv else "/usr")
-    with pytest.raises(SystemExit) as exc:
-        exec(re_env._SYSTEM_PYTHON_PROBE, {})
-    return exc.value.code
+    assert _exec_probe(capsys)[2] == flag
 
 
-def test_system_python_probe_rejects_an_externally_managed_python(
-    monkeypatch, tmp_path
-):
-    """pip refuses installs into a PEP 668 interpreter, so the agent's first
-    `pip install` would fail."""
-    assert _run_probe_with_marker(monkeypatch, tmp_path, in_venv=False)
+@pytest.mark.parametrize(
+    ("output", "usable"),
+    [
+        ("3.12\n/opt/conda\n0\n", True),
+        ("3.9\n/opt/conda\n0\n", True),
+        ("3.8\n/opt/conda\n0\n", False),
+        ("2.7\n/usr\n0\n", False),
+        ("3.12\n/usr\n1\n", False),  # PEP 668 outside a venv
+        ("", False),
+        ("Python 3.12\n", False),
+    ],
+)
+def test_unusable_reason(output, usable):
+    assert (re_env._unusable_reason(output) is None) is usable
 
 
-def test_system_python_probe_accepts_a_venv_of_an_externally_managed_python(
-    monkeypatch, tmp_path
-):
-    """PEP 668 only applies outside a venv."""
-    assert not _run_probe_with_marker(monkeypatch, tmp_path, in_venv=True)
+@pytest.mark.parametrize(
+    ("marker", "usable"),
+    [("uv-receipt.toml", False), (".evoscientist-managed", False), (None, True)],
+)
+def test_evoscientists_own_environment(monkeypatch, tmp_path, marker, usable):
+    """The environment EvoScientist runs from is unusable only when its
+    installer made it (uv tool install, the Docker image); a conda env or venv
+    the user made stays usable."""
+    if marker is not None:
+        (tmp_path / marker).write_text("")
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    output = f"3.12\n{tmp_path}{os.sep}\n0\n"  # another spelling of the prefix
+    assert (re_env._unusable_reason(output) is None) is usable
+
+
+def test_a_marker_in_another_prefix_does_not_count(monkeypatch, tmp_path):
+    (tmp_path / "uv-receipt.toml").write_text("")
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "evoscientist"))
+    assert re_env._unusable_reason(f"3.12\n{tmp_path}\n0\n") is None
 
 
 def test_find_usable_python_runs_the_python_3_probe(env, monkeypatch):

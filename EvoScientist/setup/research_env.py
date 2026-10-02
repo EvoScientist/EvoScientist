@@ -48,17 +48,26 @@ CN_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 _READY_MARKER = ".evoscientist-ready"
 _PYTHON_PROBE_TIMEOUT = 10
-# Exits non-zero under Python 2, which some systems still install as
-# `python`, and for an EXTERNALLY-MANAGED (PEP 668) interpreter outside a venv
-# (Debian/Ubuntu `python-is-python3`, Arch, Homebrew's unversioned `python`):
-# pip refuses the agent's `pip install` there. Environments people create
-# (conda, venv, pyenv, uv venvs) carry no marker. Written so Python 2 can
-# parse it.
+# Prints the interpreter's `major.minor`, its `sys.prefix`, and 1 when it is
+# EXTERNALLY-MANAGED (PEP 668) outside a venv, else 0. Written so Python 2,
+# which some systems still install as `python`, runs it too; the rules are
+# applied in :func:`_unusable_reason`.
 _SYSTEM_PYTHON_PROBE = (
-    "import os, sys, sysconfig; sys.exit(sys.version_info[0] < 3 or ("
-    "sys.prefix == getattr(sys, 'base_prefix', sys.prefix) and os.path.isfile("
-    "os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED'))))"
+    "import os, sys\n"
+    "managed = 0\n"
+    "if sys.version_info[0] >= 3:\n"
+    "    import sysconfig\n"
+    "    managed = int(sys.prefix == getattr(sys, 'base_prefix', sys.prefix)"
+    " and os.path.isfile(os.path.join(sysconfig.get_path('stdlib'),"
+    " 'EXTERNALLY-MANAGED')))\n"
+    "sys.stdout.write('%d.%d\\n%s\\n%d\\n'"
+    " % (sys.version_info[0], sys.version_info[1], sys.prefix, managed))\n"
 )
+# Older interpreters cannot install the pinned packages.
+_MIN_PYTHON = (3, 9)
+# Files that mark an environment EvoScientist's installer made (uv tool
+# install; the Docker image's /opt/venv). uv builds both without pip.
+_MANAGED_ENV_MARKERS = ("uv-receipt.toml", ".evoscientist-managed")
 _VENV_TIMEOUT = 300
 _PIP_TIMEOUT = 1800
 # The first matplotlib import builds its font cache.
@@ -270,10 +279,37 @@ def _is_untrusted_alias(path: str) -> bool:
     )
 
 
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(
+        os.path.realpath(b)
+    )
+
+
+def _unusable_reason(probe_output: str) -> str | None:
+    """Why a probed ``python`` is not usable for the agent, or None if it is."""
+    lines = probe_output.splitlines()
+    try:
+        major, minor = (int(part) for part in lines[0].split("."))
+        prefix, managed = lines[1], lines[2].strip() == "1"
+    except (IndexError, ValueError):
+        return f"unexpected probe output {probe_output!r}"
+    if (major, minor) < _MIN_PYTHON:
+        return f"Python {major}.{minor} is older than {'.'.join(map(str, _MIN_PYTHON))}"
+    if managed:
+        return "it is EXTERNALLY-MANAGED (PEP 668), so pip refuses to install into it"
+    # EvoScientist's own environment when its installer made it: no pip there.
+    if _same_path(prefix, sys.prefix) and any(
+        os.path.isfile(os.path.join(prefix, name)) for name in _MANAGED_ENV_MARKERS
+    ):
+        return "it is the environment EvoScientist's installer made, without pip"
+    return None
+
+
 def find_usable_python() -> str | None:
     """The ``python`` the agent's shell would run, as an absolute path, if it
-    runs, is Python 3 and lets pip install into it (no PEP 668 marker outside
-    a venv); else None.
+    runs, is Python 3.9 or newer, lets pip install into it (no PEP 668 marker
+    outside a venv) and is not the environment EvoScientist's installer made
+    (a uv tool environment, the Docker image's ``/opt/venv``); else None.
 
     Only the first ``python`` on PATH counts, as in the shell. When it is our
     own environment's (activated by hand, or a nested ``EvoSci`` in the
@@ -292,7 +328,13 @@ def find_usable_python() -> str | None:
     own_bin = os.path.normcase(str(_bin_dir(env_dir())))
     if os.path.normcase(os.path.dirname(found)) == own_bin:
         return None
-    if _runs([found, "-c", _SYSTEM_PYTHON_PROBE], _PYTHON_PROBE_TIMEOUT) is None:
+    result = _runs([found, "-c", _SYSTEM_PYTHON_PROBE], _PYTHON_PROBE_TIMEOUT)
+    if result is None:
+        logger.info(f"{found} is not usable: it did not run")
+        return None
+    reason = _unusable_reason(result.stdout)
+    if reason is not None:
+        logger.info(f"{found} is not usable: {reason}")
         return None
     return found
 
