@@ -190,6 +190,20 @@ def test_grader_strategy_is_tool_calling_for_anthropic_on_openrouter():
         assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
 
 
+def test_grader_strategy_is_tool_calling_for_openai_on_openrouter():
+    """OpenAI's strict JSON mode rejects the criteria oneOf; tool calling works.
+
+    ``gpt-5.6-luna`` matters: its profile declares structured output, so
+    langchain alone would pick JSON mode.
+    """
+    from langchain.agents.structured_output import ToolStrategy
+
+    from EvoScientist.subagents._factory import _grader_strategy
+
+    for model_id in ("openai/gpt-5.6-luna", "openai/gpt-6-luna"):
+        assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
+
+
 def test_grader_strategy_defers_to_langchain_elsewhere():
     from langchain_anthropic import ChatAnthropic
 
@@ -218,6 +232,112 @@ def test_scheduler_grader_is_built_with_the_explicit_strategy(tmp_path):
     response_format = spy.call_args.kwargs["response_format"]
     assert isinstance(response_format, ToolStrategy)
     assert response_format.schema is GraderResponse
+
+
+def test_scheduler_grader_uses_tool_calling_without_thinking_on_deepseek(
+    tmp_path, monkeypatch
+):
+    """DeepSeek rejects json_schema response_format and, in thinking mode, forced tool_choice."""
+    import json
+
+    import httpx
+
+    from EvoScientist.llm import get_chat_model
+    from tests.fakes import deepseek_tool_call_response
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    bodies = []
+    criteria = [
+        {"name": "report.md exists", "passed": True},
+        {"name": "report.md states F1", "passed": False, "gap": "no F1 reported"},
+    ]
+    verdict = {"result": "needs_revision", "explanation": "x", "criteria": criteria}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200, json=deepseek_tool_call_response("GraderResponse", verdict)
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = get_chat_model(
+            "deepseek-v4-pro", provider="deepseek", http_client=client
+        )
+        kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path, aux_model=model)
+        grader = kwargs["middleware"][-1]._ensure_grader()
+        result = grader.invoke(
+            {"messages": [HumanMessage("grade the deliverables")]},
+            config={"recursion_limit": 20},
+        )
+
+    assert "response_format" not in bodies[0]
+    assert bodies[0]["tool_choice"] == "required"
+    assert bodies[0]["thinking"] == {"type": "disabled"}
+    assert result["structured_response"].result == "needs_revision"
+    assert result["structured_response"].criteria == criteria
+
+
+@pytest.mark.parametrize("base_url", [None, "http://127.0.0.1:8000"])
+def test_native_sonnet_5_5_grader_uses_json_schema_not_forced_tools(
+    tmp_path, monkeypatch, base_url
+):
+    """Sonnet 5.5 rejects forced tool_choice, which a proxy route (no thinking) sends."""
+    import json
+
+    import anthropic
+    from packaging.version import Version
+
+    from EvoScientist.llm import get_chat_model
+
+    if Version(anthropic.__version__) >= Version("1"):
+        import httpx2 as httpx
+    else:
+        import httpx
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    if base_url:
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
+    else:
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    bodies = []
+    verdict = {
+        "result": "needs_revision",
+        "explanation": "x",
+        "criteria": [{"name": "report.md exists", "passed": False, "gap": "missing"}],
+    }
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": json.dumps(verdict)}],
+                "model": "claude-sonnet-5-5",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    model = get_chat_model("claude-sonnet-5-5", provider="anthropic")
+    model._client = anthropic.Anthropic(
+        api_key="sk-test",
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path, aux_model=model)
+    grader = kwargs["middleware"][-1]._ensure_grader()
+    result = grader.invoke(
+        {"messages": [HumanMessage("grade the deliverables")]},
+        config={"recursion_limit": 20},
+    )
+
+    assert "tool_choice" not in bodies[0]
+    assert bodies[0]["output_config"]["format"]["type"] == "json_schema"
+    assert result["structured_response"].result == "needs_revision"
 
 
 def test_scheduler_grader_builds_against_current_upstream_attributes(tmp_path):
@@ -296,9 +416,76 @@ def test_scheduler_grader_carries_a_call_budget(tmp_path):
     assert [type(m).__name__ for m in grader_mw] == [
         "FilesystemMiddleware",
         "_GraderCallBudget",
+        "UnsupportedContentMiddleware",
     ]
     assert isinstance(grader_mw[1], _GraderCallBudget)
     assert grader_mw[1].max_calls == 12
+
+
+class _RecordingGrader(BaseChatModel):
+    """Records each request's messages and returns a satisfied verdict."""
+
+    seen: list
+
+    @property
+    def _llm_type(self) -> str:
+        return "recording-grader"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.seen.append(messages)
+        msg = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "GraderResponse",
+                    "args": {"result": "satisfied", "explanation": "x", "criteria": []},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
+def test_scheduler_grader_replaces_media_its_model_cannot_accept(tmp_path):
+    from langchain_core.messages import ToolMessage
+
+    fake = _RecordingGrader(seen=[], profile={"image_inputs": False})
+    kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path, aux_model=fake)
+    grader = kwargs["middleware"][-1]._ensure_grader()
+    grader.invoke(
+        {
+            "messages": [
+                HumanMessage("grade the deliverables"),
+                AIMessage(
+                    "",
+                    tool_calls=[
+                        {
+                            "id": "r1",
+                            "name": "read_file",
+                            "args": {"file_path": "/a.png"},
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=[
+                        {
+                            "type": "image",
+                            "base64": "iVBORw0KGgo=",
+                            "mime_type": "image/png",
+                        }
+                    ],
+                    tool_call_id="r1",
+                ),
+            ]
+        },
+        config={"recursion_limit": 20},
+    )
+    tool_result = fake.seen[0][-1]
+    assert [block["type"] for block in tool_result.content] == ["text"]
 
 
 async def test_grader_call_budget_also_guards_the_async_path():

@@ -259,6 +259,15 @@ def deploy(
     # start_langgraph_dev already health-polled before returning; if we got
     # here, the subprocess is up.
     console.print("[green]✓[/green] langgraph dev ready")
+    # The agent is built inside the server, so its own hint lands in the
+    # server log; show it here.
+    from rich.markup import escape
+
+    from ..setup.research_env import missing_python_hint
+
+    hint = missing_python_hint()
+    if hint is not None:
+        console.print(f"[yellow]⚠ {escape(hint)}[/yellow]")
 
     # 8b. Cloudflare tunnel URL — the local server is healthy, but cloudflared
     # establishes the public tunnel a few seconds later and prints the random

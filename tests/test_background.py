@@ -52,6 +52,25 @@ def test_launch_returns_id_and_creates_log(tmp_path):
     assert (tmp_path / ".bg_processes" / f"{pid}.log").exists()
 
 
+def test_launch_applies_research_env_overrides(tmp_path, monkeypatch):
+    """Background jobs get the same env overrides as the execute shell, merged
+    over the inherited environment."""
+    from EvoScientist.setup import research_env
+
+    monkeypatch.setattr(
+        research_env, "research_env_overrides", lambda: {"EVOSCI_BG_PROBE": "venv"}
+    )
+    monkeypatch.setenv("EVOSCI_BG_INHERITED", "kept")
+    if sys.platform == "win32":
+        cmd = "echo %EVOSCI_BG_PROBE% %EVOSCI_BG_INHERITED%"
+    else:
+        cmd = "echo $EVOSCI_BG_PROBE $EVOSCI_BG_INHERITED"
+    pid = bg.launch(cmd, str(tmp_path))
+    assert _wait_until(lambda: "EXITED" in bg.status(pid))
+    log = (tmp_path / ".bg_processes" / f"{pid}.log").read_text()
+    assert "venv kept" in log
+
+
 def test_status_running_then_exited(tmp_path):
     pid = bg.launch(_sleep_cmd(1), str(tmp_path))
     assert "RUNNING" in bg.status(pid)
@@ -101,6 +120,24 @@ def test_list_records_scopes_to_thread(tmp_path):
     mine = bg.list_records("T-1")
     assert {r["origin_thread_id"] for r in mine} == {"T-1"}
     assert len(bg.list_records(None, include_all=True)) == 2
+
+
+def test_running_records_lists_only_running_across_threads(tmp_path):
+    """running_records() backs the pre-stop busy check: every still-running
+    process across all threads, and nothing that has already finished."""
+    long_a = bg.launch(_sleep_cmd(3), str(tmp_path), origin_thread_id="T-1")
+    long_b = bg.launch(_sleep_cmd(3), str(tmp_path), origin_thread_id="T-2")
+    done = bg.launch(_true_cmd(), str(tmp_path), origin_thread_id="T-1")
+    assert _wait_until(lambda: bg.poll_status(done) == "success")
+
+    running_ids = {r["process_id"] for r in bg.running_records()}
+    assert running_ids == {long_a, long_b}  # both threads, finished one excluded
+
+
+def test_running_records_empty_when_none_running(tmp_path):
+    done = bg.launch(_true_cmd(), str(tmp_path))
+    assert _wait_until(lambda: bg.poll_status(done) == "success")
+    assert bg.running_records() == []
 
 
 def test_output_captured_in_status(tmp_path):

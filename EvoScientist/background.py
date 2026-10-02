@@ -181,6 +181,18 @@ def list_records(
         return [_record_dict(p) for p in procs]
 
 
+def running_records() -> list[dict[str, Any]]:
+    """Mirror records for every tracked process still running, across all threads.
+
+    Backs ``GET /api/bg_processes/running``: before restarting or stopping the
+    backend (which tree-kills all bg children), a caller asks whether any bg
+    job is still running so it can wait for or confirm stopping them, naming
+    each. Records exits first (like :func:`list_records`), so a just-finished
+    process drops out.
+    """
+    return [r for r in list_records(include_all=True) if r.get("status") == "running"]
+
+
 def _read_tail(log_path: Path, tail_bytes: int) -> str:
     # Seek from the end so a huge log isn't fully read into memory on each status check.
     try:
@@ -230,7 +242,15 @@ def launch(
     The caller is responsible for validating ``command`` first.
 
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
+
+    The child gets the same env overrides as the ``execute`` shell
+    (:func:`~EvoScientist.setup.research_env.research_env_overrides`), so a
+    background ``python`` resolves the same interpreter as a foreground one.
     """
+    from .setup.research_env import research_env_overrides
+
+    overrides = research_env_overrides()
+    env = {**os.environ, **overrides} if overrides else None
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -246,6 +266,7 @@ def launch(
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
     finally:
         # The child inherited its own dup of the fd during spawn; the parent's copy

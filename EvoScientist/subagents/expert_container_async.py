@@ -27,6 +27,7 @@ task description, not in state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, NotRequired
@@ -213,9 +214,10 @@ class ExpertSkillLoaderMiddleware(AgentMiddleware[Any, Any, Any]):
         request: ModelRequest[Any],
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
-        return await handler(
-            request.override(system_message=self._compose_system_message(request))
-        )
+        # Composing walks the skill tiers on disk; langgraph dev's blockbuster
+        # raises on that scan when it runs on the event loop (Python 3.13+).
+        system_message = await asyncio.to_thread(self._compose_system_message, request)
+        return await handler(request.override(system_message=system_message))
 
 
 def build_expert_async_subagent_specs(cfg: Any | None = None) -> list[dict[str, Any]]:
@@ -355,8 +357,16 @@ def build_expert_container_async_graph() -> Any:
     # experts routinely abuse the fan-out or ignore it entirely, a
     # per-skill ``include_general_purpose: false`` frontmatter opt-out
     # is a natural follow-up.
+    # ``backend=`` matters: without it the per-run SummarizationMiddleware
+    # subclass is not appended and the stock frozen-window built-in survives
+    # in this graph even though it takes ``configurable.model`` overrides
+    # (#466) — the replacement must also offload history to this backend.
+    # Built before subagent injection so general-purpose (an explicit spec,
+    # not deepagents' auto-GP) gets the same subclass and the same model.
+    backend = _get_default_backend()
+    model = _ensure_chat_model()
     _ensure_general_purpose_subagent(subagents)
-    _inject_subagent_middleware(subagents)
+    _inject_subagent_middleware(subagents, chat_model=model, backend=backend)
 
     middleware = [
         # Loader runs FIRST so downstream middleware sees the composed
@@ -367,16 +377,18 @@ def build_expert_container_async_graph() -> Any:
         *_get_default_middleware(
             for_async_subagent=True,
             memory_source_agent="expert-container-async",
+            backend=backend,
+            chat_model=model,
         ),
     ]
 
     return create_deep_agent(
         name="expert-container-async",
-        model=_ensure_chat_model(),
+        model=model,
         system_prompt=_FALLBACK_SYSTEM_PROMPT,
         tools=[think_tool],
         skills=["/skills/"],
-        backend=_get_default_backend(),
+        backend=backend,
         middleware=middleware,
         subagents=subagents,
         state_schema=ExpertContainerState,

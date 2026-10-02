@@ -228,6 +228,15 @@ class TestIsLanggraphDevRunning:
         assert called_url == "http://127.0.0.1:6174/ok"
 
     @patch("EvoScientist.langgraph_dev.manager.httpx.get")
+    def test_probe_bypasses_proxy(self, mock_get):
+        # The loopback probe must set trust_env=False: on Windows httpx otherwise
+        # routes 127.0.0.1 through the system (registry) proxy and never reaches
+        # the local server, so a healthy backend reads as unhealthy.
+        mock_get.return_value = MagicMock(status_code=200)
+        manager.is_langgraph_dev_running(port=6174)
+        assert mock_get.call_args.kwargs.get("trust_env") is False
+
+    @patch("EvoScientist.langgraph_dev.manager.httpx.get")
     def test_returns_false_on_non_200(self, mock_get):
         mock_get.return_value = MagicMock(status_code=503)
         assert manager.is_langgraph_dev_running(port=6174) is False
@@ -480,6 +489,36 @@ class TestEnsureLanggraphDev:
         cfg.enable_scheduler = False
         assert manager.needs_langgraph_dev(cfg) is False
 
+    def test_needs_langgraph_dev_for_server_backend_only(self):
+        """gateway_backend=langgraph_server needs the server even with every
+        other trigger off (execution itself is server-routed)."""
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.memory_skill_synthesis_enabled = False
+        cfg.enable_scheduler = False
+        assert manager.needs_langgraph_dev(cfg) is False
+        cfg.gateway_backend = "langgraph_server"
+        assert manager.needs_langgraph_dev(cfg) is True
+
+    def test_needs_langgraph_dev_explicit_backend_overrides_global(self):
+        """The explicit ``backend`` param wins over ``config.gateway_backend``.
+
+        A surface resolved to the server backend must force the dev server even
+        when the global flag is still ``local`` (per-surface override), and a
+        surface resolved to ``local`` must not be forced on by a server global
+        when it has no other trigger.
+        """
+        cfg = EvoScientistConfig()
+        cfg.enable_async_subagents = False
+        cfg.memory_workers_enabled = False
+        cfg.memory_skill_synthesis_enabled = False
+        cfg.enable_scheduler = False
+        cfg.gateway_backend = "local"
+        assert manager.needs_langgraph_dev(cfg, backend="langgraph_server") is True
+        cfg.gateway_backend = "langgraph_server"
+        assert manager.needs_langgraph_dev(cfg, backend="local") is False
+
     def test_reuses_existing_healthy_subprocess(self, tmp_path, runtime_paths):
         """When the subprocess is already running, no new Popen call."""
         cfg = EvoScientistConfig()
@@ -720,6 +759,7 @@ def start_langgraph_dev_capture(tmp_path, monkeypatch):
         # strictly after the capture line in start_langgraph_dev.
         captured["args"] = args
         captured["env"] = kwargs["env"]
+        captured["kwargs"] = kwargs
         captured["offset"] = manager._LOG_OFFSET_AT_START
         raise FileNotFoundError("stop before real spawn")
 
@@ -882,3 +922,38 @@ class TestReadTunnelUrl:
             manager.read_tunnel_url(timeout=1.0)
             == "https://fresh-new-url.trycloudflare.com"
         )
+
+
+class TestStartLanggraphDevSpawnFlags:
+    """On Windows the langgraph dev child gets its own process group (Ctrl+C
+    does not reach it) but keeps the parent's console, so closing the console
+    ends it. On POSIX it gets its own session."""
+
+    def test_windows_uses_new_process_group(
+        self, start_langgraph_dev_capture, monkeypatch
+    ):
+        env = start_langgraph_dev_capture
+        monkeypatch.setattr(manager.os, "name", "nt", raising=False)
+        monkeypatch.setattr(
+            manager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False
+        )
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+        except FileNotFoundError:
+            pass  # _fake_popen stops before the real spawn
+        kw = env.captured["kwargs"]
+        # Exactly the process-group flag: no CREATE_NO_WINDOW, which would
+        # detach the server from the console and let it outlive a closed one.
+        assert kw.get("creationflags") == 0x00000200
+        assert "start_new_session" not in kw
+
+    def test_posix_uses_new_session(self, start_langgraph_dev_capture, monkeypatch):
+        env = start_langgraph_dev_capture
+        monkeypatch.setattr(manager.os, "name", "posix", raising=False)
+        try:
+            manager.start_langgraph_dev(workspace_dir=env.tmp_path)
+        except FileNotFoundError:
+            pass
+        kw = env.captured["kwargs"]
+        assert kw.get("start_new_session") is True
+        assert "creationflags" not in kw

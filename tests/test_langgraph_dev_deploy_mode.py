@@ -28,6 +28,9 @@ def _patch_start_prereqs(monkeypatch, tmp_path: Path, runtime_paths) -> dict:
     Returns a ``captured`` dict that the test populates from the fake Popen."""
     captured: dict = {}
 
+    from EvoScientist.mcp import client as mcp_client
+
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {})
     monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/usr/bin/langgraph")
 
     fake_config = tmp_path / "langgraph.json"
@@ -347,3 +350,66 @@ def test_tunnel_false_default_omits_flag(monkeypatch, tmp_path, runtime_paths):
         )
 
     assert "--tunnel" not in captured["args"]
+
+
+def test_node_for_mcp_servers_is_installed_before_the_spawn(
+    monkeypatch, tmp_path, runtime_paths
+):
+    from EvoScientist.mcp import client as mcp_client
+
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    servers = {"fs": {"transport": "stdio", "command": "npx"}}
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: servers)
+
+    def install(config):
+        assert config == servers
+        monkeypatch.setenv("PATH", "private-node-bin")
+
+    monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", install)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16176)
+    assert captured["env"]["PATH"] == "private-node-bin"
+
+
+def test_a_failing_node_check_does_not_block_the_spawn(
+    monkeypatch, tmp_path, runtime_paths
+):
+    from EvoScientist.mcp import client as mcp_client
+
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {"fs": None})
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16177)
+    assert "env" in captured
+
+
+def test_start_records_the_agent_python_in_the_sidecar(
+    monkeypatch, tmp_path, runtime_paths
+):
+    """Reuse compares this record; without it the python warning never fires."""
+    import json
+    from types import SimpleNamespace
+
+    from EvoScientist.setup import research_env
+
+    _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(
+            manager.RUNTIME, workspace_sidecar=tmp_path / "workspace.json"
+        ),
+    )
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+
+    def _poll():
+        # Called by the health loop, after the sidecar is written.
+        raise _PopenAbort("sidecar written")
+
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(pid=4242, poll=_poll)
+    )
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
+    sidecar = json.loads((tmp_path / "workspace.json").read_text())
+    assert sidecar["agent_python"] == "/env/bin/python"

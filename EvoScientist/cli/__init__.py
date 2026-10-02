@@ -90,5 +90,9 @@ def main():
     # Priority: env var > config file > default (WARNING)
     config = load_config()
     _log_level = os.environ.get("EVOSCIENTIST_LOG_LEVEL", "") or config.log_level
+    # Before any child process starts, so they all find the private Node.
+    from ..setup.node import activate_runtime
+
+    activate_runtime()
     _configure_logging()
     app()

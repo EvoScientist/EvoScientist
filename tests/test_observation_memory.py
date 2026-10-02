@@ -2495,6 +2495,110 @@ def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch):
     assert calls[0]["workspace_dir"] == tmp_path / "workspace"
 
 
+def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
+    tmp_path, monkeypatch
+):
+    """DeepSeek rejects json_schema response_format and, in thinking mode, forced tool_choice."""
+    import httpx
+
+    from EvoScientist.llm import get_chat_model
+    from EvoScientist.memory.agents._factory import build_memory_agent_graph
+    from tests.fakes import deepseek_tool_call_response
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    bodies: list[dict[str, Any]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json=deepseek_tool_call_response(
+                "SubagentMemoryDecision", {"summary": "baseline trained"}
+            ),
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = get_chat_model(
+            "deepseek-v4-pro", provider="deepseek", http_client=client
+        )
+        monkeypatch.setattr(
+            "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
+        )
+        graph = build_memory_agent_graph(
+            name="evomemory-subagent-worker",
+            system_prompt="Summarize the run.",
+            memory_dir=tmp_path / "memories",
+            workspace_dir=tmp_path / "workspace",
+            tools=[],
+            middleware=[],
+            response_format=memory_worker.SubagentMemoryDecision,
+        )
+        result = graph.invoke({"messages": [HumanMessage("summarize")]})
+
+    assert "response_format" not in bodies[0]
+    assert bodies[0]["tool_choice"] == "required"
+    assert bodies[0]["thinking"] == {"type": "disabled"}
+    assert result["structured_response"] == memory_worker.SubagentMemoryDecision(
+        summary="baseline trained"
+    )
+
+
+def test_memory_agent_graph_leaves_other_models_to_langchain(tmp_path, monkeypatch):
+    from langchain_anthropic import ChatAnthropic
+
+    from EvoScientist.memory.agents._factory import build_memory_agent_graph
+
+    model = ChatAnthropic(model="claude-haiku-4-5", api_key="k")
+    create = MagicMock()
+    monkeypatch.setattr("deepagents.create_deep_agent", create)
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
+    )
+
+    build_memory_agent_graph(
+        name="evomemory-subagent-worker",
+        system_prompt="Summarize the run.",
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        tools=[],
+        middleware=[],
+        response_format=memory_worker.SubagentMemoryDecision,
+    )
+
+    assert create.call_args.kwargs["model"] is model
+    assert (
+        create.call_args.kwargs["response_format"]
+        is memory_worker.SubagentMemoryDecision
+    )
+
+
+def test_memory_agent_graph_keeps_deepseek_thinking_without_response_format(
+    tmp_path, monkeypatch
+):
+    from EvoScientist.llm import get_chat_model
+    from EvoScientist.memory.agents._factory import build_memory_agent_graph
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    model = get_chat_model("deepseek-v4-pro", provider="deepseek")
+    create = MagicMock()
+    monkeypatch.setattr("deepagents.create_deep_agent", create)
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
+    )
+
+    build_memory_agent_graph(
+        name="evomemory-turn-worker",
+        system_prompt="Maintain the profile.",
+        memory_dir=tmp_path / "memories",
+        workspace_dir=tmp_path / "workspace",
+        tools=[],
+        middleware=[],
+    )
+
+    assert create.call_args.kwargs["model"] is model
+    assert "response_format" not in create.call_args.kwargs
+
+
 def _memory_tool_names(middleware) -> list[str]:
     memory_middleware = next(item for item in middleware if getattr(item, "tools", ()))
     return [tool.name for tool in memory_middleware.tools]

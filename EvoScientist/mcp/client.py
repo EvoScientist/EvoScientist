@@ -789,6 +789,57 @@ def _resolve_command(command: str) -> str:
     return command
 
 
+_NODE_COMMANDS = frozenset({"node", "npx", "npm"})
+
+
+def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
+    """Install the private Node when a stdio server runs ``node`` / ``npx`` /
+    ``npm`` and that command is not on PATH.
+
+    Covers users who never ran ``EvoSci setup``. A failed install is logged and
+    the server then fails to start as it would without Node. Never runs inside
+    ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set): a download there would
+    race the server's health deadline with its progress hidden in the server
+    log, so ``start_langgraph_dev`` runs this before spawning instead.
+    """
+    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+        return
+    missing = [
+        name
+        for name, server in config.items()
+        if server.get("transport") == "stdio"
+        and (command := str(server.get("command", "")))
+        and not os.path.isabs(command)
+        and Path(command).stem.lower() in _NODE_COMMANDS
+        and shutil.which(command) is None
+    ]
+    if not missing:
+        return
+    from ..setup.node import activate_runtime, ensure_node, log_progress
+    from ..setup.protocol import StageError
+
+    try:
+        ensure_node(progress=log_progress(logger))
+    except StageError as exc:
+        logger.warning(
+            f"MCP servers {', '.join(missing)} need Node.js, and installing it "
+            f"failed: {exc.message}. Run 'EvoSci setup' to retry."
+        )
+        return
+    except Exception as exc:
+        # Unpacking can still raise outside StageError (zipfile's
+        # NotImplementedError / RuntimeError, lzma.LZMAError). This hook runs
+        # before every MCP load; letting it raise would drop all servers, not
+        # just the Node ones.
+        logger.warning(
+            f"MCP servers {', '.join(missing)} need Node.js, and installing it "
+            f"failed unexpectedly: {exc!r}. Run 'EvoSci setup' to retry.",
+            exc_info=True,
+        )
+        return
+    activate_runtime()
+
+
 def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Convert YAML config to ``MultiServerMCPClient`` connections format.
 
@@ -936,6 +987,9 @@ async def _load_tools(
             "Install with: pip install langchain-mcp-adapters"
         ) from None
 
+    # May download Node (in the CLI process only); off the event loop so the
+    # running session stays responsive.
+    await asyncio.to_thread(_ensure_node_for_stdio, config)
     connections = _build_connections(config)
     if not connections:
         return {}

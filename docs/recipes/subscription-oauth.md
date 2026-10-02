@@ -6,8 +6,8 @@ Requests are routed through [ccproxy](https://pypi.org/project/ccproxy-api/),
 a local proxy that authenticates with the same OAuth tokens your Claude Code
 or Codex CLI login produced.
 
-This recipe covers both providers, including two non-obvious pitfalls on the
-ChatGPT/Codex path that produce misleading errors.
+This recipe covers both providers, including three non-obvious pitfalls on the
+ChatGPT/Codex path that produce misleading errors or behavior.
 
 ---
 
@@ -105,13 +105,13 @@ EvoSci config set model            gpt-5.5
 EvoSci config set reasoning_effort high     # optional; see note below
 ```
 
-### 3. Know the two Codex-route pitfalls
+### 3. Know the three Codex-route pitfalls
 
 The ChatGPT Codex backend is not a plain OpenAI-compatible API, and ccproxy's
-defaults interact badly with it in two ways. **EvoScientist handles both
-automatically as of [#324](https://github.com/EvoScientist/EvoScientist/pull/324)**
-— read this section if you are on an older version, run your own ccproxy
-instance (e.g. as a launchd/systemd service), or need to debug the errors.
+defaults interact badly with it in three ways. **EvoScientist handles all of
+them automatically when it starts ccproxy itself** — read this section if you
+are on an older version, run your own ccproxy instance (e.g. as a
+launchd/systemd service), or need to debug the errors.
 
 #### Pitfall A — ccproxy silently rewrites your model
 
@@ -126,14 +126,18 @@ The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT accou
 ```
 
 **Fix:** disable the mappings so requested models pass through unmodified.
-EvoScientist (with #324) generates this config and passes it via
-`ccproxy serve --config` when it starts ccproxy itself. For a ccproxy
-instance you manage yourself, add this section to your global config
-(`~/.config/ccproxy/config.toml`) and restart it:
+When EvoScientist starts ccproxy itself it sets these two keys through
+ccproxy's environment overrides (`PLUGINS__CODEX__MODEL_MAPPINGS=[]`,
+`PLUGINS__CODEX__INJECT_DETECTION_PAYLOAD=false`), which layer on top of any
+config file ccproxy finds on its own, so your other ccproxy settings keep
+working. (`ccproxy serve --config` does not reach the server's plugin
+settings.) For a ccproxy instance you manage yourself, add this section to
+your global config (`~/.config/ccproxy/config.toml`) and restart it:
 
 ```toml
 [plugins.codex]
 model_mappings = []
+inject_detection_payload = false   # see Pitfall C
 ```
 
 (Note: ccproxy loads only the first config file it finds — a `.ccproxy.toml`
@@ -157,6 +161,20 @@ route. It advertises the installed Codex CLI version, with
 it advertises the newer of the installed CLI version and EvoScientist's
 minimum fallback. If you probe the route manually (curl, scripts), supply
 the headers yourself — see Verification below.
+
+#### Pitfall C — ccproxy injects the Codex CLI system prompt
+
+By default ccproxy prepends the Codex CLI's own system prompt to every
+request's `instructions`, ahead of EvoScientist's. That prompt tells the model
+to edit files with an `apply_patch` tool, which EvoScientist does not provide
+(it edits through `edit_file` / `write_file`). The model then tries to run
+`apply_patch` as a shell command, and may refuse to edit files at all once it
+finds the command missing.
+
+**Fix:** `inject_detection_payload = false` in the same `[plugins.codex]`
+section. EvoScientist sets it through the environment override above; the
+Codex backend accepts requests that carry only EvoScientist's own
+instructions.
 
 ### 4. Model availability is account-specific
 
@@ -223,6 +241,7 @@ Success is an SSE stream ending in `response.completed` whose payload shows
 | `The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.` (you requested a different model) | ccproxy's default model mappings rewrote your model (Pitfall A) | Disable `model_mappings` and restart ccproxy |
 | `The '<model>' model requires a newer version of Codex. Please upgrade…` | Backend rejected the client identity (Pitfall B) | Use an EvoScientist build containing #324, or send Codex headers; `EVOSCIENTIST_CODEX_CLIENT_VERSION` is the explicit override |
 | `The '<model>' model is not supported…` for the model you actually requested | Your ChatGPT tier does not serve that ID | Try `gpt-5.4`; check tier |
+| The agent tries `apply_patch` or refuses to edit files, citing a developer instruction | ccproxy injected the Codex CLI system prompt (Pitfall C) | Set `inject_detection_payload = false` and restart ccproxy |
 | `Run: ccproxy auth login codex` (or `claude_api`) on startup | No OAuth credentials on this machine | Run the login command shown |
 | `ccproxy not found` | OAuth extra not installed | `pip install 'evoscientist[oauth]'` |
 | Config change has no effect | A long-running ccproxy instance predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | Restart that ccproxy instance; check for a shadowing config file |

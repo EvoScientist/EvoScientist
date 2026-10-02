@@ -40,7 +40,7 @@ from ..gateway import (
     GraphGateway,
     GraphTarget,
     RuntimeGateways,
-    create_runtime_gateways,
+    create_runtime_gateways_for_config,
 )
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
@@ -287,6 +287,7 @@ async def _resolve_startup_session(
     workspace_dir: str | None,
     graph_gateway: GraphGateway,
     config: Any,
+    backend: str | None = None,
 ) -> _StartupSession:
     """Resolve/create the initial CLI session before shared REPL state exists."""
     if not requested_thread_id:
@@ -330,6 +331,7 @@ async def _resolve_startup_session(
             await _sync_background_agent_server_workspace(
                 config,
                 workspace_dir=resolved_workspace,
+                backend=backend,
             )
         except WorkspaceMismatchError as exc:
             console.print(f"[red]{exc}[/red]")
@@ -445,6 +447,12 @@ def cmd_interactive(
         )
         return
 
+    from ..config import GatewaySurface, resolve_gateway_backend
+    from .commands import warn_server_backend_hitl_caveats
+
+    gateway_backend = resolve_gateway_backend(config, GatewaySurface.INTERACTIVE)
+    warn_server_backend_hitl_caveats(gateway_backend, surface_label="interactive CLI")
+
     from .. import paths
 
     memory_dir = str(paths.MEMORIES_DIR)
@@ -520,7 +528,9 @@ def cmd_interactive(
         fallback_display=lambda text, style: console.print(text, style=style)
     )
 
-    runtime_gateways = create_runtime_gateways(events=event_sink)
+    runtime_gateways = create_runtime_gateways_for_config(
+        config, backend=gateway_backend, events=event_sink
+    )
     graph_gateway = runtime_gateways.graph_gateway
     requested_thread_id = thread_id
 
@@ -774,6 +784,7 @@ def cmd_interactive(
                 workspace_dir=state["workspace_dir"],
                 graph_gateway=graph_gateway,
                 config=config,
+                backend=gateway_backend,
             )
             state["thread_id"] = startup.thread_id
             state["workspace_dir"] = startup.workspace_dir
@@ -845,6 +856,7 @@ def cmd_interactive(
                         await _sync_background_agent_server_workspace(
                             config,
                             workspace_dir=workspace_dir,
+                            backend=gateway_backend,
                         )
                     except WorkspaceMismatchError as exc:
                         # Another EvoSci process owns the langgraph dev
@@ -1014,11 +1026,15 @@ def cmd_interactive(
                                 timeout=30,
                             )
 
-                    def _channel_hitl_prompt(
-                        action_requests: list,
-                    ) -> list[dict] | None:
+                    def _channel_hitl_outcome(
+                        action_requests: list, human_budget_exhausted: bool
+                    ):
                         """Send HITL approval prompt to channel user and wait for reply."""
-                        return _ch_mod.channel_hitl_prompt(action_requests, msg)
+                        return _ch_mod.channel_hitl_prompt(
+                            action_requests,
+                            msg,
+                            human_budget_exhausted=human_budget_exhausted,
+                        )
 
                     def _channel_ask_user(ask_user_data: dict) -> dict:
                         """Send ask_user questions to channel user and wait for reply."""
@@ -1122,7 +1138,7 @@ def cmd_interactive(
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
-                            hitl_prompt_fn=_channel_hitl_prompt,
+                            hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,
                             status_footer_builder=_stream_status_footer,

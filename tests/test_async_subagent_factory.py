@@ -92,10 +92,15 @@ def test_factory_requests_async_safe_middleware(
 
     build_async_subagent_graph("writing-agent")
 
-    # The contract: factory MUST pass async-safe mode and the source agent name.
+    # The contract: factory MUST pass async-safe mode, the source agent name,
+    # and its backend — the backend is what makes the per-run
+    # SummarizationMiddleware subclass replace the frozen-window built-in in
+    # the deployed graph (#466).
     mock_get_mw.assert_called_once_with(
         for_async_subagent=True,
         memory_source_agent="writing-agent",
+        backend=mock_backend.return_value,
+        chat_model=mock_chat.return_value,
     )
     subagents = mock_create.call_args.kwargs["subagents"]
     assert subagents[0]["name"] == "general-purpose"

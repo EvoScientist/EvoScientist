@@ -51,6 +51,7 @@ FIELD_CHANNELS: dict[str, str] = {
     " not by graph construction",
     "shell_allow_list": "per-call client-side approval policy, read fresh at"
     " each HITL interrupt (channels/interaction.py, stream/display.py)",
+    "mirror": "download source, read from the config file at each install",
 }
 
 #: Channel justification for each prefix-based exclusion.

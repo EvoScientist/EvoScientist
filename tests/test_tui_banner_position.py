@@ -386,3 +386,20 @@ def _assert_banner_at_top(chat, welcome, label: str = "") -> None:
     assert chat.scroll_y <= 1, (
         f"banner must stay at top{suffix}, scroll_y={chat.scroll_y}"
     )
+
+
+async def test_agent_python_notices_are_shown_in_the_app(monkeypatch):
+    """Textual hides terminal output while the app runs, so the hint and the
+    server-python warning must reach the user as notifications."""
+    from EvoScientist.cli import tui_interactive as tui_mod
+
+    notice = "Run `EvoSci setup` [/x]"
+    monkeypatch.setattr(tui_mod, "_agent_python_notices", lambda: [notice])
+    app = await _capture_app(monkeypatch)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        (shown,) = [n for n in app._notifications if n.message == notice]
+        assert shown.severity == "warning"
+        assert shown.markup is False

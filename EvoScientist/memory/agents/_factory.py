@@ -89,10 +89,12 @@ def build_memory_agent_graph(
 
     from ...backends import build_memory_agent_backend
     from ...EvoScientist import _ensure_auxiliary_chat_model
+    from ...middleware.utils import structured_output_for
 
+    model = _ensure_auxiliary_chat_model()
     kwargs: dict[str, Any] = {}
     if response_format is not None:
-        kwargs["response_format"] = response_format
+        model, kwargs["response_format"] = structured_output_for(model, response_format)
 
     if backend is None:
         backend = build_memory_agent_backend(
@@ -102,7 +104,7 @@ def build_memory_agent_graph(
 
     agent = create_deep_agent(
         name=name,
-        model=_ensure_auxiliary_chat_model(),
+        model=model,
         system_prompt=system_prompt,
         tools=list(tools),
         backend=backend,

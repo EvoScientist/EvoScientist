@@ -14,7 +14,6 @@ import os
 import re
 import subprocess
 import warnings
-from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
 
@@ -58,28 +57,43 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 }
 
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
-# installed versions are advertised automatically.
-_CODEX_CLIENT_VERSION_FALLBACK = "0.144.1"
+# installed versions are advertised automatically. The backend gates models on
+# it (gpt-6-* is refused as "not supported" at 0.144.1).
+_CODEX_CLIENT_VERSION_FALLBACK = "0.156.1"
+_CODEX_VERSION_TIMEOUT_SECONDS = 10
+_installed_codex_version = ""
+_codex_probe_disabled = False
 
 
-@lru_cache(maxsize=1)
 def _installed_codex_client_version() -> str:
-    """Return the installed Codex CLI version, or an empty string."""
+    """Return the installed Codex CLI version, or an empty string.
+
+    A success and a missing binary are cached; a timeout or non-zero exit
+    (e.g. mid-upgrade) is retried on the next call.
+    """
+    global _installed_codex_version, _codex_probe_disabled
+    if _installed_codex_version or _codex_probe_disabled:
+        return _installed_codex_version
     try:
         result = subprocess.run(
             ["codex", "--version"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_CODEX_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
+    except FileNotFoundError:
+        _codex_probe_disabled = True
+        return ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
     if result.returncode != 0:
         return ""
     match = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout + result.stderr)
-    return match.group(1) if match else ""
+    if match:
+        _installed_codex_version = match.group(1)
+    return _installed_codex_version
 
 
 def _resolve_codex_client_version() -> str:
@@ -275,6 +289,33 @@ def _enable_openrouter_429_retry(chat_model: Any) -> None:
     retry_config.status_codes_override = ["429", "5XX"]
 
 
+# Claude models from before adaptive thinking (4.6). A closed set, so any newer id,
+# including one langchain-anthropic has no profile for yet, counts as current.
+_PRE_ADAPTIVE_CLAUDE = re.compile(
+    r"claude-(3|(haiku|sonnet|opus)-4-[015](-|$)|(sonnet|opus)-4-\d{8})"
+)
+
+
+def _is_current_claude(model_id: str) -> bool:
+    return model_id.startswith("claude-") and not _PRE_ADAPTIVE_CLAUDE.match(model_id)
+
+
+def _fill_claude_structured_output(chat_model: Any, model_id: str) -> None:
+    """Declare native structured output for a current Claude id that
+    langchain-anthropic has no profile for yet; without it agents fall back to
+    forced tool calling, which newer Claude models reject."""
+    if not _is_current_claude(model_id):
+        return
+    profile = getattr(chat_model, "profile", None)
+    if isinstance(profile, dict) and "structured_output" in profile:
+        return
+    base = profile if isinstance(profile, dict) else {}
+    try:
+        chat_model.profile = {**base, "structured_output": True}
+    except Exception:
+        pass
+
+
 def _apply_auto_config(
     provider: str,
     model_id: str,
@@ -287,9 +328,9 @@ def _apply_auto_config(
     Mutates *kwargs* in place.  Only sets keys that the caller hasn't already
     provided, so explicit user settings are never overridden.
     """
-    # No langchain-anthropic profile for Opus 5.5 yet, so max_tokens would fall
-    # back to 4096; applies on every route (explicit thinking, ccproxy, ...).
-    if provider == "anthropic" and model_id.endswith("opus-5-5"):
+    # Current Claude models all output up to 128K (their profiles agree); without a
+    # profile langchain-anthropic falls back to 4096. Applies on every route.
+    if provider == "anthropic" and _is_current_claude(model_id):
         kwargs.setdefault("max_tokens", 128000)
 
     # Anthropic: extended thinking
@@ -310,9 +351,7 @@ def _apply_auto_config(
             if is_third_party and _is_mandatory_thinking_kimi(model_id):
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
                 kwargs.setdefault("max_tokens", 16000)
-        elif "fable" in model_id or model_id.endswith(
-            ("opus-5", "opus-5-5", "sonnet-5", "4-6", "4-7", "4-8")
-        ):
+        elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")
         else:
@@ -666,6 +705,7 @@ def get_chat_model(
     if provider == "anthropic":
         _patch_anthropic_strip_foreign_reasoning()
         _patch_anthropic_structured_output()
+        _fill_claude_structured_output(chat_model, model_id)
 
     apply_known_context_window(chat_model)
 

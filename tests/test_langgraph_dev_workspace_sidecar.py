@@ -373,6 +373,78 @@ def test_reuse_clears_drift_flag_on_matching_fingerprint(
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
+def test_server_config_fingerprint_ignores_the_agent_python(monkeypatch):
+    """The fingerprint covers launch settings only; a PATH difference is
+    reported on its own (``AGENT_PYTHON_DRIFT``)."""
+    from EvoScientist.setup import research_env
+
+    cfg = manager.EvoScientistConfig()
+    monkeypatch.setattr(research_env, "agent_python", lambda: None)
+    base = manager._server_config_fingerprint(cfg)
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+    assert manager._server_config_fingerprint(cfg) == base
+
+
+def test_sidecar_records_the_agent_python_only_when_passed(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1, agent_python=None)
+    assert json.loads((tmp_path / "ws.json").read_text())["agent_python"] is None
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
+    assert "agent_python" not in json.loads((tmp_path / "ws.json").read_text())
+
+
+def _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, recorded):
+    """Reuse a server whose sidecar records ``recorded`` (or nothing, when
+    ``recorded`` is ``...``) from a session that resolves the research env."""
+    from EvoScientist.setup import research_env
+
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    fp = manager._server_config_fingerprint(cfg)
+    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
+    if recorded is not ...:
+        manager._write_workspace_sidecar(
+            workspace_dir=tmp_path / "A",
+            pid=99999,
+            config_fingerprint=fp,
+            agent_python=recorded,
+        )
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
+
+
+def test_reuse_warns_when_the_server_python_differs(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A server launched from a shell with conda active, reused from one
+    without: its agents keep conda's python."""
+    _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, "/conda/bin/python")
+    assert "/conda/bin/python" in manager.AGENT_PYTHON_DRIFT
+    assert "/env/bin/python" in manager.AGENT_PYTHON_DRIFT
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
+
+
+def test_reuse_does_not_warn_when_the_server_python_matches(
+    tmp_path, monkeypatch, runtime_paths
+):
+    _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, "/env/bin/python")
+    assert manager.AGENT_PYTHON_DRIFT is None
+
+
+def test_reuse_does_not_warn_without_a_recorded_python(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A server started by an older version has no record."""
+    _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, ...)
+    assert manager.AGENT_PYTHON_DRIFT is None
+
+
 def test_stop_recorded_server_none_when_no_pid_file(
     tmp_path, monkeypatch, runtime_paths
 ):
@@ -454,6 +526,51 @@ def test_stop_recorded_server_kills_owned_langgraph_process(
         if victim.poll() is None:
             victim.kill()
         victim.wait()
+
+
+def test_stop_inflight_owned_server_ignores_disk_record(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """The launcher's mid-start fallback stops only the in-memory owned process.
+    With nothing spawned yet (pre-Popen), the on-disk PID file still names a
+    different session's backend — it must be left untouched, not killed."""
+    import subprocess
+    import sys
+
+    victim = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "langgraph"]
+    )
+    try:
+        pid_file = tmp_path / "pid.txt"
+        pid_file.write_text(str(victim.pid))
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, pid_file=pid_file)
+        )
+        monkeypatch.setattr(manager, "_PROCESS", None)  # nothing spawned yet
+        assert manager.stop_inflight_owned_server() is None
+        assert victim.poll() is None, "disk-recorded server must not be killed"
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_stop_inflight_owned_server_stops_the_owned_process(monkeypatch, runtime_paths):
+    """Once our own child is spawned (``_PROCESS`` set), a mid-start stop still
+    tears it down, so the close-during-boot orphan is cleaned up."""
+    import subprocess
+    import sys
+
+    owned = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        monkeypatch.setattr(manager, "RUNTIME", runtime_paths)
+        monkeypatch.setattr(manager, "_PROCESS", owned)
+        assert manager.stop_inflight_owned_server() == owned.pid
+        owned.wait(timeout=5)
+        assert owned.poll() is not None, "owned in-flight process must be stopped"
+    finally:
+        if owned.poll() is None:
+            owned.kill()
+            owned.wait()
 
 
 def test_stop_recorded_server_cleans_corrupt_pid_file(

@@ -248,6 +248,77 @@ def onboard(
 
 
 # =============================================================================
+# Setup command
+# =============================================================================
+
+
+@app.command()
+def setup(
+    manifest: bool = typer.Option(
+        False, "--manifest", help="Print the setup stages as JSON and exit"
+    ),
+    stage: str | None = typer.Option(
+        None, "--stage", help="Run only this stage (ids from --manifest)"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON event per line instead of progress text"
+    ),
+    cn: bool = typer.Option(
+        False, "--cn", help="Download from mainland China mirrors and remember it"
+    ),
+):
+    """Install what EvoScientist needs beyond the Python package (Node.js, and a
+    Python for the agent's shell when none is on PATH).
+
+    Runs every stage that applies to this platform, in order. With ``--json``
+    stdout carries only the JSON event lines; everything else goes to stderr.
+    """
+    import json
+    import sys
+
+    from ..config import load_config, set_config_value
+    from ..setup import STAGES, get_stage, run_stages
+    from ..setup import manifest as setup_manifest
+    from ..setup.protocol import ConsoleEmitter, JsonEmitter
+
+    if manifest:
+        sys.stdout.write(json.dumps(setup_manifest()) + "\n")
+        return
+
+    if json_output:
+        # The shared console also carries log warnings; stdout belongs to the
+        # event lines.
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+
+    selected = tuple(s for s in STAGES if s.applies())
+    if stage is not None:
+        found = get_stage(stage)
+        if found is None:
+            known = ", ".join(s.id for s in STAGES)
+            typer.echo(f"Unknown stage {stage!r}. Known stages: {known}", err=True)
+            raise typer.Exit(2)
+        selected = (found,)
+
+    if cn:
+        try:
+            set_config_value("mirror", "cn")
+        except OSError as exc:
+            # Saving the choice is secondary; this run still uses the mirror.
+            logging.getLogger(__name__).warning(
+                f"Could not save mirror: cn to the config ({exc}); "
+                "using the mirror for this run only."
+            )
+    mirror = "cn" if cn else load_config().mirror
+
+    emit = JsonEmitter() if json_output else ConsoleEmitter(console)
+    code = run_stages(selected, emit, mirror)
+    if code:
+        raise typer.Exit(code)
+
+
+# =============================================================================
 # `EvoSci configure <section>` — re-run one onboarding section
 # =============================================================================
 
@@ -496,12 +567,19 @@ class CompactSummaryRenderable:
         yield render_compact_summary_panel(self.summary_text)
 
 
-def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
+def _ensure_async_subagent_server(
+    config: Any, *, workspace_dir: str, backend: str | None = None
+) -> None:
     """Start the langgraph dev subprocess for background agent work.
 
     Shared by both the interactive entry and the serve entry so the
     user-visible status message and workspace-mismatch handling stay in one
     place.
+
+    ``backend`` is the calling surface's resolved gateway backend, forwarded to
+    ``ensure_langgraph_dev`` so the spawn/deploy-mode decision follows the
+    surface's choice rather than re-reading the global flag. ``None`` keeps the
+    global-read behavior.
 
     Raises ``typer.Exit(1)`` (after surfacing a red error) when an
     externally-managed langgraph dev is already running for a different
@@ -523,7 +601,7 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
             "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
-            ensure_langgraph_dev(config, workspace_dir=workspace_dir)
+            ensure_langgraph_dev(config, workspace_dir=workspace_dir, backend=backend)
             _reconcile_autoskill_schedule(config, workspace_dir=workspace_dir)
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -538,6 +616,8 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
             "them with [bold]EvoSci server stop[/bold], then restart "
             "EvoSci.[/yellow]"
         )
+    if _lg_manager.AGENT_PYTHON_DRIFT is not None:
+        console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_PYTHON_DRIFT)}[/yellow]")
 
     # The backend is shared by every UI mode, so the exposure warning lives
     # here, not just in deploy/WebUI. Gated on the server being up: warning
@@ -554,6 +634,30 @@ def _ensure_async_subagent_server(config: Any, *, workspace_dir: str) -> None:
             f"the agent can run shell. Use --host 127.0.0.1 on untrusted "
             f"networks.[/bold red]"
         )
+
+
+def warn_server_backend_hitl_caveats(
+    backend: str | None, *, surface_label: str
+) -> None:
+    """Warn that the server gateway backend is lossy for a HITL surface.
+
+    The interactive CLI and TUI create a per-session workspace and switch models
+    mid-session, but on the server backend neither reaches the run: execution
+    stays in the server's import-time workspace, and per-run config (model,
+    active teams, HITL suppression) is dropped when a turn resumes after a tool
+    approval. Both are gaps the server path has not closed yet, so a surface
+    that opts into the server backend surfaces this once at startup rather than
+    silently misrouting.
+    """
+    if backend != "langgraph_server":
+        return
+    console.print(
+        f"[yellow]⚠ Server gateway backend active for the {surface_label}. "
+        "Until the remaining gaps close, the per-session workspace is not "
+        "applied server-side (execute / write_file run in the server's "
+        "workspace), and a model or team switch is dropped for the rest of a "
+        "turn that resumes after a tool approval.[/yellow]"
+    )
 
 
 def _reconcile_autoskill_schedule(config: Any, *, workspace_dir: str) -> None:
@@ -594,6 +698,7 @@ async def _sync_background_agent_server_workspace(
     config: Any,
     *,
     workspace_dir: str,
+    backend: str | None = None,
     status_message: str = (
         "[dim]Syncing background agent server to resumed workspace...[/dim]"
     ),
@@ -604,6 +709,10 @@ async def _sync_background_agent_server_workspace(
     background workers require the server even when async subagents are disabled.
     WorkspaceMismatchError is left for callers to handle according to their UI
     flow.
+
+    ``backend`` is the calling surface's resolved gateway backend, forwarded so
+    the spawn/deploy-mode decision follows the surface's choice; ``None`` keeps
+    the global-read behavior.
     """
     import asyncio
 
@@ -614,6 +723,7 @@ async def _sync_background_agent_server_workspace(
             ensure_langgraph_dev,
             config,
             workspace_dir=workspace_dir,
+            backend=backend,
         )
         await asyncio.to_thread(
             _reconcile_autoskill_schedule,
@@ -948,6 +1058,7 @@ class ServeRuntimeState:
     runtime_gateways: "RuntimeGateways"
     async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
+    gateway_backend: str | None = None
 
     def set_agent(
         self,
@@ -1046,6 +1157,7 @@ async def _apply_serve_resume_state(
             await _sync_background_agent_server_workspace(
                 effective_config,
                 workspace_dir=new_workspace,
+                backend=runtime_state.gateway_backend,
             )
             workspace_update = (new_workspace, new_agent)
         except Exception:
@@ -1252,8 +1364,10 @@ def _serve_process_message(
                 timeout=30,
             )
 
-    def _hitl_prompt(action_requests: list) -> list[dict] | None:
-        return channel_hitl_prompt(action_requests, msg)
+    def _hitl_outcome(action_requests: list, human_budget_exhausted: bool):
+        return channel_hitl_prompt(
+            action_requests, msg, human_budget_exhausted=human_budget_exhausted
+        )
 
     def _ask_user_prompt(ask_user_data: dict) -> dict:
         return channel_ask_user_prompt(ask_user_data, msg)
@@ -1332,7 +1446,7 @@ def _serve_process_message(
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
-                hitl_prompt_fn=_hitl_prompt,
+                hitl_outcome_fn=_hitl_outcome,
                 ask_user_prompt_fn=_ask_user_prompt,
                 cancel_scope=_channel_message_cancel_scope(msg),
                 gateway=runtime_gateways.graph_gateway,
@@ -1545,9 +1659,13 @@ def serve(
     set_workspace_root(ws)
     ensure_dirs()
 
+    from ..config import GatewaySurface, resolve_gateway_backend
+
+    gateway_backend = resolve_gateway_backend(config, GatewaySurface.SERVE)
+
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    _ensure_async_subagent_server(config, workspace_dir=ws)
+    _ensure_async_subagent_server(config, workspace_dir=ws, backend=gateway_backend)
 
     if config.dangerous_mode:
         from ._constants import DANGEROUS_BANNER_LABEL, DANGEROUS_BANNER_MESSAGE
@@ -1559,9 +1677,11 @@ def serve(
     console.print("[dim]Loading agent...[/dim]")
     agent = _load_agent(workspace_dir=ws, config=config, runtime=async_runtime)
 
-    from ..gateway import create_runtime_gateways
+    from ..gateway import create_runtime_gateways_for_config
 
-    runtime_gateways = create_runtime_gateways()
+    runtime_gateways = create_runtime_gateways_for_config(
+        config, backend=gateway_backend
+    )
     tid = async_runtime.run_sync(
         lambda: runtime_gateways.graph_gateway.create_thread(
             GraphTarget(workspace_dir=ws)
@@ -1578,6 +1698,7 @@ def serve(
         config=config,
         runtime_gateways=runtime_gateways,
         async_runtime=async_runtime,
+        gateway_backend=gateway_backend,
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
@@ -2459,21 +2580,39 @@ def _main_callback(
             return
         config.ui_backend = "cli"
 
+    # Resolve the gateway backend for whichever surface this callback launches:
+    # single-shot when a prompt is given, else the interactive CLI / TUI (the
+    # same value each inner entry re-resolves for its own factory call). Drives
+    # both the pre-spawn deploy mode and the single-shot factory below.
+    from ..config import GatewaySurface, resolve_gateway_backend
+
+    if prompt:
+        _gateway_surface = GatewaySurface.SINGLE_SHOT
+    elif normalize_ui_backend(config.ui_backend) == "tui":
+        _gateway_surface = GatewaySurface.TUI
+    else:
+        _gateway_surface = GatewaySurface.INTERACTIVE
+    gateway_backend = resolve_gateway_backend(config, _gateway_surface)
+
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    _ensure_async_subagent_server(config, workspace_dir=workspace_dir)
+    _ensure_async_subagent_server(
+        config, workspace_dir=workspace_dir, backend=gateway_backend
+    )
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer
         import asyncio
 
-        from ..gateway import create_runtime_gateways
+        from ..gateway import create_runtime_gateways_for_config
         from ..sessions import get_checkpointer
         from ..stream.json_sink import stream_json
         from .interactive import _wait_for_memory_workers_before_exit, cmd_run
         from .resume_hint import print_resume_hint
 
-        runtime_gateways = create_runtime_gateways()
+        runtime_gateways = create_runtime_gateways_for_config(
+            config, backend=gateway_backend
+        )
         graph_gateway = runtime_gateways.graph_gateway
 
         async def _single_shot():
