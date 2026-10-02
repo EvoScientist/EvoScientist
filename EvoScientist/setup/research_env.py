@@ -28,12 +28,22 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
-from .protocol import Emitter, StageError, StageResult, make_event
+from .protocol import CN_MIRROR_HINT, Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
 
-PACKAGES = ("numpy", "pandas", "matplotlib", "scipy")
+# The versions the environment gets, tested together. The newest set with
+# wheels for Python 3.11-3.14 on every supported platform (numpy 2.5 and scipy
+# 1.18 dropped 3.11). Update at release time, like the package's constraints.
+PINS = {
+    "numpy": "2.4.6",
+    "pandas": "3.0.6",
+    "matplotlib": "3.11.2",
+    "scipy": "1.17.1",
+}
+PACKAGES = tuple(PINS)
 CN_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 _READY_MARKER = ".evoscientist-ready"
@@ -53,8 +63,27 @@ _VENV_TIMEOUT = 300
 _PIP_TIMEOUT = 1800
 # The first matplotlib import builds its font cache.
 _IMPORT_TIMEOUT = 300
+# Prints the Python version, then one "failed <name>: <error>" line per
+# package that does not import; exits 1 if any failed. Each package is tried
+# on its own, so a repair can reinstall only what is broken.
 _IMPORT_CHECK = (
-    f"import platform, {', '.join(PACKAGES)}; print(platform.python_version())"
+    "import importlib, platform, sys\n"
+    "print(platform.python_version())\n"
+    "failed = False\n"
+    f"for name in {PACKAGES!r}:\n"
+    "    try:\n"
+    "        importlib.import_module(name)\n"
+    "    except Exception as exc:\n"
+    "        failed = True\n"
+    "        print(f'failed {name}: {exc!r}')\n"
+    "sys.exit(1 if failed else 0)\n"
+)
+_FAILED_LINE_RE = re.compile(r"^failed (\w+):", re.MULTILINE)
+# pip's last words when no candidate matches a requirement; "from versions"
+# lists what the index offers ("none" when it was not reached).
+_NO_MATCH_RE = re.compile(
+    r"satisfies the requirement (?P<name>[A-Za-z0-9_.-]+)==\S+ "
+    r"\(from versions: (?P<versions>[^)]*)\)"
 )
 _WINDOWSAPPS_RE = re.compile(r"[\\/]microsoft[\\/]windowsapps[\\/]", re.IGNORECASE)
 # Publisher ids of the Python Software Foundation's packages: the Python
@@ -268,8 +297,19 @@ def find_usable_python() -> str | None:
     return found
 
 
-def _import_check(env: Path) -> str | None:
-    """The environment's Python version when all packages import, else None.
+class ImportCheck(NamedTuple):
+    """The result of :func:`_import_check`."""
+
+    version: str | None  # None when the check did not run
+    failed: tuple[str, ...]  # the packages that do not import
+
+    @property
+    def ok(self) -> bool:
+        return self.version is not None and not self.failed
+
+
+def _import_check(env: Path) -> ImportCheck:
+    """Import each package in the environment's Python, one by one.
 
     Isolated (``-I``) like every command that maintains the environment: the
     caller's cwd and ``PYTHON*`` variables could shadow a package and send a
@@ -282,11 +322,20 @@ def _import_check(env: Path) -> str | None:
         result = _run(cmd, _IMPORT_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning(f"Import check in {env} failed: {exc}")
-        return None
-    if result.returncode != 0:
+        return ImportCheck(None, PACKAGES)
+    lines = result.stdout.splitlines()
+    version = lines[0].strip() if lines and lines[0].strip() else None
+    failed = tuple(
+        name for name in _FAILED_LINE_RE.findall(result.stdout) if name in PINS
+    )
+    if result.returncode != 0 and not failed:
+        # Python itself failed (e.g. before the first import); treat every
+        # package as failed so a repair reinstalls them all.
+        version, failed = None, PACKAGES
+    check = ImportCheck(version, failed)
+    if not check.ok:
         logger.warning(f"Import check in {env} failed:\n{result.stdout}")
-        return None
-    return _last_line(result.stdout)
+    return check
 
 
 # --------------------------------------------------------------------------- #
@@ -355,44 +404,88 @@ def _create_venv(env: Path) -> None:
     raise StageError("install_failed", message)
 
 
-def _pip_install(env: Path, mirror: str) -> None:
-    """Install :data:`PACKAGES` without upgrading what is already there."""
-    cmd = [
-        str(_env_python(env)),
-        "-I",
-        "-m",
-        "pip",
-        "install",
-        "--only-binary",
-        ":all:",
-        "--disable-pip-version-check",
-        "--no-input",
-        *PACKAGES,
-    ]
-    if mirror == "cn":
-        cmd += ["--index-url", CN_INDEX_URL]
-    try:
-        result = _run(cmd, _PIP_TIMEOUT)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise StageError("install_failed", f"pip install failed: {exc}") from exc
-    if result.returncode == 0:
-        logger.info(f"pip install output:\n{result.stdout}")
-    else:
-        # The error event keeps pip's last line; network errors (offline, a
-        # blocked index) come earlier in the output.
+def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
+    """Install ``packages`` at their :data:`PINS`; returns the ones installed
+    without the pin.
+
+    Without ``--upgrade``, so packages already there stay as they are unless a
+    missing one requires a change. When the pinned version of a package has
+    no wheel for this interpreter (pip's "from versions:" lists others), that
+    package is installed without the pin and pip takes its newest wheel, once
+    per package. "from versions: none" means the index was not reached (or
+    has nothing for this interpreter), which no fallback fixes.
+    """
+    requirements = {name: f"{name}=={PINS[name]}" for name in packages}
+    unpinned: list[str] = []
+    while True:
+        cmd = [
+            str(_env_python(env)),
+            "-I",
+            "-m",
+            "pip",
+            "install",
+            "--only-binary",
+            ":all:",
+            "--disable-pip-version-check",
+            "--no-input",
+            *requirements.values(),
+        ]
+        if mirror == "cn":
+            cmd += ["--index-url", CN_INDEX_URL]
+        try:
+            result = _run(cmd, _PIP_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise StageError("install_failed", f"pip install failed: {exc}") from exc
+        if result.returncode == 0:
+            logger.info(f"pip install output:\n{result.stdout}")
+            return unpinned
+        # The error event keeps one line; the cause (e.g. network errors) can
+        # be earlier in the output.
         logger.warning(f"pip install failed:\n{result.stdout}")
-        raise StageError(
-            "install_failed", f"pip install failed: {_last_line(result.stdout)}"
-        )
+        match = _NO_MATCH_RE.search(result.stdout)
+        name = match["name"].lower() if match else None
+        if (
+            match is not None
+            and match["versions"].strip() != "none"
+            and name in requirements
+            and name not in unpinned
+        ):
+            logger.warning(
+                f"{requirements[name]} has no wheel for this Python; installing "
+                f"the newest wheel of {name} instead."
+            )
+            requirements[name] = name
+            unpinned.append(name)
+            continue
+        message = f"pip install failed: {_last_line(result.stdout)}"
+        if match is not None and match["versions"].strip() == "none":
+            message += (
+                " The package index was not reached, or has no wheel of it for"
+                " this Python."
+            )
+            if mirror != "cn":
+                message += f" {CN_MIRROR_HINT}"
+        raise StageError("install_failed", message)
 
 
-def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
-    """Try to fix a ready environment in place; its version, or None to rebuild.
+class EnvResult(NamedTuple):
+    """A ready research environment: its Python version, and the packages
+    this run installed without their pin (see :func:`_pip_install`)."""
+
+    version: str
+    unpinned: list[str]
+
+
+def _repair(
+    env: Path, mirror: str, failed: Sequence[str], report: ProgressFn
+) -> EnvResult | None:
+    """Try to fix a ready environment in place; None to rebuild it.
 
     A Python that does not start (e.g. its base interpreter was removed) cannot
-    be repaired. Otherwise missing packages are installed; a pip failure raises
-    and leaves the environment and its marker as they are, so the agent keeps a
-    mostly working Python.
+    be repaired. Otherwise only the ``failed`` packages are installed again, at
+    their pins, so a newer version of another package that the agent installed
+    stays. A pip failure raises and leaves the environment and its marker as
+    they are, so the agent keeps a mostly working Python.
     """
     python = str(_env_python(env))
     if _runs([python, "-I", "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
@@ -401,13 +494,14 @@ def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
     _sync_pip_config(env, mirror)
     # Below the build's first step (0.1): a repair that does not help falls
     # back to a rebuild, and progress must not jump backwards.
-    report(0.03, "Installing missing packages")
-    _pip_install(env, mirror)
+    report(0.03, f"Installing {', '.join(failed)}")
+    unpinned = _pip_install(env, mirror, failed)
     report(0.06, "Checking the packages")
-    return _import_check(env)
+    check = _import_check(env)
+    return EnvResult(check.version, unpinned) if check.ok else None
 
 
-def _build(env: Path, mirror: str, report: ProgressFn) -> str:
+def _build(env: Path, mirror: str, report: ProgressFn) -> EnvResult:
     try:
         (env / _READY_MARKER).unlink(missing_ok=True)
         if env.exists():
@@ -418,18 +512,17 @@ def _build(env: Path, mirror: str, report: ProgressFn) -> str:
     _create_venv(env)
     _sync_pip_config(env, mirror)
     report(0.2, f"Installing {', '.join(PACKAGES)}")
-    _pip_install(env, mirror)
+    unpinned = _pip_install(env, mirror, PACKAGES)
     report(0.9, "Checking the packages")
-    version = _import_check(env)
-    if version is None:
-        raise StageError(
-            "probe_failed", f"{', '.join(PACKAGES)} do not import in {env}."
-        )
-    return version
+    check = _import_check(env)
+    if not check.ok:
+        failed = ", ".join(check.failed) or ", ".join(PACKAGES)
+        raise StageError("probe_failed", f"{failed} do not import in {env}.")
+    return EnvResult(check.version, unpinned)
 
 
-def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> str:
-    """Make ``envs/default`` ready and return its Python version.
+def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> EnvResult:
+    """Make ``envs/default`` ready; returns its version and unpinned packages.
 
     A ready environment that still passes the import check is kept as it is,
     including the agent's own installs, and needs no network. One that fails
@@ -445,16 +538,16 @@ def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> str:
         env.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(env.parent / f"{env.name}.lock")):
             if is_ready(env):
-                version = _import_check(env)
-                if version is not None:
+                check = _import_check(env)
+                if check.ok:
                     _sync_pip_config(env, mirror)
-                    return version
-                version = _repair(env, mirror, report)
-                if version is not None:
-                    return version
-            version = _build(env, mirror, report)
-            (env / _READY_MARKER).write_text(version, encoding="utf-8")
-            return version
+                    return EnvResult(check.version, [])
+                result = _repair(env, mirror, check.failed, report)
+                if result is not None:
+                    return result
+            result = _build(env, mirror, report)
+            (env / _READY_MARKER).write_text(result.version, encoding="utf-8")
+            return result
     except OSError as exc:
         raise StageError(
             "install_failed",
@@ -597,9 +690,12 @@ def run_stage(emit: Emitter, mirror: str) -> StageResult:
             {"reason": "system_python", "python": system},
             status="skipped",
         )
-    version = ensure_research_env(mirror, report)
+    result = ensure_research_env(mirror, report)
     env = env_dir()
-    return StageResult(
-        f"Using Python {version} in {env}",
-        {"source": "venv", "path": str(env), "python": version},
-    )
+    detail = {"source": "venv", "path": str(env), "python": result.version}
+    message = f"Using Python {result.version} in {env}"
+    if result.unpinned:
+        # Their newest wheels were never tested together with the pins.
+        detail["unpinned"] = result.unpinned
+        message += f" ({', '.join(result.unpinned)} without the pinned version)"
+    return StageResult(message, detail)

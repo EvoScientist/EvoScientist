@@ -44,7 +44,21 @@ class FakeRunner:
         self.imports_ok = True
         # Results for the next import checks, used before ``imports_ok``.
         self.imports_script: list[bool] = []
+        # Packages a failing import check reports (all of them when empty).
+        self.failed_packages: list[str] = []
+        # Packages whose pinned version has no wheel for this interpreter.
+        self.no_wheel: set[str] = set()
+        # The index is not reached: every pin reports "from versions: none".
+        self.index_down = False
         self.system_ok: dict[str, bool] = {}
+
+    def pip_requirements(self) -> list[list[str]]:
+        """The requirements of each ``pip install`` call, in order."""
+        return [
+            [part for part in cmd[cmd.index("--no-input") + 1 :] if "--" not in part]
+            for cmd in self.calls
+            if self._kind(cmd) == "pip"
+        ]
 
     def kinds(self) -> list[str]:
         return [self._kind(cmd) for cmd in self.calls]
@@ -77,21 +91,49 @@ class FakeRunner:
                 cmd, 0 if self.venv_ok else 1, self.venv_output
             )
         if kind == "pip":
-            return subprocess.CompletedProcess(
-                cmd, 0 if self.pip_ok else 1, "" if self.pip_ok else "ERROR: offline"
-            )
+            return self._pip_install(cmd)
         if kind == "config":
             return self._pip_config(cmd)
         if kind == "imports":
             scripted = self.imports_script.pop(0) if self.imports_script else None
             ok = self.env_starts and (self.imports_ok if scripted is None else scripted)
-            return subprocess.CompletedProcess(cmd, 0 if ok else 1, "3.12.9\n")
+            if not self.env_starts:
+                return subprocess.CompletedProcess(cmd, 1, "")
+            failed = [] if ok else (self.failed_packages or list(re_env.PACKAGES))
+            output = "3.12.9\n" + "".join(
+                f"failed {name}: ModuleNotFoundError({name!r})\n" for name in failed
+            )
+            return subprocess.CompletedProcess(cmd, 0 if ok else 1, output)
         # Keyed by normcase: on Windows shutil.which returns the PATHEXT
         # spelling (python.EXE).
         system_ok = self.system_ok.get(os.path.normcase(cmd[0]))
         if system_ok is not None:
             return subprocess.CompletedProcess(cmd, 0 if system_ok else 1, "")
         return subprocess.CompletedProcess(cmd, 0 if self.env_starts else 1, "")
+
+    def _pip_install(self, cmd: list[str]) -> subprocess.CompletedProcess:
+        """pip's real wording for a pin without a wheel and an unreachable
+        index (pip 24.3); it stops at the first requirement it cannot match."""
+        if not self.pip_ok:
+            return subprocess.CompletedProcess(cmd, 1, "ERROR: offline")
+        for req in cmd[cmd.index("--no-input") + 1 :]:
+            if "==" not in req:
+                continue
+            name = req.split("==")[0]
+            if self.index_down:
+                versions = "none"
+            elif name in self.no_wheel:
+                versions = "1.18.0, 1.18.1"
+            else:
+                continue
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                "ERROR: Could not find a version that satisfies the requirement"
+                f" {req} (from versions: {versions})\n"
+                f"ERROR: No matching distribution found for {req}\n",
+            )
+        return subprocess.CompletedProcess(cmd, 0, "")
 
     @staticmethod
     def _pip_config(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -387,7 +429,9 @@ def test_stage_builds_the_environment(env):
     assert venv_cmd[0] == sys.executable
     assert pip_cmd[0] == str(re_env._env_python(env["env"]))
     assert pip_cmd[pip_cmd.index("--only-binary") + 1] == ":all:"
-    assert set(re_env.PACKAGES) <= set(pip_cmd)
+    assert env["run"].pip_requirements() == [
+        [f"{name}=={version}" for name, version in re_env.PINS.items()]
+    ]
     assert "--upgrade" not in pip_cmd
     assert "--index-url" not in pip_cmd
     assert not re_env._pip_config(env["env"]).exists()
@@ -413,6 +457,59 @@ def test_progress_keeps_going_forward_when_a_repair_falls_back_to_a_rebuild(env)
     assert "Creating the virtual environment" in [e["message"] for e in events]
     progress = [e["progress"] for e in events]
     assert progress == sorted(progress)
+
+
+def test_pin_without_a_wheel_falls_back_to_the_newest_wheel(env):
+    """pip lists other versions: the pin has no wheel for this Python."""
+    env["run"].no_wheel = {"scipy"}
+    result = re_env.run_stage(lambda event: None, "default")
+    assert result.status == "done"
+    assert result.detail["unpinned"] == ["scipy"]
+    first, second = env["run"].pip_requirements()
+    assert f"scipy=={re_env.PINS['scipy']}" in first
+    assert "scipy" in second
+    assert f"numpy=={re_env.PINS['numpy']}" in second
+
+
+def test_stage_without_a_fallback_has_no_unpinned_detail(env):
+    result = re_env.run_stage(lambda event: None, "default")
+    assert "unpinned" not in result.detail
+
+
+@pytest.mark.parametrize(("mirror", "hinted"), [("default", True), ("cn", False)])
+def test_unreachable_index_is_install_failed_without_a_fallback(env, mirror, hinted):
+    """pip says "from versions: none": the index was not reached."""
+    env["run"].index_down = True
+    with pytest.raises(StageError) as exc:
+        re_env.ensure_research_env(mirror)
+    assert exc.value.code == "install_failed"
+    assert (re_env.CN_MIRROR_HINT in exc.value.message) is hinted
+    assert len(env["run"].pip_requirements()) == 1
+    assert not re_env.is_ready(env["env"])
+
+
+def test_import_check_script_reports_each_failed_package():
+    """The real script, with ``json`` and a missing module standing in for the
+    four packages."""
+    script = re_env._IMPORT_CHECK.replace(
+        repr(re_env.PACKAGES), "('json', 'no_such_module_x')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script], capture_output=True, text=True
+    )
+    lines = result.stdout.splitlines()
+    assert result.returncode == 1
+    assert lines[0] == ".".join(map(str, sys.version_info[:3]))
+    assert lines[1:] == [
+        "failed no_such_module_x: ModuleNotFoundError(\"No module named 'no_such_module_x'\")"
+    ]
+
+
+def test_import_check_names_the_failed_packages(env, monkeypatch):
+    re_env.ensure_research_env("default")
+    env["run"].imports_ok = False
+    env["run"].failed_packages = ["scipy"]
+    assert re_env._import_check(env["env"]) == re_env.ImportCheck("3.12.9", ("scipy",))
 
 
 def test_failed_pip_leaves_no_ready_marker(env):
@@ -511,7 +608,7 @@ def test_import_check_ignores_the_callers_cwd_and_pythonpath(tmp_path, monkeypat
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     monkeypatch.setattr(re_env, "_env_python", lambda _env: Path(sys.executable))
     monkeypatch.setattr(re_env, "_IMPORT_CHECK", "import json; print('3.12.9')")
-    assert re_env._import_check(tmp_path) == "3.12.9"
+    assert re_env._import_check(tmp_path) == re_env.ImportCheck("3.12.9", ())
 
 
 def test_setup_commands_run_isolated(env):
@@ -597,7 +694,7 @@ def test_ready_environment_reruns_without_network_and_keeps_agent_installs(env):
     extra = _extra_package(env["env"])
     env["run"].calls.clear()
     env["run"].pip_ok = False  # offline: any pip call would fail
-    assert re_env.ensure_research_env("default") == "3.12.9"
+    assert re_env.ensure_research_env("default").version == "3.12.9"
     assert env["run"].kinds() == ["imports"]
     assert extra.exists()
 
@@ -607,10 +704,22 @@ def test_missing_package_is_reinstalled_in_place(env):
     extra = _extra_package(env["env"])
     env["run"].calls.clear()
     env["run"].imports_script = [False]  # pandas gone, back after pip
-    assert re_env.ensure_research_env("default") == "3.12.9"
+    env["run"].failed_packages = ["pandas"]
+    assert re_env.ensure_research_env("default").version == "3.12.9"
     assert env["run"].kinds() == ["imports", "starts", "pip", "imports"]
     assert extra.exists()
     assert re_env.is_ready(env["env"])
+
+
+def test_repair_reinstalls_only_the_failed_package_at_its_pin(env):
+    """Passing only pandas keeps a newer numpy that the agent installed:
+    without --upgrade pip leaves packages it was not asked for alone."""
+    re_env.ensure_research_env("default")
+    env["run"].calls.clear()
+    env["run"].imports_script = [False]
+    env["run"].failed_packages = ["pandas"]
+    re_env.ensure_research_env("default")
+    assert env["run"].pip_requirements() == [[f"pandas=={re_env.PINS['pandas']}"]]
 
 
 def test_still_broken_after_repair_is_rebuilt(env):
@@ -638,7 +747,7 @@ def test_environment_whose_python_does_not_start_is_rebuilt(env):
     extra = _extra_package(env["env"])
     env["run"].calls.clear()
     env["run"].env_starts = False  # base interpreter removed; a new venv fixes it
-    assert re_env.ensure_research_env("default") == "3.12.9"
+    assert re_env.ensure_research_env("default").version == "3.12.9"
     assert env["run"].kinds() == ["imports", "starts", "venv", "pip", "imports"]
     assert not extra.exists()
     assert re_env.is_ready(env["env"])
