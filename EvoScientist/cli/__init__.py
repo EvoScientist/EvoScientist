@@ -90,9 +90,12 @@ def main():
     # Priority: env var > config file > default (WARNING)
     config = load_config()
     _log_level = os.environ.get("EVOSCIENTIST_LOG_LEVEL", "") or config.log_level
-    # Before any child process starts, so they all find the private Node.
-    from ..setup.node import activate_runtime
+    # Before any child process starts, so they all find the private Node and,
+    # on Windows, the private Git.
+    from ..setup import git as setup_git
+    from ..setup import node as setup_node
 
-    activate_runtime()
+    setup_node.activate_runtime()
+    setup_git.activate_runtime()
     _configure_logging()
     app()

@@ -1,6 +1,7 @@
 """Tests for EvoScientist.git_cli."""
 
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -20,8 +21,21 @@ def _proc(returncode=0, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+_NON_INTERACTIVE = ["-c", "credential.helper=", "-c", "core.askPass="]
+
+
+@pytest.fixture(autouse=True)
+def _no_recorded_git(tmp_path, monkeypatch):
+    """On Windows a missing git triggers a retry with a recorded PortableGit;
+    an empty DATA_DIR keeps the developer's real record out of these tests."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+
 class TestRunGit:
-    def test_missing_git_raises_git_not_found(self):
+    def test_missing_git_raises_git_not_found(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
         missing = FileNotFoundError(2, "No such file or directory", "git")
         with patch(_RUN, side_effect=missing):
             with pytest.raises(GitNotFoundError) as excinfo:
@@ -32,6 +46,14 @@ class TestRunGit:
             "git was not found on PATH. EvoScientist uses git to download skills "
             "and the MCP server index; install Git from "
             "https://git-scm.com/downloads and try again."
+        )
+
+    def test_windows_message_points_to_evosci_setup(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert str(GitNotFoundError()) == (
+            "git was not found on PATH. EvoScientist uses git to download skills "
+            "and the MCP server index; install Git from "
+            "https://git-scm.com/downloads, or run `EvoSci setup`, and try again."
         )
 
     def test_real_cause_is_logged(self, caplog):
@@ -64,8 +86,79 @@ class TestRunGit:
             result = run_git(["--version"], timeout=7)
 
         assert result.stdout == "git version 2.43.0\n"
-        assert run.call_args.args[0] == ["git", "--version"]
+        assert run.call_args.args[0] == ["git", *_NON_INTERACTIVE, "--version"]
         assert run.call_args.kwargs["timeout"] == 7
+
+    def test_windows_retries_with_a_portablegit_set_up_since_start(self, monkeypatch):
+        """`EvoSci setup` run in another terminal records PortableGit; the
+        running process puts it on PATH and retries once."""
+        from pathlib import Path
+
+        from EvoScientist.setup import git as setup_git
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "activate_runtime", lambda: Path("C:/pg/cmd"))
+        missing = FileNotFoundError(2, "No such file or directory", "git")
+        with patch(_RUN, side_effect=[missing, _proc(stdout="ok")]) as run:
+            result = run_git(["--version"], timeout=5)
+
+        assert result.stdout == "ok"
+        assert run.call_count == 2
+
+    def test_windows_without_portablegit_raises_after_one_attempt(self, monkeypatch):
+        from EvoScientist.setup import git as setup_git
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "activate_runtime", lambda: None)
+        with patch(
+            _RUN, side_effect=FileNotFoundError(2, "No such file", "git")
+        ) as run:
+            with pytest.raises(GitNotFoundError):
+                run_git(["--version"], timeout=5)
+        assert run.call_count == 1
+
+    def test_windows_private_git_missing_too_raises(self, monkeypatch):
+        from pathlib import Path
+
+        from EvoScientist.setup import git as setup_git
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "activate_runtime", lambda: Path("C:/pg/cmd"))
+        with patch(
+            _RUN, side_effect=FileNotFoundError(2, "No such file", "git")
+        ) as run:
+            with pytest.raises(GitNotFoundError):
+                run_git(["--version"], timeout=5)
+        assert run.call_count == 2
+
+    def test_other_platforms_do_not_look_for_portablegit(self, monkeypatch):
+        from EvoScientist.setup import git as setup_git
+
+        def boom():
+            raise AssertionError("activate_runtime must not run")
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(setup_git, "activate_runtime", boom)
+        with patch(_RUN, side_effect=FileNotFoundError(2, "No such file", "git")):
+            with pytest.raises(GitNotFoundError):
+                run_git(["--version"], timeout=5)
+
+    def test_never_asks_for_credentials(self, monkeypatch):
+        """No credential helper window, no askpass program, no terminal prompt."""
+        monkeypatch.setenv("GIT_ASKPASS", "/usr/lib/ssh/ssh-askpass")
+        monkeypatch.setenv("SSH_ASKPASS", "/usr/lib/ssh/ssh-askpass")
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+        monkeypatch.setenv("KEEP_ME", "yes")
+        with patch(_RUN, return_value=_proc()) as run:
+            run_git(["ls-remote", "https://github.com/o/r.git"], timeout=5)
+
+        argv = run.call_args.args[0]
+        assert argv[1:5] == _NON_INTERACTIVE
+        env = run.call_args.kwargs["env"]
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert "GIT_ASKPASS" not in env
+        assert "SSH_ASKPASS" not in env
+        assert env["KEEP_ME"] == "yes"
 
 
 class TestCloneRepo:
@@ -75,6 +168,10 @@ class TestCloneRepo:
 
         assert run.call_args.args[0] == [
             "git",
+            *_NON_INTERACTIVE,
+            # LF endings stay LF: CRLF breaks shell scripts in skills.
+            "-c",
+            "core.autocrlf=false",
             "clone",
             "--depth",
             "1",
@@ -87,7 +184,8 @@ class TestCloneRepo:
         with patch(_RUN, return_value=_proc()) as run:
             clone_repo("owner/repo", "v1", "/tmp/dest")
 
-        assert run.call_args.args[0][4:6] == ["--branch", "v1"]
+        argv = run.call_args.args[0]
+        assert argv[argv.index("--branch") + 1] == "v1"
 
     def test_missing_git_raises_git_not_found(self):
         with patch(_RUN, side_effect=FileNotFoundError(2, "No such file", "git")):
