@@ -27,6 +27,7 @@ from .validators import (
     validate_nvidia_key,
     validate_openai_key,
     validate_openrouter_key,
+    validate_opper_key,
     validate_requesty_key,
     validate_siliconflow_key,
     validate_volcengine_key,
@@ -82,6 +83,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Requesty",
             config.requesty_api_key or os.environ.get("REQUESTY_API_KEY", ""),
             validate_requesty_key,
+        ),
+        "opper": (
+            "Opper",
+            config.opper_api_key or os.environ.get("OPPER_API_KEY", ""),
+            validate_opper_key,
         ),
         "novita": (
             "Novita",

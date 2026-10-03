@@ -335,6 +335,10 @@ def _step_provider(
             value="novita",
         ),
         Choice(
+            title="Opper (EU-hosted aggregator — OpenAI, Anthropic, Gemini, Mistral, etc.)",
+            value="opper",
+        ),
+        Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
         ),
