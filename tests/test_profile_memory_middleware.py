@@ -453,23 +453,100 @@ def test_two_middlewares_share_the_observation_cache(tmp_path, monkeypatch):
     )
 
 
-def test_profile_memory_uses_path_pointers_when_profiles_exceed_budget(
+def test_profile_memory_over_budget_truncates_only_the_oversized_file(
     tmp_path, monkeypatch
 ):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    monkeypatch.setattr(memory_module, "_warned_profile_truncations", set())
+
+    middleware = memory_module.create_memory_middleware(
+        str(memories), max_inline_profile_chars=4_000
+    )
+    middleware.modify_request(_request())
+    profile = memories / "profile"
+    (profile / "SOUL.md").write_text(
+        "# EvoScientist soul\n\n## Lines not to cross\n- Confirm before deleting.\n",
+        encoding="utf-8",
+    )
+    user_profile = profile / "USER_PROFILE.md"
+    user_profile.write_text(
+        user_profile.read_text(encoding="utf-8")
+        + "".join(f"- preference {i:04d}\n" for i in range(1_000))
+        + "- newest preference\n",
+        encoding="utf-8",
+    )
+
+    system = _system(middleware.modify_request(_request()))
+
+    assert "- Confirm before deleting." in system
+    assert "## Things to avoid" in system
+    assert "## Known traps" in system
+    assert "# User profile" in system
+    assert "- newest preference" in system
+    assert "- preference 0500" not in system
+    assert (
+        "characters omitted; read /memories/profile/USER_PROFILE.md for the full file"
+        in system
+    )
+    assert "Profile files are available at:" not in system
+
+
+def test_allot_profile_budget_gives_unused_share_to_larger_files():
+    assert memory_module._allot_profile_budget([100, 1_000, 50, 2_000], 1_000) == [
+        100,
+        425,
+        50,
+        425,
+    ]
+    assert memory_module._allot_profile_budget([10, 20], 100) == [10, 20]
+
+
+def test_truncate_profile_keeps_whole_lines_at_the_cut():
+    path = "/memories/profile/SOUL.md"
+    # The tail slice starts exactly at "CCCC".
+    tail_on_boundary = memory_module._truncate_profile(
+        "AAAA\nBBBB\nCCCC\nDDDD", 18, path
+    ).splitlines()
+    # The head slice ends exactly after "CCCC".
+    head_on_boundary = memory_module._truncate_profile(
+        "AAAA\nBBBB\nCCCC\nDDDD\nEEEE\nFFFF", 19, path
+    ).splitlines()
+
+    assert tail_on_boundary[:2] + tail_on_boundary[3:] == [
+        "AAAA",
+        "BBBB",
+        "CCCC",
+        "DDDD",
+    ]
+    assert head_on_boundary[:3] + head_on_boundary[4:] == [
+        "AAAA",
+        "BBBB",
+        "CCCC",
+        "FFFF",
+    ]
+    assert "[... 11 of 29 characters omitted;" in head_on_boundary[3]
+
+
+def test_profile_truncation_warns_once_per_set_of_files(tmp_path, monkeypatch, caplog):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    monkeypatch.setattr(memory_module, "_warned_profile_truncations", set())
 
     middleware = memory_module.create_memory_middleware(
         str(memories), max_inline_profile_chars=10
     )
-    middleware.modify_request(_request())
-    records = middleware._read_profile_records()
+    with caplog.at_level("WARNING", logger=memory_module.__name__):
+        middleware.modify_request(_request())
+        middleware.modify_request(_request())
 
-    assert middleware._profile_context_from_records(records) == (
-        middleware._profile_pointer_context
-    )
+    warnings = [r for r in caplog.records if "prompt budget" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "/memories/profile/SOUL.md" in warnings[0].getMessage()
 
 
 async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkeypatch):
