@@ -178,3 +178,21 @@ def _no_agent_python_probe(monkeypatch):
 
     monkeypatch.setattr(research_env, "_agent_python", lambda: (None, None))
     monkeypatch.setattr(research_env, "_log_missing_python_hint", lambda: None)
+
+
+@pytest.fixture
+def no_git():
+    """Run as if git were not installed.
+
+    ``EvoScientist.git_cli.subprocess.run`` is the process-wide
+    ``subprocess.run``, so the fake asserts the command is git: a test must not
+    pass because some other subprocess call failed.
+    """
+    from unittest.mock import patch
+
+    def fake_run(argv, *args, **kwargs):
+        assert argv[0] == "git", f"unexpected subprocess.run call: {argv!r}"
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    with patch("EvoScientist.git_cli.subprocess.run", side_effect=fake_run):
+        yield
