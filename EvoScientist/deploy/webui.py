@@ -123,7 +123,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     launcher = WebUILauncher(config, cfg, NpxWebUIRunner())
     try:
         with console.status(
-            "[dim]Starting langgraph dev (deploy mode: MCP + async)...[/dim]",
+            "[dim]Starting langgraph dev...[/dim]",
             spinner="dots",
         ):
             result = launcher.start()
@@ -138,7 +138,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
     if result.backend_started:
         console.print("[green]✓[/green] langgraph dev ready")
         if cfg.keepalive:
-            # Keepalive: the deploy-mode backend outlives this session so the
+            # Keepalive: the backend outlives this session so the
             # next same-workspace launch reuses it instantly. The front-end
             # below still stops on exit as usual.
             console.print(

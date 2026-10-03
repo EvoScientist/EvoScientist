@@ -798,11 +798,11 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
     the server then fails to start as it would without Node. Never runs inside
-    ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set): a download there would
+    ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set): a download there would
     race the server's health deadline with its progress hidden in the server
     log, so ``start_langgraph_dev`` runs this before spawning instead.
     """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS"):
         return
     missing = [
         name

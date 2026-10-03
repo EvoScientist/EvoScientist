@@ -362,6 +362,27 @@ def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
 
 
+def test_reuse_sets_drift_flag_on_version_change(tmp_path, monkeypatch, runtime_paths):
+    """A server left running across an upgrade counts as drift: the session
+    reuses it and warns, and the server is not stopped."""
+    import importlib.metadata
+
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.4")
+    old_fp = manager._server_config_fingerprint(cfg)
+    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, old_fp)
+    stopped = []
+    monkeypatch.setattr(manager, "stop_langgraph_dev", lambda *a: stopped.append(a))
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.5")
+    assert manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A") is None
+
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+    assert manager.is_async_subagents_available() is True
+    assert stopped == []
+
+
 def test_reuse_clears_drift_flag_on_matching_fingerprint(
     tmp_path, monkeypatch, runtime_paths
 ):
@@ -639,18 +660,6 @@ def test_server_config_fingerprint_ignores_cli_only_fields():
     cfg.telegram_bot_token = "tg-token"
     cfg.langgraph_dev_keepalive = True
     assert manager._server_config_fingerprint(cfg) == base
-
-
-def test_sidecar_records_deploy_mode(tmp_path, monkeypatch, runtime_paths):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(
-        workspace_dir=tmp_path / "ws", pid=1, deploy_mode=False
-    )
-    assert json.loads((tmp_path / "ws.json").read_text())["deploy_mode"] is False
 
 
 def test_server_config_fingerprint_ignores_shell_allow_list():
