@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.5" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[03 Oct 2026]** **[v0.3.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.5)** — New model: GPT-6.1 Sol (OpenAI + OpenRouter); a new `EvoSci setup` command as groundwork for installer distribution; profile memory over its budget truncates only the oversized file instead of dropping all of it; the observation index lists the newest observations first; deepagents 0.7.21.
 - **[29 Sep 2026]** **[v0.3.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.4)** — New model: Claude Sonnet 5.5 (Anthropic + OpenRouter); desktop groundwork: the WebUI launcher becomes a shell-agnostic core with a background-job check; Windows fixes for local-server detection behind a system proxy, Ctrl+C isolation of the langgraph dev server, and the `EvoSci server stop` command; memory workers and scheduled-task grading fixed on native DeepSeek.
 - **[26 Sep 2026]** **[v0.3.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.3)** — Codex OAuth (ChatGPT Plus/Pro) works end to end, with reasoning captured from vLLM-style endpoints; HITL resume limits count only human-prompted rounds; summarization follows the context window of the model actually running; per-surface gateway backend selection (off by default); async expert dispatch fix; deepagents 0.7.19.
 - **[23 Sep 2026]** **[v0.3.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.2)** — New models: Claude Opus 5.5, GPT-6 Sol/Luna, MiMo-V2.6-Pro/Flash (new Xiaomi provider), and Grok 4.7; fixes for Anthropic-protocol requests and Ctrl+C during tool runs; deepagents 0.7.18.
