@@ -79,6 +79,7 @@ class ObservationSearchDocument:
     body: str
     text: str
     related_observations: tuple[RelatedObservationResult, ...] = ()
+    created_at: str | None = None
 
 
 class ObservationSearchHit(TypedDict):

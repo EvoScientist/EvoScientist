@@ -319,6 +319,7 @@ def _parse_observation_search_document(
             summary=metadata.summary,
             body=body,
             text=text,
+            created_at=metadata.created_at,
         ),
         related_observation_entries(metadata),
     )

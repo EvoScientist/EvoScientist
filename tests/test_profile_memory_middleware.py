@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -324,6 +325,53 @@ def test_observation_index_over_budget_keeps_entries_that_fit(tmp_path, monkeypa
     assert "Observation index truncated to entries that fit." in context
     assert len(context) <= 1_350
     assert "over-budget observation" in context
+
+
+def test_observation_index_lists_newest_first_and_drops_the_oldest(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
+    project_id = _path_project_id(workspace)
+    for day, label in ((1, "oldest"), (3, "newest"), (2, "middle")):
+        result = record_observation_file(
+            memory_dir=memories,
+            project_id=project_id,
+            memory_type=MemoryType.PROCEDURAL,
+            summary=f"{label} observation " + ("z" * 300),
+            observation=f"The {label} observation.",
+            why_it_matters="The index should prefer recent observations.",
+            scope=MemoryScope.GLOBAL,
+            source_type=MemorySourceType.SUBAGENT,
+            source_session_id="thread-1",
+            source_agent="research-agent",
+        )
+        path = memories / "observations" / "global" / f"{result['observation_id']}.md"
+        path.write_text(
+            re.sub(
+                r"^created_at: .*$",
+                f'created_at: "2026-10-0{day}T00:00:00Z"',
+                path.read_text(encoding="utf-8"),
+                count=1,
+                flags=re.MULTILINE,
+            ),
+            encoding="utf-8",
+        )
+
+    full = build_observation_index_context(
+        memory_dir=memories, project_id=project_id, max_inline_chars=100_000
+    )
+    truncated = build_observation_index_context(
+        memory_dir=memories, project_id=project_id, max_inline_chars=len(full) - 1
+    )
+
+    assert full.index("newest observation") < full.index("middle observation")
+    assert full.index("middle observation") < full.index("oldest observation")
+    assert "newest observation" in truncated
+    assert "middle observation" in truncated
+    assert "oldest observation" not in truncated
 
 
 def test_construction_defers_observation_index_read_to_first_request(
