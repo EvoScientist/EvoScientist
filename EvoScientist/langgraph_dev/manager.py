@@ -21,8 +21,10 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
+from functools import wraps
 from pathlib import Path
 
 import httpx
@@ -887,6 +889,30 @@ def _packaged_langgraph_config() -> Path:
 # =============================================================================
 
 
+def _cleanup_failed_start(func):
+    """Stop a failed replacement and restore the prior process record."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        global _PROCESS, _PROCESS_WORKSPACE, _PROCESS_DEPLOY_MODE
+        prior = _PROCESS, _PROCESS_WORKSPACE, _PROCESS_DEPLOY_MODE
+        paths = RUNTIME.pid_file, RUNTIME.workspace_sidecar
+        saved = {p: p.read_bytes() for p in paths if prior[0] and p.exists()}
+        try:
+            return func(*args, **kwargs)
+        except BaseException:
+            if _PROCESS is not None and _PROCESS is not prior[0]:
+                stop_langgraph_dev(_PROCESS)
+                _PROCESS, _PROCESS_WORKSPACE, _PROCESS_DEPLOY_MODE = prior
+                for path, contents in saved.items():
+                    with suppress(OSError):
+                        path.write_bytes(contents)
+            raise
+
+    return wrapper
+
+
+@_cleanup_failed_start
 def start_langgraph_dev(
     workspace_dir: Path | None = None,
     *,
@@ -1137,6 +1163,7 @@ def start_langgraph_dev(
             env=sub_env,
             **_spawn_kwargs,
         )
+        _PROCESS = proc
     finally:
         # The child has its own copy of the fd; closing ours prevents an
         # accumulating leak across restarts. Run even if Popen raises.

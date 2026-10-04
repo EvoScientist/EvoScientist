@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -381,6 +382,27 @@ def test_a_failing_node_check_does_not_block_the_spawn(
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16177)
     assert "env" in captured
+
+
+def test_interrupt_during_health_wait_cleans_up(monkeypatch, tmp_path, runtime_paths):
+    _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    prior = MagicMock(pid=1)
+    monkeypatch.setattr(manager, "_PROCESS", prior)
+    manager._write_workspace_sidecar(tmp_path, 1)
+    runtime_paths.pid_file.write_text("1")
+    proc = MagicMock(pid=4242, **{"poll.return_value": None})
+    cleanup_process = MagicMock(**{"children.return_value": []})
+    monkeypatch.setattr(manager.psutil, "Process", lambda _pid: cleanup_process)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_kw: proc)
+    monkeypatch.setattr(
+        manager.time, "sleep", MagicMock(side_effect=KeyboardInterrupt())
+    )
+    with pytest.raises(KeyboardInterrupt):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+    assert manager._PROCESS is prior
+    cleanup_process.terminate.assert_called_once_with()
+    assert runtime_paths.pid_file.read_text() == "1"
+    assert manager._read_workspace_sidecar()["pid"] == 1
 
 
 def test_start_records_the_agent_python_in_the_sidecar(
