@@ -623,8 +623,13 @@ class LangGraphServerGateway:
         self,
         thread_id: str,
         configurable_extra: Mapping[str, Any] | None,
+        *,
+        target: GraphTarget | None = None,
     ) -> dict[str, Any]:
         """Assemble this run's config, reading the live session config here.
+
+        The target's folders go in first, so the server can refuse a run
+        meant for folders it does not serve.
 
         ``_ensure_config`` returns the cached, in-place-mutated session
         config — NOT a fresh disk read — so mid-session ``/model`` edits that
@@ -638,6 +643,13 @@ class LangGraphServerGateway:
 
         cfg = _ensure_config()
         overrides: dict[str, Any] = {}
+        if target is not None:
+            for key, value in (
+                ("workspace_dir", target.workspace_dir),
+                ("run_dir", target.run_dir),
+            ):
+                if value:
+                    overrides[key] = value
         model = getattr(cfg, "model", None)
         provider = getattr(cfg, "provider", None)
         if model:
@@ -676,7 +688,9 @@ class LangGraphServerGateway:
         *,
         thread_ready: bool = False,
     ) -> None:
-        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
+        config = self._resolve_run_config(
+            request.thread_id, request.configurable_extra, target=request.target
+        )
         # ``_stream_events`` already registered the thread before the pre-run
         # state read. Skip the second ``threads.create(if_exists="do_nothing")``
         # when that succeeded; retry only if it raised (the warn-and-continue

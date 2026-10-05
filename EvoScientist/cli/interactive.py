@@ -60,7 +60,6 @@ from ._constants import (
 from .agent import (
     _create_run_dir,
     _load_agent,
-    _remove_unused_run_dir,
     _shorten_path,
 )
 from .channel import (
@@ -99,10 +98,6 @@ from .tui_runtime import (
     run_streaming,
     run_streaming_async,
 )
-
-_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
-_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
-_MEMORY_WORKER_OUTPUT_GRACE_SECONDS = 3.0
 
 _channel_logger = logging.getLogger(__name__)
 
@@ -336,12 +331,52 @@ async def _resolve_startup_session(
         dirs=await _restore_thread_dirs(
             resolution.thread_id,
             dirs=dirs,
+            served=dirs,
             graph_gateway=graph_gateway,
             config=config,
             backend=backend,
         ),
         resumed=True,
     )
+
+
+async def _new_session_dirs(
+    current: SessionDirs,
+    *,
+    config: Any,
+    backend: str | None,
+    mode: str | None,
+    run_name: str | None,
+) -> SessionDirs:
+    """The folders ``/new`` starts in, with the background agent server moved there.
+
+    ``--mode=run`` starts every session in a fresh run folder of the current
+    workspace; daemon mode works in its root. The server moves first, so the
+    new session's background work lands in its folder. Raises
+    ``WorkspaceMismatchError`` when another session holds the server: the
+    session stays as it is and the fresh run folder is removed.
+    """
+    from .commands import _move_server_or_keep_session
+
+    workspace = current.workspace
+    new_dirs = SessionDirs(
+        workspace,
+        _create_run_dir(workspace, run_name) if mode == "run" else None,
+    )
+    if not await _move_server_or_keep_session(
+        config,
+        target=new_dirs,
+        current=current,
+        backend=backend,
+        new_run_dir=True,
+        status_message="[dim]Moving background agent server to the new session...[/dim]",
+    ):
+        console.print(
+            "[yellow]Background agent server sync failed; started the new "
+            "session, but async subagents and EvoMemory workers may be "
+            "unavailable.[/yellow]"
+        )
+    return new_dirs
 
 
 # =============================================================================
@@ -805,44 +840,13 @@ def cmd_interactive(
                 and kick off background agent reload. The dispatch block
                 refreshes the status bar post-execute (symmetric with
                 /compact)."""
-                # ``--mode=run`` starts every session in a fresh run folder of
-                # the current workspace; daemon mode works in its root.
-                workspace = state["dirs"].workspace
-                new_dirs = SessionDirs(
-                    workspace,
-                    _create_run_dir(workspace, run_name) if mode == "run" else None,
+                new_dirs = await _new_session_dirs(
+                    state["dirs"],
+                    config=config,
+                    backend=gateway_backend,
+                    mode=mode,
+                    run_name=run_name,
                 )
-                if new_dirs != state["dirs"]:
-                    # Move the background agent server first, so the new
-                    # session's background work lands in its folder.
-                    from ..langgraph_dev.manager import WorkspaceMismatchError
-                    from .commands import _sync_background_agent_server_workspace
-
-                    try:
-                        await _sync_background_agent_server_workspace(
-                            config,
-                            dirs=new_dirs,
-                            backend=gateway_backend,
-                            status_message=(
-                                "[dim]Moving background agent server to the "
-                                "new session...[/dim]"
-                            ),
-                        )
-                    except WorkspaceMismatchError as exc:
-                        _remove_unused_run_dir(new_dirs.run_dir)
-                        raise RuntimeError(str(exc)) from exc
-                    except Exception:
-                        _channel_logger.warning(
-                            "Failed to sync background agent server to %s; "
-                            "continuing in degraded mode",
-                            new_dirs.work_dir,
-                            exc_info=True,
-                        )
-                        console.print(
-                            "[yellow]Background agent server sync failed; "
-                            "started the new session, but async subagents and "
-                            "EvoMemory workers may be unavailable.[/yellow]"
-                        )
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 state["dirs"] = new_dirs
                 state["thread_id"] = await graph_gateway.create_thread(
@@ -869,34 +873,27 @@ def cmd_interactive(
                 callback mutates REPL state, reloads the agent, and
                 renders conversation history."""
                 if dirs is not None:
-                    # Sync the langgraph dev subprocess to the resumed
-                    # workspace so background workers and deployed sub-agents
-                    # don't operate on the previous workspace's files. The
-                    # manager auto-detects the change and restarts when needed.
-                    # Restart can take 10-15s — show a spinner so the user
-                    # doesn't think the CLI is frozen, and run the sync call
-                    # in a worker thread so the asyncio event loop keeps
-                    # serving channel polls / MCP heartbeats during the wait.
-                    #
-                    # State mutation happens AFTER this sync succeeds so a
-                    # WorkspaceMismatchError leaves the session's existing
-                    # folders / thread_id untouched.
-                    from ..langgraph_dev.manager import WorkspaceMismatchError
-                    from .commands import _sync_background_agent_server_workspace
+                    # Move the background agent server to the resumed folders
+                    # so background workers and deployed sub-agents don't work
+                    # in the previous ones. Restart can take 10-15s behind a
+                    # spinner, in a worker thread so the event loop keeps
+                    # serving channel polls / MCP heartbeats. State changes
+                    # only after the move, so a WorkspaceMismatchError leaves
+                    # the session's folders and thread as they are, and command
+                    # UIs (including channels) report the failure.
+                    from .commands import _move_server_or_keep_session
 
-                    try:
-                        await _sync_background_agent_server_workspace(
-                            config,
-                            dirs=dirs,
-                            backend=gateway_backend,
+                    if not await _move_server_or_keep_session(
+                        config,
+                        target=dirs,
+                        current=state["dirs"],
+                        backend=gateway_backend,
+                    ):
+                        console.print(
+                            "[yellow]Background agent server sync failed; "
+                            "resumed the session, but async subagents and "
+                            "EvoMemory workers may be unavailable.[/yellow]"
                         )
-                    except WorkspaceMismatchError as exc:
-                        # Another EvoSci process owns the langgraph dev
-                        # server for a different workspace. Abort the
-                        # resume without mutating session state. Raise so
-                        # command UIs, including channel UI, report failure
-                        # instead of continuing with success/history output.
-                        raise RuntimeError(str(exc)) from exc
                     state["dirs"] = dirs
                     _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
                 if thread_id != state.get("thread_id"):
@@ -1765,7 +1762,9 @@ def cmd_run(
             gateway=runtime_gateways.graph_gateway,
             runtime=async_runtime,
         )
-        _wait_for_memory_workers_before_exit()
+        from .commands import _wait_for_memory_workers
+
+        _wait_for_memory_workers()
     except Exception as e:
         error_msg = str(e)
         if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
@@ -1783,47 +1782,3 @@ def cmd_run(
             # resume hint is shown.  Convert the failure to Click's controlled
             # exit signal while preserving the cause for programmatic callers.
             raise typer.Exit(1) from e
-
-
-def _wait_for_memory_workers_before_exit(
-    *,
-    timeout_seconds: float = _MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS,
-) -> None:
-    """Let one-shot CLI runs persist post-run memory before atexit cleanup."""
-    try:
-        from ..memory.worker_activity import (
-            MemoryActivityPhase,
-            MemoryWorkerStatusSnapshot,
-            wait_for_memory_pipeline_idle,
-        )
-    except Exception:
-        return
-
-    announced = False
-
-    def print_saved(observed: MemoryWorkerStatusSnapshot) -> None:
-        saved = []
-        if observed.observations_recorded:
-            saved.append(f"{observed.observations_recorded} observation(s)")
-        if observed.profile_updates:
-            saved.append(f"{observed.profile_updates} profile update(s)")
-        if saved:
-            console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
-
-    def print_waiting(phase: MemoryActivityPhase) -> None:
-        nonlocal announced
-        if not announced:
-            console.print(f"[dim]Waiting for EvoMemory {phase}...[/dim]")
-            announced = True
-
-    def print_timeout(phase: MemoryActivityPhase) -> None:
-        console.print(f"[dim]EvoMemory {phase} is still running; shutting down.[/dim]")
-
-    wait_for_memory_pipeline_idle(
-        timeout_seconds=timeout_seconds,
-        poll_seconds=_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS,
-        output_grace_seconds=_MEMORY_WORKER_OUTPUT_GRACE_SECONDS,
-        on_saved=print_saved,
-        on_waiting=print_waiting,
-        on_timeout=print_timeout,
-    )

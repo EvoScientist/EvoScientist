@@ -78,12 +78,24 @@ def _memory_worker_user_prompt(context: MemorySourceContext) -> str:
             raise ValueError(f"Unsupported memory source type: {context.source_type!r}")
 
 
-def _runs_create_kwargs(payload: BackgroundRunPayload) -> BackgroundRunPayload:
+def _runs_create_kwargs(
+    payload: BackgroundRunPayload, *, workspace_dir: str
+) -> BackgroundRunPayload:
+    """Merge the live model and the run's folders into *payload*.
+
+    Memory belongs to the workspace, so a run forwards its root and the
+    server checks that.
+    """
     try:
         from EvoScientist.llm.patches import _merge_runs_config_kwargs
     except Exception:
         return payload
-    return cast("BackgroundRunPayload", _merge_runs_config_kwargs(dict(payload)))
+    return cast(
+        "BackgroundRunPayload",
+        _merge_runs_config_kwargs(
+            dict(payload), folders={"workspace_dir": workspace_dir}
+        ),
+    )
 
 
 def _worker_workspace_dir(workspace_dir: str | Path) -> str:
@@ -115,8 +127,6 @@ def _memory_worker_run_payload(
         "config": {
             "configurable": {
                 "thread_id": thread_id,
-                # Memory belongs to the workspace; the server checks the root.
-                "workspace_dir": metadata["workspace_dir"],
                 "evomemory_source_session_id": context.session_id,
                 "evomemory_source_agent": context.source_agent,
                 "evomemory_project_id": context.project_id,
@@ -124,7 +134,7 @@ def _memory_worker_run_payload(
             }
         },
     }
-    return _runs_create_kwargs(payload)
+    return _runs_create_kwargs(payload, workspace_dir=metadata["workspace_dir"])
 
 
 def memory_worker_launch_request(
@@ -188,7 +198,6 @@ def _observation_linker_run_payload(
         "config": {
             "configurable": {
                 "thread_id": thread_id,
-                "workspace_dir": metadata["workspace_dir"],
                 "evomemory_project_id": context.project_id,
                 "evomemory_observation_ids": json.dumps(
                     list(context.observation_ids),
@@ -197,7 +206,7 @@ def _observation_linker_run_payload(
             }
         },
     }
-    return _runs_create_kwargs(payload)
+    return _runs_create_kwargs(payload, workspace_dir=metadata["workspace_dir"])
 
 
 def observation_linker_launch_request(

@@ -923,49 +923,40 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
-        async def _sync_server_to(self, dirs: SessionDirs) -> bool:
+        async def _sync_server_to(
+            self, dirs: SessionDirs, *, message: str, new_run_dir: bool = False
+        ) -> bool:
             """Move the background agent server to *dirs* before switching.
 
-            Until the server serves several workspaces it is pinned to one
-            workspace and run folder, so background workers and deployed
-            sub-agents would otherwise keep working in the previous ones; the
-            manager restarts it when needed. Runs in a worker thread so the
-            Textual event loop keeps refreshing the UI during the up-to-60s
-            wait, with a live timer widget (like /compact).
+            Runs ``_move_server_or_keep_session`` behind a live timer widget
+            (like /compact) showing *message*, so the Textual event loop keeps
+            refreshing the UI during the up-to-60s wait.
 
-            Raises ``RuntimeError`` when another EvoSci process owns the
-            server for other folders, so the caller leaves the session as it
-            is and command UIs (including channels) report the failure.
+            Raises ``WorkspaceMismatchError`` when another EvoSci process owns
+            the server for other folders, so the caller leaves the session as
+            it is and command UIs (including channels) report the failure.
             Returns False when the sync failed otherwise: the session can
             continue locally, but background work may be unavailable.
             """
-            from ..langgraph_dev.manager import WorkspaceMismatchError
-            from .commands import _sync_background_agent_server_workspace
+            from .commands import _move_server_or_keep_session
             from .widgets.workspace_sync_widget import WorkspaceSyncWidget
 
-            sync_widget = WorkspaceSyncWidget()
+            if dirs == self._dirs:
+                return True
+            sync_widget = WorkspaceSyncWidget(message)
             container = self.query_one("#chat", VerticalScroll)
             await container.mount(sync_widget)
             container.scroll_end(animate=False)
             try:
-                await _sync_background_agent_server_workspace(
+                return await _move_server_or_keep_session(
                     config,
-                    dirs=dirs,
+                    target=dirs,
+                    current=self._dirs,
                     backend=gateway_backend,
+                    new_run_dir=new_run_dir,
                 )
-            except WorkspaceMismatchError as exc:
-                raise RuntimeError(str(exc)) from exc
-            except Exception:
-                _channel_logger.warning(
-                    "Failed to sync background agent server to %s; continuing "
-                    "in degraded mode",
-                    dirs.work_dir,
-                    exc_info=True,
-                )
-                return False
             finally:
                 await sync_widget.cleanup()
-            return True
 
         async def start_new_session(self) -> None:
             # ``--mode=run`` starts every session in a fresh run folder of the
@@ -974,15 +965,11 @@ def run_textual_interactive(
             new_dirs = SessionDirs(
                 ws, create_run_dir(ws, run_name) if mode == "run" else None
             )
-            synced = True
-            if new_dirs != self._dirs:
-                try:
-                    synced = await self._sync_server_to(new_dirs)
-                except RuntimeError:
-                    from .agent import _remove_unused_run_dir
-
-                    _remove_unused_run_dir(new_dirs.run_dir)
-                    raise
+            synced = await self._sync_server_to(
+                new_dirs,
+                message="Moving background agent server to the new session",
+                new_run_dir=True,
+            )
 
             # Clear all widgets except #welcome
             self.clear_chat()
@@ -1022,7 +1009,9 @@ def run_textual_interactive(
             if dirs is not None:
                 # ``self._dirs`` changes only after the sync succeeds, so a
                 # refused sync leaves the session in its current folders.
-                if not await self._sync_server_to(dirs):
+                if not await self._sync_server_to(
+                    dirs, message="Syncing background agent server to resumed workspace"
+                ):
                     self.append_system(
                         "Background agent server sync failed; resumed local "
                         "session, but async subagents and EvoMemory workers "
@@ -3933,26 +3922,26 @@ def run_textual_interactive(
                     mismatch_aborted = False
                     if stored is not None:
                         effective_dirs = stored
-                        # Sync langgraph dev subprocess to the resumed
-                        # workspace BEFORE the Textual app takes over the
-                        # terminal. Mirrors interactive.py's Rich-CLI fix.
-                        # Without this, --resume against a thread from a
-                        # different workspace would leave background workers
-                        # and deployed sub-agents operating on the launch
-                        # directory's files.
+                        # Move the background agent server to the resumed
+                        # folders BEFORE the Textual app takes over the
+                        # terminal, so background workers and deployed
+                        # sub-agents don't work in the launch folders.
+                        from ..langgraph_dev.manager import WorkspaceMismatchError
                         from ..stream.console import console as _resume_console
+                        from .commands import _move_server_or_keep_session
 
                         try:
-                            from ..langgraph_dev.manager import WorkspaceMismatchError
-                            from .commands import (
-                                _sync_background_agent_server_workspace,
-                            )
-
-                            await _sync_background_agent_server_workspace(
+                            if not await _move_server_or_keep_session(
                                 config,
-                                dirs=stored,
+                                target=stored,
+                                current=dirs,
                                 backend=gateway_backend,
-                            )
+                            ):
+                                resume_warning = (
+                                    "Background agent server sync failed; "
+                                    "resumed the session, but async subagents "
+                                    "and EvoMemory workers may be unavailable."
+                                )
                         except WorkspaceMismatchError as _ws_mismatch_exc:
                             # Surface the user-actionable message via the
                             # Rich console (TUI hasn't taken over the terminal
@@ -3962,20 +3951,6 @@ def run_textual_interactive(
                             # a different workspace.
                             _resume_console.print(f"[red]{_ws_mismatch_exc}[/red]")
                             mismatch_aborted = True
-                        except Exception as _ws_sync_exc:
-                            # Non-fatal at startup — async sub-agents fall back
-                            # to sync via the manager's own availability flag,
-                            # and memory workers skip while the server is down.
-                            # Surface the exception so unexpected failures
-                            # (import errors, regressions in
-                            # ensure_langgraph_dev, etc.) don't hide silently.
-                            logging.getLogger(__name__).warning(
-                                "TUI startup workspace sync to langgraph dev "
-                                "failed: %s. Async sub-agents will fall back "
-                                "to in-process sync delegation and EvoMemory "
-                                "workers will skip for this session.",
-                                _ws_sync_exc,
-                            )
                     if mismatch_aborted:
                         # Revert the workspace mutation and fall through to the
                         # ``effective_thread_id is None`` branch below, which
@@ -3990,6 +3965,12 @@ def run_textual_interactive(
                     else:
                         effective_thread_id = resolution.thread_id
                         resumed = True
+                        if effective_dirs != dirs:
+                            # The thread works in its own folders, so the run
+                            # folder made at startup stays unused.
+                            from .agent import _remove_unused_run_dir
+
+                            _remove_unused_run_dir(dirs.run_dir)
                 elif resolution.matches:
                     resume_warning = (
                         f"Thread prefix '{thread_id}' is ambiguous "

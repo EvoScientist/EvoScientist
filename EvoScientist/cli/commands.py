@@ -45,6 +45,7 @@ from ._constants import build_metadata
 from .agent import (
     _create_run_dir,
     _load_agent,
+    _remove_unused_run_dir,
     _shorten_path,
 )
 from .channel import (
@@ -616,6 +617,7 @@ def _ensure_async_subagent_server(
             _reconcile_autoskill_schedule(config, workspace=dirs.workspace)
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
+        _remove_unused_run_dir(dirs.run_dir)
         raise typer.Exit(1) from exc
 
     from ..langgraph_dev import manager as _lg_manager
@@ -707,26 +709,64 @@ def _pending_skill_proposals_message(workspace_dir: str | Path) -> str | None:
     )
 
 
-# How long moving the server waits for the previous session's EvoMemory work.
-_MEMORY_WAIT_BEFORE_SERVER_MOVE_SECONDS = 120.0
+# How long a CLI waits for EvoMemory work before it exits or moves the server.
+_MEMORY_WAIT_SECONDS = 120.0
+_MEMORY_WAIT_POLL_SECONDS = 0.5
+_MEMORY_WAIT_OUTPUT_GRACE_SECONDS = 3.0
 
 
-def _let_memory_work_finish() -> None:
-    """Wait, bounded, for queued EvoMemory work before the server moves.
+def _wait_for_memory_workers(*, timeout_action: str = "shutting down") -> None:
+    """Wait, bounded, for queued EvoMemory work to finish.
 
-    The server is pinned to one workspace and run folder until it serves
-    several; moving it stops runs in flight, such as the memory worker for
-    the previous session's last turn. Returns at once when nothing runs.
+    One-shot runs wait so post-run memory persists before atexit cleanup;
+    moving the server waits because a move stops runs in flight.
+    ``timeout_action`` says what happens when the wait runs out. Returns at
+    once when nothing runs.
     """
     try:
-        from ..memory.worker_activity import wait_for_memory_pipeline_idle
+        from ..memory.worker_activity import (
+            MemoryActivityPhase,
+            MemoryWorkerStatusSnapshot,
+            wait_for_memory_pipeline_idle,
+        )
     except Exception:
         return
+
+    announced = False
+
+    def print_saved(observed: MemoryWorkerStatusSnapshot) -> None:
+        saved = []
+        if observed.observations_recorded:
+            saved.append(f"{observed.observations_recorded} observation(s)")
+        if observed.profile_updates:
+            saved.append(f"{observed.profile_updates} profile update(s)")
+        if saved:
+            console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
+
+    def print_waiting(phase: MemoryActivityPhase) -> None:
+        nonlocal announced
+        if not announced:
+            console.print(f"[dim]Waiting for EvoMemory {phase}...[/dim]")
+            announced = True
+
+    def print_timeout(phase: MemoryActivityPhase) -> None:
+        console.print(
+            f"[dim]EvoMemory {phase} is still running; {timeout_action}.[/dim]"
+        )
+
     wait_for_memory_pipeline_idle(
-        timeout_seconds=_MEMORY_WAIT_BEFORE_SERVER_MOVE_SECONDS,
-        poll_seconds=0.5,
-        output_grace_seconds=3.0,
+        timeout_seconds=_MEMORY_WAIT_SECONDS,
+        poll_seconds=_MEMORY_WAIT_POLL_SECONDS,
+        output_grace_seconds=_MEMORY_WAIT_OUTPUT_GRACE_SECONDS,
+        on_saved=print_saved,
+        on_waiting=print_waiting,
+        on_timeout=print_timeout,
     )
+
+
+_RESUME_SYNC_STATUS = (
+    "[dim]Syncing background agent server to resumed workspace...[/dim]"
+)
 
 
 async def _sync_background_agent_server_workspace(
@@ -734,9 +774,7 @@ async def _sync_background_agent_server_workspace(
     *,
     dirs: SessionDirs,
     backend: str | None = None,
-    status_message: str = (
-        "[dim]Syncing background agent server to resumed workspace...[/dim]"
-    ),
+    status_message: str = _RESUME_SYNC_STATUS,
 ) -> None:
     """Sync langgraph dev to a resumed workspace for background agent work.
 
@@ -751,10 +789,20 @@ async def _sync_background_agent_server_workspace(
     """
     import asyncio
 
-    from ..langgraph_dev.manager import ensure_langgraph_dev
+    from ..langgraph_dev.manager import (
+        ensure_langgraph_dev,
+        owned_server_pinned_elsewhere,
+    )
 
     with console.status(status_message, spinner="dots"):
-        await asyncio.to_thread(_let_memory_work_finish)
+        # Only a move stops runs in flight; a sync to the served folders is a
+        # health check and must not wait on memory work.
+        if await asyncio.to_thread(
+            owned_server_pinned_elsewhere, dirs.workspace.root, dirs.run_dir
+        ):
+            await asyncio.to_thread(
+                _wait_for_memory_workers, timeout_action="moving the server anyway"
+            )
         await asyncio.to_thread(
             ensure_langgraph_dev,
             config,
@@ -769,10 +817,57 @@ async def _sync_background_agent_server_workspace(
         )
 
 
+async def _move_server_or_keep_session(
+    config: Any,
+    *,
+    target: SessionDirs,
+    current: SessionDirs | None,
+    backend: str | None = None,
+    new_run_dir: bool = False,
+    status_message: str = _RESUME_SYNC_STATUS,
+) -> bool:
+    """Move the background agent server to *target* before a session goes there.
+
+    Until the server serves several workspaces it is pinned to one workspace
+    and run folder, so background workers and deployed sub-agents would
+    otherwise keep working in *current*, the folders the server was last
+    synced to (``None`` when it was not started yet). Nothing happens when
+    the two are the same.
+
+    Raises ``WorkspaceMismatchError`` when another EvoSci session holds the
+    server for other folders: the caller keeps its session as it is, and the
+    run folder made for *target* (``new_run_dir``) is removed. Returns False
+    when the move failed otherwise: the session can go to *target*, but
+    async sub-agents and EvoMemory workers may be unavailable.
+    """
+    if target == current:
+        return True
+
+    from ..langgraph_dev.manager import WorkspaceMismatchError
+
+    try:
+        await _sync_background_agent_server_workspace(
+            config, dirs=target, backend=backend, status_message=status_message
+        )
+    except WorkspaceMismatchError:
+        if new_run_dir:
+            _remove_unused_run_dir(target.run_dir)
+        raise
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Failed to sync background agent server to %s; continuing in degraded mode",
+            target.work_dir,
+            exc_info=True,
+        )
+        return False
+    return True
+
+
 async def _restore_thread_dirs(
     thread_id: str,
     *,
     dirs: SessionDirs,
+    served: SessionDirs | None,
     graph_gateway: GraphGateway,
     config: Any,
     backend: str | None = None,
@@ -781,7 +876,10 @@ async def _restore_thread_dirs(
 
     A thread resumes in the workspace and run folder it was stored with,
     wherever the CLI was started; a thread stored without folders resumes in
-    *dirs*. Raises ``typer.Exit(1)`` when another session holds the server.
+    *dirs*, the folders the session started in. *served* are the folders the
+    server was started for, ``None`` when it was not started yet. A run
+    folder made for *dirs* that the thread does not use is removed. Raises
+    ``typer.Exit(1)`` when another session holds the server.
     """
     from ..langgraph_dev.manager import WorkspaceMismatchError
 
@@ -791,12 +889,20 @@ async def _restore_thread_dirs(
         or dirs
     )
     try:
-        await _sync_background_agent_server_workspace(
-            config, dirs=restored, backend=backend
+        synced = await _move_server_or_keep_session(
+            config, target=restored, current=served, backend=backend
         )
     except WorkspaceMismatchError as exc:
+        _remove_unused_run_dir(dirs.run_dir)
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+    if not synced:
+        console.print(
+            "[yellow]Background agent server sync failed; async subagents and "
+            "EvoMemory workers may be unavailable.[/yellow]"
+        )
+    if restored != dirs:
+        _remove_unused_run_dir(dirs.run_dir)
     return restored
 
 
@@ -1210,6 +1316,8 @@ async def _apply_serve_resume_state(
     Workspace-bound resources are rebuilt and synced before mutating the shared
     state. The agent is loaded before syncing the external server so a load
     failure cannot move the server away from the currently active session.
+    When another session holds the server nothing changes; when the move fails
+    otherwise, serve switches and continues without background work.
     """
     import asyncio
 
@@ -1230,11 +1338,16 @@ async def _apply_serve_resume_state(
             config=effective_config,
             runtime=runtime_state.async_runtime,
         )
-        await _sync_background_agent_server_workspace(
+        if not await _move_server_or_keep_session(
             effective_config,
-            dirs=new_dirs,
+            target=new_dirs,
+            current=runtime_state.dirs,
             backend=runtime_state.gateway_backend,
-        )
+        ):
+            console.print(
+                "[yellow]Background agent server sync failed; async "
+                "subagents and EvoMemory workers may be unavailable.[/yellow]"
+            )
         workspace_update = (new_dirs, new_agent)
 
     old_thread_id = runtime_state.thread_id
@@ -2623,7 +2736,8 @@ def _main_callback(
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
     # A one-shot resume starts it for the thread's own folders instead, unless
     # the server gateway backend needs a running server to be built.
-    if not (prompt and thread_id) or gateway_backend == "langgraph_server":
+    prespawn = not (prompt and thread_id) or gateway_backend == "langgraph_server"
+    if prespawn:
         _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
 
     if prompt:
@@ -2633,7 +2747,7 @@ def _main_callback(
         from ..gateway import create_runtime_gateways_for_config
         from ..sessions import get_checkpointer
         from ..stream.json_sink import stream_json
-        from .interactive import _wait_for_memory_workers_before_exit, cmd_run
+        from .interactive import cmd_run
         from .resume_hint import print_resume_hint
 
         runtime_gateways = create_runtime_gateways_for_config(
@@ -2652,6 +2766,7 @@ def _main_callback(
                         session_dirs = await _restore_thread_dirs(
                             tid,
                             dirs=dirs,
+                            served=dirs if prespawn else None,
                             graph_gateway=graph_gateway,
                             config=config,
                             backend=gateway_backend,
@@ -2705,7 +2820,7 @@ def _main_callback(
                         finally:
                             # Let post-run memory workers persist before exit,
                             # matching the text path (cmd_run does this itself).
-                            _wait_for_memory_workers_before_exit()
+                            _wait_for_memory_workers()
                     else:
                         stream_worker = asyncio.create_task(
                             asyncio.to_thread(

@@ -1322,6 +1322,21 @@ def _describe_folders(workspace_dir: Path, run_dir: Path | None) -> str:
     return f"workspace {workspace_dir} (run folder {run_dir})"
 
 
+def owned_server_pinned_elsewhere(workspace_dir: Path, run_dir: Path | None) -> bool:
+    """True when this process owns a live server pinned to other folders.
+
+    Moving it stops its runs, so callers let queued work finish first.
+    """
+    with _LOCK:
+        return (
+            _PROCESS is not None
+            and _PROCESS.poll() is None
+            and _PROCESS_WORKSPACE is not None
+            and _server_folders(_PROCESS_WORKSPACE, _PROCESS_RUN_DIR)
+            != _server_folders(workspace_dir, run_dir)
+        )
+
+
 def ensure_langgraph_dev(
     config: EvoScientistConfig,
     workspace_dir: Path | str | None = None,

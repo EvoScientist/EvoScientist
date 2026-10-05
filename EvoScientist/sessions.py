@@ -1619,7 +1619,7 @@ async def _api_session_dirs_async() -> SessionDirs:
 
 # Graphs the server builds for the session's folder (``main_graph.py`` and
 # ``graphs.py``). Every other graph works in the workspace root, so its rows
-# carry no ``run_dir``.
+# carry no ``run_dir`` and its runs are checked against the workspace only.
 FOLDER_GRAPH_IDS = frozenset(
     {AGENT_NAME, "writing-agent", "data-analysis-agent", "expert-container-async"}
 )

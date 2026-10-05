@@ -1093,7 +1093,9 @@ def _patch_anthropic_structured_output() -> None:
 #
 # Upstream PR opportunity: passing ``config`` through ``client.runs.create``
 # is generic functionality; worth contributing back to ``langchain-ai/deepagents``
-# so this patch can be retired.
+# so this patch can be retired. The failed-run reason (``_RunErrors``) retires
+# once deepagents' check tool reads the thread's error: it reads
+# ``run["error"]``, which langgraph-api never fills.
 # ---------------------------------------------------------------------------
 _model_passthrough_patched = False
 
@@ -1163,8 +1165,8 @@ def _merge_runs_config_kwargs(
     """Merge the live model override into ``kwargs`` for ``runs.create``.
 
     ``folders`` are the launching graph's ``workspace_dir`` / ``run_dir``;
-    they are always forwarded so the server can refuse a run meant for other
-    folders.
+    they replace any the caller passed, so the server can refuse a run meant
+    for other folders.
 
     Model source, in increasing precedence:
 
@@ -1193,6 +1195,14 @@ def _merge_runs_config_kwargs(
     existing_configurable = existing.get("configurable")
     if not isinstance(existing_configurable, dict):
         existing_configurable = {}
+    if folders:
+        # The launching graph's folders are authoritative; in daemon mode they
+        # carry no run_dir, so a caller's stale one must not survive.
+        existing_configurable = {
+            key: value
+            for key, value in existing_configurable.items()
+            if key not in ("workspace_dir", "run_dir")
+        }
     merged_configurable = {**existing_configurable, **overrides}
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
@@ -1203,7 +1213,10 @@ def _thread_error_message(thread: Any) -> str | None:
     """The error message langgraph-api records on a thread whose run failed."""
     error = thread.get("error") if isinstance(thread, dict) else None
     if isinstance(error, dict):
-        error = error.get("message") or error.get("error")
+        # langgraph-api stores {"error": <type>, "message": <text>}; for most
+        # exception types the text is a placeholder, so keep the type.
+        kind, message = error.get("error"), error.get("message")
+        error = f"{kind}: {message}" if kind and message else (message or kind)
     return str(error) if error else None
 
 
@@ -1230,12 +1243,13 @@ class _RunErrors:
         return self._missing(run) and run.get("run_id") not in self._by_run
 
     def attach(self, run: Any, thread: Any = None) -> Any:
-        if not self._missing(run):
+        run_id = run.get("run_id") if self._missing(run) else None
+        if run_id is None:
             return run
         message = _thread_error_message(thread)
         if message:
-            self._by_run[run["run_id"]] = message
-        message = self._by_run.get(run.get("run_id"))
+            self._by_run[run_id] = message
+        message = self._by_run.get(run_id)
         return {**run, "error": message} if message else run
 
 

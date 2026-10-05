@@ -32,11 +32,15 @@ def _shorten_path(path: str) -> str:
 
 
 def _deduplicate_run_name(name: str, runs_dir: Path) -> str:
-    """Return *name* if available, otherwise *name_1*, *name_2*, etc."""
-    if not (runs_dir / name).exists():
+    """Return *name* if available, otherwise *name_1*, *name_2*, etc.
+
+    Any entry counts as taken, a dangling symlink included: ``mkdir`` fails
+    on those too.
+    """
+    if not os.path.lexists(runs_dir / name):
         return name
     i = 1
-    while (runs_dir / f"{name}_{i}").exists():
+    while os.path.lexists(runs_dir / f"{name}_{i}"):
         i += 1
     return f"{name}_{i}"
 

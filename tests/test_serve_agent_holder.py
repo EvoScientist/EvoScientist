@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from langgraph.graph.state import CompiledStateGraph
@@ -223,7 +223,9 @@ async def test_hook_updates_workspace_dir_on_resume():
         await hook(ctx, old_agent, cmd)
 
     restored = SessionDirs(Workspace("/restored-ws"))
-    sync_server.assert_awaited_once_with(cfg, dirs=restored, backend=None)
+    sync_server.assert_awaited_once_with(
+        cfg, dirs=restored, backend=None, status_message=ANY
+    )
     load_agent.assert_called_once_with(
         work_dir=str(restored.work_dir),
         workspace=restored.workspace,
@@ -385,7 +387,9 @@ async def test_start_new_session_cb_returns_to_root_after_run_folder_resume():
         await cb()
 
     root = SessionDirs(workspace)
-    sync_server.assert_awaited_once_with(cfg, dirs=root, backend=None)
+    sync_server.assert_awaited_once_with(
+        cfg, dirs=root, backend=None, status_message=ANY
+    )
     assert state.dirs == root
     assert state.thread_id == "new-tid"
     assert state.agent is root_agent
@@ -427,7 +431,9 @@ async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
     new_dirs = SessionDirs(Workspace("/new-ws"))
-    sync_server.assert_awaited_once_with(cfg, dirs=new_dirs, backend=None)
+    sync_server.assert_awaited_once_with(
+        cfg, dirs=new_dirs, backend=None, status_message=ANY
+    )
     load_agent.assert_called_once_with(
         work_dir=str(Workspace("/new-ws").root),
         workspace=Workspace("/new-ws"),
@@ -468,7 +474,10 @@ async def test_serve_resume_forwards_resolved_backend_to_server_sync():
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
     sync_server.assert_awaited_once_with(
-        cfg, dirs=SessionDirs(Workspace("/new-ws")), backend="langgraph_server"
+        cfg,
+        dirs=SessionDirs(Workspace("/new-ws")),
+        backend="langgraph_server",
+        status_message=ANY,
     )
 
 
@@ -513,7 +522,9 @@ async def test_hook_emits_resume_warning_after_resume_callback_adopts_thread():
     ctx.ui.flush.assert_awaited_once()
 
 
-async def test_serve_resume_callback_preserves_state_when_sync_fails():
+async def test_serve_resume_callback_preserves_state_when_server_refused():
+    from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
+
     cfg = _config()
     old_agent = _agent("old-agent")
     loaded_but_not_adopted = _agent("loaded-but-not-adopted")
@@ -529,13 +540,13 @@ async def test_serve_resume_callback_preserves_state_when_sync_fails():
     with (
         patch(
             "EvoScientist.cli.commands._sync_background_agent_server_workspace",
-            new=AsyncMock(side_effect=RuntimeError("workspace conflict")),
+            new=AsyncMock(side_effect=WorkspaceMismatchError("workspace conflict")),
         ),
         patch(
             "EvoScientist.cli.commands._load_agent",
             return_value=loaded_but_not_adopted,
         ) as load_agent,
-        pytest.raises(RuntimeError, match="workspace conflict"),
+        pytest.raises(WorkspaceMismatchError, match="workspace conflict"),
     ):
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 

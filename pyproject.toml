@@ -35,6 +35,7 @@ dependencies = [
     "questionary>=2.1",
     "typer>=0.24",
     "python-dotenv>=1.0",
+    "langgraph-api>=0.7.30",
     "langgraph-cli[inmem]>=0.4",
     "langgraph-sdk>=0.4",
     "langgraph-checkpoint-sqlite>=3.0",

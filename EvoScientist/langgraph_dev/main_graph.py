@@ -22,6 +22,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import PregelTask, StateSnapshot
 
 from EvoScientist.EvoScientist import EvoScientist_agent as _agent
+from EvoScientist.sessions import AGENT_NAME
 
 # Re-exported so langgraph-api finds the ``stream_transformers`` symbol on this
 # graph's source module and opts the served graph into the ``custom`` stream
@@ -201,7 +202,7 @@ class _EvoFilteredGraph(CompiledStateGraph):
 _agent.__class__ = _EvoFilteredGraph
 # The main agent works in the session's folder: a run for another workspace or
 # run folder is refused (see ``folder_check``).
-EvoScientist_agent = folder_checked(_agent, works_in_folder=True)
+EvoScientist_agent = folder_checked(_agent, graph_id=AGENT_NAME)
 
 
 def _apply_filter_to_all_registered_graphs() -> None:

@@ -12,12 +12,15 @@ To add a new async sub-agent:
   2. Add a one-line binding here::
 
          <snake_name> = folder_checked(
-             build_async_subagent_graph("<name>", **_session), works_in_folder=True
+             build_async_subagent_graph("<name>", **_session), graph_id="<name>"
          )
 
   3. Register it in ``EvoScientist/langgraph_dev/langgraph.json``::
 
          "<name>": "EvoScientist.langgraph_dev.graphs:<snake_name>"
+
+  4. If it works in the session's folder, add ``"<name>"`` to
+     ``EvoScientist.sessions.FOLDER_GRAPH_IDS``.
 
 The deployed main agent (``EvoScientist_agent``) lives in ``main_graph.py``
 because it follows a different mechanism (re-exporting a lazily-constructed
@@ -45,20 +48,21 @@ _dirs = process_session_dirs()
 _workspace = _dirs.workspace
 _session = {"workspace": _workspace, "work_dir": _dirs.work_dir}
 
-# Graphs that work in the session's folder check a run's workspace and run
-# folder; graphs built for the workspace root check the workspace only.
+# Graphs that work in the session's folder (``FOLDER_GRAPH_IDS``) check a
+# run's workspace and run folder; graphs built for the workspace root check
+# the workspace only.
 writing_agent = folder_checked(
-    build_async_subagent_graph("writing-agent", **_session), works_in_folder=True
+    build_async_subagent_graph("writing-agent", **_session), graph_id="writing-agent"
 )
 data_analysis_agent = folder_checked(
     build_async_subagent_graph("data-analysis-agent", **_session),
-    works_in_folder=True,
+    graph_id="data-analysis-agent",
 )
 # Scheduled tasks belong to the workspace, not to one run, so they always
 # work in the workspace root.
 scheduler = folder_checked(
     build_async_subagent_graph("scheduler", workspace=_workspace),
-    works_in_folder=False,
+    graph_id="scheduler",
 )
 # Generic async container for expert-skill dispatch. One graph, parameterised
 # per invocation by the ``skill_name`` payload the main agent passes through
@@ -66,19 +70,21 @@ scheduler = folder_checked(
 # dispatches through this graph; the loader middleware resolves the skill
 # body at model-call time.
 expert_container_async = folder_checked(
-    build_expert_container_async_graph(**_session), works_in_folder=True
+    build_expert_container_async_graph(**_session),
+    graph_id="expert-container-async",
 )
 evomemory_subagent_worker = folder_checked(
     build_memory_worker_graph(MemorySourceType.SUBAGENT, workspace=_workspace),
-    works_in_folder=False,
+    graph_id="evomemory-subagent-worker",
 )
 evomemory_turn_worker = folder_checked(
     build_memory_worker_graph(MemorySourceType.TURN, workspace=_workspace),
-    works_in_folder=False,
+    graph_id="evomemory-turn-worker",
 )
 evomemory_observation_linker = folder_checked(
-    build_observation_linker_graph(workspace=_workspace), works_in_folder=False
+    build_observation_linker_graph(workspace=_workspace),
+    graph_id="evomemory-observation-linker",
 )
 evomemory_autoskills = folder_checked(
-    build_autoskills_graph(workspace=_workspace), works_in_folder=False
+    build_autoskills_graph(workspace=_workspace), graph_id="evomemory-autoskills"
 )

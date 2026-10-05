@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 from langgraph_sdk.runtime import ServerRuntime
 
-from ..paths import SessionDirs, process_session_dirs
+from ..paths import SessionDirs, Workspace, process_session_dirs
+from ..sessions import FOLDER_GRAPH_IDS
 
 
 class RunFolderMismatchError(RuntimeError):
@@ -29,6 +31,25 @@ def _describe(dirs: SessionDirs, *, with_run_dir: bool) -> str:
     return text
 
 
+def _forwarded_dirs(configurable: dict[str, Any]) -> SessionDirs | None:
+    """The folders a run forwards, or ``None`` when it forwards none.
+
+    Read strictly: a value that is present but cannot be read is refused
+    rather than treated as not forwarded.
+    """
+    workspace_dir = configurable.get("workspace_dir")
+    if not workspace_dir:
+        return None
+    run_dir = configurable.get("run_dir")
+    try:
+        return SessionDirs(Workspace(workspace_dir), Path(run_dir) if run_dir else None)
+    except (TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise RunFolderMismatchError(
+            f"The run forwards folders this server cannot read "
+            f"({workspace_dir!r}, {run_dir!r}): {exc}"
+        ) from exc
+
+
 def check_run_folders(config: dict[str, Any], *, works_in_folder: bool) -> None:
     """Raise if the run's forwarded folders differ from the server's.
 
@@ -36,10 +57,7 @@ def check_run_folders(config: dict[str, Any], *, works_in_folder: bool) -> None:
     does not work in a folder, only the workspace counts. Resolves paths, so
     call it off the event loop.
     """
-    configurable = config.get("configurable") or {}
-    requested = SessionDirs.from_stored(
-        configurable.get("workspace_dir"), configurable.get("run_dir")
-    )
+    requested = _forwarded_dirs(config.get("configurable") or {})
     if requested is None:
         return
     served = process_session_dirs()
@@ -57,16 +75,16 @@ def check_run_folders(config: dict[str, Any], *, works_in_folder: bool) -> None:
     )
 
 
-def folder_checked(
-    graph: Any, *, works_in_folder: bool
-) -> Callable[..., Awaitable[Any]]:
-    """Register *graph* behind a factory that checks each run's folders.
+def folder_checked(graph: Any, *, graph_id: str) -> Callable[..., Awaitable[Any]]:
+    """Register *graph* as *graph_id* behind a factory that checks each run's folders.
 
     langgraph-api calls the factory for every access; only runs are checked
     (``runtime.execution_runtime`` is set), and the prebuilt graph is returned.
-    ``works_in_folder`` is False for graphs built for the workspace root only
-    (scheduled tasks, memory and AutoSkills workers).
+    Graphs outside ``FOLDER_GRAPH_IDS`` are built for the workspace root only
+    (scheduled tasks, memory and AutoSkills workers) and check the workspace
+    only.
     """
+    works_in_folder = graph_id in FOLDER_GRAPH_IDS
 
     async def factory(config: dict[str, Any], runtime: ServerRuntime) -> Any:
         if runtime.execution_runtime is not None:
