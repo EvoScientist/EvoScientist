@@ -743,6 +743,71 @@ def test_run_mode_media_mount_does_not_open_the_rest_of_the_workspace(
     assert result.file_data is None
 
 
+def _tool_path(path: Path) -> str:
+    """*path* as the ``ls``/``glob``/``grep`` tools hand it to the backend."""
+    from deepagents.backends.utils import validate_path
+
+    return validate_path(str(path))
+
+
+@pytest.mark.usefixtures("_plain_config")
+def test_run_mode_file_tools_list_channel_media(run_dirs, media_file):
+    """An agent finds attachments by listing or searching ``<root>/media``."""
+    from EvoScientist.EvoScientist import _get_default_backend
+
+    run_dirs.run_dir.mkdir(parents=True)
+    backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
+    media = _tool_path(run_dirs.workspace.media_dir)
+
+    listed = [entry["path"] for entry in backend.ls(media).entries]
+    globbed = [match["path"] for match in backend.glob("*.pdf", media).matches]
+    grepped = [match["path"] for match in backend.grep("attachment", media).matches]
+    assert listed == globbed == grepped == [media_file.as_posix()]
+    assert backend.read(listed[0]).error is None
+
+
+@pytest.mark.usefixtures("_plain_config")
+@pytest.mark.parametrize("folder", ["media", "uploads"])
+def test_run_mode_lists_media_through_symlinked_folder(run_dirs, folder):
+    """Either spelling of a symlinked media folder lists the attachments
+    under the path channels reference them by."""
+    from EvoScientist.EvoScientist import _get_default_backend
+
+    uploads = run_dirs.workspace.root / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "paper.pdf").write_text("attachment")
+    run_dirs.workspace.media_dir.symlink_to(uploads, target_is_directory=True)
+    run_dirs.run_dir.mkdir(parents=True)
+    backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
+    listed = _tool_path(run_dirs.workspace.root / folder)
+
+    referenced = (run_dirs.workspace.media_dir / "paper.pdf").as_posix()
+    assert [entry["path"] for entry in backend.ls(listed).entries] == [referenced]
+    assert [m["path"] for m in backend.glob("*.pdf", listed).matches] == [referenced]
+
+
+@pytest.mark.usefixtures("_plain_config")
+def test_run_mode_media_listing_stays_inside_media_folder(run_dirs, media_file):
+    from EvoScientist.EvoScientist import _get_default_backend
+
+    root = run_dirs.workspace.root
+    (root / "secret.txt").write_text("attachment")
+    (root / "media" / "leak.txt").symlink_to(root / "secret.txt")
+    (root / "media" / "root").symlink_to(root, target_is_directory=True)
+    run_dirs.run_dir.mkdir(parents=True)
+    backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
+    media = _tool_path(run_dirs.workspace.media_dir)
+
+    expected = [media_file.as_posix()]
+    assert [entry["path"] for entry in backend.ls(media).entries] == expected
+    assert [match["path"] for match in backend.glob("*", media).matches] == expected
+    matches = backend.grep("attachment", media).matches
+    assert [match["path"] for match in matches] == expected
+    linked = backend.ls(_tool_path(run_dirs.workspace.media_dir / "root"))
+    assert linked.error is not None
+    assert linked.entries is None
+
+
 async def test_channel_attachments_follow_resume_into_another_workspace(
     workspace, tmp_path, monkeypatch
 ):

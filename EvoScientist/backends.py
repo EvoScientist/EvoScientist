@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -1667,6 +1668,34 @@ def prepare_sandbox_command(
     return _restore_spans(command, ssh_replacements), None
 
 
+class _MediaFolderView(ReadOnlyFilesystemBackend):
+    """Lists a run's media folder under the paths attachments are referenced by.
+
+    deepagents drops entries outside ``root_dir`` from ``ls``, ``glob`` and
+    ``grep`` results in virtual mode, so the run sandbox lists the media
+    folder through this view. It is rooted at the resolved folder, so entries
+    that resolve outside it (a symlink pointing out) are still dropped; paths
+    come in and go out in the host form the sandbox reads.
+    """
+
+    def __init__(self, media_dir: Path, resolve: Callable[[str], Path | None]):
+        super().__init__(root_dir=str(media_dir), virtual_mode=True)
+        self._media_dir = media_dir
+        self._resolve = resolve
+
+    def _resolve_path(self, key: str) -> Path:
+        path = self._resolve(key)
+        if path is None:
+            raise ValueError(f"Path is outside the media folder: {key}")
+        return path
+
+    def _to_virtual_path(self, path: Path) -> str:
+        # ValueError for an entry that resolves outside the folder; the
+        # listing skips it.
+        path.resolve().relative_to(self.cwd)
+        return (self._media_dir / path.relative_to(self.cwd)).as_posix()
+
+
 class CustomSandboxBackend(LocalShellBackend):
     """
     Custom sandbox backend - inherits LocalShellBackend with added safety.
@@ -1725,7 +1754,7 @@ class CustomSandboxBackend(LocalShellBackend):
                 ``--mode=run`` folder outside it. Channel attachments are
                 referenced by their real path there, and file tools and
                 commands reach them by that path. File tools can only read
-                it; ``/media/...`` stays a path inside the run folder.
+                and list it; ``/media/...`` stays a path inside the run folder.
         """
         self._dangerous = dangerous
         self._skills_dir = skills_dir
@@ -1733,6 +1762,11 @@ class CustomSandboxBackend(LocalShellBackend):
         # one (``media/`` may be a symlink) bounds what the sandbox can reach.
         self._media_dir = Path(media_dir).absolute() if media_dir is not None else None
         self._media_real = self._media_dir.resolve() if self._media_dir else None
+        self._media_view = (
+            _MediaFolderView(self._media_dir, self._media_path)
+            if self._media_dir
+            else None
+        )
         self._guard_dangerous = guard_dangerous
         self._refuse_delete = refuse_delete
         if dangerous:
@@ -1872,6 +1906,33 @@ class CustomSandboxBackend(LocalShellBackend):
 
     def _in_media(self, file_path: str) -> bool:
         return not self._dangerous and self._media_relative(file_path) is not None
+
+    def ls(self, path: str) -> LsResult:
+        if self._in_media(path):
+            return self._media_view.ls(path)
+        return super().ls(path)
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        if path is not None and self._in_media(path):
+            return self._media_view.glob(pattern, path)
+        return super().glob(pattern, path)
+
+    def grep(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+        *,
+        max_count: int | None = None,
+        context_lines: int = 0,
+    ) -> GrepResult:
+        if path is not None and self._in_media(path):
+            return self._media_view.grep(
+                pattern, path, glob, max_count=max_count, context_lines=context_lines
+            )
+        return super().grep(
+            pattern, path, glob, max_count=max_count, context_lines=context_lines
+        )
 
     def write(self, file_path: str, content: str) -> WriteResult:
         if self._in_media(file_path):
