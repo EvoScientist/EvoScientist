@@ -676,16 +676,25 @@ class LangGraphServerGateway:
         # Refresh metadata on every run: ensure_thread_exists is a no-op on
         # existing threads (if_exists="do_nothing"), so without this update
         # fields like updated_at and model would go stale after the first run.
-        await self.thread_store.client.threads.update(
-            request.thread_id,
-            metadata=_build_thread_metadata(
-                graph_id=self._target_graph_id(request.target),
-                workspace_dir=(
-                    request.target.workspace_dir if request.target is not None else None
+        try:
+            await self.thread_store.client.threads.update(
+                request.thread_id,
+                metadata=_build_thread_metadata(
+                    graph_id=self._target_graph_id(request.target),
+                    workspace_dir=(
+                        request.target.workspace_dir
+                        if request.target is not None
+                        else None
+                    ),
+                    metadata=request.metadata,
                 ),
-                metadata=request.metadata,
-            ),
-        )
+            )
+        except Exception:
+            logger.warning(
+                "Thread metadata refresh failed for %s; continuing the run",
+                request.thread_id,
+                exc_info=True,
+            )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
                 # Known divergence: the resume goes through run.respond,

@@ -1397,6 +1397,58 @@ async def test_server_gateway_forwards_valid_recursion_limit_per_run():
     assert start["config"]["recursion_limit"] == 100
 
 
+@pytest.mark.parametrize("resume", [False, True])
+async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monkeypatch):
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    threads.update = AsyncMock(side_effect=RuntimeError("metadata unavailable"))
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    respond = AsyncMock()
+    monkeypatch.setattr(LangGraphServerGateway, "_respond_to_interrupt", respond)
+    message = Command(resume={"answer": "yes"}) if resume else "hi"
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message=message, thread_id="abc12345")
+        )
+    ]
+    assert events[-1]["type"] == "done"
+    assert "metadata" in caplog.text.lower()
+    assert len(threads.created) == 1
+    if resume:
+        respond.assert_awaited_once_with(stream, "abc12345", {"answer": "yes"})
+        assert stream.run.starts == []
+    else:
+        assert stream.run.starts[0]["input"] == {
+            "messages": [{"role": "user", "content": "hi"}]
+        }
+
+
+async def test_metadata_best_effort_does_not_swallow_thread_registration_failure(
+    monkeypatch,
+):
+    gateway = LangGraphServerGateway(thread_store=MagicMock())
+    monkeypatch.setattr(
+        LangGraphServerGateway,
+        "_ensure_thread",
+        AsyncMock(side_effect=RuntimeError("registration failed")),
+    )
+    stream = MagicMock()
+    with pytest.raises(RuntimeError, match="registration failed"):
+        await gateway._start_or_resume(
+            stream, RunRequest(message="hi", thread_id="thread")
+        )
+    stream.run.start.assert_not_called()
+
+
 async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
     """The gateway derives the run's HITL suppression from the live session
     config's auto_mode and forwards it per run."""
