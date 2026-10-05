@@ -239,7 +239,23 @@ class LocalGraphGateway:
         # process's registry, so read it directly (no server round-trip).
         from .. import background
 
-        return background.poll_status(process_id)
+        status = background.poll_status(process_id)
+        if status != "unknown":
+            return status
+
+        # A resumed thread can contain processes launched by the dev server.
+        # Query their owning registry before declaring them unknown. Let request
+        # failures propagate so the notifier can retry instead of marking them seen.
+        from ..langgraph_dev.sdk import (
+            cached_langgraph_async_client,
+            configured_langgraph_dev_url,
+        )
+
+        client = cached_langgraph_async_client(configured_langgraph_dev_url())
+        data = await client.http.get(
+            "/api/bg_process_status", params={"process_id": process_id}
+        )
+        return data["status"]
 
     def _require_local_graph(self, target: GraphTarget | None) -> CompiledStateGraph:
         if target is None or target.local_graph is None:
