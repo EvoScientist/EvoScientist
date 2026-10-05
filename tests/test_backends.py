@@ -1203,6 +1203,22 @@ class TestExecuteValidation:
 
 
 class TestExecuteCwdSanitization:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pwd and symlinks")
+    def test_pwd_prints_resolved_folder_behind_symlink(self, tmp_path, monkeypatch):
+        """``pwd`` agrees with the folder file paths resolve against, even when
+        the parent process started in a symlink to it."""
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        monkeypatch.setenv("PWD", str(link))
+
+        backend = CustomSandboxBackend(
+            root_dir=str(link), virtual_mode=True, inherit_env=True
+        )
+
+        assert backend.execute("pwd").output.strip() == str(real.resolve())
+
     def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
         """``prepare_sandbox_command`` must rewrite a literal workspace-root
         absolute path to ``./`` before the command reaches the shell backend.

@@ -1711,6 +1711,10 @@ class CustomSandboxBackend(LocalShellBackend):
             env=env,
             inherit_env=inherit_env,
         )
+        # Commands run in the resolved folder. A $PWD inherited from a symlinked
+        # start folder would make `pwd` print the link instead, and absolute
+        # paths built from it would miss the workspace.
+        self._env = {**self._env, "PWD": str(self.cwd)}
         # Override parent's "local-" prefix with our own
         self._sandbox_id = f"evosci-{uuid.uuid4().hex[:8]}"
         # Ensure working directory exists
