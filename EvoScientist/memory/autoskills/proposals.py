@@ -130,8 +130,10 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
     """Rewrite the ``workspace_dir`` of proposals stored before ``run_dir``.
 
     Proposals made by ``--mode=run`` sessions named the run folder; they
-    belong to its workspace. Part of the one-time upgrade of stored values
-    (see ``sessions._upgrade_stored_dirs``). Returns the number rewritten.
+    belong to its workspace. Other proposals, and folders that cannot be
+    resolved, are left as they are. Part of the one-time upgrade of stored
+    values (see ``sessions._upgrade_stored_dirs``). Returns the number
+    rewritten.
     """
     root = _proposal_root(memory_dir)
     if not root.exists():
@@ -142,9 +144,12 @@ def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
         stored = manifest.get("workspace_dir") if manifest else None
         if not isinstance(stored, str) or not stored.strip():
             continue
-        upgraded = paths.SessionDirs.from_legacy(stored.strip()).workspace.key
-        if upgraded != stored:
-            manifest["workspace_dir"] = upgraded
+        try:
+            dirs = paths.SessionDirs.from_legacy(stored.strip())
+        except (ValueError, OSError, RuntimeError):
+            continue
+        if dirs.run_dir is not None:
+            manifest["workspace_dir"] = dirs.workspace.key
             _write_manifest(manifest_path, manifest)
             rewritten += 1
     return rewritten

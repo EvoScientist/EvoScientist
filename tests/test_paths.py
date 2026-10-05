@@ -201,6 +201,16 @@ class TestSessionDirsFromStored:
             Workspace(tmp_path / "proj")
         )
 
+    def test_run_dir_outside_workspace_is_dropped(self, tmp_path):
+        """Run folders live under ``<root>/runs``; anything else is not one."""
+        dirs = SessionDirs.from_stored(
+            str(tmp_path / "a"), str(tmp_path / "b" / "runs" / "20260930_120000")
+        )
+        assert dirs == SessionDirs(Workspace(tmp_path / "a"))
+
+    def test_unreadable_value_reads_as_nothing_stored(self):
+        assert SessionDirs.from_stored("/tmp/evil\x00x") is None
+
 
 class TestSessionDirsFromLegacy:
     def test_generated_run_folder_is_split_into_workspace_and_run_dir(self, tmp_path):

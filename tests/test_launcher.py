@@ -74,6 +74,39 @@ def test_resolve_backend_other_workspace_is_mismatch(monkeypatch):
     assert ei.value.code == "workspace_mismatch"
 
 
+def test_resolve_backend_run_folder_server_is_mismatch(monkeypatch):
+    """The WebUI works in the root; a server pinned to a run folder is refused."""
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "run_dir": "/tmp/wsA/runs/20260930_120000",
+        },
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.code == "workspace_mismatch"
+    assert "runs/20260930_120000" in ei.value.message
+    assert "server stop" not in ei.value.detail
+
+
+def test_resolve_backend_run_folder_hint_covers_kept_alive_server(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "run_dir": "/tmp/wsA/runs/20260930_120000",
+        },
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA", keepalive=True), object())
+    assert "EvoSci server stop" in ei.value.detail
+
+
 def test_resolve_backend_same_workspace_reuses(monkeypatch):
     _patch_backend_probes(
         monkeypatch,

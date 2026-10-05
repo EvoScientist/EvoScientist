@@ -182,6 +182,7 @@ def _run_prompt(
     *,
     thread_id: str | None,
     stored: dict | None,
+    backend: str = "local",
 ) -> dict:
     """Drive the main callback through a ``-p`` run and capture its folders."""
     import EvoScientist.cli.interactive as interactive_mod
@@ -189,7 +190,7 @@ def _run_prompt(
     import EvoScientist.gateway as gateway_mod
     import EvoScientist.sessions as sessions_mod
 
-    captured: dict = {"synced": []}
+    captured: dict = {"synced": [], "prespawned": []}
     gateway = FakeGraphGateway(
         generated_thread_ids=["new-thread"],
         thread_store=FakeThreadStore(resolved_thread_id=thread_id, metadata=stored),
@@ -218,7 +219,7 @@ def _run_prompt(
 
     monkeypatch.setattr(config_mod, "get_effective_config", _fake_get_effective_config)
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
-    monkeypatch.setattr(config_mod, "resolve_gateway_backend", lambda *_a: "local")
+    monkeypatch.setattr(config_mod, "resolve_gateway_backend", lambda *_a: backend)
     monkeypatch.setattr(
         commands,
         "_get_cli_async_runtime",
@@ -226,7 +227,9 @@ def _run_prompt(
     )
     monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
     monkeypatch.setattr(
-        commands, "_ensure_async_subagent_server", lambda *_a, **_k: None
+        commands,
+        "_ensure_async_subagent_server",
+        lambda _config, *, dirs, backend=None: captured["prespawned"].append(dirs),
     )
     monkeypatch.setattr(commands, "_sync_background_agent_server_workspace", _fake_sync)
     monkeypatch.setattr(commands, "_load_agent", _fake_load_agent)
@@ -278,6 +281,26 @@ def test_one_shot_resume_uses_thread_workspace(monkeypatch, tmp_path):
     assert Path(got["agent_work_dir"]) == other.resolve()
     assert got["run_dirs"] == restored
     assert got["synced"] == [restored]
+    # The server is started once, for the thread's folders.
+    assert got["prespawned"] == []
+
+
+def test_one_shot_resume_on_server_backend_starts_server_first(monkeypatch, tmp_path):
+    """The server gateway backend is built against a running server."""
+    launch, other = tmp_path / "launch", tmp_path / "other"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+
+    got = _run_prompt(
+        monkeypatch,
+        _config(),
+        thread_id="t-other",
+        stored={"workspace_dir": other.as_posix()},
+        backend="langgraph_server",
+    )
+
+    assert got["prespawned"] == [SessionDirs(Workspace(launch))]
+    assert got["synced"] == [SessionDirs(Workspace(other))]
 
 
 def test_one_shot_resume_uses_thread_run_dir(monkeypatch, tmp_path):
@@ -310,4 +333,23 @@ def test_one_shot_new_thread_keeps_launch_dirs(monkeypatch, tmp_path):
     got = _run_prompt(monkeypatch, _config(), thread_id=None, stored=None)
     assert got["thread_id"] == "new-thread"
     assert got["run_dirs"] == SessionDirs(Workspace(tmp_path))
+    assert got["prespawned"] == [SessionDirs(Workspace(tmp_path))]
     assert got["synced"] == []
+
+
+def test_webui_mode_run_works_in_root(monkeypatch, tmp_path):
+    """Run mode is a CLI/TUI feature: the WebUI starts in the root, no run folder."""
+    import EvoScientist.deploy.webui as webui_mod
+
+    monkeypatch.chdir(tmp_path)
+    launched: list[str] = []
+    monkeypatch.setattr(
+        webui_mod,
+        "run_webui",
+        lambda _config, *, workspace_dir: launched.append(workspace_dir),
+    )
+
+    _run(monkeypatch, _config(ui_backend="webui"), mode="run")
+
+    assert launched == [str(tmp_path.resolve())]
+    assert not (tmp_path / "runs").exists()

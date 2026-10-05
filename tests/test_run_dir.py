@@ -73,6 +73,18 @@ def test_picker_groups_run_threads_under_their_run_folder(workspace):
     assert sorted(run_rows) == ["first", "second"]
 
 
+def test_picker_shortens_windows_style_home(monkeypatch):
+    """Stored folders are POSIX on every platform; the home prefix must match."""
+    import os
+
+    from EvoScientist.cli.widgets.thread_selector import _normalize_path
+
+    monkeypatch.setattr(
+        os.path, "expanduser", lambda p: "C:\\Users\\x" if p == "~" else p
+    )
+    assert _normalize_path("C:/Users/x/proj") == "~/proj"
+
+
 # ---------------------------------------------------------------------------
 # /resume switches the whole session
 # ---------------------------------------------------------------------------
@@ -339,11 +351,14 @@ def _stored(db: Path) -> dict[str, tuple[str, dict]]:
     return {cid: (kind, json.loads(meta)) for cid, kind, meta in rows}
 
 
-def _user_version(db: Path) -> int:
+def _upgrade_recorded(db: Path) -> bool:
+    """True if the upgrade's bit of ``user_version`` is set."""
+    from EvoScientist.sessions import _STORED_DIRS_VERSION
+
     con = sqlite3.connect(db)
     version = con.execute("PRAGMA user_version").fetchone()[0]
     con.close()
-    return version
+    return bool(version & _STORED_DIRS_VERSION)
 
 
 @pytest.fixture
@@ -381,11 +396,11 @@ def test_upgrade_splits_generated_run_folders_once(workspace, sessions_db):
         {**base, **SessionDirs(workspace, run).metadata()},
     )
     # A project can live in a folder called ``runs``: named runs stay roots.
-    assert stored["named-run"][1] == {**base, "workspace_dir": named.as_posix()}
-    # Every other folder is rewritten in the stored form.
-    assert stored["daemon"][1] == {**base, "workspace_dir": workspace.key}
+    assert stored["named-run"][1] == {**base, "workspace_dir": str(named)}
+    # Rows that gain no ``run_dir`` keep their spelling; readers normalise it.
+    assert stored["daemon"][1] == {**base, "workspace_dir": f"{workspace.root}/"}
     assert stored["new"][1] == {**base, **SessionDirs(workspace, run).metadata()}
-    assert _user_version(sessions_db) == 2
+    assert _upgrade_recorded(sessions_db)
 
 
 def test_rows_written_after_the_upgrade_are_never_split(workspace, sessions_db):
@@ -406,7 +421,7 @@ def test_upgrade_of_a_new_db_only_records_the_version(sessions_db):
     from EvoScientist.sessions import _upgrade_stored_dirs
 
     asyncio.run(_upgrade_stored_dirs())
-    assert _user_version(sessions_db) == 2
+    assert _upgrade_recorded(sessions_db)
 
 
 def test_failed_upgrade_changes_nothing_and_retries(
@@ -430,11 +445,87 @@ def test_failed_upgrade_changes_nothing_and_retries(
     asyncio.run(_upgrade_stored_dirs_safely())
 
     assert _stored(sessions_db)["c1"][1] == {"workspace_dir": str(run)}
-    assert _user_version(sessions_db) == 0
+    assert not _upgrade_recorded(sessions_db)
 
     monkeypatch.setattr(proposals, "upgrade_proposal_workspaces", real_upgrade)
     asyncio.run(_upgrade_stored_dirs())
     assert _stored(sessions_db)["c1"][1] == SessionDirs(workspace, run).metadata()
+
+
+def test_upgrade_keeps_bloat_sweep_gate(workspace, sessions_db, monkeypatch):
+    """The legacy-bloat sweep and the folder upgrade are gated independently."""
+    import EvoScientist.sessions as sessions
+    from EvoScientist.sessions import _needs_migration, _upgrade_stored_dirs
+
+    _write_rows(sessions_db, [("t1", "c1", {"workspace_dir": workspace.key})])
+    monkeypatch.setattr(sessions, "_MIGRATION_THRESHOLD_BYTES", 0)
+    assert asyncio.run(_needs_migration()) is True
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    assert _upgrade_recorded(sessions_db)
+    assert asyncio.run(_needs_migration()) is True
+
+
+def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
+    """Unreadable rows leave the others upgraded and the upgrade done."""
+    from EvoScientist.sessions import _upgrade_stored_dirs
+
+    run = workspace.runs_dir / TS_RUN
+    unresolvable = f"{workspace.root}/evil\x00x"
+    _write_rows(
+        sessions_db,
+        [
+            ("t1", "good", {"workspace_dir": str(run)}),
+            ("t2", "nul", {"workspace_dir": unresolvable}),
+        ],
+    )
+    con = sqlite3.connect(sessions_db)
+    con.execute(
+        "INSERT INTO checkpoints VALUES ('t3', '', 'broken', NULL, 'empty', NULL, "
+        "CAST('{not json' AS BLOB))"
+    )
+    con.commit()
+    _write_proposal(tmp_path / "memories", "nul", unresolvable)
+
+    asyncio.run(_upgrade_stored_dirs())
+
+    rows = dict(
+        con.execute(
+            "SELECT checkpoint_id, CAST(metadata AS TEXT) FROM checkpoints"
+        ).fetchall()
+    )
+    con.close()
+    assert json.loads(rows["good"]) == SessionDirs(workspace, run).metadata()
+    assert json.loads(rows["nul"]) == {"workspace_dir": unresolvable}
+    assert rows["broken"] == "{not json"
+    assert _upgrade_recorded(sessions_db)
+
+
+def test_thread_readers_return_stored_run_dir(workspace, sessions_db):
+    from EvoScientist.sessions import get_thread_metadata, list_threads
+
+    run = workspace.runs_dir / TS_RUN
+    base = {
+        "agent_name": "EvoScientist",
+        "model": "m",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    _write_rows(
+        sessions_db,
+        [
+            ("t-run", "c1", {**base, **SessionDirs(workspace, run).metadata()}),
+            ("t-daemon", "c2", {**base, **SessionDirs(workspace).metadata()}),
+        ],
+    )
+
+    by_id = {t["thread_id"]: t for t in asyncio.run(list_threads())}
+    assert by_id["t-run"]["run_dir"] == run.resolve().as_posix()
+    assert by_id["t-daemon"]["run_dir"] is None
+    assert asyncio.run(get_thread_metadata("t-run"))["run_dir"] == (
+        run.resolve().as_posix()
+    )
+    assert asyncio.run(get_thread_metadata("t-daemon"))["run_dir"] is None
 
 
 def _write_proposal(memory_dir: Path, name: str, workspace_dir: str) -> Path:
@@ -512,7 +603,8 @@ async def test_cli_and_server_upgrade_before_reading(
     assert restored["metadata"]["run_dir"] == run_meta["run_dir"]
 
 
-def test_server_stamps_its_run_folder_on_unstamped_rows(run_dirs, monkeypatch):
+def _stamped(run_dirs: SessionDirs, monkeypatch, graph_id: str) -> dict:
+    """Metadata the server's checkpointer writes for an unstamped row."""
     import EvoScientist.sessions as sessions
 
     captured: dict = {}
@@ -523,11 +615,24 @@ def test_server_stamps_its_run_folder_on_unstamped_rows(run_dirs, monkeypatch):
     monkeypatch.setattr(sessions, "_api_session_dirs", lambda: run_dirs)
     monkeypatch.setattr(sessions.PruningCheckpointer, "aput", _fake_super_aput)
     saver = object.__new__(sessions._ApiPruningCheckpointer)
+    asyncio.run(saver.aput({}, {}, {"graph_id": graph_id}, {}))
+    return captured
 
-    asyncio.run(saver.aput({}, {}, {"graph_id": "writing-agent"}, {}))
 
-    assert captured["workspace_dir"] == run_dirs.workspace.key
-    assert captured["run_dir"] == run_dirs.run_dir.as_posix()
+def test_server_stamps_its_run_folder_on_unstamped_rows(run_dirs, monkeypatch):
+    stamped = _stamped(run_dirs, monkeypatch, "writing-agent")
+
+    assert stamped["workspace_dir"] == run_dirs.workspace.key
+    assert stamped["run_dir"] == run_dirs.run_dir.as_posix()
+
+
+@pytest.mark.parametrize("graph_id", ["scheduler", "evomemory-turn-worker"])
+def test_server_stamps_root_graph_rows_without_run_dir(run_dirs, monkeypatch, graph_id):
+    """Scheduled tasks and memory workers work in the workspace root."""
+    stamped = _stamped(run_dirs, monkeypatch, graph_id)
+
+    assert stamped["workspace_dir"] == run_dirs.workspace.key
+    assert "run_dir" not in stamped
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +701,11 @@ def test_run_mode_reaches_media_through_a_symlinked_folder(run_dirs):
     assert backend.read(str(referenced)).error is None
     assert backend.execute(_print_file_cmd(referenced)).output.strip() == "attachment"
     assert backend.write(str(run_dirs.workspace.media_dir / "new.pdf"), "x").error
+    # The resolved spelling (what ``ls -l`` or ``realpath`` would show) works
+    # for the file tools and for commands alike.
+    resolved = uploads / "paper.pdf"
+    assert backend.read(str(resolved)).error is None
+    assert backend.execute(_print_file_cmd(resolved)).output.strip() == "attachment"
 
 
 @pytest.mark.usefixtures("_plain_config")
@@ -627,8 +737,10 @@ def test_run_mode_media_mount_does_not_open_the_rest_of_the_workspace(
     (run_dirs.workspace.root / "secret.txt").write_text("no")
     backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
 
-    with pytest.raises(ValueError, match="outside the media folder"):
-        backend.read(f"{run_dirs.workspace.media_dir}/../secret.txt")
+    # Refused as a read error the agent can act on, not as a traceback.
+    result = backend.read(f"{run_dirs.workspace.media_dir}/../secret.txt")
+    assert result.error is not None
+    assert result.file_data is None
 
 
 async def test_channel_attachments_follow_resume_into_another_workspace(

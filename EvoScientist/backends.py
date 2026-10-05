@@ -1,5 +1,6 @@
 """Custom backends for EvoScientist agent."""
 
+import errno
 import os
 import posixpath
 import re
@@ -1108,7 +1109,7 @@ def _platform_quote(s: str) -> str:
 def _resolve_virtual_mount_path(
     token: str,
     skills_dir: str | Path | None = None,
-    media_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
 ) -> str | None:
     """Resolve a virtual mount token to a shell-safe token, or ``None`` when
     *token* is not a registered virtual mount.
@@ -1125,9 +1126,10 @@ def _resolve_virtual_mount_path(
     absolute and :func:`_platform_quote`-wrapped. Memories live outside the
     workspace, so a relative form would point at an unrelated location.
 
-    ``media_dir`` is set when the sandbox works in a ``--mode=run`` folder,
-    outside the workspace's ``media/``: its real path, which is how channel
-    attachments are referenced, is kept as is.
+    ``media_dirs`` are set when the sandbox works in a ``--mode=run`` folder,
+    outside the workspace's ``media/``: the folder as configured (how channel
+    attachments are referenced) and its resolved target, both kept as they
+    are.
     """
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
@@ -1143,9 +1145,9 @@ def _resolve_virtual_mount_path(
     if rel is not None:
         return _platform_quote(str(Path(paths.MEMORIES_DIR) / rel))
 
-    if (
-        media_dir is not None
-        and _subpath_under_mount(token, Path(media_dir).as_posix()) is not None
+    if any(
+        _subpath_under_mount(token, media.as_posix()) is not None
+        for media in media_dirs
     ):
         return _platform_quote(token)
 
@@ -1164,7 +1166,7 @@ def _rewrite_quoted_path(
     path: str,
     workspace_name: str | None,
     skills_dir: str | Path | None = None,
-    media_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
 ) -> str | None:
     """Return the shell-quoted replacement for *path* (the decoded
     content of a quoted ``"..."`` or ``'...'`` argument),
@@ -1175,7 +1177,7 @@ def _rewrite_quoted_path(
     if not path.startswith("/"):
         return None
 
-    resolved = _resolve_virtual_mount_path(path, skills_dir, media_dir)
+    resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
     if resolved is not None:
         return _guard_bare_absolute(resolved)  # already shlex.quoted
 
@@ -1201,7 +1203,7 @@ def convert_virtual_paths_in_command(
     command: str,
     workspace_name: str | None = None,
     skills_dir: str | Path | None = None,
-    media_dir: str | Path | None = None,
+    media_dirs: tuple[Path, ...] = (),
 ) -> str:
     """Convert virtual paths (starting with ``/``) in commands to relative paths.
 
@@ -1225,7 +1227,7 @@ def convert_virtual_paths_in_command(
                 re.sub(r"\\(.)", r"\1", m.group(2)),
                 workspace_name,
                 skills_dir,
-                media_dir,
+                media_dirs,
             )
             or m.group(0)
         ),
@@ -1239,7 +1241,7 @@ def convert_virtual_paths_in_command(
         if "://" in command[max(0, match.start() - 10) : match.end() + 10]:
             return path
 
-        resolved = _resolve_virtual_mount_path(path, skills_dir, media_dir)
+        resolved = _resolve_virtual_mount_path(path, skills_dir, media_dirs)
         if resolved is not None:
             return resolved
 
@@ -1618,12 +1620,18 @@ def prepare_sandbox_command(
         ws = cwd_str + "/"
         if ws in command:
             command = command.replace(ws, "./")
+    # The media folder as configured and as resolved: the file tools accept
+    # both spellings, so commands do too.
+    media_dirs: tuple[Path, ...] = ()
+    if media_dir is not None:
+        configured = Path(media_dir)
+        media_dirs = tuple(dict.fromkeys((configured, configured.resolve())))
     if virtual_mode:
         command = convert_virtual_paths_in_command(
             command=command,
             workspace_name=Path(cwd_str).name,
             skills_dir=skills_dir,
-            media_dir=media_dir,
+            media_dirs=media_dirs,
         )
     # Skills/memory dirs must be allowlisted: the workspace-literal replace above runs
     # before the resolver, so any absolute path it later injects reaches validate unstripped.
@@ -1634,7 +1642,7 @@ def prepare_sandbox_command(
             paths.GLOBAL_SKILLS_DIR,
             paths.MEMORIES_DIR,
             _BUILTIN_SKILLS_DIR,
-            media_dir,
+            *media_dirs,
         )
         if prefix is not None
     )
@@ -1804,6 +1812,10 @@ class CustomSandboxBackend(LocalShellBackend):
 
         return super()._resolve_path(key)
 
+    # On Windows the file tools never reach the media folder here: deepagents'
+    # ``validate_path`` rejects drive-letter paths (``C:\...``, ``C:/...``)
+    # for every file tool before the backend sees them. In run mode a channel
+    # attachment on Windows is reachable through the shell only.
     def _media_relative(self, key: str) -> Path | None:
         """*key* relative to the media folder, if it names a path inside it.
 
@@ -1829,7 +1841,9 @@ class CustomSandboxBackend(LocalShellBackend):
             return None
         path = (self._media_real / rel).resolve()
         if not path.is_relative_to(self._media_real):
-            raise ValueError(f"Path {key} is outside the media folder")
+            # An OSError, so the file tools report it as a read error rather
+            # than a traceback.
+            raise PermissionError(errno.EACCES, "Path is outside the media folder", key)
         return path
 
     _DELETE_APPROVAL_ERROR = (
@@ -1851,8 +1865,9 @@ class CustomSandboxBackend(LocalShellBackend):
         return super().delete(file_path)
 
     _MEDIA_READ_ONLY_ERROR = (
-        "The media folder holds channel attachments and is read-only here. "
-        "Copy a file into the run folder to change it."
+        "The media folder holds channel attachments; the file tools do not "
+        "change it. Copy the file into the run folder (for example with a "
+        "shell command) and work on the copy."
     )
 
     def _in_media(self, file_path: str) -> bool:

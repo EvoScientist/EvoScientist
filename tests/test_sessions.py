@@ -1615,8 +1615,8 @@ class TestMigrationSweep(unittest.IsolatedAsyncioTestCase):
     async def test_get_checkpointer_blocks_on_sweep_then_idempotent(self):
         """End-to-end: ``get_checkpointer()`` must run the sweep BEFORE
         yielding the saver so a concurrent ``aput()`` can't race the
-        DELETEs. After the first call sets ``user_version=1``, subsequent
-        calls must skip the sweep entirely.
+        DELETEs. After the first call sets the sweep bit of
+        ``user_version``, subsequent calls must skip the sweep entirely.
         """
         from EvoScientist import sessions as sessions_module
         from EvoScientist.sessions import (
@@ -1636,9 +1636,7 @@ class TestMigrationSweep(unittest.IsolatedAsyncioTestCase):
                     return saver is not None
 
             assert await _first()
-            # The stored-folder upgrade runs right after the sweep and
-            # records the later version.
-            assert await self._user_version() >= _MIGRATION_VERSION
+            assert await self._user_version() & _MIGRATION_VERSION
 
             # Second entry: sweep must be skipped — patch _run_migration_sweep
             # to raise so any accidental re-invocation fails the test loudly.

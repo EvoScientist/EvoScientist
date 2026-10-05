@@ -358,6 +358,41 @@ async def test_start_new_session_cb_leaves_agent_alone():
     assert state.agent is agent
 
 
+async def test_start_new_session_cb_returns_to_root_after_run_folder_resume():
+    """A new thread works in the workspace root, also after a channel
+    ``/resume`` of a run-mode thread."""
+    cfg = _config()
+    old_agent = _agent("run-agent")
+    root_agent = _agent("root-agent")
+    workspace = Workspace("/ws")
+    state = _runtime_state(
+        agent=old_agent,
+        thread_id="run-tid",
+        dirs=SessionDirs(workspace, workspace.runs_dir / "20260930_120000"),
+        config=cfg,
+        thread_store=_thread_store("new-tid"),
+    )
+    runtime = ChannelRuntime(agent=old_agent, thread_id="run-tid")
+    cb = _make_serve_start_new_session_cb(state, runtime)
+
+    with (
+        patch(
+            "EvoScientist.cli.commands._sync_background_agent_server_workspace",
+            new=AsyncMock(),
+        ) as sync_server,
+        patch("EvoScientist.cli.commands._load_agent", return_value=root_agent),
+    ):
+        await cb()
+
+    root = SessionDirs(workspace)
+    sync_server.assert_awaited_once_with(cfg, dirs=root, backend=None)
+    assert state.dirs == root
+    assert state.thread_id == "new-tid"
+    assert state.agent is root_agent
+    assert runtime.thread_id == "new-tid"
+    assert runtime.agent is root_agent
+
+
 async def test_serve_resume_callback_syncs_reloads_and_adopts_workspace():
     cfg = _config()
     old_agent = _agent("old-agent")

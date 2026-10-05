@@ -122,12 +122,22 @@ class SessionDirs:
     ) -> SessionDirs | None:
         """Read the folders a thread was stored with, normalised.
 
-        Returns ``None`` when nothing was stored. Resolves paths, so call it
-        off the event loop on the server.
+        Returns ``None`` when nothing was stored or the value cannot be
+        resolved. A ``run_dir`` outside the workspace is dropped: run folders
+        live under ``<root>/runs``. Resolves paths, so call it off the event
+        loop on the server.
         """
         if not workspace_dir:
             return None
-        return cls(Workspace(workspace_dir), Path(run_dir) if run_dir else None)
+        try:
+            dirs = cls(Workspace(workspace_dir), Path(run_dir) if run_dir else None)
+        except (ValueError, OSError, RuntimeError):
+            return None
+        if dirs.run_dir is not None and not dirs.run_dir.is_relative_to(
+            dirs.workspace.root
+        ):
+            return cls(dirs.workspace)
+        return dirs
 
     @classmethod
     def from_legacy(cls, workspace_dir: str | Path) -> SessionDirs:

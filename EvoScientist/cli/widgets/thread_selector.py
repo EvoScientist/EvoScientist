@@ -60,7 +60,9 @@ def _normalize_path(path: str) -> str:
     if not path:
         return ""
     path = path.rstrip("/")
-    home = os.path.expanduser("~")
+    # Stored folders use forward slashes on every platform; so must the home
+    # prefix they are compared with.
+    home = os.path.expanduser("~").replace("\\", "/")
     if path.startswith(home):
         path = "~" + path[len(home) :]
     return path

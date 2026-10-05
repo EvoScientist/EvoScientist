@@ -1147,13 +1147,20 @@ def _make_serve_start_new_session_cb(
     and nothing actually rotates.  This helper generates a new thread
     id, updates the shared runtime state, and syncs the channel runtime so
     subsequent messages land on the new thread.
+
+    The new thread works in the workspace root: after a ``/resume`` of a
+    run-mode thread, the agent is reloaded and the server synced back
+    there, as a resume into other folders does.
     """
 
     async def _cb() -> None:
+        root = SessionDirs(runtime_state.dirs.workspace)
         new_tid = await runtime_state.runtime_gateways.graph_gateway.create_thread(
-            GraphTarget(**runtime_state.dirs.metadata())
+            GraphTarget(**root.metadata())
         )
-        runtime_state.set_thread_id(new_tid, channel_runtime)
+        await _apply_serve_resume_state(
+            runtime_state, channel_runtime, thread_id=new_tid, dirs=root
+        )
         console.print(f"[dim][serve] New thread: {new_tid}[/dim]")
 
     return _cb
@@ -2595,7 +2602,10 @@ def _main_callback(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
+    # A one-shot resume starts it for the thread's own folders instead, unless
+    # the server gateway backend needs a running server to be built.
+    if not (prompt and thread_id) or gateway_backend == "langgraph_server":
+        _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer

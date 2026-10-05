@@ -476,9 +476,9 @@ async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
     yielding the saver when needed. Sequencing sweep ahead of any agent
     ``aput()`` eliminates the SQLite file-lock contention that produced
     "database is locked" when channel inbound raced the sweep mid-DELETE.
-    The sweep is gated by ``PRAGMA user_version`` so it runs at most
-    once across all future launches; subsequent invocations cost nothing.
-    On failure ``user_version`` is NOT bumped, so the next launch retries.
+    The sweep is gated by its bit of ``PRAGMA user_version`` so it runs at
+    most once across all future launches; subsequent invocations cost
+    nothing. On failure the bit is NOT set, so the next launch retries.
     """
     keep = _resolve_keep_per_ns()
     async with PruningCheckpointer.from_conn_string_with_keep(
@@ -1149,9 +1149,10 @@ async def get_thread_messages(thread_id: str) -> list:
 # Migration sweep & VACUUM (one-time legacy cleanup)
 # ---------------------------------------------------------------------------
 
-# PRAGMA user_version is a 32-bit int slot in the SQLite file header. We
-# bump this to 1 once the legacy-bloat sweep has run successfully so it
-# never runs again. Future structural migrations can use 2, 3, ...
+# PRAGMA user_version is a 32-bit int slot in the SQLite file header. Each
+# one-time job owns one bit of it and is gated on its own bit, so one job
+# can never mark another as done: the legacy-bloat sweep sets bit 1 once it
+# has run successfully, the stored-folders upgrade below sets bit 2.
 _MIGRATION_VERSION = 1
 
 # Threshold below which the sweep is skipped (DB is already small enough
@@ -1251,7 +1252,8 @@ async def _needs_migration() -> bool:
     """Return True if the legacy-bloat sweep should run now.
 
     True iff the DB exists, is larger than ``_MIGRATION_THRESHOLD_BYTES``,
-    and ``PRAGMA user_version`` is below ``_MIGRATION_VERSION``.
+    and the sweep's ``_MIGRATION_VERSION`` bit of ``PRAGMA user_version``
+    is not set.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -1266,7 +1268,7 @@ async def _needs_migration() -> bool:
         async with aiosqlite.connect(str(db_path), timeout=30.0) as conn:
             if not await _table_exists(conn, "checkpoints"):
                 return False
-            return await _get_user_version(conn) < _MIGRATION_VERSION
+            return not await _get_user_version(conn) & _MIGRATION_VERSION
     except aiosqlite.Error:
         return False
 
@@ -1279,8 +1281,8 @@ async def _run_migration_sweep(
 
     Iterates pairs in deterministic order, applies the same DELETE pattern
     the per-step pruner uses, and yields to the event loop between pairs
-    so the agent stays responsive. On success bumps ``PRAGMA user_version``
-    so the sweep never reruns.
+    so the agent stays responsive. On success sets the sweep's bit of
+    ``PRAGMA user_version`` so the sweep never reruns.
 
     ``progress_cb``: optional ``async (done: int, total: int) -> None``
     fired after each pair is committed; used by callers to drive a live
@@ -1295,7 +1297,7 @@ async def _run_migration_sweep(
     async with aiosqlite.connect(db_path, timeout=60.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return 0
-        if await _get_user_version(conn) >= _MIGRATION_VERSION:
+        if await _get_user_version(conn) & _MIGRATION_VERSION:
             return 0
 
         async with conn.execute(
@@ -1331,7 +1333,9 @@ async def _run_migration_sweep(
             if _SWEEP_YIELD_SECONDS >= 0:
                 await asyncio.sleep(_SWEEP_YIELD_SECONDS)
 
-        await _set_user_version(conn, _MIGRATION_VERSION)
+        await _set_user_version(
+            conn, await _get_user_version(conn) | _MIGRATION_VERSION
+        )
 
     # Schedule VACUUM at process exit (must run after the long-lived saver
     # connection closes to acquire the exclusive lock VACUUM requires).
@@ -1345,20 +1349,26 @@ async def _run_migration_sweep(
 # Stored workspace folders (one-time upgrade)
 # ---------------------------------------------------------------------------
 
-# ``user_version`` from which stored ``workspace_dir`` values name the
+# ``user_version`` bit set once stored ``workspace_dir`` values name the
 # workspace root, with a ``--mode=run`` session's folder in ``run_dir``.
 _STORED_DIRS_VERSION = 2
 
 
 def _upgraded_dir_fields(values: list[str]) -> dict[str, dict[str, str]]:
-    """New metadata fields for each stored ``workspace_dir`` that changes.
+    """New metadata fields for each stored ``workspace_dir`` naming a run folder.
 
+    Every other value is left as it is: readers normalise the stored string
+    themselves, and cannot resolve a value this cannot resolve either.
     Resolves paths; run it off the event loop.
     """
     upgraded: dict[str, dict[str, str]] = {}
     for value in values:
-        fields = SessionDirs.from_legacy(value).metadata()
-        if fields != {"workspace_dir": value}:
+        try:
+            fields = SessionDirs.from_legacy(value).metadata()
+        except (ValueError, OSError, RuntimeError) as exc:
+            _logger.warning("Leaving stored workspace folder %r as is: %s", value, exc)
+            continue
+        if fields.get("run_dir"):
             upgraded[value] = fields
     return upgraded
 
@@ -1366,33 +1376,33 @@ def _upgraded_dir_fields(values: list[str]) -> dict[str, dict[str, str]]:
 async def _apply_dir_upgrade(
     conn: aiosqlite.Connection, upgraded: dict[str, dict[str, str]]
 ) -> None:
-    """Rewrite every upgraded ``workspace_dir`` in one pass over the table."""
+    """Split every upgraded ``workspace_dir`` in one pass over the table."""
     await conn.execute(
         "CREATE TEMP TABLE _dir_upgrade "
-        "(old TEXT PRIMARY KEY, workspace_dir TEXT NOT NULL, run_dir TEXT)"
+        "(old TEXT PRIMARY KEY, workspace_dir TEXT NOT NULL, run_dir TEXT NOT NULL)"
     )
     await conn.executemany(
         "INSERT INTO _dir_upgrade VALUES (?, ?, ?)",
         [
-            (old, fields["workspace_dir"], fields.get("run_dir"))
+            (old, fields["workspace_dir"], fields["run_dir"])
             for old, fields in upgraded.items()
         ],
     )
-    # ``metadata`` is stored as a BLOB of JSON text; keep it one. ``run_dir``
-    # is added only for rows that name a run folder.
+    # ``metadata`` is stored as a BLOB of JSON text; keep it one. A correlated
+    # subquery rather than ``UPDATE ... FROM``, which needs SQLite 3.33.
     await conn.execute(
         """
         UPDATE checkpoints SET metadata = CAST(
-            CASE WHEN u.run_dir IS NULL
-                THEN json_set(CAST(metadata AS TEXT),
-                              '$.workspace_dir', u.workspace_dir)
-                ELSE json_set(CAST(metadata AS TEXT),
-                              '$.workspace_dir', u.workspace_dir,
-                              '$.run_dir', u.run_dir)
-            END AS BLOB)
-        FROM _dir_upgrade AS u
-        WHERE json_extract(checkpoints.metadata, '$.workspace_dir') = u.old
-          AND json_extract(checkpoints.metadata, '$.run_dir') IS NULL
+            (SELECT json_set(CAST(checkpoints.metadata AS TEXT),
+                             '$.workspace_dir', u.workspace_dir,
+                             '$.run_dir', u.run_dir)
+             FROM _dir_upgrade AS u
+             WHERE u.old = json_extract(checkpoints.metadata, '$.workspace_dir'))
+            AS BLOB)
+        WHERE json_valid(metadata)
+          AND json_extract(metadata, '$.workspace_dir')
+              IN (SELECT old FROM _dir_upgrade)
+          AND json_extract(metadata, '$.run_dir') IS NULL
         """
     )
     await conn.execute("DROP TABLE _dir_upgrade")
@@ -1416,30 +1426,34 @@ async def _upgrade_stored_dirs() -> None:
 
     Run-mode sessions stored their run folder as ``workspace_dir``. Rows
     whose folder has the name ``--mode=run`` generates get the workspace
-    root plus ``run_dir``; every other stored folder is rewritten in the
-    stored form (resolved, POSIX). AutoSkills proposals get the same
-    upgrade. Afterwards readers use the stored values as they are.
+    root plus ``run_dir``; no other row is rewritten, since readers
+    normalise the stored folder themselves. Rows whose metadata is not
+    valid JSON, or whose folder cannot be resolved, are skipped. AutoSkills
+    proposals get the same upgrade.
 
-    Runs in one ``BEGIN IMMEDIATE`` transaction that also bumps
-    ``user_version``, so concurrent processes upgrade once. On failure
-    nothing is committed and the next start retries.
+    Runs in one ``BEGIN IMMEDIATE`` transaction that also sets the
+    ``_STORED_DIRS_VERSION`` bit of ``user_version``, so concurrent
+    processes upgrade once. On failure nothing is committed and the next
+    start retries.
     """
     from . import paths
     from .memory.autoskills.proposals import upgrade_proposal_workspaces
 
     async with aiosqlite.connect(str(get_db_path()), timeout=30.0) as conn:
-        if await _get_user_version(conn) >= _STORED_DIRS_VERSION:
+        if await _get_user_version(conn) & _STORED_DIRS_VERSION:
             return
         await conn.execute("BEGIN IMMEDIATE")
         try:
-            if await _get_user_version(conn) >= _STORED_DIRS_VERSION:
+            version = await _get_user_version(conn)
+            if version & _STORED_DIRS_VERSION:
                 await conn.rollback()
                 return
             if await _table_exists(conn, "checkpoints"):
                 async with conn.execute(
                     "SELECT DISTINCT json_extract(metadata, '$.workspace_dir') "
                     "FROM checkpoints "
-                    "WHERE json_extract(metadata, '$.run_dir') IS NULL"
+                    "WHERE json_valid(metadata) "
+                    "AND json_extract(metadata, '$.run_dir') IS NULL"
                 ) as cur:
                     values = [
                         row[0]
@@ -1450,7 +1464,7 @@ async def _upgrade_stored_dirs() -> None:
                 if upgraded:
                     await _apply_dir_upgrade(conn, upgraded)
             await asyncio.to_thread(upgrade_proposal_workspaces, paths.MEMORIES_DIR)
-            await _set_user_version(conn, _STORED_DIRS_VERSION)
+            await _set_user_version(conn, version | _STORED_DIRS_VERSION)
         except BaseException:
             await conn.rollback()
             raise
@@ -1603,6 +1617,14 @@ async def _api_session_dirs_async() -> SessionDirs:
     return await asyncio.to_thread(_api_session_dirs)
 
 
+# Graphs the server builds for the session's folder (``main_graph.py`` and
+# ``graphs.py``). Every other graph works in the workspace root, so its rows
+# carry no ``run_dir``.
+FOLDER_GRAPH_IDS = frozenset(
+    {AGENT_NAME, "writing-agent", "data-analysis-agent", "expert-container-async"}
+)
+
+
 class _ApiPruningCheckpointer(PruningCheckpointer):
     """``PruningCheckpointer`` that stamps CLI-compatible ownership metadata.
 
@@ -1612,6 +1634,7 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
     rows with the current workspace keeps main and async-subagent threads
     restorable without exposing other workspaces. Memory-worker rows still get
     workspace metadata, but remain disposable until worker cloning lands.
+    Only graphs that work in the session's folder get its ``run_dir``.
 
     Only the main graph receives ``agent_name``. The local CLI session
     surface still uses that ownership key, so worker/subagent graph rows must
@@ -1631,7 +1654,10 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
             # the dev runtime's blockbuster guard. Run it in a thread, and only
             # when the run did not bring its own folders.
             if "workspace_dir" not in metadata:
-                metadata.update((await _api_session_dirs_async()).metadata())
+                dirs = await _api_session_dirs_async()
+                if metadata["graph_id"] not in FOLDER_GRAPH_IDS:
+                    dirs = SessionDirs(dirs.workspace)
+                metadata.update(dirs.metadata())
             metadata["updated_at"] = datetime.now(UTC).isoformat()
             if metadata.get("graph_id") == AGENT_NAME:
                 metadata.setdefault("agent_name", AGENT_NAME)
