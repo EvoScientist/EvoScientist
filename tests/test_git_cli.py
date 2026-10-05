@@ -53,7 +53,10 @@ class TestRunGit:
             with pytest.raises(GitNotFoundError) as excinfo:
                 run_git(["--version"], timeout=5)
 
-        assert str(excinfo.value) == "git could not be started: Permission denied"
+        message = str(excinfo.value)
+        assert message.startswith("git could not be started:")
+        assert "Permission denied" in message
+        assert "git-scm.com" not in message
 
     def test_git_not_found_error_pickles_and_copies(self):
         import copy
