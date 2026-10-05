@@ -45,11 +45,22 @@ def _info(bash: Path, source: str = "system") -> GitInfo:
 
 @pytest.fixture
 def scripts(tmp_path, monkeypatch) -> Path:
-    """Script files go to a test directory, swept only when a test asks."""
+    """Script files go to a test directory, swept only when a test asks; the
+    agent's git config file goes to a test data dir, not the real one."""
+    from EvoScientist import paths
+
     directory = tmp_path / "scripts"
     monkeypatch.setattr(agent_shell, "_script_dir", lambda: directory)
     monkeypatch.setattr(agent_shell, "_sweep_stale_scripts", lambda: None)
-    return directory
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    agent_shell._agent_gitconfig.cache_clear()
+    yield directory
+    agent_shell._agent_gitconfig.cache_clear()
+
+
+def _without_git_config(env: dict[str, str]) -> dict[str, str]:
+    """The env minus GIT_CONFIG_SYSTEM, which the git config tests cover."""
+    return {k: v for k, v in env.items() if k != "GIT_CONFIG_SYSTEM"}
 
 
 @pytest.fixture
@@ -220,7 +231,7 @@ def test_bash_env_asks_python_for_utf8_and_keeps_path_conversion(fake_bash):
     launch = agent_shell.prepare("true", {"A": "1"})
     # No MSYS_NO_PATHCONV: $(pwd), ~ and $HOME must reach Windows programs
     # converted to C:/...
-    assert launch.env == {"A": "1", "PYTHONIOENCODING": "utf-8"}
+    assert _without_git_config(launch.env) == {"A": "1", "PYTHONIOENCODING": "utf-8"}
     launch.cleanup()
 
 
@@ -234,7 +245,7 @@ def test_bash_env_keeps_the_users_python_encoding(fake_bash):
 def test_bash_env_treats_an_empty_python_encoding_as_unset(fake_bash):
     """Python ignores an empty PYTHONIOENCODING and falls back to the code page."""
     launch = agent_shell.prepare("true", {"pythonioencoding": ""})
-    assert launch.env == {"PYTHONIOENCODING": "utf-8"}
+    assert _without_git_config(launch.env) == {"PYTHONIOENCODING": "utf-8"}
     launch.cleanup()
 
 
@@ -255,7 +266,7 @@ def test_windows_command_line_quotes_both_paths(monkeypatch):
 
 def test_bash_env_drops_bash_env(fake_bash):
     launch = agent_shell.prepare("true", {"BASH_ENV": "~/.bashrc", "Bash_Env": "x"})
-    assert launch.env == {"PYTHONIOENCODING": "utf-8"}
+    assert _without_git_config(launch.env) == {"PYTHONIOENCODING": "utf-8"}
     launch.cleanup()
 
 
@@ -496,10 +507,53 @@ def test_users_own_system_config_is_kept(portablegit):
         assert set(launch.env) == {name, "PYTHONIOENCODING"}
 
 
-def test_a_system_git_keeps_the_users_settings(fake_bash):
+@pytest.fixture
+def system_git(scripts, tmp_path, monkeypatch) -> GitInfo:
+    """A recorded system Git for Windows (bash is /bin/bash) whose installer
+    config preselects autocrlf = true and Git Credential Manager."""
+    bash = shutil.which("bash")
+    if bash is None or sys.platform == "win32":
+        pytest.skip("needs a POSIX bash")
+    root = tmp_path / "Program Files" / "Git"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc" / "gitconfig").write_text(
+        "[core]\n\tautocrlf = true\n[credential]\n\thelper = manager\n"
+    )
+    info = GitInfo("system", "2.55.0.windows.3", root / "cmd" / "git.exe", Path(bash))
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: info)
+    return info
+
+
+def test_system_git_gets_lf_checkouts_and_keeps_its_helper(system_git):
     launch = agent_shell.prepare("true", {})
     launch.cleanup()
-    assert "GIT_CONFIG_SYSTEM" not in launch.env
+    text = Path(launch.env["GIT_CONFIG_SYSTEM"]).read_text(encoding="utf-8")
+    shipped = (system_git.git.parent.parent / "etc" / "gitconfig").as_posix()
+    assert f'path = "{shipped}"' in text
+    assert "autocrlf = input" in text
+    assert "helper" not in text
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_system_git_config_resolves(system_git):
+    launch = agent_shell.prepare("true", {"GIT_CONFIG_GLOBAL": os.devnull})
+    launch.cleanup()
+    env = {**os.environ, **launch.env}
+    assert _git_config(env, "--get", "core.autocrlf").strip() == "input"
+    assert _git_config(env, "--get-all", "credential.helper").splitlines() == [
+        "manager"
+    ]
+
+
+def test_agent_gitconfig_follows_the_record(system_git, portablegit):
+    """Written at every start from the record: a later PortableGit replaces
+    the system Git's include and adds the helper lines."""
+    first = agent_shell._agent_gitconfig_text(system_git.git.parent.parent, "system")
+    second = agent_shell._agent_gitconfig_text(
+        portablegit.git.parent.parent, "portablegit"
+    )
+    assert first != second
+    assert "helper = manager" in second
 
 
 def test_unwritable_agent_gitconfig_is_skipped_with_a_warning(

@@ -219,38 +219,41 @@ def _write_script(command: str) -> Path:
     return Path(name)
 
 
-def _agent_gitconfig_text(root: Path) -> str:
+def _agent_gitconfig_text(root: Path, source: str) -> str:
     # Quoted: a path may contain `#` or `;`, which start a comment otherwise.
     # Forward slashes, so nothing in a Windows path needs escaping.
     shipped = (root / "etc" / "gitconfig").as_posix()
-    return (
+    text = (
         "# Written by EvoScientist for the agent's shell (GIT_CONFIG_SYSTEM).\n"
         "[include]\n"
         f'\tpath = "{shipped}"\n'
         "[core]\n"
         "\tautocrlf = input\n"
-        "[credential]\n"
-        "\thelper =\n"
-        "\thelper = manager\n"
     )
+    if source == "portablegit":
+        text += "[credential]\n\thelper =\n\thelper = manager\n"
+    return text
 
 
 @functools.cache
-def _agent_gitconfig(root: Path) -> Path | None:
-    """The git config file for the agent's shell when it runs PortableGit.
+def _agent_gitconfig(root: Path, source: str) -> Path | None:
+    """The system-level git config file for the agent's shell.
 
-    PortableGit's ``etc\\gitconfig`` sets ``core.autocrlf = true``, which
-    checks out scripts with CRLF line endings that bash cannot run, and
-    ``credential.helper = helper-selector``, a picker window that blocks the
-    command until its timeout. This file includes that one and overrides the
-    two; it is a system-level file, so the user's ``~/.gitconfig`` and the
-    repository's config still win. Written once per process; None (and a
-    WARNING) when it cannot be written.
+    It includes the recorded Git's own ``etc\\gitconfig`` and sets
+    ``core.autocrlf = input``: PortableGit ships ``true``, and the Git for
+    Windows installer preselects it, which checks out scripts with CRLF line
+    endings that bash cannot run. For PortableGit it also replaces
+    ``credential.helper = helper-selector`` (a picker window before any
+    sign-in) with ``manager``; a system Git keeps the helper it was installed
+    with. The user's ``~/.gitconfig`` and the repository's config still win.
+    Written at every start from ``tools/git.json``, so the include follows a
+    moved or replaced Git (git ignores an include of a missing file without a
+    word); None (and a WARNING) when it cannot be written.
     """
     from .setup._install import atomic_write_text, tools_dir
 
     path = tools_dir() / "git-agent.gitconfig"
-    text = _agent_gitconfig_text(root)
+    text = _agent_gitconfig_text(root, source)
     try:
         # Atomic: another EvoScientist process's agent git may be reading it.
         if not path.is_file() or path.read_text(encoding="utf-8") != text:
@@ -269,10 +272,9 @@ def _bash_env(env: dict[str, str] | None, info: GitInfo) -> dict[str, str]:
 
     ``PYTHONIOENCODING``: a native ``python`` writes to a pipe in the ANSI code
     page, while MSYS tools write UTF-8, and the output is decoded as UTF-8; a
-    value the user set is kept. For PortableGit, ``GIT_CONFIG_SYSTEM`` points
-    the agent's ``git`` at :func:`_agent_gitconfig`, unless the user set it (or
-    ``GIT_CONFIG_NOSYSTEM``) themselves; a system Git for Windows is left as
-    the user configured it.
+    value the user set is kept. ``GIT_CONFIG_SYSTEM`` points the agent's
+    ``git`` at :func:`_agent_gitconfig`, unless the user set it (or
+    ``GIT_CONFIG_NOSYSTEM``) themselves.
 
     Path conversion stays on, as in any Git Bash: ``$(pwd)``, ``~`` and
     ``$HOME`` expand to ``/c/Users/...`` and must reach Windows programs as
@@ -291,11 +293,8 @@ def _bash_env(env: dict[str, str] | None, info: GitInfo) -> dict[str, str]:
         for key in encoding_keys:
             del child[key]
         child["PYTHONIOENCODING"] = "utf-8"
-    if info.source == "portablegit" and not keys & {
-        "GIT_CONFIG_SYSTEM",
-        "GIT_CONFIG_NOSYSTEM",
-    }:
-        gitconfig = _agent_gitconfig(info.git.parent.parent)
+    if not keys & {"GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"}:
+        gitconfig = _agent_gitconfig(info.git.parent.parent, info.source)
         if gitconfig is not None:
             child["GIT_CONFIG_SYSTEM"] = str(gitconfig)
     return child
