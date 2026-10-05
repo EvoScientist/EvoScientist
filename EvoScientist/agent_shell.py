@@ -96,19 +96,76 @@ def _write_script(command: str) -> Path:
     return Path(name)
 
 
-def _bash_env(env: dict[str, str] | None) -> dict[str, str]:
+def _agent_gitconfig_text(root: Path) -> str:
+    # Quoted: a path may contain `#` or `;`, which start a comment otherwise.
+    # Forward slashes, so nothing in a Windows path needs escaping.
+    shipped = (root / "etc" / "gitconfig").as_posix()
+    return (
+        "# Written by EvoScientist for the agent's shell (GIT_CONFIG_SYSTEM).\n"
+        "[include]\n"
+        f'\tpath = "{shipped}"\n'
+        "[core]\n"
+        "\tautocrlf = input\n"
+        "[credential]\n"
+        "\thelper =\n"
+        "\thelper = manager\n"
+    )
+
+
+@functools.cache
+def _agent_gitconfig(root: Path) -> Path | None:
+    """The git config file for the agent's shell when it runs PortableGit.
+
+    PortableGit's ``etc\\gitconfig`` sets ``core.autocrlf = true``, which
+    checks out scripts with CRLF line endings that bash cannot run, and
+    ``credential.helper = helper-selector``, a picker window that blocks the
+    command until its timeout. This file includes that one and overrides the
+    two; it is a system-level file, so the user's ``~/.gitconfig`` and the
+    repository's config still win. Written once per process; None (and a
+    WARNING) when it cannot be written.
+    """
+    from .setup._install import tools_dir
+
+    path = tools_dir() / "git-agent.gitconfig"
+    text = _agent_gitconfig_text(root)
+    try:
+        if not path.is_file() or path.read_text(encoding="utf-8") != text:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        logger.warning(
+            f"Could not write {path}: {exc}. The agent's git uses PortableGit's "
+            "own settings (CRLF checkouts, credential picker)."
+        )
+        return None
+    return path
+
+
+def _bash_env(env: dict[str, str] | None, info: GitInfo) -> dict[str, str]:
     """The bash child's environment: ``env`` (or ours) plus what bash needs.
 
     ``MSYS_NO_PATHCONV`` stops bash from rewriting arguments that look like
     POSIX paths (``"/hi"`` would reach a native program as
     ``C:/Program Files/Git/hi``). ``PYTHONIOENCODING``: a native ``python``
     writes to a pipe in the ANSI code page, while MSYS tools write UTF-8, and
-    the output is decoded as UTF-8; a value the user set is kept.
+    the output is decoded as UTF-8; a value the user set is kept. For
+    PortableGit, ``GIT_CONFIG_SYSTEM`` points the agent's ``git`` at
+    :func:`_agent_gitconfig`, unless the user set it (or
+    ``GIT_CONFIG_NOSYSTEM``) themselves; a system Git for Windows is left as
+    the user configured it.
     """
     child = dict(os.environ if env is None else env)
+    keys = {key.upper() for key in child}
     child["MSYS_NO_PATHCONV"] = "1"
-    if not any(key.upper() == "PYTHONIOENCODING" for key in child):
+    if "PYTHONIOENCODING" not in keys:
         child["PYTHONIOENCODING"] = "utf-8"
+    if info.source == "portablegit" and not keys & {
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+    }:
+        gitconfig = _agent_gitconfig(info.git.parent.parent)
+        if gitconfig is not None:
+            child["GIT_CONFIG_SYSTEM"] = str(gitconfig)
     return child
 
 
@@ -168,6 +225,6 @@ def prepare(command: str, env: dict[str, str] | None) -> ShellLaunch:
     # the first argument must not look like one of bin\bash.exe's own options.
     return ShellLaunch(
         args=[str(info.bash), script.as_posix()],
-        env=_bash_env(env),
+        env=_bash_env(env, info),
         script=script,
     )

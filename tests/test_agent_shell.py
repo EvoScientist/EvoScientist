@@ -146,6 +146,102 @@ def test_bash_gets_no_console_window(fake_bash, monkeypatch):
     launch.cleanup()
 
 
+# --------------------------------------------------------------------------- #
+# The agent's git settings for PortableGit
+# --------------------------------------------------------------------------- #
+_SHIPPED_GITCONFIG = (
+    "[core]\n\tautocrlf = true\n[credential]\n\thelper = helper-selector\n"
+)
+
+
+@pytest.fixture
+def portablegit(scripts, tmp_path, monkeypatch) -> GitInfo:
+    """A recorded PortableGit (bash is /bin/bash) under a path that needs quoting."""
+    from EvoScientist import paths
+
+    bash = shutil.which("bash")
+    if bash is None or sys.platform == "win32":
+        pytest.skip("needs a POSIX bash")
+    data = tmp_path / "Jan #1; ąę" / ".evoscientist"
+    root = data / "tools" / "git-2.56.0.windows.1"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc" / "gitconfig").write_text(_SHIPPED_GITCONFIG)
+    monkeypatch.setattr(paths, "DATA_DIR", data)
+    agent_shell._agent_gitconfig.cache_clear()
+    info = GitInfo(
+        "portablegit", "2.56.0.windows.1", root / "cmd" / "git.exe", Path(bash)
+    )
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: info)
+    yield info
+    agent_shell._agent_gitconfig.cache_clear()
+
+
+def _git_config(env: dict[str, str], *args: str) -> str:
+    result = subprocess.run(
+        ["git", "config", *args], env=env, capture_output=True, text=True
+    )
+    return result.stdout
+
+
+def test_portablegit_gets_the_agent_gitconfig(portablegit):
+    launch = agent_shell.prepare("true", {"A": "1"})
+    launch.cleanup()
+    path = Path(launch.env["GIT_CONFIG_SYSTEM"])
+    assert path.parent == portablegit.git.parent.parent.parent.resolve()
+    assert path.name == "git-agent.gitconfig"
+    shipped = (portablegit.git.parent.parent / "etc" / "gitconfig").as_posix()
+    assert f'path = "{shipped}"' in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_agent_gitconfig_overrides_the_shipped_settings(portablegit, tmp_path):
+    launch = agent_shell.prepare("true", {"GIT_CONFIG_GLOBAL": os.devnull})
+    launch.cleanup()
+    env = {**os.environ, **launch.env}
+    assert _git_config(env, "--get", "core.autocrlf").strip() == "input"
+    # The shipped file is included; the empty entry then resets the list, so
+    # git asks only `manager`.
+    assert _git_config(env, "--get-all", "credential.helper").splitlines() == [
+        "helper-selector",
+        "",
+        "manager",
+    ]
+    # The user's own setting wins over a system-level file.
+    user = tmp_path / "user.gitconfig"
+    user.write_text("[core]\n\tautocrlf = false\n")
+    env["GIT_CONFIG_GLOBAL"] = str(user)
+    assert _git_config(env, "--get", "core.autocrlf").strip() == "false"
+
+
+def test_users_own_system_config_is_kept(portablegit):
+    for name in ("GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
+        launch = agent_shell.prepare("true", {name: "x"})
+        launch.cleanup()
+        assert launch.env[name] == "x"
+        assert set(launch.env) == {name, "MSYS_NO_PATHCONV", "PYTHONIOENCODING"}
+
+
+def test_a_system_git_keeps_the_users_settings(fake_bash):
+    launch = agent_shell.prepare("true", {})
+    launch.cleanup()
+    assert "GIT_CONFIG_SYSTEM" not in launch.env
+
+
+def test_unwritable_agent_gitconfig_is_skipped_with_a_warning(
+    portablegit, monkeypatch, tmp_path, caplog
+):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("")
+    monkeypatch.setattr(
+        "EvoScientist.setup._install.tools_dir", lambda: blocker / "tools"
+    )
+    with caplog.at_level("WARNING", logger="EvoScientist.agent_shell"):
+        launch = agent_shell.prepare("true", {})
+    launch.cleanup()
+    assert "GIT_CONFIG_SYSTEM" not in launch.env
+    assert "Could not write" in caplog.text
+
+
 def test_sweep_removes_only_stale_scripts(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_shell, "_script_dir", lambda: tmp_path)
     old = tmp_path / "cmd-old.sh"
