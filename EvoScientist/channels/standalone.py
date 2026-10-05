@@ -240,6 +240,13 @@ def run_standalone(
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
     """
+    # Telegram's Bot API puts the bot token in the URL path. httpx logs every
+    # request URL at INFO, so a standalone channel started with DEBUG logging
+    # (each serve.py) would write the token to stdout and any redirected file.
+    # Elevate httpx above INFO here — the same effect `EvoSci serve` has.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     config = None
     backend = None
     if use_agent:

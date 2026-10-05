@@ -92,3 +92,16 @@ def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
     ensure_configs.clear()
     standalone.run_standalone(channel=None, bus=None, use_agent=False)
     assert ensure_configs == []
+
+
+def test_run_standalone_quiets_httpx(monkeypatch):
+    """httpx must not log request URLs (Telegram tokens live in the path)."""
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from EvoScientist.channels.standalone import run_standalone
+
+    monkeypatch.setattr(logging.getLogger("httpx"), "level", logging.DEBUG)
+    with patch("EvoScientist.channels.standalone.asyncio.run"):
+        run_standalone(MagicMock(), MagicMock(), use_agent=False)
+    assert logging.getLogger("httpx").level == logging.WARNING
