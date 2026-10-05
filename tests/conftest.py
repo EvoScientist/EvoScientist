@@ -180,6 +180,20 @@ def _no_agent_python_probe(monkeypatch):
     monkeypatch.setattr(research_env, "_log_missing_python_hint", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_agent_bash(monkeypatch):
+    """Keep the agent-shell bash decision away from the real machine.
+
+    It is cached per process and reads ``tools/git.json`` from the real data
+    dir, so on a Windows developer machine every ``execute`` test would run in
+    that Git Bash. Pinned to "no bash" (``cmd.exe`` on Windows, ``/bin/sh``
+    elsewhere); ``tests/test_agent_shell.py`` opts into a real bash.
+    """
+    from EvoScientist import agent_shell
+
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+
+
 @pytest.fixture
 def no_git(tmp_path, monkeypatch):
     """Run as if git were not installed.

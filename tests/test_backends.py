@@ -299,6 +299,33 @@ class TestConvertVirtualPaths:
         assert tokens[0] == "python"
         assert tokens[1] == str(builtin_dir / "find skills" / "tool.py")
 
+    def test_skills_path_with_whitespace_is_quoted_for_git_bash(
+        self, monkeypatch, tmp_path
+    ):
+        """On Windows with Git Bash the resolved path is one POSIX-quoted
+        token with forward slashes, for bash rather than cmd.exe."""
+        from EvoScientist import agent_shell
+
+        builtin_dir = tmp_path / "builtin_skills"
+        for name in ("ws_skills", "global_skills", "builtin_skills", "memories"):
+            (tmp_path / name).mkdir()
+        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+        (builtin_dir / "find skills").mkdir()
+        (builtin_dir / "find skills" / "tool.py").write_text("print('ok')")
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"'
+        )
+
+        expected = str(builtin_dir / "find skills" / "tool.py").replace("\\", "/")
+        assert shlex.split(result) == ["python", expected]
+        assert result == f"python '{expected}'"
+
     def test_quoted_system_path_with_workspace_and_whitespace_corrected(self):
         """A quoted system path that references the workspace dir name
         (which itself contains a space) must be auto-corrected to the
@@ -1956,6 +1983,23 @@ class TestPlatformQuote:
         # Embedded " is escaped as \" so cmd.exe keeps the literal quote inside
         # the token rather than terminating the quoted region.
         assert backends._platform_quote(r'C:\path\a"b') == r'"C:\path\a\"b"'
+
+    def test_windows_with_git_bash_uses_posix_quotes_and_forward_slashes(
+        self, monkeypatch
+    ):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+        # bash and native programs both accept C:/...; a backslash would be an
+        # escape character for bash.
+        assert (
+            backends._platform_quote(r"C:\Users\John Smith\file.py")
+            == "'C:/Users/John Smith/file.py'"
+        )
+        assert (
+            backends._platform_quote(r"C:\Users\foo\file.py") == "C:/Users/foo/file.py"
+        )
 
     def test_windows_percent_sign_treated_as_regular_char(self, monkeypatch):
         monkeypatch.setattr(backends, "_is_windows", lambda: True)

@@ -741,6 +741,44 @@ def test_activate_runtime_ignores_a_missing_install(env, monkeypatch):
     assert git.activate_runtime() is None
 
 
+def test_recorded_git_reads_the_portablegit_record(env, monkeypatch):
+    git.ensure_git()
+    monkeypatch.setattr(git.sys, "platform", "win32")
+    info = git.recorded_git()
+    root = (env["tools"] / f"git-{git.GIT_VERSION}").resolve()
+    assert info == git.GitInfo(
+        "portablegit",
+        git.GIT_VERSION,
+        root / "cmd" / "git.exe",
+        root / "bin" / "bash.exe",
+    )
+
+
+def test_recorded_git_reads_a_system_git_record(env, monkeypatch):
+    _system_git(env, monkeypatch)
+    git.ensure_git()
+    monkeypatch.setattr(git.sys, "platform", "win32")
+    info = git.recorded_git()
+    assert info is not None
+    assert info.source == "system"
+    assert info.bash.name == "bash.exe"
+
+
+def test_recorded_git_is_none_without_a_record_or_outside_windows(env, monkeypatch):
+    monkeypatch.setattr(git.sys, "platform", "win32")
+    assert git.recorded_git() is None
+    git.ensure_git()
+    monkeypatch.setattr(git.sys, "platform", "linux")
+    assert git.recorded_git() is None
+
+
+def test_recorded_git_is_none_when_the_bash_is_gone(env, monkeypatch):
+    git.ensure_git()
+    monkeypatch.setattr(git.sys, "platform", "win32")
+    (env["tools"] / f"git-{git.GIT_VERSION}" / "bin" / "bash.exe").unlink()
+    assert git.recorded_git() is None
+
+
 # --------------------------------------------------------------------------- #
 # Stage
 # --------------------------------------------------------------------------- #

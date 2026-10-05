@@ -97,11 +97,13 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
         if os.name == "nt":
             # CREATE_NEW_PROCESS_GROUP alone does not make terminate() recursive.
             # taskkill is the native way to stop the complete descendant tree.
+            # No window: the parent may have no console (desktop app).
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 check=False,
                 capture_output=True,
                 timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         else:
             os.killpg(process.pid, signal.SIGKILL)
@@ -1089,17 +1091,24 @@ def _cmd_quote(s: str) -> str:
 
 
 def _platform_quote(s: str) -> str:
-    """Quote *s* for the host's default shell.
+    """Quote *s* for the agent's shell.
 
     On POSIX, delegates to :func:`shlex.quote` (single-quote wrapping).
-    On Windows, uses double-quote wrapping compatible with cmd.exe —
-    see :func:`_cmd_quote`. The platform check is read at call time, so
-    tests can swap it via ``monkeypatch.setattr(backends, "_is_windows", ...)``
-    without mutating :mod:`sys` module state.
+    On Windows with the recorded Git Bash (:mod:`EvoScientist.agent_shell`),
+    :func:`shlex.quote` of the path with forward slashes (``C:/Users/...``),
+    which bash and native programs both accept. On Windows without it,
+    double-quote wrapping compatible with cmd.exe — see :func:`_cmd_quote`.
+    The platform check is read at call time, so tests can swap it via
+    ``monkeypatch.setattr(backends, "_is_windows", ...)`` without mutating
+    :mod:`sys` module state.
     """
-    if _is_windows():
-        return _cmd_quote(s)
-    return shlex.quote(s)
+    if not _is_windows():
+        return shlex.quote(s)
+    from . import agent_shell
+
+    if agent_shell.uses_bash():
+        return shlex.quote(s.replace("\\", "/"))
+    return _cmd_quote(s)
 
 
 def _resolve_virtual_mount_path(token: str) -> str | None:
@@ -1833,25 +1842,32 @@ class CustomSandboxBackend(LocalShellBackend):
                 truncated=False,
             )
 
+        from . import agent_shell
+
         process: subprocess.Popen[str] | None = None
         termination_reason: str | None = None
         output_abandoned = False
+        launch: agent_shell.ShellLaunch | None = None
         try:
+            launch = agent_shell.prepare(command, self._env)
             process_options: dict[str, object] = {}
             if os.name == "nt":
-                process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                process_options["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | launch.creationflags
+                )
             else:
                 process_options["start_new_session"] = True
 
             process = subprocess.Popen(
-                command,
-                shell=True,
+                launch.args,
+                shell=launch.shell,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
                 text=True,
-                env=self._env,
+                env=launch.env,
                 cwd=str(self.cwd),
+                **launch.text_options,
                 **process_options,
             )
             _register_shell_process(cancel_event, process)
@@ -1952,6 +1968,10 @@ class CustomSandboxBackend(LocalShellBackend):
         finally:
             if process is not None:
                 _unregister_shell_process(cancel_event, process)
+            # The shell has exited or been stopped: its script can go, even if
+            # a detached descendant still holds the pipes.
+            if launch is not None:
+                launch.cleanup()
 
         # Enhance timeout errors with actionable recovery guidance
         if response.exit_code == 124:

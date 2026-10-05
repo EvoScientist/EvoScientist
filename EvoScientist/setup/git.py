@@ -757,6 +757,29 @@ def activate_runtime() -> Path | None:
     return git.parent
 
 
+def recorded_git() -> GitInfo | None:
+    """The recorded Git for Windows, when its ``bin\\bash.exe`` still exists.
+
+    Windows only. Reads ``tools/git.json`` and checks one file (no
+    subprocess), so it is cheap enough to call when an agent is built. Never
+    looks for ``bash`` on PATH, where ``System32\\bash.exe`` starts WSL.
+    """
+    if sys.platform != "win32":
+        return None
+    record = _read_record()
+    if record is None:
+        return None
+    bash = Path(record["bash"]).resolve()
+    if not bash.is_file():
+        return None
+    return GitInfo(
+        source=record["source"],
+        version=record["version"],
+        git=Path(record["git"]).resolve(),
+        bash=bash,
+    )
+
+
 def private_git_on_path() -> bool:
     """True when the ``git`` that PATH resolves to is the recorded PortableGit.
 
