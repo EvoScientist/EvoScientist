@@ -292,6 +292,26 @@ def test_system_python_probe_accepts_python_3():
     assert result.returncode == 0
 
 
+def test_run_opens_no_console_window(monkeypatch):
+    """The probes also run when an agent is built; from a process without a
+    console (the desktop app) each would flash a console window."""
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "")
+
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(re_env.subprocess, "run", fake_run)
+    re_env._run(["python", "-c", "pass"], 5)
+    assert seen["creationflags"] == 0x08000000
+
+
+def test_run_works_for_real():
+    result = re_env._run([sys.executable, "-c", "print('ok')"], 30)
+    assert result.stdout.strip() == "ok"
+
+
 def _run_probe_with_marker(monkeypatch, tmp_path, *, in_venv: bool):
     import sysconfig
 

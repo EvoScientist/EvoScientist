@@ -110,7 +110,12 @@ def is_ready(env: Path | None = None) -> bool:
 # Subprocesses
 # --------------------------------------------------------------------------- #
 def _run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    """Run ``cmd`` capturing combined output. Raises OSError / SubprocessError."""
+    """Run ``cmd`` capturing combined output. Raises OSError / SubprocessError.
+
+    No console window on Windows: the python probes also run when an agent is
+    built, and a process without a console (the desktop app) would otherwise
+    flash one for every probe.
+    """
     return subprocess.run(
         list(cmd),
         stdout=subprocess.PIPE,
@@ -119,6 +124,7 @@ def _run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]
         text=True,
         errors="replace",
         timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
 
