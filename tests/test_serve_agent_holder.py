@@ -595,23 +595,52 @@ async def test_serve_resume_callback_load_failure_does_not_sync_or_adopt():
     assert runtime.thread_id == "old-tid"
 
 
-async def test_hook_handles_both_agent_and_thread_swap():
-    """Edge case: a command that changes both (hypothetical). Both
-    updates must land in runtime state."""
-    old_agent = _agent("old-agent")
-    new_agent = _agent("new-agent")
-    state = _runtime_state(agent=old_agent, thread_id="old-tid")
-    hook = _make_serve_cmd_completed_hook(state)
+def test_serve_channel_new_and_resume_switch_threads():
+    """A channel ``/new`` leaves serve on the new thread once the command
+    hook has run; ``/resume`` still switches back."""
+    thread_store = FakeThreadStore(
+        generated_thread_id="new-tid", resolved_thread_id="old-tid"
+    )
+    state = _runtime_state(
+        thread_id="old-tid",
+        dirs=SessionDirs(Workspace("/ws")),
+        thread_store=thread_store,
+    )
+    runtime = ChannelRuntime(agent=state.agent, thread_id="old-tid")
 
-    ctx = MagicMock()
-    ctx.agent = new_agent
-    ctx.thread_id = "new-tid"
-    cmd = MagicMock()
+    def _send(content: str) -> None:
+        msg = ChannelMessage(
+            msg_id=f"msg-{content}",
+            content=content,
+            sender="channel-user",
+            channel_type="telegram",
+            metadata={},
+            channel_ref=None,
+            bus_ref=None,
+            chat_id="channel-user",
+            message_id=f"ts-{content}",
+        )
+        _register_channel_request(msg)
+        _serve_process_message(
+            msg,
+            runtime_state=state,
+            model="model",
+            show_thinking=False,
+            channel_runtime=runtime,
+        )
 
-    await hook(ctx, old_agent, cmd)
+    with (
+        AsyncRuntime(thread_name="test-serve-new-runtime") as async_runtime,
+        patch("EvoScientist.cli.tui_runtime.run_streaming") as run_streaming,
+    ):
+        state.async_runtime = async_runtime
+        _send("/new")
+        assert state.thread_id == runtime.thread_id == "new-tid"
 
-    assert state.agent is new_agent
-    assert state.thread_id == "new-tid"
+        _send("/resume old-tid")
+        assert state.thread_id == runtime.thread_id == "old-tid"
+
+    run_streaming.assert_not_called()
 
 
 def test_serve_process_message_reports_slash_dispatch_error_without_fallback():

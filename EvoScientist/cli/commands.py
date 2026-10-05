@@ -1285,14 +1285,14 @@ def _make_serve_cmd_completed_hook(
         resume_warning_thread_id = runtime_state.resume_warning_thread_id
         runtime_state.resume_warning_thread_id = None
 
-        # ``/resume`` mutates ``ctx.thread_id`` directly (its UI callback
-        # is a no-op in serve mode since there's no REPL to reset).  Pick
-        # up the new id here so subsequent messages run on the resumed
-        # thread instead of the one captured at serve startup.  A bare
-        # ``/resume`` with no argument just prints usage and leaves
-        # ``ctx.thread_id`` unchanged — ``thread_changed`` gates both
-        # the adoption and the user-facing warning so neither fires in
-        # that case.
+        # ``/resume`` mutates ``ctx.thread_id`` and ``ctx.dirs`` directly.
+        # Adopt them here (a no-op when the resume callback already has) so
+        # subsequent messages run on the resumed thread.  A bare ``/resume``
+        # with no argument just prints usage and leaves ``ctx.thread_id``
+        # unchanged — ``thread_changed`` keeps the user-facing warning from
+        # firing in that case.  Other commands leave the thread to
+        # ``runtime_state``: ``/new`` rotates it through its callback, and
+        # ``ctx.thread_id`` still holds the old id afterwards.
         new_tid = ctx.thread_id
         if cmd.name == "/resume":
             await _apply_serve_resume_state(
@@ -1302,10 +1302,6 @@ def _make_serve_cmd_completed_hook(
                 dirs=ctx.dirs,
                 config=config,
             )
-        else:
-            thread_changed = new_tid != old_thread_id
-            if thread_changed:
-                runtime_state.set_thread_id(new_tid, channel_runtime)
 
         thread_changed = new_tid != old_thread_id
 
