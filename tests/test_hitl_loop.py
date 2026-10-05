@@ -535,6 +535,43 @@ class TestConsumerHitlRoundBudget:
         await consumer.stop()
         await task
 
+    async def test_interrupt_closes_stream_in_consumer_task(self):
+        """Leaving the stream at an interrupt closes it right away, in the
+        consumer's own task, not later in the event loop's generator
+        finalizer (a different task and contextvars context)."""
+        stream_calls = 0
+        started_in: list[asyncio.Task | None] = []
+        closed_in: list[asyncio.Task | None] = []
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            started_in.append(asyncio.current_task())
+            try:
+                if stream_calls == 1:
+                    yield _interrupt_event(stream_calls)
+                    return
+                yield {"type": "text", "content": "final answer"}
+                yield {"type": "done", "content": "final answer"}
+            finally:
+                closed_in.append(asyncio.current_task())
+
+        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer._approval_policy.grant_session("stub:c1")
+
+        await bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
+        )
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+
+        assert outbound.content == "final answer"
+        assert stream_calls == 2
+        assert closed_in == started_in
+
+        await consumer.stop()
+        await task
+
     async def test_human_round_budget_exhausted_notifies_channel(
         self, monkeypatch, caplog
     ):
