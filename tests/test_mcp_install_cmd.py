@@ -1,4 +1,4 @@
-"""Tests for EvoScientist.cli.mcp_install_cmd."""
+"""Tests for EvoScientist.cli.mcp_install_cmd (the shell command ``EvoSci mcp install``)."""
 
 import io
 from unittest.mock import patch
@@ -6,7 +6,7 @@ from unittest.mock import patch
 from rich.console import Console
 
 
-class TestCmdInstallMcp:
+class TestEvoSciMcpInstall:
     def test_missing_git_prints_the_git_message(self, no_git):
         from EvoScientist.cli.mcp_install_cmd import _cmd_install_mcp
         from EvoScientist.mcp.registry import _MARKETPLACE_CACHE
