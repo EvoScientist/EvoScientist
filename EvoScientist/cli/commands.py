@@ -615,6 +615,7 @@ def _ensure_async_subagent_server(
                 backend=backend,
             )
             _reconcile_autoskill_schedule(config, workspace=dirs.workspace)
+            _adopt_stale_scheduled_tasks(workspace=dirs.workspace)
     except WorkspaceMismatchError as exc:
         console.print(f"[red]{exc}[/red]")
         _remove_unused_run_dir(dirs.run_dir)
@@ -686,6 +687,24 @@ def _reconcile_autoskill_schedule(config: Any, *, workspace: Workspace) -> None:
     except Exception:
         logging.getLogger(__name__).warning(
             "Failed to reconcile EvoMemory AutoSkills schedule", exc_info=True
+        )
+
+
+def _adopt_stale_scheduled_tasks(*, workspace: Workspace) -> None:
+    """Best-effort re-tagging of the served store's untagged and moved tasks.
+
+    Their runs then work in *workspace* and pass the server's folder check.
+    """
+    try:
+        from ..cron import schedule as crons
+
+        if crons.is_available():
+            crons.adopt_stale_tasks(
+                crons._client(), workspace, run_kind=crons.SCHEDULED_RUN_KIND
+            )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Failed to re-tag stale scheduled tasks", exc_info=True
         )
 
 
@@ -815,6 +834,7 @@ async def _sync_background_agent_server_workspace(
             config,
             workspace=dirs.workspace,
         )
+        await asyncio.to_thread(_adopt_stale_scheduled_tasks, workspace=dirs.workspace)
 
 
 async def _move_server_or_keep_session(

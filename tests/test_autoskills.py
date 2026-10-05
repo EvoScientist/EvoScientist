@@ -22,6 +22,7 @@ from EvoScientist.memory.autoskills.proposals import (
 )
 from EvoScientist.memory.autoskills.schedule import (
     AUTOSKILL_GRAPH_ID,
+    AUTOSKILL_RUN_KIND,
     alist_autoskill_schedules,
     autoskill_cron,
     reconcile_autoskill_schedule,
@@ -926,12 +927,26 @@ class _FakeCrons:
 
 
 class _AsyncFakeCrons:
-    async def search(self, **_kwargs):
-        return [{"cron_id": "cron-async"}]
+    """Two pages: a full page of another workspace's crons, then ours."""
+
+    def __init__(self, workspace: Workspace, other: str) -> None:
+        self.rows = [
+            {"cron_id": f"theirs-{i}", "metadata": {"workspace_dir": other}}
+            for i in range(1000)
+        ] + [{"cron_id": "cron-async", "metadata": {"workspace_dir": workspace.key}}]
+        self.calls: list[dict] = []
+
+    async def search(self, *, metadata, limit, offset):
+        self.calls.append({"metadata": metadata, "limit": limit, "offset": offset})
+        return self.rows[offset : offset + limit]
 
 
-async def test_alist_autoskill_schedules_uses_async_client(monkeypatch, workspace):
-    crons = _AsyncFakeCrons()
+async def test_alist_autoskill_schedules_uses_async_client(
+    monkeypatch, workspace, tmp_path
+):
+    other = Workspace(tmp_path / "other")
+    other.root.mkdir(parents=True)
+    crons = _AsyncFakeCrons(workspace, other.key)
     client = SimpleNamespace(crons=crons)
     monkeypatch.setattr("langgraph_sdk.get_client", lambda **_kwargs: client)
 
@@ -940,7 +955,9 @@ async def test_alist_autoskill_schedules_uses_async_client(monkeypatch, workspac
         workspace_dir=workspace.root,
     )
 
-    assert rows == [{"cron_id": "cron-async"}]
+    assert [row["cron_id"] for row in rows] == ["cron-async"]
+    assert [c["offset"] for c in crons.calls] == [0, 1000]
+    assert all(c["metadata"] == {"run_kind": AUTOSKILL_RUN_KIND} for c in crons.calls)
 
 
 def test_reconcile_autoskill_schedule_creates_updates_and_disables(

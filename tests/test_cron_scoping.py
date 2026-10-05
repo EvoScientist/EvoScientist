@@ -20,7 +20,10 @@ def _cron(cron_id: str, workspace_dir: str | None = None, **metadata) -> dict:
 
 @pytest.fixture
 def other(tmp_path) -> Workspace:
-    return Workspace(tmp_path / "other")
+    """Another live workspace on this machine (its folder exists)."""
+    ws = Workspace(tmp_path / "other")
+    ws.root.mkdir(parents=True)
+    return ws
 
 
 @pytest.fixture
@@ -33,6 +36,7 @@ def client(workspace, other, monkeypatch) -> MagicMock:
         _cron("untagged"),
     ]
     monkeypatch.setattr(crons, "_client", lambda: fake)
+    monkeypatch.setattr(crons, "_default_timezone", lambda: "UTC")
     return fake
 
 
@@ -47,6 +51,33 @@ def test_belongs_to_matches_tagged_workspace(workspace, other, tmp_path):
     assert not crons.belongs_to(_cron("a", "~nobody-by-this-name/x"), workspace)
     # Created before tasks were tagged: the server serves one workspace.
     assert crons.belongs_to(_cron("a"), workspace)
+    # The project was moved or renamed: its store, and the cron in it, came along.
+    assert crons.belongs_to(_cron("a", str(tmp_path / "gone")), workspace)
+
+
+def test_adopt_stale_tasks_retags_untagged_and_moved_crons(workspace, other, tmp_path):
+    fake = MagicMock()
+    fake.crons.search.return_value = [
+        _cron("mine", workspace.key),
+        _cron("untagged"),
+        _cron("moved", str(tmp_path / "gone")),
+        _cron("theirs", other.key),
+    ]
+
+    adopted = crons.adopt_stale_tasks(
+        fake, workspace, run_kind=crons.SCHEDULED_RUN_KIND
+    )
+
+    assert adopted == 2
+    assert sorted(c.args[0] for c in fake.crons.update.call_args_list) == [
+        "moved",
+        "untagged",
+    ]
+    for call in fake.crons.update.call_args_list:
+        assert call.kwargs == {
+            "metadata": {"workspace_dir": workspace.key},
+            "config": {"configurable": {"workspace_dir": workspace.key}},
+        }
 
 
 def test_list_schedules_filters_by_workspace(workspace, client):
@@ -64,6 +95,26 @@ def test_list_schedules_reads_every_page(workspace, other, client):
 
     ids = [row["cron_id"] for row in crons.list_schedules(workspace=workspace)]
     assert ids == ["mine"]
+
+
+def test_list_schedules_dedupes_shifted_pages(workspace, client):
+    """Pages are newest first; a cron created between two fetches shifts the
+    rest down by one, so the row at the page boundary comes back twice."""
+    rows = [_cron(f"c{i}", workspace.key) for i in range(1200)]
+    fetches = 0
+
+    def _search(*, metadata, limit, offset):
+        nonlocal fetches
+        fetches += 1
+        if fetches == 2:
+            rows.insert(0, _cron("newest", workspace.key))
+        return rows[offset : offset + limit]
+
+    client.crons.search.side_effect = _search
+
+    ids = [row["cron_id"] for row in crons.list_schedules(workspace=workspace)]
+    assert len(ids) == len(set(ids)) == 1200
+    assert ids[0] == "c0"
 
 
 def test_delete_and_set_enabled_refuse_other_workspace(workspace, other, client):
@@ -127,6 +178,9 @@ async def test_schedule_command_scoped_to_workspace(workspace, client, monkeypat
     await ScheduleCommand().execute(ctx, ["pause", "theirs"])
     client.crons.delete.assert_not_called()
     client.crons.update.assert_not_called()
+    # Another workspace's id never resolves: the user sees a plain miss.
+    messages = [c.args[0] for c in ui.append_system.call_args_list]
+    assert messages.count("No schedule matching theirs.") == 2
 
     await ScheduleCommand().execute(ctx, ["pause", "mine"])
     client.crons.update.assert_called_once_with("mine", enabled=False)
@@ -163,12 +217,11 @@ def autoskills(monkeypatch):
     fake.crons.create.return_value = {"cron_id": "new"}
     monkeypatch.setattr(schedule, "get_langgraph_sync_client", lambda **_k: fake)
     monkeypatch.setattr(schedule, "langgraph_dev_url", lambda _c: "http://x")
-    monkeypatch.setattr(schedule, "autoskill_cron", lambda *_a: "0 3 * * *")
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_k: True)
     config = SimpleNamespace(
         memory_skill_synthesis_enabled=True,
         memory_skill_synthesis_mode=SimpleNamespace(value="propose"),
-        memory_skill_synthesis_cadence=SimpleNamespace(value="daily"),
+        memory_skill_synthesis_cadence=SimpleNamespace(value="nightly"),
         memory_skill_synthesis_time="03:00",
     )
     return schedule, fake, config
@@ -207,3 +260,18 @@ def test_reconcile_autoskills_replaces_unforwarded_cron(workspace, other, autosk
     assert fake.crons.create.call_args.kwargs["config"] == {
         "configurable": {"workspace_dir": workspace.key}
     }
+
+
+def test_reconcile_autoskills_replaces_moved_folder_cron(
+    workspace, autoskills, tmp_path
+):
+    """The project was renamed: the store, and its cron tagged with the old
+    folder, came along. The cron is ours and is recreated for the new root."""
+    schedule, fake, config = autoskills
+    gone = str(tmp_path / "gone")
+    fake.crons.search.return_value = [_autoskill_cron("stale", gone, forwarded=True)]
+
+    result = schedule.reconcile_autoskill_schedule(config, workspace_dir=workspace.root)
+
+    assert result["status"] == "created"
+    fake.crons.delete.assert_called_once_with("stale")

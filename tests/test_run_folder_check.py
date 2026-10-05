@@ -522,6 +522,7 @@ async def _sync_order(workspace, *, pinned_elsewhere: bool) -> list[str]:
             lambda *a, **k: order.append("move"),
         ),
         patch.object(commands, "_reconcile_autoskill_schedule", lambda *a, **k: None),
+        patch.object(commands, "_adopt_stale_scheduled_tasks", lambda **_k: None),
     ):
         await commands._sync_background_agent_server_workspace(
             MagicMock(), dirs=SessionDirs(workspace)

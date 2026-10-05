@@ -141,6 +141,7 @@ def _run_ensure_backend(monkeypatch, config, *, server_up=True):
         lambda: server_up,
     )
     monkeypatch.setattr(cmds, "_reconcile_autoskill_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(cmds, "_adopt_stale_scheduled_tasks", lambda **_k: None)
     monkeypatch.setattr(
         cmds.console, "print", lambda *a, **k: printed.append(str(a[0]) if a else "")
     )
@@ -209,6 +210,7 @@ def test_background_agent_server_starts_even_when_async_subagents_disabled(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
         fake_ensure,
     )
+    monkeypatch.setattr(cmds, "_adopt_stale_scheduled_tasks", lambda **_k: None)
 
     config = SimpleNamespace(enable_async_subagents=False)
     cmds._ensure_async_subagent_server(
@@ -232,6 +234,7 @@ async def test_resume_workspace_sync_runs_even_when_async_subagents_disabled(
         "EvoScientist.langgraph_dev.manager.ensure_langgraph_dev",
         fake_ensure,
     )
+    monkeypatch.setattr(cmds, "_adopt_stale_scheduled_tasks", lambda **_k: None)
 
     run_dir = workspace.root / "runs" / "resumed"
     config = SimpleNamespace(enable_async_subagents=False)
