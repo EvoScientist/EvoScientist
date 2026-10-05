@@ -84,7 +84,11 @@ def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *_NON_INTERACTIVE, *_portablegit_args(), *args],
         capture_output=True,
-        text=True,
+        # git writes paths as UTF-8 (e.g. "Cloning into '<%TEMP% path>'"). With
+        # the ANSI code page a non-ASCII profile name kills subprocess's reader
+        # thread on Windows: a stray traceback, and stderr silently None.
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         env=_git_env(),
     )

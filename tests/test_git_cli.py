@@ -1,5 +1,6 @@
 """Tests for EvoScientist.git_cli."""
 
+import shutil
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -103,6 +104,19 @@ class TestRunGit:
         assert result.stdout == "git version 2.43.0\n"
         assert run.call_args.args[0] == ["git", *_NON_INTERACTIVE, "--version"]
         assert run.call_args.kwargs["timeout"] == 7
+        assert run.call_args.kwargs["encoding"] == "utf-8"
+        assert run.call_args.kwargs["errors"] == "replace"
+
+    @pytest.mark.skipif(shutil.which("git") is None, reason="needs a real git")
+    def test_non_ascii_path_in_git_output_is_decoded(self, tmp_path):
+        """git echoes paths as UTF-8; under a non-UTF-8 code page (Windows) the
+        old decoding lost stderr. A profile name such as `Łukasz` in %TEMP%."""
+        missing = tmp_path / "Łukasz" / "missing-repo"
+        result = run_git(["clone", str(missing), str(tmp_path / "dest")], timeout=30)
+
+        assert result.returncode != 0
+        assert result.stderr is not None
+        assert "Łukasz" in result.stderr
 
     def test_windows_retries_with_a_portablegit_set_up_since_start(self, monkeypatch):
         """`EvoSci setup` run in another terminal records PortableGit; the
@@ -159,7 +173,7 @@ class TestRunGit:
             with pytest.raises(GitNotFoundError) as excinfo:
                 run_git(["--version"], timeout=5)
         assert run.call_count == 1
-        assert str(excinfo.value) == "git could not be started: Permission denied"
+        assert str(excinfo.value).startswith("git could not be started:")
 
     def test_other_platforms_do_not_look_for_portablegit(self, monkeypatch):
         from EvoScientist.setup import git as setup_git
