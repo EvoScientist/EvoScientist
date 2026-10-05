@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -665,6 +665,7 @@ class LangGraphServerGateway:
         request: RunRequest,
         *,
         thread_ready: bool = False,
+        on_run_attempt: Callable[[], None] | None = None,
     ) -> None:
         config = self._resolve_run_config(request.thread_id, request.configurable_extra)
         # ``_stream_events`` already registered the thread before the pre-run
@@ -697,7 +698,10 @@ class LangGraphServerGateway:
                 # run.start with Command(resume=...); switching to it needs
                 # live-server verification first.
                 await self._respond_to_interrupt(
-                    stream, request.thread_id, request.message.resume
+                    stream,
+                    request.thread_id,
+                    request.message.resume,
+                    on_run_attempt=on_run_attempt,
                 )
                 return
             raise RuntimeError(
@@ -708,6 +712,8 @@ class LangGraphServerGateway:
             request.message,
             media=request.media,
         )
+        if on_run_attempt is not None:
+            on_run_attempt()
         await stream.run.start(
             input=run_input,
             config=config,
@@ -719,6 +725,8 @@ class LangGraphServerGateway:
         stream: AsyncThreadStream,
         thread_id: str,
         response: object,
+        *,
+        on_run_attempt: Callable[[], None] | None = None,
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
@@ -746,6 +754,8 @@ class LangGraphServerGateway:
                     str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
                 }
                 if str(key) in ids:
+                    if on_run_attempt is not None:
+                        on_run_attempt()
                     await stream.run.respond(response[key], interrupt_id=str(key))
                     return
             raise RuntimeError(
@@ -792,6 +802,8 @@ class LangGraphServerGateway:
                 interrupt_id,
                 thread_id,
             )
+        if on_run_attempt is not None:
+            on_run_attempt()
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
 
     async def _repair_stuck_thread_state(self, thread_id: str) -> None:
@@ -1060,11 +1072,22 @@ class LangGraphServerGateway:
         )
 
         run_started = False
+        run_attempted = False
         run_completed = False
         emitted_interrupt = False
+
+        def mark_run_attempted() -> None:
+            nonlocal run_attempted
+            run_attempted = True
+
         try:
             async with stream:
-                await self._start_or_resume(stream, request, thread_ready=thread_ready)
+                await self._start_or_resume(
+                    stream,
+                    request,
+                    thread_ready=thread_ready,
+                    on_run_attempt=mark_run_attempted,
+                )
                 run_started = True
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
@@ -1098,7 +1121,10 @@ class LangGraphServerGateway:
             # at the yield, so any repair after it never runs and the thread
             # keeps its non-empty ``next`` — the failed step would replay on
             # the next request.
-            await self._repair_stuck_thread_state(request.thread_id)
+            # Pre-run failures cannot have left a checkpoint belonging to this
+            # request. Include raising start/respond calls, but not validation.
+            if run_attempted:
+                await self._repair_stuck_thread_state(request.thread_id)
             yield emitter.error(str(exc)).data
             for event in tracker.finish():
                 yield event
