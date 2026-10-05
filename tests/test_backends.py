@@ -152,6 +152,17 @@ class TestValidateCommandDangerous:
     def test_rm_rf_root_still_blocked(self):
         assert validate_command("rm -rf /", dangerous=True) is not None
 
+    @pytest.mark.parametrize(
+        "command",
+        ["rm -rf C:/", "rm -rf c:\\", "rm -rf 'C:/Users/you'", 'rm -rf "D:\\data"'],
+    )
+    def test_rm_rf_windows_drive_still_blocked(self, command):
+        """Git Bash's rm takes Windows drive paths; refuse them like `/`."""
+        assert validate_command(command, dangerous=True) is not None
+
+    def test_rm_rf_relative_still_allowed(self):
+        assert validate_command("rm -rf build", dangerous=True) is None
+
 
 # === convert_virtual_paths_in_command ===
 

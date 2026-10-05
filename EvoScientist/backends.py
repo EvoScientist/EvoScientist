@@ -66,6 +66,8 @@ _PATH_PATTERNS = [
 # Destructive patterns: catastrophic regardless of mode — always enforced.
 _DESTRUCTIVE_PATTERNS = [
     r"\brm\s+-rf\s+/",  # rm -rf with absolute path
+    # The same with a Windows drive path, which Git Bash's rm accepts.
+    r"\brm\s+-rf\s+['\"]?[A-Za-z]:[\\/]",
 ]
 
 # Dangerous commands that should never be executed
