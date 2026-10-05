@@ -134,11 +134,15 @@ def run_git(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[s
 def clone_repo(repo: str, ref: str | None, dest: str) -> None:
     """Shallow-clone ``github.com/<repo>`` (at ``ref`` if given) into ``dest``.
 
-    Files keep the repository's line endings (``core.autocrlf=false``): CRLF
-    breaks shell scripts in skills. Raises :class:`GitNotFoundError` without
-    git, and ``RuntimeError`` on a timeout or a failed clone.
+    Files keep the repository's line endings: CRLF breaks shell scripts in
+    skills. ``core.autocrlf=false`` covers files Git does not treat as text;
+    ``core.eol=lf`` covers the ones a ``text`` / ``text=auto`` attribute marks,
+    which would otherwise check out with ``native`` (CRLF on Windows). An
+    explicit ``eol=crlf`` attribute still wins. Raises
+    :class:`GitNotFoundError` without git, and ``RuntimeError`` on a timeout or
+    a failed clone.
     """
-    args = ["-c", "core.autocrlf=false", "clone", "--depth", "1"]
+    args = ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "clone", "--depth", "1"]
     if ref:
         args += ["--branch", ref]
     args += [f"https://github.com/{repo}.git", dest]

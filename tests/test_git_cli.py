@@ -218,9 +218,12 @@ class TestCloneRepo:
         assert run.call_args.args[0] == [
             "git",
             *_NON_INTERACTIVE,
-            # LF endings stay LF: CRLF breaks shell scripts in skills.
+            # LF endings stay LF: CRLF breaks shell scripts in skills. eol=lf
+            # also covers files a `text=auto` attribute marks as text.
             "-c",
             "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
             "clone",
             "--depth",
             "1",
