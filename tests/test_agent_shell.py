@@ -216,13 +216,11 @@ def test_with_bash_the_command_goes_into_a_script_file(fake_bash, scripts):
     launch.cleanup()  # idempotent
 
 
-def test_bash_env_turns_off_path_conversion_and_asks_python_for_utf8(fake_bash):
+def test_bash_env_asks_python_for_utf8_and_keeps_path_conversion(fake_bash):
     launch = agent_shell.prepare("true", {"A": "1"})
-    assert launch.env == {
-        "A": "1",
-        "MSYS_NO_PATHCONV": "1",
-        "PYTHONIOENCODING": "utf-8",
-    }
+    # No MSYS_NO_PATHCONV: $(pwd), ~ and $HOME must reach Windows programs
+    # converted to C:/...
+    assert launch.env == {"A": "1", "PYTHONIOENCODING": "utf-8"}
     launch.cleanup()
 
 
@@ -237,8 +235,48 @@ def test_bash_env_inherits_ours_when_none_is_given(fake_bash, monkeypatch):
     monkeypatch.setenv("EVOSCI_TEST_MARKER", "x")
     launch = agent_shell.prepare("true", None)
     assert launch.env["EVOSCI_TEST_MARKER"] == "x"
-    assert launch.env["MSYS_NO_PATHCONV"] == "1"
+    assert launch.env["PYTHONIOENCODING"] == "utf-8"
     launch.cleanup()
+
+
+@pytest.mark.parametrize(
+    ("value", "stray"),
+    [
+        ("/hi", "/hi"),
+        ("/api/v1", "/api/v1"),
+        ("--root=/api", "/api"),
+        ("/", "/"),
+        # Drive paths ($(pwd), ~, $HOME expand to these) and Git Bash's own tree.
+        ("/c/Users/me/x.py", None),
+        ("/d", None),
+        ("/usr/bin/env", None),
+        ("/tmp/x", None),
+        ("/ucrt64/bin/git", None),
+        # Escaped, not a path, or a URL.
+        ("//hi", None),
+        ("hi", None),
+        ("a/b", None),
+        ("https://example.org/a", None),
+        ("--url=https://example.org/a", None),
+    ],
+)
+def test_converted_by_mistake(value, stray):
+    assert agent_shell._converted_by_mistake(value) == stray
+
+
+def test_path_conversion_note_names_each_stray_argument(fake_bash):
+    note = agent_shell.path_conversion_note(
+        'python x.py "/hi" --root=/api "$(pwd)/o" /c/Users/me ~/a //lit "/hi"'
+    )
+    root = fake_bash.bash.parent.parent.as_posix()
+    assert note.startswith("Note: Git Bash passes `/hi`, `/api` to Windows programs")
+    assert f"`/hi` as `{root}/hi`" in note
+    assert "write `//hi` or start the command with `MSYS_NO_PATHCONV=1`" in note
+
+
+def test_path_conversion_note_only_with_git_bash():
+    # conftest pins "no bash": cmd.exe on Windows, /bin/sh elsewhere.
+    assert agent_shell.path_conversion_note('python x.py "/hi"') is None
 
 
 def test_bash_gets_no_console_window(fake_bash, monkeypatch):
@@ -320,7 +358,7 @@ def test_users_own_system_config_is_kept(portablegit):
         launch = agent_shell.prepare("true", {name: "x"})
         launch.cleanup()
         assert launch.env[name] == "x"
-        assert set(launch.env) == {name, "MSYS_NO_PATHCONV", "PYTHONIOENCODING"}
+        assert set(launch.env) == {name, "PYTHONIOENCODING"}
 
 
 def test_a_system_git_keeps_the_users_settings(fake_bash):
@@ -371,11 +409,19 @@ def test_sweep_without_a_directory_is_quiet(tmp_path, monkeypatch):
 def test_execute_runs_the_script_and_deletes_it(fake_bash, scripts, tmp_path):
     backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
     resp = backend.execute(
-        "printf '%s\\n' 'a\\\\b'; echo \"$MSYS_NO_PATHCONV\"; echo café 中文"
+        "printf '%s\\n' 'a\\\\b'; echo \"$PYTHONIOENCODING\"; echo café 中文"
     )
     assert resp.exit_code == 0, resp.output
-    assert resp.output.splitlines() == ["a\\\\b", "1", "café 中文"]
+    assert resp.output.splitlines() == ["a\\\\b", "utf-8", "café 中文"]
     assert list(scripts.iterdir()) == []
+
+
+def test_execute_output_carries_the_path_conversion_note(fake_bash, tmp_path):
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
+    resp = backend.execute('echo "/api/v1"')
+    assert resp.output.startswith("/api/v1\n")
+    assert "Note: Git Bash passes `/api/v1`" in resp.output
+    assert "Note:" not in backend.execute("echo ok").output
 
 
 def test_execute_deletes_the_script_after_a_timeout(fake_bash, scripts, tmp_path):
@@ -389,13 +435,13 @@ def test_background_runs_the_script_and_deletes_it_on_exit(
     fake_bash, scripts, tmp_path
 ):
     bg._PROCESSES.clear()
-    pid = bg.launch('echo "$MSYS_NO_PATHCONV"', str(tmp_path))
+    pid = bg.launch('echo "$PYTHONIOENCODING"', str(tmp_path))
     proc = bg._PROCESSES[pid]
     proc.popen.wait(timeout=10)
     deadline = time.time() + 5
     while any(scripts.iterdir()) and time.time() < deadline:
         time.sleep(0.05)
-    assert proc.log_path.read_text().strip() == "1"
+    assert proc.log_path.read_text().strip() == "utf-8"
     assert list(scripts.iterdir()) == []
     bg._PROCESSES.clear()
 
@@ -427,9 +473,24 @@ def test_windows_execute_runs_in_bash(real_bash, tmp_path):
 
 
 @windows_bash
-def test_windows_slash_arguments_reach_native_programs_unchanged(real_bash, tmp_path):
+def test_windows_bash_paths_reach_native_programs_converted(real_bash, tmp_path):
+    """$(pwd), ~ and $HOME expand to /c/... in Git Bash; python must get C:/..."""
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
+    resp = backend.execute(
+        f'"{_py()}" -c "import os, sys; print([os.path.isdir(a) for a in sys.argv[1:]])" '
+        '"$(pwd)" ~ "$HOME"'
+    )
+    assert resp.output.strip() == "[True, True, True]", resp.output
+
+
+@windows_bash
+def test_windows_literal_slash_argument_gets_a_note(real_bash, tmp_path):
     backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
     resp = backend.execute(f'"{_py()}" -c "import sys; print(sys.argv[1])" "/hi"')
+    converted = (_SYSTEM_GIT / "hi").as_posix()
+    assert resp.output.splitlines()[0].lower() == converted.lower(), resp.output
+    assert "Note: Git Bash passes `/hi`" in resp.output
+    resp = backend.execute(f'"{_py()}" -c "import sys; print(sys.argv[1])" "//hi"')
     assert resp.output.strip() == "/hi", resp.output
 
 

@@ -32,7 +32,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from .. import background, paths
+from .. import agent_shell, background, paths
 from ..backends import is_hitl_suppressed, prepare_sandbox_command
 
 
@@ -171,6 +171,9 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
                 f"(code {record.get('returncode')}). "
                 f"Output -> {log_path}."
             )
+        note = agent_shell.path_conversion_note(command)
+        if note is not None:
+            text = f"{text}\n\n{note}"
         return _bg_command(text, [record], runtime)
 
     return run_in_background

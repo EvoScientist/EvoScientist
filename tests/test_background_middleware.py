@@ -477,3 +477,26 @@ def test_run_reports_immediate_exit(tmp_path, monkeypatch):
     assert "code 7" in text
     assert "Started background process" not in text
     assert result.update["bg_processes"]["p1"] is terminal_record
+
+
+def test_run_adds_the_git_bash_path_note(tmp_path, monkeypatch):
+    """Under Git Bash a literal "/x" argument reaches Windows programs as a path
+    under the Git install; the tool result says so."""
+    from types import SimpleNamespace
+
+    from EvoScientist import agent_shell
+
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    monkeypatch.setattr(
+        agent_shell,
+        "agent_bash",
+        lambda: SimpleNamespace(bash=tmp_path / "Git" / "bin" / "bash.exe"),
+    )
+    monkeypatch.setattr(bg, "launch", lambda *a, **k: "pidX")
+    monkeypatch.setattr(
+        bg, "state_record", lambda pid: {"process_id": pid, "status": "running"}
+    )
+    result = _run_bg().func(
+        command='python serve.py --route "/api"', runtime=_STUB_RUNTIME
+    )
+    assert "Note: Git Bash passes `/api`" in _msg_text(result)

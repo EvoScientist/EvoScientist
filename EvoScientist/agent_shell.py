@@ -266,19 +266,20 @@ def _agent_gitconfig(root: Path) -> Path | None:
 def _bash_env(env: dict[str, str] | None, info: GitInfo) -> dict[str, str]:
     """The bash child's environment: ``env`` (or ours) plus what bash needs.
 
-    ``MSYS_NO_PATHCONV`` stops bash from rewriting arguments that look like
-    POSIX paths (``"/hi"`` would reach a native program as
-    ``C:/Program Files/Git/hi``). ``PYTHONIOENCODING``: a native ``python``
-    writes to a pipe in the ANSI code page, while MSYS tools write UTF-8, and
-    the output is decoded as UTF-8; a value the user set is kept. For
-    PortableGit, ``GIT_CONFIG_SYSTEM`` points the agent's ``git`` at
-    :func:`_agent_gitconfig`, unless the user set it (or
+    ``PYTHONIOENCODING``: a native ``python`` writes to a pipe in the ANSI code
+    page, while MSYS tools write UTF-8, and the output is decoded as UTF-8; a
+    value the user set is kept. For PortableGit, ``GIT_CONFIG_SYSTEM`` points
+    the agent's ``git`` at :func:`_agent_gitconfig`, unless the user set it (or
     ``GIT_CONFIG_NOSYSTEM``) themselves; a system Git for Windows is left as
     the user configured it.
+
+    Path conversion stays on, as in any Git Bash: ``$(pwd)``, ``~`` and
+    ``$HOME`` expand to ``/c/Users/...`` and must reach Windows programs as
+    ``C:/Users/...``. Its cost, a literal ``/x`` reaching them as a path under
+    the Git install, is reported by :func:`path_conversion_note`.
     """
     child = dict(os.environ if env is None else env)
     keys = {key.upper() for key in child}
-    child["MSYS_NO_PATHCONV"] = "1"
     if "PYTHONIOENCODING" not in keys:
         child["PYTHONIOENCODING"] = "utf-8"
     if info.source == "portablegit" and not keys & {
@@ -289,6 +290,69 @@ def _bash_env(env: dict[str, str] | None, info: GitInfo) -> dict[str, str]:
         if gitconfig is not None:
             child["GIT_CONFIG_SYSTEM"] = str(gitconfig)
     return child
+
+
+# First path components that Git Bash maps to a real location: its own tree
+# (`/usr`, `/tmp`, ...) and drive letters (`/c/...`, which `$(pwd)`, `~` and
+# `$HOME` expand to). Any other argument starting with `/` reaches a Windows
+# program as a path under the Git install.
+_MSYS_ROOTS = frozenset(
+    {"usr", "bin", "etc", "tmp", "dev", "proc", "opt", "cmd"}
+    | {"mingw64", "ucrt64", "clangarm64"}
+)
+
+
+def _converted_by_mistake(value: str) -> str | None:
+    """The part of a shell word that Git Bash would turn into a path under
+    its install, when it is not one of its own locations."""
+    if "://" in value:
+        return None
+    if not value.startswith("/"):
+        _, sep, rest = value.partition("=/")
+        if not sep:
+            return None
+        value = "/" + rest
+    if value.startswith("//"):  # Git Bash's escape for a literal "/..."
+        return None
+    first = value[1:].split("/", 1)[0]
+    if (len(first) == 1 and first.isalpha()) or first in _MSYS_ROOTS:
+        return None
+    return value
+
+
+def path_conversion_note(command: str) -> str | None:
+    """A note for the agent when ``command`` passes a literal ``/x`` argument.
+
+    Git Bash converts arguments that look like POSIX paths when it starts a
+    Windows program (python, git, pip, ...), and has no switch that reports
+    it; so ``python x.py "/api"`` hands python ``C:/.../Git/api``. Returned for
+    each such argument outside Git Bash's own locations and drive paths; None
+    when there is none, or when the agent's shell is not Git Bash. The command
+    may still be right (an MSYS tool such as ``grep`` gets ``/api`` as it is),
+    so this is a note, not a refusal.
+    """
+    info = agent_bash()
+    if info is None:
+        return None
+    from .backends import _shell_token_spans
+
+    found = []
+    for token in _shell_token_spans(command):
+        if token["type"] != "word":
+            continue
+        stray = _converted_by_mistake(str(token["value"]))
+        if stray is not None and stray not in found:
+            found.append(stray)
+    if not found:
+        return None
+    root = info.bash.parent.parent.as_posix()
+    example = found[0]
+    return (
+        f"Note: Git Bash passes {', '.join(f'`{a}`' for a in found)} to Windows "
+        f"programs (python, git, ...) as paths under {root}, e.g. `{example}` as "
+        f"`{root}{example}`. If that was meant as text, write `/{example}` or "
+        "start the command with `MSYS_NO_PATHCONV=1`."
+    )
 
 
 @dataclass
