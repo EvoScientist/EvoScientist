@@ -102,9 +102,18 @@ class FakeSfx:
         self.wait_timeouts: list[float] = []
         self.extract = True
         self.closed = 0
+        self.launched_sha: str | None = None
+        self.part_left: bool | None = None
 
     def __call__(self, argv):
         self.calls.append(argv)
+        # Like the real launch: only an existing file starts. Record what ran,
+        # so tests can pin that it is the hashed download.
+        exe = Path(argv[0])
+        if not exe.is_file():
+            raise FileNotFoundError(2, "The system cannot find the file", argv[0])
+        self.launched_sha = hashlib.sha256(exe.read_bytes()).hexdigest()
+        self.part_left = exe.with_name(exe.name + ".part").exists()
         sfx = self
 
         class Proc:
@@ -339,6 +348,9 @@ def test_download_and_sfx_switches(env):
     assert len(argv) == 3  # anything more is appended to the post-install command
     out = Path(argv[2][2:])
     assert out.parent.parent == env["tools"]  # a temp dir inside tools\
+    # The file that ran is the hashed download, with no .part left beside it.
+    assert env["sfx"].launched_sha == PINNED
+    assert env["sfx"].part_left is False
 
 
 def test_cn_mirror_downloads_from_npmmirror(env):
@@ -714,3 +726,40 @@ def test_private_git_on_path_is_false_for_a_recorded_system_git(env, monkeypatch
 
 def test_private_git_on_path_is_false_without_a_record(env, monkeypatch):
     assert not git.private_git_on_path()
+
+
+def test_probe_output_is_decoded_as_utf8(monkeypatch):
+    """Git for Windows writes paths as UTF-8; the ANSI code page would garble
+    or reject a profile name such as ``Łukasz``."""
+    seen: dict = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        exec_path = "C:/Users/Łukasz/Git/ucrt64/libexec/git-core\n"
+        return subprocess.CompletedProcess(argv, 0, exec_path, "")
+
+    monkeypatch.setattr(git.subprocess, "run", fake_run)
+    root = git._root_from_exec_path(Path("C:/Users/Łukasz/Git/cmd/git.exe"))
+    assert root == Path("C:/Users/Łukasz/Git")
+    assert (seen["encoding"], seen["errors"]) == ("utf-8", "replace")
+
+
+def test_verified_download_rename_retries_a_scanner_lock(env, monkeypatch):
+    """A scanner holding the just-closed download makes its first rename fail."""
+    from EvoScientist.setup import _install
+
+    real_replace = os.replace
+    denied: list[str] = []
+
+    def flaky_replace(src, dst):
+        if str(src).endswith(".part") and not denied:
+            denied.append(str(src))
+            raise PermissionError(13, "Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(_install.os, "replace", flaky_replace)
+    monkeypatch.setattr(_install.time, "sleep", lambda _s: None)
+    info = git.ensure_git()
+    assert info.source == "portablegit"
+    assert denied
+    assert len(env["net"].urls) == 1

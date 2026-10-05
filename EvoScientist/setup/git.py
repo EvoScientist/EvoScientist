@@ -158,7 +158,10 @@ def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
         result = subprocess.run(
             argv,
             capture_output=True,
-            text=True,
+            # Git for Windows writes paths (``--exec-path``) as UTF-8; the ANSI
+            # code page would garble or reject a non-ASCII profile name.
+            encoding="utf-8",
+            errors="replace",
             timeout=_PROBE_TIMEOUT,
             env=env,
             creationflags=_no_window(),
@@ -599,7 +602,14 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
                 f"{asset} sha256 {actual} does not match the pinned {sha256}.",
             )
         exe = tmp / asset
-        os.replace(part, exe)
+        # A scanner opens the 60 MB executable the moment it is closed, so this
+        # rename gets the same bounded retry as the move into place.
+        try:
+            move_into_place(part, exe, what=asset)
+        except OSError as exc:
+            raise StageError(
+                "install_failed", f"Could not rename the verified {asset}: {exc}"
+            ) from exc
 
         report(0.8, "Unpacking")
         out = tmp / "PortableGit"
