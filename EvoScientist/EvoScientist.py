@@ -574,16 +574,6 @@ def _maybe_swap_async_subagents(
             s.pop("_async", None)
             out.append(s)
 
-    # Forward the CLI's live (model, provider) into deepagents'
-    # start/update_async_task tool calls so the deployed graph can
-    # re-resolve its chat model per run via ConfigurableModelMiddleware.
-    # Idempotent — safe to call on every CLI startup. ``async_specs`` is
-    # non-empty here (early-returned above otherwise), so at least one spec
-    # was swapped in.
-    from .llm.patches import _patch_deepagents_model_passthrough
-
-    _patch_deepagents_model_passthrough()
-
     return out
 
 
@@ -626,16 +616,6 @@ def _route_async_specs_through_evo_middleware(
     async_specs.extend(expert_specs)
 
     if async_specs:
-        # ``_maybe_swap_async_subagents`` installs the model-passthrough patch
-        # only when the yaml-async spec list is non-empty. An expert-only setup
-        # (no ``writing-agent`` / ``data-analysis-agent`` / ``scheduler`` in
-        # yaml) would otherwise miss the patch entirely, so we install it here
-        # too. Idempotent — the shared ``_model_passthrough_patched`` flag
-        # guards against double-patching.
-        from .llm.patches import _patch_deepagents_model_passthrough
-
-        _patch_deepagents_model_passthrough()
-
         # Prepend rather than append so the ``## Async subagents`` prompt
         # section stays in the stable prefix. Appending pushes it past the
         # volatile memory tail, invalidating the cached prefix on every

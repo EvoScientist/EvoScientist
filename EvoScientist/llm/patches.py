@@ -1070,34 +1070,13 @@ def _patch_anthropic_structured_output() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Patch: forward CLI's live (model, model_provider) into deepagents'
-# start_async_task / update_async_task tool calls so the deployed graph
-# (running in a separate ``langgraph dev`` subprocess) re-resolves the
-# chat model per run.
+# Explicit client composition for EvoAsyncSubAgentMiddleware and memory runs.
+# Inject the live model into runs.create without mutating upstream factories.
 #
-# Without this, async sub-agents stay on the model their graph was compiled
-# with at langgraph dev boot — `/model` switches in the CLI never reach
-# them because they live in another process.
-#
-# Mechanism: wrap deepagents' ``_build_start_tool`` and ``_build_update_tool``
-# factories. Each wrapped factory calls the original with a proxied client
-# cache that intercepts ``runs.create(...)`` calls only and injects
-# ``config={"configurable": {"model": <cfg.model>, "model_provider": <cfg.provider>}}``.
-# All other client methods (``threads.create``, ``runs.get``, ``runs.cancel``,
-# ``runs.join_stream``) pass through unchanged. The deployed graph picks up
-# ``configurable.model`` via ``ConfigurableModelMiddleware``.
-#
-# Reads ``_ensure_config()`` at tool-call time (not patch time) so a
-# ``/model`` switch in the CLI is reflected on the very next async tool
-# call without an agent rebuild.
-#
-# Upstream PR opportunity: passing ``config`` through ``client.runs.create``
-# is generic functionality; worth contributing back to ``langchain-ai/deepagents``
-# so this patch can be retired. The failed-run reason (``_RunErrors``) retires
-# once deepagents' check tool reads the thread's error: it reads
-# ``run["error"]``, which langgraph-api never fills.
+# The failed-run reason (``_RunErrors``) retires once deepagents' check tool
+# reads the thread's error: it reads ``run["error"]``, which langgraph-api
+# never fills.
 # ---------------------------------------------------------------------------
-_model_passthrough_patched = False
 
 # The launching run's per-run (model, provider), set by the async-task tools
 # from ``runtime.config`` for the duration of a single ``runs.create`` call.
@@ -1108,8 +1087,7 @@ _model_passthrough_patched = False
 # ``update_async_task``), but only the tool functions can see the caller's
 # per-run model (via ``runtime.config``, the config langgraph's ToolNode
 # injects into tool calls). Threading it through a ContextVar
-# lets the single merge point below inject it, so ``update_async_task`` (whose
-# body we delegate to upstream unchanged) is covered without reimplementing it.
+# lets start and update share a single merge point.
 _caller_configurable: ContextVar[dict[str, str] | None] = ContextVar(
     "_evo_caller_configurable", default=None
 )
@@ -1140,7 +1118,7 @@ def _read_cfg_configurable() -> dict[str, str]:
 
     Returns a dict suitable for inserting under
     ``RunnableConfig.configurable``. Empty dict on any failure (so the
-    patch degrades to a no-op rather than breaking async tool calls).
+    proxy degrades to a no-op rather than breaking async tool calls).
     """
     try:
         from EvoScientist.EvoScientist import _ensure_config
@@ -1389,45 +1367,6 @@ class _ClientCacheProxy:
             folders=self._folders,
             errors=self._errors,
         )
-
-
-def _patch_deepagents_model_passthrough() -> None:
-    """Wrap deepagents' async-launch tool factories to inject CLI model.
-
-    Idempotent: re-invocation is a no-op once the patch is active. Safe to
-    call from ``_maybe_swap_async_subagents`` on every CLI startup; both
-    that hook and this patch turn on together when async sub-agents are
-    enabled.
-    """
-    global _model_passthrough_patched
-    if _model_passthrough_patched:
-        return
-
-    try:
-        from deepagents.middleware import async_subagents as ds_mod
-    except ImportError:
-        return
-
-    # Defensive ``getattr`` lookups mirror the rest of this file (lines 254,
-    # 266, 279, 290, 339, 351, 362, 373, 473): a deepagents update that
-    # renames or removes either private helper degrades to a no-op instead
-    # of raising ``AttributeError`` at CLI startup.
-    orig_build_start = getattr(ds_mod, "_build_start_tool", None)
-    orig_build_update = getattr(ds_mod, "_build_update_tool", None)
-    if orig_build_start is None or orig_build_update is None:
-        return
-
-    def _patched_build_start(
-        agent_map: Any, clients: Any, tool_description: str
-    ) -> Any:
-        return orig_build_start(agent_map, _ClientCacheProxy(clients), tool_description)
-
-    def _patched_build_update(agent_map: Any, clients: Any) -> Any:
-        return orig_build_update(agent_map, _ClientCacheProxy(clients))
-
-    ds_mod._build_start_tool = _patched_build_start
-    ds_mod._build_update_tool = _patched_build_update
-    _model_passthrough_patched = True
 
 
 # ---------------------------------------------------------------------------
