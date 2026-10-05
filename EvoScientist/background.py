@@ -218,8 +218,8 @@ def _watch(proc: BgProcess, on_exit: Callable[[], None] | None = None) -> None:
     Running in a daemon thread, ``popen.wait()`` lets us record ``finished_ts`` at
     (very close to) the real exit time, fixing the observation-time inflation. The
     CLI completion notification is derived from thread state (mirrored records +
-    the state reader); there is no push callback anymore. ``on_exit`` deletes the
-    command's script file when it ran in Git Bash.
+    the state reader), not pushed from here. ``on_exit`` only cleans up: it
+    deletes the command's script file when it ran in Git Bash.
     """
     try:
         proc.popen.wait()
@@ -263,12 +263,15 @@ def launch(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{process_id}.log"
 
-    launch = agent_shell.prepare(command, env)
-    platform_options: dict[str, Any] = {}
-    if launch.creationflags:
-        platform_options["creationflags"] = launch.creationflags
     log_file = open(log_path, "w")
+    # Inside the try, after the log opens: a failure at any step closes the log
+    # and leaves no script file behind.
+    launch: agent_shell.ShellLaunch | None = None
     try:
+        launch = agent_shell.prepare(command, env)
+        platform_options: dict[str, Any] = {}
+        if launch.creationflags:
+            platform_options["creationflags"] = launch.creationflags
         popen = subprocess.Popen(
             launch.args,
             shell=launch.shell,
@@ -281,7 +284,8 @@ def launch(
             **platform_options,
         )
     except BaseException:
-        launch.cleanup()
+        if launch is not None:
+            launch.cleanup()
         raise
     finally:
         # The child inherited its own dup of the fd during spawn; the parent's copy

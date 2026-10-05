@@ -246,14 +246,14 @@ def _agent_gitconfig(root: Path) -> Path | None:
     repository's config still win. Written once per process; None (and a
     WARNING) when it cannot be written.
     """
-    from .setup._install import tools_dir
+    from .setup._install import atomic_write_text, tools_dir
 
     path = tools_dir() / "git-agent.gitconfig"
     text = _agent_gitconfig_text(root)
     try:
+        # Atomic: another EvoScientist process's agent git may be reading it.
         if not path.is_file() or path.read_text(encoding="utf-8") != text:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8", newline="\n")
+            atomic_write_text(path, text)
     except OSError as exc:
         logger.warning(
             f"Could not write {path}: {exc}. The agent's git uses PortableGit's "
@@ -280,7 +280,11 @@ def _bash_env(env: dict[str, str] | None, info: GitInfo) -> dict[str, str]:
     """
     child = dict(os.environ if env is None else env)
     keys = {key.upper() for key in child}
-    if "PYTHONIOENCODING" not in keys:
+    # Python ignores an empty PYTHONIOENCODING, so empty counts as unset.
+    encoding_keys = [k for k in child if k.upper() == "PYTHONIOENCODING"]
+    if not any(child[k] for k in encoding_keys):
+        for key in encoding_keys:
+            del child[key]
         child["PYTHONIOENCODING"] = "utf-8"
     if info.source == "portablegit" and not keys & {
         "GIT_CONFIG_SYSTEM",

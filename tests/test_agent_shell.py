@@ -231,6 +231,13 @@ def test_bash_env_keeps_the_users_python_encoding(fake_bash):
     launch.cleanup()
 
 
+def test_bash_env_treats_an_empty_python_encoding_as_unset(fake_bash):
+    """Python ignores an empty PYTHONIOENCODING and falls back to the code page."""
+    launch = agent_shell.prepare("true", {"pythonioencoding": ""})
+    assert launch.env == {"PYTHONIOENCODING": "utf-8"}
+    launch.cleanup()
+
+
 def test_bash_env_inherits_ours_when_none_is_given(fake_bash, monkeypatch):
     monkeypatch.setenv("EVOSCI_TEST_MARKER", "x")
     launch = agent_shell.prepare("true", None)
@@ -446,6 +453,18 @@ def test_background_runs_the_script_and_deletes_it_on_exit(
     bg._PROCESSES.clear()
 
 
+def test_background_failed_spawn_leaves_no_script(
+    fake_bash, scripts, tmp_path, monkeypatch
+):
+    def refuse(*args, **kwargs):
+        raise OSError("refused")
+
+    monkeypatch.setattr(bg.subprocess, "Popen", refuse)
+    with pytest.raises(OSError, match="refused"):
+        bg.launch("true", str(tmp_path))
+    assert list(scripts.iterdir()) == []
+
+
 # --------------------------------------------------------------------------- #
 # Real Git for Windows bash
 # --------------------------------------------------------------------------- #
@@ -525,6 +544,47 @@ def test_windows_manual_background_recipe_returns_at_once(real_bash, tmp_path):
 
 
 @windows_bash
+def test_windows_cancel_stops_a_python_child(real_bash, tmp_path):
+    """The path the TUI's Esc takes: set the run's cancel event, then stop its
+    shell processes."""
+    import threading
+
+    from EvoScientist.backends import cancel_active_shell_processes
+    from EvoScientist.cancellation import bind_cancel_event
+
+    tag = "evosci-c07-cancel"
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
+    event = threading.Event()
+    box = {}
+
+    def run():
+        with bind_cancel_event(event):
+            box["resp"] = backend.execute(
+                f'"{_py()}" -c "import time; time.sleep(60)" {tag}'
+            )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        deadline = time.time() + 15
+        while not _marked(tag) and time.time() < deadline:
+            time.sleep(0.2)
+        assert _marked(tag)
+        event.set()
+        cancel_active_shell_processes(event)
+        worker.join(timeout=15)
+        assert box["resp"].exit_code == 130
+        deadline = time.time() + 10
+        while _marked(tag) and time.time() < deadline:
+            time.sleep(0.2)
+        assert _marked(tag) == []
+    finally:
+        event.set()
+        for p in _marked(tag):
+            p.kill()
+
+
+@windows_bash
 def test_windows_timeout_stops_a_python_child(real_bash, tmp_path):
     tag = "evosci-c07-timeout"
     backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"), timeout=3)
@@ -545,7 +605,7 @@ def test_windows_background_job_runs_in_bash_and_stops(real_bash, tmp_path):
     tag = "evosci-c07-job"
     bg._PROCESSES.clear()
     pid = bg.launch(
-        f'echo "$BASH_VERSION"; "{_py()}" -c "import time; time.sleep(60)" {tag}',
+        f'echo "bash $BASH_VERSION"; "{_py()}" -c "import time; time.sleep(60)" {tag}',
         str(tmp_path),
     )
     try:
@@ -558,7 +618,10 @@ def test_windows_background_job_runs_in_bash_and_stops(real_bash, tmp_path):
         while _marked(tag) and time.time() < deadline:
             time.sleep(0.2)
         assert _marked(tag) == []
-        assert bg._PROCESSES[pid].log_path.read_text().strip()
+        # cmd.exe would echo the line literally, quotes and `$BASH_VERSION`.
+        first = bg._PROCESSES[pid].log_path.read_text().split()
+        assert first[0] == "bash", first
+        assert first[1][0].isdigit(), first
     finally:
         for p in _marked(tag):
             p.kill()
