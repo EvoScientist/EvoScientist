@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._install import is_under as _is_under
 from ._install import (
+    is_under,
     move_into_place,
     prepend_to_path,
     remove_stale_temp_dirs,
@@ -197,7 +197,7 @@ def _system_node() -> NodeInfo | None:
     search = os.pathsep.join(
         p
         for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and not _is_under(Path(p), root)
+        if p and not is_under(Path(p), root)
     )
     found = shutil.which("node", path=search)
     if found is None or shutil.which("npx", path=str(Path(found).parent)) is None:
@@ -265,11 +265,11 @@ def _extract(archive: Path, dest: Path) -> None:
         root = dest.resolve()
         for member in tf.getmembers():
             target = (dest / member.name).resolve()
-            if not _is_under(target, root):
+            if not is_under(target, root):
                 raise tarfile.TarError(f"member {member.name!r} escapes {dest}")
             if member.issym() or member.islnk():
                 link_base = target.parent if member.issym() else root
-                if os.path.isabs(member.linkname) or not _is_under(
+                if os.path.isabs(member.linkname) or not is_under(
                     (link_base / member.linkname).resolve(), root
                 ):
                     raise tarfile.TarError(f"link {member.name!r} escapes {dest}")
@@ -448,7 +448,7 @@ def activate_runtime() -> Path | None:
 
 def is_private(exe: str | Path | None) -> bool:
     """True when ``exe`` lives under our tools dir."""
-    return exe is not None and _is_under(Path(exe), tools_dir())
+    return exe is not None and is_under(Path(exe), tools_dir())
 
 
 def node_child_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:

@@ -332,7 +332,8 @@ def _ensure_npx(reason: str) -> bool:
 
     from rich.markup import escape
 
-    from ...setup.node import NODE_VERSION, activate_runtime, ensure_node, tools_dir
+    from ...setup._install import tools_dir
+    from ...setup.node import NODE_VERSION, activate_runtime, ensure_node
     from ...setup.protocol import ConsoleEmitter, StageError, make_event
 
     console.print(f"  [yellow]✗ npx not found — {reason}[/yellow]")
