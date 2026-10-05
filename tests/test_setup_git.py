@@ -483,6 +483,27 @@ def test_interrupted_wait_stops_the_extractor_tree(env, error):
     assert not list(env["tools"].glob(".git-*"))
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        KeyboardInterrupt(),
+        BrokenPipeError(32, "Broken pipe"),
+        OSError(6, "WAIT_FAILED"),
+    ],
+    ids=["ctrl-c", "closed-stdout", "wait-failed"],
+)
+def test_interrupted_wait_keeps_the_folder_of_a_tree_that_survives(env, error):
+    """The keep-the-folder rule holds on every early end, not only the stall."""
+    env["sfx"].wait_error = error
+    env["sfx"].survives_kill = True
+    with pytest.raises((KeyboardInterrupt, StageError)):
+        git.ensure_git()
+    assert env["killed"] == [4242]
+    assert env["sfx"].closed == 1
+    assert list(env["tools"].glob(".git-*"))
+    assert _record(env) is None
+
+
 def test_silent_sfx_emits_heartbeats_until_it_ends(env):
     env["sfx"].busy_polls = 3
     events: list[dict] = []

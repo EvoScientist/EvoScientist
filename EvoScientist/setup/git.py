@@ -511,11 +511,6 @@ def _tree_signature(root: Path) -> tuple[int, int]:
     return files, size
 
 
-class _ExtractorStillRunning(StageError):
-    """The self-extractor was told to stop but its tree did not exit, so its
-    temporary directory is still in use and must not be removed."""
-
-
 def _stop(proc: _HiddenDesktopProcess, exe: Path) -> bool:
     """Kill the extractor's process tree; True once it has exited."""
     _kill_tree(proc.pid)
@@ -528,16 +523,22 @@ def _stop(proc: _HiddenDesktopProcess, exe: Path) -> bool:
     return stopped
 
 
-def _run_sfx(exe: Path, out: Path, beat: Callable[[], None]) -> None:
+def _run_sfx(
+    exe: Path,
+    out: Path,
+    beat: Callable[[], None],
+    on_survivor: Callable[[], None],
+) -> None:
     """Run the verified self-extractor into ``out``, unseen, with heartbeats.
 
     It prints nothing, so a growing ``out`` counts as progress: ``beat()``
     re-emits the last ``running`` event every few seconds, and the process tree
     is stopped after :data:`SFX_SILENCE_LIMIT` seconds without growth (this
-    also ends a hanging post-install step). It parses exactly ``-y`` and
-    ``-o<dir>``: anything after them is appended to its post-install command,
-    and a trailing backslash on the directory is kept doubled, so neither is
-    passed.
+    also ends a hanging post-install step). Whenever the tree is stopped and
+    does not exit, ``on_survivor()`` runs, so the caller keeps the folder it
+    may still write to. It parses exactly ``-y`` and ``-o<dir>``: anything
+    after them is appended to its post-install command, and a trailing
+    backslash on the directory is kept doubled, so neither is passed.
     """
     argv = [str(exe), "-y", f"-o{str(out).rstrip(os.sep)}"]
     try:
@@ -556,7 +557,8 @@ def _run_sfx(exe: Path, out: Path, beat: Callable[[], None]) -> None:
             )
         except StepStalled as exc:
             if not _stop(proc, exe):
-                raise _ExtractorStillRunning(
+                on_survivor()
+                raise StageError(
                     "install_failed",
                     f"{exe.name} made no progress for {SFX_SILENCE_LIMIT} s and "
                     "could not be stopped; its files are left for the next run.",
@@ -570,7 +572,8 @@ def _run_sfx(exe: Path, out: Path, beat: Callable[[], None]) -> None:
             # Ctrl+C, a heartbeat written to a closed pipe (the desktop app went
             # away), a failed wait: the extractor runs on a desktop nobody sees,
             # so stop it before anything removes the folder it writes to.
-            _stop(proc, exe)
+            if not _stop(proc, exe):
+                on_survivor()
             raise
     except OSError as exc:
         raise StageError(
@@ -610,6 +613,13 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
 
     tmp = Path(tempfile.mkdtemp(prefix=".git-", dir=root))
     keep_tmp = False
+
+    def extractor_survived() -> None:
+        # Its tree may still write into ``tmp``; the next run's stale-dir
+        # cleanup (under the install lock) removes it instead.
+        nonlocal keep_tmp
+        keep_tmp = True
+
     try:
         # Saved under a name without ".exe" until its hash matches, so a partial
         # or tampered download cannot be launched.
@@ -641,7 +651,9 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
 
         report(0.8, "Unpacking")
         out = tmp / "PortableGit"
-        _run_sfx(exe, out, lambda: report(0.8, "Unpacking"))
+        _run_sfx(
+            exe, out, lambda: report(0.8, "Unpacking"), on_survivor=extractor_survived
+        )
         _check_post_install(out)
         try:
             if final.exists():
@@ -666,11 +678,6 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
             )
         _write_record(info)
         return info
-    except _ExtractorStillRunning:
-        # Its tree may still write there; the next run's stale-dir cleanup
-        # (under the install lock) removes it instead.
-        keep_tmp = True
-        raise
     finally:
         if not keep_tmp:
             shutil.rmtree(tmp, ignore_errors=True)
