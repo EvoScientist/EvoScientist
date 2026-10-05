@@ -252,4 +252,23 @@ def run_standalone(
         config = get_effective_config()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
         _ensure_standalone_dev_server(config, backend=backend)
+
+        # Auto-start ccproxy if any provider uses OAuth mode — same bootstrap
+        # as `EvoSci serve`. Without it, model calls fail unless the user set
+        # ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY by hand.
+        if (
+            getattr(config, "anthropic_auth_mode", None) == "oauth"
+            or getattr(config, "openai_auth_mode", None) == "oauth"
+        ):
+            try:
+                from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+
+                ccproxy_proc = maybe_start_ccproxy(config)
+                if ccproxy_proc:
+                    import atexit
+
+                    atexit.register(stop_ccproxy, ccproxy_proc)
+            except RuntimeError as exc:
+                logger.error("ccproxy failed to start for standalone channel: %s", exc)
+                raise
     asyncio.run(_async_main(channel, bus, use_agent, send_thinking, config, backend))
