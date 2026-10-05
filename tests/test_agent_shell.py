@@ -316,11 +316,109 @@ def test_path_conversion_note_only_with_git_bash():
     assert agent_shell.path_conversion_note('python x.py "/hi"') is None
 
 
-def test_bash_gets_no_console_window(fake_bash, monkeypatch):
-    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+def test_bash_starts_suspended_without_a_console_window(fake_bash, monkeypatch):
     launch = agent_shell.prepare("true", None)
-    assert launch.creationflags == 0x08000000
+    assert launch.creationflags == 0  # POSIX: no Windows flags
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(agent_shell.sys, "platform", "win32")
+    assert launch.creationflags == 0x08000000 | agent_shell._CREATE_SUSPENDED
     launch.cleanup()
+
+
+class FakeProcess:
+    """Stands in for a Popen: a handle, and weak-referenceable like one."""
+
+    def __init__(self, handle: int) -> None:
+        self._handle = handle
+
+
+class FakeJobApi:
+    def __init__(self, *, assign_ok: bool = True) -> None:
+        self.assign_ok = assign_ok
+        self.calls: list[tuple] = []
+
+    def create(self):
+        self.calls.append(("create",))
+        return 77
+
+    def assign(self, job, process):
+        self.calls.append(("assign", job, process))
+        return self.assign_ok
+
+    def last_error(self):
+        return 5
+
+    def resume(self, process):
+        self.calls.append(("resume", process))
+
+    def terminate(self, job):
+        self.calls.append(("terminate", job))
+        return True
+
+    def close(self, job):
+        self.calls.append(("close", job))
+
+
+def _windows_launch(monkeypatch, api):
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(agent_shell.sys, "platform", "win32")
+    monkeypatch.setattr(agent_shell, "_job_api", lambda: api)
+    agent_shell._warn_no_job.cache_clear()
+    return agent_shell.ShellLaunch(args="x", env={}, script=Path("s.sh"))
+
+
+def test_started_puts_bash_in_a_job_and_resumes_it(monkeypatch):
+    api = FakeJobApi()
+    launch = _windows_launch(monkeypatch, api)
+    process = FakeProcess(1234)
+    launch.started(process)
+    assert api.calls == [("create",), ("assign", 77, 1234), ("resume", 1234)]
+    assert agent_shell.terminate_job(process) is True
+    assert api.calls[-1] == ("terminate", 77)
+    launch.cleanup()
+    assert ("close", 77) in api.calls
+    # After cleanup the caller falls back to the tree kill.
+    assert agent_shell.terminate_job(process) is False
+
+
+def test_started_resumes_and_warns_when_no_job_can_be_assigned(monkeypatch, caplog):
+    api = FakeJobApi(assign_ok=False)
+    launch = _windows_launch(monkeypatch, api)
+    process = FakeProcess(1234)
+    with caplog.at_level("WARNING", logger="EvoScientist.agent_shell"):
+        launch.started(process)
+    assert api.calls == [
+        ("create",),
+        ("assign", 77, 1234),
+        ("close", 77),
+        ("resume", 1234),
+    ]
+    assert "Could not put the agent's Git Bash in a Windows job object" in caplog.text
+    assert agent_shell.terminate_job(process) is False
+
+
+def test_started_resumes_even_when_assigning_raises(monkeypatch):
+    api = FakeJobApi()
+
+    def boom(job, process):
+        raise OSError("no")
+
+    api.assign = boom
+    launch = _windows_launch(monkeypatch, api)
+    with pytest.raises(OSError, match="no"):
+        launch.started(FakeProcess(1234))
+    assert api.calls[-1] == ("resume", 1234)
+
+
+def test_started_does_nothing_without_bash_or_off_windows(monkeypatch):
+    api = FakeJobApi()
+    monkeypatch.setattr(agent_shell, "_job_api", lambda: api)
+    agent_shell.ShellLaunch(args="x", env={}).started(FakeProcess(1))
+    monkeypatch.setattr(agent_shell.sys, "platform", "linux")
+    agent_shell.ShellLaunch(args="x", env={}, script=Path("s.sh")).started(
+        FakeProcess(1)
+    )
+    assert api.calls == []
 
 
 # --------------------------------------------------------------------------- #
@@ -626,6 +724,96 @@ def test_windows_cancel_stops_a_python_child(real_bash, tmp_path):
         event.set()
         for p in _marked(tag):
             p.kill()
+
+
+def _sleeps(secs: int) -> list[psutil.Process]:
+    """MSYS sleep.exe processes started with ``secs`` (unique per test)."""
+    found = []
+    for p in psutil.process_iter(["name", "cmdline"]):
+        try:
+            name = (p.info["name"] or "").lower()
+            if name.startswith("sleep") and str(secs) in " ".join(
+                p.info["cmdline"] or []
+            ):
+                found.append(p)
+        except (psutil.Error, TypeError):
+            pass
+    return found
+
+
+def _wait(predicate, secs: float = 10) -> bool:
+    end = time.time() + secs
+    while not predicate() and time.time() < end:
+        time.sleep(0.2)
+    return predicate()
+
+
+@windows_bash
+@pytest.mark.parametrize(
+    ("secs", "template"), [(6101, "sleep {s}"), (6102, "sleep {s}; echo x")]
+)
+def test_windows_timeout_stops_msys_programs(real_bash, tmp_path, secs, template):
+    """An MSYS program's forked bash exits once it is started, so the program
+    is outside the tree that taskkill /T sees; the job object still stops it,
+    and the call returns instead of waiting on its pipes."""
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"), timeout=3)
+    try:
+        started = time.monotonic()
+        resp = backend.execute(template.format(s=secs))
+        assert resp.exit_code == 124
+        assert time.monotonic() - started < 15
+        assert _wait(lambda: not _sleeps(secs))
+    finally:
+        for p in _sleeps(secs):
+            p.kill()
+
+
+@windows_bash
+@pytest.mark.parametrize(
+    ("secs", "template"), [(6103, "sleep {s}"), (6104, "sleep {s}; echo x")]
+)
+def test_windows_cancel_stops_msys_programs(real_bash, tmp_path, secs, template):
+    import threading
+
+    from EvoScientist.backends import cancel_active_shell_processes
+    from EvoScientist.cancellation import bind_cancel_event
+
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
+    event = threading.Event()
+    box = {}
+
+    def run():
+        with bind_cancel_event(event):
+            box["resp"] = backend.execute(template.format(s=secs))
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert _wait(lambda: bool(_sleeps(secs)), 15)
+        event.set()
+        cancel_active_shell_processes(event)
+        worker.join(timeout=15)
+        assert box["resp"].exit_code == 130
+        assert _wait(lambda: not _sleeps(secs))
+    finally:
+        event.set()
+        for p in _sleeps(secs):
+            p.kill()
+
+
+@windows_bash
+def test_windows_stop_process_stops_msys_programs(real_bash, tmp_path):
+    secs = 6105
+    bg._PROCESSES.clear()
+    pid = bg.launch(f"sleep {secs}; echo x", str(tmp_path))
+    try:
+        assert _wait(lambda: bool(_sleeps(secs)), 15)
+        bg.stop(pid)
+        assert _wait(lambda: not _sleeps(secs))
+    finally:
+        for p in _sleeps(secs):
+            p.kill()
+        bg._PROCESSES.clear()
 
 
 @windows_bash

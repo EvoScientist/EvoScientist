@@ -89,6 +89,13 @@ _PROCESS_DRAIN_GRACE_SECONDS = 1.0
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Force-stop a shell and its descendants without waiting for reaping."""
+    from . import agent_shell
+
+    # Git Bash on Windows runs in a job object: stop all of it, including MSYS
+    # programs whose parent bash has exited. A job handle cannot be reused, so
+    # this also works after the shell itself has exited.
+    if agent_shell.terminate_job(process):
+        return
     # A completed Popen has already reaped its PID, which the OS may reuse.
     # Inspect the recorded state rather than calling poll(): an exited but
     # unreaped shell can still have live descendants in its process group.
@@ -1872,6 +1879,7 @@ class CustomSandboxBackend(LocalShellBackend):
                 **launch.text_options,
                 **process_options,
             )
+            launch.started(process)
             _register_shell_process(cancel_event, process)
             deadline = time.monotonic() + effective_timeout
             drain_deadline: float | None = None

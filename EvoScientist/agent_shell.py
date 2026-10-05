@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -368,13 +369,15 @@ class ShellLaunch:
     """How to start one agent command with :class:`subprocess.Popen`.
 
     Pass ``args``, ``shell`` and ``env`` to ``Popen``, OR :attr:`creationflags`
-    into its flags, decode piped output with :attr:`text_options`, and call
-    :meth:`cleanup` once the process has ended.
+    into its flags, decode piped output with :attr:`text_options`, call
+    :meth:`started` right after ``Popen`` returns, and :meth:`cleanup` once the
+    process has ended.
     """
 
     args: str | list[str]
     env: dict[str, str] | None
     script: Path | None = None
+    job: int | None = None
 
     @property
     def bash(self) -> bool:
@@ -386,9 +389,12 @@ class ShellLaunch:
 
     @property
     def creationflags(self) -> int:
+        if not self.bash or sys.platform != "win32":
+            return 0
         # ``shell=True`` hides cmd.exe's window itself (SW_HIDE); a plain argv
-        # does not, and bash.exe is a console program.
-        return getattr(subprocess, "CREATE_NO_WINDOW", 0) if self.bash else 0
+        # does not, and bash.exe is a console program. Suspended until
+        # :meth:`started` has put it in a job object.
+        return subprocess.CREATE_NO_WINDOW | _CREATE_SUSPENDED
 
     @property
     def text_options(self) -> dict[str, str]:
@@ -396,14 +402,121 @@ class ShellLaunch:
         the locale default as before."""
         return {"encoding": "utf-8", "errors": "replace"} if self.bash else {}
 
+    def started(self, process: subprocess.Popen) -> None:
+        """Put the suspended bash in a new job object, then let it run.
+
+        In a script, bash forks for every external command, and the forked
+        bash exits once it has started an MSYS program (``sleep``, ``grep``,
+        ``ssh``, ...). That program's Windows parent is then gone, so
+        ``taskkill /T`` and a psutil walk cannot find it, and it keeps the
+        pipes open. Everything started inside the job stays in it, so
+        :func:`terminate_job` stops the whole command. The job does not kill
+        on close: a job started with ``&`` outlives the call, as the prompt's
+        background recipe expects. The process is resumed whatever happens.
+        """
+        if self.creationflags & _CREATE_SUSPENDED == 0:
+            return
+        api = _job_api()
+        try:
+            job = api.create()
+            if job and api.assign(job, int(process._handle)):
+                self.job = job
+                _JOBS[process] = job
+            else:
+                error = api.last_error()
+                if job:
+                    api.close(job)
+                _warn_no_job(error)
+        finally:
+            api.resume(int(process._handle))
+
     def cleanup(self) -> None:
-        """Delete the script file, if any. Safe to call more than once."""
+        """Close the job handle and delete the script file. Safe to call more
+        than once; closing the job leaves anything still in it running."""
+        if self.job is not None:
+            for process, job in list(_JOBS.items()):
+                if job == self.job:
+                    del _JOBS[process]
+            _job_api().close(self.job)
+            self.job = None
         if self.script is None:
             return
         try:
             self.script.unlink(missing_ok=True)
         except OSError as exc:
             logger.debug(f"Could not delete {self.script}: {exc}")
+
+
+# --------------------------------------------------------------------------- #
+# Windows job objects
+# --------------------------------------------------------------------------- #
+_CREATE_SUSPENDED = 0x00000004
+# Process -> its open job handle, while the command runs.
+_JOBS: weakref.WeakKeyDictionary[subprocess.Popen, int] = weakref.WeakKeyDictionary()
+
+
+class _JobApi:
+    """The few kernel32 / ntdll calls the job object needs (Windows only)."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        self._ctypes = ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        ntdll = ctypes.WinDLL("ntdll")
+        ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+        self._k32, self._ntdll = k32, ntdll
+
+    def create(self) -> int | None:
+        return self._k32.CreateJobObjectW(None, None)
+
+    def assign(self, job: int, process: int) -> bool:
+        return bool(self._k32.AssignProcessToJobObject(job, process))
+
+    def last_error(self) -> int:
+        return self._ctypes.get_last_error()
+
+    def resume(self, process: int) -> None:
+        self._ntdll.NtResumeProcess(process)
+
+    def terminate(self, job: int) -> bool:
+        return bool(self._k32.TerminateJobObject(job, 1))
+
+    def close(self, job: int) -> None:
+        self._k32.CloseHandle(job)
+
+
+@functools.cache
+def _job_api() -> _JobApi:
+    return _JobApi()
+
+
+@functools.cache
+def _warn_no_job(error: int) -> None:
+    logger.warning(
+        f"Could not put the agent's Git Bash in a Windows job object (error "
+        f"{error}). Stopping a command falls back to taskkill /T, which misses "
+        "MSYS programs (sleep, grep, ssh, ...) whose parent bash has exited."
+    )
+
+
+def terminate_job(process: subprocess.Popen) -> bool:
+    """Stop every process in ``process``'s job object, the whole command.
+
+    True when ``process`` runs in a job (Git Bash on Windows); False otherwise,
+    and the caller stops the process tree as before. Unlike a tree walk this
+    does not depend on ``process`` still running or on parent links.
+    """
+    job = _JOBS.get(process)
+    if job is None:
+        return False
+    return _job_api().terminate(job)
 
 
 def prepare(command: str, env: dict[str, str] | None) -> ShellLaunch:

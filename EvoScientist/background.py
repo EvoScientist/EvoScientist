@@ -283,6 +283,7 @@ def launch(
             env=launch.env,
             **platform_options,
         )
+        launch.started(popen)
     except BaseException:
         if launch is not None:
             launch.cleanup()
@@ -352,8 +353,15 @@ def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:
     grandchildren).  On Windows ``TerminateProcess`` (used by
     ``Popen.terminate()`` / ``Popen.kill()``) only kills the direct
     child — it does *not* cascade to grandchildren.  We use ``psutil``
-    to walk the process tree and signal every descendant.
+    to walk the process tree and signal every descendant. A command running
+    in Git Bash is in a job object, which is stopped as a whole instead
+    (:func:`~EvoScientist.agent_shell.terminate_job`): MSYS programs whose
+    parent bash has exited are not in the tree.
     """
+    from . import agent_shell
+
+    if agent_shell.terminate_job(popen):
+        return
     if os.name == "nt":
         try:
             proc = psutil.Process(popen.pid)
