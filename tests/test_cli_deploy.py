@@ -562,10 +562,10 @@ def test_handle_shutdown_sigterm_sets_shutdown_event(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("hint", [None, "Run `EvoSci setup`, then restart."])
-def test_deploy_prints_the_missing_python_hint(monkeypatch, tmp_path, hint):
-    from EvoScientist.setup import research_env
+def test_deploy_prints_the_setup_hint(monkeypatch, tmp_path, hint):
+    from EvoScientist import agent_shell
 
-    monkeypatch.setattr(research_env, "missing_python_hint", lambda: hint)
+    monkeypatch.setattr(agent_shell, "setup_hint", lambda: hint)
     captured = _run_deploy_once(
         monkeypatch, _make_config(default_workdir=str(tmp_path))
     )

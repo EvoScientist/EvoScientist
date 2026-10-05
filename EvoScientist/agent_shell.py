@@ -24,6 +24,7 @@ import functools
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -54,7 +55,7 @@ def agent_bash() -> GitInfo | None:
     info = recorded_git()
     if info is not None:
         logger.info(f"Agent shell: {info.bash}")
-    elif os.name == "nt":
+    elif sys.platform == "win32":
         logger.info("Agent shell: cmd.exe (no Git for Windows recorded)")
     return info
 
@@ -64,6 +65,127 @@ def uses_bash() -> bool:
     return agent_bash() is not None
 
 
+# --------------------------------------------------------------------------- #
+# Setup hint and server drift: python (research_env) and bash together
+# --------------------------------------------------------------------------- #
+MISSING_BASH_HINT = (
+    "The agent's shell runs in cmd.exe because `EvoSci setup` has not set up "
+    "Git Bash. Run `EvoSci setup`, then restart EvoScientist, to run it in bash."
+)
+
+# Sidecar key for the bash a langgraph dev server's agents got at launch
+# (its path, or None for cmd.exe / a POSIX shell), next to research_env's.
+SIDECAR_KEY = "agent_bash"
+
+
+def _bash_missing() -> bool:
+    return sys.platform == "win32" and agent_bash() is None
+
+
+def _hint(python_missing: bool, bash_missing: bool) -> str | None:
+    from .setup.research_env import MISSING_PYTHON_HINT, PACKAGES
+
+    if python_missing and bash_missing:
+        return (
+            "The agent's shell has no usable `python` and runs in cmd.exe "
+            "because `EvoSci setup` has not set up Git Bash. Run `EvoSci setup`, "
+            "then restart EvoScientist, to give it bash and a Python with "
+            f"{', '.join(PACKAGES)}."
+        )
+    if python_missing:
+        return MISSING_PYTHON_HINT
+    if bash_missing:
+        return MISSING_BASH_HINT
+    return None
+
+
+def setup_hint() -> str | None:
+    """One "run ``EvoSci setup``" hint for the agent's shell, else None.
+
+    Names what is missing: a usable ``python`` (any OS), Git Bash (Windows),
+    or both, which one ``EvoSci setup`` fixes. For callers that show it
+    themselves (the TUI, ``EvoSci deploy``); not logged here.
+    """
+    from .setup.research_env import agent_python
+
+    return _hint(agent_python() is None, _bash_missing())
+
+
+def server_setup_hint(sidecar: dict | None) -> str | None:
+    """The setup hint for the agents of a server this process reuses.
+
+    Those agents got the ``python`` and the shell recorded in the server's
+    sidecar. A part without a record (no reused server, or one started by an
+    older version) falls back to this session's own state, as in
+    :func:`setup_hint`. When the server recorded none but this session has
+    one, ``EvoSci setup`` would not help; :func:`shell_drift_message` names
+    the fix.
+    """
+    from .setup.research_env import SIDECAR_KEY as PYTHON_KEY
+    from .setup.research_env import agent_python
+
+    sidecar = sidecar or {}
+    if PYTHON_KEY in sidecar:
+        python_missing = sidecar[PYTHON_KEY] is None and agent_python() is None
+    else:
+        python_missing = agent_python() is None
+    if SIDECAR_KEY in sidecar:
+        bash_missing = sidecar[SIDECAR_KEY] is None and _bash_missing()
+    else:
+        bash_missing = _bash_missing()
+    return _hint(python_missing, bash_missing)
+
+
+def sidecar_bash() -> str | None:
+    """What :data:`SIDECAR_KEY` records for a server started by this process."""
+    info = agent_bash()
+    return str(info.bash) if info is not None else None
+
+
+def _bash_drift_message(sidecar: dict) -> str | None:
+    if SIDECAR_KEY not in sidecar:
+        return None
+    recorded, current = sidecar[SIDECAR_KEY], sidecar_bash()
+    if recorded == current or (
+        isinstance(recorded, str)
+        and current is not None
+        and os.path.normcase(recorded) == os.path.normcase(current)
+    ):
+        return None
+    return (
+        f"The running langgraph dev runs its agents' commands in "
+        f"{recorded or 'cmd.exe'}, but this session uses {current or 'cmd.exe'}. "
+        "Its agents keep the server's shell until 'EvoSci server stop' and a "
+        "restart."
+    )
+
+
+def shell_drift_message(sidecar: dict) -> str | None:
+    """A warning when a reused server's agents got another ``python`` or shell.
+
+    The server's backends fix both when it starts, so after a reuse its agents
+    (async sub-agents, and the WebUI's main agent) keep them. None when both
+    match or the sidecar has no record.
+    """
+    from .setup.research_env import python_drift_message
+
+    parts = [python_drift_message(sidecar), _bash_drift_message(sidecar)]
+    message = " ".join(p for p in parts if p is not None)
+    return message or None
+
+
+@functools.cache
+def log_setup_hint() -> None:
+    """Log :func:`setup_hint` once per process where the agent is built, so
+    the Rich CLI, ``-p`` and ``EvoSci serve`` show it."""
+    hint = setup_hint()
+    if hint is not None:
+        logger.warning(hint)
+
+
+# --------------------------------------------------------------------------- #
+# Script files
+# --------------------------------------------------------------------------- #
 def _script_dir() -> Path:
     return Path(tempfile.gettempdir()) / "evoscientist"
 

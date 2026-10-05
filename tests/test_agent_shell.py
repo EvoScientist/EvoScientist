@@ -22,10 +22,13 @@ import pytest
 from EvoScientist import agent_shell
 from EvoScientist import background as bg
 from EvoScientist.backends import CustomSandboxBackend
+from EvoScientist.setup import research_env
 from EvoScientist.setup.git import GitInfo
 
-# Saved at import, before the autouse fixture in conftest pins it to None.
+# Saved at import, before the autouse fixture in conftest pins them.
 _REAL_AGENT_BASH = agent_shell.agent_bash
+_REAL_BASH_MISSING = agent_shell._bash_missing
+_REAL_LOG_SETUP_HINT = agent_shell.log_setup_hint
 
 _SYSTEM_GIT = Path(r"C:\Program Files\Git")
 windows_bash = pytest.mark.skipif(
@@ -81,6 +84,105 @@ def test_agent_bash_is_the_recorded_git(monkeypatch, caplog):
 def test_agent_bash_is_none_without_a_record(monkeypatch):
     monkeypatch.setattr("EvoScientist.setup.git.recorded_git", lambda: None)
     assert _REAL_AGENT_BASH.__wrapped__() is None
+
+
+# --------------------------------------------------------------------------- #
+# Setup hint and server drift
+# --------------------------------------------------------------------------- #
+def test_bash_is_missing_only_on_windows_without_a_record(monkeypatch):
+    monkeypatch.setattr(agent_shell, "_bash_missing", _REAL_BASH_MISSING)
+    monkeypatch.setattr(agent_shell.sys, "platform", "win32")
+    assert agent_shell._bash_missing() is True
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+    assert agent_shell._bash_missing() is False
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+    monkeypatch.setattr(agent_shell.sys, "platform", "linux")
+    assert agent_shell._bash_missing() is False
+
+
+@pytest.mark.parametrize(
+    ("python", "bash_missing", "expected"),
+    [
+        ("/usr/bin/python", False, None),
+        (None, False, research_env.MISSING_PYTHON_HINT),
+        ("/usr/bin/python", True, agent_shell.MISSING_BASH_HINT),
+        (None, True, "combined"),
+    ],
+)
+def test_setup_hint_names_what_is_missing(monkeypatch, python, bash_missing, expected):
+    monkeypatch.setattr(research_env, "agent_python", lambda: python)
+    monkeypatch.setattr(agent_shell, "_bash_missing", lambda: bash_missing)
+    hint = agent_shell.setup_hint()
+    if expected == "combined":
+        assert hint.count("Run `EvoSci setup`") == 1
+        assert "no usable `python`" in hint
+        assert "cmd.exe" in hint
+    else:
+        assert hint == expected
+
+
+@pytest.mark.parametrize(
+    ("sidecar", "own_missing", "shown"),
+    [
+        # The reused server's agents run in Git Bash: no hint, even if we lack it.
+        ({agent_shell.SIDECAR_KEY: r"C:\Git\bin\bash.exe"}, True, False),
+        # They run in cmd.exe: hint when we lack bash too; otherwise the drift
+        # warning names the fix.
+        ({agent_shell.SIDECAR_KEY: None}, True, True),
+        ({agent_shell.SIDECAR_KEY: None}, False, False),
+        # No record (older server) or no reuse: our own state.
+        ({"workspace": "/w"}, True, True),
+        (None, True, True),
+        (None, False, False),
+    ],
+)
+def test_server_setup_hint_for_bash(monkeypatch, sidecar, own_missing, shown):
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/usr/bin/python")
+    monkeypatch.setattr(agent_shell, "_bash_missing", lambda: own_missing)
+    hint = agent_shell.server_setup_hint(sidecar)
+    assert (hint == agent_shell.MISSING_BASH_HINT) is shown
+    assert hint is None or shown
+
+
+@pytest.mark.parametrize(
+    ("recorded", "current", "warns"),
+    [
+        (r"C:\Git\bin\bash.exe", r"C:\Git\bin\bash.exe", False),
+        (None, None, False),
+        (None, r"C:\Git\bin\bash.exe", True),
+        (r"C:\Git\bin\bash.exe", None, True),
+        # Windows: the same file spelled with another case.
+        (r"C:\Git\bin\bash.exe", r"c:\git\BIN\bash.exe", False),
+    ],
+)
+def test_shell_drift_message_for_bash(monkeypatch, recorded, current, warns):
+    from types import SimpleNamespace
+
+    info = None if current is None else SimpleNamespace(bash=current)
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: info)
+    monkeypatch.setattr(agent_shell.os.path, "normcase", str.lower)
+    message = agent_shell.shell_drift_message({agent_shell.SIDECAR_KEY: recorded})
+    assert (message is not None) is warns
+
+
+def test_shell_drift_message_joins_python_and_bash(monkeypatch):
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+    sidecar = {
+        research_env.SIDECAR_KEY: "/conda/bin/python",
+        agent_shell.SIDECAR_KEY: "C:/b",
+    }
+    message = agent_shell.shell_drift_message(sidecar)
+    assert "/conda/bin/python" in message
+    assert "C:/b" in message
+    assert agent_shell.shell_drift_message({"workspace": "/w"}) is None
+
+
+def test_setup_hint_is_logged_once(monkeypatch, caplog):
+    monkeypatch.setattr(agent_shell, "setup_hint", lambda: "Run `EvoSci setup`")
+    log_once = _REAL_LOG_SETUP_HINT.__wrapped__
+    with caplog.at_level("WARNING", logger="EvoScientist.agent_shell"):
+        log_once()
+    assert "Run `EvoSci setup`" in caplog.text
 
 
 # --------------------------------------------------------------------------- #

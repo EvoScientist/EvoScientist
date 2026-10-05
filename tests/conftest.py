@@ -177,7 +177,6 @@ def _no_agent_python_probe(monkeypatch):
     from EvoScientist.setup import research_env
 
     monkeypatch.setattr(research_env, "_agent_python", lambda: (None, None))
-    monkeypatch.setattr(research_env, "_log_missing_python_hint", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -187,11 +186,16 @@ def _no_agent_bash(monkeypatch):
     It is cached per process and reads ``tools/git.json`` from the real data
     dir, so on a Windows developer machine every ``execute`` test would run in
     that Git Bash. Pinned to "no bash" (``cmd.exe`` on Windows, ``/bin/sh``
-    elsewhere); ``tests/test_agent_shell.py`` opts into a real bash.
+    elsewhere); ``tests/test_agent_shell.py`` opts into a real bash. The setup
+    hint leaves out the Git Bash part, so hint tests read the same on every
+    OS, and its once-per-process log is silenced
+    (``tests/test_setup_research_env.py`` restores it).
     """
     from EvoScientist import agent_shell
 
     monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+    monkeypatch.setattr(agent_shell, "_bash_missing", lambda: False)
+    monkeypatch.setattr(agent_shell, "log_setup_hint", lambda: None)
 
 
 @pytest.fixture

@@ -388,13 +388,13 @@ def _assert_banner_at_top(chat, welcome, label: str = "") -> None:
     )
 
 
-async def test_agent_python_notices_are_shown_in_the_app(monkeypatch):
+async def test_agent_shell_notices_are_shown_in_the_app(monkeypatch):
     """Textual hides terminal output while the app runs, so the hint and the
     server-python warning must reach the user as notifications."""
     from EvoScientist.cli import tui_interactive as tui_mod
 
     notice = "Run `EvoSci setup` [/x]"
-    monkeypatch.setattr(tui_mod, "_agent_python_notices", lambda: [notice])
+    monkeypatch.setattr(tui_mod, "_agent_shell_notices", lambda: [notice])
     app = await _capture_app(monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()

@@ -375,7 +375,7 @@ def test_reuse_clears_drift_flag_on_matching_fingerprint(
 
 def test_server_config_fingerprint_ignores_the_agent_python(monkeypatch):
     """The fingerprint covers launch settings only; a PATH difference is
-    reported on its own (``AGENT_PYTHON_DRIFT``)."""
+    reported on its own (``AGENT_SHELL_DRIFT``)."""
     from EvoScientist.setup import research_env
 
     cfg = manager.EvoScientistConfig()
@@ -397,6 +397,51 @@ def test_sidecar_records_the_agent_python_only_when_passed(
     assert json.loads((tmp_path / "ws.json").read_text())["agent_python"] is None
     manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
     assert "agent_python" not in json.loads((tmp_path / "ws.json").read_text())
+
+
+def test_sidecar_records_the_agent_bash_only_when_passed(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    bash = r"C:\Program Files\Git\bin\bash.exe"
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1, agent_bash=bash)
+    assert json.loads((tmp_path / "ws.json").read_text())["agent_bash"] == bash
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=1)
+    assert "agent_bash" not in json.loads((tmp_path / "ws.json").read_text())
+
+
+def test_reuse_warns_when_the_server_shell_differs(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A server started before `EvoSci setup` recorded Git Bash keeps cmd.exe
+    for its agents; this session runs bash."""
+    from types import SimpleNamespace
+
+    from EvoScientist import agent_shell
+    from EvoScientist.setup import research_env
+
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    fp = manager._server_config_fingerprint(cfg)
+    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
+    manager._write_workspace_sidecar(
+        workspace_dir=tmp_path / "A",
+        pid=99999,
+        config_fingerprint=fp,
+        agent_python="/env/bin/python",
+        agent_bash=None,
+    )
+    monkeypatch.setattr(research_env, "agent_python", lambda: "/env/bin/python")
+    bash = r"C:\Git\bin\bash.exe"
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: SimpleNamespace(bash=bash))
+    manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A")
+    assert "cmd.exe" in manager.AGENT_SHELL_DRIFT
+    assert bash in manager.AGENT_SHELL_DRIFT
+    assert "python" not in manager.AGENT_SHELL_DRIFT
 
 
 def _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, recorded):
@@ -425,8 +470,8 @@ def test_reuse_warns_when_the_server_python_differs(
     """A server launched from a shell with conda active, reused from one
     without: its agents keep conda's python."""
     _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, "/conda/bin/python")
-    assert "/conda/bin/python" in manager.AGENT_PYTHON_DRIFT
-    assert "/env/bin/python" in manager.AGENT_PYTHON_DRIFT
+    assert "/conda/bin/python" in manager.AGENT_SHELL_DRIFT
+    assert "/env/bin/python" in manager.AGENT_SHELL_DRIFT
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
@@ -434,7 +479,7 @@ def test_reuse_does_not_warn_when_the_server_python_matches(
     tmp_path, monkeypatch, runtime_paths
 ):
     _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, "/env/bin/python")
-    assert manager.AGENT_PYTHON_DRIFT is None
+    assert manager.AGENT_SHELL_DRIFT is None
 
 
 def test_reuse_does_not_warn_without_a_recorded_python(
@@ -442,7 +487,7 @@ def test_reuse_does_not_warn_without_a_recorded_python(
 ):
     """A server started by an older version has no record."""
     _reuse_with_agent_python(tmp_path, monkeypatch, runtime_paths, ...)
-    assert manager.AGENT_PYTHON_DRIFT is None
+    assert manager.AGENT_SHELL_DRIFT is None
 
 
 def test_stop_recorded_server_none_when_no_pid_file(

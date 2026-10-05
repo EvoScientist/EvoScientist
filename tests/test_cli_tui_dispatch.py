@@ -185,7 +185,7 @@ def test_no_warning_when_backend_failed_to_start(monkeypatch):
 def test_cli_prints_the_server_python_warning(monkeypatch, drift):
     from EvoScientist.langgraph_dev import manager
 
-    monkeypatch.setattr(manager, "AGENT_PYTHON_DRIFT", drift)
+    monkeypatch.setattr(manager, "AGENT_SHELL_DRIFT", drift)
     config = SimpleNamespace(langgraph_dev_host="127.0.0.1")
     printed = _run_ensure_backend(monkeypatch, config)
 
