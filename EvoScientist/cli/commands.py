@@ -612,10 +612,9 @@ def _ensure_async_subagent_server(
     if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
         console.print(
             "[yellow]⚠ Configuration or version changed since the background "
-            "agent server was launched — async sub-agents still use the old "
-            "settings. Apply "
-            "them with [bold]EvoSci server stop[/bold], then restart "
-            "EvoSci.[/yellow]"
+            "agent server was launched — it still runs the old settings or "
+            "version. Apply them with [bold]EvoSci server stop[/bold], then "
+            "restart EvoSci.[/yellow]"
         )
     if _lg_manager.AGENT_PYTHON_DRIFT is not None:
         console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_PYTHON_DRIFT)}[/yellow]")

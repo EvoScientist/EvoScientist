@@ -802,7 +802,7 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     race the server's health deadline with its progress hidden in the server
     log, so ``start_langgraph_dev`` runs this before spawning instead.
     """
-    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
     missing = [
         name

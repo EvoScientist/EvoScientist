@@ -362,6 +362,26 @@ def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
 
 
+def test_reuse_sets_drift_flag_for_older_stripped_server(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A server an older version started without MCP (``deploy_mode: false``)
+    is reused with the drift warning, also by a server-backend session."""
+    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "old-version-fingerprint")
+    sidecar = tmp_path / "ws.json"
+    sidecar.write_text(
+        json.dumps({**json.loads(sidecar.read_text()), "deploy_mode": False})
+    )
+
+    reused = manager.ensure_langgraph_dev(
+        cfg, workspace_dir=tmp_path / "A", backend="langgraph_server"
+    )
+
+    assert reused is None
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+    assert manager.is_async_subagents_available() is True
+
+
 def test_reuse_sets_drift_flag_on_version_change(tmp_path, monkeypatch, runtime_paths):
     """A server left running across an upgrade counts as drift: the session
     reuses it and warns, and the server is not stopped."""

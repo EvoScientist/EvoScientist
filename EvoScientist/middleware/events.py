@@ -422,6 +422,6 @@ def resolve_middleware_event_sink(
     if for_async_subagent:
         return NO_OP_SINK
     sink = events if events is not None else RunScopedEventSink()
-    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return StreamBroadcastSink(sink)
     return sink

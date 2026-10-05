@@ -599,7 +599,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     ):
         warnings.append(
             "Configuration or version changed since this server was "
-            "launched — it still serves the old settings. Apply them with "
+            "launched — it still serves the old settings or version. Apply them with "
             "'EvoSci server stop', then re-run EvoSci."
         )
     from ..setup.research_env import python_drift_message

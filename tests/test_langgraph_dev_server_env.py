@@ -146,7 +146,7 @@ def test_async_subagents_available_init_true_in_server(monkeypatch):
     import time, ``_ASYNC_SUBAGENTS_AVAILABLE`` initializes to True so the
     deployed main agent's ``_maybe_swap_async_subagents`` swaps eagerly
     without waiting for ``start_langgraph_dev`` to flip the flag (which it
-    can't — the deploy subprocess never calls that function on itself)."""
+    can't — the server never calls that function on itself)."""
     monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
     # Re-import the module to re-run the module-level initialization.
     import importlib

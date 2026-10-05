@@ -382,7 +382,7 @@ _TUNNEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.trycloudflare\.com")
 #   ``EVOSCIENTIST_SERVER_PROCESS`` env var ``start_langgraph_dev`` sets.
 #   The served main agent runs inside the server, so http://localhost:{port}
 #   is always reachable for self-loop async sub-agent dispatch.
-_ASYNC_SUBAGENTS_AVAILABLE: bool = bool(os.environ.get("EVOSCIENTIST_SERVER_PROCESS"))
+_ASYNC_SUBAGENTS_AVAILABLE: bool = os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1"
 
 
 def is_async_subagents_available() -> bool:
@@ -1397,8 +1397,8 @@ def _ensure_langgraph_dev_locked(
                     CONFIG_DRIFT_SINCE_LAUNCH = True
                     logger.warning(
                         "Configuration or version changed since the running "
-                        "langgraph dev was launched — async sub-agents still "
-                        "use the old settings until the server is restarted "
+                        "langgraph dev was launched — it still serves the old "
+                        "settings or version until it is restarted "
                         "(EvoSci server stop)."
                     )
                 from EvoScientist.setup.research_env import python_drift_message

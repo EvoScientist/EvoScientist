@@ -89,7 +89,14 @@ def test_resolve_backend_same_workspace_reuses(monkeypatch):
     assert decision.warnings == []
 
 
-def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
+@pytest.mark.parametrize(
+    "legacy",
+    [{}, {"deploy_mode": False}],
+    ids=["current", "stripped_from_older_version"],
+)
+def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch, legacy):
+    """A server from another version is reused with the drift warning, also
+    one an older version started without MCP (``deploy_mode: false``)."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
@@ -97,6 +104,7 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
         sidecar={
             "workspace": "/tmp/wsA",
             "config_fingerprint": "fp-old",
+            **legacy,
         },
         fingerprint="fp-now",
     )
