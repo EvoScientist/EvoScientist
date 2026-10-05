@@ -511,6 +511,23 @@ def _tree_signature(root: Path) -> tuple[int, int]:
     return files, size
 
 
+class _ExtractorStillRunning(StageError):
+    """The self-extractor was told to stop but its tree did not exit, so its
+    temporary directory is still in use and must not be removed."""
+
+
+def _stop(proc: _HiddenDesktopProcess, exe: Path) -> bool:
+    """Kill the extractor's process tree; True once it has exited."""
+    _kill_tree(proc.pid)
+    try:
+        stopped = proc.wait(30) is not None
+    except OSError:
+        stopped = False
+    if not stopped:
+        logger.warning(f"{exe.name} (pid {proc.pid}) did not stop after being killed")
+    return stopped
+
+
 def _run_sfx(exe: Path, out: Path, beat: Callable[[], None]) -> None:
     """Run the verified self-extractor into ``out``, unseen, with heartbeats.
 
@@ -538,13 +555,23 @@ def _run_sfx(exe: Path, out: Path, beat: Callable[[], None]) -> None:
                 silence_limit=SFX_SILENCE_LIMIT,
             )
         except StepStalled as exc:
-            _kill_tree(proc.pid)
-            proc.wait(30)
+            if not _stop(proc, exe):
+                raise _ExtractorStillRunning(
+                    "install_failed",
+                    f"{exe.name} made no progress for {SFX_SILENCE_LIMIT} s and "
+                    "could not be stopped; its files are left for the next run.",
+                ) from exc
             raise StageError(
                 "install_failed",
                 f"{exe.name} made no progress for {SFX_SILENCE_LIMIT} s and was "
                 "stopped.",
             ) from exc
+        except BaseException:
+            # Ctrl+C, a heartbeat written to a closed pipe (the desktop app went
+            # away), a failed wait: the extractor runs on a desktop nobody sees,
+            # so stop it before anything removes the folder it writes to.
+            _stop(proc, exe)
+            raise
     except OSError as exc:
         raise StageError(
             "install_failed", f"Could not wait for {exe.name}: {exc}"
@@ -582,6 +609,7 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
     final = root / f"git-{GIT_VERSION}"
 
     tmp = Path(tempfile.mkdtemp(prefix=".git-", dir=root))
+    keep_tmp = False
     try:
         # Saved under a name without ".exe" until its hash matches, so a partial
         # or tampered download cannot be launched.
@@ -638,8 +666,14 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
             )
         _write_record(info)
         return info
+    except _ExtractorStillRunning:
+        # Its tree may still write there; the next run's stale-dir cleanup
+        # (under the install lock) removes it instead.
+        keep_tmp = True
+        raise
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if not keep_tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> GitInfo:

@@ -104,6 +104,9 @@ class FakeSfx:
         self.closed = 0
         self.launched_sha: str | None = None
         self.part_left: bool | None = None
+        self.killed = False  # set by the fake _kill_tree
+        self.survives_kill = False  # the tree does not exit when killed
+        self.wait_error: BaseException | None = None  # raised by the first wait
 
     def __call__(self, argv):
         self.calls.append(argv)
@@ -125,6 +128,10 @@ class FakeSfx:
             def wait(self, timeout):
                 self.waited += 1
                 sfx.wait_timeouts.append(timeout)
+                if sfx.killed:
+                    return None if sfx.survives_kill else 1
+                if sfx.wait_error is not None and self.waited == 1:
+                    raise sfx.wait_error
                 if sfx.hang or self.waited <= sfx.busy_polls:
                     return None  # still running
                 return sfx.exit_code
@@ -162,7 +169,12 @@ def env(tmp_path, monkeypatch):
     sfx = FakeSfx()
     monkeypatch.setattr(git, "_launch", sfx)
     killed: list[int] = []
-    monkeypatch.setattr(git, "_kill_tree", killed.append)
+
+    def kill_tree(pid):
+        killed.append(pid)
+        sfx.killed = True
+
+    monkeypatch.setattr(git, "_kill_tree", kill_tree)
     # The real check would read the test host's free space.
     plenty = type("Usage", (), {"free": git.MIN_FREE_BYTES * 10})
     monkeypatch.setattr(git.shutil, "disk_usage", lambda _p: plenty)
@@ -433,6 +445,41 @@ def test_stalled_sfx_is_stopped_and_is_install_failed(env, monkeypatch):
     assert "made no progress" in ei.value.message
     assert env["killed"] == [4242]
     assert env["sfx"].closed == 1  # process handle and desktop released
+    assert not list(env["tools"].glob(".git-*"))
+
+
+def test_stalled_sfx_that_survives_the_kill_keeps_its_temp_dir(env, monkeypatch):
+    """Its tree may still write there, so the dir is left for the next run."""
+    monkeypatch.setattr(git, "SFX_SILENCE_LIMIT", 0)
+    env["sfx"].hang = True
+    env["sfx"].survives_kill = True
+    with pytest.raises(StageError) as ei:
+        git.ensure_git()
+    assert ei.value.code == "install_failed"
+    assert "could not be stopped" in ei.value.message
+    assert env["sfx"].closed == 1
+    assert list(env["tools"].glob(".git-*"))
+    assert _record(env) is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        KeyboardInterrupt(),
+        BrokenPipeError(32, "Broken pipe"),
+        OSError(6, "WAIT_FAILED"),
+    ],
+    ids=["ctrl-c", "closed-stdout", "wait-failed"],
+)
+def test_interrupted_wait_stops_the_extractor_tree(env, error):
+    """Whatever ends the wait, the unseen extractor is not left running."""
+    env["sfx"].wait_error = error
+    with pytest.raises((KeyboardInterrupt, StageError)) as ei:
+        git.ensure_git()
+    if isinstance(error, OSError):
+        assert ei.value.code == "install_failed"
+    assert env["killed"] == [4242]
+    assert env["sfx"].closed == 1
     assert not list(env["tools"].glob(".git-*"))
 
 
