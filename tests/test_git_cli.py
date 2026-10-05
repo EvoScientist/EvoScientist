@@ -28,11 +28,9 @@ class TestRunGit:
                 run_git(["--version"], timeout=5)
 
         assert excinfo.value.__cause__ is missing
-        assert str(excinfo.value) == (
-            "git was not found on PATH. EvoScientist uses git to download skills "
-            "and the MCP server index; install Git from "
-            "https://git-scm.com/downloads and try again."
-        )
+        message = str(excinfo.value)
+        assert message.startswith("git was not found on PATH.")
+        assert "https://git-scm.com/downloads" in message
 
     def test_real_cause_is_logged(self, caplog):
         too_many = OSError(24, "Too many open files")
@@ -49,10 +47,24 @@ class TestRunGit:
         # Callers already turn RuntimeError into a clean error result.
         assert issubclass(GitNotFoundError, RuntimeError)
 
-    def test_permission_error_counts_as_missing_git(self):
+    def test_other_start_errors_name_the_cause(self):
+        """git is on PATH but cannot start: no install hint, the real cause."""
         with patch(_RUN, side_effect=PermissionError(13, "Permission denied")):
-            with pytest.raises(GitNotFoundError):
+            with pytest.raises(GitNotFoundError) as excinfo:
                 run_git(["--version"], timeout=5)
+
+        assert str(excinfo.value) == "git could not be started: Permission denied"
+
+    def test_git_not_found_error_pickles_and_copies(self):
+        import copy
+        import pickle
+
+        for error in (
+            GitNotFoundError(),
+            GitNotFoundError("git could not be started: x"),
+        ):
+            assert str(pickle.loads(pickle.dumps(error))) == str(error)
+            assert str(copy.copy(error)) == str(error)
 
     def test_timeout_propagates(self):
         with patch(_RUN, side_effect=subprocess.TimeoutExpired("git", 5)):

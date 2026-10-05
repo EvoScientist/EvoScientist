@@ -19,18 +19,23 @@ def _install_hint() -> str:
     return "install Git from https://git-scm.com/downloads and try again"
 
 
+def _not_found_message() -> str:
+    return (
+        "git was not found on PATH. EvoScientist uses git to download "
+        f"skills and the MCP server index; {_install_hint()}."
+    )
+
+
 class GitNotFoundError(RuntimeError):
     """git could not be started: not installed, not on PATH, or not runnable.
 
     A ``RuntimeError`` so the callers that already turn ``RuntimeError`` into a
-    clean error result need no new ``except``.
+    clean error result need no new ``except``. The message is a plain argument
+    so the exception still pickles and copies.
     """
 
-    def __init__(self) -> None:
-        super().__init__(
-            "git was not found on PATH. EvoScientist uses git to download "
-            f"skills and the MCP server index; {_install_hint()}."
-        )
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or _not_found_message())
 
 
 def run_git(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
@@ -45,10 +50,14 @@ def run_git(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[s
             ["git", *args], capture_output=True, text=True, timeout=timeout
         )
     except OSError as exc:
-        # The user sees only the readable message; keep the real errno
-        # (e.g. EACCES, EMFILE) in the log.
         logger.debug("could not start git", exc_info=True)
-        raise GitNotFoundError() from exc
+        # Only a missing binary gets the install hint; anything else (EACCES,
+        # EMFILE, a Windows policy block) names its cause, because git is there.
+        if isinstance(exc, FileNotFoundError):
+            raise GitNotFoundError() from exc
+        raise GitNotFoundError(
+            f"git could not be started: {exc.strerror or exc}"
+        ) from exc
 
 
 def clone_repo(repo: str, ref: str | None, dest: str) -> None:
