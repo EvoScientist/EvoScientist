@@ -31,6 +31,35 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class _RedactingFormatter(logging.Formatter):
+    """Formats like the wrapped formatter, with the bot token blanked out."""
+
+    def __init__(self, inner: logging.Formatter, token: str) -> None:
+        super().__init__()
+        self._inner = inner
+        self._token = token
+
+    def format(self, record: logging.LogRecord) -> str:
+        # the whole formatted text, so URLs inside exception messages and tracebacks are covered too
+        return self._inner.format(record).replace(self._token, "<bot-token>")
+
+
+def protect_bot_token(token: str) -> None:
+    """Keep the bot token out of the log (#567).
+
+    The Bot API puts it in the URL path (``/bot<token>/getUpdates``), and httpx logs
+    every request URL at INFO. Quiet those lines like ``EvoSci serve`` does, and blank
+    the token in whatever else gets logged, such as an error that quotes the URL.
+    """
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    if not token:
+        return
+    for handler in logging.getLogger().handlers:
+        formatter = handler.formatter or logging.Formatter(logging.BASIC_FORMAT)
+        if not isinstance(formatter, _RedactingFormatter):
+            handler.setFormatter(_RedactingFormatter(formatter, token))
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -64,6 +93,7 @@ def parse_args():
 def main():
     """Entry point."""
     args = parse_args()
+    protect_bot_token(args.bot_token)
 
     config = TelegramConfig(
         bot_token=args.bot_token,
