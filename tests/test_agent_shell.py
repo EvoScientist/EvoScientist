@@ -238,6 +238,36 @@ def test_bash_env_treats_an_empty_python_encoding_as_unset(fake_bash):
     launch.cleanup()
 
 
+def test_windows_command_line_quotes_both_paths(monkeypatch):
+    """The MSYS2 runtime splits the command line itself; `subprocess` would
+    leave a path without spaces unquoted, so `'` and `[` would not survive."""
+    monkeypatch.setattr(agent_shell.sys, "platform", "win32")
+    bash = Path("C:/Program Files/Git/bin/bash.exe")
+    script = Path("C:/Users/O'Brien [x]/AppData/Local/Temp/evoscientist/cmd-a.sh")
+    line = agent_shell._bash_command_line(bash, script)
+    assert line == f'"{bash}" "{script.as_posix()}"'
+    monkeypatch.setattr(agent_shell.sys, "platform", "linux")
+    assert agent_shell._bash_command_line(bash, script) == [
+        str(bash),
+        script.as_posix(),
+    ]
+
+
+def test_bash_env_drops_bash_env(fake_bash):
+    launch = agent_shell.prepare("true", {"BASH_ENV": "~/.bashrc", "Bash_Env": "x"})
+    assert launch.env == {"PYTHONIOENCODING": "utf-8"}
+    launch.cleanup()
+
+
+def test_execute_does_not_source_bash_env(fake_bash, tmp_path):
+    rc = tmp_path / "rc.sh"
+    rc.write_text("echo sourced\n")
+    backend = CustomSandboxBackend(
+        root_dir=str(tmp_path / "ws"), env={"BASH_ENV": str(rc)}
+    )
+    assert backend.execute("echo ok").output.strip() == "ok"
+
+
 def test_bash_env_inherits_ours_when_none_is_given(fake_bash, monkeypatch):
     monkeypatch.setenv("EVOSCI_TEST_MARKER", "x")
     launch = agent_shell.prepare("true", None)
@@ -511,6 +541,20 @@ def test_windows_literal_slash_argument_gets_a_note(real_bash, tmp_path):
     assert "Note: Git Bash passes `/hi`" in resp.output
     resp = backend.execute(f'"{_py()}" -c "import sys; print(sys.argv[1])" "//hi"')
     assert resp.output.strip() == "/hi", resp.output
+
+
+@windows_bash
+def test_windows_python_is_the_one_on_path(real_bash, tmp_path):
+    """bin\\bash.exe puts <prefix>\\bin, usr\\bin and ~\\bin before PATH;
+    none of them may shadow the python the agent is meant to get (the
+    research environment's or the user's, first on PATH)."""
+    expected = shutil.which("python")
+    assert expected is not None
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
+    resp = backend.execute('python -c "import sys; print(sys.executable)"')
+    assert os.path.normcase(os.path.realpath(resp.output.strip())) == os.path.normcase(
+        os.path.realpath(expected)
+    ), resp.output
 
 
 @windows_bash

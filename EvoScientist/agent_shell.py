@@ -279,6 +279,10 @@ def _bash_env(env: dict[str, str] | None, info: GitInfo) -> dict[str, str]:
     the Git install, is reported by :func:`path_conversion_note`.
     """
     child = dict(os.environ if env is None else env)
+    # bash sources $BASH_ENV before a non-interactive script; the agent's
+    # commands must not depend on a file the user set up for their own shells.
+    for key in [k for k in child if k.upper() == "BASH_ENV"]:
+        del child[key]
     keys = {key.upper() for key in child}
     # Python ignores an empty PYTHONIOENCODING, so empty counts as unset.
     encoding_keys = [k for k in child if k.upper() == "PYTHONIOENCODING"]
@@ -411,10 +415,24 @@ def prepare(command: str, env: dict[str, str] | None) -> ShellLaunch:
     if info is None:
         return ShellLaunch(args=command, env=env)
     script = _write_script(command)
-    # Forward slashes: the MSYS2 runtime would turn a ``\\`` into ``\``, and
-    # the first argument must not look like one of bin\bash.exe's own options.
     return ShellLaunch(
-        args=[str(info.bash), script.as_posix()],
+        args=_bash_command_line(info.bash, script),
         env=_bash_env(env, info),
         script=script,
     )
+
+
+def _bash_command_line(bash: Path, script: Path) -> str | list[str]:
+    """``bin\\bash.exe`` running ``script``, as ``Popen`` should get it.
+
+    On Windows one command line with both paths in double quotes: the MSYS2
+    runtime splits it with its own rules, and ``subprocess`` quotes an
+    argument only for a space or tab, so a ``%TEMP%`` like
+    ``C:/Users/O'Brien/...`` would lose its ``'`` and one with ``[`` or ``{``
+    would be globbed. A Windows path cannot contain ``"``, and the forward
+    slashes leave no ``\\`` for the runtime to collapse; the first argument
+    then cannot look like one of ``bin\\bash.exe``'s own options either.
+    """
+    if sys.platform == "win32":
+        return f'"{bash}" "{script.as_posix()}"'
+    return [str(bash), script.as_posix()]
