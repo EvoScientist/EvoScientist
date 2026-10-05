@@ -21,7 +21,7 @@ def _proc(returncode=0, stdout="", stderr=""):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-_NON_INTERACTIVE = ["-c", "credential.helper=", "-c", "core.askPass="]
+_NON_INTERACTIVE = ["-c", "core.askPass="]
 
 
 @pytest.fixture(autouse=True)
@@ -173,22 +173,41 @@ class TestRunGit:
             with pytest.raises(GitNotFoundError):
                 run_git(["--version"], timeout=5)
 
-    def test_never_asks_for_credentials(self, monkeypatch):
-        """No credential helper window, no askpass program, no terminal prompt."""
+    def test_never_prompts_but_keeps_the_users_helpers(self, monkeypatch):
+        """No terminal prompt, no askpass program, no Credential Manager window;
+        the user's own credential helpers (e.g. from `gh auth setup-git`) still
+        answer, so private repositories that clone on `main` keep cloning."""
+        monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.setenv("GIT_ASKPASS", "/usr/lib/ssh/ssh-askpass")
         monkeypatch.setenv("SSH_ASKPASS", "/usr/lib/ssh/ssh-askpass")
         monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+        monkeypatch.setenv("GCM_INTERACTIVE", "auto")
         monkeypatch.setenv("KEEP_ME", "yes")
         with patch(_RUN, return_value=_proc()) as run:
             run_git(["ls-remote", "https://github.com/o/r.git"], timeout=5)
 
         argv = run.call_args.args[0]
-        assert argv[1:5] == _NON_INTERACTIVE
+        assert argv[1:3] == _NON_INTERACTIVE
+        assert "credential.helper=" not in argv
         env = run.call_args.kwargs["env"]
         assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GCM_INTERACTIVE"] == "0"
         assert "GIT_ASKPASS" not in env
         assert "SSH_ASKPASS" not in env
         assert env["KEEP_ME"] == "yes"
+
+    @pytest.mark.parametrize("private", [True, False])
+    def test_windows_resets_the_helper_list_only_for_portablegit(
+        self, monkeypatch, private
+    ):
+        from EvoScientist.setup import git as setup_git
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(setup_git, "private_git_on_path", lambda: private)
+        with patch(_RUN, return_value=_proc()) as run:
+            run_git(["--version"], timeout=5)
+
+        assert ("credential.helper=" in run.call_args.args[0]) is private
 
 
 class TestCloneRepo:

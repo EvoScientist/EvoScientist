@@ -159,7 +159,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(git.shutil, "disk_usage", lambda _p: plenty)
 
     def which(name, path=None):
-        for d in (path or "").split(os.pathsep):
+        # Like shutil.which: PATH when no path= is given.
+        for d in (path or os.environ.get("PATH", "")).split(os.pathsep):
             candidate = Path(d) / f"{name}.exe"
             if d and candidate.is_file():
                 return str(candidate)
@@ -671,3 +672,45 @@ def test_run_stage_done_detail(env):
     assert result.detail["source"] == "portablegit"
     assert result.detail["version"] == "2.56.0.windows.1"
     assert all(e["status"] == "running" for e in events)
+
+
+# --------------------------------------------------------------------------- #
+# The git that run_git uses
+# --------------------------------------------------------------------------- #
+def _recorded_portablegit(env) -> Path:
+    root = _layout(env["tools"] / f"git-{git.GIT_VERSION}")
+    git._write_record(
+        git.GitInfo(
+            "portablegit",
+            git.GIT_VERSION,
+            root / "cmd" / "git.exe",
+            root / "bin" / "bash.exe",
+        )
+    )
+    return root
+
+
+def test_private_git_on_path_is_the_recorded_portablegit(env, monkeypatch):
+    root = _recorded_portablegit(env)
+    monkeypatch.setenv("PATH", str(root / "cmd"))
+    assert git.private_git_on_path()
+
+
+def test_private_git_on_path_is_false_for_a_system_git_ahead_of_it(env, monkeypatch):
+    root = _recorded_portablegit(env)
+    system = _layout(env["tmp"] / "Program Files" / "Git")
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join([str(system / "cmd"), str(root / "cmd")])
+    )
+    assert not git.private_git_on_path()
+
+
+def test_private_git_on_path_is_false_for_a_recorded_system_git(env, monkeypatch):
+    _system_git(env, monkeypatch)
+    git.ensure_git()
+    assert _record(env)["source"] == "system"
+    assert not git.private_git_on_path()
+
+
+def test_private_git_on_path_is_false_without_a_record(env, monkeypatch):
+    assert not git.private_git_on_path()

@@ -18,14 +18,19 @@ logger = logging.getLogger(__name__)
 CLONE_TIMEOUT = 120  # seconds
 
 # A missing or private repository makes GitHub ask for credentials. Git would
-# then open a credential helper window (Git for Windows ships a picker) or wait
-# for a username on the terminal. An empty ``credential.helper`` resets the
-# helper list; askpass programs run before git checks GIT_TERMINAL_PROMPT, so
-# they are cleared too. This covers HTTPS, the only scheme our URLs use. A
-# user's ``url.<ssh>.insteadOf`` rule turns them into SSH, whose own prompts
-# (key passphrase, host key) these settings do not reach; ``core.sshCommand``
-# is left alone so the user's ssh setup keeps working.
-_NON_INTERACTIVE = ["-c", "credential.helper=", "-c", "core.askPass="]
+# then open a credential helper window or wait for a username on the terminal.
+# Terminal and askpass prompts are turned off (askpass programs run before git
+# checks GIT_TERMINAL_PROMPT, so they are cleared too) and Git Credential
+# Manager is told not to prompt, so a stored credential is still used (the
+# user's own helpers, e.g. the one ``gh auth setup-git`` writes) and anything
+# else fails at once. Only our own PortableGit, whose ``etc\gitconfig`` names
+# the ``helper-selector`` picker, gets its helper list reset. This covers
+# HTTPS, the only scheme our URLs use. A user's ``url.<ssh>.insteadOf`` rule
+# turns them into SSH, whose own prompts (key passphrase, host key) these
+# settings do not reach; ``core.sshCommand`` is left alone so the user's ssh
+# setup keeps working.
+_NON_INTERACTIVE = ["-c", "core.askPass="]
+_PORTABLEGIT_ONLY = ["-c", "credential.helper="]
 _ASKPASS_VARS = ("GIT_ASKPASS", "SSH_ASKPASS")
 
 
@@ -60,12 +65,24 @@ class GitNotFoundError(RuntimeError):
 def _git_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k.upper() not in _ASKPASS_VARS}
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # Git Credential Manager answers from its store or fails, never prompts
+    # (``0`` / ``false`` are the current spellings, ``never`` the legacy one).
+    env["GCM_INTERACTIVE"] = "0"
     return env
+
+
+def _portablegit_args() -> list[str]:
+    """``-c credential.helper=`` when the git on PATH is our PortableGit."""
+    if sys.platform != "win32":
+        return []
+    from .setup import git as setup_git
+
+    return list(_PORTABLEGIT_ONLY) if setup_git.private_git_on_path() else []
 
 
 def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *_NON_INTERACTIVE, *args],
+        ["git", *_NON_INTERACTIVE, *_portablegit_args(), *args],
         capture_output=True,
         text=True,
         timeout=timeout,

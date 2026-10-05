@@ -706,6 +706,20 @@ def activate_runtime() -> Path | None:
     return git.parent
 
 
+def private_git_on_path() -> bool:
+    """True when the ``git`` that PATH resolves to is the recorded PortableGit.
+
+    ``run_git`` resets the credential-helper list only then (PortableGit's
+    ``etc\\gitconfig`` names the ``helper-selector`` picker); a system Git
+    ahead of it on PATH keeps its own helpers. Reads the record and PATH only.
+    """
+    record = _read_record()
+    if record is None or record["source"] != "portablegit":
+        return False
+    found = shutil.which("git")
+    return found is not None and is_under(Path(found), Path(record["git"]).parent)
+
+
 # --------------------------------------------------------------------------- #
 # Stage
 # --------------------------------------------------------------------------- #
