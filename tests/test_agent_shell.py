@@ -858,3 +858,32 @@ def test_windows_background_job_runs_in_bash_and_stops(real_bash, tmp_path):
         for p in _marked(tag):
             p.kill()
         bg._PROCESSES.clear()
+
+
+# --------------------------------------------------------------------------- #
+# A Git Bash removed after the choice
+# --------------------------------------------------------------------------- #
+def _gone_bash(monkeypatch, tmp_path) -> Path:
+    bash = tmp_path / "scoop" / "apps" / "git" / "2.56" / "bin" / "bash.exe"
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: _info(bash))
+    return bash
+
+
+def test_execute_names_a_missing_bash(scripts, tmp_path, monkeypatch):
+    bash = _gone_bash(monkeypatch, tmp_path)
+    resp = CustomSandboxBackend(root_dir=str(tmp_path / "ws")).execute("echo hi")
+    assert resp.exit_code == 1
+    assert str(bash) in resp.output
+    assert "Run `EvoSci setup`, then restart EvoScientist." in resp.output
+    assert "FileNotFoundError" not in resp.output
+    assert not scripts.exists() or list(scripts.iterdir()) == []
+
+
+def test_run_in_background_names_a_missing_bash(scripts, tmp_path, monkeypatch):
+    from EvoScientist.middleware.background import _make_run_in_background
+
+    bash = _gone_bash(monkeypatch, tmp_path)
+    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
+    result = _make_run_in_background(False).invoke({"command": "echo hi"})
+    assert str(bash) in result
+    assert "Run `EvoSci setup`" in result

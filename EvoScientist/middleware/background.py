@@ -145,7 +145,10 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
         if error:
             return error
         tid = _origin_thread_id(runtime)
-        process_id = background.launch(command, cwd, name, origin_thread_id=tid)
+        try:
+            process_id = background.launch(command, cwd, name, origin_thread_id=tid)
+        except agent_shell.BashMissingError as exc:
+            return str(exc)
         label = f" (name={name!r})" if name else ""
         # In dangerous mode `/` is the real root, so advertise the real log path;
         # in virtual mode `/.bg_processes/...` correctly maps to the workspace.

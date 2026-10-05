@@ -1970,6 +1970,8 @@ class CustomSandboxBackend(LocalShellBackend):
                     exit_code=process.returncode,
                     truncated=truncated,
                 )
+        except agent_shell.BashMissingError as exc:
+            response = ExecuteResponse(output=str(exc), exit_code=1, truncated=False)
         except Exception as exc:
             if process is not None:
                 _terminate_process_tree(process)

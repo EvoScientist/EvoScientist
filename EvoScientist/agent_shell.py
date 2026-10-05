@@ -519,14 +519,28 @@ def terminate_job(process: subprocess.Popen) -> bool:
     return _job_api().terminate(job)
 
 
+class BashMissingError(RuntimeError):
+    """The Git Bash chosen for this process was removed after the choice
+    (for example ``scoop update`` replaced a versioned install). The message
+    is meant for the agent's tool result as it is."""
+
+
 def prepare(command: str, env: dict[str, str] | None) -> ShellLaunch:
     """How to run ``command`` in the agent's shell, with ``env`` as its environment.
 
-    ``env`` None means "inherit ours", as for ``Popen``.
+    ``env`` None means "inherit ours", as for ``Popen``. Raises
+    :class:`BashMissingError` when the chosen Git Bash no longer exists: the
+    choice is fixed for the process, so falling back to ``cmd.exe`` would
+    contradict the prompt.
     """
     info = agent_bash()
     if info is None:
         return ShellLaunch(args=command, env=env)
+    if not info.bash.is_file():
+        raise BashMissingError(
+            f"The agent's Git Bash ({info.bash}) is gone, so this command did "
+            "not run. Run `EvoSci setup`, then restart EvoScientist."
+        )
     script = _write_script(command)
     return ShellLaunch(
         args=_bash_command_line(info.bash, script),
