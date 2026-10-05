@@ -162,15 +162,41 @@ async def _async_main(
         channel._running = False
         await channel.stop()
         await manager.stop_health()
+        for t in tasks:
+            if t is not asyncio.current_task() and not t.done():
+                t.cancel()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda s=sig: asyncio.create_task(_graceful_shutdown()),
-        )
+    shutdown_started = False
+    shutdown_task: asyncio.Task[None] | None = None
 
-    await asyncio.gather(*tasks)
+    def _request_shutdown() -> None:
+        nonlocal shutdown_started, shutdown_task
+        if shutdown_started:
+            return
+        shutdown_started = True
+        shutdown_task = asyncio.create_task(_graceful_shutdown())
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _request_shutdown)
+
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+        pass
+
+    # If a signal started shutdown but tasks are still running, wait for the
+    # graceful path and cancel leftovers so asyncio.run can return.
+    if shutdown_task is not None and not shutdown_task.done():
+        try:
+            await shutdown_task
+        except Exception:
+            logger.exception("standalone shutdown task failed")
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _ensure_standalone_dev_server(config: Any, *, backend: str | None = None) -> None:
