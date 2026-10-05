@@ -592,6 +592,42 @@ class TestMissingGit:
         )
 
 
+class TestBareNameIndexFailure:
+    """A bare skill name whose index fetch fails reports that failure."""
+
+    def test_git_that_runs_but_fails(self, temp_skills_dir, tmp_path, monkeypatch):
+        """The macOS Command Line Tools stub (and an offline git) exit non-zero."""
+        from types import SimpleNamespace
+
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+        monkeypatch.chdir(tmp_path)
+        stub = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="xcode-select: note: No developer tools were found.\n",
+        )
+        with patch("EvoScientist.git_cli.subprocess.run", return_value=stub):
+            result = install_skill("no-such-skill-xyz", str(temp_skills_dir))
+
+        assert result["success"] is False
+        assert result["error"].startswith("git clone failed: xcode-select: note:")
+
+    def test_path_shaped_source_skips_the_index(
+        self, temp_skills_dir, tmp_path, monkeypatch
+    ):
+        """A path can never match an index name: no EvoSkills clone for a typo."""
+        monkeypatch.chdir(tmp_path)
+        with patch(
+            "EvoScientist.tools.skills_manager.fetch_remote_skill_index"
+        ) as fetch:
+            result = install_skill("./my-skil", str(temp_skills_dir))
+
+        fetch.assert_not_called()
+        assert result["error"] == "Path does not exist: ./my-skil"
+
+
 # =============================================================================
 # Tests for batch install
 # =============================================================================

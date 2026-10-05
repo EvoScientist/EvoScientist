@@ -835,27 +835,27 @@ def _install_skill_impl(
                 pass
 
             # If not local and not a GitHub URL, try remote lookup in EvoSkills
-            # This handles /install-skill skill-name shorthand
-            try:
-                index = fetch_remote_skill_index()
-                for skill in index:
-                    if skill["name"].lower() == source.lower():
-                        _logger.info(
-                            f"Skill '{source}' found in remote index. Installing..."
-                        )
-                        # Record under the user-facing source (the shorthand
-                        # name they typed) so detection works on re-runs.
-                        return _install_from_github(
-                            skill["install_source"], dest_dir, record_as=source
-                        )
-            except GitNotFoundError as e:
-                if not _looks_like_path(source):
-                    # A bare skill name: "Path does not exist" would hide the
-                    # real cause. A mistyped path keeps that message below.
+            # This handles /install-skill skill-name shorthand. A path-shaped
+            # source can never match an index name, so a mistyped path goes
+            # straight to the local check below and keeps "Path does not exist".
+            if not _looks_like_path(source):
+                try:
+                    index = fetch_remote_skill_index()
+                    for skill in index:
+                        if skill["name"].lower() == source.lower():
+                            _logger.info(
+                                f"Skill '{source}' found in remote index. Installing..."
+                            )
+                            # Record under the user-facing source (the shorthand
+                            # name they typed) so detection works on re-runs.
+                            return _install_from_github(
+                                skill["install_source"], dest_dir, record_as=source
+                            )
+                except Exception as e:
+                    # The source is not a local path either, so this failure
+                    # (git missing, the macOS Command Line Tools stub, offline)
+                    # is the real cause; "Path does not exist" would hide it.
                     return {"success": False, "error": str(e)}
-                _logger.warning(f"Failed to fetch remote index for fallback: {e}")
-            except Exception as e:
-                _logger.warning(f"Failed to fetch remote index for fallback: {e}")
 
         return _install_from_local(source, dest_dir)
 
