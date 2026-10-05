@@ -274,10 +274,11 @@ When using the `execute` tool for shell commands:
 
 **Sandbox limits**: Commands default to a 300s timeout (a deployment may override this default) and 100 KB output. For a known long command (e.g. a download), pass `timeout` (up to 3600s): `execute(command="wget ...", timeout=600)`. For unbounded tasks, use background execution (below)."""
 
-# Dangerous header: real filesystem, no virtual `/`. ``{cwd}`` = real working dir.
+# Dangerous header: real filesystem, no virtual `/`. ``{cwd}`` = real working dir,
+# ``{example_path}`` = an absolute path in the shell's own form.
 _SHELL_GUIDELINES_DANGEROUS_HEADER = """# Shell Execution Guidelines (DANGEROUS MODE)
 
-You operate on the **host filesystem with real absolute paths** — there is no virtual workspace sandbox. Your current working directory is `{cwd}`. Use real absolute paths (e.g. `/Users/you/Documents/file.txt`) or paths relative to the cwd; `..` and `~` work normally. Run `pwd` any time you are unsure where you are.
+You operate on the **host filesystem with real absolute paths** — there is no virtual workspace sandbox. Your current working directory is `{cwd}`. Use real absolute paths (e.g. `{example_path}`) or paths relative to the cwd; `..` and `~` work normally. Run `pwd` any time you are unsure where you are.
 
 ⚠ You can read, write, move, copy, and delete files **anywhere on this machine**. There is no workspace confinement and no approval prompt. Be deliberate: double-check destination paths before writing or deleting, and never operate on a path you have not confirmed.
 
@@ -290,14 +291,45 @@ _SHELL_GUIDELINES_DANGEROUS_FOOTER = """
 **Still blocked even here**: privileged/system commands (`sudo`, `chmod`, `chown`, `mkfs`, `dd`, `shutdown`, `reboot`) and `rm -rf /` are rejected regardless of mode."""
 
 
-def _build_shell_guidelines(*, dangerous: bool = False, cwd: str | None = None) -> str:
-    """Assemble the shell guidelines from the shared core + per-mode header/footer."""
+# Windows with the recorded Git Bash (EvoScientist.agent_shell). The sandbox
+# line leaves out Windows paths: there the agent uses the virtual `/` paths, and
+# the command checks do not confine `C:/...` paths.
+_SHELL_BASH_ON_WINDOWS_SANDBOX = "**Shell**: The shell is bash (Git for Windows)."
+_SHELL_BASH_ON_WINDOWS_DANGEROUS = (
+    "**Shell**: The shell is bash from Git for Windows. Write Windows paths with "
+    "forward slashes (e.g. `C:/Users/you/Documents/file.txt`)."
+)
+
+
+def _build_shell_guidelines(
+    *,
+    dangerous: bool = False,
+    cwd: str | None = None,
+    bash_on_windows: bool = False,
+) -> str:
+    """Assemble the shell guidelines from the shared core + per-mode header/footer.
+
+    ``bash_on_windows``: the agent's commands run in Git Bash on Windows, so
+    the prompt says so and shows Windows paths with forward slashes.
+    """
     if dangerous:
-        header = _SHELL_GUIDELINES_DANGEROUS_HEADER.format(cwd=cwd or ".")
+        header = _SHELL_GUIDELINES_DANGEROUS_HEADER.format(
+            cwd=(cwd or ".").replace("\\", "/") if bash_on_windows else cwd or ".",
+            example_path=(
+                "C:/Users/you/Documents/file.txt"
+                if bash_on_windows
+                else "/Users/you/Documents/file.txt"
+            ),
+        )
+        if bash_on_windows:
+            header = f"{header}\n\n{_SHELL_BASH_ON_WINDOWS_DANGEROUS}"
         body = _SHELL_GUIDELINES_CORE.format(log_path="./output.log")
         return f"{header}\n\n{body}{_SHELL_GUIDELINES_DANGEROUS_FOOTER}\n"
+    header = _SHELL_GUIDELINES_SANDBOX_HEADER
+    if bash_on_windows:
+        header = f"{header}\n\n{_SHELL_BASH_ON_WINDOWS_SANDBOX}"
     body = _SHELL_GUIDELINES_CORE.format(log_path="/output.log")
-    return f"{_SHELL_GUIDELINES_SANDBOX_HEADER}\n\n{body}\n"
+    return f"{header}\n\n{body}\n"
 
 
 SHELL_GUIDELINES = _build_shell_guidelines()
@@ -422,6 +454,7 @@ def get_system_prompt(
     *,
     dangerous: bool = False,
     cwd: str | None = None,
+    bash_on_windows: bool = False,
 ) -> str:
     """Generate the complete static system prompt.
 
@@ -446,13 +479,18 @@ def get_system_prompt(
             (no virtual workspace) instead of the sandboxed default.
         cwd: Real absolute working directory shown to the agent in
             dangerous mode. Falls back to ``.`` when not provided.
+        bash_on_windows: The agent's commands run in Git Bash on Windows
+            (:func:`EvoScientist.agent_shell.uses_bash`); the guidelines say
+            so, and dangerous mode shows Windows paths with forward slashes.
 
     Returns:
         Combined static system prompt string.
     """
     shell_guidelines = (
-        _build_shell_guidelines(dangerous=True, cwd=cwd)
-        if dangerous
+        _build_shell_guidelines(
+            dangerous=dangerous, cwd=cwd, bash_on_windows=bash_on_windows
+        )
+        if dangerous or bash_on_windows
         else SHELL_GUIDELINES
     )
     sections = [
