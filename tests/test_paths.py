@@ -22,7 +22,6 @@ def _restore_paths():
     orig = {
         "DATA_DIR": paths.DATA_DIR,
         "MEMORIES_DIR": paths.MEMORIES_DIR,
-        "MEMORY_DIR": paths.MEMORY_DIR,
         "GLOBAL_SKILLS_DIR": paths.GLOBAL_SKILLS_DIR,
         "GLOBAL_MEMORIES_DIR": paths.GLOBAL_MEMORIES_DIR,
     }
@@ -73,6 +72,20 @@ class TestWorkspace:
         ws = Workspace(f"{tmp_path}/proj/")
         assert ws.key == (tmp_path / "proj").resolve().as_posix()
         assert not ws.key.endswith("/")
+
+    @pytest.mark.parametrize(
+        ("spelling", "expected"),
+        [
+            ("proj/", "proj"),
+            ("proj/./sub/..", "proj"),
+            ("with space", "with space"),
+            ("項目 ü", "項目 ü"),
+        ],
+    )
+    def test_key_normalises_shared_spellings(self, tmp_path, spelling, expected):
+        """Spellings the WebUI normalises to the same key as the core."""
+        ws = Workspace(f"{tmp_path}/{spelling}")
+        assert ws.key == (tmp_path.resolve() / expected).as_posix()
 
     def test_is_immutable_and_hashable(self, tmp_path):
         ws = Workspace(tmp_path)
@@ -152,7 +165,6 @@ class TestReloadEnvDirs:
         monkeypatch.setenv("EVOSCIENTIST_MEMORIES_DIR", str(tmp_path / "mem"))
         paths.reload_env_dirs()
         assert paths.MEMORIES_DIR == tmp_path / "mem"
-        assert paths.MEMORY_DIR == paths.MEMORIES_DIR
 
     def test_falls_back_to_global_memories(self, monkeypatch):
         monkeypatch.delenv("EVOSCIENTIST_MEMORIES_DIR", raising=False)

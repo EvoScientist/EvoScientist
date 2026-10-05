@@ -259,7 +259,7 @@ def run_standalone(
         ws_path = start_workspace_path(default_workdir=config.default_workdir)
         workspace = Workspace(ws_path)
         _ensure_standalone_dev_server(
-            config, workspace_dir=str(ws_path), backend=backend
+            config, workspace_dir=str(workspace.root), backend=backend
         )
     else:
         # Without an agent there is no config to read; attachments go to the

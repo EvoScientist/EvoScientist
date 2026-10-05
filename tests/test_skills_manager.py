@@ -16,13 +16,10 @@ from EvoScientist.tools.skills_manager import (
     _reset_skills_changed_callbacks,
     _validate_skill_dir,
     fetch_remote_skill_index,
-    get_all_tags,
     install_skill,
     installed_provenance,
-    installed_sources,
     list_expert_skills,
     list_skills,
-    list_skills_by_tag,
     register_skills_changed_callback,
     resolve_remote_head,
     uninstall_skill,
@@ -465,25 +462,27 @@ class TestInstallManifest:
             f"unexpected temp file left behind: {manifest_files}"
         )
 
-    def test_installed_sources_filters_missing_dirs(
+    def test_installed_provenance_filters_missing_dirs(
         self, sample_skill_dir, temp_skills_dir, skills_ws, tmp_path
     ):
         """If a skill dir was removed manually but the manifest entry lingers,
-        installed_sources(workspace=skills_ws) must not report it as installed."""
+        installed_provenance() must not report it as installed."""
         empty_global = tmp_path / "empty_global"
         empty_global.mkdir()
         with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_global):
             install_skill(
                 str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws
             )
-            assert installed_sources(workspace=skills_ws) == {str(sample_skill_dir)}
+            assert set(installed_provenance(workspace=skills_ws)) == {
+                str(sample_skill_dir)
+            }
 
             # Manually wipe the dir, manifest still has the entry.
             import shutil as _shutil
 
             _shutil.rmtree(temp_skills_dir / "sample-skill")
             assert "sample-skill" in _load_manifest(temp_skills_dir)
-            assert installed_sources(workspace=skills_ws) == set()
+            assert installed_provenance(workspace=skills_ws) == {}
 
     def test_record_install_persists_commit(
         self, temp_skills_dir, skills_ws, sample_skill_dir
@@ -809,90 +808,6 @@ tags: "core, research, writing"
         """Skills without frontmatter return empty tags."""
         result = _parse_skill_md(sample_skill_no_frontmatter / "SKILL.md")
         assert result.tags == []
-
-
-# =============================================================================
-# Tests for list_skills_by_tag
-# =============================================================================
-
-
-class TestListSkillsByTag:
-    """Tests for list_skills_by_tag function."""
-
-    def _make_tagged_skill(self, parent: Path, name: str, tags: list[str]) -> Path:
-        d = parent / name
-        d.mkdir()
-        tags_yaml = ", ".join(tags)
-        (d / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: Skill {name}\n"
-            f"metadata:\n  tags: [{tags_yaml}]\n---\n"
-        )
-        return d
-
-    def test_filter_by_tag(self, tmp_path, temp_skills_dir, skills_ws):
-        self._make_tagged_skill(temp_skills_dir, "skill-a", ["core", "writing"])
-        self._make_tagged_skill(temp_skills_dir, "skill-b", ["core", "research"])
-        self._make_tagged_skill(temp_skills_dir, "skill-c", ["research"])
-
-        core = list_skills_by_tag("core", workspace=skills_ws)
-        assert len(core) == 2
-        assert {s.name for s in core} == {"skill-a", "skill-b"}
-
-        research = list_skills_by_tag("research", workspace=skills_ws)
-        assert len(research) == 2
-        assert {s.name for s in research} == {"skill-b", "skill-c"}
-
-        writing = list_skills_by_tag("writing", workspace=skills_ws)
-        assert len(writing) == 1
-        assert writing[0].name == "skill-a"
-
-    def test_filter_case_insensitive(self, tmp_path, temp_skills_dir, skills_ws):
-        self._make_tagged_skill(temp_skills_dir, "skill-x", ["Core", "Writing"])
-
-        result = list_skills_by_tag("core", workspace=skills_ws)
-        assert len(result) == 1
-        assert result[0].name == "skill-x"
-
-    def test_filter_nonexistent_tag(self, tmp_path, temp_skills_dir, skills_ws):
-        self._make_tagged_skill(temp_skills_dir, "skill-y", ["core"])
-
-        result = list_skills_by_tag("nonexistent", workspace=skills_ws)
-        assert result == []
-
-
-# =============================================================================
-# Tests for get_all_tags
-# =============================================================================
-
-
-class TestGetAllTags:
-    """Tests for get_all_tags function."""
-
-    def _make_tagged_skill(self, parent: Path, name: str, tags: list[str]) -> Path:
-        d = parent / name
-        d.mkdir()
-        tags_yaml = ", ".join(tags)
-        (d / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: Skill {name}\n"
-            f"metadata:\n  tags: [{tags_yaml}]\n---\n"
-        )
-        return d
-
-    def test_returns_tags_with_counts(self, tmp_path, temp_skills_dir, skills_ws):
-        self._make_tagged_skill(temp_skills_dir, "skill-a", ["core", "writing"])
-        self._make_tagged_skill(temp_skills_dir, "skill-b", ["core", "research"])
-        self._make_tagged_skill(temp_skills_dir, "skill-c", ["research"])
-
-        tags = get_all_tags(workspace=skills_ws)
-
-        tag_dict = dict(tags)
-        assert tag_dict["core"] == 2
-        assert tag_dict["research"] == 2
-        assert tag_dict["writing"] == 1
-
-    def test_empty_when_no_skills(self, temp_skills_dir, skills_ws):
-        tags = get_all_tags(workspace=skills_ws)
-        assert tags == []
 
 
 # =============================================================================

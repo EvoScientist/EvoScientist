@@ -55,7 +55,12 @@ def _run(
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
     monkeypatch.setattr(config_mod, "resolve_gateway_backend", lambda *_a: "local")
     monkeypatch.setattr(commands, "_get_cli_async_runtime", lambda _ctx: None)
-    monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
+    order: list[str] = []
+    captured["order"] = order
+    monkeypatch.setattr(commands, "ensure_dirs", lambda: order.append("ensure_dirs"))
+    monkeypatch.setattr(
+        commands, "reload_env_dirs", lambda: order.append("reload_env_dirs")
+    )
     monkeypatch.setattr(commands, "_ensure_async_subagent_server", _fake_ensure_server)
     monkeypatch.setattr(interactive_mod, "cmd_interactive", _fake_cmd_interactive)
 
@@ -88,6 +93,18 @@ def test_cwd_is_the_default_workspace(monkeypatch, tmp_path):
     assert Path(got["workspace_dir"]) == tmp_path
     assert got["workspace_fixed"] is True
     assert got["server_workspace_dir"] == got["workspace_dir"]
+    assert got["order"] == ["reload_env_dirs", "ensure_dirs"]
+
+
+def test_symlinked_start_folder_gives_one_spelling(monkeypatch, tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    daemon = _run(monkeypatch, _config(default_workdir=str(link)))
+    run = _run(monkeypatch, _config(default_workdir=str(link), default_mode="run"))
+    assert daemon["workspace_dir"] == str(daemon["workspace"].root)
+    assert Path(run["workspace_dir"]).parent == Path(daemon["workspace_dir"]) / "runs"
 
 
 def test_use_cwd_ignores_default_workdir(monkeypatch, tmp_path):

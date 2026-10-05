@@ -17,8 +17,10 @@ from EvoScientist.config.onboard.validators import (
 )
 from EvoScientist.config.onboard.wizard import (
     STEPS,
+    _skills_workspace,
     render_progress,
 )
+from EvoScientist.paths import Workspace
 
 
 @contextmanager
@@ -1038,6 +1040,25 @@ class TestSetupImessage:
             result = _setup_imessage()
 
         assert result is False
+
+
+class TestSkillsWorkspace:
+    """Onboarding checks skills where the CLI starts: env override, config, cwd."""
+
+    def test_uses_default_workdir(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("EVOSCIENTIST_WORKSPACE_DIR", raising=False)
+        config = EvoScientistConfig(default_workdir=str(tmp_path / "cfg"))
+        assert _skills_workspace(config) == Workspace(tmp_path / "cfg")
+
+    def test_prefers_env_override(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "env"))
+        config = EvoScientistConfig(default_workdir=str(tmp_path / "cfg"))
+        assert _skills_workspace(config) == Workspace(tmp_path / "env")
+
+    def test_falls_back_to_cwd(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("EVOSCIENTIST_WORKSPACE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert _skills_workspace(EvoScientistConfig()) == Workspace(tmp_path)
 
 
 class TestStepSkills:

@@ -139,7 +139,6 @@ def _memories_dir_from_env() -> Path:
 
 
 MEMORIES_DIR: Path = _memories_dir_from_env()
-MEMORY_DIR = MEMORIES_DIR  # backward compat alias
 
 
 def reload_env_dirs() -> None:
@@ -149,9 +148,8 @@ def reload_env_dirs() -> None:
     project ``.env`` into ``os.environ``, so entry points call this once
     after loading their config to pick up an override set there.
     """
-    global MEMORIES_DIR, MEMORY_DIR
+    global MEMORIES_DIR
     MEMORIES_DIR = _memories_dir_from_env()
-    MEMORY_DIR = MEMORIES_DIR
 
 
 # DEPRECATED(0.1.0): remove this migration helper and its call site below.

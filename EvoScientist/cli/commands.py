@@ -1648,8 +1648,8 @@ def serve(
     effective_channel_thinking = config.channel_send_thinking and (not no_thinking)
     ws_path = start_workspace_path(workdir, config.default_workdir)
     os.makedirs(ws_path, exist_ok=True)
-    ws = str(ws_path)
     workspace = Workspace(ws_path)
+    ws = str(workspace.root)
     reload_env_dirs()
     ensure_dirs()
 
@@ -2508,7 +2508,7 @@ def _main_callback(
         workspace_dir = _create_session_workspace(workspace, name)
         workspace_fixed = False
     else:
-        workspace_dir = str(workspace_root)
+        workspace_dir = str(workspace.root)
         workspace_fixed = True
 
     # The project .env was merged into os.environ by get_effective_config().

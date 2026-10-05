@@ -6,6 +6,7 @@ import os
 from types import SimpleNamespace
 
 import EvoScientist.channels.standalone as standalone
+from EvoScientist.paths import Workspace
 
 
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
@@ -74,6 +75,28 @@ def test_run_standalone_dev_server_falls_back_to_cwd(monkeypatch):
 
     assert len(ensure_calls) == 1
     assert ensure_calls[0]["workspace_dir"] == os.getcwd()
+
+
+def test_run_standalone_uses_default_workdir(monkeypatch, tmp_path):
+    import EvoScientist.config as config_mod
+
+    config, ensure_calls = _patch_manager(
+        monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
+    )
+    monkeypatch.setattr(config_mod, "get_effective_config", lambda: config)
+    seen: dict[str, object] = {}
+
+    def _fake_async_main(*args, workspace, **kwargs):
+        seen["workspace"] = workspace
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(standalone, "_async_main", _fake_async_main)
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert ensure_calls[0]["workspace_dir"] == str(Workspace(tmp_path).root)
+    assert seen["workspace"] == Workspace(tmp_path)
 
 
 def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):

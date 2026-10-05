@@ -1186,10 +1186,6 @@ def __getattr__(name: str):
     # Backward compat for module-level names
     if name == "chat_model":
         return _ensure_chat_model()
-    if name == "SYSTEM_PROMPT":
-        return _configured_system_prompt(_ensure_config(), process_workspace().root)
-    if name == "backend":
-        return _get_default_backend(process_workspace())
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

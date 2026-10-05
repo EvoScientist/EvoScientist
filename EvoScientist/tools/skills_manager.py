@@ -348,16 +348,6 @@ def _record_uninstall(dest_dir: str | Path, name: str) -> None:
         _save_manifest(dest_dir, manifest)
 
 
-def installed_sources(*, workspace: Workspace) -> set[str]:
-    """Return install sources recorded for currently-installed skills.
-
-    Reads the manifest in both the workspace and the global skills tier and
-    only returns entries whose target directories still exist on disk — so a
-    manually-removed skill stops appearing as installed.
-    """
-    return set(installed_provenance(workspace=workspace))
-
-
 def installed_provenance(*, workspace: Workspace) -> dict[str, dict[str, str | None]]:
     """Per-source provenance for currently-installed skills.
 
@@ -1238,49 +1228,6 @@ def get_skill_info(name: str, *, workspace: Workspace) -> SkillInfo | None:
         if skill.name == name:
             return skill
     return None
-
-
-def list_skills_by_tag(
-    tag: str,
-    include_system: bool = False,
-    *,
-    workspace: Workspace,
-) -> list[SkillInfo]:
-    """Filter installed skills by tag (case-insensitive).
-
-    Args:
-        tag: Tag to filter by.
-        include_system: If True, also include system skills.
-
-    Returns:
-        List of matching SkillInfo objects.
-    """
-    tag_lower = tag.lower()
-    return [
-        s
-        for s in list_skills(include_system=include_system, workspace=workspace)
-        if tag_lower in [t.lower() for t in s.tags]
-    ]
-
-
-def get_all_tags(
-    include_system: bool = False, *, workspace: Workspace
-) -> list[tuple[str, int]]:
-    """Return all tags and their counts, sorted by frequency then alphabetically.
-
-    Args:
-        include_system: If True, also include system skills.
-
-    Returns:
-        List of (tag, count) tuples sorted by count descending, then name ascending.
-    """
-    from collections import Counter
-
-    counter: Counter[str] = Counter()
-    for skill in list_skills(include_system=include_system, workspace=workspace):
-        for tag in skill.tags:
-            counter[tag.lower()] += 1
-    return sorted(counter.items(), key=lambda x: (-x[1], x[0]))
 
 
 # ── Remote skill index ──────────────────────────────────────────────

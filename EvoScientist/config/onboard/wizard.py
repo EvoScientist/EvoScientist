@@ -158,6 +158,15 @@ def _autosave(config: EvoScientistConfig) -> None:
         pass
 
 
+def _skills_workspace(config: EvoScientistConfig) -> Workspace:
+    """The workspace whose skills onboarding checks: the folder the CLI starts in."""
+    return Workspace(
+        start_workspace_path(
+            os.environ.get("EVOSCIENTIST_WORKSPACE_DIR"), config.default_workdir
+        )
+    )
+
+
 def _configure_provider_base_url(
     config: EvoScientistConfig,
     provider: str,
@@ -903,11 +912,7 @@ def run_onboard(
                 _autosave(config)
 
             if "skills" in sections_to_run:
-                _step_skills(
-                    Workspace(
-                        start_workspace_path(default_workdir=config.default_workdir)
-                    )
-                )
+                _step_skills(_skills_workspace(config))
 
             if "mcp" in sections_to_run:
                 _step_mcp_servers()
