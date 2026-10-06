@@ -707,6 +707,21 @@ def test_import_check_without_a_version_line_reinstalls_everything(env, monkeypa
     assert re_env._import_check(env["env"]) == re_env.ImportCheck(None, re_env.PACKAGES)
 
 
+def test_import_check_that_crashes_midway_reinstalls_everything(env, monkeypatch):
+    """A crash ends the loop early, so its failed lines are only a part."""
+    re_env.ensure_research_env("default")
+
+    def run(cmd, timeout):
+        if FakeRunner._kind(list(cmd)) == "imports":
+            return subprocess.CompletedProcess(
+                cmd, -11, "version 3.12.9\nfailed numpy: ImportError()\n"
+            )
+        return env["run"](cmd, timeout)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    assert re_env._import_check(env["env"]) == re_env.ImportCheck(None, re_env.PACKAGES)
+
+
 def test_import_check_names_the_failed_packages(env, monkeypatch):
     re_env.ensure_research_env("default")
     env["run"].imports_ok = False

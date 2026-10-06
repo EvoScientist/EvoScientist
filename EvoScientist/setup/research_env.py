@@ -387,9 +387,15 @@ def _import_check(env: Path) -> ImportCheck:
     failed = tuple(
         name for name in _FAILED_LINE_RE.findall(result.stdout) if name in PINS
     )
-    if version is None or (result.returncode != 0 and not failed):
-        # Python itself failed (e.g. before the first import); treat every
-        # package as failed so a repair reinstalls them all, never none.
+    if (
+        version is None
+        or result.returncode not in (0, 1)
+        or (result.returncode == 1 and not failed)
+    ):
+        # Python itself failed (e.g. before the first import), or crashed
+        # midway so the failed lines are only a part (the check exits only
+        # 0 or 1); treat every package as failed so a repair reinstalls them
+        # all, never none or too few.
         version, failed = None, PACKAGES
     check = ImportCheck(version, failed)
     if not check.ok:
