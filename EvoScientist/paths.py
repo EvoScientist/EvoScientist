@@ -17,8 +17,12 @@ def normalize_path(path: str | Path) -> Path:
 
     Expands ``~`` and resolves symlinks, so ``/tmp/x`` and ``/private/tmp/x``
     on macOS, or two spellings of a symlinked project folder, compare equal.
-    The path does not need to exist.
+    The path does not need to exist. Raises ``ValueError`` for a path with a
+    NUL byte, which no platform accepts (Windows on Python 3.13 would
+    otherwise resolve it without complaint).
     """
+    if "\x00" in str(path):
+        raise ValueError(f"Path contains a NUL byte: {path!r}")
     return Path(path).expanduser().resolve()
 
 

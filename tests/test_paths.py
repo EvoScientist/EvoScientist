@@ -110,6 +110,10 @@ class TestNormalizePath:
         b = normalize_path(tmp_path / "y")
         assert a == b
 
+    def test_nul_byte_is_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="NUL byte"):
+            normalize_path(f"{tmp_path}/evil\x00x")
+
 
 class TestStartWorkspacePath:
     """Which folder a process starts in: workdir, then default_workdir, then cwd."""
