@@ -48,7 +48,7 @@ def test_belongs_to_matches_tagged_workspace(workspace, other, tmp_path):
     assert crons.belongs_to(_cron("a", f"{link}/"), workspace)
     assert not crons.belongs_to(_cron("a", other.key), workspace)
     # A tag that is no path here names no workspace here.
-    assert not crons.belongs_to(_cron("a", "~nobody-by-this-name/x"), workspace)
+    assert not crons.belongs_to(_cron("a", "/tmp/evil\x00x"), workspace)
     # Created before tasks were tagged: the server serves one workspace.
     assert crons.belongs_to(_cron("a"), workspace)
     # The project was moved or renamed: its store, and the cron in it, came along.
