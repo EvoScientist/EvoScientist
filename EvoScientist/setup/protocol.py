@@ -45,6 +45,12 @@ ERROR_CODES = frozenset(
     }
 )
 
+# Added to an error a stage cannot tell from an unreachable source while
+# ``mirror: cn`` is off. There is no automatic switch between sources.
+CN_MIRROR_HINT = (
+    "From mainland China, run `EvoSci setup --cn` to download from mirrors there."
+)
+
 
 class StageError(Exception):
     """A stage failure carrying one of :data:`ERROR_CODES`."""
