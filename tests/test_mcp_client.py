@@ -2315,6 +2315,109 @@ class TestLoadToolsProgressCallback:
         ), warnings
 
 
+class TestNetworkDiscoveryDeadline:
+    @pytest.mark.parametrize(
+        "transport", ["http", "streamable_http", "sse", "websocket"]
+    )
+    async def test_cli_skips_hung_network_server_and_loads_healthy_tools(
+        self, monkeypatch, transport
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        cancelled = asyncio.Event()
+        tool = SimpleNamespace(name="healthy_tool")
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                if server_name == "hung":
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+                return [tool]
+
+        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.setattr(
+            mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02, raising=False
+        )
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+        events = []
+        config = {
+            "hung": {"transport": transport, "url": "http://localhost:1/mcp"},
+            "healthy": {"transport": "http", "url": "http://localhost:2/mcp"},
+        }
+
+        result = await asyncio.wait_for(
+            mcp_client.aload_mcp_tools(
+                config, on_progress=lambda *event: events.append(event)
+            ),
+            timeout=1,
+        )
+
+        assert result == {"main": [tool]}
+        assert cancelled.is_set()
+        assert ("error", "hung", "timed out after 0.02s") in events
+        assert ("success", "healthy", "1") in events
+
+    async def test_cli_stdio_startup_is_not_cut_off_by_network_budget(
+        self, monkeypatch
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                await asyncio.sleep(0.03)
+                return ["stdio_tool"]
+
+        monkeypatch.setattr(
+            mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001, raising=False
+        )
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+
+        result = await mcp_client._load_tools(
+            {"stdio": {"transport": "stdio", "command": "demo"}}
+        )
+
+        assert result == {"stdio": ["stdio_tool"]}
+
+    async def test_explicit_deadline_takes_precedence_over_network_budget(
+        self, monkeypatch
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                await asyncio.sleep(0.03)
+                return ["network_tool"]
+
+        monkeypatch.setattr(
+            mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001, raising=False
+        )
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+
+        result = await mcp_client._load_tools(
+            {"remote": {"transport": "http", "url": "http://localhost:1/mcp"}},
+            timeout=1,
+        )
+
+        assert result == {"remote": ["network_tool"]}
+
+
 # ---- _ensure_node_for_stdio ----
 
 
