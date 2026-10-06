@@ -477,7 +477,7 @@ def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
         sessions_db,
         [
             ("t1", "good", {"workspace_dir": str(run)}),
-            ("t2", "nul", {"workspace_dir": unresolvable}),
+            ("t2", "unreadable", {"workspace_dir": unresolvable}),
         ],
     )
     con = sqlite3.connect(sessions_db)
@@ -486,7 +486,7 @@ def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
         "CAST('{not json' AS BLOB))"
     )
     con.commit()
-    _write_proposal(tmp_path / "memories", "nul", unresolvable)
+    _write_proposal(tmp_path / "memories", "unreadable", unresolvable)
 
     asyncio.run(_upgrade_stored_dirs())
 
@@ -497,7 +497,7 @@ def test_upgrade_skips_unreadable_rows(workspace, sessions_db, tmp_path):
     )
     con.close()
     assert json.loads(rows["good"]) == SessionDirs(workspace, run).metadata()
-    assert json.loads(rows["nul"]) == {"workspace_dir": unresolvable}
+    assert json.loads(rows["unreadable"]) == {"workspace_dir": unresolvable}
     assert rows["broken"] == "{not json"
     assert _upgrade_recorded(sessions_db)
 
@@ -750,6 +750,9 @@ def _tool_path(path: Path) -> str:
     return validate_path(str(path))
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the file tools reject drive-letter paths"
+)
 @pytest.mark.usefixtures("_plain_config")
 def test_run_mode_file_tools_list_channel_media(run_dirs, media_file):
     """An agent finds attachments by listing or searching ``<root>/media``."""
@@ -766,6 +769,9 @@ def test_run_mode_file_tools_list_channel_media(run_dirs, media_file):
     assert backend.read(listed[0]).error is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the file tools reject drive-letter paths"
+)
 @pytest.mark.usefixtures("_plain_config")
 @pytest.mark.parametrize("folder", ["media", "uploads"])
 def test_run_mode_lists_media_through_symlinked_folder(run_dirs, folder):
@@ -786,6 +792,9 @@ def test_run_mode_lists_media_through_symlinked_folder(run_dirs, folder):
     assert [m["path"] for m in backend.glob("*.pdf", listed).matches] == [referenced]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the file tools reject drive-letter paths"
+)
 @pytest.mark.usefixtures("_plain_config")
 def test_run_mode_media_listing_stays_inside_media_folder(run_dirs, media_file):
     from EvoScientist.EvoScientist import _get_default_backend
