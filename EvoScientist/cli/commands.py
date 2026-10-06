@@ -267,8 +267,9 @@ def setup(
         False, "--cn", help="Download from mainland China mirrors and remember it"
     ),
 ):
-    """Install what EvoScientist needs beyond the Python package (Node.js, and a
-    Python for the agent's shell when none is on PATH).
+    """Install what EvoScientist needs beyond the Python package (Node.js, Git
+    for Windows on Windows, and a Python for the agent's shell when none is on
+    PATH).
 
     Runs every stage that applies to this platform, in order. With ``--json``
     stdout carries only the JSON event lines; everything else goes to stderr.

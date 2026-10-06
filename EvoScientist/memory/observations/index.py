@@ -62,7 +62,7 @@ def _observation_documents(
     exclude_ids: Iterable[str] = (),
 ) -> list[ObservationSearchDocument]:
     excluded = set(exclude_ids)
-    return sorted(
+    documents = sorted(
         (
             document
             for document in list_observation_documents(
@@ -72,6 +72,10 @@ def _observation_documents(
             if document.observation_id not in excluded
         ),
         key=lambda document: document.observation_id,
+    )
+    # Newest first, so a truncated index drops the oldest entries; undated ones go last.
+    return sorted(
+        documents, key=lambda document: document.created_at or "", reverse=True
     )
 
 

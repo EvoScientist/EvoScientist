@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from . import node, research_env
+from . import git, node, research_env
 from .protocol import PROTOCOL, Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ class Stage:
 
 STAGES: tuple[Stage, ...] = (
     Stage("node", "Node.js", None, node.run_stage),
+    Stage("git", "Git for Windows", frozenset({"win32"}), git.run_stage),
     Stage("research-env", "Python research environment", None, research_env.run_stage),
 )
 

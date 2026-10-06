@@ -24,13 +24,19 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._install import (
+    is_under,
+    move_into_place,
+    prepend_to_path,
+    remove_stale_temp_dirs,
+    tools_dir,
+)
 from .download import download, fetch_text, verify_sha256_from_sums
 from .protocol import (
     Emitter,
@@ -105,18 +111,6 @@ class NodeInfo:
 # --------------------------------------------------------------------------- #
 # Locations
 # --------------------------------------------------------------------------- #
-def tools_dir() -> Path:
-    """``<DATA_DIR>/tools`` as an absolute path, read at call time so an
-    overridden DATA_DIR applies.
-
-    Absolute because the recorded path is put on ``PATH`` for children that run
-    in other working dirs; ``EVOSCIENTIST_DATA_DIR`` may be relative.
-    """
-    from .. import paths
-
-    return (paths.DATA_DIR / "tools").resolve()
-
-
 def _record_path() -> Path:
     return tools_dir() / "node.json"
 
@@ -192,14 +186,6 @@ def _probe(exe: Path) -> tuple[int, int, int] | None:
     return _parse_version(result.stdout)
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-    except (OSError, ValueError):
-        return False
-    return True
-
-
 def _system_node() -> NodeInfo | None:
     """A ``node`` on PATH, outside our tools dir, at MIN_SYSTEM_NODE or newer,
     with ``npx`` next to it.
@@ -211,7 +197,7 @@ def _system_node() -> NodeInfo | None:
     search = os.pathsep.join(
         p
         for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and not _is_under(Path(p), root)
+        if p and not is_under(Path(p), root)
     )
     found = shutil.which("node", path=search)
     if found is None or shutil.which("npx", path=str(Path(found).parent)) is None:
@@ -279,42 +265,15 @@ def _extract(archive: Path, dest: Path) -> None:
         root = dest.resolve()
         for member in tf.getmembers():
             target = (dest / member.name).resolve()
-            if not _is_under(target, root):
+            if not is_under(target, root):
                 raise tarfile.TarError(f"member {member.name!r} escapes {dest}")
             if member.issym() or member.islnk():
                 link_base = target.parent if member.issym() else root
-                if os.path.isabs(member.linkname) or not _is_under(
+                if os.path.isabs(member.linkname) or not is_under(
                     (link_base / member.linkname).resolve(), root
                 ):
                     raise tarfile.TarError(f"link {member.name!r} escapes {dest}")
         tf.extractall(dest)
-
-
-# Pauses between attempts to move the unpacked Node into place (about 4 s).
-_MOVE_RETRY_DELAYS = (0.1, 0.2, 0.5, 1.0, 2.0)
-
-
-def _move_into_place(src: Path, dst: Path) -> None:
-    """``os.replace`` that retries briefly on ``PermissionError``.
-
-    On Windows a scanner that opens the freshly written ``node.exe`` makes the
-    rename of its folder fail with "Access is denied" (WinError 5) for a
-    moment. Other errors, and a denial that outlasts the retries, raise.
-    """
-    for denied, delay in enumerate((*_MOVE_RETRY_DELAYS, None)):
-        try:
-            os.replace(src, dst)
-        except PermissionError:
-            if delay is None:
-                raise
-            time.sleep(delay)
-            continue
-        if denied:
-            logger.warning(
-                f"Moving Node into {dst} was denied {denied} time(s) before it "
-                "succeeded (likely a file scanner holding node.exe)."
-            )
-        return
 
 
 def _install(mirror: str, report: ProgressFn) -> NodeInfo:
@@ -359,7 +318,7 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
             if final.exists():
                 # Left behind by an earlier attempt whose probe failed.
                 shutil.rmtree(final)
-            _move_into_place(extracted, final)
+            move_into_place(extracted, final, what="Node")
         except OSError as exc:
             raise StageError(
                 "install_failed", f"Could not move Node into {final}: {exc}"
@@ -393,16 +352,6 @@ def _adopt_installed(root: Path) -> NodeInfo | None:
         return None
     _write_record(NODE_VERSION, install_dir)
     return NodeInfo("private", ".".join(map(str, version)), exe)
-
-
-def _remove_stale_temp_dirs(root: Path) -> None:
-    """Delete ``.node-*`` temp dirs left by an install that was killed.
-
-    Called with the install lock held, so no live install owns one.
-    """
-    for stale in root.glob(".node-*"):
-        if stale.is_dir():
-            shutil.rmtree(stale, ignore_errors=True)
 
 
 def configured_mirror() -> str:
@@ -461,7 +410,7 @@ def ensure_node(
             recorded = _recorded_node() or _adopt_installed(root)
             if recorded is not None:
                 return recorded
-            _remove_stale_temp_dirs(root)
+            remove_stale_temp_dirs(root, ".node-")
             return _install(mirror or configured_mirror(), report)
     except StageError as exc:
         _failed_install = exc
@@ -493,19 +442,13 @@ def activate_runtime() -> Path | None:
     bin_dir = _bin_dir(install_dir)
     if not _node_exe(install_dir).exists():
         return None
-    key = os.path.normcase(str(bin_dir))
-    parts = [
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and os.path.normcase(p) != key
-    ]
-    os.environ["PATH"] = os.pathsep.join([str(bin_dir), *parts])
+    prepend_to_path(bin_dir)
     return bin_dir
 
 
 def is_private(exe: str | Path | None) -> bool:
     """True when ``exe`` lives under our tools dir."""
-    return exe is not None and _is_under(Path(exe), tools_dir())
+    return exe is not None and is_under(Path(exe), tools_dir())
 
 
 def node_child_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:

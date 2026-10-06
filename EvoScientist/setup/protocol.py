@@ -22,8 +22,12 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, TextIO
+from typing import Any, Literal, Protocol, TextIO, TypeVar
+
+T = TypeVar("T")
 
 PROTOCOL = 1
 
@@ -104,6 +108,48 @@ class JsonEmitter:
         stream = self._stream or sys.stdout
         stream.write(json.dumps(event) + "\n")
         stream.flush()
+
+
+# How often a silent step repeats its last ``running`` event, so a reader
+# (the desktop app) can tell a slow step from a stuck one.
+HEARTBEAT_INTERVAL = 5.0
+
+
+class StepStalled(Exception):
+    """A silent step showed no activity for its whole silence limit."""
+
+
+def wait_with_heartbeat(
+    poll: Callable[[float], T | None],
+    beat: Callable[[], None],
+    activity: Callable[[], object],
+    *,
+    silence_limit: float,
+    interval: float = HEARTBEAT_INTERVAL,
+    clock: Callable[[], float] = time.monotonic,
+) -> T:
+    """Wait for a step that reports nothing, with heartbeats and a silence limit.
+
+    ``poll(timeout)`` waits up to ``timeout`` seconds and returns the step's
+    result, or None while it still runs. After each empty poll ``beat()`` runs
+    (re-emit the last ``running`` event) and ``activity()`` is sampled: a value
+    that changes counts as progress (for example a growing directory).
+    Heartbeats themselves never count. Raises :class:`StepStalled` when the
+    activity value has not changed for ``silence_limit`` seconds; the caller
+    stops the step and maps it to a stage error.
+    """
+    last = activity()
+    changed_at = clock()
+    while True:
+        result = poll(interval)
+        if result is not None:
+            return result
+        beat()
+        current = activity()
+        if current != last:
+            last, changed_at = current, clock()
+        elif clock() - changed_at >= silence_limit:
+            raise StepStalled(f"no progress for {silence_limit:g} s")
 
 
 class ProgressThrottle:
