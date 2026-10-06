@@ -304,7 +304,11 @@ def test_server_graphs_work_in_the_run_folder_and_crons_in_the_root(
     process_session_dirs.cache_clear()
     monkeypatch.delitem(sys.modules, "EvoScientist.langgraph_dev.graphs", raising=False)
 
-    importlib.import_module("EvoScientist.langgraph_dev.graphs")
+    try:
+        importlib.import_module("EvoScientist.langgraph_dev.graphs")
+    finally:
+        # Built for this test's folders: later imports must build their own.
+        sys.modules.pop("EvoScientist.langgraph_dev.graphs", None)
 
     assert built["writing-agent"]["work_dir"] == run_dirs.run_dir
     assert built["expert"]["work_dir"] == run_dirs.run_dir

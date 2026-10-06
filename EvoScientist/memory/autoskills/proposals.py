@@ -123,7 +123,13 @@ def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
     if workspace_dir is None:
         return None
     text = str(workspace_dir).strip()
-    return paths.Workspace(text).key if text else None
+    if not text:
+        return None
+    try:
+        return paths.Workspace(text).key
+    except (ValueError, OSError, RuntimeError):
+        # Matches no workspace filter instead of breaking the listing.
+        return text
 
 
 def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:

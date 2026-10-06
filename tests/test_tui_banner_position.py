@@ -38,10 +38,12 @@ pytest.importorskip("textual")
 
 async def _capture_app(monkeypatch, workspace) -> object:
     """Build an ``EvoTextualInteractiveApp`` without entering its main loop."""
+    from pathlib import Path
+
     from textual.app import App
 
     from EvoScientist.cli import tui_interactive as tui_mod
-    from EvoScientist.paths import SessionDirs
+    from EvoScientist.paths import SessionDirs, Workspace
 
     captured: dict = {}
 
@@ -90,7 +92,10 @@ async def _capture_app(monkeypatch, workspace) -> object:
             tui_mod.run_textual_interactive,
             show_thinking=False,
             channel_send_thinking=False,
-            dirs=SessionDirs(workspace),
+            # The banner shows this folder: keep it short, so it fits one line on
+            # the 80-column screen whatever the temp folder is called (it wraps on
+            # Windows and pushes the banner out of view).
+            dirs=SessionDirs(Workspace(Path.cwd())),
             mode="dev",
             model=None,
             provider=None,
