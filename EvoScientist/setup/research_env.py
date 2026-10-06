@@ -83,16 +83,20 @@ _IMPORT_TIMEOUT = 300
 # on its own, so a repair can reinstall only what is broken.
 _IMPORT_CHECK = (
     "import importlib, platform, sys\n"
-    "print(platform.python_version())\n"
+    "print(f'version {platform.python_version()}', flush=True)\n"
     "failed = False\n"
     f"for name in {PACKAGES!r}:\n"
     "    try:\n"
     "        importlib.import_module(name)\n"
     "    except Exception as exc:\n"
     "        failed = True\n"
-    "        print(f'failed {name}: {exc!r}')\n"
+    "        print(f'failed {name}: {exc!r}', flush=True)\n"
     "sys.exit(1 if failed else 0)\n"
 )
+# Its lines are tagged and flushed one by one: stderr shares the pipe, and a
+# working environment can warn at startup or on import (a broken .pth line, a
+# pandas warning about an optional dependency the agent installed).
+_VERSION_LINE_RE = re.compile(r"^version (\S+)$", re.MULTILINE)
 _FAILED_LINE_RE = re.compile(r"^failed (\w+):", re.MULTILINE)
 # pip's last words when no candidate matches a requirement, pinned or not;
 # "from versions" lists the compatible versions the index offers ("none" when
@@ -378,14 +382,14 @@ def _import_check(env: Path) -> ImportCheck:
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning(f"Import check in {env} failed: {exc}")
         return ImportCheck(None, PACKAGES)
-    lines = result.stdout.splitlines()
-    version = lines[0].strip() if lines and lines[0].strip() else None
+    version_line = _VERSION_LINE_RE.search(result.stdout)
+    version = version_line[1] if version_line else None
     failed = tuple(
         name for name in _FAILED_LINE_RE.findall(result.stdout) if name in PINS
     )
-    if result.returncode != 0 and not failed:
+    if version is None or (result.returncode != 0 and not failed):
         # Python itself failed (e.g. before the first import); treat every
-        # package as failed so a repair reinstalls them all.
+        # package as failed so a repair reinstalls them all, never none.
         version, failed = None, PACKAGES
     check = ImportCheck(version, failed)
     if not check.ok:

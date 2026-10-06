@@ -46,6 +46,8 @@ class FakeRunner:
         self.imports_script: list[bool] = []
         # Packages a failing import check reports (all of them when empty).
         self.failed_packages: list[str] = []
+        # stderr the environment's Python writes before the check's own lines.
+        self.import_noise = ""
         # Packages whose pinned version has no wheel for this interpreter.
         self.no_wheel: set[str] = set()
         # The index is not reached: pip warns about the connection, then
@@ -108,7 +110,7 @@ class FakeRunner:
             if not self.env_starts:
                 return subprocess.CompletedProcess(cmd, 1, "")
             failed = [] if ok else (self.failed_packages or list(re_env.PACKAGES))
-            output = "3.12.9\n" + "".join(
+            output = f"{self.import_noise}version 3.12.9\n" + "".join(
                 f"failed {name}: ModuleNotFoundError({name!r})\n" for name in failed
             )
             return subprocess.CompletedProcess(cmd, 0 if ok else 1, output)
@@ -621,21 +623,48 @@ def test_no_wheel_at_all_after_the_unpinned_fallback_is_named(env):
     ]
 
 
-def test_import_check_script_reports_each_failed_package():
-    """The real script, with ``json`` and a missing module standing in for the
-    four packages."""
-    script = re_env._IMPORT_CHECK.replace(
-        repr(re_env.PACKAGES), "('json', 'no_such_module_x')"
+def test_import_check_reads_its_own_lines_past_startup_warnings(tmp_path, monkeypatch):
+    """A real subprocess in a throwaway venv whose broken .pth writes to
+    stderr, which shares the pipe, before the check's lines. ``json`` and
+    ``numpy`` (absent there) stand in for the four packages."""
+    venv = tmp_path / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True
     )
-    result = subprocess.run(
-        [sys.executable, "-I", "-c", script], capture_output=True, text=True
+    (site_packages,) = venv.glob("**/site-packages")
+    (site_packages / "broken.pth").write_text("import no_such_module_for_pth\n")
+    monkeypatch.setattr(
+        re_env,
+        "_IMPORT_CHECK",
+        re_env._IMPORT_CHECK.replace(repr(re_env.PACKAGES), "('json', 'numpy')"),
     )
-    lines = result.stdout.splitlines()
-    assert result.returncode == 1
-    assert lines[0] == ".".join(map(str, sys.version_info[:3]))
-    assert lines[1:] == [
-        "failed no_such_module_x: ModuleNotFoundError(\"No module named 'no_such_module_x'\")"
-    ]
+    check = re_env._import_check(venv)
+    assert check == re_env.ImportCheck(
+        ".".join(map(str, sys.version_info[:3])), ("numpy",)
+    )
+
+
+def test_import_check_ignores_warnings_before_its_version_line(env):
+    re_env.ensure_research_env("default")
+    env[
+        "run"
+    ].import_noise = (
+        "UserWarning: Pandas requires version '2.10.2' or newer of 'numexpr'\n"
+    )
+    assert re_env._import_check(env["env"]) == re_env.ImportCheck("3.12.9", ())
+
+
+def test_import_check_without_a_version_line_reinstalls_everything(env, monkeypatch):
+    """Exit 0 but no version line: never an empty repair ``pip install``."""
+    re_env.ensure_research_env("default")
+
+    def run(cmd, timeout):
+        if FakeRunner._kind(list(cmd)) == "imports":
+            return subprocess.CompletedProcess(cmd, 0, "\n")
+        return env["run"](cmd, timeout)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    assert re_env._import_check(env["env"]) == re_env.ImportCheck(None, re_env.PACKAGES)
 
 
 def test_import_check_names_the_failed_packages(env, monkeypatch):
@@ -740,7 +769,7 @@ def test_import_check_ignores_the_callers_cwd_and_pythonpath(tmp_path, monkeypat
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     monkeypatch.setattr(re_env, "_env_python", lambda _env: Path(sys.executable))
-    monkeypatch.setattr(re_env, "_IMPORT_CHECK", "import json; print('3.12.9')")
+    monkeypatch.setattr(re_env, "_IMPORT_CHECK", "import json; print('version 3.12.9')")
     assert re_env._import_check(tmp_path) == re_env.ImportCheck("3.12.9", ())
 
 
