@@ -364,7 +364,12 @@ class TelegramChannel(Channel):
             # Keep only a safe suffix, never the sender-provided path or basename.
             if file_name:
                 suffix = Path(file_name.replace("\\", "/")).suffix
-                if suffix and suffix[1:].isascii() and suffix[1:].isalnum():
+                # Reserve 16 bytes for the file-ID basename within a 255-byte component.
+                if (
+                    1 < len(suffix) <= 239
+                    and suffix[1:].isascii()
+                    and suffix[1:].isalnum()
+                ):
                     return suffix
             if mime_type:
                 return mimetypes.guess_extension(mime_type) or ""
