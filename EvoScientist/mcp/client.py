@@ -408,6 +408,10 @@ _MAX_CONCURRENT_CONNECTIONS = 8
 # past 60s.
 _SERVER_GET_TOOLS_TIMEOUT_SECONDS = 40
 
+# Network discovery must also finish in the CLI/TUI. Unlike stdio servers,
+# remote servers do not need an unbounded first-launch package download.
+_NETWORK_GET_TOOLS_TIMEOUT_SECONDS = 40
+
 # Env vars forwarded to stdio MCP subprocesses on top of the MCP SDK's
 # minimal default set (HOME/PATH/USER/…). Without this, servers behind
 # a proxy or with a custom CA bundle silently fail with long timeouts.
@@ -1089,8 +1093,8 @@ def _get_tools_timeout() -> float | None:
     """The per-server ``get_tools`` limit for this process.
 
     Only ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set) has a deadline:
-    its health check gives up after 60s.  The CLI and TUI have none, so there a
-    slow server only makes startup slower and is left to finish.
+    its health check gives up after 60s. The CLI and TUI have no process-wide
+    limit; ``_load_tools`` separately bounds their network connections.
     """
     if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
@@ -1109,7 +1113,8 @@ async def _load_tools(
 
     Args:
         timeout: Seconds each server gets to return its tools before it is
-            skipped like a failed one.  ``None`` waits as long as it takes.
+            skipped like a failed one. With ``None``, network servers use the
+            default discovery budget while stdio servers wait as long as needed.
 
     Raises:
         ImportError: if ``langchain-mcp-adapters`` is not installed.
@@ -1150,7 +1155,13 @@ async def _load_tools(
     async def _fetch(name: str) -> tuple[str, list]:
         async with sem:
             _report("start", name)
-            deadline = asyncio.timeout(timeout)
+            server_timeout = timeout
+            if (
+                server_timeout is None
+                and connections[name]["transport"] in _URL_TRANSPORTS
+            ):
+                server_timeout = _NETWORK_GET_TOOLS_TIMEOUT_SECONDS
+            deadline = asyncio.timeout(server_timeout)
             try:
                 async with deadline:
                     tools = await client.get_tools(server_name=name)
@@ -1162,7 +1173,7 @@ async def _load_tools(
                 # TimeoutError raised inside ``get_tools`` (a websocket
                 # handshake, ``socket.timeout``) keeps its real error.
                 if isinstance(exc, TimeoutError) and deadline.expired():
-                    detail = f"timed out after {timeout}s"
+                    detail = f"timed out after {server_timeout}s"
                 else:
                     detail = str(exc)
                 # When the caller wired up ``on_progress`` they own the
