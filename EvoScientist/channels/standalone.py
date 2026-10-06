@@ -240,6 +240,16 @@ def run_standalone(
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
     """
+    # HTTP request URLs can embed channel credentials (e.g. Telegram's Bot
+    # API puts the bot token in the URL path), and httpx logs every request
+    # URL at INFO. A standalone channel started with DEBUG logging (each
+    # serve.py) would therefore write secrets to stdout and any redirected
+    # file. Elevate httpx above INFO here — the same effect `EvoSci serve`
+    # has. Keep this in run_standalone (shared by every channel), not in a
+    # single channel's serve.py.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     config = None
     backend = None
     if use_agent:

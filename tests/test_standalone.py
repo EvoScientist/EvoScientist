@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from types import SimpleNamespace
 
+import pytest
+
 import EvoScientist.channels.standalone as standalone
+
+@pytest.fixture(autouse=True)
+def _restore_http_log_levels():
+    """Reset process-global httpx/httpcore levels after every test."""
+    loggers = [logging.getLogger(n) for n in ("httpx", "httpcore")]
+    saved = [lg.level for lg in loggers]
+    yield
+    for lg, level in zip(loggers, saved):
+        lg.setLevel(level)
 
 
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
@@ -92,3 +104,16 @@ def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
     ensure_configs.clear()
     standalone.run_standalone(channel=None, bus=None, use_agent=False)
     assert ensure_configs == []
+
+
+def test_run_standalone_quiets_httpx(monkeypatch):
+    """HTTP client logs must not expose channel tokens in request URLs."""
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.DEBUG)
+
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=False)
+
+    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
+    assert not logging.getLogger("httpcore").isEnabledFor(logging.INFO)
