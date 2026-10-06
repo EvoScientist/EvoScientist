@@ -468,6 +468,65 @@ def node_child_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
     }
 
 
+DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org"
+_NPM_CONFIG_TIMEOUT = 10
+# `npm config get registry` per npm executable; it starts a Node process, so
+# ask once per process.
+_npm_config_registry: dict[str, str | None] = {}
+
+
+def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | None:
+    """The npm registry the user configured, or None when they set none.
+
+    ``npm_config_registry`` in ``env`` wins (the name is compared without
+    case, as npm does). Otherwise asks the ``npm`` next to ``node_exe`` with
+    ``npm config get registry``, which reads ``~/.npmrc`` and npm's global
+    config; npm prints its default when nothing is set, so the default counts
+    as unset. It runs in the tools dir so a project ``.npmrc`` in the current
+    directory does not leak in. If it cannot run, the answer comes from
+    ``env`` alone.
+    """
+    for key, value in env.items():
+        if key.lower() == "npm_config_registry" and value.strip():
+            return value.strip()
+
+    npm = shutil.which("npm", path=str(Path(node_exe).parent))
+    if npm is None:
+        return None
+    if npm not in _npm_config_registry:
+        _npm_config_registry[npm] = _ask_npm_registry(npm, env)
+    return _npm_config_registry[npm]
+
+
+def _ask_npm_registry(npm: str, env: Mapping[str, str]) -> str | None:
+    cwd = tools_dir()
+    if not cwd.is_dir():
+        cwd = Path.home()
+    child_env = {k: v for k, v in env.items() if k.upper() != "NODE_OPTIONS"}
+    try:
+        result = subprocess.run(
+            [npm, "config", "get", "registry"],
+            capture_output=True,
+            text=True,
+            timeout=_NPM_CONFIG_TIMEOUT,
+            cwd=cwd,
+            env=child_env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug(f"npm config get registry failed to run: {exc!r}")
+        return None
+    registry = result.stdout.strip()
+    if result.returncode != 0 or not registry.startswith(("http://", "https://")):
+        logger.debug(
+            f"npm config get registry gave no registry (exit "
+            f"{result.returncode}): {result.stdout!r} {result.stderr!r}"
+        )
+        return None
+    if registry.rstrip("/") == DEFAULT_NPM_REGISTRY:
+        return None
+    return registry
+
+
 # --------------------------------------------------------------------------- #
 # Stage
 # --------------------------------------------------------------------------- #
