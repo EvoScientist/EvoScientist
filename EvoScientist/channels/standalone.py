@@ -251,5 +251,25 @@ def run_standalone(
 
         config = get_effective_config()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
+
+        # Auto-start ccproxy if any provider uses OAuth mode — same bootstrap
+        # as `EvoSci serve`. Must run BEFORE the dev server spawn: the child
+        # env is built from os.environ.copy(), so ANTHROPIC_BASE_URL /
+        # ANTHROPIC_API_KEY (and the OPENAI_* pair) have to be set by then.
+        # `maybe_start_ccproxy` no-ops on its own when neither provider uses
+        # OAuth, so no outer guard is needed. Deliberately logs then re-raises
+        # to match _ensure_standalone_dev_server's error style.
+        try:
+            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+
+            ccproxy_proc = maybe_start_ccproxy(config)
+            if ccproxy_proc:
+                import atexit
+
+                atexit.register(stop_ccproxy, ccproxy_proc)
+        except RuntimeError as exc:
+            logger.error("ccproxy failed to start for standalone channel: %s", exc)
+            raise
+
         _ensure_standalone_dev_server(config, backend=backend)
     asyncio.run(_async_main(channel, bus, use_agent, send_thinking, config, backend))

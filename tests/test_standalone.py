@@ -92,3 +92,104 @@ def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
     ensure_configs.clear()
     standalone.run_standalone(channel=None, bus=None, use_agent=False)
     assert ensure_configs == []
+
+
+def test_run_standalone_starts_ccproxy_before_dev_server(monkeypatch):
+    """OAuth standalone must bootstrap ccproxy before spawning the dev server.
+
+    The dev server builds its child env from os.environ.copy(), so the
+    ANTHROPIC_*/OPENAI_* vars written by maybe_start_ccproxy have to exist
+    before _ensure_standalone_dev_server runs (din0s, PR #571).
+    """
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    import EvoScientist.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "get_effective_config",
+        lambda: SimpleNamespace(
+            gateway_backend="langgraph_server",
+            default_workdir="",
+            anthropic_auth_mode="oauth",
+            openai_auth_mode="api_key",
+        ),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ccproxy_mod,
+        "maybe_start_ccproxy",
+        lambda cfg: calls.append("ccproxy") or None,
+    )
+    monkeypatch.setattr(
+        standalone,
+        "_ensure_standalone_dev_server",
+        lambda cfg, *, backend=None: calls.append("dev_server"),
+    )
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert calls == ["ccproxy", "dev_server"]
+
+
+def test_run_standalone_skips_ccproxy_without_agent(monkeypatch):
+    """``use_agent=False`` never touches ccproxy (config block is skipped)."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    import EvoScientist.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "get_effective_config",
+        lambda: SimpleNamespace(gateway_backend="local", default_workdir=""),
+    )
+    ccproxy_calls: list[object] = []
+    monkeypatch.setattr(
+        ccproxy_mod,
+        "maybe_start_ccproxy",
+        lambda cfg: ccproxy_calls.append(cfg),
+    )
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=False)
+
+    assert ccproxy_calls == []
+
+
+def test_run_standalone_registers_ccproxy_shutdown(monkeypatch):
+    """A ccproxy handle returned at startup is registered with atexit."""
+    import atexit
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    import EvoScientist.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "get_effective_config",
+        lambda: SimpleNamespace(
+            gateway_backend="local",
+            default_workdir="",
+            anthropic_auth_mode="oauth",
+            openai_auth_mode="api_key",
+        ),
+    )
+    fake_proc = object()
+    monkeypatch.setattr(
+        ccproxy_mod, "maybe_start_ccproxy", lambda cfg: fake_proc
+    )
+    registered: list[tuple] = []
+    monkeypatch.setattr(
+        atexit, "register", lambda fn, *args: registered.append((fn, args))
+    )
+    monkeypatch.setattr(
+        standalone,
+        "_ensure_standalone_dev_server",
+        lambda cfg, *, backend=None: None,
+    )
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert len(registered) == 1
+    fn, args = registered[0]
+    assert fn is ccproxy_mod.stop_ccproxy
+    assert args == (fake_proc,)
