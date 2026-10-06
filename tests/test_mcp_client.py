@@ -1983,7 +1983,7 @@ class TestLoadToolsProgressCallback:
     def test_no_timeout_outside_langgraph_dev(self, monkeypatch):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         assert mcp_client._get_tools_timeout() is None
 
     async def test_langgraph_dev_loads_with_the_server_timeout(self, monkeypatch):
@@ -1997,7 +1997,7 @@ class TestLoadToolsProgressCallback:
             return {}
 
         monkeypatch.setattr(mcp_client, "_load_tools", fake_load_tools)
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
 
         config = {"srv": {"transport": "stdio", "command": "demo"}}
         await mcp_client.aload_mcp_tools(config)
