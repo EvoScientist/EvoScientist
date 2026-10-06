@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from types import SimpleNamespace
 
+import pytest
+
 import EvoScientist.channels.standalone as standalone
+
+@pytest.fixture(autouse=True)
+def _restore_http_log_levels():
+    """Reset process-global httpx/httpcore levels after every test."""
+    loggers = [logging.getLogger(n) for n in ("httpx", "httpcore")]
+    saved = [lg.level for lg in loggers]
+    yield
+    for lg, level in zip(loggers, saved):
+        lg.setLevel(level)
 
 
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
@@ -95,13 +107,13 @@ def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
 
 
 def test_run_standalone_quiets_httpx(monkeypatch):
-    """httpx must not log request URLs (Telegram tokens live in the path)."""
-    import logging
-    from unittest.mock import MagicMock, patch
+    """HTTP client logs must not expose channel tokens in request URLs."""
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.DEBUG)
 
-    from EvoScientist.channels.standalone import run_standalone
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
 
-    monkeypatch.setattr(logging.getLogger("httpx"), "level", logging.DEBUG)
-    with patch("EvoScientist.channels.standalone.asyncio.run"):
-        run_standalone(MagicMock(), MagicMock(), use_agent=False)
-    assert logging.getLogger("httpx").level == logging.WARNING
+    standalone.run_standalone(channel=None, bus=None, use_agent=False)
+
+    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
+    assert not logging.getLogger("httpcore").isEnabledFor(logging.INFO)
