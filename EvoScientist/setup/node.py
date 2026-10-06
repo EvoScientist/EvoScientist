@@ -49,7 +49,8 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 NODE_VERSION = "24.21.0"
-MIN_SYSTEM_NODE = 20
+# (major, minor): the WebUI's Next.js declares ``engines.node >=20.9.0``.
+MIN_SYSTEM_NODE = (20, 9)
 
 SOURCES = {
     "default": "https://nodejs.org/dist",
@@ -203,7 +204,7 @@ def _system_node() -> NodeInfo | None:
     if found is None or shutil.which("npx", path=str(Path(found).parent)) is None:
         return None
     version = _probe(Path(found))
-    if version is None or version[0] < MIN_SYSTEM_NODE:
+    if version is None or version[:2] < MIN_SYSTEM_NODE:
         return None
     return NodeInfo("system", ".".join(map(str, version)), Path(found))
 

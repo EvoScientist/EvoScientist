@@ -323,11 +323,11 @@ def test_stage_reports_download_progress_lines(env, monkeypatch):
     assert detail["source"] == "private"
 
 
-def test_system_node_20_or_newer_wins_without_download(env, monkeypatch):
-    exe = _system_node(env, monkeypatch, (20, 0, 0))
+def test_system_node_20_9_or_newer_wins_without_download(env, monkeypatch):
+    exe = _system_node(env, monkeypatch, (20, 9, 0))
     info = node.ensure_node("default")
     detail = info.detail()
-    assert (detail["source"], detail["version"]) == ("system", "20.0.0")
+    assert (detail["source"], detail["version"]) == ("system", "20.9.0")
     # shutil.which may return the PATHEXT spelling (node.EXE) on Windows.
     assert os.path.normcase(detail["path"]) == os.path.normcase(str(exe))
     assert env["net"].urls == []
@@ -348,8 +348,9 @@ def test_no_node_downloads_and_records(env):
     ]
 
 
-def test_old_system_node_triggers_download(env, monkeypatch):
-    _system_node(env, monkeypatch, (19, 9, 0))
+@pytest.mark.parametrize("version", [(19, 9, 0), (20, 8, 1)])
+def test_old_system_node_triggers_download(env, monkeypatch, version):
+    _system_node(env, monkeypatch, version)
     assert node.ensure_node("default").source == "private"
     assert env["net"].urls
 
