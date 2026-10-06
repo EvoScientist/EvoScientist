@@ -403,6 +403,47 @@ def test_reuse_sets_drift_flag_on_version_change(tmp_path, monkeypatch, runtime_
     assert stopped == []
 
 
+def test_started_server_recorded_for_next_version(tmp_path, monkeypatch, runtime_paths):
+    """A server the CLI starts records what the next version compares: the
+    marker, the PID file for ``EvoSci server stop`` and the fingerprint."""
+    import importlib.metadata
+    import subprocess
+    from types import SimpleNamespace
+
+    from EvoScientist.mcp import client as mcp_client
+
+    up = {"running": False}
+    spawned = []
+
+    def _popen(*_a, **kw):
+        spawned.append(kw["env"])
+        up["running"] = True
+        return SimpleNamespace(pid=4242, poll=lambda: None)
+
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {})
+    monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/usr/bin/langgraph")
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_: up["running"])
+    monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
+    monkeypatch.setattr(manager, "_wait_for_port_bindable", lambda *_a, **_kw: True)
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    cfg.langgraph_dev_keepalive = True
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.5")
+    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
+    assert spawned[0]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
+    assert runtime_paths.pid_file.read_text() == "4242"
+
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.6")
+    assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A") is None
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+    assert len(spawned) == 1
+
+
 def test_reuse_clears_drift_flag_on_matching_fingerprint(
     tmp_path, monkeypatch, runtime_paths
 ):
@@ -688,6 +729,16 @@ def test_server_config_fingerprint_ignores_shell_allow_list():
     cfg = manager.EvoScientistConfig()
     base = manager._server_config_fingerprint(cfg)
     cfg.shell_allow_list = "git status,ls"
+    assert manager._server_config_fingerprint(cfg) == base
+
+
+def test_server_config_fingerprint_ignores_gateway_backend():
+    """The gateway settings only decide, in the CLI, whether a server is
+    needed; nothing in the server reads them, so they must not cause drift."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.gateway_backend_serve = "langgraph_server"
+    cfg.gateway_backend_tui = "langgraph_server"
     assert manager._server_config_fingerprint(cfg) == base
 
 

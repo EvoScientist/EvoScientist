@@ -659,6 +659,7 @@ _FINGERPRINT_EXCLUDED_PREFIXES = (
     "qq_",
     "signal_",
     "stt_",
+    "gateway_backend",
 )
 _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
     {
