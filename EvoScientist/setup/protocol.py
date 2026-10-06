@@ -42,6 +42,8 @@ ERROR_CODES = frozenset(
         "probe_failed",
         "unsupported_platform",
         "install_failed",
+        # The registry has no release inside the supported WebUI range.
+        "no_compatible_version",
     }
 )
 

@@ -41,6 +41,8 @@ dependencies = [
     "httpx>=0.28",
     "psutil>=6.0",
     "filelock>=3.16",
+    # WebUI setup stage: the supported WebUI version range
+    "packaging>=24.0",
     "lazy-loader>=0.5",
     "markdownify>=1.2",
     "tzlocal>=5.0",
