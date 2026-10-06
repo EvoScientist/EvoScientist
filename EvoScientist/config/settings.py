@@ -374,7 +374,8 @@ class EvoScientistConfig:
 
     # UI Settings
     show_thinking: bool = True
-    # "webui" launches the browser front-end (@evoscientist/webui via npx) +
+    # "webui" launches the browser front-end (@evoscientist/webui, installed
+    # locally by `EvoSci setup` or on the first launch) +
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     # Download source for `EvoSci setup` and on-demand installs (Node.js).

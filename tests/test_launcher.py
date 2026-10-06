@@ -454,105 +454,141 @@ def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Runner preflight
 # --------------------------------------------------------------------------- #
-def test_npx_runner_preflight_reports_node_missing(monkeypatch):
+def _installed_env(monkeypatch, tmp_path, *, node_error=None, webui_error=None):
+    """Stub Node / WebUI provisioning for :class:`InstalledWebUIRunner`."""
     from EvoScientist.setup import node as setup_node
+    from EvoScientist.setup import webui as setup_webui
+
+    node = _bundled_runner_files(tmp_path)
+    calls: dict = {"marked": [], "cleanups": 0, "progress": []}
+
+    def ensure_node(**kw):
+        calls["node_progress"] = kw.get("progress")
+        if node_error is not None:
+            raise node_error
+        return setup_node.NodeInfo("private", "24.21.0", node)
+
+    def ensure_webui(node_exe, **kw):
+        calls["webui_node"] = node_exe
+        if webui_error is not None:
+            raise webui_error
+        return setup_webui.WebUIInfo("0.3.1", tmp_path)
+
+    def mark_in_use(info):
+        calls["marked"].append(info)
+        return tmp_path / "marker"
+
+    def cleanup():
+        calls["cleanups"] += 1
+        return []
+
+    monkeypatch.setattr(setup_node, "ensure_node", ensure_node)
+    monkeypatch.setattr(setup_webui, "ensure_webui", ensure_webui)
+    monkeypatch.setattr(setup_webui, "mark_in_use", mark_in_use)
+    monkeypatch.setattr(setup_webui, "cleanup_old_versions", cleanup)
+    monkeypatch.setattr(
+        setup_webui, "release_in_use", lambda m: calls.setdefault("released", m)
+    )
+    return node, calls
+
+
+def test_installed_runner_provides_node_and_webui_then_runs_them(monkeypatch, tmp_path):
+    node, calls = _installed_env(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return _DoneProc()
+
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    progress: list = []
+    runner = lm.InstalledWebUIRunner(progress=lambda f, m: progress.append((f, m)))
+    runner.preflight(_cfg())
+    assert calls["webui_node"] == node
+    assert callable(calls["node_progress"])  # an on-demand Node install reports
+    assert progress[-1] == (1.0, "WebUI 0.3.1")  # the caller's spinner moves on
+    assert [i.version for i in calls["marked"]] == ["0.3.1"]
+    assert calls["cleanups"] == 1
+    proc = runner.start(_cfg(), {"PORT": "4716"})
+    assert captured["argv"] == [str(node), str(tmp_path / "dist" / "server.js")]
+    runner.stop(proc)
+    assert calls["released"] == tmp_path / "marker"
+
+
+@pytest.mark.parametrize(
+    ("which", "code"),
+    [("node", "node_missing"), ("webui", "download_failed")],
+)
+def test_installed_runner_preflight_reports_setup_failures(
+    monkeypatch, tmp_path, which, code
+):
     from EvoScientist.setup.protocol import StageError
 
-    def offline(*_a, **_k):
-        raise StageError("download_failed", "offline")
-
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: None)
-    monkeypatch.setattr(setup_node, "ensure_node", offline)
+    error = StageError("download_failed", "offline")
+    _installed_env(
+        monkeypatch,
+        tmp_path,
+        node_error=error if which == "node" else None,
+        webui_error=error if which == "webui" else None,
+    )
     with pytest.raises(lm.LauncherError) as ei:
-        lm.NpxWebUIRunner().preflight(_cfg())
-    assert ei.value.code == "node_missing"
+        lm.InstalledWebUIRunner().preflight(_cfg())
+    assert ei.value.code == code
     assert "offline" in ei.value.message
     assert "EvoSci setup" in ei.value.detail
 
 
-def test_npx_runner_preflight_installs_node_on_demand(monkeypatch):
-    """No npx on PATH: preflight installs the private Node and activates it."""
-    from EvoScientist.setup import node as setup_node
+def test_failed_install_starts_no_backend(monkeypatch, tmp_path):
+    """preflight runs before the backend, so a failed install leaves nothing."""
+    from EvoScientist.setup.protocol import StageError
 
-    state = {"installed": False, "active": False}
-    monkeypatch.setattr(
-        lm.shutil, "which", lambda _n: "/p/npx" if state["active"] else None
+    _installed_env(
+        monkeypatch, tmp_path, webui_error=StageError("download_failed", "offline")
     )
-
-    def ensure(*_a, **kw):
-        # The install must report progress; a silent download looks frozen.
-        assert callable(kw.get("progress"))
-        state.update(installed=True)
-
-    monkeypatch.setattr(setup_node, "ensure_node", ensure)
-    monkeypatch.setattr(
-        setup_node, "activate_runtime", lambda: state.update(active=True)
-    )
-    lm.NpxWebUIRunner().preflight(_cfg())
-    assert state == {"installed": True, "active": True}
+    started = []
+    monkeypatch.setattr(lm, "_resolve_backend", lambda *a: started.append(a))
+    launcher = lm.WebUILauncher(object(), _cfg(), lm.InstalledWebUIRunner())
+    with pytest.raises(lm.LauncherError):
+        launcher.start()
+    assert started == []
 
 
-def test_npx_runner_preflight_with_npx_does_not_install(monkeypatch):
-    from EvoScientist.setup import node as setup_node
+def test_installed_runner_update_check_runs_in_a_daemon_thread(monkeypatch, tmp_path):
+    from EvoScientist.setup import webui as setup_webui
 
-    def boom(*_a, **_k):
-        raise AssertionError("ensure_node must not run when npx is on PATH")
-
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/usr/bin/npx")
-    monkeypatch.setattr(setup_node, "ensure_node", boom)
-    lm.NpxWebUIRunner().preflight(_cfg())
+    node, _calls = _installed_env(monkeypatch, tmp_path)
+    seen = []
+    monkeypatch.setattr(setup_webui, "stage_update", lambda exe: seen.append(exe))
+    runner = lm.InstalledWebUIRunner()
+    assert runner.start_update_check() is None  # nothing to check before preflight
+    runner.preflight(_cfg())
+    thread = runner.start_update_check()
+    thread.join(5)
+    assert thread.daemon
+    assert seen == [node]
 
 
 @pytest.mark.parametrize("private", [True, False])
-def test_npx_runner_start_cleans_env_only_for_private_node(monkeypatch, private):
-    from EvoScientist.setup import node as setup_node
-
-    captured = {}
-
-    def fake_popen(argv, env, **_kw):
-        captured["env"] = env
-        return object()
-
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
-    monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
-    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "default")
-    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
-    env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
-    lm.NpxWebUIRunner().start(_cfg(), env)
-    if private:
-        assert captured["env"] == {"PATH": "p"}
-    else:
-        assert captured["env"] == env
-
-
-@pytest.mark.parametrize(
-    ("private", "user_registry", "expected"),
-    [
-        (True, "r", "https://registry.npmmirror.com"),  # user's npm_config_* stripped
-        (False, None, "https://registry.npmmirror.com"),
-        (False, "r", "r"),  # a registry the user set in the environment wins
-    ],
-)
-def test_npx_runner_start_uses_npmmirror_under_the_cn_mirror(
-    monkeypatch, private, user_registry, expected
+def test_bundled_runner_cleans_env_only_for_private_node(
+    monkeypatch, tmp_path, private
 ):
     from EvoScientist.setup import node as setup_node
 
+    node = _bundled_runner_files(tmp_path)
     captured = {}
 
     def fake_popen(argv, env, **_kw):
         captured["env"] = env
-        return object()
+        return _DoneProc()
 
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
     monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
-    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "cn")
     monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
-    env = {"PATH": "p"}
-    if user_registry:
-        env["npm_config_registry"] = user_registry
-    lm.NpxWebUIRunner().start(_cfg(), env)
-    assert captured["env"]["npm_config_registry"] == expected
+    env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
+    lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
+    if private:
+        assert captured["env"] == {"PATH": "p", "NODE_ENV": "production"}
+    else:
+        assert captured["env"] == {**env, "NODE_ENV": "production"}
 
 
 def test_bundled_runner_preflight_missing_node(tmp_path):
@@ -570,6 +606,7 @@ def test_bundled_runner_preflight_missing_server(tmp_path):
         runner.preflight(_cfg())
     assert ei.value.code == "node_missing"
     assert "server" in ei.value.message.lower()
+    assert "EvoSci setup" in ei.value.detail
 
 
 def test_bundled_runner_preflight_ok(tmp_path):
@@ -724,7 +761,7 @@ def test_poll_ready_fails_fast_when_webui_proc_exits(monkeypatch):
 
 def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: False)
-    launcher = lm.WebUILauncher(object(), _cfg(), lm.NpxWebUIRunner())
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
     with pytest.raises(lm.LauncherError) as ei:
         launcher.wait_ready(timeout=0.05)
     assert ei.value.code == "not_ready"
@@ -770,7 +807,7 @@ def test_build_launcher_config_resolves_ports_and_workspace(monkeypatch, tmp_pat
     assert cfg.webui_port == 4000
     assert cfg.webui_host == "0.0.0.0"
     assert cfg.keepalive is True
-    assert cfg.open_browser is False
+    assert cfg.open_browser is True
 
 
 def test_build_launcher_config_blank_host_falls_back_to_loopback(monkeypatch):

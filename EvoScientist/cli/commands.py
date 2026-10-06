@@ -2562,8 +2562,8 @@ def _main_callback(
     ensure_dirs()
 
     # WebUI mode: instead of the in-terminal CLI/TUI, run a deploy-style
-    # langgraph server (full MCP + async) + the published @evoscientist/webui
-    # front-end (npx) in THIS terminal, then block. Reuses start_langgraph_dev
+    # langgraph server (full MCP + async) + the locally installed
+    # @evoscientist/webui front-end in THIS terminal, then block. Reuses start_langgraph_dev
     # but leaves `EvoSci deploy` untouched (it stays a clean server for external
     # UIs / SDK clients).
     #

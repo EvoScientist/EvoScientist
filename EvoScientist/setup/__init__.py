@@ -61,9 +61,10 @@ def manifest() -> dict[str, Any]:
 def run_stages(stages: Iterable[Stage], emit: Emitter, mirror: str) -> int:
     """Run every stage in order; returns 1 if any failed, else 0.
 
-    The stages do not depend on each other, so a failed one (e.g. a blocked
-    Node download) does not stop the rest; each still ends with its own
-    terminal event.
+    A failed stage (e.g. a blocked Node download) does not stop the rest;
+    each still ends with its own terminal event. The one dependency, ``webui``
+    on ``node``, needs no ordering here: the webui stage asks ``ensure_node()``
+    itself, which raises the Node failure again within the same process.
     """
     failed = False
     for stage in stages:

@@ -1,11 +1,11 @@
 """Tests for ``run_webui`` bind-host wiring.
 
-The front-end is an external npm package (``@evoscientist/webui``) with no
-``--host`` flag: its bin launcher does
-``HOSTNAME: process.env.HOSTNAME || "127.0.0.1"`` and hands that to the Next
-standalone server. Setting ``HOSTNAME`` on the npx env is therefore the *only*
-supported way to widen the front-end's interface — these tests pin that
-contract so a refactor can't quietly drop it and silently re-narrow the bind.
+The front-end is the ``@evoscientist/webui`` Next.js standalone server, started
+as ``node dist/server.js``. It takes no flags: it reads ``PORT`` and
+``HOSTNAME`` from its environment, and without ``HOSTNAME`` it binds every
+interface. Setting ``HOSTNAME`` on the node env is therefore the *only* way to
+choose the front-end's interface — these tests pin that contract so a refactor
+can't quietly drop it and silently widen or re-narrow the bind.
 """
 
 from __future__ import annotations
@@ -17,6 +17,14 @@ from typing import Any
 import pytest
 
 from EvoScientist.deploy import webui as webui_mod
+
+NODE = "/opt/node/bin/node"
+APP = "/data/tools/webui/0.3.1"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """``webui.log`` lands next to the isolated ``langgraph_dev.log``."""
 
 
 def _make_config(
@@ -73,6 +81,9 @@ class _RecordingConsole:
             def __exit__(self_inner, *a):
                 return False
 
+            def update(self_inner, *a, **k):
+                self._sink.append(f"status: {a[0] if a else ''}")
+
         return _Ctx()
 
 
@@ -120,14 +131,13 @@ def _run_webui_once(
     containing this text prints; ``run_webui`` then propagates it."""
     import atexit
     import os
-    import shutil
     import signal
     import threading
 
     import EvoScientist.config as config_mod
     from EvoScientist.langgraph_dev import manager as lgm
 
-    captured: dict[str, Any] = {"printed": [], "npx_env": {}, "npx_args": []}
+    captured: dict[str, Any] = {"printed": [], "node_env": {}, "node_args": []}
 
     monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
     console = (
@@ -137,7 +147,40 @@ def _run_webui_once(
     )
     monkeypatch.setattr(webui_mod, "console", console)
     monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/npx")
+    # The installed front-end: Node and WebUI provisioning are stubbed; the
+    # launcher's readiness wait is covered in test_launcher.py.
+    from pathlib import Path
+
+    from EvoScientist.deploy import launcher as launcher_mod
+    from EvoScientist.setup import node as node_mod
+    from EvoScientist.setup import webui as setup_webui
+
+    monkeypatch.setattr(
+        node_mod,
+        "ensure_node",
+        lambda **_kw: node_mod.NodeInfo("system", "22.0.0", Path(NODE)),
+    )
+    monkeypatch.setattr(
+        setup_webui,
+        "ensure_webui",
+        lambda *_a, **_kw: setup_webui.WebUIInfo("0.3.1", Path(APP)),
+    )
+    monkeypatch.setattr(setup_webui, "mark_in_use", lambda _info: None)
+    monkeypatch.setattr(setup_webui, "cleanup_old_versions", lambda: [])
+    captured["update_checks"] = 0
+
+    def _fake_update_check(_self):
+        captured["update_checks"] += 1
+
+    monkeypatch.setattr(
+        launcher_mod.InstalledWebUIRunner, "start_update_check", _fake_update_check
+    )
+    monkeypatch.setattr(
+        launcher_mod.BundledWebUIRunner, "preflight", lambda _self, _cfg: None
+    )
+    monkeypatch.setattr(
+        launcher_mod.WebUILauncher, "wait_ready", lambda self, *a, **k: self._result()
+    )
 
     monkeypatch.setattr(
         lgm, "_is_port_occupied", lambda _p, *_a, **_kw: backend_port_occupied
@@ -175,14 +218,13 @@ def _run_webui_once(
             return None
 
     def _fake_popen(args, **kwargs):
-        captured["npx_args"] = args
-        captured["npx_env"] = kwargs.get("env", {})
+        captured["node_args"] = args
+        captured["node_env"] = kwargs.get("env", {})
+        captured["node_stdout"] = kwargs.get("stdout")
         return _FakeProc()
 
     monkeypatch.setattr(subprocess, "Popen", _fake_popen)
     # The front-end runner's stop shells out to taskkill on Windows — neutralize.
-    from EvoScientist.deploy import launcher as launcher_mod
-
     monkeypatch.setattr(launcher_mod, "_stop_process_tree", lambda _proc: None)
     captured["atexit_fns"] = []
     monkeypatch.setattr(
@@ -208,7 +250,7 @@ def test_hostname_env_carries_webui_host(monkeypatch):
     config = _make_config(webui_host="0.0.0.0")
     captured = _run_webui_once(monkeypatch, config)
 
-    assert captured["npx_env"].get("HOSTNAME") == "0.0.0.0", (
+    assert captured["node_env"].get("HOSTNAME") == "0.0.0.0", (
         "HOSTNAME is the package's only bind knob — without it the front-end "
         "falls back to its own 127.0.0.1 default"
     )
@@ -220,25 +262,42 @@ def test_hostname_env_defaults_to_loopback(monkeypatch):
     config = _make_config()
     captured = _run_webui_once(monkeypatch, config)
 
-    assert captured["npx_env"].get("HOSTNAME") == "127.0.0.1"
+    assert captured["node_env"].get("HOSTNAME") == "127.0.0.1"
 
 
-def test_port_env_and_flag_still_set(monkeypatch):
+def test_port_env_set(monkeypatch):
     config = _make_config(webui_port=4800)
     captured = _run_webui_once(monkeypatch, config)
 
-    assert captured["npx_env"].get("PORT") == "4800"
-    assert "--port" in captured["npx_args"]
-    assert captured["npx_args"][captured["npx_args"].index("--port") + 1] == "4800"
+    assert captured["node_env"].get("PORT") == "4800"
 
 
-def test_no_host_flag_passed_to_npx(monkeypatch):
-    """The package's arg parser only knows ``--port``; a stray ``--host`` is at
-    best ignored and at worst breaks startup, so we must not emit one."""
-    config = _make_config()
-    captured = _run_webui_once(monkeypatch, config)
+def test_installed_server_runs_without_npx_or_flags(monkeypatch):
+    """The installed copy runs as ``node dist/server.js``: no ``npx``, and no
+    flags, since the standalone server reads only its environment."""
+    captured = _run_webui_once(monkeypatch, _make_config())
 
-    assert "--host" not in captured["npx_args"]
+    from pathlib import Path
+
+    assert captured["node_args"] == [
+        str(Path(NODE)),
+        str(Path(APP) / "dist" / "server.js"),
+    ]
+    assert captured["node_env"].get("NODE_ENV") == "production"
+
+
+def test_node_output_goes_to_webui_log_next_to_the_backend_log(
+    monkeypatch, runtime_paths
+):
+    captured = _run_webui_once(monkeypatch, _make_config())
+    log = runtime_paths.log_file.parent / "webui.log"
+    assert captured["node_stdout"].name == str(log)
+    assert any("webui.log" in line for line in captured["printed"])
+
+
+def test_update_check_starts_once_the_ui_is_up(monkeypatch):
+    captured = _run_webui_once(monkeypatch, _make_config())
+    assert captured["update_checks"] == 1
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
@@ -246,7 +305,7 @@ def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
     config = _make_config(webui_host=blank)
     captured = _run_webui_once(monkeypatch, config)
 
-    assert captured["npx_env"].get("HOSTNAME") == "127.0.0.1"
+    assert captured["node_env"].get("HOSTNAME") == "127.0.0.1"
 
 
 # =============================================================================
