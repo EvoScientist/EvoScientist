@@ -115,7 +115,10 @@ def adopt_stale_tasks(client: Any, workspace: Workspace, *, run_kind: str) -> in
             continue
         client.crons.update(
             str(cron["cron_id"]),
-            metadata={"workspace_dir": workspace.key},
+            # The full metadata: a server that replaces it rather than merging
+            # would otherwise drop run_kind, and the task would vanish from
+            # every listing while it keeps firing.
+            metadata={**(cron.get("metadata") or {}), "workspace_dir": workspace.key},
             config=run_config(workspace),
         )
         adopted += 1

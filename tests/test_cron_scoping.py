@@ -74,8 +74,14 @@ def test_adopt_stale_tasks_retags_untagged_and_moved_crons(workspace, other, tmp
         "untagged",
     ]
     for call in fake.crons.update.call_args_list:
+        cron_id = call.args[0]
         assert call.kwargs == {
-            "metadata": {"workspace_dir": workspace.key},
+            # The rest of the metadata is kept, whatever the server merges.
+            "metadata": {
+                "run_kind": crons.SCHEDULED_RUN_KIND,
+                "name": cron_id,
+                "workspace_dir": workspace.key,
+            },
             "config": {"configurable": {"workspace_dir": workspace.key}},
         }
 
