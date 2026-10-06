@@ -519,12 +519,17 @@ def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
         sentences = [f"pip install failed: {_last_line(result.stdout).rstrip('.')}."]
         if _CONNECTION_FAILED in result.stdout:
             sentences.append("The package index could not be reached.")
-            if mirror != "cn":
-                sentences.append(CN_MIRROR_HINT)
         elif match is not None and match["versions"].strip() == "none":
             sentences.append(
-                f"The package index has no wheel of {match['name']} for this Python."
+                f"The package index has no wheel of {match['name']} for this"
+                " Python, or did not answer."
             )
+        # On every pip failure while the mirror is off, as for download
+        # errors: a wheel download that stalls mid-file ends with a traceback,
+        # and an index answering with an HTTP error says "none", neither with
+        # a connection warning.
+        if mirror != "cn":
+            sentences.append(CN_MIRROR_HINT)
         raise StageError("install_failed", " ".join(sentences))
 
 

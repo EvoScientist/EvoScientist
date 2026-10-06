@@ -598,16 +598,24 @@ def test_unreachable_index_is_install_failed_without_a_fallback(env, mirror, hin
     assert not re_env.is_ready(env["env"])
 
 
-def test_no_wheel_for_this_python_gets_no_mirror_hint(env):
-    """ "from versions: none" without a connection warning: the index was
-    reached but has no wheel for this interpreter (e.g. a brand-new Python),
-    which the mirror does not change."""
+def test_no_wheel_for_this_python_is_named(env):
+    """ "from versions: none" without a connection warning: no wheel for this
+    interpreter, or an index that answered with an HTTP error."""
     env["run"].no_wheel_at_all = {"numpy"}
     with pytest.raises(StageError) as exc:
         re_env.ensure_research_env("default")
     assert exc.value.code == "install_failed"
-    assert "no wheel of numpy for this Python" in exc.value.message
-    assert re_env.CN_MIRROR_HINT not in exc.value.message
+    assert "no wheel of numpy for this Python, or did not answer" in exc.value.message
+
+
+@pytest.mark.parametrize(("mirror", "hinted"), [("default", True), ("cn", False)])
+def test_any_pip_failure_names_the_mirror_while_it_is_off(env, mirror, hinted):
+    """A download that stalls mid-wheel ends with a traceback, not a
+    connection warning."""
+    env["run"].pip_ok = False
+    with pytest.raises(StageError) as exc:
+        re_env.ensure_research_env(mirror)
+    assert (re_env.CN_MIRROR_HINT in exc.value.message) is hinted
 
 
 def test_no_wheel_at_all_after_the_unpinned_fallback_is_named(env):
