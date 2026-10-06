@@ -694,10 +694,16 @@ def _adopt_stale_scheduled_tasks(*, workspace: Workspace) -> None:
     """Best-effort re-tagging of the served store's untagged and moved tasks.
 
     Their runs then work in *workspace* and pass the server's folder check.
+    Only for a server known to serve *workspace*: a reused server without a
+    workspace record may hold another workspace's store, whose crons this must
+    not take over.
     """
     try:
         from ..cron import schedule as crons
+        from ..langgraph_dev import manager
 
+        if not manager.SERVER_WORKSPACE_VERIFIED:
+            return
         if crons.is_available():
             crons.adopt_stale_tasks(
                 crons._client(), workspace, run_kind=crons.SCHEDULED_RUN_KIND

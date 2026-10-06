@@ -144,6 +144,12 @@ CONFIG_DRIFT_SINCE_LAUNCH = False
 # ``research_env.python_drift_message``). The CLI prints it after startup.
 AGENT_PYTHON_DRIFT: str | None = None
 
+# Set by ``ensure_langgraph_dev``: True when the server it started or reused is
+# known to serve the requested workspace (this process started it, or its
+# sidecar names that workspace). A server reused without a sidecar is not, so
+# callers must not treat its store as this workspace's.
+SERVER_WORKSPACE_VERIFIED = False
+
 # Default for sidecar fields that are left out of the record.
 _NOT_RECORDED = object()
 
@@ -1369,8 +1375,10 @@ def ensure_langgraph_dev(
     background workers will fail.
     """
     global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
+    global SERVER_WORKSPACE_VERIFIED
     CONFIG_DRIFT_SINCE_LAUNCH = False
     AGENT_PYTHON_DRIFT = None
+    SERVER_WORKSPACE_VERIFIED = False
 
     if not needs_langgraph_dev(config, backend=backend):
         _ASYNC_SUBAGENTS_AVAILABLE = False
@@ -1414,6 +1422,7 @@ def _ensure_langgraph_dev_locked(
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
+    global SERVER_WORKSPACE_VERIFIED
     config_fp = _server_config_fingerprint(config)
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
@@ -1465,6 +1474,7 @@ def _ensure_langgraph_dev_locked(
         # short-circuit this check, or we'd silently reuse a wrong-workspace
         # server.
         owned_running = _PROCESS is not None and _PROCESS.poll() is None
+        verified = owned_running
         if not owned_running:
             sidecar = _read_workspace_sidecar()
             if sidecar is not None:
@@ -1481,6 +1491,7 @@ def _ensure_langgraph_dev_locked(
                             )
                             + _keepalive_stop_hint(config)
                         )
+                    verified = True
                 recorded_fp = sidecar.get("config_fingerprint")
                 if isinstance(recorded_fp, str) and recorded_fp != config_fp:
                     CONFIG_DRIFT_SINCE_LAUNCH = True
@@ -1526,6 +1537,7 @@ def _ensure_langgraph_dev_locked(
                 "langgraph dev already running on %s, reusing", _base_url(port, host)
             )
         _ASYNC_SUBAGENTS_AVAILABLE = True
+        SERVER_WORKSPACE_VERIFIED = verified
         return None
 
     try:
@@ -1553,6 +1565,7 @@ def _ensure_langgraph_dev_locked(
         return None
 
     _ASYNC_SUBAGENTS_AVAILABLE = True
+    SERVER_WORKSPACE_VERIFIED = True
     if getattr(config, "langgraph_dev_keepalive", False):
         # Keepalive: leave the server (plus PID file + sidecar) behind on CLI
         # exit so the next start in this workspace reuses it instantly.

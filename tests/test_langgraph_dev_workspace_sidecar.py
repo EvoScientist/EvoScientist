@@ -245,6 +245,8 @@ def test_ensure_langgraph_dev_reuses_when_sidecar_missing(
     cfg.enable_async_subagents = True
     # Should NOT raise — degrades to the prior reuse-with-warning branch.
     manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B")
+    # Nothing says which workspace's store it holds.
+    assert manager.SERVER_WORKSPACE_VERIFIED is False
 
 
 def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths):
@@ -352,6 +354,12 @@ def _reuse_setup(tmp_path, monkeypatch, runtime_paths, fingerprint):
     cfg = manager.EvoScientistConfig()
     cfg.enable_async_subagents = True
     return cfg
+
+
+def test_reuse_confirms_workspace_from_sidecar(tmp_path, monkeypatch, runtime_paths):
+    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "fp")
+    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
+    assert manager.SERVER_WORKSPACE_VERIFIED is True
 
 
 def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
