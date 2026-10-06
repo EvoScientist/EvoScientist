@@ -61,12 +61,18 @@ async def _timeout_aiter(
     seconds, :class:`asyncio.TimeoutError` is raised.  Continuous
     yielding resets the timer each time, so only a truly stalled
     generator will trigger the timeout.
+
+    The timeout uses :func:`asyncio.timeout` rather than
+    :func:`asyncio.wait_for`: before Python 3.12 ``wait_for`` runs the
+    awaitable in a child task, so the wrapped generator would advance in a
+    different task and context than the one that later closes it.
     """
     ait = agen.__aiter__()
     try:
         while True:
             try:
-                item = await asyncio.wait_for(ait.__anext__(), timeout=idle_timeout)
+                async with asyncio.timeout(idle_timeout):
+                    item = await ait.__anext__()
             except StopAsyncIteration:
                 return
             yield item
