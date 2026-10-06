@@ -16,6 +16,7 @@ Usage from a channel's ``main()``::
 import asyncio
 import logging
 import signal
+import threading
 from typing import Any
 
 from .base import Channel
@@ -109,6 +110,12 @@ async def _async_main(
 
     await manager.start_health()
 
+    # Bound into the consumer task's context so blocking sync tools (shell)
+    # see it via current_cancel_event() — the same mechanism serve's
+    # run_streaming uses. Set on shutdown so in-flight tool subprocesses die
+    # and asyncio.run's executor join cannot hang.
+    turn_cancel = threading.Event()
+
     tasks = [channel.run()]
 
     dispatcher = standalone_outbound_dispatcher(bus, channel)
@@ -135,68 +142,77 @@ async def _async_main(
             send_thinking=send_thinking,
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)
-        tasks.append(consumer.run())
+        async def _run_consumer() -> None:
+            from ..cancellation import bind_cancel_event
+
+            with bind_cancel_event(turn_cancel):
+                await consumer.run()
+
+        tasks.append(_run_consumer())
         if send_thinking:
             logger.info("Thinking messages enabled")
+
+    # Wrap the coroutines in Task objects once, after agent init (so the
+    # channel still only starts when the agent is ready) and before the
+    # signal handlers go in. Everything below operates on `workers`.
+    workers: list[asyncio.Task] = [asyncio.create_task(coro) for coro in tasks]
 
     async def _graceful_shutdown() -> None:
         """Graceful shutdown: drain consumer, flush outbound, stop channel."""
         logger.info("Graceful shutdown initiated...")
+        turn_cancel.set()
         if consumer is not None:
-            await consumer.stop()
-        # Drain outbound queue before stopping the channel
-        drained = 0
-        while True:
-            try:
-                msg = bus.outbound.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            try:
-                await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
-                if msg.content or msg.media:
-                    drained += 1
-            except Exception:
-                pass
-        if drained:
-            logger.info(f"Outbound drain: {drained} sent")
-        channel._running = False
-        await channel.stop()
-        await manager.stop_health()
-        for t in tasks:
-            if t is not asyncio.current_task() and not t.done():
+            from ..backends import cancel_active_shell_processes
+
+            cancel_active_shell_processes(turn_cancel)
+        try:
+            if consumer is not None:
+                await consumer.stop()
+            # Drain outbound queue before stopping the channel
+            drained = 0
+            while True:
+                try:
+                    msg = bus.outbound.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
+                    if msg.content or msg.media:
+                        drained += 1
+                except Exception:
+                    pass
+            if drained:
+                logger.info(f"Outbound drain: {drained} sent")
+            channel._running = False
+            await channel.stop()
+            await manager.stop_health()
+        except Exception:
+            # A failing stop step must never skip worker cancellation — that
+            # path leaves the first gather waiting forever (hung process).
+            logger.exception("Graceful shutdown failed")
+        finally:
+            for t in workers:
                 t.cancel()
 
     loop = asyncio.get_running_loop()
-    shutdown_started = False
     shutdown_task: asyncio.Task[None] | None = None
 
     def _request_shutdown() -> None:
-        nonlocal shutdown_started, shutdown_task
-        if shutdown_started:
+        nonlocal shutdown_task
+        if shutdown_task is None:
+            shutdown_task = asyncio.create_task(_graceful_shutdown())
             return
-        shutdown_started = True
-        shutdown_task = asyncio.create_task(_graceful_shutdown())
+        # Second signal forces the exit: cancel the graceful path, whose
+        # `finally` then cancels the workers.
+        logger.warning("Second signal received, forcing shutdown")
+        shutdown_task.cancel()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, _request_shutdown)
 
-    try:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except asyncio.CancelledError:
-        pass
-
-    # If a signal started shutdown but tasks are still running, wait for the
-    # graceful path and cancel leftovers so asyncio.run can return.
-    if shutdown_task is not None and not shutdown_task.done():
-        try:
-            await shutdown_task
-        except Exception:
-            logger.exception("standalone shutdown task failed")
-    for t in tasks:
-        if not t.done():
-            t.cancel()
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(*workers, return_exceptions=True)
+    if shutdown_task is not None:
+        await asyncio.gather(shutdown_task, return_exceptions=True)
 
 
 def _ensure_standalone_dev_server(config: Any, *, backend: str | None = None) -> None:
