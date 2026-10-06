@@ -2217,14 +2217,23 @@ class TestLoadToolsProgressCallback:
             ("error", "srv", "opening handshake timed out"),
         ]
 
-    def test_no_timeout_outside_langgraph_dev(self, monkeypatch):
+    @pytest.mark.parametrize("server_process", [False, True])
+    @pytest.mark.parametrize(
+        "transport", ["stdio", "http", "streamable_http", "sse", "websocket"]
+    )
+    def test_default_timeout_by_transport_and_process(
+        self, monkeypatch, server_process, transport
+    ):
         from EvoScientist.mcp import client as mcp_client
 
         monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        assert mcp_client._get_tools_timeout() is None
+        if server_process:
+            monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+        expected = 20 if transport != "stdio" else 40 if server_process else None
+        assert mcp_client._get_tools_timeout(transport) == expected
 
-    async def test_langgraph_dev_loads_with_the_server_timeout(self, monkeypatch):
-        """Inside ``langgraph dev`` the loaders pass the server limit through."""
+    async def test_loaders_delegate_default_deadlines_per_connection(self, monkeypatch):
+        """The per-server loader determines defaults for each connection."""
         from EvoScientist.mcp import client as mcp_client
 
         seen: list[float | None] = []
@@ -2239,7 +2248,7 @@ class TestLoadToolsProgressCallback:
         config = {"srv": {"transport": "stdio", "command": "demo"}}
         await mcp_client.aload_mcp_tools(config)
 
-        assert seen == [mcp_client._SERVER_GET_TOOLS_TIMEOUT_SECONDS]
+        assert seen == [None]
 
     @pytest.mark.parametrize(
         ("server_process", "expected_tools"),
@@ -2339,10 +2348,8 @@ class TestNetworkDiscoveryDeadline:
                         cancelled.set()
                 return [tool]
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
-        monkeypatch.setattr(
-            mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02, raising=False
-        )
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02)
         monkeypatch.setattr(
             "langchain_mcp_adapters.client.MultiServerMCPClient", Client
         )
@@ -2377,9 +2384,7 @@ class TestNetworkDiscoveryDeadline:
                 await asyncio.sleep(0.03)
                 return ["stdio_tool"]
 
-        monkeypatch.setattr(
-            mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001, raising=False
-        )
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001)
         monkeypatch.setattr(
             "langchain_mcp_adapters.client.MultiServerMCPClient", Client
         )
@@ -2403,9 +2408,7 @@ class TestNetworkDiscoveryDeadline:
                 await asyncio.sleep(0.03)
                 return ["network_tool"]
 
-        monkeypatch.setattr(
-            mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001, raising=False
-        )
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.001)
         monkeypatch.setattr(
             "langchain_mcp_adapters.client.MultiServerMCPClient", Client
         )
