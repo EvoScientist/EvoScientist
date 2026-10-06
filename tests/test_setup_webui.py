@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import sys
 import tarfile
 import textwrap
@@ -456,3 +457,168 @@ def test_run_stage_reports_the_installed_copy(env, monkeypatch):
     assert result.status == "done"
     assert result.detail["version"] == "0.3.1"
     assert {e["status"] for e in events} == {"running"}
+
+
+# --------------------------------------------------------------------------- #
+# Background update and promotion
+# --------------------------------------------------------------------------- #
+def _install_old(env, monkeypatch) -> webui.WebUIInfo:
+    """Record 0.3.0 while 0.3.1 is the newest in range."""
+    monkeypatch.setenv(webui.COMPAT_ENV, ">=0.3,<0.3.1")
+    info = webui.ensure_webui(env["node"], "default")
+    monkeypatch.delenv(webui.COMPAT_ENV)
+    env["probes"].clear()
+    env["reg"].urls.clear()
+    return info
+
+
+def test_background_update_stages_without_probing_or_switching(env, monkeypatch):
+    old = _install_old(env, monkeypatch)
+    assert webui.stage_update(env["node"], "default") == "0.3.1"
+    record = _record(env["data"])
+    staged = env["data"] / "tools" / "webui" / "0.3.1"
+    # The running launch keeps its copy; the new one waits for the next launch.
+    assert (record["version"], record["path"]) == ("0.3.0", str(old.path))
+    assert record["staged"] == {"version": "0.3.1", "path": str(staged)}
+    assert old.server_entry.is_file()
+    assert (staged / "dist" / "server.js").is_file()
+    assert env["probes"] == []
+
+
+def test_background_update_runs_once_per_interval(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    webui.stage_update(env["node"], "default")
+    env["reg"].urls.clear()
+    assert webui.stage_update(env["node"], "default") is None
+    assert env["reg"].urls == []
+
+
+def test_background_update_skips_when_the_lock_is_held(env, monkeypatch):
+    """Another process installing holds the lock; the check does not wait."""
+    import filelock
+
+    _install_old(env, monkeypatch)
+
+    def busy(self, *args, **kwargs):
+        raise filelock.Timeout(self.lock_file)
+
+    monkeypatch.setattr(filelock.FileLock, "acquire", busy)
+    assert webui.stage_update(env["node"], "default") is None
+    assert env["reg"].urls == []
+
+
+def test_background_update_failures_stay_quiet(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    env["reg"].offline = True
+    assert webui.stage_update(env["node"], "default") is None
+    assert "staged" not in _record(env["data"])
+    assert webui._failed_install is None
+
+
+def test_background_update_without_a_record_does_nothing(env):
+    assert webui.stage_update(env["node"], "default") is None
+    assert env["reg"].urls == []
+
+
+def test_next_launch_probes_and_promotes_the_staged_copy(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    webui.stage_update(env["node"], "default")
+    env["reg"].offline = True  # promotion needs no network
+    info = webui.ensure_webui(env["node"], "default")
+    staged = env["data"] / "tools" / "webui" / "0.3.1"
+    assert (info.version, info.path) == ("0.3.1", staged)
+    assert env["probes"] == [staged]
+    record = _record(env["data"])
+    assert (record["version"], record["previous"]) == ("0.3.1", "0.3.0")
+    assert "staged" not in record
+
+
+def test_staged_copy_that_fails_its_probe_is_rejected(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    webui.stage_update(env["node"], "default")
+
+    def failing_probe(root, node_exe):
+        raise StageError("probe_failed", "no answer")
+
+    monkeypatch.setattr(webui, "probe", failing_probe)
+    assert webui.ensure_webui(env["node"], "default").version == "0.3.0"
+    record = _record(env["data"])
+    assert record["version"] == "0.3.0"
+    assert record["rejected"] == ["0.3.1"]
+    assert "staged" not in record
+    assert not (env["data"] / "tools" / "webui" / "0.3.1").exists()
+    # The next day's check does not fetch it again.
+    monkeypatch.setattr(webui, "_checked_recently", lambda now: False)
+    env["reg"].urls.clear()
+    assert webui.stage_update(env["node"], "default") is None
+    assert all("webui-0.3.1" not in u for u in env["reg"].urls)
+
+
+def test_staged_copy_outside_the_range_is_dropped_without_a_probe(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    webui.stage_update(env["node"], "default")
+    monkeypatch.setenv(webui.COMPAT_ENV, ">=0.3,<0.3.1")  # the range moved
+    assert webui.ensure_webui(env["node"], "default").version == "0.3.0"
+    assert env["probes"] == []
+    assert "staged" not in _record(env["data"])
+
+
+# --------------------------------------------------------------------------- #
+# In-use markers and cleanup
+# --------------------------------------------------------------------------- #
+def _fake_version(env, version: str) -> Path:
+    path = env["data"] / "tools" / "webui" / version
+    (path / "dist").mkdir(parents=True)
+    (path / "dist" / "server.js").write_text("")
+    return path
+
+
+def test_cleanup_keeps_current_previous_and_staged(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    webui.stage_update(env["node"], "default")
+    webui.ensure_webui(env["node"], "default")  # 0.3.1 current, 0.3.0 previous
+    _fake_version(env, "0.2.8")
+    _fake_version(env, "0.2.9")
+    assert webui.cleanup_old_versions() == ["0.2.8", "0.2.9"]
+    left = sorted(p.name for p in (env["data"] / "tools" / "webui").iterdir())
+    assert left == ["0.3.0", "0.3.1"]
+
+
+def test_cleanup_keeps_a_version_a_live_process_runs(env, monkeypatch):
+    webui.ensure_webui(env["node"], "default")
+    old = webui.WebUIInfo("0.2.9", _fake_version(env, "0.2.9"))
+    marker = webui.mark_in_use(old)
+    assert marker is not None
+    assert marker.exists()
+    assert webui.cleanup_old_versions() == []
+    webui.release_in_use(marker)
+    assert webui.cleanup_old_versions() == ["0.2.9"]
+
+
+def test_cleanup_ignores_a_marker_whose_pid_was_reused(env, monkeypatch):
+    webui.ensure_webui(env["node"], "default")
+    path = _fake_version(env, "0.2.9")
+    # This process's pid with another start time: a dead process's marker.
+    start = webui._process_start_ms(os.getpid())
+    (path / ".in-use").mkdir()
+    (path / ".in-use" / f"{os.getpid()}-{start - 5000}").touch()
+    (path / ".in-use" / "garbage").touch()
+    assert webui.cleanup_old_versions() == ["0.2.9"]
+
+
+def test_cleanup_keeps_a_directory_it_cannot_rename(env, monkeypatch):
+    webui.ensure_webui(env["node"], "default")
+    path = _fake_version(env, "0.2.9")
+
+    def deny(src, dst):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(webui.os, "replace", deny)
+    assert webui.cleanup_old_versions() == []
+    assert (path / "dist" / "server.js").is_file()
+
+
+def test_cleanup_without_a_record_or_directory_does_nothing(env):
+    assert webui.cleanup_old_versions() == []
+    (env["data"] / "tools" / "webui").mkdir(parents=True)
+    assert webui.cleanup_old_versions() == []

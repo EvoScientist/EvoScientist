@@ -15,6 +15,7 @@ no ``npm install`` and no network once installed.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -351,12 +352,22 @@ def probe(root: Path, node_exe: Path, timeout: float = _PROBE_TIMEOUT) -> None:
 # --------------------------------------------------------------------------- #
 # Record
 # --------------------------------------------------------------------------- #
+# ``tools/webui.json``:
+#   version, path   the copy to run
+#   previous        the version recorded before it (kept by the cleanup)
+#   staged          {version, path}: downloaded in the background, not yet probed
+#   rejected        versions whose probe failed; the background never fetches
+#                   them again (``EvoSci setup`` may retry them)
 def webui_root() -> Path:
     return tools_dir() / "webui"
 
 
 def _record_path() -> Path:
     return tools_dir() / "webui.json"
+
+
+def _lock_path() -> Path:
+    return tools_dir() / "webui.lock"
 
 
 def _read_record() -> dict[str, Any] | None:
@@ -373,10 +384,42 @@ def _read_record() -> dict[str, Any] | None:
     return data
 
 
-def _write_record(info: WebUIInfo) -> None:
+def _write_record(record: Mapping[str, Any]) -> None:
     from ._install import atomic_write_text
 
-    atomic_write_text(_record_path(), json.dumps(info.detail()))
+    atomic_write_text(_record_path(), json.dumps(record))
+
+
+def _staged(record: Mapping[str, Any] | None) -> WebUIInfo | None:
+    staged = (record or {}).get("staged")
+    if not isinstance(staged, dict):
+        return None
+    version, path = staged.get("version"), staged.get("path")
+    if not isinstance(version, str) or not isinstance(path, str):
+        return None
+    return WebUIInfo(version, Path(path))
+
+
+def _rejected(record: Mapping[str, Any] | None) -> list[str]:
+    rejected = (record or {}).get("rejected")
+    return (
+        [v for v in rejected if isinstance(v, str)]
+        if isinstance(rejected, list)
+        else []
+    )
+
+
+def _set_current(record: dict[str, Any] | None, info: WebUIInfo) -> dict[str, Any]:
+    """``record`` with ``info`` as the copy to run; the old one becomes ``previous``."""
+    new = dict(record or {})
+    old = new.get("version")
+    if isinstance(old, str) and old != info.version:
+        new["previous"] = old
+    new.update(info.detail())
+    staged = _staged(new)
+    if staged is not None and staged.version == info.version:
+        new.pop("staged")
+    return new
 
 
 def recorded_webui(compat: str | None = None) -> WebUIInfo | None:
@@ -392,12 +435,36 @@ def recorded_webui(compat: str | None = None) -> WebUIInfo | None:
     return info
 
 
+def _set_aside(path: Path) -> bool:
+    """Move ``path`` out of the way with one rename, so the stale-temp cleanup
+    deletes it later. False when the rename fails: on Windows that means a
+    server still runs from it."""
+    try:
+        os.replace(
+            path, Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=path.parent)) / "old"
+        )
+    except OSError as exc:
+        logger.debug(f"Could not set {path} aside: {exc!r}")
+        return False
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # Install
 # --------------------------------------------------------------------------- #
-def _install(
-    version: str, dist: Mapping[str, Any], node_exe: Path, report: ProgressFn
-) -> WebUIInfo:
+def _download_into_place(
+    version: str,
+    dist: Mapping[str, Any],
+    report: ProgressFn,
+    node_exe: Path | None,
+) -> Path:
+    """Download, verify and unpack ``version`` into ``tools/webui/<version>/``.
+
+    With ``node_exe`` the copy is probed in its temporary directory before it
+    moves into place, so the version directory never holds an unchecked copy
+    that is recorded to run. Without it (a background download) the probe is
+    left to the next launch.
+    """
     root = webui_root()
     final = root / version
     name = f"{PACKAGE}@{version}"
@@ -429,22 +496,54 @@ def _install(
             ) from exc
         _check_layout(unpacked, version)
 
-        report(0.85, "Checking the WebUI server")
-        probe(unpacked, node_exe)
+        if node_exe is not None:
+            report(0.85, "Checking the WebUI server")
+            probe(unpacked, node_exe)
 
-        if final.exists():
-            # A copy left by an earlier run that was never recorded; set it
-            # aside (a rename fails on Windows while a server runs from it)
-            # and let the stale-temp cleanup remove it later.
-            os.replace(
-                final, Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX, dir=root)) / "old"
+        if final.exists() and not _set_aside(final):
+            # A copy that was never recorded, still held by a running server.
+            raise StageError(
+                "install_failed", f"{final} is in use and cannot be replaced."
             )
         move_into_place(unpacked, final, what="the WebUI")
-        info = WebUIInfo(version, final)
-        _write_record(info)
-        return info
+        return final
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _promote_staged(compat: str, node_exe: Path, report: ProgressFn) -> None:
+    """Make a copy staged by the background check the one to run, after it
+    passes the probe. Call with the stage lock held.
+
+    A staged copy outside the current range (the range may have moved since
+    the download) is dropped; one that fails its probe is dropped and its
+    version is not fetched in the background again.
+    """
+    record = _read_record()
+    staged = _staged(record)
+    if record is None or staged is None:
+        return
+    record = dict(record)
+    record.pop("staged")
+    if not in_range(staged.version, compat) or not staged.server_entry.is_file():
+        logger.info(
+            f"Dropping staged WebUI {staged.version}: not usable with {compat}."
+        )
+        _set_aside(staged.path)
+    else:
+        report(0.05, f"Checking WebUI {staged.version}")
+        try:
+            probe(staged.path, node_exe)
+        except StageError as exc:
+            logger.warning(
+                f"WebUI {staged.version} failed its check and is not used; "
+                f"keeping {record['version']}. {exc.message}"
+            )
+            record["rejected"] = sorted({*_rejected(record), staged.version})
+            _set_aside(staged.path)
+        else:
+            record = _set_current(record, staged)
+    _write_record(record)
 
 
 # The first failed install in this process; later calls raise it again without
@@ -461,19 +560,20 @@ def ensure_webui(
 ) -> WebUIInfo:
     """Return the WebUI copy to run, installing it if needed.
 
-    Without ``refresh`` the recorded copy is used as it is, with no network.
-    With ``refresh`` (``EvoSci setup``) the registry is asked for the newest
-    version in range; when it cannot be reached and a copy is recorded, that
-    copy is used. ``node_exe`` runs the probe and picks the ``npm`` whose
-    registry setting counts. Raises :class:`StageError`; a failure leaves any
-    previous record in place.
+    A copy staged by the background check is probed and, if it passes, takes
+    over first. Without ``refresh`` the recorded copy is then used as it is,
+    with no network. With ``refresh`` (``EvoSci setup``) the registry is asked
+    for the newest version in range; when it cannot be reached and a copy is
+    recorded, that copy is used. ``node_exe`` runs the probe and picks the
+    ``npm`` whose registry setting counts. Raises :class:`StageError`; a
+    failure leaves any previous record in place.
     """
     from .node import configured_mirror
 
     report = progress or (lambda _f, _m: None)
     compat = compat_range()
     recorded = recorded_webui(compat)
-    if recorded is not None and not refresh:
+    if recorded is not None and not refresh and _staged(_read_record()) is None:
         return recorded
 
     global _failed_install
@@ -485,11 +585,12 @@ def ensure_webui(
     root = webui_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(tools_dir() / "webui.lock")):
+        with FileLock(str(_lock_path())):
+            remove_stale_temp_dirs(root, _TEMP_PREFIX)
+            _promote_staged(compat, node_exe, report)
             recorded = recorded_webui(compat)
             if recorded is not None and not refresh:
                 return recorded
-            remove_stale_temp_dirs(root, _TEMP_PREFIX)
             registry = registry_url(mirror or configured_mirror(), node_exe)
             report(0.02, f"Checking {registry} for WebUI releases in {compat}")
             try:
@@ -503,7 +604,11 @@ def ensure_webui(
             if recorded is not None and recorded.version == version:
                 return recorded
             dist = metadata["versions"][version].get("dist") or {}
-            return _install(version, dist, node_exe, report)
+            info = WebUIInfo(
+                version, _download_into_place(version, dist, report, node_exe)
+            )
+            _write_record(_set_current(_read_record(), info))
+            return info
     except StageError as exc:
         _failed_install = exc
         raise
@@ -512,6 +617,178 @@ def ensure_webui(
             "install_failed", f"Could not install the WebUI into {root}: {exc}"
         )
         raise _failed_install from exc
+
+
+# --------------------------------------------------------------------------- #
+# Background update
+# --------------------------------------------------------------------------- #
+# How often a launch may ask the registry for a newer WebUI.
+CHECK_INTERVAL = 86_400
+
+
+def _check_stamp() -> Path:
+    return tools_dir() / "webui.check.json"
+
+
+def _checked_recently(now: float) -> bool:
+    try:
+        checked = json.loads(_check_stamp().read_text(encoding="utf-8"))["checked_at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return isinstance(checked, (int, float)) and 0 <= now - checked < CHECK_INTERVAL
+
+
+def stage_update(node_exe: Path, mirror: str | None = None) -> str | None:
+    """Download a newer WebUI in range for the next launch; return its version.
+
+    Runs at most once per :data:`CHECK_INTERVAL`, skips when another process
+    holds the stage lock, never touches the copy that runs and never starts a
+    process: the next launch probes the staged copy before it switches. Every
+    failure is logged at debug level only.
+    """
+    from filelock import FileLock, Timeout
+
+    from ._install import atomic_write_text
+    from .node import configured_mirror
+
+    now = time.time()
+    if _checked_recently(now):
+        return None
+    try:
+        with FileLock(str(_lock_path()), timeout=0):
+            atomic_write_text(_check_stamp(), json.dumps({"checked_at": now}))
+            record = _read_record()
+            if record is None:
+                return None
+            compat = compat_range()
+            registry = registry_url(mirror or configured_mirror(), node_exe)
+            metadata = fetch_metadata(registry)
+            version = pick_version(metadata["versions"], compat)
+            staged = _staged(record)
+            if (
+                version == record["version"]
+                or version in _rejected(record)
+                or (staged is not None and staged.version == version)
+            ):
+                return None
+            dist = metadata["versions"][version].get("dist") or {}
+            path = _download_into_place(version, dist, lambda _f, _m: None, None)
+            record = _read_record() or record
+            if staged is not None and staged.path != path:
+                _set_aside(staged.path)
+            _write_record({**record, "staged": WebUIInfo(version, path).detail()})
+            logger.debug(f"Staged WebUI {version} for the next launch.")
+            return version
+    except Timeout:
+        return None
+    except Exception as exc:
+        logger.debug(f"Background WebUI update check failed: {exc!r}")
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# In use and cleanup
+# --------------------------------------------------------------------------- #
+_IN_USE = ".in-use"
+
+
+def _process_start_ms(pid: int) -> int | None:
+    import psutil
+
+    try:
+        return int(psutil.Process(pid).create_time() * 1000)
+    except psutil.NoSuchProcess:
+        return None
+
+
+def mark_in_use(info: WebUIInfo, pid: int | None = None) -> Path | None:
+    """Mark ``info`` as run by ``pid`` (default: this process) until
+    :func:`release_in_use`. The name carries the process start time, so a
+    reused pid does not keep a dead marker alive."""
+    pid = os.getpid() if pid is None else pid
+    start = _process_start_ms(pid)
+    if start is None:
+        return None
+    marker = info.path / _IN_USE / f"{pid}-{start}"
+    try:
+        marker.parent.mkdir(exist_ok=True)
+        marker.touch()
+    except OSError as exc:
+        logger.debug(f"Could not mark {info.path} in use: {exc!r}")
+        return None
+    return marker
+
+
+def release_in_use(marker: Path | None) -> None:
+    if marker is not None:
+        with contextlib.suppress(OSError):
+            marker.unlink()
+
+
+def _marker_alive(name: str) -> bool:
+    import psutil
+
+    try:
+        pid_text, start_text = name.split("-", 1)
+        pid, start = int(pid_text), int(start_text)
+    except ValueError:
+        return False
+    try:
+        actual = _process_start_ms(pid)
+    except psutil.Error:
+        return True  # cannot tell (e.g. access denied): keep the copy
+    return actual is not None and abs(actual - start) <= 1
+
+
+def _in_use(version_dir: Path) -> bool:
+    """True while a live process runs this copy; removes dead markers."""
+    alive = False
+    with contextlib.suppress(OSError):
+        for marker in (version_dir / _IN_USE).iterdir():
+            if _marker_alive(marker.name):
+                alive = True
+            else:
+                with contextlib.suppress(OSError):
+                    marker.unlink()
+    return alive
+
+
+def cleanup_old_versions() -> list[str]:
+    """Delete installed versions other than the current, the previous and a
+    staged one; return their names.
+
+    A version a live process runs is kept. Each directory is first renamed
+    with a single ``os.replace``: on Windows that fails while a server runs
+    from it, and a renamed directory is never mistaken for an install, even if
+    its removal stops halfway. Skips when another process holds the stage lock.
+    """
+    from filelock import FileLock, Timeout
+
+    root = webui_root()
+    removed: list[str] = []
+    try:
+        with FileLock(str(_lock_path()), timeout=0):
+            record = _read_record()
+            if record is None:
+                return removed
+            staged = _staged(record)
+            keep = {record["version"], record.get("previous")}
+            if staged is not None:
+                keep.add(staged.version)
+            for version_dir in sorted(root.iterdir()):
+                if version_dir.name.startswith(".") or not version_dir.is_dir():
+                    continue
+                in_use = _in_use(version_dir)
+                if version_dir.name in keep or in_use:
+                    continue
+                if _set_aside(version_dir):
+                    removed.append(version_dir.name)
+            remove_stale_temp_dirs(root, _TEMP_PREFIX)
+    except Timeout:
+        pass
+    except OSError as exc:
+        logger.debug(f"WebUI cleanup failed: {exc!r}")
+    return removed
 
 
 # --------------------------------------------------------------------------- #
@@ -535,7 +812,11 @@ __all__ = [
     "PACKAGE",
     "WEBUI_COMPAT",
     "WebUIInfo",
+    "cleanup_old_versions",
     "compat_range",
     "ensure_webui",
+    "mark_in_use",
+    "release_in_use",
     "run_stage",
+    "stage_update",
 ]
