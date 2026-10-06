@@ -436,6 +436,13 @@ def test_a_marker_in_another_prefix_does_not_count(monkeypatch, tmp_path):
     assert re_env._unusable_reason(f"3.12\n{tmp_path}\n0\n") is None
 
 
+def test_find_usable_python_rejects_what_the_probe_reports_unusable(env, monkeypatch):
+    exe = _fake_python(env["tmp"] / "old" / "bin")
+    monkeypatch.setenv("PATH", str(exe.parent))
+    env["run"].system_output[os.path.normcase(str(exe))] = "3.8\n/opt/old\n0\n"
+    assert re_env.find_usable_python() is None
+
+
 def test_find_usable_python_runs_the_python_3_probe(env, monkeypatch):
     exe = _fake_python(env["tmp"] / "conda" / "bin")
     monkeypatch.setenv("PATH", str(exe.parent))
@@ -570,6 +577,15 @@ def test_repair_at_the_pin_clears_an_unpinned_package(env):
     assert re_env.ensure_research_env("default").unpinned == []
 
 
+def test_repair_keeps_the_unpinned_packages_it_does_not_reinstall(env):
+    env["run"].no_wheel = {"scipy"}
+    re_env.ensure_research_env("default")
+    env["run"].imports_script = [False]
+    env["run"].failed_packages = ["pandas"]
+    assert re_env.ensure_research_env("default").unpinned == ["scipy"]
+    assert re_env.ensure_research_env("default").unpinned == ["scipy"]
+
+
 def test_marker_from_an_older_version_still_counts_as_ready(env):
     """#542 wrote only the Python version into the marker."""
     re_env.ensure_research_env("default")
@@ -578,6 +594,22 @@ def test_marker_from_an_older_version_still_counts_as_ready(env):
     result = re_env.ensure_research_env("default")
     assert result == re_env.EnvResult("3.12.9", [])
     assert env["run"].kinds() == ["imports"]
+
+
+def test_a_package_falls_back_only_once(env, monkeypatch):
+    def lists_versions_for_any_scipy(cmd):
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            f"ERROR: Could not find a version that satisfies the requirement"
+            f" {cmd[-1]} (from versions: 1.18.0)\n",
+        )
+
+    monkeypatch.setattr(env["run"], "_pip_install", lists_versions_for_any_scipy)
+    with pytest.raises(StageError) as exc:
+        re_env.ensure_research_env("default")
+    assert exc.value.code == "install_failed"
+    assert len(env["run"].pip_requirements()) == 2
 
 
 def test_stage_without_a_fallback_has_no_unpinned_detail(env):
