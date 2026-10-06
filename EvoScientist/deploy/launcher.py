@@ -24,6 +24,7 @@ Design rules that keep it shell-agnostic:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import signal
@@ -39,7 +40,6 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-# Front-end npm package + spec. ``@latest`` → always the newest published UI.
 _DEFAULT_WEBUI_PORT = 4716
 _DEFAULT_WEBUI_HOST = "127.0.0.1"
 
@@ -72,6 +72,8 @@ class LaunchResult:
     webui_url: str
     backend_started: bool  # True = we own backend teardown; False = reused
     warnings: list[str] = field(default_factory=list)
+    # True when wait_ready() opened a browser (False on a host without one).
+    browser_opened: bool = False
 
 
 class LauncherError(Exception):
@@ -260,7 +262,11 @@ class InstalledWebUIRunner:
             self._marker = mark_in_use(info)
         cleanup_old_versions()
         self._bundled = BundledWebUIRunner(info.path, node.path, self._log_path)
-        self._bundled.preflight(cfg)
+        try:
+            self._bundled.preflight(cfg)
+        except BaseException:
+            self.release()
+            raise
 
     def start(self, cfg: LauncherConfig, env: dict[str, str]) -> subprocess.Popen:
         if self._bundled is None:  # narrowed for type-checkers
@@ -268,10 +274,15 @@ class InstalledWebUIRunner:
         return self._bundled.start(cfg, env)
 
     def stop(self, proc: subprocess.Popen) -> None:
-        from ..setup.webui import release_in_use
-
         if self._bundled is not None:
             self._bundled.stop(proc)
+        self.release()
+
+    def release(self) -> None:
+        """Drop this process's in-use marker (idempotent). The launcher calls
+        it on every teardown, also when the front-end never started."""
+        from ..setup.webui import release_in_use
+
         release_in_use(self._marker)
         self._marker = None
 
@@ -442,9 +453,10 @@ class WebUILauncher:
             self._runner, "handles_browser_open", False
         ):
             try:
-                webbrowser.open(self.webui_url)
+                opened = bool(webbrowser.open(self.webui_url))
             except Exception:  # pragma: no cover - best-effort
-                pass
+                opened = False
+            return dataclasses.replace(self._result(), browser_opened=opened)
 
         return self._result()
 
@@ -473,6 +485,12 @@ class WebUILauncher:
             if self._webui_proc is not None:
                 proc, self._webui_proc = self._webui_proc, None
                 self._runner.stop(proc)
+            # A runner that marks its copy in use in preflight (the installed
+            # one) releases it here too when a later step failed before the
+            # front-end started.
+            release = getattr(self._runner, "release", None)
+            if release is not None:
+                release()
             if self._backend_proc is not None and not self._cfg.keepalive:
                 from ..langgraph_dev.manager import stop_langgraph_dev
 

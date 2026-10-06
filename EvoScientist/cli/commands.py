@@ -276,8 +276,8 @@ def setup(
     ] = None,
 ):
     """Install what EvoScientist needs beyond the Python package (Node.js, Git
-    for Windows on Windows, and a Python for the agent's shell when none is on
-    PATH).
+    for Windows on Windows, a Python for the agent's shell when none is on
+    PATH, and the WebUI).
 
     Runs every stage that applies to this platform, in order. With ``--json``
     stdout carries only the JSON event lines; everything else goes to stderr.

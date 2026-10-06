@@ -175,13 +175,16 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             f"[dim]Starting WebUI {escape(runner.version or '')}...[/dim]",
             spinner="dots",
         ):
-            launcher.wait_ready()
+            ready = launcher.wait_ready()
     except LauncherError as exc:
         if exc.code == "webui_start_failed" and not exc.detail:
             exc.detail = f"See {_shorten(str(webui_log))}."
         _render_launcher_error(exc)
         raise typer.Exit(1) from exc
     runner.start_update_check()
+    browser_note = (
+        "opened in your browser" if ready.browser_opened else "open it in your browser"
+    )
 
     # The UI reaches the backend from the BROWSER; when only the front-end is
     # exposed, remote pages load but every request fails — say so.
@@ -202,7 +205,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                 f"[dim](langgraph dev — Assistant: EvoScientist)[/dim]\n"
                 f"[bold]WebUI:[/bold]    "
                 f"http://{_format_hostport(cfg.webui_host, cfg.webui_port)}  "
-                f"[dim](opened in your browser)[/dim]\n"
+                f"[dim]({browser_note})[/dim]\n"
                 f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n"
                 f"          {_shorten(str(webui_log))}\n"
                 f"{remote_backend_hint}\n"

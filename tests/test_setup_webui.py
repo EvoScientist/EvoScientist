@@ -622,3 +622,55 @@ def test_cleanup_without_a_record_or_directory_does_nothing(env):
     assert webui.cleanup_old_versions() == []
     (env["data"] / "tools" / "webui").mkdir(parents=True)
     assert webui.cleanup_old_versions() == []
+
+
+# --------------------------------------------------------------------------- #
+# Review round 1: no downgrade, live leftovers, stamp, malformed metadata
+# --------------------------------------------------------------------------- #
+def test_a_lagging_registry_never_downgrades(env, monkeypatch):
+    """A registry whose newest release is older than the copy we run (a
+    mirror or company proxy that lags) leaves the copy alone."""
+    webui.ensure_webui(env["node"], "default")  # 0.3.1
+    del env["reg"].metadata["versions"]["0.3.1"]
+    assert webui.stage_update(env["node"], "default") is None
+    assert "staged" not in _record(env["data"])
+    assert webui.ensure_webui(env["node"], "default", refresh=True).version == "0.3.1"
+    assert _record(env["data"])["version"] == "0.3.1"
+
+
+def test_background_update_does_not_replace_a_newer_staged_copy(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    webui.stage_update(env["node"], "default")  # stages 0.3.1
+    monkeypatch.setattr(webui, "_checked_recently", lambda now: False)
+    del env["reg"].metadata["versions"]["0.3.1"]
+    assert webui.stage_update(env["node"], "default") is None
+    assert _record(env["data"])["staged"]["version"] == "0.3.1"
+
+
+def test_a_leftover_copy_a_live_process_runs_is_not_replaced(env):
+    leftover = webui.WebUIInfo("0.3.1", _fake_version(env, "0.3.1"))
+    marker = webui.mark_in_use(leftover)
+    with pytest.raises(StageError) as exc:
+        webui.ensure_webui(env["node"], "default")
+    assert exc.value.code == "install_failed"
+    assert "in use" in exc.value.message
+    assert marker.exists()
+    assert leftover.server_entry.is_file()
+
+
+def test_an_offline_check_does_not_stamp_the_day(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    env["reg"].offline = True
+    assert webui.stage_update(env["node"], "default") is None
+    assert not (env["data"] / "tools" / "webui.check.json").exists()
+    env["reg"].offline = False
+    assert webui.stage_update(env["node"], "default") == "0.3.1"
+    assert (env["data"] / "tools" / "webui.check.json").exists()
+
+
+@pytest.mark.parametrize("entry", ["not a dict", {"dist": "not a dict"}, {}])
+def test_malformed_version_entry_is_download_failed(env, entry):
+    env["reg"].metadata["versions"]["0.3.1"] = entry
+    with pytest.raises(StageError) as exc:
+        webui.ensure_webui(env["node"], "default")
+    assert exc.value.code == "download_failed"

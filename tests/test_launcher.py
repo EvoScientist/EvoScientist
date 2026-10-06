@@ -815,3 +815,33 @@ def test_build_launcher_config_blank_host_falls_back_to_loopback(monkeypatch):
     config = SimpleNamespace(default_workdir="/tmp/x", webui_host="   ")
     cfg = lm.build_launcher_config(config, workspace_dir=None)
     assert cfg.webui_host == "127.0.0.1"
+
+
+def test_backend_failure_releases_the_in_use_marker(monkeypatch, tmp_path):
+    _node, calls = _installed_env(monkeypatch, tmp_path)
+
+    def broken_backend(*_a):
+        raise lm.LauncherError("backend_start_failed", "boom")
+
+    monkeypatch.setattr(lm, "_resolve_backend", broken_backend)
+    launcher = lm.WebUILauncher(object(), _cfg(), lm.InstalledWebUIRunner())
+    with pytest.raises(lm.LauncherError):
+        launcher.start()
+    assert calls["released"] == tmp_path / "marker"
+
+
+def test_failed_bundled_preflight_releases_the_in_use_marker(monkeypatch, tmp_path):
+    _node, calls = _installed_env(monkeypatch, tmp_path)
+    (tmp_path / "dist" / "server.js").unlink()
+    with pytest.raises(lm.LauncherError):
+        lm.InstalledWebUIRunner().preflight(_cfg())
+    assert calls["released"] == tmp_path / "marker"
+
+
+@pytest.mark.parametrize("opened", [True, False])
+def test_wait_ready_reports_whether_the_browser_opened(monkeypatch, opened):
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: True)
+    monkeypatch.setattr(lm, "_poll_ready", lambda *a, **k: None)
+    monkeypatch.setattr(lm.webbrowser, "open", lambda _url: opened)
+    launcher = lm.WebUILauncher(object(), _cfg(open_browser=True), _FakeRunner())
+    assert launcher.wait_ready(timeout=1).browser_opened is opened

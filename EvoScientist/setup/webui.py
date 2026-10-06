@@ -119,6 +119,17 @@ def in_range(version: str, compat: str) -> bool:
     return not parsed.is_prerelease and parsed in SpecifierSet(compat)
 
 
+def is_newer(version: str, than: str) -> bool:
+    """True when ``version`` sorts after ``than`` (PEP 440). A registry that
+    lags behind the installed copy must never downgrade it."""
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        return Version(version) > Version(than)
+    except InvalidVersion:
+        return False
+
+
 def pick_version(versions: Mapping[str, Any], compat: str) -> str:
     """The newest release in ``compat``; pre-releases and versions that are not
     valid PEP 440 (npm allows ``0.4.0-beta.1``) are skipped."""
@@ -181,6 +192,18 @@ def fetch_metadata(registry: str) -> dict[str, Any]:
             "download_failed", f"{registry} sent no version list for {PACKAGE}."
         )
     return data
+
+
+def dist_of(metadata: Mapping[str, Any], version: str) -> Mapping[str, Any]:
+    """The ``dist`` object of ``version`` in the registry's document."""
+    entry = metadata["versions"].get(version)
+    dist = entry.get("dist") if isinstance(entry, dict) else None
+    if not isinstance(dist, dict):
+        raise StageError(
+            "download_failed",
+            f"The registry sent no dist data for {PACKAGE}@{version}.",
+        )
+    return dist
 
 
 def verify_integrity(path: Path, dist: Mapping[str, Any], name: str) -> None:
@@ -500,8 +523,9 @@ def _download_into_place(
             report(0.85, "Checking the WebUI server")
             probe(unpacked, node_exe)
 
-        if final.exists() and not _set_aside(final):
-            # A copy that was never recorded, still held by a running server.
+        if final.exists() and (_in_use(final) or not _set_aside(final)):
+            # A copy that was never recorded, still run by a live process (its
+            # in-use marker; on Windows the rename also fails).
             raise StageError(
                 "install_failed", f"{final} is in use and cannot be replaced."
             )
@@ -601,9 +625,9 @@ def ensure_webui(
                     return recorded
                 raise
             version = pick_version(metadata["versions"], compat)
-            if recorded is not None and recorded.version == version:
+            if recorded is not None and not is_newer(version, recorded.version):
                 return recorded
-            dist = metadata["versions"][version].get("dist") or {}
+            dist = dist_of(metadata, version)
             info = WebUIInfo(
                 version, _download_into_place(version, dist, report, node_exe)
             )
@@ -656,22 +680,24 @@ def stage_update(node_exe: Path, mirror: str | None = None) -> str | None:
         return None
     try:
         with FileLock(str(_lock_path()), timeout=0):
-            atomic_write_text(_check_stamp(), json.dumps({"checked_at": now}))
             record = _read_record()
             if record is None:
                 return None
             compat = compat_range()
             registry = registry_url(mirror or configured_mirror(), node_exe)
             metadata = fetch_metadata(registry)
+            # Stamped only once the registry answered, as update_check.py does:
+            # an offline launch leaves the check to the next one.
+            atomic_write_text(_check_stamp(), json.dumps({"checked_at": now}))
             version = pick_version(metadata["versions"], compat)
             staged = _staged(record)
             if (
-                version == record["version"]
+                not is_newer(version, record["version"])
                 or version in _rejected(record)
-                or (staged is not None and staged.version == version)
+                or (staged is not None and not is_newer(version, staged.version))
             ):
                 return None
-            dist = metadata["versions"][version].get("dist") or {}
+            dist = dist_of(metadata, version)
             path = _download_into_place(version, dist, lambda _f, _m: None, None)
             record = _read_record() or record
             if staged is not None and staged.path != path:
