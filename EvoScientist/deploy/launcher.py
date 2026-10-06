@@ -125,7 +125,8 @@ class NpxWebUIRunner:
             return
         # Users who installed with pip / uv may never have run `EvoSci setup`:
         # install the private Node now instead of failing.
-        from ..setup.node import activate_runtime, ensure_node, log_progress, tools_dir
+        from ..setup._install import tools_dir
+        from ..setup.node import activate_runtime, ensure_node, log_progress
         from ..setup.protocol import StageError
 
         logger.warning(f"Node.js not found on PATH; installing it into {tools_dir()}")

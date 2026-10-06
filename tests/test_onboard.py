@@ -1504,6 +1504,43 @@ class TestStepMcpServersNpxFailure:
         assert result == []
         mock_add.assert_not_called()
 
+    @staticmethod
+    def _render_fetch_failure(exc):
+        """Run the step with a failing index fetch through a real Rich console."""
+        import io
+
+        from rich.console import Console
+
+        from EvoScientist.config.onboard.steps import _step_mcp_servers
+
+        out = io.StringIO()
+        with (
+            patch("EvoScientist.mcp.registry.fetch_marketplace_index", side_effect=exc),
+            patch(
+                "EvoScientist.config.onboard.steps.console",
+                Console(file=out, width=500, color_system=None),
+            ),
+        ):
+            result = _step_mcp_servers()
+        return result, out.getvalue()
+
+    def test_index_failure_prints_the_reason(self):
+        from EvoScientist.git_cli import GitNotFoundError
+
+        result, output = self._render_fetch_failure(GitNotFoundError())
+
+        assert result == []
+        assert "git was not found on PATH." in output
+        assert "GitNotFoundError" not in output
+
+    def test_index_failure_reason_is_not_read_as_markup(self):
+        result, output = self._render_fetch_failure(
+            RuntimeError("git clone failed: fatal: [/b] bad")
+        )
+
+        assert result == []
+        assert "git clone failed: fatal: [/b] bad" in output
+
 
 class TestStepThinking:
     def test_returns_show_thinking(self):
