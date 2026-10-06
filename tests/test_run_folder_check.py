@@ -466,7 +466,8 @@ def test_merge_runs_config_replaces_caller_folders():
 
 
 def test_server_gateway_run_config_forwards_target_folders(monkeypatch):
-    """The gateway's own main-agent runs carry their folders like child runs."""
+    """The gateway's own main-agent runs carry their folders like child runs,
+    over any a caller put in ``configurable_extra``."""
     import EvoScientist.EvoScientist as evo
     from EvoScientist.gateway.server import LangGraphServerGateway
     from EvoScientist.gateway.types import GraphTarget
@@ -480,17 +481,19 @@ def test_server_gateway_run_config_forwards_target_folders(monkeypatch):
         "EvoScientist.backends.hitl_suppressed_for_run", lambda _cfg: False
     )
     gateway = object.__new__(LangGraphServerGateway)
+    stale = {"workspace_dir": "/b", "run_dir": "/b/runs/y", "active_teams": ["t"]}
 
     run_mode = gateway._resolve_run_config(
-        "t1", None, target=GraphTarget(workspace_dir="/ws", run_dir="/ws/runs/x")
+        "t1", stale, target=GraphTarget(workspace_dir="/ws", run_dir="/ws/runs/x")
     )["configurable"]
     daemon = gateway._resolve_run_config(
-        "t1", None, target=GraphTarget(workspace_dir="/ws")
+        "t1", stale, target=GraphTarget(workspace_dir="/ws")
     )["configurable"]
     bare = gateway._resolve_run_config("t1", None)["configurable"]
 
     assert (run_mode["workspace_dir"], run_mode["run_dir"]) == ("/ws", "/ws/runs/x")
     assert run_mode["model"] == "m"
+    assert run_mode["active_teams"] == ["t"]
     assert daemon["workspace_dir"] == "/ws"
     assert "run_dir" not in daemon
     assert "workspace_dir" not in bare

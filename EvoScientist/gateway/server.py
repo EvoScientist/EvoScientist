@@ -628,8 +628,9 @@ class LangGraphServerGateway:
     ) -> dict[str, Any]:
         """Assemble this run's config, reading the live session config here.
 
-        The target's folders go in first, so the server can refuse a run
-        meant for folders it does not serve.
+        The target's folders go in last and replace any a caller put in
+        ``configurable_extra``, so the server checks the run against the
+        folders the session works in and can refuse it when it serves others.
 
         ``_ensure_config`` returns the cached, in-place-mutated session
         config — NOT a fresh disk read — so mid-session ``/model`` edits that
@@ -643,13 +644,6 @@ class LangGraphServerGateway:
 
         cfg = _ensure_config()
         overrides: dict[str, Any] = {}
-        if target is not None:
-            for key, value in (
-                ("workspace_dir", target.workspace_dir),
-                ("run_dir", target.run_dir),
-            ):
-                if value:
-                    overrides[key] = value
         model = getattr(cfg, "model", None)
         provider = getattr(cfg, "provider", None)
         if model:
@@ -662,13 +656,27 @@ class LangGraphServerGateway:
             if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
             else None
         )
-        return resolve_per_run_config(
+        folders = (
+            {"workspace_dir": target.workspace_dir, "run_dir": target.run_dir}
+            if target is not None
+            else {}
+        )
+        extra = {
+            key: value
+            for key, value in (configurable_extra or {}).items()
+            if key not in folders
+        }
+        config = resolve_per_run_config(
             thread_id,
-            configurable_extra,
+            extra,
             per_run_overrides=overrides,
             recursion_limit=recursion_limit,
             hitl_suppressed=hitl_suppressed_for_run(cfg),
         )
+        for key, value in folders.items():
+            if value:
+                config["configurable"][key] = value
+        return config
 
     async def _ensure_thread(self, request: RunRequest) -> None:
         await self.thread_store.ensure_thread_exists(
