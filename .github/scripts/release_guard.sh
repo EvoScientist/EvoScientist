@@ -7,8 +7,9 @@
 #            these is published neither to PyPI nor as versioned images.
 #   pr       (release-check.yml) The uv.lock and constraints.txt checks, only
 #            when the pull request changes the pyproject.toml version, so a
-#            release PR is fixed before its tag exists. The workflow checks
-#            out the merge commit with fetch-depth 2: HEAD^1 is the base branch.
+#            release PR is fixed before its tag exists. BASE_SHA is the pull
+#            request's base commit; the checkout has only the merge commit, so
+#            it is fetched here.
 set -euo pipefail
 
 EXPORT_ARGS=(--frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate)
@@ -22,8 +23,10 @@ check_lock_and_constraints() {
   # Printed so a mismatch caused by a change in uv's export format can be
   # reproduced with the same uv: uvx uv@<version> export ...
   uv --version
+  # Fails both when uv.lock is out of date and when pyproject.toml cannot be
+  # resolved at all; uv's own output above says which.
   if ! uv lock --check; then
-    echo "::error::uv.lock is out of date with pyproject.toml. Run: uv lock && ${EXPORT_CMD}"
+    echo "::error::uv lock --check failed (see uv's output above). Run: uv lock, then: ${EXPORT_CMD}"
     exit 1
   fi
   local expected
@@ -53,7 +56,8 @@ case "${1:-}" in
     ;;
   pr)
     VERSION=$(pyproject_version < pyproject.toml)
-    BASE_VERSION=$(git show HEAD^1:pyproject.toml | pyproject_version)
+    git fetch --quiet --depth=1 origin "${BASE_SHA:?BASE_SHA must be the pull request base commit}"
+    BASE_VERSION=$(git show "$BASE_SHA:pyproject.toml" | pyproject_version)
     if [ "$VERSION" = "$BASE_VERSION" ]; then
       echo "pyproject version unchanged ($VERSION): not a release PR, nothing to check."
       exit 0

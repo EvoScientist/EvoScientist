@@ -61,6 +61,8 @@ uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-head
 
 The file is generated; never edit it by hand. A check on the release PR and the publish workflows refuse a release whose `uv.lock` is out of date or whose `constraints.txt` does not match it. Other PRs do not need to regenerate it.
 
+Installs read the file from the release tag, and jsDelivr caches tagged files for a year. A release with a wrong `constraints.txt` is fixed by a new patch release, never by moving the tag.
+
 ## Code style
 
 - We use [Ruff](https://docs.astral.sh/ruff/) for linting. Run `uv run ruff check .` before pushing.

@@ -22,13 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # The PR merge commit plus its first parent, the base branch, whose
-          # pyproject.toml version the script compares against.
-          fetch-depth: 2
           persist-credentials: false
       # Full tag required — setup-uv dropped major/minor tags in v8.0.0, so
       # `@v9` does not resolve. See the note in lint.yml.
       - uses: astral-sh/setup-uv@v9.0.0
 
       - name: Check uv.lock and constraints.txt (release PRs only)
+        env:
+          # The script fetches it and compares its pyproject.toml version.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: bash .github/scripts/release_guard.sh pr
