@@ -50,6 +50,17 @@ If you want to add a niche or specialized workflow, consider contributing to the
 4. Open a PR against `main` and fill in the PR template.
 5. A maintainer will review your PR. Please be responsive to feedback.
 
+## Releases
+
+The release PR (`release: vX.Y.Z`) also refreshes `constraints.txt`, which pins every dependency to its version in `uv.lock`, so installs from the release tag get the tested set:
+
+```bash
+uv lock
+uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate -o constraints.txt
+```
+
+The file is generated; never edit it by hand. A check on the release PR and the publish workflows refuse a release whose `uv.lock` is out of date or whose `constraints.txt` does not match it. Other PRs do not need to regenerate it.
+
 ## Code style
 
 - We use [Ruff](https://docs.astral.sh/ruff/) for linting. Run `uv run ruff check .` before pushing.
