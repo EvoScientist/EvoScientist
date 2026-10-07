@@ -587,8 +587,9 @@ def ensure_webui(
     A copy staged by the background check is probed and, if it passes, takes
     over first. Without ``refresh`` the recorded copy is then used as it is,
     with no network. With ``refresh`` (``EvoSci setup``) the registry is asked
-    for the newest version in range; when it cannot be reached and a copy is
-    recorded, that copy is used. ``node_exe`` runs the probe and picks the
+    for the newest version in range; when it cannot offer one (offline, an
+    HTTP error, nothing in range) and a copy is recorded, that copy is used
+    and a warning says why. ``node_exe`` runs the probe and picks the
     ``npm`` whose registry setting counts. Raises :class:`StageError`; a
     failure leaves any previous record in place.
     """
@@ -619,12 +620,15 @@ def ensure_webui(
             report(0.02, f"Checking {registry} for WebUI releases in {compat}")
             try:
                 metadata = fetch_metadata(registry)
-            except StageError:
+                version = pick_version(metadata["versions"], compat)
+            except StageError as exc:
+                # The registry cannot offer a release in range (offline, an
+                # HTTP error, nothing in range): keep the installed copy and
+                # say why.
                 if recorded is not None:
-                    logger.info("Registry unreachable; keeping the recorded WebUI.")
+                    logger.warning(f"Keeping WebUI {recorded.version}: {exc.message}")
                     return recorded
                 raise
-            version = pick_version(metadata["versions"], compat)
             if recorded is not None and not is_newer(version, recorded.version):
                 return recorded
             dist = dist_of(metadata, version)

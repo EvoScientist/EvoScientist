@@ -327,10 +327,17 @@ def test_recorded_copy_is_used_without_the_network(env):
     assert env["reg"].urls == []
 
 
-def test_refresh_offline_keeps_the_recorded_copy(env):
+@pytest.mark.parametrize("problem", ["offline", "nothing in range"])
+def test_refresh_keeps_the_recorded_copy_and_says_why(env, caplog, problem):
     webui.ensure_webui(env["node"], "default")
-    env["reg"].offline = True
-    assert webui.ensure_webui(env["node"], "default", refresh=True).version == "0.3.1"
+    if problem == "offline":
+        env["reg"].offline = True
+    else:
+        env["reg"].metadata["versions"] = {}
+    with caplog.at_level(logging.WARNING, logger=webui.logger.name):
+        version = webui.ensure_webui(env["node"], "default", refresh=True).version
+    assert version == "0.3.1"
+    assert "Keeping WebUI 0.3.1" in caplog.text
 
 
 def test_refresh_with_the_newest_recorded_downloads_nothing(env):
