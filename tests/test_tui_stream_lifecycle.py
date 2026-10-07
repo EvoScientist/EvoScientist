@@ -25,6 +25,7 @@ async def test_pause_closes_stream_in_tui_turn_context(monkeypatch, workspace, p
     loop_errors: list[dict] = []
 
     async def _fake_stream(_request):
+        """Bind the sink until the owning TUI task closes this stream."""
         nonlocal stream_calls
         stream_calls += 1
         started_in.append(asyncio.current_task())
