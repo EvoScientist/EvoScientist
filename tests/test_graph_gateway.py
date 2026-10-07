@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1421,7 +1422,10 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monke
         )
     ]
     assert events[-1]["type"] == "done"
-    assert "metadata" in caplog.text.lower()
+    records = [r for r in caplog.records if r.name == "EvoScientist.gateway.server"]
+    assert any(
+        r.levelno == logging.WARNING and "abc12345" in r.getMessage() for r in records
+    )
     assert len(threads.created) == 1
     if resume:
         respond.assert_awaited_once_with(stream, "abc12345", {"answer": "yes"})
@@ -1435,6 +1439,7 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monke
 async def test_metadata_best_effort_does_not_swallow_thread_registration_failure(
     monkeypatch,
 ):
+    """Guard against a future over-wide try that swallows registration errors."""
     gateway = LangGraphServerGateway(thread_store=MagicMock())
     monkeypatch.setattr(
         LangGraphServerGateway,

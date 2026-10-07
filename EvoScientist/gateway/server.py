@@ -676,18 +676,19 @@ class LangGraphServerGateway:
         # Refresh metadata on every run: ensure_thread_exists is a no-op on
         # existing threads (if_exists="do_nothing"), so without this update
         # fields like updated_at and model would go stale after the first run.
+        # Best-effort: the graph is selected by the stream's assistant_id and
+        # the workspace by server config, so a failed refresh only leaves
+        # listing metadata stale until the next successful turn.
+        metadata = _build_thread_metadata(
+            graph_id=self._target_graph_id(request.target),
+            workspace_dir=(
+                request.target.workspace_dir if request.target is not None else None
+            ),
+            metadata=request.metadata,
+        )
         try:
             await self.thread_store.client.threads.update(
-                request.thread_id,
-                metadata=_build_thread_metadata(
-                    graph_id=self._target_graph_id(request.target),
-                    workspace_dir=(
-                        request.target.workspace_dir
-                        if request.target is not None
-                        else None
-                    ),
-                    metadata=request.metadata,
-                ),
+                request.thread_id, metadata=metadata
             )
         except Exception:
             logger.warning(
