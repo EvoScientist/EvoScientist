@@ -6,6 +6,7 @@ import os
 from types import SimpleNamespace
 
 import EvoScientist.channels.standalone as standalone
+from EvoScientist.paths import Workspace
 
 
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
@@ -25,8 +26,7 @@ def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
             {"config": cfg, "workspace_dir": workspace_dir, "backend": backend}
         ),
     )
-    # Avoid mutating the real process-global workspace / creating dirs.
-    monkeypatch.setattr(paths_mod, "set_workspace_root", lambda path: None)
+    # Avoid creating the real data dirs.
     monkeypatch.setattr(paths_mod, "ensure_dirs", lambda: None)
     config = SimpleNamespace(
         gateway_backend=gateway_backend,
@@ -40,10 +40,12 @@ def test_ensure_dev_server_spawns_on_server_backend(monkeypatch, tmp_path):
         monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
     )
 
-    standalone._ensure_standalone_dev_server(config, backend="langgraph_server")
+    standalone._ensure_standalone_dev_server(
+        config, workspace_dir=str(tmp_path), backend="langgraph_server"
+    )
 
     assert len(ensure_calls) == 1
-    assert ensure_calls[0]["workspace_dir"] == os.path.abspath(str(tmp_path))
+    assert ensure_calls[0]["workspace_dir"] == str(tmp_path)
     # The resolved backend is forwarded so the manager spawns in full mode.
     assert ensure_calls[0]["backend"] == "langgraph_server"
 
@@ -53,20 +55,48 @@ def test_ensure_dev_server_noop_on_local_backend(monkeypatch, tmp_path):
         monkeypatch, gateway_backend="local", default_workdir=str(tmp_path)
     )
 
-    standalone._ensure_standalone_dev_server(config, backend="local")
+    standalone._ensure_standalone_dev_server(
+        config, workspace_dir=str(tmp_path), backend="local"
+    )
 
     assert ensure_calls == []
 
 
-def test_ensure_dev_server_falls_back_to_cwd(monkeypatch):
+def test_run_standalone_dev_server_falls_back_to_cwd(monkeypatch):
+    import EvoScientist.config as config_mod
+
     config, ensure_calls = _patch_manager(
         monkeypatch, gateway_backend="langgraph_server", default_workdir=""
     )
+    monkeypatch.setattr(config_mod, "get_effective_config", lambda: config)
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
 
-    standalone._ensure_standalone_dev_server(config, backend="langgraph_server")
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
 
     assert len(ensure_calls) == 1
     assert ensure_calls[0]["workspace_dir"] == os.getcwd()
+
+
+def test_run_standalone_uses_default_workdir(monkeypatch, tmp_path):
+    import EvoScientist.config as config_mod
+
+    config, ensure_calls = _patch_manager(
+        monkeypatch, gateway_backend="langgraph_server", default_workdir=str(tmp_path)
+    )
+    monkeypatch.setattr(config_mod, "get_effective_config", lambda: config)
+    seen: dict[str, object] = {}
+
+    def _fake_async_main(*args, workspace, **kwargs):
+        seen["workspace"] = workspace
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(standalone, "_async_main", _fake_async_main)
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert ensure_calls[0]["workspace_dir"] == str(Workspace(tmp_path).root)
+    assert seen["workspace"] == Workspace(tmp_path)
 
 
 def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
@@ -82,7 +112,7 @@ def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
     monkeypatch.setattr(
         standalone,
         "_ensure_standalone_dev_server",
-        lambda cfg, *, backend=None: ensure_configs.append(cfg),
+        lambda cfg, *, workspace_dir, backend=None: ensure_configs.append(cfg),
     )
     monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
 

@@ -108,12 +108,6 @@ def _run_deploy_once(
 
     monkeypatch.setattr(deploy_server, "console", _SilentConsole(captured["printed"]))
 
-    # Workspace setup mocks
-    from EvoScientist import paths as paths_mod
-
-    monkeypatch.setattr(paths_mod, "set_workspace_root", lambda _p: None)
-    monkeypatch.setattr(paths_mod, "ensure_dirs", lambda: None)
-
     # langgraph_dev.manager mocks
     from EvoScientist.langgraph_dev import manager as lgm
 

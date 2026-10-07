@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.langgraph_dev.http import app
+from EvoScientist.paths import Workspace
 
 client = TestClient(app)
 
@@ -280,14 +281,16 @@ def test_get_teams_returns_empty_list_when_no_experts_installed():
     assert body == {"teams": []}
 
 
-def test_get_teams_calls_loader_with_include_system_true():
+def test_get_teams_calls_loader_with_include_system_true(monkeypatch, tmp_path):
     """First-party experts ship as builtin skills; the endpoint must
     include the builtin tier or the gallery will be empty on a fresh
-    workspace with no user-installed experts."""
+    workspace with no user-installed experts, and it must look in the
+    server's workspace."""
+    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
     calls = []
 
-    def spy(include_system=False):
-        calls.append(include_system)
+    def spy(include_system=False, *, workspace):
+        calls.append((include_system, workspace))
         return []
 
     with patch(
@@ -295,7 +298,7 @@ def test_get_teams_calls_loader_with_include_system_true():
         new=spy,
     ):
         client.get("/api/teams")
-    assert calls == [True]
+    assert calls == [(True, Workspace(tmp_path))]
 
 
 # ---- /api/bg_process_status -----------------------------------------------

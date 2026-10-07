@@ -2004,6 +2004,79 @@ class TestLoadToolsProgressCallback:
 
         assert seen == [mcp_client._SERVER_GET_TOOLS_TIMEOUT_SECONDS]
 
+    @pytest.mark.parametrize(
+        ("server_process", "expected_tools"),
+        [("1", []), (None, ["ping"])],
+    )
+    def test_sync_loader_cuts_off_slow_stdio_only_in_langgraph_dev(
+        self, monkeypatch, server_process, expected_tools
+    ):
+        """``langgraph dev`` reaches ``_load_tools`` through the sync loader
+        (via ``_load_mcp_tools_cached``). A slow stdio server is cut off there
+        and left to finish everywhere else."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        class _SlowClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                await asyncio.sleep(0.5)
+                return [SimpleNamespace(name="ping")]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _SlowClient)
+        monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
+        if server_process is None:
+            monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        else:
+            monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", server_process)
+
+        config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
+        result = mcp_client.load_mcp_tools(config)
+
+        tools = [tool.name for agent_tools in result.values() for tool in agent_tools]
+        assert tools == expected_tools
+
+    def test_sync_loader_warns_with_the_timeout_reason(self, monkeypatch, caplog):
+        """With no ``on_progress`` (the ``langgraph dev`` path), a server that
+        runs out of time is logged with the timeout, not an empty reason."""
+        import asyncio
+        import logging
+
+        from EvoScientist.mcp import client as mcp_client
+
+        class _HangingClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                # Long enough to outlast the 0.05s limit, short enough that a
+                # missing limit fails the test instead of hanging it.
+                await asyncio.sleep(2)
+                return ["late"]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _HangingClient)
+        monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+
+        config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
+        with caplog.at_level(logging.WARNING, logger=mcp_client.logger.name):
+            mcp_client.load_mcp_tools(config)
+
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "'slow_srv'" in message and "timed out after 0.05s" in message
+            for message in warnings
+        ), warnings
+
 
 # ---- _ensure_node_for_stdio ----
 

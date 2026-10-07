@@ -261,8 +261,10 @@ def test_agent_uses_filtered_graph_class():
         _EvoFilteredGraph,
     )
 
-    assert isinstance(EvoScientist_agent, _EvoFilteredGraph)
-    assert isinstance(EvoScientist_agent.copy(update={}), _EvoFilteredGraph)
+    # Registered graphs sit behind a folder-checking factory; it serves this graph.
+    graph = EvoScientist_agent.graph
+    assert isinstance(graph, _EvoFilteredGraph)
+    assert isinstance(graph.copy(update={}), _EvoFilteredGraph)
 
 
 def test_all_registered_graphs_use_filtered_graph_class():
@@ -292,7 +294,7 @@ def test_all_registered_graphs_use_filtered_graph_class():
     config = json.loads(config_path.read_text())
     for name, path in config["graphs"].items():
         module_path, attr = path.rsplit(":", 1)
-        graph = getattr(import_module(module_path), attr)
+        graph = getattr(import_module(module_path), attr).graph
         assert isinstance(graph, _EvoFilteredGraph), (
             f"graph {name!r} ({path}) did not receive the class swap"
         )

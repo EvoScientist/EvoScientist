@@ -102,14 +102,14 @@ def test_read_active_teams_returns_empty_outside_runnable_context(mock_get_confi
 
 
 @patch("langgraph.config.get_config")
-def test_middleware_injects_concept_when_no_experts_invited(mock_get_config):
+def test_middleware_injects_concept_when_no_experts_invited(mock_get_config, workspace):
     """The ## Experts concept is injected every turn, even with no invites.
 
     Gating the whole block on invitation would make the expert mechanism
     vanish when nothing is invited — the trap the design avoids.
     """
     mock_get_config.return_value = {"configurable": {}}
-    middleware = ActiveTeamMiddleware()
+    middleware = ActiveTeamMiddleware(workspace)
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     assert "## Experts" in text
@@ -118,9 +118,11 @@ def test_middleware_injects_concept_when_no_experts_invited(mock_get_config):
 
 
 @patch("langgraph.config.get_config")
-def test_middleware_injects_concept_when_active_teams_empty_list(mock_get_config):
+def test_middleware_injects_concept_when_active_teams_empty_list(
+    mock_get_config, workspace
+):
     mock_get_config.return_value = {"configurable": {"active_teams": []}}
-    middleware = ActiveTeamMiddleware()
+    middleware = ActiveTeamMiddleware(workspace)
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     assert "## Experts" in text
@@ -141,25 +143,26 @@ def _mock_expert(name: str) -> MagicMock:
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
 def test_middleware_appends_invite_for_single_expert(
-    mock_get_config, mock_dispatchable
+    mock_get_config, mock_dispatchable, workspace
 ):
     mock_get_config.return_value = {
         "configurable": {"active_teams": ["idea-brainstorm"]},
     }
     mock_dispatchable.return_value = [_mock_expert("idea-brainstorm")]
-    middleware = ActiveTeamMiddleware()
+    middleware = ActiveTeamMiddleware(workspace)
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     assert "## Experts" in text  # concept always present
     assert "The user has invited" in text  # plus the invite block
     assert "`idea-brainstorm`" in text
     assert "base system" in text  # original preserved
+    mock_dispatchable.assert_called_once_with(workspace=workspace)
 
 
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
 def test_middleware_appends_invite_for_multiple_experts(
-    mock_get_config, mock_dispatchable
+    mock_get_config, mock_dispatchable, workspace
 ):
     """One <active_expert> tag names one or many invited experts."""
     mock_get_config.return_value = {
@@ -169,7 +172,7 @@ def test_middleware_appends_invite_for_multiple_experts(
         _mock_expert("idea-brainstorm"),
         _mock_expert("literature-review"),
     ]
-    middleware = ActiveTeamMiddleware()
+    middleware = ActiveTeamMiddleware(workspace)
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     assert "## Experts" in text
@@ -184,7 +187,7 @@ def test_middleware_appends_invite_for_multiple_experts(
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
 def test_middleware_omits_invite_for_undispatchable_names(
-    mock_get_config, mock_dispatchable
+    mock_get_config, mock_dispatchable, workspace
 ):
     """Names not in ``list_dispatchable_experts`` are dropped from the invite.
 
@@ -196,7 +199,7 @@ def test_middleware_omits_invite_for_undispatchable_names(
         "configurable": {"active_teams": ["nonexistent-expert"]},
     }
     mock_dispatchable.return_value = []  # nothing dispatchable
-    middleware = ActiveTeamMiddleware()
+    middleware = ActiveTeamMiddleware(workspace)
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     assert "## Experts" in text
@@ -206,7 +209,7 @@ def test_middleware_omits_invite_for_undispatchable_names(
 @patch("EvoScientist.subagents.expert_container.list_dispatchable_experts")
 @patch("langgraph.config.get_config")
 def test_middleware_drops_invited_expert_that_is_not_dispatchable(
-    mock_get_config, mock_dispatchable
+    mock_get_config, mock_dispatchable, workspace
 ):
     """An invited expert that stops being dispatchable — uninstalled, or its
     actor definition emptied — must drop out of the cue. Naming an expert
@@ -219,7 +222,7 @@ def test_middleware_drops_invited_expert_that_is_not_dispatchable(
     # literature-review invited but not dispatchable this turn.
     mock_dispatchable.return_value = [_mock_expert("idea-brainstorm")]
 
-    middleware = ActiveTeamMiddleware()
+    middleware = ActiveTeamMiddleware(workspace)
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     # Single-cue shape (only one expert survived the filter).
@@ -229,10 +232,12 @@ def test_middleware_drops_invited_expert_that_is_not_dispatchable(
 
 
 @patch("langgraph.config.get_config", side_effect=RuntimeError("outside context"))
-def test_middleware_injects_concept_outside_runnable_context(mock_get_config):
+def test_middleware_injects_concept_outside_runnable_context(
+    mock_get_config, workspace
+):
     """Outside a runnable context there are no invites, but the concept still
     injects — ``_read_active_teams`` degrades to an empty list, not a raise."""
-    middleware = ActiveTeamMiddleware()
+    middleware = ActiveTeamMiddleware(workspace)
     modified = middleware.modify_request(_request())
     text = _system_text(modified)
     assert "## Experts" in text
@@ -249,14 +254,14 @@ def test_middleware_injects_concept_outside_runnable_context(mock_get_config):
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_default_middleware_includes_active_team_for_main_agent(
-    mock_config, mock_model, mock_tool_selector
+    mock_config, mock_model, mock_tool_selector, workspace
 ):
     mock_config.return_value = _mock_config()
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    middleware = _get_default_middleware()
+    middleware = _get_default_middleware(workspace=workspace)
 
     assert any(isinstance(m, ActiveTeamMiddleware) for m in middleware)
 
@@ -268,14 +273,14 @@ def test_default_middleware_includes_active_team_for_main_agent(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_default_middleware_excludes_active_team_for_async_subagent(
-    mock_config, mock_model, mock_tool_selector
+    mock_config, mock_model, mock_tool_selector, workspace
 ):
     mock_config.return_value = _mock_config()
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    middleware = _get_default_middleware(for_async_subagent=True)
+    middleware = _get_default_middleware(workspace=workspace, for_async_subagent=True)
 
     assert not any(isinstance(m, ActiveTeamMiddleware) for m in middleware)
 
@@ -283,5 +288,5 @@ def test_default_middleware_excludes_active_team_for_async_subagent(
 # ---- factory --------------------------------------------------------------
 
 
-def test_factory_returns_middleware_instance():
-    assert isinstance(create_active_team_middleware(), ActiveTeamMiddleware)
+def test_factory_returns_middleware_instance(workspace):
+    assert isinstance(create_active_team_middleware(workspace), ActiveTeamMiddleware)

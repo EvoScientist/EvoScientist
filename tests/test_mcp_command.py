@@ -2,13 +2,18 @@
 
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+from tests.fakes import TEST_WORKSPACE
+
 
 def _ctx():
     from EvoScientist.commands.base import CommandContext
 
     ui = MagicMock()
     ui.supports_interactive = True
-    return CommandContext(agent=None, thread_id="tid", ui=ui), ui
+    return CommandContext(
+        dirs=SessionDirs(TEST_WORKSPACE), agent=None, thread_id="tid", ui=ui
+    ), ui
 
 
 class TestMCPCommandDispatch:

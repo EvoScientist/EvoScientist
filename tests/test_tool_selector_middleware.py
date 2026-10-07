@@ -481,7 +481,9 @@ def test_consume_is_once_only():
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_default_middleware_includes_tool_selector(mock_config, mock_model, mock_ts):
+def test_default_middleware_includes_tool_selector(
+    mock_config, mock_model, mock_ts, workspace
+):
     mock_model.return_value = _mock_model()
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -492,19 +494,19 @@ def test_default_middleware_includes_tool_selector(mock_config, mock_model, mock
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware()
+    mw = _get_default_middleware(workspace=workspace)
     type_names = [type(m).__name__ for m in mw]
     assert "_ConditionalToolSelectorMiddleware" in type_names
 
 
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
-def test_subagent_no_tool_selector(mock_model):
+def test_subagent_no_tool_selector(mock_model, workspace):
     mock_model.return_value = _mock_model()
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
 
     subs = [{"name": "test-agent"}]
-    _inject_subagent_middleware(subs)
+    _inject_subagent_middleware(subs, workspace=workspace)
 
     type_names = [type(m).__name__ for m in subs[0]["middleware"]]
     assert "_ConditionalToolSelectorMiddleware" not in type_names
@@ -521,7 +523,7 @@ def test_subagent_no_tool_selector(mock_model):
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
+def test_tool_selector_ordering(mock_config, mock_model, mock_ts, workspace):
     """ToolSelector should come after ToolErrorHandler and before Memory."""
     mock_model.return_value = _mock_model()
     cfg = MagicMock()
@@ -533,7 +535,7 @@ def test_tool_selector_ordering(mock_config, mock_model, mock_ts):
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware()
+    mw = _get_default_middleware(workspace=workspace)
     type_names = [type(m).__name__ for m in mw]
 
     ts_idx = type_names.index("_ConditionalToolSelectorMiddleware")

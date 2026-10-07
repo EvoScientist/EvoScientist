@@ -378,10 +378,12 @@ async def _download_and_decrypt_media(
     return raw
 
 
-def _cache_media_bytes(data: bytes, suffix: str, prefix: str = "wechat_") -> str:
-    """Persist downloaded media to MEDIA_DIR; return the local path."""
+def _cache_media_bytes(
+    data: bytes, suffix: str, prefix: str = "wechat_", *, media_dir: Path
+) -> str:
+    """Persist downloaded media to *media_dir*; return the local path."""
     name = f"{prefix}{uuid.uuid4().hex}{suffix}"
-    path = media_path(name)
+    path = media_path(media_dir, name)
     path.write_bytes(data)
     return str(path)
 
@@ -1054,7 +1056,9 @@ class WeixinPersonalChannel(Channel):
                 full_url=media.get("full_url"),
                 timeout_seconds=30.0,
             )
-            return _cache_media_bytes(data, ".jpg", "wechat_img_")
+            return _cache_media_bytes(
+                data, ".jpg", "wechat_img_", media_dir=self._require_media_dir()
+            )
         except Exception as exc:
             logger.warning("personal-wechat: image download failed: %s", exc)
             return None
@@ -1070,7 +1074,9 @@ class WeixinPersonalChannel(Channel):
                 full_url=media.get("full_url"),
                 timeout_seconds=120.0,
             )
-            return _cache_media_bytes(data, ".mp4", "wechat_video_")
+            return _cache_media_bytes(
+                data, ".mp4", "wechat_video_", media_dir=self._require_media_dir()
+            )
         except Exception as exc:
             logger.warning("personal-wechat: video download failed: %s", exc)
             return None
@@ -1089,7 +1095,7 @@ class WeixinPersonalChannel(Channel):
                 timeout_seconds=60.0,
             )
             safe = re.sub(r"[^\w.\-]", "_", filename)
-            local = media_path(f"wechat_file_{uuid.uuid4().hex}_{safe}")
+            local = self._media_path(f"wechat_file_{uuid.uuid4().hex}_{safe}")
             local.write_bytes(data)
             return str(local), f"[attachment: {local}]"
         except Exception as exc:
@@ -1110,7 +1116,9 @@ class WeixinPersonalChannel(Channel):
                 full_url=media.get("full_url"),
                 timeout_seconds=60.0,
             )
-            return _cache_media_bytes(data, ".silk", "wechat_voice_")
+            return _cache_media_bytes(
+                data, ".silk", "wechat_voice_", media_dir=self._require_media_dir()
+            )
         except Exception as exc:
             logger.warning("personal-wechat: voice download failed: %s", exc)
             return None

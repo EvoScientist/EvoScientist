@@ -647,6 +647,21 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
             f"Stop that EvoSci session, or launch from that workspace "
             f"(--workdir {sidecar['workspace']}).",
         )
+    # The WebUI works in the workspace root; a server started for a
+    # ``--mode=run`` session works in one of its run folders.
+    if sidecar.get("run_dir"):
+        raise LauncherError(
+            "workspace_mismatch",
+            f"Port {cfg.backend_port} is already serving a langgraph dev "
+            f"for a run folder of this workspace ({sidecar['run_dir']}).",
+            "Stop that EvoSci --mode=run session, then launch again."
+            + (
+                " If that session already ended, stop its kept-alive server "
+                "with 'EvoSci server stop'."
+                if cfg.keepalive
+                else ""
+            ),
+        )
     recorded_fp = sidecar.get("config_fingerprint")
     if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
         config
@@ -796,13 +811,11 @@ def build_launcher_config(
     same way ``run_webui`` does, so every entrypoint agrees. The launcher
     opens the browser once the WebUI answers."""
     from ..langgraph_dev.manager import _DEFAULT_HOST, _DEFAULT_PORT
+    from ..paths import start_workspace_path
 
-    if workspace_dir:
-        ws = os.path.abspath(os.path.expanduser(workspace_dir))
-    elif getattr(config, "default_workdir", ""):
-        ws = os.path.abspath(os.path.expanduser(config.default_workdir))
-    else:
-        ws = os.getcwd()
+    ws = str(
+        start_workspace_path(workspace_dir, getattr(config, "default_workdir", ""))
+    )
     os.makedirs(ws, exist_ok=True)
 
     backend_port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))

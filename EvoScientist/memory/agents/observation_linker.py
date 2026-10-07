@@ -8,6 +8,7 @@ from pathlib import Path
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
+from ...paths import Workspace
 from ..observations import (
     create_link_observations_tool,
     create_read_memory_tool,
@@ -67,15 +68,15 @@ def _observation_linker_tools(
 
 def build_observation_linker_graph(
     *,
+    workspace: Workspace,
     memory_dir: str | Path | None = None,
-    workspace_dir: str | Path | None = None,
 ) -> CompiledStateGraph:
     """Build the registered LangGraph observation linker."""
     from ...middleware.error_normalization import ErrorNormalizationMiddleware
 
     agent_paths = resolve_memory_agent_paths(
+        workspace=workspace,
         memory_dir=memory_dir,
-        workspace_dir=workspace_dir,
     )
     tools = _observation_linker_tools(
         memory_dir=agent_paths.memory_dir,

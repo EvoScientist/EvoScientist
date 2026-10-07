@@ -109,9 +109,13 @@ async def get_teams(_request: Request) -> JSONResponse:
     Response shape (each entry): ``{name, description, byline?,
     capability_tags?, avatar_hint?}`` — the WebUI gallery consumes these.
     """
+    from EvoScientist.paths import process_workspace
     from EvoScientist.tools.skills_manager import list_expert_skills
 
-    experts = await asyncio.to_thread(list_expert_skills, True)
+    def _list() -> list:
+        return list_expert_skills(True, workspace=process_workspace())
+
+    experts = await asyncio.to_thread(_list)
     teams = []
     for info in experts:
         entry = {
