@@ -541,7 +541,9 @@ class TestConsumerHitlRoundBudget:
         await task
 
     @pytest.mark.parametrize("pause", ["interrupt", "ask_user"])
-    async def test_pause_closes_stream_in_consumer_context(self, monkeypatch, pause):
+    async def test_pause_closes_stream_in_consumer_context(
+        self, monkeypatch, tmp_path, pause
+    ):
         """Leaving the stream at an approval or a question closes it right
         away, in the consumer's own task and contextvars context (issue #568).
 
@@ -586,7 +588,7 @@ class TestConsumerHitlRoundBudget:
         async def _fake_ask_user(_questions, _io, timeout=0):
             return {"answers": ["yes"], "status": "answered"}
 
-        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer, bus, _gateway = self._consumer(_fake_stream, tmp_path)
         consumer._approval_policy.grant_session("stub:c1")
         monkeypatch.setattr(consumer_mod, "resolve_ask_user", _fake_ask_user)
 
