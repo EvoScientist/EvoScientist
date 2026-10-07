@@ -247,12 +247,11 @@ async def test_local_process_status_falls_back_to_dev_server(
     monkeypatch, remote_status
 ):
     monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: "unknown")
+    monkeypatch.setattr(
+        "EvoScientist.gateway.local.needs_langgraph_dev", lambda cfg, backend: True
+    )
     client = MagicMock()
     client.http.get = AsyncMock(return_value={"status": remote_status})
-    monkeypatch.setattr(
-        "EvoScientist.langgraph_dev.sdk.configured_langgraph_dev_url",
-        lambda: "http://dev",
-    )
     factory = MagicMock(return_value=client)
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client", factory
@@ -263,31 +262,42 @@ async def test_local_process_status_falls_back_to_dev_server(
         )
         == remote_status
     )
-    factory.assert_called_once_with("http://dev")
+    factory.assert_called_once()
     client.http.get.assert_awaited_once_with(
         "/api/bg_process_status", params={"process_id": "remote-process"}
     )
 
 
-async def test_local_process_status_server_failure_can_be_retried(monkeypatch):
+async def test_local_process_status_no_dev_server_returns_unknown(monkeypatch):
     monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: "unknown")
-    client = MagicMock()
-    client.http.get = AsyncMock(
-        side_effect=[ConnectionError("offline"), {"status": "success"}]
-    )
     monkeypatch.setattr(
-        "EvoScientist.langgraph_dev.sdk.configured_langgraph_dev_url",
-        lambda: "http://dev",
+        "EvoScientist.gateway.local.needs_langgraph_dev", lambda cfg, backend: False
     )
+    factory = MagicMock(side_effect=AssertionError("must not query server"))
     monkeypatch.setattr(
-        "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client", lambda _: client
+        "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client", factory
     )
-    gateway = LocalGraphGateway()
-    with pytest.raises(ConnectionError, match="offline"):
-        await gateway.get_process_status(GraphTarget(), "thread", "process")
     assert (
-        await gateway.get_process_status(GraphTarget(), "thread", "process")
-        == "success"
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
+    )
+    factory.assert_not_called()
+
+
+async def test_local_process_status_connect_error_returns_unknown(monkeypatch):
+    monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: "unknown")
+    monkeypatch.setattr(
+        "EvoScientist.gateway.local.needs_langgraph_dev", lambda cfg, backend: True
+    )
+    client = MagicMock()
+    client.http.get = AsyncMock(side_effect=ConnectionError("offline"))
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client",
+        lambda _: client,
+    )
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
     )
 
 
