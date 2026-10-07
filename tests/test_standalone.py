@@ -10,13 +10,14 @@ import pytest
 
 import EvoScientist.channels.standalone as standalone
 
+
 @pytest.fixture(autouse=True)
 def _restore_http_log_levels():
     """Reset process-global httpx/httpcore levels after every test."""
     loggers = [logging.getLogger(n) for n in ("httpx", "httpcore")]
     saved = [lg.level for lg in loggers]
     yield
-    for lg, level in zip(loggers, saved):
+    for lg, level in zip(loggers, saved, strict=False):
         lg.setLevel(level)
 
 
