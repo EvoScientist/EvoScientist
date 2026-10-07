@@ -26,6 +26,7 @@ from EvoScientist.channels.bus.events import InboundMessage as BusInbound
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
+from EvoScientist.middleware import events as mw_events
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
 from tests.fakes import StubChannel as _StubChannel
@@ -535,29 +536,55 @@ class TestConsumerHitlRoundBudget:
         await consumer.stop()
         await task
 
-    async def test_interrupt_closes_stream_in_consumer_task(self):
-        """Leaving the stream at an interrupt closes it right away, in the
-        consumer's own task, not later in the event loop's generator
-        finalizer (a different task and contextvars context)."""
+    @pytest.mark.parametrize("pause", ["interrupt", "ask_user"])
+    async def test_pause_closes_stream_in_consumer_context(self, monkeypatch, pause):
+        """Leaving the stream at an approval or a question closes it right
+        away, in the consumer's own task and contextvars context (issue #568).
+
+        The fake stream binds and resets the run event sink like
+        ``stream_agent_events``: ``reset_run_event_sink`` raises
+        ``ValueError`` if it runs in another context, e.g. in the event
+        loop's generator finalizer, or when ``_timeout_aiter`` advances the
+        stream in a child task (``asyncio.wait_for`` before Python 3.12).
+        """
         stream_calls = 0
         started_in: list[asyncio.Task | None] = []
         closed_in: list[asyncio.Task | None] = []
+        sink_at_start: list[object] = []
+        loop_errors: list[dict] = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _loop, context: loop_errors.append(context)
+        )
 
         async def _fake_stream(_request):
             nonlocal stream_calls
             stream_calls += 1
             started_in.append(asyncio.current_task())
+            sink_at_start.append(mw_events._current_run_event_sink.get())
+            token = mw_events.bind_run_event_sink(MagicMock())
             try:
                 if stream_calls == 1:
-                    yield _interrupt_event(stream_calls)
+                    if pause == "interrupt":
+                        yield _interrupt_event(stream_calls)
+                    else:
+                        yield {
+                            "type": "ask_user",
+                            "interrupt_id": "ask-1",
+                            "questions": [{"question": "Continue?"}],
+                        }
                     return
                 yield {"type": "text", "content": "final answer"}
                 yield {"type": "done", "content": "final answer"}
             finally:
                 closed_in.append(asyncio.current_task())
+                mw_events.reset_run_event_sink(token)
+
+        async def _fake_ask_user(_questions, _io, timeout=0):
+            return {"answers": ["yes"], "status": "answered"}
 
         consumer, bus, _gateway = self._consumer(_fake_stream)
         consumer._approval_policy.grant_session("stub:c1")
+        monkeypatch.setattr(consumer_mod, "resolve_ask_user", _fake_ask_user)
 
         await bus.publish_inbound(
             BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
@@ -568,6 +595,9 @@ class TestConsumerHitlRoundBudget:
         assert outbound.content == "final answer"
         assert stream_calls == 2
         assert closed_in == started_in
+        # The first run's sink was unbound before the resumed run started.
+        assert sink_at_start == [None, None]
+        assert loop_errors == []
 
         await consumer.stop()
         await task
