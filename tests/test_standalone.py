@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import signal
+import threading
+import time
 from types import SimpleNamespace
 
+import pytest
+
 import EvoScientist.channels.standalone as standalone
+from EvoScientist.channels.bus.message_bus import MessageBus
+from tests.fakes import QueueFakeChannel
 
 
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
@@ -94,25 +102,15 @@ def test_run_standalone_ensures_dev_server_only_with_agent(monkeypatch):
     assert ensure_configs == []
 
 
-import asyncio
-import signal
-import threading
-import time
-
-import pytest
-
-from EvoScientist.channels.bus.message_bus import MessageBus
-from tests.fakes import QueueFakeChannel
-
-
 class _SigintChannel(QueueFakeChannel):
     """Fake channel that schedules SIGINT once its worker is running."""
 
-    def __init__(self, *, second_sigint_at: float | None = None, hang_stop: bool = False):
+    def __init__(
+        self, *, second_sigint_at: float | None = None, hang_stop: bool = False
+    ):
         super().__init__()
         self._second_sigint_at = second_sigint_at
         self._hang_stop = hang_stop
-        self._stop_release: asyncio.Event | None = None
 
     async def run(self) -> None:
         threading.Timer(0.1, signal.raise_signal, [signal.SIGINT]).start()

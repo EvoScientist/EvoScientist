@@ -113,7 +113,8 @@ async def _async_main(
     # Bound into the consumer task's context so blocking sync tools (shell)
     # see it via current_cancel_event() — the same mechanism serve's
     # run_streaming uses. Set on shutdown so in-flight tool subprocesses die
-    # and asyncio.run's executor join cannot hang.
+    # and asyncio.run's executor join cannot hang. Only takes effect when
+    # the agent runs in-process with the `local` backend.
     turn_cancel = threading.Event()
 
     tasks = [channel.run()]
@@ -142,6 +143,7 @@ async def _async_main(
             send_thinking=send_thinking,
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)
+
         async def _run_consumer() -> None:
             from ..cancellation import bind_cancel_event
 
