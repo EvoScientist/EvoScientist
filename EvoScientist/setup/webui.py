@@ -112,6 +112,11 @@ def in_range(version: str, compat: str) -> bool:
     from packaging.specifiers import SpecifierSet
     from packaging.version import InvalidVersion, Version
 
+    # A semver pre-release part (npm's ``0.3.2-0``, ``-beta.1``) is never a
+    # stable release, although PEP 440 reads ``-0`` or ``-r.1`` as a
+    # post-release that sorts above 0.3.2.
+    if "-" in version.partition("+")[0]:
+        return False
     try:
         parsed = Version(version)
     except InvalidVersion:

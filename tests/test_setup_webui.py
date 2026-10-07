@@ -111,7 +111,9 @@ def test_newest_version_in_range_wins():
 
 
 def test_prereleases_and_unparsable_versions_are_skipped():
-    versions = dict.fromkeys(["0.3.0", "0.3.1rc1", "0.3.2-beta.1", "garbage"])
+    versions = dict.fromkeys(
+        ["0.3.0", "0.3.1rc1", "0.3.2-beta.1", "0.3.2-0", "0.3.2-r.1", "garbage"]
+    )
     assert webui.pick_version(versions, ">=0.3,<0.4") == "0.3.0"
 
 
