@@ -642,6 +642,18 @@ def test_cleanup_ignores_a_marker_whose_pid_was_reused(env, monkeypatch):
     assert webui.cleanup_old_versions() == ["0.2.9"]
 
 
+def test_a_live_marker_survives_a_small_clock_step(env):
+    """psutil derives the start time from the boot time, which moves when the
+    clock is stepped; a live session's marker must still count."""
+    webui.ensure_webui(env["node"], "default")
+    path = _fake_version(env, "0.2.9")
+    start = webui._process_start_ms(os.getpid())
+    (path / ".in-use").mkdir()
+    (path / ".in-use" / f"{os.getpid()}-{start - 1500}").touch()
+    assert webui.cleanup_old_versions() == []
+    assert (path / "dist" / "server.js").is_file()
+
+
 def test_cleanup_keeps_a_directory_it_cannot_rename(env, monkeypatch):
     webui.ensure_webui(env["node"], "default")
     path = _fake_version(env, "0.2.9")

@@ -772,7 +772,9 @@ def _marker_alive(name: str) -> bool:
         actual = _process_start_ms(pid)
     except psutil.Error:
         return True  # cannot tell (e.g. access denied): keep the copy
-    return actual is not None and abs(actual - start) <= 1
+    # create_time() on Linux is boot time (whole seconds, moved by clock steps)
+    # plus the start offset, so allow for a one-second shift
+    return actual is not None and abs(actual - start) <= 2000
 
 
 def _in_use(version_dir: Path) -> bool:
