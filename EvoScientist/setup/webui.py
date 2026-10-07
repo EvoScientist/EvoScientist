@@ -773,7 +773,7 @@ def _marker_alive(name: str) -> bool:
     except psutil.Error:
         return True  # cannot tell (e.g. access denied): keep the copy
     # create_time() on Linux is boot time (whole seconds, moved by clock steps)
-    # plus the start offset, so allow for a one-second shift
+    # plus the start offset, so allow for a two-second shift
     return actual is not None and abs(actual - start) <= 2000
 
 
