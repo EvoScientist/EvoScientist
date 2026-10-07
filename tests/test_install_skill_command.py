@@ -38,10 +38,12 @@ class TestInstallSkill:
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Installed: demo-skill" in m for m in msgs)
 
-    async def test_missing_git_prints_the_git_message(self, tmp_path, no_git):
+    async def test_missing_git_prints_the_git_message(
+        self, tmp_path, workspace, no_git
+    ):
         from EvoScientist.commands.implementation.skills import InstallSkill
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "skills"):
             await InstallSkill().execute(ctx, ["owner/repo@skill"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]

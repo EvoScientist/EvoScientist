@@ -105,12 +105,12 @@ class TestInstallSkills:
         assert any("Failed to fetch" in m for m in msgs)
         assert any("Try: /install-skill" in m for m in msgs)
 
-    async def test_missing_git_prints_the_git_message(self, no_git):
+    async def test_missing_git_prints_the_git_message(self, workspace, no_git):
         from EvoScientist.commands.implementation.skills import InstallSkills
         from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
 
         _REMOTE_INDEX_CACHE.clear()
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         await InstallSkills().execute(ctx, [])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any(
@@ -120,11 +120,11 @@ class TestInstallSkills:
         # The /install-skill hint needs git too, so it is left out.
         assert not any("Try: /install-skill" in m for m in msgs)
 
-    async def test_install_loop_reports_missing_git(self, tmp_path, no_git):
+    async def test_install_loop_reports_missing_git(self, tmp_path, workspace, no_git):
         """A git that disappears after the index fetch fails each install cleanly."""
         from EvoScientist.commands.implementation.skills import InstallSkills
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         ui.wait_for_skill_browse.return_value = ["owner/repo@paper-writing"]
         with (
             patch(

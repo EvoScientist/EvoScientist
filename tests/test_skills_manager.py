@@ -542,21 +542,25 @@ class TestResolveRemoteHead:
 class TestMissingGit:
     """Without a git binary every git path reports the same readable error."""
 
-    def test_github_install_reports_missing_git(self, temp_skills_dir):
-        result = install_skill("owner/repo@skill", str(temp_skills_dir))
+    def test_github_install_reports_missing_git(self, temp_skills_dir, skills_ws):
+        result = install_skill(
+            "owner/repo@skill", str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is False
         assert result["error"].startswith("git was not found on PATH.")
 
     def test_bare_name_reports_missing_git_not_missing_path(
-        self, temp_skills_dir, tmp_path, monkeypatch
+        self, temp_skills_dir, skills_ws, tmp_path, monkeypatch
     ):
         from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
 
         _REMOTE_INDEX_CACHE.clear()
         monkeypatch.chdir(tmp_path)
 
-        result = install_skill("no-such-skill-xyz", str(temp_skills_dir))
+        result = install_skill(
+            "no-such-skill-xyz", str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is False
         assert result["error"].startswith("git was not found on PATH.")
@@ -566,14 +570,14 @@ class TestMissingGit:
         "source", ["./my-skil", "~/skills/my-skil", "skills/local/my-skil"]
     )
     def test_mistyped_path_still_reports_missing_path(
-        self, source, temp_skills_dir, tmp_path, monkeypatch
+        self, source, temp_skills_dir, skills_ws, tmp_path, monkeypatch
     ):
         from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
 
         _REMOTE_INDEX_CACHE.clear()
         monkeypatch.chdir(tmp_path)
 
-        result = install_skill(source, str(temp_skills_dir))
+        result = install_skill(source, str(temp_skills_dir), workspace=skills_ws)
 
         assert result["success"] is False
         assert result["error"] == f"Path does not exist: {source}"
@@ -593,7 +597,9 @@ class TestMissingGit:
         assert _resolve_local_head(str(tmp_path)) is None
 
     def test_agent_install_returns_the_message(self, tmp_path):
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(Workspace(tmp_path))
 
         with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "skills"):
             result = skill_manager.invoke(
@@ -603,11 +609,12 @@ class TestMissingGit:
         assert "git was not found on PATH." in result
         assert "Traceback" not in result
 
-    def test_agent_browse_returns_the_message(self):
-        from EvoScientist.tools.skill_manager import skill_manager
+    def test_agent_browse_returns_the_message(self, tmp_path):
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
         from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
 
         _REMOTE_INDEX_CACHE.clear()
+        skill_manager = make_skill_manager_tool(Workspace(tmp_path))
 
         result = skill_manager.invoke({"action": "browse"})
 
@@ -619,7 +626,9 @@ class TestMissingGit:
 class TestBareNameIndexFailure:
     """A bare skill name whose index fetch fails reports that failure."""
 
-    def test_git_that_runs_but_fails(self, temp_skills_dir, tmp_path, monkeypatch):
+    def test_git_that_runs_but_fails(
+        self, temp_skills_dir, skills_ws, tmp_path, monkeypatch
+    ):
         """The macOS Command Line Tools stub (and an offline git) exit non-zero."""
         from types import SimpleNamespace
 
@@ -633,20 +642,24 @@ class TestBareNameIndexFailure:
             stderr="xcode-select: note: No developer tools were found.\n",
         )
         with patch("EvoScientist.git_cli.subprocess.run", return_value=stub):
-            result = install_skill("no-such-skill-xyz", str(temp_skills_dir))
+            result = install_skill(
+                "no-such-skill-xyz", str(temp_skills_dir), workspace=skills_ws
+            )
 
         assert result["success"] is False
         assert result["error"].startswith("git clone failed: xcode-select: note:")
 
     def test_path_shaped_source_skips_the_index(
-        self, temp_skills_dir, tmp_path, monkeypatch
+        self, temp_skills_dir, skills_ws, tmp_path, monkeypatch
     ):
         """A path can never match an index name: no EvoSkills clone for a typo."""
         monkeypatch.chdir(tmp_path)
         with patch(
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index"
         ) as fetch:
-            result = install_skill("./my-skil", str(temp_skills_dir))
+            result = install_skill(
+                "./my-skil", str(temp_skills_dir), workspace=skills_ws
+            )
 
         fetch.assert_not_called()
         assert result["error"] == "Path does not exist: ./my-skil"
