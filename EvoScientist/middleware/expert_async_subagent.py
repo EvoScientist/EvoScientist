@@ -16,9 +16,10 @@ predictable timeline; this subclass gives us the mechanism locally.
 Design
 ------
 - Subclass ``AsyncSubAgentMiddleware``; call ``super().__init__()`` for spec
-  validation + default 5-tool build, then swap in a start tool that injects
-  ``skill_name=subagent_type`` by construction (keeping check / update /
-  cancel / list unchanged).
+  validation + system-prompt composition, then rebuild all five tools on a
+  config-injecting client cache: the start tool injects
+  ``skill_name=subagent_type`` by construction, update forwards the caller's
+  model, and check / cancel / list keep upstream bodies.
 - The tool signature matches upstream exactly: ``(description, subagent_type,
   runtime)``. No LLM-visible ``payload`` field: every value the middleware
   can derive itself (the skill name) is injected inside the middleware, not
