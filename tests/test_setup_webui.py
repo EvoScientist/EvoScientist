@@ -589,11 +589,12 @@ def _fake_version(env, version: str) -> Path:
 
 def test_cleanup_keeps_current_previous_and_staged(env, monkeypatch):
     _install_old(env, monkeypatch)
-    webui.stage_update(env["node"], "default")
+    webui.stage_update(env["node"], "default")  # 0.3.0 current, 0.3.1 staged
+    _fake_version(env, "0.2.9")
+    assert webui.cleanup_old_versions() == ["0.2.9"]
     webui.ensure_webui(env["node"], "default")  # 0.3.1 current, 0.3.0 previous
     _fake_version(env, "0.2.8")
-    _fake_version(env, "0.2.9")
-    assert webui.cleanup_old_versions() == ["0.2.8", "0.2.9"]
+    assert webui.cleanup_old_versions() == ["0.2.8"]
     left = sorted(p.name for p in (env["data"] / "tools" / "webui").iterdir())
     assert left == ["0.3.0", "0.3.1"]
 
@@ -653,12 +654,26 @@ def test_a_lagging_registry_never_downgrades(env, monkeypatch):
 
 
 def test_background_update_does_not_replace_a_newer_staged_copy(env, monkeypatch):
+    v032 = _tarball("0.3.2")
+    env["reg"].tarballs[f"{REG}/webui-0.3.2.tgz"] = v032
+    env["reg"].metadata["versions"]["0.3.2"] = {
+        "dist": {"tarball": f"{REG}/webui-0.3.2.tgz", "integrity": _sri(v032)}
+    }
     _install_old(env, monkeypatch)
-    webui.stage_update(env["node"], "default")  # stages 0.3.1
+    assert webui.stage_update(env["node"], "default") == "0.3.2"
     monkeypatch.setattr(webui, "_checked_recently", lambda now: False)
-    del env["reg"].metadata["versions"]["0.3.1"]
+    del env["reg"].metadata["versions"]["0.3.2"]
     assert webui.stage_update(env["node"], "default") is None
-    assert _record(env["data"])["staged"]["version"] == "0.3.1"
+    assert _record(env["data"])["staged"]["version"] == "0.3.2"
+
+
+def test_the_next_daily_check_does_not_fetch_the_staged_copy_again(env, monkeypatch):
+    _install_old(env, monkeypatch)
+    assert webui.stage_update(env["node"], "default") == "0.3.1"
+    monkeypatch.setattr(webui, "_checked_recently", lambda now: False)
+    env["reg"].urls.clear()
+    assert webui.stage_update(env["node"], "default") is None
+    assert env["reg"].urls == [REG]
 
 
 def test_a_leftover_copy_a_live_process_runs_is_not_replaced(env):

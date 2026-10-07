@@ -18,9 +18,17 @@ from EvoScientist.setup.protocol import PROTOCOL
 def evosci(monkeypatch):
     """Invoke the CLI with ``sys.argv`` set as a real run would set it: the
     eager ``--version`` callback reads the raw arguments."""
+    import EvoScientist.config as config_mod
     from EvoScientist.stream.console import console
 
     monkeypatch.delenv(webui.COMPAT_ENV, raising=False)
+    # A fall-through to the main callback would load the developer's config
+    # and start whatever UI it names; fail inside the test instead.
+    monkeypatch.setattr(
+        config_mod,
+        "get_effective_config",
+        lambda *_a, **_k: pytest.fail("the main callback ran past --version/--json"),
+    )
     # --version --json redirects the shared console; undo it after the test.
     monkeypatch.setattr(console, "_file", None)
     runner = CliRunner()
