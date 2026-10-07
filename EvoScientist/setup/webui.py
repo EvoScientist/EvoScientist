@@ -837,7 +837,9 @@ def run_stage(emit: Emitter, mirror: str) -> StageResult:
     def report(fraction: float, message: str) -> None:
         emit(make_event("webui", "running", progress=fraction, message=message))
 
-    node = ensure_node(mirror)
+    # Without the node stage (``--stage webui``, ``--skip node``) the Node
+    # download happens here; report it under this stage.
+    node = ensure_node(mirror, report)
     info = ensure_webui(node.path, mirror, report, refresh=True)
     return StageResult(f"Using WebUI {info.version} from {info.path}", info.detail())
 

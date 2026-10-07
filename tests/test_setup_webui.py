@@ -464,13 +464,34 @@ def test_run_stage_reports_the_installed_copy(env, monkeypatch):
     monkeypatch.setattr(
         node,
         "ensure_node",
-        lambda mirror: node.NodeInfo("system", "22.0.0", env["node"]),
+        lambda mirror, progress=None: node.NodeInfo("system", "22.0.0", env["node"]),
     )
     events: list[dict] = []
     result = webui.run_stage(events.append, "default")
     assert result.status == "done"
     assert result.detail["version"] == "0.3.1"
     assert {e["status"] for e in events} == {"running"}
+
+
+def test_run_stage_reports_a_node_download_under_the_webui_stage(env, monkeypatch):
+    """``--stage webui`` / ``--skip node`` on a machine without Node: the Node
+    download is visible, not a silent wait."""
+    from EvoScientist.setup import node
+
+    def ensure_node(mirror, progress=None):
+        progress(0.5, "Downloading Node 24.21.0")
+        return node.NodeInfo("private", "24.21.0", env["node"])
+
+    monkeypatch.setattr(node, "ensure_node", ensure_node)
+    events: list[dict] = []
+    webui.run_stage(events.append, "default")
+    assert {
+        "protocol": 1,
+        "stage": "webui",
+        "status": "running",
+        "progress": 0.5,
+        "message": "Downloading Node 24.21.0",
+    } in events
 
 
 # --------------------------------------------------------------------------- #
