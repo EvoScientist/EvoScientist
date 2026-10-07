@@ -177,8 +177,9 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         ):
             ready = launcher.wait_ready()
     except LauncherError as exc:
-        if exc.code == "webui_start_failed" and not exc.detail:
-            exc.detail = f"See {_shorten(str(webui_log))}."
+        if exc.code == "webui_start_failed":
+            log_hint = f"See {_shorten(str(webui_log))}."
+            exc.detail = f"{exc.detail}\n{log_hint}" if exc.detail else log_hint
         _render_launcher_error(exc)
         raise typer.Exit(1) from exc
     runner.start_update_check()

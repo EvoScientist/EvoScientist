@@ -301,6 +301,25 @@ def test_update_check_starts_once_the_ui_is_up(monkeypatch):
     assert captured["update_checks"] == 1
 
 
+def test_a_crashed_webui_points_at_webui_log(monkeypatch):
+    import typer
+
+    class _CrashingLauncher(webui_mod.WebUILauncher):
+        def wait_ready(self, *a, **k):
+            raise webui_mod.LauncherError(
+                "webui_start_failed",
+                "WebUI process exited before it became ready.",
+                "[Errno 54] Connection reset by peer",
+            )
+
+    monkeypatch.setattr(webui_mod, "WebUILauncher", _CrashingLauncher)
+    with pytest.raises(typer.Exit):
+        _run_webui_once(monkeypatch, _make_config())
+    panel = webui_mod.console._sink[-1]
+    assert "Connection reset by peer" in panel
+    assert "webui.log" in panel
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
     config = _make_config(webui_host=blank)
