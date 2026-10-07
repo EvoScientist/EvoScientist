@@ -61,7 +61,7 @@ uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-head
 
 The file is generated; never edit it by hand. A check on the release PR flags a `uv.lock` that is out of date or a `constraints.txt` that does not match it, and the publish workflows refuse such a release. Other PRs do not need to regenerate it.
 
-Installs read the file from the release tag, and jsDelivr caches tagged files for a year. A release with a wrong `constraints.txt` is fixed by a new patch release, never by moving the tag.
+Installs read the file from the release tag. A release that the publish guard refuses, or that shipped a wrong `constraints.txt`, is fixed by a new patch release. The repository uses immutable releases: a published release's tag never moves, and its name cannot be reused even after the release is deleted. jsDelivr also caches tagged files for a year.
 
 ## Code style
 
