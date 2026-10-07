@@ -695,14 +695,14 @@ def _adopt_stale_scheduled_tasks(*, workspace: Workspace) -> None:
 
     Their runs then work in *workspace* and pass the server's folder check.
     Only for a server known to serve *workspace*: a reused server without a
-    workspace record may hold another workspace's store, whose crons this must
-    not take over.
+    workspace record, or one another session has since moved, may hold another
+    workspace's store, whose crons this must not take over.
     """
     try:
         from ..cron import schedule as crons
         from ..langgraph_dev import manager
 
-        if not manager.SERVER_WORKSPACE_VERIFIED:
+        if manager.SERVED_WORKSPACE != workspace.root:
             return
         if crons.is_available():
             crons.adopt_stale_tasks(

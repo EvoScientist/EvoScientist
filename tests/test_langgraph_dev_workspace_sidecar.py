@@ -246,7 +246,7 @@ def test_ensure_langgraph_dev_reuses_when_sidecar_missing(
     # Should NOT raise — degrades to the prior reuse-with-warning branch.
     manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B")
     # Nothing says which workspace's store it holds.
-    assert manager.SERVER_WORKSPACE_VERIFIED is False
+    assert manager.SERVED_WORKSPACE is None
 
 
 def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths):
@@ -268,6 +268,15 @@ def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths
     monkeypatch.setattr(manager, "_PROCESS", None)
     manager.stop_langgraph_dev()
     assert not sidecar.exists()
+
+
+def test_stop_langgraph_dev_forgets_served_workspace(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(manager, "SERVED_WORKSPACE", tmp_path / "A")
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    manager.stop_langgraph_dev()
+    assert manager.SERVED_WORKSPACE is None
 
 
 def test_keepalive_skips_atexit_registration(tmp_path, monkeypatch, runtime_paths):
@@ -359,7 +368,7 @@ def _reuse_setup(tmp_path, monkeypatch, runtime_paths, fingerprint):
 def test_reuse_confirms_workspace_from_sidecar(tmp_path, monkeypatch, runtime_paths):
     cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "fp")
     manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
-    assert manager.SERVER_WORKSPACE_VERIFIED is True
+    assert manager.SERVED_WORKSPACE == tmp_path / "A"
 
 
 def test_reuse_sets_drift_flag_on_fingerprint_mismatch(

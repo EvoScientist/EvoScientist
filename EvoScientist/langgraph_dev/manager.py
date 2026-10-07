@@ -144,11 +144,12 @@ CONFIG_DRIFT_SINCE_LAUNCH = False
 # ``research_env.python_drift_message``). The CLI prints it after startup.
 AGENT_PYTHON_DRIFT: str | None = None
 
-# Set by ``ensure_langgraph_dev``: True when the server it started or reused is
-# known to serve the requested workspace (this process started it, or its
-# sidecar names that workspace). A server reused without a sidecar is not, so
-# callers must not treat its store as this workspace's.
-SERVER_WORKSPACE_VERIFIED = False
+# Set by ``ensure_langgraph_dev``: the workspace root the server it started or
+# reused is known to serve (this process started it, or its sidecar names that
+# root). None for a server reused without a sidecar, and after a stop. Callers
+# compare it with their own root before treating the server's store as theirs:
+# another session of this process may have moved the server since.
+SERVED_WORKSPACE: Path | None = None
 
 # Default for sidecar fields that are left out of the record.
 _NOT_RECORDED = object()
@@ -1218,8 +1219,9 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
     ``_PROCESS_WORKSPACE`` so concurrent ``ensure_langgraph_dev`` callers
     (which also hold ``_LOCK``) don't observe partially-cleared state.
     """
-    global _PROCESS, _PROCESS_WORKSPACE, _PROCESS_RUN_DIR
+    global _PROCESS, _PROCESS_WORKSPACE, _PROCESS_RUN_DIR, SERVED_WORKSPACE
     with _LOCK:
+        SERVED_WORKSPACE = None
         proc = proc if proc is not None else _PROCESS
         if proc is None:
             # No live process to stop, but stale PID/sidecar files may still
@@ -1375,10 +1377,10 @@ def ensure_langgraph_dev(
     background workers will fail.
     """
     global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
-    global SERVER_WORKSPACE_VERIFIED
+    global SERVED_WORKSPACE
     CONFIG_DRIFT_SINCE_LAUNCH = False
     AGENT_PYTHON_DRIFT = None
-    SERVER_WORKSPACE_VERIFIED = False
+    SERVED_WORKSPACE = None
 
     if not needs_langgraph_dev(config, backend=backend):
         _ASYNC_SUBAGENTS_AVAILABLE = False
@@ -1422,7 +1424,7 @@ def _ensure_langgraph_dev_locked(
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
-    global SERVER_WORKSPACE_VERIFIED
+    global SERVED_WORKSPACE
     config_fp = _server_config_fingerprint(config)
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
@@ -1474,7 +1476,7 @@ def _ensure_langgraph_dev_locked(
         # short-circuit this check, or we'd silently reuse a wrong-workspace
         # server.
         owned_running = _PROCESS is not None and _PROCESS.poll() is None
-        verified = owned_running
+        served = _PROCESS_WORKSPACE if owned_running else None
         if not owned_running:
             sidecar = _read_workspace_sidecar()
             if sidecar is not None:
@@ -1491,7 +1493,7 @@ def _ensure_langgraph_dev_locked(
                             )
                             + _keepalive_stop_hint(config)
                         )
-                    verified = True
+                    served = ws_path
                 recorded_fp = sidecar.get("config_fingerprint")
                 if isinstance(recorded_fp, str) and recorded_fp != config_fp:
                     CONFIG_DRIFT_SINCE_LAUNCH = True
@@ -1537,7 +1539,7 @@ def _ensure_langgraph_dev_locked(
                 "langgraph dev already running on %s, reusing", _base_url(port, host)
             )
         _ASYNC_SUBAGENTS_AVAILABLE = True
-        SERVER_WORKSPACE_VERIFIED = verified
+        SERVED_WORKSPACE = served
         return None
 
     try:
@@ -1565,7 +1567,7 @@ def _ensure_langgraph_dev_locked(
         return None
 
     _ASYNC_SUBAGENTS_AVAILABLE = True
-    SERVER_WORKSPACE_VERIFIED = True
+    SERVED_WORKSPACE = ws_path
     if getattr(config, "langgraph_dev_keepalive", False):
         # Keepalive: leave the server (plus PID file + sidecar) behind on CLI
         # exit so the next start in this workspace reuses it instantly.

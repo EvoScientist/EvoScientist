@@ -86,23 +86,24 @@ def test_adopt_stale_tasks_retags_untagged_and_moved_crons(workspace, other, tmp
         }
 
 
-@pytest.mark.parametrize("verified", [False, True])
-def test_startup_adoption_needs_verified_server(
-    workspace, client, monkeypatch, verified
+@pytest.mark.parametrize("served", ["unknown", "other", "workspace"])
+def test_startup_adoption_needs_server_serving_the_workspace(
+    workspace, other, client, monkeypatch, served
 ):
     """Moved and untagged tasks are taken over only from a server known to
-    hold this workspace's store; a reused server without a workspace record
-    may hold another workspace's."""
+    hold this workspace's store; a reused server without a workspace record,
+    or one moved to another workspace since, may hold another workspace's."""
     from EvoScientist.cli import commands
     from EvoScientist.langgraph_dev import manager
 
+    roots = {"unknown": None, "other": other.root, "workspace": workspace.root}
     monkeypatch.setattr(crons, "is_available", lambda: True)
-    monkeypatch.setattr(manager, "SERVER_WORKSPACE_VERIFIED", verified)
+    monkeypatch.setattr(manager, "SERVED_WORKSPACE", roots[served])
 
     commands._adopt_stale_scheduled_tasks(workspace=workspace)
 
     retagged = [c.args[0] for c in client.crons.update.call_args_list]
-    assert retagged == (["untagged"] if verified else [])
+    assert retagged == (["untagged"] if served == "workspace" else [])
 
 
 def test_list_schedules_filters_by_workspace(workspace, client):
