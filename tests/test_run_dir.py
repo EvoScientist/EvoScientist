@@ -175,7 +175,7 @@ def test_run_mode_memory_is_keyed_to_the_workspace_root(run_dirs, monkeypatch):
 def test_server_starts_in_the_root_with_the_run_folder_in_its_env(
     run_dirs, monkeypatch, tmp_path, runtime_paths
 ):
-    from tests.test_langgraph_dev_deploy_mode import _patch_start_prereqs, _PopenAbort
+    from tests.test_langgraph_dev_server_env import _patch_start_prereqs, _PopenAbort
 
     monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", "/inherited")
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
@@ -192,7 +192,7 @@ def test_server_starts_in_the_root_with_the_run_folder_in_its_env(
 def test_daemon_server_env_has_no_run_folder(
     workspace, monkeypatch, tmp_path, runtime_paths
 ):
-    from tests.test_langgraph_dev_deploy_mode import _patch_start_prereqs, _PopenAbort
+    from tests.test_langgraph_dev_server_env import _patch_start_prereqs, _PopenAbort
 
     monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", "/inherited")
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
@@ -249,7 +249,6 @@ def test_owned_server_restarts_for_another_run_folder(
     monkeypatch.setattr(manager, "_PROCESS", _LiveProc())
     monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", workspace.root)
     monkeypatch.setattr(manager, "_PROCESS_RUN_DIR", workspace.runs_dir / "a")
-    monkeypatch.setattr(manager, "_PROCESS_DEPLOY_MODE", False)
     monkeypatch.setattr(manager, "stop_langgraph_dev", lambda *a: stopped.append(1))
     monkeypatch.setattr(manager, "_wait_for_port_release", lambda *a, **k: True)
     monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
