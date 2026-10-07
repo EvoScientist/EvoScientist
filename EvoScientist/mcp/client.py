@@ -813,11 +813,11 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
     the server then fails to start as it would without Node. Never runs inside
-    ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set): a download there would
+    ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set): a download there would
     race the server's health deadline with its progress hidden in the server
     log, so ``start_langgraph_dev`` runs this before spawning instead.
     """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
     missing = [
         name
@@ -985,11 +985,11 @@ ProgressCallback = Callable[[str, str, str], None]
 def _get_tools_timeout() -> float | None:
     """The per-server ``get_tools`` limit for this process.
 
-    Only ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set) has a deadline:
+    Only ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set) has a deadline:
     its health check gives up after 60s.  The CLI and TUI have none, so there a
     slow server only makes startup slower and is left to finish.
     """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
     return None
 

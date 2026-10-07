@@ -1116,25 +1116,11 @@ def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
 def _get_default_agent():
     """Build the default agent (no checkpointer) on first access.
 
-    MCP loading depends on which subprocess mode (if any) this agent is
-    being built in. ``langgraph_dev.manager.start_langgraph_dev`` injects
-    ``EVOSCIENTIST_DEPLOY_MODE`` into the subprocess with one of two values:
-
-    - ``EVOSCIENTIST_DEPLOY_MODE=full`` — set by ``EvoSci deploy``. The
-      subprocess is the *primary* programmatic entry point (Python scripts,
-      Jupyter, integration tests via ``langgraph_sdk``), so it needs the full
-      configuration: **load MCP**, and ``_ASYNC_SUBAGENTS_AVAILABLE`` flips on
-      at module load so async sub-agents self-loop through this same
-      langgraph dev server.
-
-    - ``EVOSCIENTIST_DEPLOY_MODE=stripped`` — set by ``EvoSci`` / ``EvoSci
-      serve``. The CLI's in-process main agent already loaded MCP; this
-      subprocess only services async sub-agent self-loops, so **skip MCP**
-      to avoid running a second copy of the same servers.
-
-    Plain ``from EvoScientist import EvoScientist_agent`` (env var unset)
-    loads MCP. Async sub-agents stay disabled in that case because there is
-    no langgraph dev server to self-loop into.
+    This is the main graph the langgraph dev server serves, and the agent a
+    plain ``from EvoScientist import EvoScientist_agent`` gets. It always
+    loads MCP. Inside the server (``EVOSCIENTIST_SERVER_PROCESS``, set by
+    ``start_langgraph_dev``) async sub-agents dispatch back to that server;
+    elsewhere they stay disabled, since there is no server to dispatch to.
     """
     global _EvoScientist_agent
     if _EvoScientist_agent is None:
@@ -1144,18 +1130,11 @@ def _get_default_agent():
         be = _get_default_backend()
         mw = _get_default_middleware(backend=be)
 
-        if os.environ.get("EVOSCIENTIST_DEPLOY_MODE", "").lower() == "stripped":
-            kwargs = _build_base_kwargs(
-                be,
-                mw,
-                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
-            )
-        else:
-            kwargs = load_mcp_and_build_kwargs(
-                be,
-                mw,
-                workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
-            )
+        kwargs = load_mcp_and_build_kwargs(
+            be,
+            mw,
+            workspace_dir=str(_paths_mod.WORKSPACE_ROOT),
+        )
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,

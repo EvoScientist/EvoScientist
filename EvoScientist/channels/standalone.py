@@ -186,7 +186,7 @@ def _ensure_standalone_dev_server(config: Any, *, backend: str | None = None) ->
     Called synchronously before the asyncio loop starts (like serve), so the
     cold-start poll never blocks the channel event loop. Unlike serve, there is
     no console to render serve's red mismatch banner + ``typer.Exit``: a
-    workspace/deploy-mode mismatch from :func:`ensure_langgraph_dev` is logged as
+    workspace mismatch from :func:`ensure_langgraph_dev` is logged as
     a single error line and re-raised to abort startup; a generic start failure
     does not raise here — ``ensure_langgraph_dev`` leaves the dev server
     unavailable, and ``create_runtime_gateways_for_config`` then falls back to the

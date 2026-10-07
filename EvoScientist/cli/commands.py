@@ -598,7 +598,7 @@ def _ensure_async_subagent_server(
     place.
 
     ``backend`` is the calling surface's resolved gateway backend, forwarded to
-    ``ensure_langgraph_dev`` so the spawn/deploy-mode decision follows the
+    ``ensure_langgraph_dev`` so whether a server is needed follows the
     surface's choice rather than re-reading the global flag. ``None`` keeps the
     global-read behavior.
 
@@ -632,10 +632,10 @@ def _ensure_async_subagent_server(
 
     if _lg_manager.CONFIG_DRIFT_SINCE_LAUNCH:
         console.print(
-            "[yellow]⚠ Config changed since the background agent server was "
-            "launched — async sub-agents still use the old settings. Apply "
-            "them with [bold]EvoSci server stop[/bold], then restart "
-            "EvoSci.[/yellow]"
+            "[yellow]⚠ Configuration or version changed since the background "
+            "agent server was launched — it still runs the old settings or "
+            "version. Apply them with [bold]EvoSci server stop[/bold], then "
+            "restart EvoSci.[/yellow]"
         )
     if _lg_manager.AGENT_PYTHON_DRIFT is not None:
         console.print(f"[yellow]⚠ {escape(_lg_manager.AGENT_PYTHON_DRIFT)}[/yellow]")
@@ -732,7 +732,7 @@ async def _sync_background_agent_server_workspace(
     flow.
 
     ``backend`` is the calling surface's resolved gateway backend, forwarded so
-    the spawn/deploy-mode decision follows the surface's choice; ``None`` keeps
+    whether a server is needed follows the surface's choice; ``None`` keeps
     the global-read behavior.
     """
     import asyncio
@@ -2636,7 +2636,7 @@ def _main_callback(
     # Resolve the gateway backend for whichever surface this callback launches:
     # single-shot when a prompt is given, else the interactive CLI / TUI (the
     # same value each inner entry re-resolves for its own factory call). Drives
-    # both the pre-spawn deploy mode and the single-shot factory below.
+    # both the server start and the single-shot factory below.
     from ..config import GatewaySurface, resolve_gateway_backend
 
     if prompt:

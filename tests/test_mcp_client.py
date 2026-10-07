@@ -1983,7 +1983,7 @@ class TestLoadToolsProgressCallback:
     def test_no_timeout_outside_langgraph_dev(self, monkeypatch):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         assert mcp_client._get_tools_timeout() is None
 
     async def test_langgraph_dev_loads_with_the_server_timeout(self, monkeypatch):
@@ -1997,7 +1997,7 @@ class TestLoadToolsProgressCallback:
             return {}
 
         monkeypatch.setattr(mcp_client, "_load_tools", fake_load_tools)
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
 
         config = {"srv": {"transport": "stdio", "command": "demo"}}
         await mcp_client.aload_mcp_tools(config)
@@ -2014,7 +2014,7 @@ class TestEnsureNodeForStdio:
         from EvoScientist.setup import node as setup_node
 
         calls = {"ensure": 0, "activate": 0}
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
 
         def ensure(*_a, **_k):
             calls["ensure"] += 1
@@ -2062,7 +2062,7 @@ class TestEnsureNodeForStdio:
         def offline(*_a, **_k):
             raise StageError("download_failed", "offline")
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
@@ -2081,7 +2081,7 @@ class TestEnsureNodeForStdio:
         def broken(*_a, **_k):
             raise NotImplementedError("compression type 99")
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
@@ -2093,7 +2093,7 @@ class TestEnsureNodeForStdio:
     def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}
