@@ -114,8 +114,12 @@ class RecordingGateway:
         self.calls.append(("stream_events", request.thread_id))
         return _empty_async_iter()
 
-    async def update_state_values(self, target, tid, values):
-        self.calls.append(("update_state_values", tid))
+    async def get_state_snapshot(self, target, tid):
+        self.calls.append(("get_state_snapshot", tid))
+        return SimpleNamespace(next=(), tasks=(), interrupts=(), values=self._state)
+
+    async def update_state_values(self, target, tid, values, *, as_node=None):
+        self.calls.append(("update_state_values", tid, as_node))
 
     async def get_run_status(self, target, tid, run_id):
         self.calls.append(("get_run_status", tid))
@@ -296,6 +300,76 @@ async def test_update_state_values_legacy_refused():
     assert not execute.called("update_state_values")
     await comp.update_state_values(None, UUID, {})
     assert execute.called("update_state_values")
+
+
+async def test_update_state_values_forwards_as_node():
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e")
+    await _composite(read, execute).update_state_values(
+        None, UUID, None, as_node="__end__"
+    )
+    assert ("update_state_values", UUID, "__end__") in execute.calls
+    assert not read.called("update_state_values")
+
+
+async def test_state_snapshot_uuid_server_legacy_local():
+    read = RecordingGateway("r", state={"src": "local"})
+    execute = RecordingGateway("e", state={"src": "server"})
+    comp = _composite(read, execute)
+    assert (await comp.get_state_snapshot(None, UUID)).values == {"src": "server"}
+    assert not read.called("get_state_snapshot")
+    assert (await comp.get_state_snapshot(None, LEGACY)).values == {"src": "local"}
+
+
+async def test_close_parked_checkpoint_through_composite():
+    """HITL close on the server backend reads and writes via the composite (#600)."""
+    from langchain_core.messages import AIMessage
+
+    from EvoScientist.backends import (
+        HITL_ROUND_LIMIT_REJECT_MESSAGE,
+        close_parked_checkpoint,
+    )
+    from EvoScientist.gateway import GraphTarget
+    from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
+
+    agent = FakeCheckpointAgent(
+        values={
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "echo hi"},
+                            "id": "exec-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        }
+    )
+    read = RecordingGateway("r")
+    execute = FakeGraphGateway(checkpoint=agent)
+    comp = CompositeGraphGateway(read=read, execute=execute)
+
+    await close_parked_checkpoint(comp, GraphTarget(local_graph=None), UUID)
+
+    assert [as_node for _values, as_node in agent.updates] == [
+        "__end__",
+        "tools",
+        "__end__",
+    ]
+    assert not read.called("get_state_snapshot")
+    assert not read.called("update_state_values")
+    patched = [
+        m for m in agent.values["messages"] if getattr(m, "type", None) == "tool"
+    ]
+    assert [m.tool_call_id for m in patched] == ["exec-1"]
+    assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patched[0].content
+    verify = await agent.aget_state({})
+    assert verify.next == ()
+    assert not verify.interrupts
 
 
 async def test_clone_thread_uuid_server_legacy_refused():
