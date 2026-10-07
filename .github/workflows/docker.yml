@@ -35,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
 
-      # Same guard as publish.yml — a release that PyPI would refuse must not
+      # Same guard as publish.yml — a release that its guard refuses must not
       # publish versioned images either. Gated on a tag ref, not the release
       # event, so a dispatch from a tag is guarded too; main builds skip it.
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0

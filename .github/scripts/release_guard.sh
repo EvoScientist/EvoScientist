@@ -15,8 +15,17 @@ set -euo pipefail
 EXPORT_ARGS=(--frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate)
 EXPORT_CMD="uv export ${EXPORT_ARGS[*]} -o constraints.txt"
 
+# Prints the version of the pyproject.toml on stdin, or nothing when it has no
+# version line.
 pyproject_version() {
-  grep -m1 '^version = ' | sed -E 's/^version = "(.*)"/\1/'
+  { grep -m1 '^version = ' || true; } | sed -E 's/^version = "(.*)"/\1/'
+}
+
+require_version() {
+  if [ -z "$1" ]; then
+    echo "::error::No version line (version = \"...\") in $2."
+    exit 1
+  fi
 }
 
 check_lock_and_constraints() {
@@ -46,6 +55,7 @@ case "${1:-}" in
       exit 1
     fi
     VERSION=$(pyproject_version < pyproject.toml)
+    require_version "$VERSION" pyproject.toml
     TAG="${GITHUB_REF_NAME#v}"
     echo "pyproject version: $VERSION | release tag: $TAG"
     if [ "$VERSION" != "$TAG" ]; then
@@ -56,8 +66,10 @@ case "${1:-}" in
     ;;
   pr)
     VERSION=$(pyproject_version < pyproject.toml)
+    require_version "$VERSION" pyproject.toml
     git fetch --quiet --depth=1 origin "${BASE_SHA:?BASE_SHA must be the pull request base commit}"
     BASE_VERSION=$(git show "$BASE_SHA:pyproject.toml" | pyproject_version)
+    require_version "$BASE_VERSION" "the base commit's pyproject.toml"
     if [ "$VERSION" = "$BASE_VERSION" ]; then
       echo "pyproject version unchanged ($VERSION): not a release PR, nothing to check."
       exit 0

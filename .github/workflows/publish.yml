@@ -3,8 +3,9 @@ name: Publish to PyPI
 # Publishes EvoScientist to PyPI via OpenID Connect (trusted publishing) — no
 # API token or password involved. Fires when a GitHub Release is published
 # (i.e. after `gh release create vX.Y.Z`), builds the sdist + wheel, guards
-# that the package version matches the release tag and that constraints.txt
-# matches uv.lock, then uploads with a short-lived OIDC token.
+# that the package version matches the release tag, that uv.lock is up to date
+# and that constraints.txt matches it, then uploads with a short-lived OIDC
+# token.
 #
 # One-time PyPI setup (Manage project -> Publishing -> Add a new publisher):
 #   Owner:            EvoScientist
