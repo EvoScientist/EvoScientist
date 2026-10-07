@@ -204,9 +204,14 @@ def test_fetch_metadata_http_errors_name_the_registry(monkeypatch, status, words
     assert words in exc.value.message
 
 
-def test_fetch_metadata_network_error_is_download_failed(monkeypatch):
+@pytest.mark.parametrize("error", ["refused", "cut off"])
+def test_fetch_metadata_network_error_is_download_failed(monkeypatch, error):
+    import http.client
+
     def urlopen(request, timeout):
-        raise urllib.error.URLError("refused")
+        if error == "cut off":
+            raise http.client.IncompleteRead(b'{"versions": {"0.3', 4982)
+        raise urllib.error.URLError(error)
 
     monkeypatch.setattr(webui.urllib.request, "urlopen", urlopen)
     with pytest.raises(StageError) as exc:

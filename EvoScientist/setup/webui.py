@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from ._install import move_into_place, remove_stale_temp_dirs, tools_dir
-from .download import download
+from .download import _NETWORK_ERRORS, download
 from .protocol import Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ def fetch_metadata(registry: str) -> dict[str, Any]:
             "download_failed",
             f"{registry} answered HTTP {exc.code} for {PACKAGE}.{hint}",
         ) from exc
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except _NETWORK_ERRORS as exc:
         raise StageError(
             "download_failed", f"Could not read {PACKAGE} from {registry}: {exc}"
         ) from exc
