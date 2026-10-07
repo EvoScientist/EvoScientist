@@ -1,9 +1,11 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import json
 import logging
 import os
 import queue
 import re
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from importlib.metadata import version as _pkg_version
@@ -272,10 +274,16 @@ def setup(
     cn: bool = typer.Option(
         False, "--cn", help="Download from mainland China mirrors and remember it"
     ),
+    skip: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skip", help="Skip this stage (repeatable; ids from --manifest)"
+        ),
+    ] = None,
 ):
     """Install what EvoScientist needs beyond the Python package (Node.js, Git
-    for Windows on Windows, and a Python for the agent's shell when none is on
-    PATH).
+    for Windows on Windows, a Python for the agent's shell when none is on
+    PATH, and the WebUI).
 
     Runs every stage that applies to this platform, in order. With ``--json``
     stdout carries only the JSON event lines; everything else goes to stderr.
@@ -299,11 +307,23 @@ def setup(
 
         redirect_console_to_stderr()
 
+    known = ", ".join(s.id for s in STAGES)
+    skipped = frozenset(skip or ())
+    unknown = sorted(skipped - {s.id for s in STAGES})
+    if unknown:
+        typer.echo(
+            f"Unknown stage {', '.join(map(repr, unknown))}. Known stages: {known}",
+            err=True,
+        )
+        raise typer.Exit(2)
+    if skipped and stage is not None:
+        typer.echo("--skip cannot be combined with --stage.", err=True)
+        raise typer.Exit(2)
+
     selected = tuple(s for s in STAGES if s.applies())
     if stage is not None:
         found = get_stage(stage)
         if found is None:
-            known = ", ".join(s.id for s in STAGES)
             typer.echo(f"Unknown stage {stage!r}. Known stages: {known}", err=True)
             raise typer.Exit(2)
         selected = (found,)
@@ -320,7 +340,7 @@ def setup(
     mirror = "cn" if cn else load_config().mirror
 
     emit = JsonEmitter() if json_output else ConsoleEmitter(console)
-    code = run_stages(selected, emit, mirror)
+    code = run_stages(selected, emit, mirror, skip=skipped)
     if code:
         raise typer.Exit(code)
 
@@ -2454,7 +2474,29 @@ def sessions_stats(ctx: typer.Context):
 
 def _version_callback(value: bool):
     if value:
-        typer.echo(f"EvoScientist {_pkg_version('EvoScientist')}")
+        # ``--version`` is eager, so it runs before ``--json`` is parsed (Click
+        # runs eager callbacks in command-line order); read the raw arguments
+        # so both flag orders print the same JSON.
+        if "--json" in sys.argv[1:]:
+            from ..setup.protocol import PROTOCOL
+            from ..setup.webui import compat_range
+            from ..stream.json_sink import redirect_console_to_stderr
+
+            # stdout carries only the JSON line; a warning (e.g. the range
+            # override) goes to stderr.
+            redirect_console_to_stderr()
+
+            typer.echo(
+                json.dumps(
+                    {
+                        "version": _pkg_version("EvoScientist"),
+                        "protocol": PROTOCOL,
+                        "webui_compat": compat_range(),
+                    }
+                )
+            )
+        else:
+            typer.echo(f"EvoScientist {_pkg_version('EvoScientist')}")
         raise typer.Exit()
 
 
@@ -2570,8 +2612,22 @@ def _main_callback(
             "'stream-json' (line-delimited JSON events to stdout)."
         ),
     ),
+    # Annotated, so a direct call without this argument gets a plain False
+    # rather than Typer's OptionInfo default, which is truthy.
+    version_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            hidden=True,
+            help="With --version: print the version, protocol and WebUI range as JSON.",
+        ),
+    ] = False,
 ):
     """EvoScientist Agent - AI-powered research & code execution CLI"""
+    if version_json:
+        # ``--version --json`` exits in the version callback before this runs.
+        typer.echo("--json is only valid with --version.", err=True)
+        raise typer.Exit(2)
     # If a subcommand was invoked, don't run the default behavior
     if ctx.invoked_subcommand is not None:
         return
@@ -2719,8 +2775,8 @@ def _main_callback(
     ensure_dirs()
 
     # WebUI mode: instead of the in-terminal CLI/TUI, run a deploy-style
-    # langgraph server (full MCP + async) + the published @evoscientist/webui
-    # front-end (npx) in THIS terminal, then block. Reuses start_langgraph_dev
+    # langgraph server (full MCP + async) + the locally installed
+    # @evoscientist/webui front-end in THIS terminal, then block. Reuses start_langgraph_dev
     # but leaves `EvoSci deploy` untouched (it stays a clean server for external
     # UIs / SDK clients).
     #

@@ -3,11 +3,11 @@
 Selected via ``ui_backend = "webui"`` (onboard → "Select UI mode" → WebUI).
 Running ``EvoSci`` then becomes, in ONE terminal:
 
-    EvoSci deploy  +  npx @evoscientist/webui
+    EvoSci deploy  +  node <tools>/webui/<version>/dist/server.js
 
 i.e. start a *full* langgraph dev server (MCP + async sub-agents, exactly like
-``EvoSci deploy``) AND launch the published ``@evoscientist/webui`` Next.js
-front-end via ``npx``, so the user never needs two terminals.
+``EvoSci deploy``) AND the ``@evoscientist/webui`` Next.js front-end that
+``EvoSci setup`` installed locally, so the user never needs two terminals.
 
 Design boundary: this module is the **terminal front-end** over the
 shell-agnostic launcher core in :mod:`EvoScientist.deploy.launcher`. All the
@@ -20,11 +20,11 @@ same :class:`~EvoScientist.deploy.launcher.WebUILauncher` without this module.
 consumers (deep-agents-ui, agent-chat-ui, LangSmith Studio, SDK clients); WebUI
 mode is a separate, parallel launcher.
 
-``npx @evoscientist/webui@latest`` is used (not a pinned version) so each launch
-transparently pulls the newest published UI — front-end fixes ship to users
-without touching the EvoScientist install. The trade-off: the first launch (and
-the first launch after a new release) downloads the package and needs network;
-subsequent launches reuse the npm cache.
+The front-end is the newest release inside the range this core supports
+(``setup/webui.py``), installed on demand when nothing is installed yet. Once
+installed it starts offline. After the UI is up, a background check downloads
+a newer release in range, which the next launch uses, so front-end fixes still
+reach users without an EvoScientist release.
 """
 
 from __future__ import annotations
@@ -42,9 +42,8 @@ from rich.text import Text
 
 from ..stream.console import console
 from .launcher import (
-    _WEBUI_PACKAGE,
+    InstalledWebUIRunner,
     LauncherError,
-    NpxWebUIRunner,
     WebUILauncher,
     build_launcher_config,
 )
@@ -108,7 +107,7 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
             )
             raise typer.Exit(1)
     if cfg.webui_port == cfg.backend_port:
-        # Same port → the backend would claim it first and npx would fail to
+        # Same port → the backend would claim it first and the WebUI would fail to
         # bind. Catch it here with a clear message instead of a cryptic error.
         console.print(
             f"[red]WebUI port and langgraph dev port must differ "
@@ -120,16 +119,32 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         )
         raise typer.Exit(1)
 
-    launcher = WebUILauncher(config, cfg, NpxWebUIRunner())
+    webui_log = RUNTIME.log_file.parent / "webui.log"
+    starting = "[dim]Starting langgraph dev...[/dim]"
+    status_box: dict[str, Any] = {}
+
+    def _install_progress(fraction: float, message: str) -> None:
+        # An on-demand Node / WebUI install runs inside launcher.start(),
+        # before the backend; show its steps on the same spinner.
+        status = status_box.get("status")
+        if status is None:
+            return
+        if fraction >= 1.0:
+            status.update(starting)
+        else:
+            status.update(f"[dim]{escape(message)} ({int(fraction * 100)}%)...[/dim]")
+
+    runner = InstalledWebUIRunner(progress=_install_progress, log_path=webui_log)
+    launcher = WebUILauncher(config, cfg, runner)
     try:
-        with console.status(
-            "[dim]Starting langgraph dev...[/dim]",
-            spinner="dots",
-        ):
+        with console.status(starting, spinner="dots") as status:
+            status_box["status"] = status
             result = launcher.start()
     except LauncherError as exc:
         _render_launcher_error(exc)
         raise typer.Exit(1) from exc
+    finally:
+        status_box.clear()
     # start() has already spawned the backend (unless reused) and the front-end;
     # register teardown now so a Ctrl+C while the output below renders still
     # stops them. Idempotent, and honours keepalive inside launcher.stop().
@@ -154,6 +169,24 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         # Warnings can carry paths; a segment like "[lab]" is not markup.
         console.print(f"[yellow]⚠ {escape(warning)}[/yellow]")
 
+    # The launcher opens the browser once the WebUI answers.
+    try:
+        with console.status(
+            f"[dim]Starting WebUI {escape(runner.version or '')}...[/dim]",
+            spinner="dots",
+        ):
+            ready = launcher.wait_ready()
+    except LauncherError as exc:
+        if exc.code == "webui_start_failed":
+            log_hint = f"See {_shorten(str(webui_log))}."
+            exc.detail = f"{exc.detail}\n{log_hint}" if exc.detail else log_hint
+        _render_launcher_error(exc)
+        raise typer.Exit(1) from exc
+    runner.start_update_check()
+    browser_note = (
+        "opened in your browser" if ready.browser_opened else "open it in your browser"
+    )
+
     # The UI reaches the backend from the BROWSER; when only the front-end is
     # exposed, remote pages load but every request fails — say so.
     remote_backend_hint = ""
@@ -173,11 +206,11 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
                 f"[dim](langgraph dev — Assistant: EvoScientist)[/dim]\n"
                 f"[bold]WebUI:[/bold]    "
                 f"http://{_format_hostport(cfg.webui_host, cfg.webui_port)}  "
-                f"[dim](opens in your browser)[/dim]\n"
+                f"[dim]({browser_note})[/dim]\n"
                 f"[bold]Logs:[/bold]     {_shorten(str(RUNTIME.log_file))}\n"
+                f"          {_shorten(str(webui_log))}\n"
                 f"{remote_backend_hint}\n"
-                f"[dim]Fetching {_WEBUI_PACKAGE} via npx (first run may take a "
-                f"moment)…  Press Ctrl+C to stop.[/dim]"
+                f"[dim]Press Ctrl+C to stop.[/dim]"
             ),
             title="[bold green]✓ EvoScientist WebUI[/bold green]",
             border_style="green",
