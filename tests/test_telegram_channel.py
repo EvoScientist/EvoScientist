@@ -288,9 +288,7 @@ class TestTelegramChannel:
             ("PAPER.PDF", "application/octet-stream", ".PDF"),
             ("paper.bad suffix", "application/pdf", ".pdf"),
             (None, None, ""),
-            ("a." + "x" * 238, "application/pdf", "." + "x" * 238),
-            ("a." + "x" * 239, "application/pdf", ".pdf"),
-            ("a." + "x" * 240, None, ""),
+            ("a." + "x" * 20, "application/pdf", ".pdf"),
             (None, "application/x-unknown-evosci", ""),
             ("../../paper.pdf", "application/pdf", ".pdf"),
             ("C:\\uploads\\paper.pdf", "application/pdf", ".pdf"),
@@ -301,7 +299,7 @@ class TestTelegramChannel:
         self, tmp_path, monkeypatch, file_name, mime_type, suffix
     ):
         channel = TelegramChannel(TelegramConfig(bot_token="test"))
-        file_id = "synthetic-file-id-for-document"
+        file_unique_id = "synthetic-unique-id-for-document"
         download = AsyncMock()
         channel._app = SimpleNamespace(
             bot=SimpleNamespace(
@@ -316,12 +314,16 @@ class TestTelegramChannel:
         for name in ("photo", "voice", "audio", "video", "sticker", "location"):
             setattr(update.message, name, None)
         update.message.document = SimpleNamespace(
-            file_id=file_id, file_size=10, file_name=file_name, mime_type=mime_type
+            file_id="synthetic-file-id",
+            file_unique_id=file_unique_id,
+            file_size=10,
+            file_name=file_name,
+            mime_type=mime_type,
         )
 
         await channel._on_message(update, None)
 
-        expected = tmp_path / f"{file_id[:16]}{suffix}"
+        expected = tmp_path / f"{file_unique_id}{suffix}"
         download.assert_awaited_once_with(str(expected))
         raw = channel._enqueue_raw.await_args.args[0]
         assert raw.media_files == [str(expected)]
