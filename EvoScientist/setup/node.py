@@ -503,6 +503,11 @@ def _ask_npm_registry(npm: str, env: Mapping[str, str]) -> str | None:
     if not cwd.is_dir():
         cwd = Path.home()
     child_env = {k: v for k, v in env.items() if k.upper() != "NODE_OPTIONS"}
+    # On macOS and Linux `npm` is `#!/usr/bin/env node`: it runs the first
+    # `node` on PATH, which is not ours when it was installed in this process.
+    child_env["PATH"] = os.pathsep.join(
+        filter(None, [str(Path(npm).parent), child_env.get("PATH")])
+    )
     try:
         result = subprocess.run(
             [npm, "config", "get", "registry"],

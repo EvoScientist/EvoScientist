@@ -728,14 +728,20 @@ def test_configured_registry_is_none_without_npm(env, monkeypatch):
 def test_configured_registry_runs_npm_outside_the_current_project(
     env, npm_env, monkeypatch
 ):
-    """A project ``.npmrc`` in the cwd must not decide; NODE_OPTIONS is dropped."""
+    """A project ``.npmrc`` in the cwd must not decide; NODE_OPTIONS is dropped;
+    npm's launcher finds the Node next to it first on PATH."""
     (env["data"] / "tools").mkdir(parents=True)
     fake = FakeNpmConfig("https://npmrc.example/")
     monkeypatch.setattr(node.subprocess, "run", fake)
-    node.configured_npm_registry({"NODE_OPTIONS": "--x", "HOME": "h"}, npm_env)
+    node.configured_npm_registry(
+        {"NODE_OPTIONS": "--x", "HOME": "h", "PATH": "elsewhere"}, npm_env
+    )
     (call,) = fake.calls
     assert Path(call["cwd"]) == env["data"] / "tools"
-    assert call["env"] == {"HOME": "h"}
+    assert call["env"] == {
+        "HOME": "h",
+        "PATH": os.pathsep.join([str(npm_env.parent), "elsewhere"]),
+    }
 
 
 def test_run_stage_returns_done_with_the_node_detail(monkeypatch):
