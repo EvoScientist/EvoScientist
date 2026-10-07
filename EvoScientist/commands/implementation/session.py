@@ -6,6 +6,7 @@ from typing import ClassVar
 from rich.table import Table
 
 from ...gateway import GraphGateway, GraphTarget
+from ...paths import SessionDirs
 from ..base import Argument, Command, CommandContext
 from ..manager import manager
 
@@ -46,10 +47,8 @@ class CompactCommand(Command):
             result = await compact_conversation(
                 graph_gateway=_graph_gateway(ctx),
                 thread_id=ctx.thread_id,
-                target=GraphTarget(
-                    local_graph=ctx.agent,
-                    workspace_dir=ctx.workspace_dir,
-                ),
+                target=GraphTarget(local_graph=ctx.agent, **ctx.dirs.metadata()),
+                workspace=ctx.workspace,
                 input_tokens_hint=ctx.input_tokens_hint,
             )
         finally:
@@ -177,10 +176,14 @@ class ResumeCommand(Command):
         if not resolved:
             return
 
-        metadata = await gateway.get_thread_metadata(resolved)
-        restored_workspace = (metadata or {}).get("workspace_dir", "")
-        if restored_workspace:
-            ctx.workspace_dir = restored_workspace
+        metadata = await gateway.get_thread_metadata(resolved) or {}
+        # A thread from another workspace switches everything: skills,
+        # experts, memory and the folder the agent works in.
+        restored = SessionDirs.from_stored(
+            metadata.get("workspace_dir"), metadata.get("run_dir")
+        )
+        if restored is not None:
+            ctx.dirs = restored
 
         switched_thread = resolved != ctx.thread_id
         ctx.thread_id = resolved
@@ -199,7 +202,7 @@ class ResumeCommand(Command):
 
         # Signal session change to UI
         if hasattr(ctx.ui, "handle_session_resume"):
-            await ctx.ui.handle_session_resume(resolved, restored_workspace)
+            await ctx.ui.handle_session_resume(resolved, restored)
 
     async def _resolve_thread_id(self, prefix: str, ctx: CommandContext) -> str | None:
         resolution = await _graph_gateway(ctx).resolve_thread(prefix)

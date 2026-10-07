@@ -67,23 +67,44 @@ def test_resolve_backend_other_workspace_is_mismatch(monkeypatch):
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsB", "deploy_mode": True},
+        sidecar={"workspace": "/tmp/wsB"},
     )
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert ei.value.code == "workspace_mismatch"
 
 
-def test_resolve_backend_stripped_server_is_refused(monkeypatch):
+def test_resolve_backend_run_folder_server_is_mismatch(monkeypatch):
+    """The WebUI works in the root; a server pinned to a run folder is refused."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsA", "deploy_mode": False},
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "run_dir": "/tmp/wsA/runs/20260930_120000",
+        },
     )
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
-    assert ei.value.code == "stripped_backend"
+    assert ei.value.code == "workspace_mismatch"
+    assert "runs/20260930_120000" in ei.value.message
+    assert "server stop" not in ei.value.detail
+
+
+def test_resolve_backend_run_folder_hint_covers_kept_alive_server(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "run_dir": "/tmp/wsA/runs/20260930_120000",
+        },
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA", keepalive=True), object())
+    assert "EvoSci server stop" in ei.value.detail
 
 
 def test_resolve_backend_same_workspace_reuses(monkeypatch):
@@ -93,7 +114,6 @@ def test_resolve_backend_same_workspace_reuses(monkeypatch):
         running=True,
         sidecar={
             "workspace": "/tmp/wsA",
-            "deploy_mode": True,
             "config_fingerprint": "fp-now",
         },
     )
@@ -102,21 +122,28 @@ def test_resolve_backend_same_workspace_reuses(monkeypatch):
     assert decision.warnings == []
 
 
-def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
+@pytest.mark.parametrize(
+    "legacy",
+    [{}, {"deploy_mode": False}],
+    ids=["current", "stripped_from_older_version"],
+)
+def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch, legacy):
+    """A server from another version is reused with the drift warning, also
+    one an older version started without MCP (``deploy_mode: false``)."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
         running=True,
         sidecar={
             "workspace": "/tmp/wsA",
-            "deploy_mode": True,
             "config_fingerprint": "fp-old",
+            **legacy,
         },
         fingerprint="fp-now",
     )
     decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert decision.action == "reuse"
-    assert any("Config changed" in w for w in decision.warnings)
+    assert any("EvoSci server stop" in w for w in decision.warnings)
 
 
 def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
@@ -128,7 +155,6 @@ def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
         running=True,
         sidecar={
             "workspace": "/tmp/wsA",
-            "deploy_mode": True,
             "config_fingerprint": "fp-now",
             "agent_python": "/conda/bin/python",
         },
@@ -151,7 +177,7 @@ def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
 def test_start_hint_follows_the_reused_server(monkeypatch, recorded, own, hinted):
     from EvoScientist.setup import research_env
 
-    sidecar = {"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 1}
+    sidecar = {"workspace": "/tmp/wsA", "pid": 1}
     _patch_for_evosci_occupant(monkeypatch, {**sidecar, "agent_python": recorded})
     monkeypatch.setattr(research_env, "agent_python", lambda: own)
     result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
@@ -173,7 +199,7 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 12345},
+        sidecar={"workspace": "/tmp/wsA", "pid": 12345},
         pid_serves=False,
     )
     with pytest.raises(lm.LauncherError) as ei:
@@ -353,9 +379,7 @@ def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
 
 
 def test_stop_after_reuse_leaves_backend_running(monkeypatch):
-    _patch_for_evosci_occupant(
-        monkeypatch, sidecar={"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 1}
-    )
+    _patch_for_evosci_occupant(monkeypatch, sidecar={"workspace": "/tmp/wsA", "pid": 1})
     calls: list = []
     monkeypatch.setattr(lgm, "stop_langgraph_dev", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(lgm, "stop_inflight_owned_server", lambda: calls.append(0))
@@ -373,16 +397,14 @@ def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: sidecar)
     monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: "fp")
     # The sidecar genuinely describes the server on this port; these tests
-    # exercise the workspace/deploy-mode checks past the PID-serves-port guard.
+    # exercise the workspace checks past the PID-serves-port guard.
     monkeypatch.setattr(lgm, "_pid_serves_port", lambda *a, **k: True)
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 
 def test_start_raises_on_workspace_mismatch(monkeypatch):
     """A server for a different workspace is refused; no second backend starts."""
-    _patch_for_evosci_occupant(
-        monkeypatch, sidecar={"workspace": "/tmp/wsB", "deploy_mode": True}
-    )
+    _patch_for_evosci_occupant(monkeypatch, sidecar={"workspace": "/tmp/wsB"})
     started: list = []
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: started.append(k))
     launcher = lm.WebUILauncher(object(), _cfg(workspace_dir="/tmp/wsA"), _FakeRunner())

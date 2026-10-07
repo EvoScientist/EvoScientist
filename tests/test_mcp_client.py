@@ -633,7 +633,7 @@ class TestOwnedRuntimeLoading:
         executions: list[tuple[str, asyncio.AbstractEventLoop]] = []
         tool = _make_tool("search")
 
-        async def fake_load(_config, *, on_progress=None):
+        async def fake_load(_config, *, on_progress=None, timeout=None):
             executions.append(
                 (threading.current_thread().name, asyncio.get_running_loop())
             )
@@ -657,7 +657,7 @@ class TestOwnedRuntimeLoading:
     def test_direct_caller_gets_a_scoped_runtime(self, monkeypatch):
         execution: dict[str, object] = {}
 
-        async def fake_load(_config, *, on_progress=None):
+        async def fake_load(_config, *, on_progress=None, timeout=None):
             execution["thread"] = threading.current_thread().name
             execution["loop"] = asyncio.get_running_loop()
             return {"server": []}
@@ -1904,6 +1904,179 @@ class TestLoadToolsProgressCallback:
         assert inflight["peak"] <= 3
         assert inflight["peak"] > 1  # sanity: we *are* parallelizing
 
+    async def test_slow_server_is_skipped_after_timeout(self, monkeypatch):
+        """A server that never answers is cancelled, reported as an error and
+        left out, and the other servers still load."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        cancelled = asyncio.Event()
+
+        class _HangingClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                if server_name == "slow_srv":
+                    # Cancellation is what makes the MCP SDK shut a stdio
+                    # subprocess down, so check it happens, not just that the
+                    # load returns.
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                return ["a"]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _HangingClient)
+
+        events: list[tuple[str, str, str]] = []
+
+        def record(event, name, detail):
+            events.append((event, name, detail))
+
+        config = {
+            "ok_srv": {"transport": "stdio", "command": "demo"},
+            "slow_srv": {"transport": "stdio", "command": "demo"},
+        }
+        result = await asyncio.wait_for(
+            mcp_client._load_tools(config, on_progress=record, timeout=0.05),
+            timeout=5,
+        )
+
+        assert result == {"ok_srv": ["a"], "slow_srv": []}
+        assert cancelled.is_set()
+        by_server = {}
+        for ev, name, detail in events:
+            by_server.setdefault(name, []).append((ev, detail))
+        assert by_server["ok_srv"] == [("start", ""), ("success", "1")]
+        assert by_server["slow_srv"] == [
+            ("start", ""),
+            ("error", "timed out after 0.05s"),
+        ]
+
+    async def test_timeout_raised_inside_get_tools_keeps_its_message(self, monkeypatch):
+        """A TimeoutError from the server itself (e.g. a websocket handshake)
+        is not reported as our own deadline."""
+        from EvoScientist.mcp.client import _load_tools
+
+        events: list[tuple[str, str, str]] = []
+        self._patch_client(
+            monkeypatch, {"srv": TimeoutError("opening handshake timed out")}
+        )
+
+        config = {"srv": {"transport": "websocket", "url": "ws://localhost:1"}}
+
+        def record(event, name, detail):
+            events.append((event, name, detail))
+
+        await _load_tools(config, on_progress=record, timeout=5)
+
+        assert events == [
+            ("start", "srv", ""),
+            ("error", "srv", "opening handshake timed out"),
+        ]
+
+    def test_no_timeout_outside_langgraph_dev(self, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        assert mcp_client._get_tools_timeout() is None
+
+    async def test_langgraph_dev_loads_with_the_server_timeout(self, monkeypatch):
+        """Inside ``langgraph dev`` the loaders pass the server limit through."""
+        from EvoScientist.mcp import client as mcp_client
+
+        seen: list[float | None] = []
+
+        async def fake_load_tools(config, *, on_progress=None, timeout=None):
+            seen.append(timeout)
+            return {}
+
+        monkeypatch.setattr(mcp_client, "_load_tools", fake_load_tools)
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+
+        config = {"srv": {"transport": "stdio", "command": "demo"}}
+        await mcp_client.aload_mcp_tools(config)
+
+        assert seen == [mcp_client._SERVER_GET_TOOLS_TIMEOUT_SECONDS]
+
+    @pytest.mark.parametrize(
+        ("server_process", "expected_tools"),
+        [("1", []), (None, ["ping"])],
+    )
+    def test_sync_loader_cuts_off_slow_stdio_only_in_langgraph_dev(
+        self, monkeypatch, server_process, expected_tools
+    ):
+        """``langgraph dev`` reaches ``_load_tools`` through the sync loader
+        (via ``_load_mcp_tools_cached``). A slow stdio server is cut off there
+        and left to finish everywhere else."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        class _SlowClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                await asyncio.sleep(0.5)
+                return [SimpleNamespace(name="ping")]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _SlowClient)
+        monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
+        if server_process is None:
+            monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        else:
+            monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", server_process)
+
+        config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
+        result = mcp_client.load_mcp_tools(config)
+
+        tools = [tool.name for agent_tools in result.values() for tool in agent_tools]
+        assert tools == expected_tools
+
+    def test_sync_loader_warns_with_the_timeout_reason(self, monkeypatch, caplog):
+        """With no ``on_progress`` (the ``langgraph dev`` path), a server that
+        runs out of time is logged with the timeout, not an empty reason."""
+        import asyncio
+        import logging
+
+        from EvoScientist.mcp import client as mcp_client
+
+        class _HangingClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                # Long enough to outlast the 0.05s limit, short enough that a
+                # missing limit fails the test instead of hanging it.
+                await asyncio.sleep(2)
+                return ["late"]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _HangingClient)
+        monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+
+        config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
+        with caplog.at_level(logging.WARNING, logger=mcp_client.logger.name):
+            mcp_client.load_mcp_tools(config)
+
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "'slow_srv'" in message and "timed out after 0.05s" in message
+            for message in warnings
+        ), warnings
+
 
 # ---- _ensure_node_for_stdio ----
 
@@ -1914,7 +2087,7 @@ class TestEnsureNodeForStdio:
         from EvoScientist.setup import node as setup_node
 
         calls = {"ensure": 0, "activate": 0}
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
 
         def ensure(*_a, **_k):
             calls["ensure"] += 1
@@ -1962,7 +2135,7 @@ class TestEnsureNodeForStdio:
         def offline(*_a, **_k):
             raise StageError("download_failed", "offline")
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
@@ -1981,7 +2154,7 @@ class TestEnsureNodeForStdio:
         def broken(*_a, **_k):
             raise NotImplementedError("compression type 99")
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
@@ -1993,7 +2166,7 @@ class TestEnsureNodeForStdio:
     def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}

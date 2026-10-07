@@ -4,7 +4,8 @@ from unittest.mock import MagicMock
 
 from rich.table import Table
 
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from EvoScientist.paths import SessionDirs
+from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _ctx(**overrides):
@@ -14,10 +15,10 @@ def _ctx(**overrides):
     ui.supports_interactive = overrides.pop("supports_interactive", True)
     store = overrides.pop("thread_store", FakeThreadStore())
     return CommandContext(
+        dirs=SessionDirs(TEST_WORKSPACE),
         agent=None,
         thread_id=overrides.pop("thread_id", "tid-1"),
         ui=ui,
-        workspace_dir=overrides.pop("workspace_dir", "/ws"),
         graph_gateway=FakeGraphGateway(thread_store=store),
     ), ui
 

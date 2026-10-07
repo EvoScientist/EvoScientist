@@ -9,6 +9,7 @@ from .base import CommandUI
 
 if TYPE_CHECKING:
     from ..gateway import GraphGateway
+    from ..paths import SessionDirs
 
 _logger = logging.getLogger(__name__)
 
@@ -200,11 +201,11 @@ class ChannelCommandUI(CommandUI):
             )
 
     async def handle_session_resume(
-        self, thread_id: str, workspace_dir: str | None = None
+        self, thread_id: str, dirs: SessionDirs | None = None
     ) -> None:
         mirror_local = self.handle_session_resume_callback is None
         if self.handle_session_resume_callback:
-            await self.handle_session_resume_callback(thread_id, workspace_dir)
+            await self.handle_session_resume_callback(thread_id, dirs)
         lines = [f"Resumed session: {thread_id}"]
         try:
             messages = await self.graph_gateway.get_thread_messages(thread_id)
