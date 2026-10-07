@@ -160,6 +160,7 @@ def _run_webui_once(
         "ensure_node",
         lambda **_kw: node_mod.NodeInfo("system", "22.0.0", Path(NODE)),
     )
+    monkeypatch.setattr(node_mod, "activate_runtime", lambda: None)
     monkeypatch.setattr(
         setup_webui,
         "ensure_webui",

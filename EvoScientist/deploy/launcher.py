@@ -239,7 +239,7 @@ class InstalledWebUIRunner:
         self.version: str | None = None
 
     def preflight(self, cfg: LauncherConfig) -> None:
-        from ..setup.node import ensure_node
+        from ..setup.node import activate_runtime, ensure_node
         from ..setup.protocol import StageError
         from ..setup.webui import cleanup_old_versions, ensure_webui, mark_in_use
 
@@ -249,6 +249,9 @@ class InstalledWebUIRunner:
             raise LauncherError(
                 "node_missing", exc.message, "Run `EvoSci setup` when online."
             ) from exc
+        # A Node installed just now is not on PATH yet; the backend started
+        # next, and the agent's shell inside it, need it there.
+        activate_runtime()
         try:
             info = ensure_webui(node.path, progress=self._progress)
         except StageError as exc:

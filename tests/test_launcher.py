@@ -472,6 +472,9 @@ def _installed_env(monkeypatch, tmp_path, *, node_error=None, webui_error=None):
         return []
 
     monkeypatch.setattr(setup_node, "ensure_node", ensure_node)
+    monkeypatch.setattr(
+        setup_node, "activate_runtime", lambda: calls.setdefault("activated", True)
+    )
     monkeypatch.setattr(setup_webui, "ensure_webui", ensure_webui)
     monkeypatch.setattr(setup_webui, "mark_in_use", mark_in_use)
     monkeypatch.setattr(setup_webui, "cleanup_old_versions", cleanup)
@@ -495,6 +498,7 @@ def test_installed_runner_provides_node_and_webui_then_runs_them(monkeypatch, tm
     runner.preflight(_cfg())
     assert calls["webui_node"] == node
     assert callable(calls["node_progress"])  # an on-demand Node install reports
+    assert calls["activated"]  # the backend and the agent's shell find it too
     assert progress[-1] == (1.0, "WebUI 0.3.1")  # the caller's spinner moves on
     assert [i.version for i in calls["marked"]] == ["0.3.1"]
     assert calls["cleanups"] == 1
