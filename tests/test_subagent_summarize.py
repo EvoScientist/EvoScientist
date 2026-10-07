@@ -181,14 +181,14 @@ class TestStreamAgentEventsSubagentText:
 # ═══════════════════════════════════════════════════════════════════
 
 
-def _make_consumer(stream_events: list[dict], **kw):
+def _make_consumer(stream_events: list[dict], *, media_dir, **kw):
     """Create an InboundConsumer whose agent streams the given event dicts.
 
     ``stream_events`` is a flat list of event data dicts (as produced by
     ``StreamEventEmitter.xxx().data``).
     """
     bus = MessageBus()
-    mgr = ChannelManager(bus)
+    mgr = ChannelManager(bus, media_dir=media_dir)
     mgr.register(_StubChannel())
 
     agent = MagicMock()
@@ -210,7 +210,7 @@ def _make_consumer(stream_events: list[dict], **kw):
 class TestConsumerSubagentTextFallback:
     """InboundConsumer should use sub-agent text as fallback when main agent is silent."""
 
-    async def test_subagent_text_used_when_no_final_content(self):
+    async def test_subagent_text_used_when_no_final_content(self, tmp_path):
         """When the main agent produces no text, sub-agent text becomes the response."""
         events = [
             {
@@ -227,7 +227,7 @@ class TestConsumerSubagentTextFallback:
             },
             {"type": "done", "content": ""},
         ]
-        consumer, bus = _make_consumer(events)
+        consumer, bus = _make_consumer(events, media_dir=tmp_path)
 
         msg = BusInbound(
             channel="stub",
@@ -246,7 +246,7 @@ class TestConsumerSubagentTextFallback:
         await consumer.stop()
         await task
 
-    async def test_final_content_takes_priority_over_subagent_text(self):
+    async def test_final_content_takes_priority_over_subagent_text(self, tmp_path):
         """When the main agent produces text, sub-agent text is ignored."""
         events = [
             {
@@ -258,7 +258,7 @@ class TestConsumerSubagentTextFallback:
             {"type": "text", "content": "Here is my summary."},
             {"type": "done", "content": ""},
         ]
-        consumer, bus = _make_consumer(events)
+        consumer, bus = _make_consumer(events, media_dir=tmp_path)
 
         msg = BusInbound(
             channel="stub",
@@ -276,10 +276,10 @@ class TestConsumerSubagentTextFallback:
         await consumer.stop()
         await task
 
-    async def test_duplicate_thinking_not_relayed_across_resume_rounds(self):
+    async def test_duplicate_thinking_not_relayed_across_resume_rounds(self, tmp_path):
         """Repeated thinking from resumed rounds should only be sent once."""
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(_StubChannel())
 
         channel = mgr.get_channel("stub")
@@ -342,10 +342,10 @@ class TestConsumerSubagentTextFallback:
         await consumer.stop()
         await task
 
-    async def test_new_thinking_relayed_after_resume(self):
+    async def test_new_thinking_relayed_after_resume(self, tmp_path):
         """Genuinely different thinking in round 2 should be sent."""
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(_StubChannel())
 
         channel = mgr.get_channel("stub")
@@ -411,12 +411,12 @@ class TestConsumerSubagentTextFallback:
         await consumer.stop()
         await task
 
-    async def test_no_response_fallback_when_both_empty(self):
+    async def test_no_response_fallback_when_both_empty(self, tmp_path):
         """When both final_content and subagent_text are empty, 'No response' is used."""
         events = [
             {"type": "done", "content": ""},
         ]
-        consumer, bus = _make_consumer(events)
+        consumer, bus = _make_consumer(events, media_dir=tmp_path)
 
         msg = BusInbound(
             channel="stub",
@@ -434,7 +434,7 @@ class TestConsumerSubagentTextFallback:
         await consumer.stop()
         await task
 
-    async def test_done_content_overrides_subagent_text(self):
+    async def test_done_content_overrides_subagent_text(self, tmp_path):
         """Done event with content takes priority over sub-agent text buffer."""
         events = [
             {
@@ -445,7 +445,7 @@ class TestConsumerSubagentTextFallback:
             },
             {"type": "done", "content": "Final summary from done event."},
         ]
-        consumer, bus = _make_consumer(events)
+        consumer, bus = _make_consumer(events, media_dir=tmp_path)
 
         msg = BusInbound(
             channel="stub",
@@ -541,7 +541,7 @@ class TestJoinSubagentText:
 class TestConsumerParallelSubagentFallback:
     """Consumer should group parallel sub-agent text by agent name."""
 
-    async def test_parallel_agents_grouped_with_attribution(self):
+    async def test_parallel_agents_grouped_with_attribution(self, tmp_path):
         """Multiple sub-agents produce grouped, attributed output."""
         events = [
             {
@@ -564,7 +564,7 @@ class TestConsumerParallelSubagentFallback:
             },
             {"type": "done", "content": ""},
         ]
-        consumer, bus = _make_consumer(events)
+        consumer, bus = _make_consumer(events, media_dir=tmp_path)
 
         msg = BusInbound(
             channel="stub",
@@ -583,7 +583,7 @@ class TestConsumerParallelSubagentFallback:
         await consumer.stop()
         await task
 
-    async def test_single_agent_no_attribution_prefix(self):
+    async def test_single_agent_no_attribution_prefix(self, tmp_path):
         """Single sub-agent fallback has no [name]: prefix."""
         events = [
             {
@@ -594,7 +594,7 @@ class TestConsumerParallelSubagentFallback:
             },
             {"type": "done", "content": ""},
         ]
-        consumer, bus = _make_consumer(events)
+        consumer, bus = _make_consumer(events, media_dir=tmp_path)
 
         msg = BusInbound(
             channel="stub",
@@ -617,7 +617,9 @@ class TestConsumerParallelSubagentFallback:
 class TestConsumerSameNameInterleaved:
     """Two instances of the same agent type with interleaved chunks."""
 
-    async def test_same_name_interleaved_chunks_separated_by_instance_id(self):
+    async def test_same_name_interleaved_chunks_separated_by_instance_id(
+        self, tmp_path
+    ):
         """Two research-agent instances with different instance_ids are properly separated.
 
         With the instance_id fix, chunks are keyed by instance_id so
@@ -651,7 +653,7 @@ class TestConsumerSameNameInterleaved:
             },
             {"type": "done", "content": ""},
         ]
-        consumer, bus = _make_consumer(events)
+        consumer, bus = _make_consumer(events, media_dir=tmp_path)
 
         msg = BusInbound(
             channel="stub",

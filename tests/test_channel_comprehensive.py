@@ -1117,11 +1117,11 @@ class TestChannelTyping:
 
 
 class TestChannelReconnect:
-    async def test_run_reconnects_on_error(self, monkeypatch):
+    async def test_run_reconnects_on_error(self, monkeypatch, tmp_path):
         """Channel.run() should reconnect with backoff on transient errors."""
 
         ch = StubChannel()
-        mgr = ChannelManager(MessageBus())
+        mgr = ChannelManager(MessageBus(), media_dir=tmp_path)
         mgr.register(ch)
         start_count = 0
         sleep_count = 0
@@ -1487,47 +1487,47 @@ class TestChannelAttachments:
 
 
 class TestChannelManagerRegister:
-    def test_register_and_lookup(self):
+    def test_register_and_lookup(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         mgr.register(ch)
         assert mgr.get_channel("stub") is ch
         assert "stub" in mgr.enabled_channels
 
-    def test_duplicate_raises(self):
+    def test_duplicate_raises(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
         with pytest.raises(ValueError, match="already registered"):
             mgr.register(StubChannel())
 
-    def test_register_injects_bus(self):
+    def test_register_injects_bus(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         mgr.register(ch)
         assert ch._bus is bus
 
-    def test_register_applies_kwargs(self):
+    def test_register_applies_kwargs(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         mgr.register(ch, send_thinking=True, initial_debounce=5.0)
         assert ch.send_thinking is True
         assert ch.initial_debounce == 5.0
 
-    def test_health_entry_created(self):
+    def test_health_entry_created(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
         assert "stub" in mgr._health
 
 
 class TestChannelManagerDispatch:
-    async def test_dispatch_routes_to_channel(self):
+    async def test_dispatch_routes_to_channel(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         # Override send to track calls
         sent = []
@@ -1559,11 +1559,11 @@ class TestChannelManagerDispatch:
         assert len(sent) == 1
         assert sent[0].content == "hello"
 
-    async def test_dispatch_unknown_channel_logged(self):
+    async def test_dispatch_unknown_channel_logged(self, tmp_path):
         """Messages to unknown channels should be logged, not crash."""
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
 
         task = asyncio.create_task(mgr._dispatch_outbound())
         await bus.publish_outbound(
@@ -1584,11 +1584,11 @@ class TestChannelManagerDispatch:
             pass
         # Should not raise
 
-    async def test_dispatch_send_return_false_counts_failure(self):
+    async def test_dispatch_send_return_false_counts_failure(self, tmp_path):
         """send() returning False should mark the delivery as failed."""
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         failed_event = asyncio.Event()
 
@@ -1619,9 +1619,9 @@ class TestChannelManagerDispatch:
         assert health.total_failures == 1
         assert health.consecutive_failures == 1
 
-    async def test_dispatch_uses_short_notice_when_command_output_fails(self):
+    async def test_dispatch_uses_short_notice_when_command_output_fails(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         sent: list[OutboundMessage] = []
 
@@ -1657,11 +1657,11 @@ class TestChannelManagerDispatch:
         ]
         assert sent[1].failure_notice is None
 
-    async def test_shutdown_drain_sends_failure_notice(self):
+    async def test_shutdown_drain_sends_failure_notice(self, tmp_path):
         """The stop_all drain mirrors the dispatch fallback: a payload that
         fails during shutdown still produces the short failure notice."""
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         sent: list[OutboundMessage] = []
 
@@ -1690,11 +1690,11 @@ class TestChannelManagerDispatch:
         ]
         assert sent[1].failure_notice is None
 
-    async def test_dispatch_sends_notice_when_content_send_raises(self):
+    async def test_dispatch_sends_notice_when_content_send_raises(self, tmp_path):
         """A raising send() must reach the failure notice, not the outer
         handler — exceptions are the common transport failure mode."""
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         sent: list[OutboundMessage] = []
 
@@ -1732,11 +1732,11 @@ class TestChannelManagerDispatch:
         ]
         assert mgr._health["stub"].last_failure_error == "network down"
 
-    async def test_dispatch_send_media_return_false_counts_failure(self):
+    async def test_dispatch_send_media_return_false_counts_failure(self, tmp_path):
         """send_media() returning False should mark the delivery as failed."""
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         failed_event = asyncio.Event()
 
@@ -1770,18 +1770,18 @@ class TestChannelManagerDispatch:
 
 
 class TestChannelManagerHealth:
-    def test_health_tracks_success(self):
+    def test_health_tracks_success(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
         health = mgr._health["stub"]
         health.total_successes = 5
         health.consecutive_failures = 0
         assert health.total_successes == 5
 
-    def test_health_tracks_failure(self):
+    def test_health_tracks_failure(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
         health = mgr._health["stub"]
         health.consecutive_failures = 3
@@ -1792,12 +1792,12 @@ class TestChannelManagerHealth:
 
 
 class TestChannelManagerDynamicOps:
-    def test_add_channel_runtime(self):
+    def test_add_channel_runtime(self, tmp_path):
         """[B-15] add_channel uses channel_type as key for start_times
         but register() uses channel.name — potential mismatch."""
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         # We can't easily test add_channel without registry,
         # but we can verify the key mismatch concern
         ch = StubChannel()
@@ -1807,11 +1807,11 @@ class TestChannelManagerDynamicOps:
         # If add_channel used "other_type" but channel.name is "custom_name",
         # start_times would be keyed differently
 
-    async def test_remove_channel(self):
+    async def test_remove_channel(self, tmp_path):
         """[B-14] remove_channel removes from dict but doesn't cancel task."""
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         mgr.register(ch)
         assert "stub" in mgr._channels
@@ -1819,16 +1819,16 @@ class TestChannelManagerDynamicOps:
         await mgr.remove_channel("stub")
         assert "stub" not in mgr._channels
 
-    async def test_remove_nonexistent_channel(self):
+    async def test_remove_nonexistent_channel(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         await mgr.remove_channel("ghost")  # should not raise
 
 
 class TestChannelManagerDrain:
-    async def test_stop_all_drains_outbound(self):
+    async def test_stop_all_drains_outbound(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus, drain_timeout=1.0)
+        mgr = ChannelManager(bus, media_dir=tmp_path, drain_timeout=1.0)
         ch = StubChannel()
         sent = []
         ch.send = AsyncMock(side_effect=lambda m: sent.append(m) or True)
@@ -1848,9 +1848,11 @@ class TestChannelManagerDrain:
         assert len(sent) == 1
         assert sent[0].content == "drain me"
 
-    async def test_stop_all_drains_media_and_counts_only_success(self, caplog):
+    async def test_stop_all_drains_media_and_counts_only_success(
+        self, caplog, tmp_path
+    ):
         bus = MessageBus()
-        mgr = ChannelManager(bus, drain_timeout=1.0)
+        mgr = ChannelManager(bus, media_dir=tmp_path, drain_timeout=1.0)
         ch = StubChannel()
         sent = []
         media_sent = []
@@ -1879,9 +1881,9 @@ class TestChannelManagerDrain:
 
 
 class TestChannelManagerTracking:
-    def test_record_message(self):
+    def test_record_message(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
 
         mgr.record_message("stub", "received")
@@ -1891,17 +1893,17 @@ class TestChannelManagerTracking:
         assert mgr._message_counts["stub"]["received"] == 2
         assert mgr._message_counts["stub"]["sent"] == 1
 
-    def test_record_message_unknown_channel(self):
+    def test_record_message_unknown_channel(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
 
         # Should not raise, auto-creates entry
         mgr.record_message("unknown", "received")
         assert mgr._message_counts["unknown"]["received"] == 1
 
-    def test_get_detailed_status(self):
+    def test_get_detailed_status(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
 
         # Simulate start_all setting start_times
@@ -1916,9 +1918,9 @@ class TestChannelManagerTracking:
         assert status["stub"]["uptime_seconds"] >= 0
         assert status["stub"]["start_time"] is not None
 
-    def test_get_detailed_status_no_start_time(self):
+    def test_get_detailed_status_no_start_time(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
 
         status = mgr.get_detailed_status()
@@ -1927,26 +1929,26 @@ class TestChannelManagerTracking:
 
 
 class TestChannelManagerStatus:
-    def test_get_status(self):
+    def test_get_status(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
         status = mgr.get_status()
         assert "stub" in status
         assert status["stub"]["registered"] is True
 
-    def test_running_channels(self):
+    def test_running_channels(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         mgr.register(ch)
         assert mgr.running_channels() == []
         ch._running = True
         assert mgr.running_channels() == ["stub"]
 
-    def test_startup_results_report_fatal_error(self):
+    def test_startup_results_report_fatal_error(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         mgr.register(ch)
         ch._startup_error = "dependency missing"
@@ -1954,16 +1956,16 @@ class TestChannelManagerStatus:
 
         assert mgr.startup_results() == [("stub", False, "failed: dependency missing")]
 
-    def test_startup_results_do_not_assume_pending_channel_is_connected(self):
+    def test_startup_results_do_not_assume_pending_channel_is_connected(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
 
         assert mgr.startup_results() == [("stub", False, "starting (bus)")]
 
-    def test_get_stats(self):
+    def test_get_stats(self, tmp_path):
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
         stats = mgr.get_stats()
         assert "channels" in stats
@@ -1978,10 +1980,10 @@ class TestChannelManagerStatus:
 
 class TestInboundConsumer:
     @staticmethod
-    def _make_consumer(bus=None, mgr=None, agent=None, **kw):
+    def _make_consumer(media_dir, bus=None, mgr=None, agent=None, **kw):
         bus = bus or MessageBus()
         if mgr is None:
-            mgr = ChannelManager(bus)
+            mgr = ChannelManager(bus, media_dir=media_dir)
             mgr.register(StubChannel())
         if agent is None:
             agent = MagicMock()
@@ -2002,28 +2004,29 @@ class TestInboundConsumer:
         msg = BusInbound(channel="tg", sender_id="u1", chat_id="c1", content="hi")
         assert msg.session_key == "tg:c1"
 
-    async def test_get_thread_id_creates_unique(self):
+    async def test_get_thread_id_creates_unique(self, tmp_path):
         consumer = self._make_consumer(
+            tmp_path,
             graph_gateway=FakeGraphGateway(
                 generated_thread_ids=["thread-a", "thread-b"]
-            )
+            ),
         )
         tid1 = await consumer._get_thread_id("user_a")
         tid2 = await consumer._get_thread_id("user_b")
         assert tid1 != tid2
 
-    async def test_get_thread_id_returns_same_for_same_sender(self):
+    async def test_get_thread_id_returns_same_for_same_sender(self, tmp_path):
         consumer = self._make_consumer(
-            graph_gateway=FakeGraphGateway(generated_thread_ids=["thread-a"])
+            tmp_path, graph_gateway=FakeGraphGateway(generated_thread_ids=["thread-a"])
         )
         tid1 = await consumer._get_thread_id("user_a")
         tid2 = await consumer._get_thread_id("user_a")
         assert tid1 == tid2
 
-    async def test_shared_thread_id_bug(self):
+    async def test_shared_thread_id_bug(self, tmp_path):
         """[B-20] If thread_id is non-empty, senders get unique thread IDs with shared prefix."""
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
         consumer = InboundConsumer(
             bus=bus,
@@ -2039,9 +2042,9 @@ class TestInboundConsumer:
         assert tid1 == "shared_thread:alice"
         assert tid2 == "shared_thread:bob"
 
-    async def test_session_eviction_is_lru(self):
+    async def test_session_eviction_is_lru(self, tmp_path):
         """Sessions use LRU eviction: recently accessed senders are kept."""
-        consumer = self._make_consumer()
+        consumer = self._make_consumer(tmp_path)
         consumer._sessions.clear()
 
         # Fill up to limit
@@ -2055,16 +2058,16 @@ class TestInboundConsumer:
         oldest = next(iter(consumer._sessions))
         assert oldest == "user_1"  # user_1 is now the least recently used
 
-    def test_metrics_initial(self):
-        consumer = self._make_consumer()
+    def test_metrics_initial(self, tmp_path):
+        consumer = self._make_consumer(tmp_path)
         m = consumer.metrics
         assert m["total_processed"] == 0
         assert m["total_successes"] == 0
         assert m["total_failures"] == 0
         assert m["total_timeouts"] == 0
 
-    async def test_stop_graceful(self):
-        consumer = self._make_consumer()
+    async def test_stop_graceful(self, tmp_path):
+        consumer = self._make_consumer(tmp_path)
         # Start and immediately stop
         task = asyncio.create_task(consumer.run())
         await asyncio.sleep(0)
@@ -2077,12 +2080,12 @@ class TestInboundConsumer:
 
 
 class TestInboundConsumerErrorHandling:
-    def test_error_message_leaks_info(self):
+    def test_error_message_leaks_info(self, tmp_path):
         """[B-22] Exception messages are sent directly to users."""
 
         # This test documents that internal error details are exposed
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         mgr.register(ch)
 
@@ -2205,11 +2208,11 @@ class TestIntegration:
         await _flush_debounce(ch, "user1")
         assert bus.inbound_size == 1
 
-    async def test_outbound_dispatch_with_media(self):
+    async def test_outbound_dispatch_with_media(self, tmp_path):
         """Dispatch routes media alongside text content."""
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         ch = StubChannel()
         media_sent = []
         media_event = asyncio.Event()
@@ -2339,12 +2342,12 @@ class TestEdgeCases:
         resolved = ch._resolve_chat_id(msg)
         assert resolved == "fallback_id"
 
-    def test_health_server_response_structure(self):
+    def test_health_server_response_structure(self, tmp_path):
         """HealthServer builds response with expected keys."""
         from EvoScientist.channels.channel_manager import _HealthServer
 
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=tmp_path)
         mgr.register(StubChannel())
 
         hs = _HealthServer(mgr, 0)

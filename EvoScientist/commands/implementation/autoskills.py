@@ -136,7 +136,7 @@ class AutoSkillsCommand(Command):
             )
         if cfg.memory_skill_synthesis_enabled:
             try:
-                rows = await alist_autoskill_schedules(cfg, limit=1)
+                rows = await alist_autoskill_schedules(cfg, workspace_dir=workspace_dir)
             except Exception:
                 rows = []
             if rows:
@@ -226,6 +226,7 @@ class AutoSkillsCommand(Command):
             approve_skill_proposal,
             paths.MEMORIES_DIR,
             proposal_id,
+            skills_dir=ctx.workspace.skills_dir,
             workspace_dir=workspace_dir,
         )
         if result.get("approved"):
@@ -423,9 +424,7 @@ class AutoSkillsCommand(Command):
 
     @staticmethod
     def _workspace_dir(ctx: CommandContext) -> str:
-        from ... import paths
-
-        return str(ctx.workspace_dir or paths.WORKSPACE_ROOT)
+        return str(ctx.workspace.root)
 
     @staticmethod
     def _first_arg(args: list[str]) -> str | None:

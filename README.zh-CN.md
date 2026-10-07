@@ -451,7 +451,7 @@ EvoSci -p "你的问题"              # 单次查询模式
 EvoSci --workdir /path/to/project # 在指定目录下启动
 EvoSci -m run                     # 隔离的会话级工作区
 EvoSci --ui cli                   # 经典 CLI（轻量）
-EvoSci --ui webui                 # 浏览器工作区界面（需 Node/npx）
+EvoSci --ui webui                 # 浏览器工作区界面（需 Node.js）
 EvoSci serve                      # 无头模式——仅渠道，无交互提示符
 EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI / SDK 客户端使用
 ```
@@ -469,7 +469,7 @@ EvoSci                               # 打开 http://localhost:4716
 EvoSci config set webui_port 4800    # 修改前端端口（须与 langgraph dev 端口不同）
 ```
 
-需要 **Node.js 24 LTS**（提供 `npx`）；首次启动会下载 `@evoscientist/webui`，需要联网。注意：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
+需要 **Node.js 20.9 或更高版本**（未找到时 `EvoSci setup` 会安装 Node.js 24 LTS）。`EvoSci setup` 会在本地安装 `@evoscientist/webui`（否则由首次启动安装，需要联网）；之后 WebUI 可离线启动，兼容的新版本会在后台下载，并在下次启动时使用。注意：WebUI 不会显示 CLI/TUI 的历史会话，且 `-p` / `--resume` 会回退到经典 CLI。
 
 **从其他机器访问。** 两个服务默认都绑定回环地址（`127.0.0.1`），WebUI 开箱即为仅本机可用。要在局域网使用，需把两者一并放开——UI 是**从浏览器**直连后端的，因此还要把 UI 里的部署地址填成 `http://<本机IP>:6174`，而不是保留 localhost：
 

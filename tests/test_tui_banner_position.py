@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -37,11 +36,14 @@ pytest.importorskip("textual")
 # ---------------------------------------------------------------------------
 
 
-async def _capture_app(monkeypatch) -> object:
+async def _capture_app(monkeypatch, workspace) -> object:
     """Build an ``EvoTextualInteractiveApp`` without entering its main loop."""
+    from pathlib import Path
+
     from textual.app import App
 
     from EvoScientist.cli import tui_interactive as tui_mod
+    from EvoScientist.paths import SessionDirs, Workspace
 
     captured: dict = {}
 
@@ -77,10 +79,10 @@ async def _capture_app(monkeypatch) -> object:
     )
 
     monkeypatch.setattr("EvoScientist.cli.tui_interactive.mode", "dev", raising=False)
-    # Note: ``create_session_workspace`` and ``load_agent`` are passed
+    # Note: ``create_run_dir`` and ``load_agent`` are passed
     # as parameters to ``run_textual_interactive`` (the factory), so the
     # closure inside ``EvoTextualInteractiveApp`` uses the fakes directly
-    # and the module-level ``create_session_workspace`` / ``load_agent``
+    # and the module-level ``_create_run_dir`` / ``load_agent``
     # symbols never get a chance to run.
 
     # The factory is synchronous at the outer level and owns its top-level
@@ -90,15 +92,17 @@ async def _capture_app(monkeypatch) -> object:
             tui_mod.run_textual_interactive,
             show_thinking=False,
             channel_send_thinking=False,
-            workspace_dir=None,
-            workspace_fixed=False,
+            # The banner shows this folder: keep it short, so it fits one line on
+            # the 80-column screen whatever the temp folder is called (it wraps on
+            # Windows and pushes the banner out of view).
+            dirs=SessionDirs(Workspace(Path.cwd())),
             mode="dev",
             model=None,
             provider=None,
             run_name="test-run",
             thread_id=None,
             load_agent=fake_load_agent,
-            create_session_workspace=lambda *_a, **_k: str(Path.cwd()),
+            create_run_dir=lambda ws, _name: ws.root,
             config=None,
         )
     except SystemExit:
@@ -119,7 +123,7 @@ async def _capture_app(monkeypatch) -> object:
 
 
 async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
-    monkeypatch,
+    monkeypatch, workspace
 ):
     """Repro of issue #301: clear after a long anchored stream → banner on top.
 
@@ -132,7 +136,7 @@ async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -157,13 +161,13 @@ async def test_clear_chat_resets_scroll_after_long_anchored_conversation(
         assert len(chat.children) == 2
 
 
-async def test_clear_chat_with_anchor_released_also_resets(monkeypatch):
+async def test_clear_chat_with_anchor_released_also_resets(monkeypatch, workspace):
     """User scrolled up (anchor released) before /new → still lands at top."""
 
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -185,13 +189,13 @@ async def test_clear_chat_with_anchor_released_also_resets(monkeypatch):
         assert len(chat.children) == 2
 
 
-async def test_clear_chat_short_conversation_anchored(monkeypatch):
+async def test_clear_chat_short_conversation_anchored(monkeypatch, workspace):
     """Even with a short conversation, anchor + clear should not push banner down."""
 
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -213,7 +217,9 @@ async def test_clear_chat_short_conversation_anchored(monkeypatch):
         _assert_banner_at_top(chat, welcome, label="after /new on short convo")
 
 
-async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
+async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(
+    monkeypatch, workspace
+):
     """Repro of the user-reported scenario: clear → mount welcome banner →
     mount new-session → mount user message → mount assistant reply, in a
     normal-sized terminal where the resulting content fits in the viewport.
@@ -228,7 +234,7 @@ async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch, workspace)
     # Tall-ish terminal: welcome + a few messages must fit in the
     # viewport, mirroring the user's manual-test setup.
     async with app.run_test(size=(80, 40)) as pilot:
@@ -282,7 +288,9 @@ async def test_clear_chat_then_full_user_turn_keeps_banner_at_top(monkeypatch):
         )
 
 
-async def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
+async def test_short_turn_keeps_banner_at_top_after_layout_refresh(
+    monkeypatch, workspace
+):
     """Regression for the second symptom of issue #301: after a short
     user/assistant turn that fits in the viewport, end-of-stream
     ``_anchor_chat`` must NOT leave the chat anchored.
@@ -302,7 +310,7 @@ async def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
     from EvoScientist.cli.widgets.assistant_message import AssistantMessage
     from EvoScientist.cli.widgets.user_message import UserMessage
 
-    app = await _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch, workspace)
     # Tall terminal: welcome + a short exchange fits with room to spare,
     # which is exactly the bug condition (content < viewport).
     async with app.run_test(size=(80, 40)) as pilot:
@@ -330,7 +338,7 @@ async def test_short_turn_keeps_banner_at_top_after_layout_refresh(monkeypatch):
         _assert_banner_at_top(chat, welcome, label="after short turn + trailing mount")
 
 
-async def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch):
+async def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch, workspace):
     """When the conversation overflows, ``_anchor_chat`` must still engage
     the anchor so streaming output remains visible. The issue #301 fix
     only suppresses anchoring when content fits — long content must
@@ -340,7 +348,7 @@ async def test_long_turn_keeps_viewport_pinned_to_bottom(monkeypatch):
     from textual.containers import VerticalScroll
     from textual.widgets import Static
 
-    app = await _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         chat = app.query_one("#chat", VerticalScroll)
@@ -388,14 +396,14 @@ def _assert_banner_at_top(chat, welcome, label: str = "") -> None:
     )
 
 
-async def test_agent_python_notices_are_shown_in_the_app(monkeypatch):
+async def test_agent_python_notices_are_shown_in_the_app(monkeypatch, workspace):
     """Textual hides terminal output while the app runs, so the hint and the
     server-python warning must reach the user as notifications."""
     from EvoScientist.cli import tui_interactive as tui_mod
 
     notice = "Run `EvoSci setup` [/x]"
     monkeypatch.setattr(tui_mod, "_agent_python_notices", lambda: [notice])
-    app = await _capture_app(monkeypatch)
+    app = await _capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         await app.workers.wait_for_complete()

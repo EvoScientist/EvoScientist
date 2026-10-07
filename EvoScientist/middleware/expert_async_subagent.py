@@ -16,9 +16,10 @@ predictable timeline; this subclass gives us the mechanism locally.
 Design
 ------
 - Subclass ``AsyncSubAgentMiddleware``; call ``super().__init__()`` for spec
-  validation + default 5-tool build, then swap in a start tool that injects
-  ``skill_name=subagent_type`` by construction (keeping check / update /
-  cancel / list unchanged).
+  validation + system-prompt composition, then rebuild all five tools on a
+  config-injecting client cache: the start tool injects
+  ``skill_name=subagent_type`` by construction, update forwards the caller's
+  model, and check / cancel / list keep upstream bodies.
 - The tool signature matches upstream exactly: ``(description, subagent_type,
   runtime)``. No LLM-visible ``payload`` field: every value the middleware
   can derive itself (the skill name) is injected inside the middleware, not
@@ -62,6 +63,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, NotRequired
 
 from deepagents.middleware.async_subagents import (
@@ -81,6 +83,8 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
+
+from ..paths import SessionDirs, Workspace
 
 _logger = logging.getLogger(__name__)
 
@@ -221,6 +225,7 @@ def _resolve_merge_validate(
     agent_map: dict[str, AsyncSubAgent],
     watcher_agents: dict[str, AsyncSubAgent] | None,
     cfg: Any | None,
+    workspace: Workspace,
     subagent_type: str,
     lock: Any = None,
 ) -> str | None:
@@ -289,7 +294,7 @@ def _resolve_merge_validate(
     from ..subagents.expert_container_async import build_expert_async_subagent_specs
 
     # The walk is the blocking part — never hold the lock over I/O.
-    specs = build_expert_async_subagent_specs(cfg=cfg)
+    specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
     if lock is not None:
         with lock:
             _merge_expert_specs(agent_map, watcher_agents, specs)
@@ -323,6 +328,8 @@ def _build_expert_start_tool(
     watcher_agents: dict[str, AsyncSubAgent] | None = None,
     cfg: Any | None = None,
     map_lock: Any = None,
+    *,
+    workspace: Workspace,
 ) -> StructuredTool:
     """Build the skill-name-injecting ``start_async_task`` tool.
 
@@ -376,7 +383,7 @@ def _build_expert_start_tool(
         error = _locked_validate(subagent_type)
         if error:
             error = _resolve_merge_validate(
-                agent_map, watcher_agents, cfg, subagent_type, map_lock
+                agent_map, watcher_agents, cfg, workspace, subagent_type, map_lock
             )
             if error:
                 return error
@@ -422,6 +429,7 @@ def _build_expert_start_tool(
                 agent_map,
                 watcher_agents,
                 cfg,
+                workspace,
                 subagent_type,
                 map_lock,
             )
@@ -480,28 +488,18 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         self,
         *,
         async_subagents: list[AsyncSubAgent],
+        workspace: Workspace,
+        work_dir: str | Path | None = None,
         system_prompt: str | None = None,
         watcher_agents: dict[str, AsyncSubAgent] | None = None,
         cfg: Any | None = None,
     ) -> None:
-        # Install the model-passthrough patch BEFORE ``super().__init__(...)``
-        # so upstream's ``_build_async_subagent_tools`` sees the patched
-        # ``_build_start_tool`` / ``_build_update_tool`` module attributes.
-        # Idempotent (guarded by ``_model_passthrough_patched`` in
-        # ``llm/patches.py``), so re-invocation on repeated middleware
-        # construction is a no-op. Without this, super()'s vanilla tools
-        # would still ignore ``cfg.model`` — including ``update_async_task``,
-        # which we inherit unchanged below.
-        from ..llm.patches import (
-            _ClientCacheProxy,
-            _patch_deepagents_model_passthrough,
-        )
-
-        _patch_deepagents_model_passthrough()
+        from ..llm.patches import _ClientCacheProxy
 
         # Upstream's __init__ validates spec shape, builds the default 5-tool
         # list, and composes the system_prompt. Delegate to it, then swap in
-        # the skill-name-injecting start tool. This wastes one tool-build cycle
+        # all five tools using our config-injecting client cache below.
+        # This wastes one tool-build cycle
         # (~microseconds at construction) but avoids duplicating upstream's
         # validation and system-prompt-composition logic. Pass ``system_prompt``
         # through unchanged — deepagents 0.7.0 dropped its ``ASYNC_TASK_SYSTEM_PROMPT``
@@ -518,7 +516,12 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
         # ``configurable.model_provider`` per run. ``_ClientCacheProxy`` exposes
         # the same ``get_sync`` / ``get_async`` surface as ``_ClientCache``, so
         # the upstream tool builders accept it without a type change.
-        clients = _ClientCacheProxy(_ClientCache(agent_map))
+        # Every launched run also carries this graph's folders, so the server
+        # refuses one meant for another workspace or run folder.
+        clients = _ClientCacheProxy(
+            _ClientCache(agent_map),
+            folders=SessionDirs(workspace, work_dir).metadata(),
+        )
         agents_desc = "\n".join(
             f"- {a['name']}: {a['description']}" for a in async_subagents
         )
@@ -540,6 +543,7 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
                 watcher_agents,
                 cfg,
                 self._resolve_lock,
+                workspace=workspace,
             ),
             _build_check_tool(clients),
             _build_expert_update_tool(agent_map, clients),

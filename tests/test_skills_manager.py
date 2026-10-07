@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from EvoScientist.paths import Workspace
 from EvoScientist.tools.skills_manager import (
     SkillInfo,
     _is_github_url,
@@ -15,13 +16,10 @@ from EvoScientist.tools.skills_manager import (
     _reset_skills_changed_callbacks,
     _validate_skill_dir,
     fetch_remote_skill_index,
-    get_all_tags,
     install_skill,
     installed_provenance,
-    installed_sources,
     list_expert_skills,
     list_skills,
-    list_skills_by_tag,
     register_skills_changed_callback,
     resolve_remote_head,
     uninstall_skill,
@@ -41,6 +39,12 @@ def temp_skills_dir(tmp_path):
     empty_global.mkdir()
     with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_global):
         yield skills_dir
+
+
+@pytest.fixture
+def skills_ws(temp_skills_dir):
+    """A ``Workspace`` whose skills tier is ``temp_skills_dir``."""
+    return Workspace(temp_skills_dir.parent)
 
 
 @pytest.fixture
@@ -243,8 +247,12 @@ class TestValidateSkillDir:
 class TestInstallSkill:
     """Tests for install_skill function."""
 
-    def test_install_from_local_path(self, sample_skill_dir, temp_skills_dir):
-        result = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+    def test_install_from_local_path(
+        self, sample_skill_dir, temp_skills_dir, skills_ws
+    ):
+        result = install_skill(
+            str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is True
         assert result["name"] == "sample-skill"
@@ -255,24 +263,34 @@ class TestInstallSkill:
         assert installed_path.exists()
         assert (installed_path / "SKILL.md").exists()
 
-    def test_install_nonexistent_path(self, temp_skills_dir):
-        result = install_skill("/nonexistent/path", str(temp_skills_dir))
+    def test_install_nonexistent_path(self, temp_skills_dir, skills_ws):
+        result = install_skill(
+            "/nonexistent/path", str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is False
         assert "does not exist" in result["error"]
 
-    def test_install_invalid_skill_no_skillmd(self, tmp_path, temp_skills_dir):
+    def test_install_invalid_skill_no_skillmd(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
         empty_dir = tmp_path / "empty-skill"
         empty_dir.mkdir()
 
-        result = install_skill(str(empty_dir), str(temp_skills_dir))
+        result = install_skill(
+            str(empty_dir), str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is False
         assert "No SKILL.md" in result["error"]
 
-    def test_install_replaces_existing(self, sample_skill_dir, temp_skills_dir):
+    def test_install_replaces_existing(
+        self, sample_skill_dir, temp_skills_dir, skills_ws
+    ):
         # Install first time
-        result1 = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        result1 = install_skill(
+            str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws
+        )
         assert result1["success"] is True
 
         # Modify the original skill
@@ -288,7 +306,9 @@ description: Modified description
         )
 
         # Install again
-        result2 = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        result2 = install_skill(
+            str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws
+        )
         assert result2["success"] is True
         assert result2["description"] == "Modified description"
 
@@ -301,24 +321,22 @@ description: Modified description
 class TestListSkills:
     """Tests for list_skills function."""
 
-    def test_list_empty_dir(self, temp_skills_dir):
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            skills = list_skills(include_system=False)
-            assert skills == []
+    def test_list_empty_dir(self, temp_skills_dir, skills_ws):
+        skills = list_skills(include_system=False, workspace=skills_ws)
+        assert skills == []
 
-    def test_list_with_skills(self, sample_skill_dir, temp_skills_dir):
+    def test_list_with_skills(self, sample_skill_dir, temp_skills_dir, skills_ws):
         # Install a skill
-        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        install_skill(str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws)
 
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            skills = list_skills(include_system=False)
+        skills = list_skills(include_system=False, workspace=skills_ws)
 
-            assert len(skills) == 1
-            assert skills[0].name == "sample-skill"
-            assert skills[0].description == "A sample skill for testing"
-            assert skills[0].source == "workspace"
+        assert len(skills) == 1
+        assert skills[0].name == "sample-skill"
+        assert skills[0].description == "A sample skill for testing"
+        assert skills[0].source == "workspace"
 
-    def test_list_multiple_skills(self, tmp_path, temp_skills_dir):
+    def test_list_multiple_skills(self, tmp_path, temp_skills_dir, skills_ws):
         # Create and install multiple skills
         for i in range(3):
             skill_dir = tmp_path / f"skill-{i}"
@@ -330,16 +348,15 @@ description: Skill number {i}
 ---
 """
             )
-            install_skill(str(skill_dir), str(temp_skills_dir))
+            install_skill(str(skill_dir), str(temp_skills_dir), workspace=skills_ws)
 
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            skills = list_skills(include_system=False)
+        skills = list_skills(include_system=False, workspace=skills_ws)
 
-            assert len(skills) == 3
-            names = [s.name for s in skills]
-            assert "skill-0" in names
-            assert "skill-1" in names
-            assert "skill-2" in names
+        assert len(skills) == 3
+        names = [s.name for s in skills]
+        assert "skill-0" in names
+        assert "skill-1" in names
+        assert "skill-2" in names
 
 
 # =============================================================================
@@ -350,25 +367,25 @@ description: Skill number {i}
 class TestUninstallSkill:
     """Tests for uninstall_skill function."""
 
-    def test_uninstall_existing_skill(self, sample_skill_dir, temp_skills_dir):
+    def test_uninstall_existing_skill(
+        self, sample_skill_dir, temp_skills_dir, skills_ws
+    ):
         # Install first
-        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        install_skill(str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws)
 
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            result = uninstall_skill("sample-skill")
+        result = uninstall_skill("sample-skill", workspace=skills_ws)
 
-            assert result["success"] is True
+        assert result["success"] is True
 
-            # Verify the skill was removed
-            skill_path = temp_skills_dir / "sample-skill"
-            assert not skill_path.exists()
+        # Verify the skill was removed
+        skill_path = temp_skills_dir / "sample-skill"
+        assert not skill_path.exists()
 
-    def test_uninstall_nonexistent_skill(self, temp_skills_dir):
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            result = uninstall_skill("nonexistent-skill")
+    def test_uninstall_nonexistent_skill(self, temp_skills_dir, skills_ws):
+        result = uninstall_skill("nonexistent-skill", workspace=skills_ws)
 
-            assert result["success"] is False
-            assert "not found" in result["error"]
+        assert result["success"] is False
+        assert "not found" in result["error"]
 
 
 # =============================================================================
@@ -387,8 +404,12 @@ class TestInstallManifest:
         )
         return d
 
-    def test_local_install_records_source(self, sample_skill_dir, temp_skills_dir):
-        result = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+    def test_local_install_records_source(
+        self, sample_skill_dir, temp_skills_dir, skills_ws
+    ):
+        result = install_skill(
+            str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws
+        )
         assert result["success"]
 
         manifest = _load_manifest(temp_skills_dir)
@@ -396,7 +417,7 @@ class TestInstallManifest:
         assert manifest == {"sample-skill": {"source": str(sample_skill_dir)}}
 
     def test_pack_install_records_one_source_for_all_children(
-        self, tmp_path, temp_skills_dir
+        self, tmp_path, temp_skills_dir, skills_ws
     ):
         """A pack (root has no SKILL.md, multiple child skills) should record
         the same user-facing source for every child skill, so detection by
@@ -407,7 +428,7 @@ class TestInstallManifest:
         self._make_skill(repo, "evo-memory")
         self._make_skill(repo, "research-survey")
 
-        result = install_skill(str(repo), str(temp_skills_dir))
+        result = install_skill(str(repo), str(temp_skills_dir), workspace=skills_ws)
         assert result["success"]
         assert result["batch"]
 
@@ -416,20 +437,23 @@ class TestInstallManifest:
         sources = {entry["source"] for entry in manifest.values()}
         assert sources == {str(repo)}
 
-    def test_uninstall_clears_manifest_entry(self, sample_skill_dir, temp_skills_dir):
-        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+    def test_uninstall_clears_manifest_entry(
+        self, sample_skill_dir, temp_skills_dir, skills_ws
+    ):
+        install_skill(str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws)
         assert "sample-skill" in _load_manifest(temp_skills_dir)
 
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            result = uninstall_skill("sample-skill")
+        result = uninstall_skill("sample-skill", workspace=skills_ws)
 
         assert result["success"]
         assert "sample-skill" not in _load_manifest(temp_skills_dir)
 
-    def test_save_is_atomic_and_leaves_no_temp(self, sample_skill_dir, temp_skills_dir):
+    def test_save_is_atomic_and_leaves_no_temp(
+        self, sample_skill_dir, temp_skills_dir, skills_ws
+    ):
         """_save_manifest must rename a temp file into place, not overwrite,
         so a crash mid-write can't leave a half-written manifest behind."""
-        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        install_skill(str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws)
 
         manifest_files = sorted(p.name for p in temp_skills_dir.iterdir())
         # Only the manifest itself should remain — no leftover .tmp siblings.
@@ -438,31 +462,34 @@ class TestInstallManifest:
             f"unexpected temp file left behind: {manifest_files}"
         )
 
-    def test_installed_sources_filters_missing_dirs(
-        self, sample_skill_dir, temp_skills_dir, tmp_path
+    def test_installed_provenance_filters_missing_dirs(
+        self, sample_skill_dir, temp_skills_dir, skills_ws, tmp_path
     ):
         """If a skill dir was removed manually but the manifest entry lingers,
-        installed_sources() must not report it as installed."""
+        installed_provenance() must not report it as installed."""
         empty_global = tmp_path / "empty_global"
         empty_global.mkdir()
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_global),
-        ):
-            install_skill(str(sample_skill_dir), str(temp_skills_dir))
-            assert installed_sources() == {str(sample_skill_dir)}
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_global):
+            install_skill(
+                str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws
+            )
+            assert set(installed_provenance(workspace=skills_ws)) == {
+                str(sample_skill_dir)
+            }
 
             # Manually wipe the dir, manifest still has the entry.
             import shutil as _shutil
 
             _shutil.rmtree(temp_skills_dir / "sample-skill")
             assert "sample-skill" in _load_manifest(temp_skills_dir)
-            assert installed_sources() == set()
+            assert installed_provenance(workspace=skills_ws) == {}
 
-    def test_record_install_persists_commit(self, temp_skills_dir, sample_skill_dir):
+    def test_record_install_persists_commit(
+        self, temp_skills_dir, skills_ws, sample_skill_dir
+    ):
         """When _record_install gets a commit SHA it makes it through the
         normalize-on-write pass and is readable as provenance."""
-        install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        install_skill(str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws)
         # Simulate a github install by manually recording a commit.
         _record_install(
             temp_skills_dir,
@@ -470,14 +497,11 @@ class TestInstallManifest:
             "owner/repo@skill",
             commit="abc123def456",
         )
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir),
-            patch(
-                "EvoScientist.paths.GLOBAL_SKILLS_DIR",
-                temp_skills_dir.parent / "missing",
-            ),
+        with patch(
+            "EvoScientist.paths.GLOBAL_SKILLS_DIR",
+            temp_skills_dir.parent / "missing",
         ):
-            prov = installed_provenance()
+            prov = installed_provenance(workspace=skills_ws)
         assert prov == {"owner/repo@skill": {"commit": "abc123def456"}}
 
 
@@ -518,21 +542,25 @@ class TestResolveRemoteHead:
 class TestMissingGit:
     """Without a git binary every git path reports the same readable error."""
 
-    def test_github_install_reports_missing_git(self, temp_skills_dir):
-        result = install_skill("owner/repo@skill", str(temp_skills_dir))
+    def test_github_install_reports_missing_git(self, temp_skills_dir, skills_ws):
+        result = install_skill(
+            "owner/repo@skill", str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is False
         assert result["error"].startswith("git was not found on PATH.")
 
     def test_bare_name_reports_missing_git_not_missing_path(
-        self, temp_skills_dir, tmp_path, monkeypatch
+        self, temp_skills_dir, skills_ws, tmp_path, monkeypatch
     ):
         from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
 
         _REMOTE_INDEX_CACHE.clear()
         monkeypatch.chdir(tmp_path)
 
-        result = install_skill("no-such-skill-xyz", str(temp_skills_dir))
+        result = install_skill(
+            "no-such-skill-xyz", str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is False
         assert result["error"].startswith("git was not found on PATH.")
@@ -542,14 +570,14 @@ class TestMissingGit:
         "source", ["./my-skil", "~/skills/my-skil", "skills/local/my-skil"]
     )
     def test_mistyped_path_still_reports_missing_path(
-        self, source, temp_skills_dir, tmp_path, monkeypatch
+        self, source, temp_skills_dir, skills_ws, tmp_path, monkeypatch
     ):
         from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
 
         _REMOTE_INDEX_CACHE.clear()
         monkeypatch.chdir(tmp_path)
 
-        result = install_skill(source, str(temp_skills_dir))
+        result = install_skill(source, str(temp_skills_dir), workspace=skills_ws)
 
         assert result["success"] is False
         assert result["error"] == f"Path does not exist: {source}"
@@ -569,7 +597,9 @@ class TestMissingGit:
         assert _resolve_local_head(str(tmp_path)) is None
 
     def test_agent_install_returns_the_message(self, tmp_path):
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(Workspace(tmp_path))
 
         with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "skills"):
             result = skill_manager.invoke(
@@ -579,11 +609,12 @@ class TestMissingGit:
         assert "git was not found on PATH." in result
         assert "Traceback" not in result
 
-    def test_agent_browse_returns_the_message(self):
-        from EvoScientist.tools.skill_manager import skill_manager
+    def test_agent_browse_returns_the_message(self, tmp_path):
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
         from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
 
         _REMOTE_INDEX_CACHE.clear()
+        skill_manager = make_skill_manager_tool(Workspace(tmp_path))
 
         result = skill_manager.invoke({"action": "browse"})
 
@@ -595,7 +626,9 @@ class TestMissingGit:
 class TestBareNameIndexFailure:
     """A bare skill name whose index fetch fails reports that failure."""
 
-    def test_git_that_runs_but_fails(self, temp_skills_dir, tmp_path, monkeypatch):
+    def test_git_that_runs_but_fails(
+        self, temp_skills_dir, skills_ws, tmp_path, monkeypatch
+    ):
         """The macOS Command Line Tools stub (and an offline git) exit non-zero."""
         from types import SimpleNamespace
 
@@ -609,20 +642,24 @@ class TestBareNameIndexFailure:
             stderr="xcode-select: note: No developer tools were found.\n",
         )
         with patch("EvoScientist.git_cli.subprocess.run", return_value=stub):
-            result = install_skill("no-such-skill-xyz", str(temp_skills_dir))
+            result = install_skill(
+                "no-such-skill-xyz", str(temp_skills_dir), workspace=skills_ws
+            )
 
         assert result["success"] is False
         assert result["error"].startswith("git clone failed: xcode-select: note:")
 
     def test_path_shaped_source_skips_the_index(
-        self, temp_skills_dir, tmp_path, monkeypatch
+        self, temp_skills_dir, skills_ws, tmp_path, monkeypatch
     ):
         """A path can never match an index name: no EvoSkills clone for a typo."""
         monkeypatch.chdir(tmp_path)
         with patch(
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index"
         ) as fetch:
-            result = install_skill("./my-skil", str(temp_skills_dir))
+            result = install_skill(
+                "./my-skil", str(temp_skills_dir), workspace=skills_ws
+            )
 
         fetch.assert_not_called()
         assert result["error"] == "Path does not exist: ./my-skil"
@@ -645,7 +682,9 @@ class TestBatchInstall:
         )
         return d
 
-    def test_batch_install_local_multiple_skills(self, tmp_path, temp_skills_dir):
+    def test_batch_install_local_multiple_skills(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
         """Local path with no root SKILL.md but 3 sub-skills installs all."""
         repo = tmp_path / "multi-repo"
         repo.mkdir()
@@ -653,7 +692,7 @@ class TestBatchInstall:
         self._make_skill(repo, "skill-b", "Beta")
         self._make_skill(repo, "skill-c", "Gamma")
 
-        result = install_skill(str(repo), str(temp_skills_dir))
+        result = install_skill(str(repo), str(temp_skills_dir), workspace=skills_ws)
 
         assert result["success"] is True
         assert result.get("batch") is True
@@ -667,27 +706,33 @@ class TestBatchInstall:
         for name in names:
             assert (temp_skills_dir / name / "SKILL.md").exists()
 
-    def test_batch_install_local_single_still_works(self, tmp_path, temp_skills_dir):
+    def test_batch_install_local_single_still_works(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
         """Local path with root SKILL.md still installs as single."""
         self._make_skill(tmp_path, "single", "Just one")
 
-        result = install_skill(str(tmp_path / "single"), str(temp_skills_dir))
+        result = install_skill(
+            str(tmp_path / "single"), str(temp_skills_dir), workspace=skills_ws
+        )
 
         assert result["success"] is True
         assert result.get("batch") is not True
         assert result["name"] == "single"
 
-    def test_batch_install_local_empty_repo_fails(self, tmp_path, temp_skills_dir):
+    def test_batch_install_local_empty_repo_fails(
+        self, tmp_path, temp_skills_dir, skills_ws
+    ):
         """Local path with no skills at any level fails."""
         empty = tmp_path / "empty-repo"
         empty.mkdir()
 
-        result = install_skill(str(empty), str(temp_skills_dir))
+        result = install_skill(str(empty), str(temp_skills_dir), workspace=skills_ws)
 
         assert result["success"] is False
         assert "No SKILL.md" in result["error"]
 
-    def test_batch_install_local_mixed_dirs(self, tmp_path, temp_skills_dir):
+    def test_batch_install_local_mixed_dirs(self, tmp_path, temp_skills_dir, skills_ws):
         """Directories without SKILL.md are silently skipped."""
         repo = tmp_path / "mixed"
         repo.mkdir()
@@ -695,7 +740,7 @@ class TestBatchInstall:
         (repo / "not-a-skill").mkdir()  # no SKILL.md
         (repo / "readme.md").write_text("# Readme")  # file, not dir
 
-        result = install_skill(str(repo), str(temp_skills_dir))
+        result = install_skill(str(repo), str(temp_skills_dir), workspace=skills_ws)
 
         assert result["success"] is True
         assert result.get("batch") is not True  # only 1 skill → single install
@@ -776,95 +821,6 @@ tags: "core, research, writing"
         """Skills without frontmatter return empty tags."""
         result = _parse_skill_md(sample_skill_no_frontmatter / "SKILL.md")
         assert result.tags == []
-
-
-# =============================================================================
-# Tests for list_skills_by_tag
-# =============================================================================
-
-
-class TestListSkillsByTag:
-    """Tests for list_skills_by_tag function."""
-
-    def _make_tagged_skill(self, parent: Path, name: str, tags: list[str]) -> Path:
-        d = parent / name
-        d.mkdir()
-        tags_yaml = ", ".join(tags)
-        (d / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: Skill {name}\n"
-            f"metadata:\n  tags: [{tags_yaml}]\n---\n"
-        )
-        return d
-
-    def test_filter_by_tag(self, tmp_path, temp_skills_dir):
-        self._make_tagged_skill(temp_skills_dir, "skill-a", ["core", "writing"])
-        self._make_tagged_skill(temp_skills_dir, "skill-b", ["core", "research"])
-        self._make_tagged_skill(temp_skills_dir, "skill-c", ["research"])
-
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            core = list_skills_by_tag("core")
-            assert len(core) == 2
-            assert {s.name for s in core} == {"skill-a", "skill-b"}
-
-            research = list_skills_by_tag("research")
-            assert len(research) == 2
-            assert {s.name for s in research} == {"skill-b", "skill-c"}
-
-            writing = list_skills_by_tag("writing")
-            assert len(writing) == 1
-            assert writing[0].name == "skill-a"
-
-    def test_filter_case_insensitive(self, tmp_path, temp_skills_dir):
-        self._make_tagged_skill(temp_skills_dir, "skill-x", ["Core", "Writing"])
-
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            result = list_skills_by_tag("core")
-            assert len(result) == 1
-            assert result[0].name == "skill-x"
-
-    def test_filter_nonexistent_tag(self, tmp_path, temp_skills_dir):
-        self._make_tagged_skill(temp_skills_dir, "skill-y", ["core"])
-
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            result = list_skills_by_tag("nonexistent")
-            assert result == []
-
-
-# =============================================================================
-# Tests for get_all_tags
-# =============================================================================
-
-
-class TestGetAllTags:
-    """Tests for get_all_tags function."""
-
-    def _make_tagged_skill(self, parent: Path, name: str, tags: list[str]) -> Path:
-        d = parent / name
-        d.mkdir()
-        tags_yaml = ", ".join(tags)
-        (d / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: Skill {name}\n"
-            f"metadata:\n  tags: [{tags_yaml}]\n---\n"
-        )
-        return d
-
-    def test_returns_tags_with_counts(self, tmp_path, temp_skills_dir):
-        self._make_tagged_skill(temp_skills_dir, "skill-a", ["core", "writing"])
-        self._make_tagged_skill(temp_skills_dir, "skill-b", ["core", "research"])
-        self._make_tagged_skill(temp_skills_dir, "skill-c", ["research"])
-
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            tags = get_all_tags()
-
-        tag_dict = dict(tags)
-        assert tag_dict["core"] == 2
-        assert tag_dict["research"] == 2
-        assert tag_dict["writing"] == 1
-
-    def test_empty_when_no_skills(self, temp_skills_dir):
-        with patch("EvoScientist.paths.USER_SKILLS_DIR", temp_skills_dir):
-            tags = get_all_tags()
-            assert tags == []
 
 
 # =============================================================================
@@ -978,19 +934,18 @@ class TestSkillManagerList:
 
     def test_list_user_skills_workspace(self, tmp_path):
         """Workspace-tier skills appear under 'User Skills'."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         self._make_skill(tmp_path, "ws-skill")
-        install_skill(str(tmp_path / "ws-skill"), str(workspace_dir))
+        install_skill(str(tmp_path / "ws-skill"), str(workspace_dir), workspace=ws)
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
             result = skill_manager.invoke({"action": "list", "include_system": False})
 
         assert "User Skills (1)" in result
@@ -999,19 +954,18 @@ class TestSkillManagerList:
 
     def test_list_user_skills_global(self, tmp_path):
         """Global-tier skills appear under 'User Skills'."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         self._make_skill(tmp_path, "global-skill")
-        install_skill(str(tmp_path / "global-skill"), str(global_dir))
+        install_skill(str(tmp_path / "global-skill"), str(global_dir), workspace=ws)
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
             result = skill_manager.invoke({"action": "list", "include_system": False})
 
         assert "User Skills (1)" in result
@@ -1019,15 +973,17 @@ class TestSkillManagerList:
 
     def test_list_include_system_shows_both_sections(self, tmp_path):
         """include_system=True shows both User Skills and System Skills sections."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
         from EvoScientist.tools.skills_manager import SkillInfo
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         self._make_skill(tmp_path, "user-skill")
-        install_skill(str(tmp_path / "user-skill"), str(workspace_dir))
+        install_skill(str(tmp_path / "user-skill"), str(workspace_dir), workspace=ws)
 
         builtin_skill = SkillInfo(
             name="builtin-skill",
@@ -1037,7 +993,6 @@ class TestSkillManagerList:
         )
 
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
             patch(
                 "EvoScientist.tools.skills_manager.list_skills",
@@ -1061,17 +1016,16 @@ class TestSkillManagerList:
 
     def test_list_no_user_skills_returns_message(self, tmp_path):
         """Empty workspace and global dirs return the 'no user skills' message."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global"
         global_dir.mkdir()
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
             result = skill_manager.invoke({"action": "list", "include_system": False})
 
         assert "No user skills installed" in result
@@ -1482,8 +1436,9 @@ class TestListExpertSkills:
     """`list_expert_skills()` filters `list_skills()` to `type == 'expert'`."""
 
     def test_returns_only_expert_skills(self, tmp_path):
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         # An expert skill and a utility skill, both in workspace tier.
@@ -1499,18 +1454,16 @@ description: Plain utility skill
 # Body
 """
         )
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            all_skills = list_skills()
-            expert_skills = list_expert_skills(include_system=False)
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
+            all_skills = list_skills(workspace=ws)
+            expert_skills = list_expert_skills(include_system=False, workspace=ws)
         assert {s.name for s in all_skills} == {"expert-a", "util-b"}
         assert [s.name for s in expert_skills] == ["expert-a"]
 
     def test_empty_when_no_expert_skills_installed(self, tmp_path):
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
         global_dir = tmp_path / "global"
         global_dir.mkdir()
         util = workspace_dir / "util-only"
@@ -1524,11 +1477,8 @@ description: Utility
 # Body
 """
         )
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            expert_skills = list_expert_skills(include_system=False)
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
+            expert_skills = list_expert_skills(include_system=False, workspace=ws)
         assert expert_skills == []
 
 
@@ -1558,8 +1508,10 @@ class TestSkillManagerToolExpertSurface:
             ),
         ]
 
-    def test_list_filters_to_expert_when_skill_type_set(self):
-        from EvoScientist.tools.skill_manager import skill_manager
+    def test_list_filters_to_expert_when_skill_type_set(self, workspace):
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(workspace)
 
         with patch(
             "EvoScientist.tools.skills_manager.list_skills",
@@ -1571,7 +1523,7 @@ class TestSkillManagerToolExpertSurface:
         assert "expert-a" in out
         assert "util-b" not in out
 
-    def test_skill_type_enum_contains_no_empty_string(self):
+    def test_skill_type_enum_contains_no_empty_string(self, workspace):
         """Gemini's function-declaration schema rejects empty enum values
         (`GenerateContentRequest.tools[N].function_declarations[N].parameters.properties[skill_type].enum[0]: cannot be empty`).
         The `skill_type` argument must use a non-empty sentinel (`"all"`)
@@ -1580,7 +1532,9 @@ class TestSkillManagerToolExpertSurface:
         This test guards against silently reintroducing the empty-string
         default that broke the live agent-teams smoke on 2026-07-17.
         """
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(workspace)
 
         schema = skill_manager.args_schema.model_json_schema()
         skill_type_prop = schema.get("properties", {}).get("skill_type", {})
@@ -1598,10 +1552,12 @@ class TestSkillManagerToolExpertSurface:
             f"Empty string in skill_type enum will break Gemini: {enum_values}"
         )
 
-    def test_list_all_sentinel_is_no_filter(self):
+    def test_list_all_sentinel_is_no_filter(self, workspace):
         """`skill_type='all'` (the default) must return every skill —
         it's the no-filter case, not a bucket that only 'all' skills fall into."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(workspace)
 
         with patch(
             "EvoScientist.tools.skills_manager.list_skills",
@@ -1614,8 +1570,10 @@ class TestSkillManagerToolExpertSurface:
         assert "expert-a" in out
         assert "util-b" in out
 
-    def test_list_all_when_skill_type_absent(self):
-        from EvoScientist.tools.skill_manager import skill_manager
+    def test_list_all_when_skill_type_absent(self, workspace):
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(workspace)
 
         with patch(
             "EvoScientist.tools.skills_manager.list_skills",
@@ -1625,8 +1583,10 @@ class TestSkillManagerToolExpertSurface:
         assert "expert-a" in out
         assert "util-b" in out
 
-    def test_list_returns_message_when_filter_matches_nothing(self):
-        from EvoScientist.tools.skill_manager import skill_manager
+    def test_list_returns_message_when_filter_matches_nothing(self, workspace):
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(workspace)
 
         with patch(
             "EvoScientist.tools.skills_manager.list_skills",
@@ -1637,8 +1597,10 @@ class TestSkillManagerToolExpertSurface:
             )
         assert "No expert skills found" in out
 
-    def test_info_surfaces_expert_fields(self):
-        from EvoScientist.tools.skill_manager import skill_manager
+    def test_info_surfaces_expert_fields(self, workspace):
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(workspace)
 
         with patch(
             "EvoScientist.tools.skills_manager.get_skill_info",
@@ -1653,8 +1615,10 @@ class TestSkillManagerToolExpertSurface:
         # No dispatch line: an expert does not pin its own reach.
         assert "Default dispatch" not in out
 
-    def test_info_omits_expert_block_for_utility_skills(self):
-        from EvoScientist.tools.skill_manager import skill_manager
+    def test_info_omits_expert_block_for_utility_skills(self, workspace):
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
+
+        skill_manager = make_skill_manager_tool(workspace)
 
         with patch(
             "EvoScientist.tools.skills_manager.get_skill_info",
@@ -1686,19 +1650,18 @@ class TestSkillManagerInfo:
 
     def test_info_reports_virtual_mount_path(self, tmp_path):
         """``Path:`` is the sandbox-visible ``/skills/<name>``, not the host path."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global-empty"
         global_dir.mkdir()
         self._make_skill(tmp_path, "info-skill")
-        install_skill(str(tmp_path / "info-skill"), str(workspace_dir))
+        install_skill(str(tmp_path / "info-skill"), str(workspace_dir), workspace=ws)
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
             result = skill_manager.invoke({"action": "info", "name": "info-skill"})
 
         assert "Path: /skills/info-skill" in result
@@ -1710,21 +1673,22 @@ class TestSkillManagerInfo:
         keeps the path visible under a different label (``Local:``,
         ``Installed at:``, embedded in ``Source: …``).
         """
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
         from EvoScientist.tools.skills_manager import get_skill_info
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global-empty"
         global_dir.mkdir()
         self._make_skill(tmp_path, "host-leak-guard")
-        install_skill(str(tmp_path / "host-leak-guard"), str(workspace_dir))
+        install_skill(
+            str(tmp_path / "host-leak-guard"), str(workspace_dir), workspace=ws
+        )
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
-            info = get_skill_info("host-leak-guard")
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
+            info = get_skill_info("host-leak-guard", workspace=ws)
             result = skill_manager.invoke({"action": "info", "name": "host-leak-guard"})
 
         assert str(info.path) not in result
@@ -1749,18 +1713,17 @@ class TestSkillManagerInstall:
 
     def test_install_single_reports_virtual_mount_path(self, tmp_path):
         """Single install: ``Path: /skills/<name>``, no host path."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global-empty"
         global_dir.mkdir()
         self._make_skill(tmp_path, "solo-skill")
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
             result = skill_manager.invoke(
                 {"action": "install", "source": str(tmp_path / "solo-skill")}
             )
@@ -1772,24 +1735,23 @@ class TestSkillManagerInstall:
         """Single install: no host filesystem path leaks into the response.
 
         ``install_skill(source)`` defaults to ``global_install=True``, so the
-        skill lands under ``GLOBAL_SKILLS_DIR`` rather than ``USER_SKILLS_DIR``.
+        skill lands under ``GLOBAL_SKILLS_DIR`` rather than the workspace skills tier.
         Checking against a narrower directory (e.g. workspace_dir) would pass
         even without the scrub - the check has to cover every path the tool
         might resolve to. ``tmp_path`` covers both patched dirs and the source
         path used by ``install_skill``.
         """
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global-empty"
         global_dir.mkdir()
         self._make_skill(tmp_path, "leak-guard-install")
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
             result = skill_manager.invoke(
                 {"action": "install", "source": str(tmp_path / "leak-guard-install")}
             )
@@ -1798,10 +1760,12 @@ class TestSkillManagerInstall:
 
     def test_install_batch_lists_each_skill_with_virtual_path(self, tmp_path):
         """Batch install: one block per installed skill, each with ``Path: /skills/<name>``."""
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global-empty"
         global_dir.mkdir()
         pack = tmp_path / "pack"
@@ -1809,10 +1773,7 @@ class TestSkillManagerInstall:
         self._make_skill(pack, "alpha", description="first")
         self._make_skill(pack, "beta", description="second")
 
-        with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
-            patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-        ):
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir):
             result = skill_manager.invoke({"action": "install", "source": str(pack)})
 
         assert "Successfully installed skill: alpha" in result
@@ -1833,10 +1794,12 @@ class TestSkillManagerInstall:
         "installed": [], "failed": [{"name": ..., "error": ...}]}`` with no
         top-level ``error`` key. This test pins the guard.
         """
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global-empty"
         global_dir.mkdir()
 
@@ -1851,7 +1814,6 @@ class TestSkillManagerInstall:
         }
 
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
             patch(
                 "EvoScientist.tools.skills_manager.install_skill",
@@ -1874,10 +1836,12 @@ class TestSkillManagerInstall:
         Pre-fix behavior: partial failures were silently dropped; only the
         success blocks reached the agent.
         """
-        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skill_manager import make_skill_manager_tool
 
-        workspace_dir = tmp_path / "workspace"
-        workspace_dir.mkdir()
+        ws = Workspace(tmp_path / "project")
+        workspace_dir = ws.skills_dir
+        workspace_dir.mkdir(parents=True)
+        skill_manager = make_skill_manager_tool(ws)
         global_dir = tmp_path / "global-empty"
         global_dir.mkdir()
 
@@ -1897,7 +1861,6 @@ class TestSkillManagerInstall:
         }
 
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", workspace_dir),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
             patch(
                 "EvoScientist.tools.skills_manager.install_skill",
@@ -1937,34 +1900,42 @@ class TestSkillsChangedCallback:
     """
 
     def test_install_skill_fires_callback_on_error_return(
-        self, isolated_skills_changed_callbacks, temp_skills_dir
+        self, isolated_skills_changed_callbacks, temp_skills_dir, skills_ws
     ):
         fired: list[bool] = []
         register_skills_changed_callback(lambda: fired.append(True))
-        result = install_skill("/nonexistent/path", str(temp_skills_dir))
+        result = install_skill(
+            "/nonexistent/path", str(temp_skills_dir), workspace=skills_ws
+        )
         assert result["success"] is False
         assert fired == [True]
 
     def test_install_skill_fires_callback_on_success(
-        self, isolated_skills_changed_callbacks, sample_skill_dir, temp_skills_dir
+        self,
+        isolated_skills_changed_callbacks,
+        sample_skill_dir,
+        temp_skills_dir,
+        skills_ws,
     ):
         fired: list[bool] = []
         register_skills_changed_callback(lambda: fired.append(True))
-        result = install_skill(str(sample_skill_dir), str(temp_skills_dir))
+        result = install_skill(
+            str(sample_skill_dir), str(temp_skills_dir), workspace=skills_ws
+        )
         assert result["success"] is True
         assert fired == [True]
 
     def test_uninstall_skill_fires_callback_on_error_return(
-        self, isolated_skills_changed_callbacks
+        self, isolated_skills_changed_callbacks, workspace
     ):
         fired: list[bool] = []
         register_skills_changed_callback(lambda: fired.append(True))
-        result = uninstall_skill("nonexistent-skill")
+        result = uninstall_skill("nonexistent-skill", workspace=workspace)
         assert result["success"] is False
         assert fired == [True]
 
     def test_misbehaving_callback_does_not_break_return(
-        self, isolated_skills_changed_callbacks, temp_skills_dir
+        self, isolated_skills_changed_callbacks, temp_skills_dir, skills_ws
     ):
         good: list[bool] = []
 
@@ -1975,6 +1946,8 @@ class TestSkillsChangedCallback:
         register_skills_changed_callback(lambda: good.append(True))
         # Bad callback runs first; the good one still fires; the install
         # return value is unaffected.
-        result = install_skill("/nonexistent/path", str(temp_skills_dir))
+        result = install_skill(
+            "/nonexistent/path", str(temp_skills_dir), workspace=skills_ws
+        )
         assert result["success"] is False
         assert good == [True]

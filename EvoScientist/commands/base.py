@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ..gateway import GraphGateway
+    from ..paths import SessionDirs, Workspace
     from ..runtime import AsyncRuntime
 
 
@@ -59,7 +62,7 @@ class CommandUI(Protocol):
     def force_quit(self) -> None: ...
     async def start_new_session(self) -> None: ...
     async def handle_session_resume(
-        self, thread_id: str, workspace_dir: str | None = None
+        self, thread_id: str, dirs: SessionDirs | None = None
     ) -> None: ...
     async def flush(self) -> None: ...
 
@@ -114,7 +117,9 @@ class CommandContext:
     agent: Any
     thread_id: str
     ui: CommandUI
-    workspace_dir: str | None = None
+    # The session's workspace (skills, experts, AutoSkills), and the run
+    # folder it works in under ``--mode=run``.
+    dirs: SessionDirs
     checkpointer: Any = None
     config: Any = None
     channel_runtime: ChannelRuntime | None = None
@@ -124,6 +129,19 @@ class CommandContext:
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.
     input_tokens_hint: int | None = None
+
+    @property
+    def workspace(self) -> Workspace:
+        return self.dirs.workspace
+
+    @property
+    def run_dir(self) -> Path | None:
+        return self.dirs.run_dir
+
+    @property
+    def work_dir(self) -> Path:
+        """The folder the agent works in."""
+        return self.dirs.work_dir
 
 
 class Command(ABC):
@@ -150,11 +168,15 @@ class Command(ABC):
         """
         return self.requires_agent
 
-    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+    def get_completions(
+        self, tokens: list[str], *, workspace: Workspace | None = None
+    ) -> list[tuple[str, str]]:
         """Return completions for args typed after the command name.
 
         Default walks :attr:`subcommands` for the first positional token
         only.  Override for deeper levels (e.g. server names, thread IDs).
+        ``workspace`` is the session's workspace, for completions that list
+        what is installed there.
         """
         if not self.subcommands:
             return []

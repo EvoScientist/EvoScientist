@@ -3,8 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+from tests.fakes import TEST_WORKSPACE
 
-def _ctx():
+
+def _ctx(workspace=TEST_WORKSPACE):
     from EvoScientist.commands.base import ChannelRuntime, CommandContext
 
     ui = MagicMock()
@@ -14,8 +17,8 @@ def _ctx():
         agent=object(),
         thread_id="tid-42",
         ui=ui,
-        workspace_dir="/ws",
         channel_runtime=runtime,
+        dirs=SessionDirs(workspace),
     )
     return ctx, ui
 
@@ -53,10 +56,10 @@ class TestNeedsAgent:
 class TestStartPath:
     """Start flow must propagate agent/thread_id globals."""
 
-    async def test_start_binds_channel_runtime(self):
+    async def test_start_binds_channel_runtime(self, workspace):
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
-        ctx, _ui = _ctx()
+        ctx, _ui = _ctx(workspace)
         config = SimpleNamespace(
             channel_enabled="telegram",
             channel_send_thinking=True,
@@ -79,20 +82,21 @@ class TestStartPath:
         assert ctx.channel_runtime.agent is ctx.agent
         assert ctx.channel_runtime.thread_id == "tid-42"
 
-    async def test_start_propagates_send_thinking(self):
+    async def test_start_propagates_send_thinking(self, workspace):
         """send_thinking flag must reach _start_channels_bus_mode."""
         from EvoScientist.commands.implementation.channel import ChannelCommand
 
-        ctx, _ui = _ctx()
+        ctx, _ui = _ctx(workspace)
         config = SimpleNamespace(
             channel_enabled="telegram",
             channel_send_thinking=False,
         )
         captured = {}
 
-        def _fake_start(cfg, agent, thread_id, *, send_thinking=None):
+        def _fake_start(cfg, agent, thread_id, *, media_dir, send_thinking=None):
             captured["agent"] = agent
             captured["thread_id"] = thread_id
+            captured["media_dir"] = media_dir
             captured["send_thinking"] = send_thinking
 
         with (
@@ -112,6 +116,7 @@ class TestStartPath:
             await ChannelCommand().execute(ctx, ["telegram"])
         assert captured["agent"] is ctx.agent
         assert captured["thread_id"] == "tid-42"
+        assert captured["media_dir"] == workspace.media_dir
         assert captured["send_thinking"] is False
 
 

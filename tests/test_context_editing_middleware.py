@@ -195,7 +195,9 @@ async def test_trigger_recompute_is_cached_for_unhashable_models():
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_default_middleware_includes_context_editing(mock_config, mock_model, mock_ts):
+def test_default_middleware_includes_context_editing(
+    mock_config, mock_model, mock_ts, workspace
+):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -206,20 +208,20 @@ def test_default_middleware_includes_context_editing(mock_config, mock_model, mo
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware()
+    mw = _get_default_middleware(workspace=workspace)
     # ContextEditingMiddleware is present (its absolute position depends on
     # other leading middlewares like ConfigurableModelMiddleware).
     assert any(isinstance(m, ContextEditingMiddleware) for m in mw)
 
 
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
-def test_inject_subagent_includes_context_editing(mock_model):
+def test_inject_subagent_includes_context_editing(mock_model, workspace):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
 
     subs = [{"name": "test-agent"}]
-    _inject_subagent_middleware(subs)
+    _inject_subagent_middleware(subs, workspace=workspace)
 
     # Subclass of langchain's ContextEditingMiddleware (per-run trigger).
     assert any(isinstance(m, ContextEditingMiddleware) for m in subs[0]["middleware"])
@@ -244,7 +246,9 @@ def test_inject_subagent_includes_context_editing(mock_model):
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_context_editing_before_overflow_mapper(mock_config, mock_model, mock_ts):
+def test_context_editing_before_overflow_mapper(
+    mock_config, mock_model, mock_ts, workspace
+):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
     cfg = MagicMock()
     cfg.enable_ask_user = False
@@ -255,7 +259,7 @@ def test_context_editing_before_overflow_mapper(mock_config, mock_model, mock_ts
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware()
+    mw = _get_default_middleware(workspace=workspace)
     type_names = [type(m).__name__ for m in mw]
 
     ce_idx = type_names.index("_PerRunTriggerContextEditingMiddleware")

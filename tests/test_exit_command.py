@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock
 
+from EvoScientist.paths import SessionDirs
+from tests.fakes import TEST_WORKSPACE
+
 
 class TestExitCommand:
     async def test_execute_calls_force_quit(self):
@@ -10,6 +13,7 @@ class TestExitCommand:
 
         ui = MagicMock()
         ctx = CommandContext(
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="tid",
             ui=ui,

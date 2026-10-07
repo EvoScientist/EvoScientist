@@ -18,7 +18,6 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
-from ..paths import MEDIA_DIR
 from ..runtime import AsyncRuntime
 from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
@@ -151,10 +150,10 @@ def classify_media(ext: str) -> str | None:
     return None
 
 
-def media_path(filename: str) -> Path:
-    """Ensure MEDIA_DIR exists and return a path inside it."""
-    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    return MEDIA_DIR / filename
+def media_path(media_dir: Path, filename: str) -> Path:
+    """Ensure *media_dir* exists and return a path inside it."""
+    media_dir.mkdir(parents=True, exist_ok=True)
+    return media_dir / filename
 
 
 def check_attachment_size(file_size: int, filename: str) -> str | None:
@@ -171,12 +170,13 @@ async def download_attachment(
     url: str,
     filename: str,
     *,
+    media_dir: Path,
     channel_name: str = "",
     headers: dict[str, str] | None = None,
     file_size: int | None = None,
     proxy: str | None = None,
 ) -> tuple[str | None, str | None]:
-    """Download an attachment via httpx.
+    """Download an attachment via httpx into *media_dir*.
 
     Returns ``(local_path, annotation)``.
 
@@ -195,7 +195,7 @@ async def download_attachment(
 
         safe_name = filename.replace("/", "_")
         prefix = f"{channel_name}_" if channel_name else ""
-        local_path = media_path(f"{prefix}{safe_name}")
+        local_path = media_path(media_dir, f"{prefix}{safe_name}")
 
         async with httpx.AsyncClient(proxy=proxy) as client:
             async with client.stream(
@@ -326,6 +326,9 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
         # Bus integration (injected by ChannelManager.register / set_bus)
         self._bus: Any = None
+        # Where inbound attachments are stored (injected by
+        # ChannelManager.register / set_media_dir)
+        self._media_dir: Path | None = None
         self.send_thinking: bool = False
         self._on_activity: Callable | None = None
 
@@ -708,9 +711,17 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
     # ── Attachment / proxy helpers ─────────────────────────────────
 
+    def _require_media_dir(self) -> Path:
+        if self._media_dir is None:
+            raise RuntimeError(
+                f"Channel {self.name!r} has no media folder; register it with "
+                "a ChannelManager before it receives attachments."
+            )
+        return self._media_dir
+
     def _media_path(self, filename: str) -> Path:
-        """Ensure MEDIA_DIR exists and return a path inside it."""
-        return media_path(filename)
+        """Ensure the media folder exists and return a path inside it."""
+        return media_path(self._require_media_dir(), filename)
 
     def _resolve_media_chat_id(self, recipient: str, metadata: dict | None) -> str:
         """Extract chat_id from metadata, falling back to recipient."""
@@ -739,6 +750,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         return await download_attachment(
             url,
             filename,
+            media_dir=self._require_media_dir(),
             channel_name=self.name,
             headers=headers,
             file_size=file_size,
@@ -1124,6 +1136,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
     def set_bus(self, bus) -> None:
         """Inject the MessageBus reference (called by ChannelManager)."""
         self._bus = bus
+
+    def set_media_dir(self, media_dir: Path) -> None:
+        """Set where inbound attachments are stored (called by ChannelManager)."""
+        self._media_dir = media_dir
 
     async def queue_message(self, msg: InboundMessage) -> None:
         """Buffer *msg* with debounce, then publish to bus."""

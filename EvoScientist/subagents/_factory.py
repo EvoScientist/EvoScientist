@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from deepagents.middleware.rubric import (
@@ -28,6 +29,8 @@ from langchain.agents import create_agent
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
 from langchain_core.messages import AIMessage
+
+from ..paths import Workspace
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
@@ -228,12 +231,17 @@ def _scheduler_rubric_middleware(*, model: BaseChatModel, backend: BackendProtoc
         )
 
 
-def build_async_subagent_graph(name: str) -> Any:
+def build_async_subagent_graph(
+    name: str, *, workspace: Workspace, work_dir: str | Path | None = None
+) -> Any:
     """Build a deployable graph for the ``name`` sub-agent defined in yaml.
 
     Args:
         name: The sub-agent's key in one of the ``EvoScientist/subagents/*.yaml``
             files (e.g. ``"writing-agent"``).
+        workspace: The workspace the graph serves (skills, memory).
+        work_dir: The folder the sandbox works in; defaults to the workspace
+            root.
 
     Returns:
         A compiled ``langgraph`` graph ready for registration in ``langgraph.json``.
@@ -256,7 +264,7 @@ def build_async_subagent_graph(name: str) -> Any:
         _get_default_middleware,
         _inject_subagent_middleware,
     )
-    from EvoScientist.tools import skill_manager, tavily_search, think_tool
+    from EvoScientist.tools import make_skill_manager_tool, tavily_search, think_tool
     from EvoScientist.utils import load_subagents, resolve_subagent_tools
 
     # Surface API keys as env vars so downstream SDKs (openai, anthropic, …)
@@ -265,7 +273,10 @@ def build_async_subagent_graph(name: str) -> Any:
     apply_config_to_env(cfg)
 
     # Mirror the tool registry constructed in EvoScientist._build_base_kwargs.
-    tool_registry = {"think_tool": think_tool, "skill_manager": skill_manager}
+    tool_registry = {
+        "think_tool": think_tool,
+        "skill_manager": make_skill_manager_tool(workspace, work_dir=work_dir),
+    }
     if os.environ.get("TAVILY_API_KEY"):
         tool_registry["tavily_search"] = tavily_search
 
@@ -318,17 +329,26 @@ def build_async_subagent_graph(name: str) -> Any:
     )
 
     guarded = name in _GUARDED_ASYNC_SUBAGENTS
-    backend = _get_default_backend(guard_dangerous=guarded, refuse_delete=guarded)
+    backend = _get_default_backend(
+        workspace, work_dir=work_dir, guard_dangerous=guarded, refuse_delete=guarded
+    )
 
     subagents = []
     _ensure_general_purpose_subagent(subagents)
-    _inject_subagent_middleware(subagents, chat_model=model, backend=backend)
+    _inject_subagent_middleware(
+        subagents,
+        workspace=workspace,
+        chat_model=model,
+        backend=backend,
+    )
 
     # ``backend=`` matters: without it the per-run SummarizationMiddleware
     # subclass is not appended and the stock frozen-window built-in survives
     # in these graphs even though they take ``configurable.model`` overrides
     # (#466) — the replacement must also offload history to this backend.
     middleware = _get_default_middleware(
+        workspace=workspace,
+        work_dir=work_dir,
         for_async_subagent=True,
         memory_source_agent=name,
         backend=backend,

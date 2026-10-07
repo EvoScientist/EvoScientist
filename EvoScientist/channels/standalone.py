@@ -18,6 +18,7 @@ import logging
 import signal
 from typing import Any
 
+from ..paths import Workspace
 from .base import Channel
 from .bus import MessageBus
 from .bus.events import OutboundMessage
@@ -27,11 +28,11 @@ from .debug import emit_debug_event
 logger = logging.getLogger(__name__)
 
 
-async def _create_standalone_agent():
+async def _create_standalone_agent(workspace: Workspace):
     """Construct the synchronous agent without blocking the channel loop."""
     from ..EvoScientist import create_cli_agent
 
-    return await asyncio.to_thread(create_cli_agent)
+    return await asyncio.to_thread(create_cli_agent, workspace=workspace)
 
 
 def _channel_trace_enabled(channel: Channel) -> bool:
@@ -95,16 +96,19 @@ async def _async_main(
     send_thinking: bool,
     config: Any = None,
     backend: str | None = None,
+    *,
+    workspace: Workspace,
 ) -> None:
     """Async entry point — gather channel, dispatcher and optional consumer."""
     from .channel_manager import ChannelManager
 
     channel.set_bus(bus)
+    channel.set_media_dir(workspace.media_dir)
     if send_thinking:
         channel.send_thinking = True
 
     # Create a lightweight manager for the consumer to use
-    manager = ChannelManager(bus)
+    manager = ChannelManager(bus, media_dir=workspace.media_dir)
     manager._channels[channel.name] = channel
 
     await manager.start_health()
@@ -122,7 +126,7 @@ async def _async_main(
         # Agent construction performs synchronous MCP discovery through the
         # owned-runtime bridge.  Keep it off this already-running channel loop
         # (and avoid blocking channel health/startup work while it loads).
-        agent = await _create_standalone_agent()
+        agent = await _create_standalone_agent(workspace)
         runtime_gateways = create_runtime_gateways_for_config(config, backend=backend)
         logger.info("Agent loaded")
 
@@ -173,7 +177,9 @@ async def _async_main(
     await asyncio.gather(*tasks)
 
 
-def _ensure_standalone_dev_server(config: Any, *, backend: str | None = None) -> None:
+def _ensure_standalone_dev_server(
+    config: Any, *, workspace_dir: str, backend: str | None = None
+) -> None:
     """Spawn the langgraph dev server for a server-backed standalone runner.
 
     Spawns the same dev server serve uses so a headless channel running on the
@@ -200,19 +206,13 @@ def _ensure_standalone_dev_server(config: Any, *, backend: str | None = None) ->
     import os
 
     from ..langgraph_dev.manager import WorkspaceMismatchError, ensure_langgraph_dev
-    from ..paths import ensure_dirs, set_workspace_root
+    from ..paths import ensure_dirs
 
-    ws = (
-        os.path.abspath(os.path.expanduser(config.default_workdir))
-        if config.default_workdir
-        else os.getcwd()
-    )
-    os.makedirs(ws, exist_ok=True)
-    set_workspace_root(ws)
+    os.makedirs(workspace_dir, exist_ok=True)
     ensure_dirs()
     logger.info("Starting background agent server (langgraph dev)...")
     try:
-        ensure_langgraph_dev(config, workspace_dir=ws, backend=backend)
+        ensure_langgraph_dev(config, workspace_dir=workspace_dir, backend=backend)
     except WorkspaceMismatchError as exc:
         logger.error("Cannot start server-backed standalone channel: %s", exc)
         raise
@@ -240,6 +240,8 @@ def run_standalone(
         When ``True`` **and** *use_agent* is set, forward intermediate
         thinking messages to the channel.
     """
+    from ..paths import process_workspace
+
     config = None
     backend = None
     if use_agent:
@@ -248,8 +250,29 @@ def run_standalone(
             get_effective_config,
             resolve_gateway_backend,
         )
+        from ..paths import reload_env_dirs, start_workspace_path
 
         config = get_effective_config()
+        reload_env_dirs()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
-        _ensure_standalone_dev_server(config, backend=backend)
-    asyncio.run(_async_main(channel, bus, use_agent, send_thinking, config, backend))
+        # The agent serves ``default_workdir``, else the current directory.
+        ws_path = start_workspace_path(default_workdir=config.default_workdir)
+        workspace = Workspace(ws_path)
+        _ensure_standalone_dev_server(
+            config, workspace_dir=str(workspace.root), backend=backend
+        )
+    else:
+        # Without an agent there is no config to read; attachments go to the
+        # process workspace's ``media`` folder.
+        workspace = process_workspace()
+    asyncio.run(
+        _async_main(
+            channel,
+            bus,
+            use_agent,
+            send_thinking,
+            config,
+            backend,
+            workspace=workspace,
+        )
+    )
