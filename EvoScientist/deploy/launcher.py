@@ -29,6 +29,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -451,10 +452,22 @@ class WebUILauncher:
         if self._cfg.open_browser and not getattr(
             self._runner, "handles_browser_open", False
         ):
-            try:
-                opened = bool(webbrowser.open(self.webui_url))
-            except Exception:  # pragma: no cover - best-effort
-                opened = False
+            # Without a display (an SSH session), Python's webbrowser falls
+            # back to console browsers on PATH (w3m, lynx, ...) and runs them
+            # in the foreground; skip the open there unless BROWSER says
+            # which one to use.
+            opened = False
+            headless = (
+                sys.platform not in ("darwin", "win32")
+                and not os.environ.get("BROWSER")
+                and not os.environ.get("DISPLAY")
+                and not os.environ.get("WAYLAND_DISPLAY")
+            )
+            if not headless:
+                try:
+                    opened = bool(webbrowser.open(self.webui_url))
+                except Exception:  # pragma: no cover - best-effort
+                    pass
             return dataclasses.replace(self._result(), browser_opened=opened)
 
         return self._result()

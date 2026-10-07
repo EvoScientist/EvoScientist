@@ -829,8 +829,22 @@ def test_failed_bundled_preflight_releases_the_in_use_marker(monkeypatch, tmp_pa
 
 @pytest.mark.parametrize("opened", [True, False])
 def test_wait_ready_reports_whether_the_browser_opened(monkeypatch, opened):
+    monkeypatch.setenv("DISPLAY", ":0")
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: True)
     monkeypatch.setattr(lm, "_poll_ready", lambda *a, **k: None)
     monkeypatch.setattr(lm.webbrowser, "open", lambda _url: opened)
     launcher = lm.WebUILauncher(object(), _cfg(open_browser=True), _FakeRunner())
     assert launcher.wait_ready(timeout=1).browser_opened is opened
+
+
+def test_wait_ready_opens_no_console_browser_without_a_display(monkeypatch):
+    for name in ("DISPLAY", "WAYLAND_DISPLAY", "BROWSER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(lm.sys, "platform", "linux")
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: True)
+    monkeypatch.setattr(lm, "_poll_ready", lambda *a, **k: None)
+    opened = []
+    monkeypatch.setattr(lm.webbrowser, "open", opened.append)
+    launcher = lm.WebUILauncher(object(), _cfg(open_browser=True), _FakeRunner())
+    assert launcher.wait_ready(timeout=1).browser_opened is False
+    assert opened == []
