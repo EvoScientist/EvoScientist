@@ -2612,12 +2612,16 @@ def _main_callback(
             "'stream-json' (line-delimited JSON events to stdout)."
         ),
     ),
-    version_json: bool = typer.Option(
-        False,
-        "--json",
-        hidden=True,
-        help="With --version: print the version, protocol and WebUI range as JSON.",
-    ),
+    # Annotated, so a direct call without this argument gets a plain False
+    # rather than Typer's OptionInfo default, which is truthy.
+    version_json: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            hidden=True,
+            help="With --version: print the version, protocol and WebUI range as JSON.",
+        ),
+    ] = False,
 ):
     """EvoScientist Agent - AI-powered research & code execution CLI"""
     if version_json:
