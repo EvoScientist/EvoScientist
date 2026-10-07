@@ -43,7 +43,10 @@ from ..commands.base import ChannelRuntime
 from ..stream.console import console
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ..gateway import GraphGateway
+    from ..paths import SessionDirs
     from ..runtime import AsyncRuntime
 
 _channel_logger = logging.getLogger(__name__)
@@ -274,9 +277,9 @@ async def dispatch_channel_slash_command(
     *,
     agent: Any,
     thread_id: str,
-    workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
+    dirs: SessionDirs,
     graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None = None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None = None,
@@ -300,7 +303,7 @@ async def dispatch_channel_slash_command(
     agent:
         Default agent handle for the ``CommandContext``.  Commands that
         do not need the agent use this value directly.
-    thread_id, workspace_dir, checkpointer:
+    thread_id, dirs, checkpointer:
         Populate ``CommandContext``.
     append_system:
         ``(text, style)`` callback for local CLI/TUI log output.  Used
@@ -341,7 +344,7 @@ async def dispatch_channel_slash_command(
             msg,
             agent=agent,
             thread_id=thread_id,
-            workspace_dir=workspace_dir,
+            dirs=dirs,
             checkpointer=checkpointer,
             append_system=append_system,
             start_new_session_cb=start_new_session_cb,
@@ -378,9 +381,9 @@ async def _dispatch_channel_slash_impl(
     *,
     agent: Any,
     thread_id: str,
-    workspace_dir: str | None,
     checkpointer: Any,
     append_system: Callable[[str, str], None],
+    dirs: SessionDirs,
     graph_gateway: GraphGateway,
     start_new_session_cb: Callable[[], Awaitable[None]] | None,
     handle_session_resume_cb: Callable[..., Awaitable[None]] | None,
@@ -432,7 +435,7 @@ async def _dispatch_channel_slash_impl(
         agent=agent_for_ctx,
         thread_id=thread_id,
         ui=ui,
-        workspace_dir=workspace_dir,
+        dirs=dirs,
         checkpointer=checkpointer,
         channel_runtime=channel_runtime,
         graph_gateway=graph_gateway,
@@ -856,6 +859,12 @@ _bus_loop: asyncio.AbstractEventLoop | None = None
 _bus_thread: threading.Thread | None = None
 
 
+def _set_channels_media_dir(media_dir: Path) -> None:
+    """Point running channels at the media folder of the session's workspace."""
+    if _manager is not None:
+        _manager.set_media_dir(media_dir)
+
+
 def get_channel_startup_results() -> list[tuple[str, bool, str]]:
     """Return the current channel startup snapshot without waiting."""
     return _manager.startup_results() if _manager is not None else []
@@ -929,6 +938,7 @@ def _start_channels_bus_mode(
     agent,
     thread_id: str,
     *,
+    media_dir: Path,
     send_thinking: bool | None = None,
 ) -> list[tuple[str, bool, str]]:
     """Start all channels in bus mode with MessageBus + ChannelManager.
@@ -940,7 +950,7 @@ def _start_channels_bus_mode(
 
     from ..channels.channel_manager import ChannelManager
 
-    mgr = ChannelManager.from_config(config)
+    mgr = ChannelManager.from_config(config, media_dir=media_dir)
 
     effective_send_thinking = (
         getattr(config, "channel_send_thinking", True)
@@ -1254,6 +1264,7 @@ def _auto_start_channel(
     thread_id: str,
     config,
     *,
+    media_dir: Path,
     send_thinking: bool | None = None,
     runtime: ChannelRuntime | None = None,
 ) -> list[tuple[str, bool, str]]:
@@ -1274,6 +1285,7 @@ def _auto_start_channel(
         config,
         agent,
         thread_id,
+        media_dir=media_dir,
         send_thinking=send_thinking,
     )
     # A channel that is still starting may connect later and needs the runtime

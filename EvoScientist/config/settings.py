@@ -289,13 +289,10 @@ class EvoScientistConfig:
     # Which backend serves the CLI/TUI's graph runs: the in-process local
     # gateway (default) or the langgraph dev server via LangGraphServerGateway.
     # Server-gateway-migration rollback flag: flipping back to "local" restores
-    # the in-process path without code changes. While "langgraph_server" is
-    # set, the auto-started langgraph dev spawns in full deploy mode (MCP +
-    # async sub-agents loaded server-side); reusing a stripped-mode leftover
-    # is refused rather than silently degraded. This flag routes spawn mode
-    # only: the CLI keeps building its in-process agent (and its MCP
-    # sessions) until a surface actually cuts over to the server gateway -
-    # skipping that init lands with the surface cutover, not here.
+    # the in-process path without code changes. The CLI keeps building its
+    # in-process agent (and its MCP sessions) until a surface actually cuts
+    # over to the server gateway - skipping that init lands with the surface
+    # cutover, not here.
     gateway_backend: Literal["local", "langgraph_server"] = "local"
 
     # Per-surface overrides of ``gateway_backend``. Each production surface can
@@ -375,7 +372,8 @@ class EvoScientistConfig:
 
     # UI Settings
     show_thinking: bool = True
-    # "webui" launches the browser front-end (@evoscientist/webui via npx) +
+    # "webui" launches the browser front-end (@evoscientist/webui, installed
+    # locally by `EvoSci setup` or on the first launch) +
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     # Download source for `EvoSci setup` and on-demand installs (Node.js).

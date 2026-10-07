@@ -2,7 +2,7 @@
 
 This module provides functions for installing, listing, and uninstalling user skills.
 Skills are installed to GLOBAL_SKILLS_DIR by default (~/.evoscientist/skills/).
-Pass global_install=False to install to USER_SKILLS_DIR (<workspace>/skills/) instead.
+Pass global_install=False to install to the workspace skills tier (<workspace>/skills/) instead.
 
 Supported installation sources:
 - Local directory paths
@@ -10,23 +10,26 @@ Supported installation sources:
 - GitHub shorthand (owner/repo@skill-name)
 
 Usage:
+    from EvoScientist.paths import Workspace
     from EvoScientist.tools.skills_manager import install_skill, list_skills, uninstall_skill
 
+    ws = Workspace("~/my-project")
+
     # Install from local path (global by default)
-    install_skill("./my-skill")
+    install_skill("./my-skill", workspace=ws)
 
     # Install to workspace only
-    install_skill("./my-skill", global_install=False)
+    install_skill("./my-skill", global_install=False, workspace=ws)
 
     # Install from GitHub
-    install_skill("https://github.com/user/repo/tree/main/my-skill")
+    install_skill("https://github.com/user/repo/tree/main/my-skill", workspace=ws)
 
     # List installed skills (source: "workspace", "global", or "builtin")
-    for skill in list_skills():
+    for skill in list_skills(workspace=ws):
         print(skill.name, skill.source, skill.description)
 
     # Uninstall a skill
-    uninstall_skill("my-skill")
+    uninstall_skill("my-skill", workspace=ws)
 """
 
 from __future__ import annotations
@@ -45,6 +48,9 @@ from pathlib import Path
 import yaml
 
 from .. import paths
+from ..git_cli import GitNotFoundError, run_git
+from ..git_cli import clone_repo as _clone_repo
+from ..paths import Workspace, resolve_virtual_path
 
 _logger = logging.getLogger(__name__)
 
@@ -342,17 +348,7 @@ def _record_uninstall(dest_dir: str | Path, name: str) -> None:
         _save_manifest(dest_dir, manifest)
 
 
-def installed_sources() -> set[str]:
-    """Return install sources recorded for currently-installed skills.
-
-    Reads the manifest in both ``USER_SKILLS_DIR`` and ``GLOBAL_SKILLS_DIR``
-    and only returns entries whose target directories still exist on disk —
-    so a manually-removed skill stops appearing as installed.
-    """
-    return set(installed_provenance())
-
-
-def installed_provenance() -> dict[str, dict[str, str | None]]:
+def installed_provenance(*, workspace: Workspace) -> dict[str, dict[str, str | None]]:
     """Per-source provenance for currently-installed skills.
 
     Maps source URL/shorthand → ``{"commit": <sha or None>}``. When several
@@ -362,7 +358,7 @@ def installed_provenance() -> dict[str, dict[str, str | None]]:
     recorded commit no longer matches upstream.
     """
     out: dict[str, dict[str, str | None]] = {}
-    for dest_dir in (paths.USER_SKILLS_DIR, paths.GLOBAL_SKILLS_DIR):
+    for dest_dir in (workspace.skills_dir, paths.GLOBAL_SKILLS_DIR):
         dest = Path(dest_dir)
         if not dest.exists():
             continue
@@ -641,41 +637,15 @@ def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
     raise ValueError(f"Cannot parse GitHub URL: {url}")
 
 
-_CLONE_TIMEOUT = 120  # seconds
 _LS_REMOTE_TIMEOUT = 5  # seconds — bounded, runs once per recommended pack
-
-
-def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
-    """Shallow-clone a GitHub repo."""
-    clone_url = f"https://github.com/{repo}.git"
-    cmd = ["git", "clone", "--depth", "1"]
-    if ref:
-        cmd += ["--branch", ref]
-    cmd += [clone_url, dest]
-
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_CLONE_TIMEOUT
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"git clone timed out after {_CLONE_TIMEOUT}s for {repo}"
-        ) from e
-    if result.returncode != 0:
-        raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
 
 
 def _resolve_local_head(clone_dir: str) -> str | None:
     """Return the HEAD commit SHA of a freshly cloned working tree, or None
     when ``git rev-parse`` is unavailable or the call fails."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", clone_dir, "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        proc = run_git(["-C", clone_dir, "rev-parse", "HEAD"], timeout=10)
+    except (GitNotFoundError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
@@ -703,13 +673,8 @@ def resolve_remote_head(
     target = ref or "HEAD"
     repo_url = f"https://github.com/{repo}.git"
     try:
-        proc = subprocess.run(
-            ["git", "ls-remote", "--exit-code", repo_url, target],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        proc = run_git(["ls-remote", "--exit-code", repo_url, target], timeout=timeout)
+    except (GitNotFoundError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
@@ -809,6 +774,9 @@ def install_skill(
     source: str,
     dest_dir: str | None = None,
     global_install: bool = True,
+    *,
+    workspace: Workspace,
+    work_dir: str | Path | None = None,
 ) -> dict:
     """Install a skill from a local path or GitHub URL.
 
@@ -816,8 +784,11 @@ def install_skill(
         source: Local directory path or GitHub URL/shorthand.
         dest_dir: Explicit destination directory (overrides global_install).
         global_install: If True (default), install to GLOBAL_SKILLS_DIR
-            (~/.evoscientist/skills/). If False, install to the
-            workspace-local USER_SKILLS_DIR.
+            (~/.evoscientist/skills/). If False, install to the workspace
+            skills tier.
+        workspace: The workspace whose skills tier receives a local install.
+        work_dir: Folder that virtual source paths (``/my-skill``) resolve
+            against. Defaults to the workspace root.
 
     Returns:
         Dictionary with installation result:
@@ -827,18 +798,27 @@ def install_skill(
         - error: error message (if failed)
     """
     try:
-        return _install_skill_impl(source, dest_dir, global_install)
+        return _install_skill_impl(
+            source,
+            dest_dir,
+            global_install,
+            workspace=workspace,
+            work_dir=Path(work_dir) if work_dir is not None else workspace.root,
+        )
     finally:
         _notify_skills_changed()
 
 
 def _install_skill_impl(
     source: str,
-    dest_dir: str | None = None,
-    global_install: bool = True,
+    dest_dir: str | None,
+    global_install: bool,
+    *,
+    workspace: Workspace,
+    work_dir: Path,
 ) -> dict:
     dest_dir = dest_dir or (
-        str(paths.GLOBAL_SKILLS_DIR) if global_install else str(paths.USER_SKILLS_DIR)
+        str(paths.GLOBAL_SKILLS_DIR) if global_install else str(workspace.skills_dir)
     )
     try:
         os.makedirs(dest_dir, exist_ok=True)
@@ -855,44 +835,52 @@ def _install_skill_impl(
         source_path = Path(source).expanduser().resolve()
         if not source_path.exists():
             # Fallback: try resolving as a virtual workspace path
-            from ..paths import resolve_virtual_path
-
             try:
-                if resolve_virtual_path(source).exists():
-                    return _install_from_local(source, dest_dir)
+                if resolve_virtual_path(work_dir, source).exists():
+                    return _install_from_local(source, dest_dir, work_dir=work_dir)
             except Exception:
                 pass
 
             # If not local and not a GitHub URL, try remote lookup in EvoSkills
-            # This handles /install-skill skill-name shorthand
-            try:
-                index = fetch_remote_skill_index()
-                for skill in index:
-                    if skill["name"].lower() == source.lower():
-                        _logger.info(
-                            f"Skill '{source}' found in remote index. Installing..."
-                        )
-                        # Record under the user-facing source (the shorthand
-                        # name they typed) so detection works on re-runs.
-                        return _install_from_github(
-                            skill["install_source"], dest_dir, record_as=source
-                        )
-            except Exception as e:
-                _logger.warning(f"Failed to fetch remote index for fallback: {e}")
+            # This handles /install-skill skill-name shorthand. A path-shaped
+            # source can never match an index name, so a mistyped path goes
+            # straight to the local check below and keeps "Path does not exist".
+            if not _looks_like_path(source):
+                try:
+                    index = fetch_remote_skill_index()
+                    for skill in index:
+                        if skill["name"].lower() == source.lower():
+                            _logger.info(
+                                f"Skill '{source}' found in remote index. Installing..."
+                            )
+                            # Record under the user-facing source (the shorthand
+                            # name they typed) so detection works on re-runs.
+                            return _install_from_github(
+                                skill["install_source"], dest_dir, record_as=source
+                            )
+                except Exception as e:
+                    # The source is not a local path either, so this failure
+                    # (git missing, the macOS Command Line Tools stub, offline)
+                    # is the real cause; "Path does not exist" would hide it.
+                    return {"success": False, "error": str(e)}
 
-        return _install_from_local(source, dest_dir)
+        return _install_from_local(source, dest_dir, work_dir=work_dir)
 
 
-def _install_from_local(source: str, dest_dir: str) -> dict:
+def _looks_like_path(source: str) -> bool:
+    """True for a filesystem-shaped source (``./x``, ``~/x``, ``a/b``), as
+    opposed to a bare skill name such as ``paper-writing``."""
+    return source.startswith((".", "~")) or "/" in source or os.sep in source
+
+
+def _install_from_local(source: str, dest_dir: str, *, work_dir: Path) -> dict:
     """Install a skill from a local directory path."""
     source_path = Path(source).expanduser().resolve()
 
     if not source_path.exists():
         # Fallback: try resolving as a virtual workspace path
-        from ..paths import resolve_virtual_path
-
         try:
-            source_path = resolve_virtual_path(source)
+            source_path = resolve_virtual_path(work_dir, source)
         except Exception:
             pass
         if not source_path.exists():
@@ -1076,7 +1064,9 @@ def _install_from_github(
         return result
 
 
-def list_skills(include_system: bool = False) -> list[SkillInfo]:
+def list_skills(
+    include_system: bool = False, *, workspace: Workspace
+) -> list[SkillInfo]:
     """List all installed skills across all tiers.
 
     Priority order: workspace > global > builtin.
@@ -1084,6 +1074,7 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
 
     Args:
         include_system: If True, also include built-in (PyPI) skills.
+        workspace: The workspace whose skills tier is listed first.
 
     Returns:
         List of SkillInfo objects for each skill, deduplicated by name.
@@ -1103,7 +1094,7 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
                 seen.add(info.name)
 
     # Tier 1: workspace-local skills (always highest priority, no dedup needed)
-    _add_tier(Path(paths.USER_SKILLS_DIR), source="workspace", check_seen=False)
+    _add_tier(workspace.skills_dir, source="workspace", check_seen=False)
 
     # Tier 2: global skills (~/.evoscientist/skills/)
     _add_tier(Path(paths.GLOBAL_SKILLS_DIR), source="global")
@@ -1117,7 +1108,9 @@ def list_skills(include_system: bool = False) -> list[SkillInfo]:
     return skills
 
 
-def list_expert_skills(include_system: bool = True) -> list[SkillInfo]:
+def list_expert_skills(
+    include_system: bool = True, *, workspace: Workspace
+) -> list[SkillInfo]:
     """List installed expert skills.
 
     Filters ``list_skills()`` output to entries classified as experts by
@@ -1142,10 +1135,14 @@ def list_expert_skills(include_system: bool = True) -> list[SkillInfo]:
     Returns:
         List of ``SkillInfo`` for each expert skill.
     """
-    return [s for s in list_skills(include_system=include_system) if s.type == "expert"]
+    return [
+        s
+        for s in list_skills(include_system=include_system, workspace=workspace)
+        if s.type == "expert"
+    ]
 
 
-def uninstall_skill(name: str) -> dict:
+def uninstall_skill(name: str, *, workspace: Workspace) -> dict:
     """Uninstall a skill from workspace or global tier.
 
     Searches workspace first, then global. Built-in skills cannot be uninstalled.
@@ -1159,12 +1156,12 @@ def uninstall_skill(name: str) -> dict:
         - error: error message (if failed)
     """
     try:
-        return _uninstall_skill_impl(name)
+        return _uninstall_skill_impl(name, workspace=workspace)
     finally:
         _notify_skills_changed()
 
 
-def _uninstall_skill_impl(name: str) -> dict:
+def _uninstall_skill_impl(name: str, *, workspace: Workspace) -> dict:
     # Validate name to prevent path traversal
     clean_name = _sanitize_name(name)
     if not clean_name:
@@ -1172,7 +1169,7 @@ def _uninstall_skill_impl(name: str) -> dict:
 
     # Search workspace tier first, then global tier
     search_dirs = [
-        Path(paths.USER_SKILLS_DIR).resolve(),
+        workspace.skills_dir.resolve(),
         Path(paths.GLOBAL_SKILLS_DIR).resolve(),
     ]
 
@@ -1218,7 +1215,7 @@ def _uninstall_skill_impl(name: str) -> dict:
     return {"success": False, "error": f"Skill not found: {name}"}
 
 
-def get_skill_info(name: str) -> SkillInfo | None:
+def get_skill_info(name: str, *, workspace: Workspace) -> SkillInfo | None:
     """Get information about a specific skill.
 
     Args:
@@ -1227,49 +1224,10 @@ def get_skill_info(name: str) -> SkillInfo | None:
     Returns:
         SkillInfo if found, None otherwise.
     """
-    for skill in list_skills(include_system=True):
+    for skill in list_skills(include_system=True, workspace=workspace):
         if skill.name == name:
             return skill
     return None
-
-
-def list_skills_by_tag(
-    tag: str,
-    include_system: bool = False,
-) -> list[SkillInfo]:
-    """Filter installed skills by tag (case-insensitive).
-
-    Args:
-        tag: Tag to filter by.
-        include_system: If True, also include system skills.
-
-    Returns:
-        List of matching SkillInfo objects.
-    """
-    tag_lower = tag.lower()
-    return [
-        s
-        for s in list_skills(include_system=include_system)
-        if tag_lower in [t.lower() for t in s.tags]
-    ]
-
-
-def get_all_tags(include_system: bool = False) -> list[tuple[str, int]]:
-    """Return all tags and their counts, sorted by frequency then alphabetically.
-
-    Args:
-        include_system: If True, also include system skills.
-
-    Returns:
-        List of (tag, count) tuples sorted by count descending, then name ascending.
-    """
-    from collections import Counter
-
-    counter: Counter[str] = Counter()
-    for skill in list_skills(include_system=include_system):
-        for tag in skill.tags:
-            counter[tag.lower()] += 1
-    return sorted(counter.items(), key=lambda x: (-x[1], x[0]))
 
 
 # ── Remote skill index ──────────────────────────────────────────────

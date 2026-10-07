@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..paths import Workspace
 
 
 class CompletionKind(StrEnum):
@@ -34,8 +38,13 @@ class CompletionResult:
     candidates: list[CompletionCandidate]
 
 
-def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
+def compute_completions(
+    text: str, cursor_pos: int, *, workspace: Workspace | None = None
+) -> CompletionResult:
     """Parse *text* up to *cursor_pos* and return completion candidates.
+
+    ``workspace`` is the session's workspace, forwarded to commands whose
+    completions list what is installed there (e.g. ``/expert``).
 
     This is the shared engine used by both the Rich CLI
     (``SlashCommandCompleter``) and the TUI (``on_text_area_changed``).
@@ -76,7 +85,7 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
             return CompletionResult(CompletionKind.EMPTY, [])
 
         if exact_cmd and has_trailing_space:
-            completions = exact_cmd.get_completions([""])
+            completions = exact_cmd.get_completions([""], workspace=workspace)
             if completions:
                 insert_pos = len(before)
                 return CompletionResult(
@@ -134,7 +143,7 @@ def compute_completions(text: str, cursor_pos: int) -> CompletionResult:
     tokens = parts[1:]
     if has_trailing_space:
         tokens.append("")
-    completions = cmd.get_completions(tokens)
+    completions = cmd.get_completions(tokens, workspace=workspace)
     if not completions:
         return CompletionResult(CompletionKind.EMPTY, [])
 

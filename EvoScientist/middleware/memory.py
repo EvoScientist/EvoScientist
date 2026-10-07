@@ -43,7 +43,9 @@ from .utils import append_to_system_message
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_INLINE_PROFILE_CHARS = 24_000
+DEFAULT_MAX_INLINE_PROFILE_CHARS = 60_000
+_TRUNCATED_PROFILE_HEAD_RATIO = 0.75
+_warned_profile_truncations: set[tuple[str, ...]] = set()
 _LEGACY_MEMORY_FILENAME = "MEMORY.md"
 _LEGACY_IMPORT_HEADING = "Imported from legacy MEMORY.md"
 
@@ -397,6 +399,55 @@ def _agent_path(memory_path: str) -> str:
     return f"/memories{memory_path}"
 
 
+def _allot_profile_budget(sizes: list[int], budget: int) -> list[int]:
+    """Split ``budget`` so files within their fair share stay whole.
+
+    Smallest first; what a small file leaves unused goes to the larger ones.
+    """
+    allotted = [0] * len(sizes)
+    remaining = budget
+    order = sorted(range(len(sizes)), key=lambda i: sizes[i])
+    for position, index in enumerate(order):
+        share = remaining // (len(order) - position)
+        allotted[index] = min(sizes[index], share)
+        remaining -= allotted[index]
+    return allotted
+
+
+def _truncate_profile(content: str, keep: int, agent_path: str) -> str:
+    """Keep the head and tail of ``content`` on line boundaries, pointing at the rest."""
+    cut = int(keep * _TRUNCATED_PROFILE_HEAD_RATIO)
+    head = content[:cut]
+    # Drop a partial line only; a cut on a newline already ends a whole line.
+    if content[cut : cut + 1] != "\n" and "\n" in head:
+        head = head[: head.rindex("\n")]
+    start = len(content) - (keep - len(head))
+    tail = content[start:]
+    if content[start - 1 : start] != "\n" and "\n" in tail:
+        tail = tail[tail.index("\n") + 1 :]
+    omitted = len(content) - len(head) - len(tail)
+    marker = (
+        f"[... {omitted:,} of {len(content):,} characters omitted; "
+        f"read {agent_path} for the full file ...]"
+    )
+    return "\n".join(part for part in (head, marker, tail) if part)
+
+
+def _warn_profile_truncation(agent_paths: list[str], budget: int) -> None:
+    """Warn once per process for each distinct set of truncated profile files."""
+    key = tuple(agent_paths)
+    if key in _warned_profile_truncations:
+        return
+    _warned_profile_truncations.add(key)
+    logger.warning(
+        "Profile memory exceeds its %s-character prompt budget; only part of %s "
+        "is inlined into each model call. Shorten the listed files to inline them "
+        "in full.",
+        f"{budget:,}",
+        ", ".join(agent_paths),
+    )
+
+
 def _legacy_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
     """Split the old ``MEMORY.md`` format into preface and top-level sections."""
     pattern = re.compile(
@@ -456,7 +507,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self,
         *,
         memory_dir: str | Path,
-        workspace_dir: str | Path | None = None,
+        workspace_dir: str | Path,
         max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
         source_type: MemorySourceType = MemorySourceType.TURN,
         source_agent: str = "EvoScientist",
@@ -467,7 +518,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_profile_bootstrap: bool = False,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
-        workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
+        workspace = Path(workspace_dir).expanduser()
         self._workspace_dir = workspace
         self._project_id = resolve_project_id(workspace)
         self._enable_profile_memory = enable_profile_memory
@@ -692,15 +743,25 @@ class EvoMemoryMiddleware(AgentMiddleware):
         return self._read_bootstrapped_profile_records()
 
     def _profile_context_from_records(self, records: list[tuple[str, str]]) -> str:
-        """Inline profile contents unless they exceed the prompt budget."""
-        full = "\n\n".join(
-            f"File: {_agent_path(path)}\n\n{content.strip()}"
+        """Inline profile files, truncating only those over their share of the budget."""
+        files = [
+            (_agent_path(path), content.strip())
             for path, content in records
             if content.strip()
-        ).strip()
-        if len(full) <= self._max_inline_profile_chars:
-            return full
-        return self._profile_pointer_context
+        ]
+        allotted = _allot_profile_budget(
+            [len(content) for _, content in files], self._max_inline_profile_chars
+        )
+        sections = []
+        truncated = []
+        for (agent_path, content), keep in zip(files, allotted, strict=True):
+            if keep < len(content):
+                content = _truncate_profile(content, keep, agent_path)
+                truncated.append(agent_path)
+            sections.append(f"File: {agent_path}\n\n{content}")
+        if truncated:
+            _warn_profile_truncation(truncated, self._max_inline_profile_chars)
+        return "\n\n".join(sections)
 
     def _read_profile_memory(self) -> str:
         """Return profile context, falling back to file pointers."""
@@ -932,7 +993,8 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
 def create_memory_middleware(
     memory_dir: str | None = None,
-    workspace_dir: str | Path | None = None,
+    *,
+    workspace_dir: str | Path,
     max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
     source_type: MemorySourceType = MemorySourceType.TURN,
     source_agent: str = "EvoScientist",

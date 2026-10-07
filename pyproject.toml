@@ -1,6 +1,6 @@
 [project]
 name = "EvoScientist"
-version = "0.3.4"
+version = "0.3.5"
 description = "EvoScientist: Towards Self-Evolving AI Scientists for End-to-End Scientific Discovery"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,18 +35,25 @@ dependencies = [
     "questionary>=2.1",
     "typer>=0.24",
     "python-dotenv>=1.0",
+    "langgraph-api>=0.7.30",
     "langgraph-cli[inmem]>=0.4",
     "langgraph-sdk>=0.4",
     "langgraph-checkpoint-sqlite>=3.0",
     "httpx>=0.28",
     "psutil>=6.0",
     "filelock>=3.16",
+    # WebUI setup stage: the supported WebUI version range
+    "packaging>=24.0",
     "lazy-loader>=0.5",
     "markdownify>=1.2",
     "tzlocal>=5.0",
     "langchain-mcp-adapters>=0.3.2",
     # <8.2.7: 8.2.7 Kitty "report-all-keys" breaks CJK input on iTerm2
     "textual>=8.0,<8.2.7",
+    # 49+ ships no Intel macOS wheel
+    "cryptography<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    # Complement of the cap above so `uv lock` forks and other platforms keep the newest release
+    "cryptography; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
 
 [dependency-groups]

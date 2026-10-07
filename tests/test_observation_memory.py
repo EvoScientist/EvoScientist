@@ -2476,7 +2476,7 @@ def test_observation_linker_uses_read_search_memory_and_link_tool(tmp_path):
     assert "record_observation" not in {tool.name for tool in tools}
 
 
-def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch):
+def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch, workspace):
     calls = []
 
     def fake_build(**kwargs):
@@ -2487,12 +2487,12 @@ def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch):
 
     memory_worker.build_memory_worker_graph(
         MemorySourceType.TURN,
+        workspace=workspace,
         memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
     )
 
     assert calls[0]["memory_dir"] == tmp_path / "memories"
-    assert calls[0]["workspace_dir"] == tmp_path / "workspace"
+    assert calls[0]["workspace_dir"] == workspace.root
 
 
 def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(

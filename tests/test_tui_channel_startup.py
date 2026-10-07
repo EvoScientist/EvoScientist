@@ -12,7 +12,9 @@ from EvoScientist.cli import tui_interactive as tui_mod
 from EvoScientist.commands.base import ChannelRuntime
 
 
-async def test_channel_startup_worker_keeps_event_loop_responsive(monkeypatch):
+async def test_channel_startup_worker_keeps_event_loop_responsive(
+    monkeypatch, tmp_path
+):
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -33,6 +35,7 @@ async def test_channel_startup_worker_keeps_event_loop_responsive(monkeypatch):
             object(),
             "thread-1",
             SimpleNamespace(channel_enabled="telegram"),
+            media_dir=tmp_path,
             send_thinking=False,
             runtime=ChannelRuntime(),
             stop_requested=threading.Event(),
@@ -56,7 +59,7 @@ async def test_channel_startup_worker_keeps_event_loop_responsive(monkeypatch):
     assert finished.is_set()
 
 
-async def test_channel_startup_worker_stops_channels_after_exit(monkeypatch):
+async def test_channel_startup_worker_stops_channels_after_exit(monkeypatch, tmp_path):
     runtime = ChannelRuntime()
     stop_requested = threading.Event()
     stop_requested.set()
@@ -77,6 +80,7 @@ async def test_channel_startup_worker_stops_channels_after_exit(monkeypatch):
         object(),
         "thread-1",
         SimpleNamespace(channel_enabled="telegram"),
+        media_dir=tmp_path,
         send_thinking=False,
         runtime=runtime,
         stop_requested=stop_requested,

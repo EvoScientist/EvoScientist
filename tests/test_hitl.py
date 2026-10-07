@@ -849,7 +849,7 @@ class TestInterruptOnWiring:
         assert _hitl_when(suppressed_req) is False
         assert _hitl_when(armed_req) is True
 
-    def test_hitl_interrupt_on_reaches_create_deep_agent(self):
+    def test_hitl_interrupt_on_reaches_create_deep_agent(self, workspace):
         """The kwarg must actually reach ``create_deep_agent`` — not just the
         pure helper — so a future edit that drops it or re-adds a bare
         ``HumanInTheLoopMiddleware`` append gets caught. Now armed regardless
@@ -885,7 +885,7 @@ class TestInterruptOnWiring:
                             return_value={"name": "x"},
                         ):
                             es_mod.create_cli_agent(
-                                workspace_dir="/tmp/test-interrupt-on-wiring",
+                                workspace=workspace,
                                 config=cfg,
                                 chat_model=MagicMock(),
                             )
@@ -1073,18 +1073,23 @@ class TestAsyncSubagentGuard:
     backend guard — they ingest untrusted content and have no approval path.
     Internal machinery (scheduler, evomemory, autoskills) runs unguarded."""
 
-    def test_get_default_backend_applies_forced_guard(self):
+    def test_get_default_backend_applies_forced_guard(self, workspace):
         from EvoScientist.EvoScientist import _get_default_backend
 
         assert (
-            _get_default_backend(guard_dangerous=True).default._guard_dangerous is True
+            _get_default_backend(
+                workspace, guard_dangerous=True
+            ).default._guard_dangerous
+            is True
         )
         assert (
-            _get_default_backend(guard_dangerous=False).default._guard_dangerous
+            _get_default_backend(
+                workspace, guard_dangerous=False
+            ).default._guard_dangerous
             is False
         )
 
-    def test_get_default_backend_guard_defaults_false(self):
+    def test_get_default_backend_guard_defaults_false(self, workspace):
         """The construction-time guard default is always False (was cfg.auto_approve):
         the graph is always armed and the guard derives per call from the run's
         HITL-suppression state (see CustomSandboxBackend._effective_guard_dangerous),
@@ -1092,10 +1097,10 @@ class TestAsyncSubagentGuard:
         backend. Independent of the machine's config value."""
         from EvoScientist.EvoScientist import _get_default_backend
 
-        assert _get_default_backend().default._guard_dangerous is False
+        assert _get_default_backend(workspace).default._guard_dangerous is False
 
     @staticmethod
-    def _factory_kwargs_for(name: str) -> dict:
+    def _factory_kwargs_for(name: str, workspace) -> dict:
         """Run the async factory for ``name`` and capture the backend kwargs."""
         from unittest.mock import MagicMock, NonCallableMagicMock, patch
 
@@ -1104,7 +1109,7 @@ class TestAsyncSubagentGuard:
 
         captured: dict = {}
 
-        def _spy_backend(**kwargs):
+        def _spy_backend(_workspace, **kwargs):
             captured.update(kwargs)
             # Non-callable: deepagents rejects callable backends as removed factories.
             return NonCallableMagicMock()
@@ -1127,21 +1132,21 @@ class TestAsyncSubagentGuard:
             patch.object(ev, "_ensure_auxiliary_chat_model", return_value=MagicMock()),
             patch("deepagents.create_deep_agent", return_value=MagicMock()),
         ):
-            _factory.build_async_subagent_graph(name)
+            _factory.build_async_subagent_graph(name, workspace=workspace)
 
         return captured
 
-    def test_async_factory_guards_research_agents(self):
+    def test_async_factory_guards_research_agents(self, workspace):
         # Research async agents keep both the dangerous-command guard AND the
         # delete refusal on (no interactive approval path → relay to orchestrator).
         for name in ("writing-agent", "data-analysis-agent"):
-            kw = self._factory_kwargs_for(name)
+            kw = self._factory_kwargs_for(name, workspace)
             assert kw.get("guard_dangerous") is True
             assert kw.get("refuse_delete") is True
 
-    def test_async_factory_does_not_guard_internal_agents(self):
+    def test_async_factory_does_not_guard_internal_agents(self, workspace):
         # Scheduler and any other internal async graph run unguarded in any mode.
-        kw = self._factory_kwargs_for("scheduler")
+        kw = self._factory_kwargs_for("scheduler", workspace)
         assert kw.get("guard_dangerous") is False
         assert kw.get("refuse_delete") is False
 

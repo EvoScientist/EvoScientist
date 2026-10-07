@@ -36,6 +36,8 @@ from langchain.agents.middleware.types import (
     ModelResponse,
 )
 
+from ..paths import Workspace
+
 # The expert concept — injected on every main-agent turn so the mechanism is
 # always visible, mirroring how ``## Skills System`` is always present. Moved
 # here from ``DELEGATION_STRATEGY`` (an expert is a fractal of a skill, so its
@@ -88,7 +90,7 @@ def _read_active_teams() -> list[str]:
     return [t for t in raw if isinstance(t, str) and t]
 
 
-def _dispatchable_names() -> set[str]:
+def _dispatchable_names(workspace: Workspace) -> set[str]:
     """Return the names of experts the orchestrator can currently reach.
 
     Fresh filesystem read every call so a ``skill_manager install <expert>``
@@ -108,7 +110,7 @@ def _dispatchable_names() -> set[str]:
     except Exception:
         return set()
     try:
-        return {s.name for s in list_dispatchable_experts()}
+        return {s.name for s in list_dispatchable_experts(workspace=workspace)}
     except Exception:
         return set()
 
@@ -118,6 +120,10 @@ class ActiveTeamMiddleware(AgentMiddleware):
 
     name = "active_team"
 
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__()
+        self._workspace = workspace
+
     def _invite_block(self, experts: list[str]) -> str:
         """Render the ``<active_expert>`` block over the dispatchable subset.
 
@@ -126,7 +132,7 @@ class ActiveTeamMiddleware(AgentMiddleware):
         expert the model cannot reach is worse than saying nothing. Returns
         the empty string when nothing survives the filter.
         """
-        reachable = _dispatchable_names()
+        reachable = _dispatchable_names(self._workspace)
         experts = [e for e in experts if e in reachable]
         if not experts:
             return ""
@@ -161,6 +167,6 @@ class ActiveTeamMiddleware(AgentMiddleware):
         return await handler(self.modify_request(request))
 
 
-def create_active_team_middleware() -> ActiveTeamMiddleware:
-    """Build ActiveTeamMiddleware."""
-    return ActiveTeamMiddleware()
+def create_active_team_middleware(workspace: Workspace) -> ActiveTeamMiddleware:
+    """Build ActiveTeamMiddleware for the experts installed in ``workspace``."""
+    return ActiveTeamMiddleware(workspace)

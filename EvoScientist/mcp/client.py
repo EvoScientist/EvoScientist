@@ -290,6 +290,21 @@ _URL_TRANSPORTS = {"http", "streamable_http", "sse", "websocket"}
 # still parallelizing the common 3–7 server case to completion.
 _MAX_CONCURRENT_CONNECTIONS = 8
 
+# Per-server time limit for ``get_tools`` inside ``langgraph dev`` (see
+# :func:`_get_tools_timeout`).  A server that hasn't answered by then is
+# skipped like one that failed, so a single slow server can't hold up the
+# rest.  The server builds its graphs, and so loads MCP tools, before
+# answering ``/ok``, so this is sized for the 60s health budget in
+# ``start_langgraph_dev`` while still leaving room for a first ``npx -y``
+# launch that downloads its package.  Shutting down a stdio server that timed
+# out adds up to ~4s on top (the MCP SDK's termination waits).
+#
+# It is not a hard bound on the whole load: the limit starts once a server
+# gets a slot under ``_MAX_CONCURRENT_CONNECTIONS``, so with more than that
+# many servers hanging, the ones queued behind them can still push the load
+# past 60s.
+_SERVER_GET_TOOLS_TIMEOUT_SECONDS = 40
+
 # Env vars forwarded to stdio MCP subprocesses on top of the MCP SDK's
 # minimal default set (HOME/PATH/USER/…). Without this, servers behind
 # a proxy or with a custom CA bundle silently fail with long timeouts.
@@ -798,11 +813,11 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
     the server then fails to start as it would without Node. Never runs inside
-    ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set): a download there would
+    ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set): a download there would
     race the server's health deadline with its progress hidden in the server
     log, so ``start_langgraph_dev`` runs this before spawning instead.
     """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
     missing = [
         name
@@ -967,14 +982,31 @@ ProgressCallback = Callable[[str, str, str], None]
 """
 
 
+def _get_tools_timeout() -> float | None:
+    """The per-server ``get_tools`` limit for this process.
+
+    Only ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set) has a deadline:
+    its health check gives up after 60s.  The CLI and TUI have none, so there a
+    slow server only makes startup slower and is left to finish.
+    """
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
+        return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
+    return None
+
+
 async def _load_tools(
     config: dict[str, Any],
     *,
     on_progress: ProgressCallback | None = None,
+    timeout: float | None = None,
 ) -> dict[str, list]:
     """Connect to MCP servers and retrieve tools.
 
     Returns a dict of server name -> list of LangChain tools.
+
+    Args:
+        timeout: Seconds each server gets to return its tools before it is
+            skipped like a failed one.  ``None`` waits as long as it takes.
 
     Raises:
         ImportError: if ``langchain-mcp-adapters`` is not installed.
@@ -1015,20 +1047,33 @@ async def _load_tools(
     async def _fetch(name: str) -> tuple[str, list]:
         async with sem:
             _report("start", name)
+            deadline = asyncio.timeout(timeout)
             try:
-                tools = await client.get_tools(server_name=name)
+                async with deadline:
+                    tools = await client.get_tools(server_name=name)
                 logger.info("MCP server %r: loaded %d tool(s)", name, len(tools))
                 _report("success", name, str(len(tools)))
                 return name, tools
             except Exception as exc:
+                # Only our own deadline gets the "timed out" message.  A
+                # TimeoutError raised inside ``get_tools`` (a websocket
+                # handshake, ``socket.timeout``) keeps its real error.
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    detail = f"timed out after {timeout}s"
+                else:
+                    detail = str(exc)
                 # When the caller wired up ``on_progress`` they own the
                 # user-facing display; downgrade the logger so we don't
                 # double-print.
                 if on_progress is None:
-                    logger.warning("MCP server %r: failed to load tools: %s", name, exc)
+                    logger.warning(
+                        "MCP server %r: failed to load tools: %s", name, detail
+                    )
                 else:
-                    logger.debug("MCP server %r: failed to load tools: %s", name, exc)
-                _report("error", name, str(exc))
+                    logger.debug(
+                        "MCP server %r: failed to load tools: %s", name, detail
+                    )
+                _report("error", name, detail)
                 return name, []
 
     # ``return_exceptions=False`` is fine because ``_fetch`` already
@@ -1057,7 +1102,9 @@ async def aload_mcp_tools(
     if not config:
         return {}
     try:
-        server_tools = await _load_tools(config, on_progress=on_progress)
+        server_tools = await _load_tools(
+            config, on_progress=on_progress, timeout=_get_tools_timeout()
+        )
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}
@@ -1110,7 +1157,9 @@ def load_mcp_tools(
 
     try:
         server_tools = runtime.run_sync(
-            lambda: _load_tools(config, on_progress=on_progress)
+            lambda: _load_tools(
+                config, on_progress=on_progress, timeout=_get_tools_timeout()
+            )
         )
     except AsyncRuntimeError as exc:
         # A bridge lifecycle/call-site error is not an MCP availability

@@ -1,9 +1,9 @@
-"""Transient widget shown while a /resume restarts the langgraph dev subprocess.
+"""Transient widget shown while /new or /resume moves the langgraph dev subprocess.
 
 Mirrors ``CompactingWidget`` — a timer-backed status line that ticks elapsed
 seconds so the user has live feedback during the up-to-60s langgraph dev
 workspace sync (subprocess stop + restart so deployed sub-agents see the
-resumed thread's workspace).
+session's new folders).
 """
 
 from __future__ import annotations
@@ -23,14 +23,12 @@ class WorkspaceSyncWidget(TimedStatusWidget):
     }
     """
 
-    def __init__(self) -> None:
+    def __init__(self, message: str) -> None:
         super().__init__()
+        self._message = message
 
     def _refresh_display(self) -> None:
-        self.update(
-            f"Syncing async sub-agent server to resumed workspace... "
-            f"({self.elapsed_seconds}s)"
-        )
+        self.update(f"{self._message}... ({self.elapsed_seconds}s)")
 
     async def cleanup(self) -> None:
         """Stop timer and remove from DOM."""

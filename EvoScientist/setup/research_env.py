@@ -3,7 +3,10 @@
 When no usable ``python`` is on PATH, the agent's shell gets a virtual
 environment under ``<DATA_DIR>/envs/default`` with numpy, pandas, matplotlib
 and scipy, so ``python script.py`` and ``pip install`` work as the prompts
-teach. A user's own ``python`` (conda, venv, system) always wins.
+teach. A user's own ``python`` (conda, venv, system) wins whenever it is
+usable: Python 3.9 or newer, not EXTERNALLY-MANAGED (PEP 668) outside a venv,
+and not the environment EvoScientist's installer made (see
+:func:`find_usable_python`).
 
 The environment reaches only the agent's ``execute`` and ``run_in_background``
 commands, through :func:`research_env_overrides`; EvoScientist's own child
@@ -19,6 +22,7 @@ from __future__ import annotations
 
 import configparser
 import functools
+import json
 import logging
 import os
 import re
@@ -28,34 +32,82 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
-from .protocol import Emitter, StageError, StageResult, make_event
+from .protocol import CN_MIRROR_HINT, Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
 
-PACKAGES = ("numpy", "pandas", "matplotlib", "scipy")
+# The versions the environment gets, tested together. The newest set with
+# wheels for Python 3.11-3.14 on every supported platform (numpy 2.5 and scipy
+# 1.18 dropped 3.11). Update at release time, like the package's constraints.
+PINS = {
+    "numpy": "2.4.6",
+    "pandas": "3.0.6",
+    "matplotlib": "3.11.2",
+    "scipy": "1.17.1",
+}
+PACKAGES = tuple(PINS)
 CN_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 _READY_MARKER = ".evoscientist-ready"
 _PYTHON_PROBE_TIMEOUT = 10
-# Exits non-zero under Python 2, which some systems still install as
-# `python`, and for an EXTERNALLY-MANAGED (PEP 668) interpreter outside a venv
-# (Debian/Ubuntu `python-is-python3`, Arch, Homebrew's unversioned `python`):
-# pip refuses the agent's `pip install` there. Environments people create
-# (conda, venv, pyenv, uv venvs) carry no marker. Written so Python 2 can
-# parse it.
+# Prints the interpreter's `major.minor`, its `sys.prefix`, and 1 when it is
+# EXTERNALLY-MANAGED (PEP 668) outside a venv, else 0. Written so Python 2,
+# which some systems still install as `python`, runs it too; the rules are
+# applied in :func:`_unusable_reason`.
 _SYSTEM_PYTHON_PROBE = (
-    "import os, sys, sysconfig; sys.exit(sys.version_info[0] < 3 or ("
-    "sys.prefix == getattr(sys, 'base_prefix', sys.prefix) and os.path.isfile("
-    "os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED'))))"
+    "import os, sys\n"
+    "managed = 0\n"
+    "if sys.version_info[0] >= 3:\n"
+    "    import sysconfig\n"
+    "    managed = int(sys.prefix == getattr(sys, 'base_prefix', sys.prefix)"
+    " and os.path.isfile(os.path.join(sysconfig.get_path('stdlib'),"
+    " 'EXTERNALLY-MANAGED')))\n"
+    "sys.stdout.write('%d.%d\\n%s\\n%d\\n'"
+    " % (sys.version_info[0], sys.version_info[1], sys.prefix, managed))\n"
 )
+# The oldest `python` of the user's own that the agent keeps: older ones
+# (Python 2.7 on CentOS 7 or early macOS, 3.8) fail the agent's `pip install`
+# of current packages.
+_MIN_PYTHON = (3, 9)
+# Files that mark an environment EvoScientist's installer made (uv tool
+# install; the Docker image's /opt/venv). uv builds both without pip.
+_MANAGED_ENV_MARKERS = ("uv-receipt.toml", ".evoscientist-managed")
 _VENV_TIMEOUT = 300
 _PIP_TIMEOUT = 1800
 # The first matplotlib import builds its font cache.
 _IMPORT_TIMEOUT = 300
+# Prints the Python version, then one "failed <name>: <error>" line per
+# package that does not import; exits 1 if any failed. Each package is tried
+# on its own, so a repair can reinstall only what is broken.
 _IMPORT_CHECK = (
-    f"import platform, {', '.join(PACKAGES)}; print(platform.python_version())"
+    "import importlib, platform, sys\n"
+    "print(f'version {platform.python_version()}', flush=True)\n"
+    "failed = False\n"
+    f"for name in {PACKAGES!r}:\n"
+    "    try:\n"
+    "        importlib.import_module(name)\n"
+    "    except Exception as exc:\n"
+    "        failed = True\n"
+    "        print(f'failed {name}: {exc!r}', flush=True)\n"
+    "sys.exit(1 if failed else 0)\n"
 )
+# Its lines are tagged and flushed one by one: stderr shares the pipe, and a
+# working environment can warn at startup or on import (a broken .pth line, a
+# pandas warning about an optional dependency the agent installed).
+_VERSION_LINE_RE = re.compile(r"^version (\S+)$", re.MULTILINE)
+_FAILED_LINE_RE = re.compile(r"^failed (\w+):", re.MULTILINE)
+# pip's last words when no candidate matches a requirement, pinned or not;
+# "from versions" lists the compatible versions the index offers ("none" when
+# it was not reached, or has no wheel for this interpreter).
+_NO_MATCH_RE = re.compile(
+    r"satisfies the requirement (?P<name>[A-Za-z0-9_.-]+)(?:==\S+)? "
+    r"\(from versions: (?P<versions>[^)]*)\)"
+)
+# pip's warning for each failed connection to the index (DNS failure,
+# timeout, refusal), printed before it gives up.
+_CONNECTION_FAILED = "after connection broken by"
 _WINDOWSAPPS_RE = re.compile(r"[\\/]microsoft[\\/]windowsapps[\\/]", re.IGNORECASE)
 # Publisher ids of the Python Software Foundation's packages: the Python
 # install manager and the Microsoft Store CPython builds. Windows derives a
@@ -241,10 +293,39 @@ def _is_untrusted_alias(path: str) -> bool:
     )
 
 
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(
+        os.path.realpath(b)
+    )
+
+
+def _unusable_reason(probe_output: str) -> str | None:
+    """Why a probed ``python`` is not usable for the agent, or None if it is."""
+    # The probe's own three lines come last: stderr shares the pipe, and a
+    # working interpreter can print warnings at startup (a broken .pth line).
+    lines = probe_output.splitlines()[-3:]
+    try:
+        major, minor = (int(part) for part in lines[0].split("."))
+        prefix, managed = lines[1], lines[2].strip() == "1"
+    except (IndexError, ValueError):
+        return f"unexpected probe output {probe_output!r}"
+    if (major, minor) < _MIN_PYTHON:
+        return f"Python {major}.{minor} is older than {'.'.join(map(str, _MIN_PYTHON))}"
+    if managed:
+        return "it is EXTERNALLY-MANAGED (PEP 668), so pip refuses to install into it"
+    # EvoScientist's own environment when its installer made it: no pip there.
+    if _same_path(prefix, sys.prefix) and any(
+        os.path.isfile(os.path.join(prefix, name)) for name in _MANAGED_ENV_MARKERS
+    ):
+        return "it is the environment EvoScientist's installer made, without pip"
+    return None
+
+
 def find_usable_python() -> str | None:
     """The ``python`` the agent's shell would run, as an absolute path, if it
-    runs, is Python 3 and lets pip install into it (no PEP 668 marker outside
-    a venv); else None.
+    runs, is Python 3.9 or newer, lets pip install into it (no PEP 668 marker
+    outside a venv) and is not the environment EvoScientist's installer made
+    (a uv tool environment, the Docker image's ``/opt/venv``); else None.
 
     Only the first ``python`` on PATH counts, as in the shell. When it is our
     own environment's (activated by hand, or a nested ``EvoSci`` in the
@@ -263,13 +344,31 @@ def find_usable_python() -> str | None:
     own_bin = os.path.normcase(str(_bin_dir(env_dir())))
     if os.path.normcase(os.path.dirname(found)) == own_bin:
         return None
-    if _runs([found, "-c", _SYSTEM_PYTHON_PROBE], _PYTHON_PROBE_TIMEOUT) is None:
+    result = _runs([found, "-c", _SYSTEM_PYTHON_PROBE], _PYTHON_PROBE_TIMEOUT)
+    if result is None:
+        logger.info(f"{found} is not usable: it did not run")
+        return None
+    reason = _unusable_reason(result.stdout)
+    if reason is not None:
+        logger.info(f"{found} is not usable: {reason}")
         return None
     return found
 
 
-def _import_check(env: Path) -> str | None:
-    """The environment's Python version when all packages import, else None.
+class ImportCheck(NamedTuple):
+    """The result of :func:`_import_check`."""
+
+    # None when the check did not run, or Python failed before the imports
+    version: str | None
+    failed: tuple[str, ...]  # the packages that do not import
+
+    @property
+    def ok(self) -> bool:
+        return self.version is not None and not self.failed
+
+
+def _import_check(env: Path) -> ImportCheck:
+    """Import each package in the environment's Python, one by one.
 
     Isolated (``-I``) like every command that maintains the environment: the
     caller's cwd and ``PYTHON*`` variables could shadow a package and send a
@@ -282,11 +381,26 @@ def _import_check(env: Path) -> str | None:
         result = _run(cmd, _IMPORT_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning(f"Import check in {env} failed: {exc}")
-        return None
-    if result.returncode != 0:
+        return ImportCheck(None, PACKAGES)
+    version_line = _VERSION_LINE_RE.search(result.stdout)
+    version = version_line[1] if version_line else None
+    failed = tuple(
+        name for name in _FAILED_LINE_RE.findall(result.stdout) if name in PINS
+    )
+    if (
+        version is None
+        or result.returncode not in (0, 1)
+        or (result.returncode == 1 and not failed)
+    ):
+        # Python itself failed (e.g. before the first import), or crashed
+        # midway so the failed lines are only a part (the check exits only
+        # 0 or 1); treat every package as failed so a repair reinstalls them
+        # all, never none or too few.
+        version, failed = None, PACKAGES
+    check = ImportCheck(version, failed)
+    if not check.ok:
         logger.warning(f"Import check in {env} failed:\n{result.stdout}")
-        return None
-    return _last_line(result.stdout)
+    return check
 
 
 # --------------------------------------------------------------------------- #
@@ -355,44 +469,119 @@ def _create_venv(env: Path) -> None:
     raise StageError("install_failed", message)
 
 
-def _pip_install(env: Path, mirror: str) -> None:
-    """Install :data:`PACKAGES` without upgrading what is already there."""
-    cmd = [
-        str(_env_python(env)),
-        "-I",
-        "-m",
-        "pip",
-        "install",
-        "--only-binary",
-        ":all:",
-        "--disable-pip-version-check",
-        "--no-input",
-        *PACKAGES,
-    ]
-    if mirror == "cn":
-        cmd += ["--index-url", CN_INDEX_URL]
-    try:
-        result = _run(cmd, _PIP_TIMEOUT)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise StageError("install_failed", f"pip install failed: {exc}") from exc
-    if result.returncode == 0:
-        logger.info(f"pip install output:\n{result.stdout}")
-    else:
-        # The error event keeps pip's last line; network errors (offline, a
-        # blocked index) come earlier in the output.
+def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
+    """Install ``packages`` at their :data:`PINS`; returns the ones installed
+    without the pin.
+
+    Without ``--upgrade``, so packages already there stay as they are unless a
+    missing one requires a change. When the pinned version of a package has
+    no wheel for this interpreter (pip's "from versions:" lists others), that
+    package is installed without the pin and pip takes its newest wheel, once
+    per package. "from versions: none" means the index was not reached (or
+    has nothing for this interpreter), which no fallback fixes.
+    """
+    requirements = {name: f"{name}=={PINS[name]}" for name in packages}
+    unpinned: list[str] = []
+    while True:
+        cmd = [
+            str(_env_python(env)),
+            "-I",
+            "-m",
+            "pip",
+            "install",
+            "--only-binary",
+            ":all:",
+            "--disable-pip-version-check",
+            "--no-input",
+            *requirements.values(),
+        ]
+        if mirror == "cn":
+            cmd += ["--index-url", CN_INDEX_URL]
+        try:
+            result = _run(cmd, _PIP_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise StageError("install_failed", f"pip install failed: {exc}") from exc
+        if result.returncode == 0:
+            logger.info(f"pip install output:\n{result.stdout}")
+            return unpinned
+        # The error event keeps one line; the cause (e.g. network errors) can
+        # be earlier in the output.
         logger.warning(f"pip install failed:\n{result.stdout}")
-        raise StageError(
-            "install_failed", f"pip install failed: {_last_line(result.stdout)}"
-        )
+        match = _NO_MATCH_RE.search(result.stdout)
+        name = match["name"].lower() if match else None
+        if (
+            match is not None
+            and match["versions"].strip() != "none"
+            and name in requirements
+            and name not in unpinned
+        ):
+            logger.warning(
+                f"{requirements[name]} has no wheel for this Python; installing "
+                f"the newest wheel of {name} instead."
+            )
+            requirements[name] = name
+            unpinned.append(name)
+            continue
+        sentences = [f"pip install failed: {_last_line(result.stdout).rstrip('.')}."]
+        if _CONNECTION_FAILED in result.stdout:
+            sentences.append("The package index could not be reached.")
+        elif match is not None and match["versions"].strip() == "none":
+            sentences.append(
+                f"The package index has no wheel of {match['name']} for this"
+                " Python, or did not answer."
+            )
+        # On every pip failure while the mirror is off, as for download
+        # errors: a wheel download that stalls mid-file ends with a traceback,
+        # and an index answering with an HTTP error says "none", neither with
+        # a connection warning.
+        if mirror != "cn":
+            sentences.append(CN_MIRROR_HINT)
+        raise StageError("install_failed", " ".join(sentences))
 
 
-def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
-    """Try to fix a ready environment in place; its version, or None to rebuild.
+class EnvResult(NamedTuple):
+    """A ready research environment: its Python version, and the packages it
+    has without their pin (see :func:`_pip_install`), which were never tested
+    together with the pins."""
+
+    version: str
+    unpinned: list[str]
+
+
+def _read_unpinned(env: Path) -> list[str]:
+    """The unpinned packages recorded in the ready marker.
+
+    A marker written by an older version holds only the Python version, and
+    counts as none.
+    """
+    try:
+        data = json.loads((env / _READY_MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    unpinned = data.get("unpinned") if isinstance(data, dict) else None
+    if not isinstance(unpinned, list):
+        return []
+    return [name for name in unpinned if name in PINS]
+
+
+def _write_ready_marker(env: Path, result: EnvResult) -> None:
+    """Mark the environment ready, after its import check passed."""
+    (env / _READY_MARKER).write_text(
+        json.dumps({"python": result.version, "unpinned": result.unpinned}),
+        encoding="utf-8",
+    )
+
+
+def _repair(
+    env: Path, mirror: str, failed: Sequence[str], report: ProgressFn
+) -> EnvResult | None:
+    """Try to fix a ready environment in place; None to rebuild it.
 
     A Python that does not start (e.g. its base interpreter was removed) cannot
-    be repaired. Otherwise missing packages are installed; a pip failure raises
-    and leaves the environment and its marker as they are, so the agent keeps a
-    mostly working Python.
+    be repaired. Otherwise only the ``failed`` packages are installed again, at
+    their pins, so a newer version of another package that the agent installed
+    stays. A pip failure raises and leaves the environment and its marker as
+    they are, so the agent keeps a mostly working Python.
     """
     python = str(_env_python(env))
     if _runs([python, "-I", "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
@@ -401,13 +590,18 @@ def _repair(env: Path, mirror: str, report: ProgressFn) -> str | None:
     _sync_pip_config(env, mirror)
     # Below the build's first step (0.1): a repair that does not help falls
     # back to a rebuild, and progress must not jump backwards.
-    report(0.03, "Installing missing packages")
-    _pip_install(env, mirror)
+    report(0.03, f"Installing {', '.join(failed)}")
+    still_unpinned = [name for name in _read_unpinned(env) if name not in failed]
+    unpinned = _pip_install(env, mirror, failed)
     report(0.06, "Checking the packages")
-    return _import_check(env)
+    check = _import_check(env)
+    if not check.ok:
+        return None
+    # A package reinstalled at its pin is no longer unpinned.
+    return EnvResult(check.version, still_unpinned + unpinned)
 
 
-def _build(env: Path, mirror: str, report: ProgressFn) -> str:
+def _build(env: Path, mirror: str, report: ProgressFn) -> EnvResult:
     try:
         (env / _READY_MARKER).unlink(missing_ok=True)
         if env.exists():
@@ -418,18 +612,17 @@ def _build(env: Path, mirror: str, report: ProgressFn) -> str:
     _create_venv(env)
     _sync_pip_config(env, mirror)
     report(0.2, f"Installing {', '.join(PACKAGES)}")
-    _pip_install(env, mirror)
+    unpinned = _pip_install(env, mirror, PACKAGES)
     report(0.9, "Checking the packages")
-    version = _import_check(env)
-    if version is None:
-        raise StageError(
-            "probe_failed", f"{', '.join(PACKAGES)} do not import in {env}."
-        )
-    return version
+    check = _import_check(env)
+    if not check.ok:
+        failed = ", ".join(check.failed) or ", ".join(PACKAGES)
+        raise StageError("probe_failed", f"{failed} do not import in {env}.")
+    return EnvResult(check.version, unpinned)
 
 
-def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> str:
-    """Make ``envs/default`` ready and return its Python version.
+def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> EnvResult:
+    """Make ``envs/default`` ready; returns its version and unpinned packages.
 
     A ready environment that still passes the import check is kept as it is,
     including the agent's own installs, and needs no network. One that fails
@@ -445,16 +638,17 @@ def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> str:
         env.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(env.parent / f"{env.name}.lock")):
             if is_ready(env):
-                version = _import_check(env)
-                if version is not None:
+                check = _import_check(env)
+                if check.ok:
                     _sync_pip_config(env, mirror)
-                    return version
-                version = _repair(env, mirror, report)
-                if version is not None:
-                    return version
-            version = _build(env, mirror, report)
-            (env / _READY_MARKER).write_text(version, encoding="utf-8")
-            return version
+                    return EnvResult(check.version, _read_unpinned(env))
+                result = _repair(env, mirror, check.failed, report)
+                if result is not None:
+                    _write_ready_marker(env, result)
+                    return result
+            result = _build(env, mirror, report)
+            _write_ready_marker(env, result)
+            return result
     except OSError as exc:
         raise StageError(
             "install_failed",
@@ -597,9 +791,12 @@ def run_stage(emit: Emitter, mirror: str) -> StageResult:
             {"reason": "system_python", "python": system},
             status="skipped",
         )
-    version = ensure_research_env(mirror, report)
+    result = ensure_research_env(mirror, report)
     env = env_dir()
-    return StageResult(
-        f"Using Python {version} in {env}",
-        {"source": "venv", "path": str(env), "python": version},
-    )
+    detail = {"source": "venv", "path": str(env), "python": result.version}
+    message = f"Using Python {result.version} in {env}"
+    if result.unpinned:
+        # Their newest wheels were never tested together with the pins.
+        detail["unpinned"] = result.unpinned
+        message += f" ({', '.join(result.unpinned)} without the pinned version)"
+    return StageResult(message, detail)

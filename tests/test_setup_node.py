@@ -8,13 +8,14 @@ import io
 import json
 import os
 import re
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from EvoScientist.setup import node
+from EvoScientist.setup import _install, node
 from EvoScientist.setup.protocol import StageError
 
 V = node.NODE_VERSION
@@ -184,14 +185,14 @@ def _deny_moving_node(monkeypatch, times: int) -> list[int]:
             raise PermissionError(13, "Access is denied")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(node, "_MOVE_RETRY_DELAYS", (0, 0, 0, 0, 0))
-    monkeypatch.setattr(node.os, "replace", replace)
+    monkeypatch.setattr(_install, "_MOVE_RETRY_DELAYS", (0, 0, 0, 0, 0))
+    monkeypatch.setattr(_install.os, "replace", replace)
     return denied
 
 
 def test_brief_access_denied_on_move_is_retried(env, monkeypatch, caplog):
     denied = _deny_moving_node(monkeypatch, times=2)
-    with caplog.at_level("WARNING", logger=node.__name__):
+    with caplog.at_level("WARNING", logger=_install.__name__):
         info = node.ensure_node("default")
     assert info.source == "private"
     assert denied[0] == 2
@@ -323,11 +324,11 @@ def test_stage_reports_download_progress_lines(env, monkeypatch):
     assert detail["source"] == "private"
 
 
-def test_system_node_20_or_newer_wins_without_download(env, monkeypatch):
-    exe = _system_node(env, monkeypatch, (20, 0, 0))
+def test_system_node_20_9_or_newer_wins_without_download(env, monkeypatch):
+    exe = _system_node(env, monkeypatch, (20, 9, 0))
     info = node.ensure_node("default")
     detail = info.detail()
-    assert (detail["source"], detail["version"]) == ("system", "20.0.0")
+    assert (detail["source"], detail["version"]) == ("system", "20.9.0")
     # shutil.which may return the PATHEXT spelling (node.EXE) on Windows.
     assert os.path.normcase(detail["path"]) == os.path.normcase(str(exe))
     assert env["net"].urls == []
@@ -348,8 +349,9 @@ def test_no_node_downloads_and_records(env):
     ]
 
 
-def test_old_system_node_triggers_download(env, monkeypatch):
-    _system_node(env, monkeypatch, (19, 9, 0))
+@pytest.mark.parametrize("version", [(19, 9, 0), (20, 8, 1)])
+def test_old_system_node_triggers_download(env, monkeypatch, version):
+    _system_node(env, monkeypatch, version)
     assert node.ensure_node("default").source == "private"
     assert env["net"].urls
 
@@ -635,6 +637,111 @@ def test_node_child_env_strips_npm_config_and_node_options():
     }
     assert node.node_child_env(env, private=True) == {"PATH": "p"}
     assert node.node_child_env(env, private=False) == env
+
+
+class FakeNpmConfig:
+    """Fake ``npm config get registry``; records each call."""
+
+    def __init__(self, stdout: str = "", returncode: int = 0, exc=None) -> None:
+        self.stdout, self.returncode, self.exc = stdout, returncode, exc
+        self.calls: list[dict] = []
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append({"cmd": cmd, **kwargs})
+        if self.exc is not None:
+            raise self.exc
+        return subprocess.CompletedProcess(cmd, self.returncode, self.stdout, "")
+
+
+@pytest.fixture
+def npm_env(env, monkeypatch):
+    """A node + npm pair outside PATH and a clean per-process registry cache."""
+    bin_dir = env["tmp"] / "node-bin"
+    bin_dir.mkdir()
+    names = ["node.exe", "npm.cmd"] if os.name == "nt" else ["node", "npm"]
+    for name in names:
+        (bin_dir / name).write_text("")
+        (bin_dir / name).chmod(0o755)
+    monkeypatch.setattr(node, "_npm_config_registry", {})
+    return bin_dir / names[0]
+
+
+@pytest.mark.parametrize("name", ["npm_config_registry", "NPM_CONFIG_REGISTRY"])
+def test_configured_registry_from_env_wins_without_asking_npm(
+    npm_env, monkeypatch, name
+):
+    fake = FakeNpmConfig("https://npmrc.example/")
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    env = {name: "https://env.example/"}
+    assert node.configured_npm_registry(env, npm_env) == "https://env.example/"
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ("https://npmrc.example/\n", "https://npmrc.example/"),
+        ("https://registry.npmjs.org/\n", None),
+        ("https://registry.npmjs.org\n", None),
+        ("undefined\n", None),
+        ("", None),
+    ],
+)
+def test_configured_registry_from_npm_config(npm_env, monkeypatch, stdout, expected):
+    fake = FakeNpmConfig(stdout)
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    assert node.configured_npm_registry({}, npm_env) == expected
+    (call,) = fake.calls
+    assert call["cmd"][1:] == ["config", "get", "registry"]
+    assert Path(call["cmd"][0]).parent == npm_env.parent
+
+
+def test_configured_registry_asks_npm_once_per_process(npm_env, monkeypatch):
+    fake = FakeNpmConfig("https://npmrc.example/")
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    for _ in range(3):
+        assert node.configured_npm_registry({}, npm_env) == "https://npmrc.example/"
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        FakeNpmConfig(exc=OSError("blocked")),
+        FakeNpmConfig(exc=subprocess.TimeoutExpired("npm", 10)),
+        FakeNpmConfig("https://npmrc.example/", returncode=1),
+    ],
+)
+def test_configured_registry_is_none_when_npm_fails(npm_env, monkeypatch, fake):
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    assert node.configured_npm_registry({}, npm_env) is None
+
+
+def test_configured_registry_is_none_without_npm(env, monkeypatch):
+    fake = FakeNpmConfig("https://npmrc.example/")
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    monkeypatch.setattr(node, "_npm_config_registry", {})
+    assert node.configured_npm_registry({}, env["tmp"] / "nowhere" / "node") is None
+    assert fake.calls == []
+
+
+def test_configured_registry_runs_npm_outside_the_current_project(
+    env, npm_env, monkeypatch
+):
+    """A project ``.npmrc`` in the cwd must not decide; NODE_OPTIONS is dropped;
+    npm's launcher finds the Node next to it first on PATH."""
+    (env["data"] / "tools").mkdir(parents=True)
+    fake = FakeNpmConfig("https://npmrc.example/")
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    node.configured_npm_registry(
+        {"NODE_OPTIONS": "--x", "HOME": "h", "PATH": "elsewhere"}, npm_env
+    )
+    (call,) = fake.calls
+    assert Path(call["cwd"]) == env["data"] / "tools"
+    assert call["env"] == {
+        "HOME": "h",
+        "PATH": os.pathsep.join([str(npm_env.parent), "elsewhere"]),
+    }
 
 
 def test_run_stage_returns_done_with_the_node_detail(monkeypatch):

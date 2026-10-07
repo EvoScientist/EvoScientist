@@ -1,6 +1,7 @@
 """Telegram channel implementation using python-telegram-bot."""
 
 import logging
+import mimetypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -305,8 +306,11 @@ class TelegramChannel(Channel):
                         ext = self._get_extension(
                             media_type,
                             getattr(media_file, "mime_type", None),
+                            getattr(media_file, "file_name", None),
                         )
-                        file_path = self._media_path(f"{media_file.file_id[:16]}{ext}")
+                        file_path = self._media_path(
+                            f"{media_file.file_unique_id}{ext}"
+                        )
                         await file.download_to_drive(str(file_path))
 
                         media_paths.append(str(file_path))
@@ -353,9 +357,30 @@ class TelegramChannel(Channel):
         "sticker": ".webp",
     }
 
+    _MAX_SUFFIX_LEN = 16  # includes the dot
+
     @staticmethod
-    def _get_extension(media_type: str, mime_type: str | None) -> str:
-        """Get file extension based on media type and MIME type."""
+    def _get_extension(
+        media_type: str, mime_type: str | None, file_name: str | None = None
+    ) -> str:
+        """Get file extension based on media type and MIME type.
+
+        Documents prefer the sender's filename suffix (capped at 16 chars),
+        then fall back to ``mimetypes.guess_extension``. Other media types
+        use the fixed ``_MIME_TO_EXT`` / ``_TYPE_TO_EXT`` mappings.
+        """
+        if media_type == "file":
+            # Keep only a safe suffix, never the sender-provided path or basename.
+            if file_name:
+                suffix = Path(file_name.replace("\\", "/")).suffix
+                if (
+                    1 < len(suffix) <= TelegramChannel._MAX_SUFFIX_LEN
+                    and suffix[1:].isascii()
+                    and suffix[1:].isalnum()
+                ):
+                    return suffix
+            if mime_type:
+                return mimetypes.guess_extension(mime_type) or ""
         if mime_type and mime_type in TelegramChannel._MIME_TO_EXT:
             return TelegramChannel._MIME_TO_EXT[mime_type]
         return TelegramChannel._TYPE_TO_EXT.get(media_type, "")

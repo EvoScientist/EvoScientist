@@ -74,12 +74,15 @@ def resolve_per_run_config(
 class GraphTarget:
     """Identifies the graph/workspace a thread operation targets.
 
+    ``workspace_dir`` is the workspace root and ``run_dir`` the run folder a
+    ``--mode=run`` session works in (``SessionDirs.metadata()`` fills both).
     ``local_graph`` is the in-process execution handle required only by the
     local backend. Server backends select execution via ``graph_id``.
     """
 
     graph_id: str = DEFAULT_GRAPH_ID
     workspace_dir: str | None = None
+    run_dir: str | None = None
     local_graph: CompiledStateGraph | None = None
 
 

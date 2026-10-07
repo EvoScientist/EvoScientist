@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.4" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.5" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[03 Oct 2026]** **[v0.3.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.5)** — New model: GPT-6.1 Sol (OpenAI + OpenRouter); a new `EvoSci setup` command as groundwork for installer distribution; profile memory over its budget truncates only the oversized file instead of dropping all of it; the observation index lists the newest observations first; deepagents 0.7.21.
 - **[29 Sep 2026]** **[v0.3.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.4)** — New model: Claude Sonnet 5.5 (Anthropic + OpenRouter); desktop groundwork: the WebUI launcher becomes a shell-agnostic core with a background-job check; Windows fixes for local-server detection behind a system proxy, Ctrl+C isolation of the langgraph dev server, and the `EvoSci server stop` command; memory workers and scheduled-task grading fixed on native DeepSeek.
 - **[26 Sep 2026]** **[v0.3.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.3)** — Codex OAuth (ChatGPT Plus/Pro) works end to end, with reasoning captured from vLLM-style endpoints; HITL resume limits count only human-prompted rounds; summarization follows the context window of the model actually running; per-surface gateway backend selection (off by default); async expert dispatch fix; deepagents 0.7.19.
 - **[23 Sep 2026]** **[v0.3.2](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.2)** — New models: Claude Opus 5.5, GPT-6 Sol/Luna, MiMo-V2.6-Pro/Flash (new Xiaomi provider), and Grok 4.7; fixes for Anthropic-protocol requests and Ctrl+C during tool runs; deepagents 0.7.18.
@@ -332,6 +333,8 @@ What the mounts are for:
 | `./workspace:/workspace` | The agent's working directory |
 | `evosci-data:/home/evosci/.evoscientist` | Persistent app state: sessions DB, global skills, memories, and `config.yaml`/`mcp.yaml` |
 
+The image does not include the agent's research Python; run `EvoSci setup` once in a container with the same `evosci-data` mount (`docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup`, since the image's entrypoint is `evosci`; with compose, `docker compose run --rm evoscientist setup`), and it builds the environment in that volume, where it survives image upgrades.
+
 > [!IMPORTANT]
 > The image runs as a non-root user (`evosci`, UID `1000`). For the `./workspace` bind mount, the host directory must be writable by that UID. If your host user ID differs, either `chown -R 1000:1000 ./workspace` once, or pass `--user "$(id -u):$(id -g)"` on every `docker run` so the container takes on your UID.
 
@@ -441,7 +444,7 @@ EvoSci -p "your question"        # single-shot mode
 EvoSci --workdir /path/to/project # open in a specific directory
 EvoSci -m run                     # isolated per-session workspace
 EvoSci --ui cli                   # classic CLI (lightweight)
-EvoSci --ui webui                 # browser workspace UI (needs Node/npx)
+EvoSci --ui webui                 # browser workspace UI (needs Node.js)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
@@ -462,7 +465,7 @@ EvoSci                               # opens http://localhost:4716
 EvoSci config set webui_port 4800    # change the front-end port (must differ from the langgraph dev port)
 ```
 
-Requires **Node.js 24 LTS** (for `npx`); the first launch downloads `@evoscientist/webui` and needs network. Note: the WebUI does not show your CLI/TUI chat history, and `-p` / `--resume` fall back to the classic CLI.
+Requires **Node.js 20.9 or newer** (`EvoSci setup` installs Node.js 24 LTS when none is found). `EvoSci setup` installs `@evoscientist/webui` locally (the first launch does it otherwise, which needs network); after that the WebUI starts offline, and a newer compatible release is downloaded in the background and used from the next launch. Note: the WebUI does not show your CLI/TUI chat history, and `-p` / `--resume` fall back to the classic CLI.
 
 **Opening it from another machine.** Both servers bind loopback (`127.0.0.1`) by default, so the WebUI is local-only out of the box. To use it over the LAN, widen both — the UI connects to the backend **from the browser**, so also point the UI's deployment URL at `http://<this-machine-ip>:6174` rather than leaving it on localhost:
 
