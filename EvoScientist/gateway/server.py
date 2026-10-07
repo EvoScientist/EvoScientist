@@ -665,7 +665,7 @@ class LangGraphServerGateway:
         request: RunRequest,
         *,
         thread_ready: bool = False,
-        on_run_attempt: Callable[[], None] | None = None,
+        on_run_attempt: Callable[[], None],
     ) -> None:
         config = self._resolve_run_config(request.thread_id, request.configurable_extra)
         # ``_stream_events`` already registered the thread before the pre-run
@@ -726,7 +726,7 @@ class LangGraphServerGateway:
         thread_id: str,
         response: object,
         *,
-        on_run_attempt: Callable[[], None] | None = None,
+        on_run_attempt: Callable[[], None],
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
@@ -754,8 +754,7 @@ class LangGraphServerGateway:
                     str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
                 }
                 if str(key) in ids:
-                    if on_run_attempt is not None:
-                        on_run_attempt()
+                    on_run_attempt()
                     await stream.run.respond(response[key], interrupt_id=str(key))
                     return
             raise RuntimeError(
@@ -802,8 +801,7 @@ class LangGraphServerGateway:
                 interrupt_id,
                 thread_id,
             )
-        if on_run_attempt is not None:
-            on_run_attempt()
+        on_run_attempt()
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
 
     async def _repair_stuck_thread_state(self, thread_id: str) -> None:
@@ -1121,8 +1119,11 @@ class LangGraphServerGateway:
             # at the yield, so any repair after it never runs and the thread
             # keeps its non-empty ``next`` — the failed step would replay on
             # the next request.
-            # Pre-run failures cannot have left a checkpoint belonging to this
-            # request. Include raising start/respond calls, but not validation.
+            # Only repair once this request reached run.start / run.respond,
+            # even if that call raised. Earlier failures (thread metadata,
+            # input building, resume validation) have not touched the
+            # checkpoint, and a non-empty ``next`` there may belong to another
+            # in-flight request on the same thread.
             if run_attempted:
                 await self._repair_stuck_thread_state(request.thread_id)
             yield emitter.error(str(exc)).data
