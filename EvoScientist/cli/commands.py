@@ -678,11 +678,16 @@ def _reconcile_autoskill_schedule(config: Any, *, workspace: Workspace) -> None:
     """Best-effort reconciliation for EvoMemory's hidden AutoSkills cron.
 
     The cron belongs to the workspace, whichever run folder the session
-    works in.
+    works in. Only for a server known to serve *workspace*, as for
+    ``_adopt_stale_scheduled_tasks``: the reconcile replaces crons it counts as
+    the workspace's, and in another workspace's store those are not.
     """
     try:
+        from ..langgraph_dev import manager
         from ..memory.autoskills.schedule import reconcile_autoskill_schedule
 
+        if manager.SERVED_WORKSPACE != workspace.root:
+            return
         reconcile_autoskill_schedule(config, workspace_dir=workspace.root)
     except Exception:
         logging.getLogger(__name__).warning(

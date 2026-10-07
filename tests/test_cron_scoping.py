@@ -106,6 +106,30 @@ def test_startup_adoption_needs_server_serving_the_workspace(
     assert retagged == (["untagged"] if served == "workspace" else [])
 
 
+@pytest.mark.parametrize("served", ["unknown", "other", "workspace"])
+def test_startup_autoskills_reconcile_needs_server_serving_the_workspace(
+    workspace, other, monkeypatch, served
+):
+    """The reconcile replaces crons it counts as this workspace's, so it runs
+    only on a server known to hold this workspace's store."""
+    from EvoScientist.cli import commands
+    from EvoScientist.langgraph_dev import manager
+    from EvoScientist.memory.autoskills import schedule as autoskills_schedule
+
+    calls = []
+    roots = {"unknown": None, "other": other.root, "workspace": workspace.root}
+    monkeypatch.setattr(manager, "SERVED_WORKSPACE", roots[served])
+    monkeypatch.setattr(
+        autoskills_schedule,
+        "reconcile_autoskill_schedule",
+        lambda config, *, workspace_dir: calls.append(workspace_dir),
+    )
+
+    commands._reconcile_autoskill_schedule(object(), workspace=workspace)
+
+    assert calls == ([workspace.root] if served == "workspace" else [])
+
+
 def test_list_schedules_filters_by_workspace(workspace, client):
     ids = [row["cron_id"] for row in crons.list_schedules(workspace=workspace)]
     assert ids == ["mine", "untagged"]
