@@ -45,6 +45,8 @@ from pathlib import Path
 import yaml
 
 from .. import paths
+from ..git_cli import GitNotFoundError, run_git
+from ..git_cli import clone_repo as _clone_repo
 
 _logger = logging.getLogger(__name__)
 
@@ -641,41 +643,15 @@ def _parse_github_url(url: str) -> tuple[str, str | None, str | None]:
     raise ValueError(f"Cannot parse GitHub URL: {url}")
 
 
-_CLONE_TIMEOUT = 120  # seconds
 _LS_REMOTE_TIMEOUT = 5  # seconds — bounded, runs once per recommended pack
-
-
-def _clone_repo(repo: str, ref: str | None, dest: str) -> None:
-    """Shallow-clone a GitHub repo."""
-    clone_url = f"https://github.com/{repo}.git"
-    cmd = ["git", "clone", "--depth", "1"]
-    if ref:
-        cmd += ["--branch", ref]
-    cmd += [clone_url, dest]
-
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_CLONE_TIMEOUT
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            f"git clone timed out after {_CLONE_TIMEOUT}s for {repo}"
-        ) from e
-    if result.returncode != 0:
-        raise RuntimeError(f"git clone failed: {result.stderr.strip()}")
 
 
 def _resolve_local_head(clone_dir: str) -> str | None:
     """Return the HEAD commit SHA of a freshly cloned working tree, or None
     when ``git rev-parse`` is unavailable or the call fails."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", clone_dir, "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        proc = run_git(["-C", clone_dir, "rev-parse", "HEAD"], timeout=10)
+    except (GitNotFoundError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
@@ -703,13 +679,8 @@ def resolve_remote_head(
     target = ref or "HEAD"
     repo_url = f"https://github.com/{repo}.git"
     try:
-        proc = subprocess.run(
-            ["git", "ls-remote", "--exit-code", repo_url, target],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        proc = run_git(["ls-remote", "--exit-code", repo_url, target], timeout=timeout)
+    except (GitNotFoundError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None
@@ -864,23 +835,35 @@ def _install_skill_impl(
                 pass
 
             # If not local and not a GitHub URL, try remote lookup in EvoSkills
-            # This handles /install-skill skill-name shorthand
-            try:
-                index = fetch_remote_skill_index()
-                for skill in index:
-                    if skill["name"].lower() == source.lower():
-                        _logger.info(
-                            f"Skill '{source}' found in remote index. Installing..."
-                        )
-                        # Record under the user-facing source (the shorthand
-                        # name they typed) so detection works on re-runs.
-                        return _install_from_github(
-                            skill["install_source"], dest_dir, record_as=source
-                        )
-            except Exception as e:
-                _logger.warning(f"Failed to fetch remote index for fallback: {e}")
+            # This handles /install-skill skill-name shorthand. A path-shaped
+            # source can never match an index name, so a mistyped path goes
+            # straight to the local check below and keeps "Path does not exist".
+            if not _looks_like_path(source):
+                try:
+                    index = fetch_remote_skill_index()
+                    for skill in index:
+                        if skill["name"].lower() == source.lower():
+                            _logger.info(
+                                f"Skill '{source}' found in remote index. Installing..."
+                            )
+                            # Record under the user-facing source (the shorthand
+                            # name they typed) so detection works on re-runs.
+                            return _install_from_github(
+                                skill["install_source"], dest_dir, record_as=source
+                            )
+                except Exception as e:
+                    # The source is not a local path either, so this failure
+                    # (git missing, the macOS Command Line Tools stub, offline)
+                    # is the real cause; "Path does not exist" would hide it.
+                    return {"success": False, "error": str(e)}
 
         return _install_from_local(source, dest_dir)
+
+
+def _looks_like_path(source: str) -> bool:
+    """True for a filesystem-shaped source (``./x``, ``~/x``, ``a/b``), as
+    opposed to a bare skill name such as ``paper-writing``."""
+    return source.startswith((".", "~")) or "/" in source or os.sep in source
 
 
 def _install_from_local(source: str, dest_dir: str) -> dict:

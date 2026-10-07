@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from EvoScientist.setup import node
+from EvoScientist.setup import _install, node
 from EvoScientist.setup.protocol import StageError
 
 V = node.NODE_VERSION
@@ -184,14 +184,14 @@ def _deny_moving_node(monkeypatch, times: int) -> list[int]:
             raise PermissionError(13, "Access is denied")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(node, "_MOVE_RETRY_DELAYS", (0, 0, 0, 0, 0))
-    monkeypatch.setattr(node.os, "replace", replace)
+    monkeypatch.setattr(_install, "_MOVE_RETRY_DELAYS", (0, 0, 0, 0, 0))
+    monkeypatch.setattr(_install.os, "replace", replace)
     return denied
 
 
 def test_brief_access_denied_on_move_is_retried(env, monkeypatch, caplog):
     denied = _deny_moving_node(monkeypatch, times=2)
-    with caplog.at_level("WARNING", logger=node.__name__):
+    with caplog.at_level("WARNING", logger=_install.__name__):
         info = node.ensure_node("default")
     assert info.source == "private"
     assert denied[0] == 2

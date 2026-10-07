@@ -1316,9 +1316,16 @@ def _step_mcp_servers() -> list[str]:
     try:
         all_servers = fetch_marketplace_index()
     except Exception as exc:
+        from rich.markup import escape
+
+        # The message carries git's stderr; unescaped, `[...]` in it would be
+        # read as Rich markup.
         console.print(
-            "  [yellow]\u26a0 Could not fetch MCP marketplace index "
-            f"({type(exc).__name__}). Skipping MCP setup \u2014 "
+            "  [yellow]\u26a0 Could not fetch MCP marketplace index: "
+            f"{escape(str(exc))}[/yellow]"
+        )
+        console.print(
+            "  [yellow]Skipping MCP setup \u2014 "
             "you can re-run with [bold]EvoSci configure mcp[/bold] later.[/yellow]"
         )
         return []

@@ -58,7 +58,6 @@ class LauncherConfig:
     backend_port: int
     webui_host: str
     webui_port: int
-    deploy_mode: bool = True
     keepalive: bool = False
     # Honoured only by front-ends whose ``handles_browser_open`` is False
     # (e.g. the bundled runner). The npx runner opens the browser itself.
@@ -125,7 +124,8 @@ class NpxWebUIRunner:
             return
         # Users who installed with pip / uv may never have run `EvoSci setup`:
         # install the private Node now instead of failing.
-        from ..setup.node import activate_runtime, ensure_node, log_progress, tools_dir
+        from ..setup._install import tools_dir
+        from ..setup.node import activate_runtime, ensure_node, log_progress
         from ..setup.protocol import StageError
 
         logger.warning(f"Node.js not found on PATH; installing it into {tools_dir()}")
@@ -502,7 +502,6 @@ class WebUILauncher:
                 host=self._cfg.backend_host,
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
-                deploy_mode=self._cfg.deploy_mode,
                 config_fingerprint=_server_config_fingerprint(self._config),
             )
         except Exception as exc:
@@ -539,9 +538,9 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     """Decide whether to reuse an already-running backend or start a fresh one.
 
     Pure decision logic: raises :class:`LauncherError` for foreign occupants,
-    workspace mismatch, stripped (CLI-mode) servers and sidecar port
-    mismatches; returns ``reuse`` or ``start`` otherwise.
-    Config-fingerprint drift is a warning, not an error.
+    workspace mismatch and sidecar port mismatches; returns ``reuse`` or
+    ``start`` otherwise. Config-fingerprint drift (configuration or version)
+    is a warning, not an error.
     """
     from ..langgraph_dev.manager import (
         _is_port_occupied,
@@ -564,7 +563,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
         )
 
     # An EvoSci server is already there — reuse only if it serves THIS
-    # workspace, is full deploy-mode, and (soft) matches the current config.
+    # workspace, and (soft) matches the current config and version.
     sidecar = _read_workspace_sidecar()
     ws = Path(cfg.workspace_dir).resolve()
     if sidecar is None:
@@ -595,22 +594,14 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
             f"Stop that EvoSci session, or launch from that workspace "
             f"(--workdir {sidecar['workspace']}).",
         )
-    if sidecar.get("deploy_mode") is False:
-        raise LauncherError(
-            "stripped_backend",
-            f"Port {cfg.backend_port} is serving a stripped (CLI-mode) "
-            f"langgraph dev — the WebUI needs the full deploy-mode server "
-            f"(MCP + async sub-agents).",
-            "Stop it with 'EvoSci server stop', then re-run EvoSci.",
-        )
     recorded_fp = sidecar.get("config_fingerprint")
     if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
         config
     ):
         warnings.append(
-            "Config changed since this server was launched — it still "
-            "serves the old settings. Apply them with 'EvoSci server "
-            "stop', then re-run EvoSci."
+            "Configuration or version changed since this server was "
+            "launched — it still serves the old settings or version. Apply them with "
+            "'EvoSci server stop', then re-run EvoSci."
         )
     from ..setup.research_env import python_drift_message
 
@@ -774,7 +765,6 @@ def build_launcher_config(
         backend_port=backend_port,
         webui_host=webui_host,
         webui_port=webui_port,
-        deploy_mode=True,
         keepalive=bool(getattr(config, "langgraph_dev_keepalive", False)),
         open_browser=False,
     )

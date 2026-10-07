@@ -1382,25 +1382,25 @@ class TestDotenvIsolation:
     ):
         """The snapshot must protect every ``EVOSCIENTIST_*`` key in the shell,
         not just the ones declared in ``_ENV_MAPPINGS``. Concrete case: the
-        langgraph_dev manager sets ``EVOSCIENTIST_DEPLOY_MODE`` on the
-        subprocess env to dispatch MCP-load / async-subagent behavior, but
+        langgraph_dev manager sets ``EVOSCIENTIST_SERVER_PROCESS`` on the
+        subprocess env to mark it as the server, but
         that key is read directly via ``os.environ.get(...)`` and never goes
         through ``get_effective_config`` — so it never made it into
         ``_ENV_MAPPINGS``. Without the prefix-based snapshot, a workspace
-        ``.env`` with ``EVOSCIENTIST_DEPLOY_MODE=stripped`` could clobber the
-        parent-injected ``full`` and silently disable async subagents.
+        ``.env`` with ``EVOSCIENTIST_SERVER_PROCESS=`` could clobber the
+        parent-injected value and silently disable async subagents.
         """
         env_file = tmp_path / ".env"
-        env_file.write_text("EVOSCIENTIST_DEPLOY_MODE=stripped\n")
+        env_file.write_text("EVOSCIENTIST_SERVER_PROCESS=\n")
         monkeypatch.setattr(
             "EvoScientist.config.settings.find_dotenv",
             lambda *args, **kwargs: str(env_file),
         )
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
 
         get_effective_config()
 
-        assert os.environ["EVOSCIENTIST_DEPLOY_MODE"] == "full"
+        assert os.environ["EVOSCIENTIST_SERVER_PROCESS"] == "1"
 
     def test_empty_shell_evoscientist_key_defers_to_dotenv(
         self, temp_config_dir, tmp_path, monkeypatch

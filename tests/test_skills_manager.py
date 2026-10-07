@@ -488,14 +488,14 @@ class TestResolveRemoteHead:
         assert resolve_remote_head("/tmp/some/local/path") is None
 
     def test_returns_none_when_git_unavailable(self):
-        with patch("EvoScientist.tools.skills_manager.subprocess.run") as run:
+        with patch("EvoScientist.git_cli.subprocess.run") as run:
             run.side_effect = FileNotFoundError("git not on PATH")
             assert resolve_remote_head("owner/repo@skill") is None
 
     def test_returns_none_on_timeout(self):
         import subprocess as _sp
 
-        with patch("EvoScientist.tools.skills_manager.subprocess.run") as run:
+        with patch("EvoScientist.git_cli.subprocess.run") as run:
             run.side_effect = _sp.TimeoutExpired(cmd="git", timeout=5)
             assert resolve_remote_head("owner/repo@skill") is None
 
@@ -509,11 +509,123 @@ class TestResolveRemoteHead:
                 "stderr": "",
             },
         )()
-        with patch(
-            "EvoScientist.tools.skills_manager.subprocess.run", return_value=proc
-        ):
+        with patch("EvoScientist.git_cli.subprocess.run", return_value=proc):
             sha = resolve_remote_head("owner/repo@skill")
         assert sha == "deadbeef0000000000000000000000000000abcd"
+
+
+@pytest.mark.usefixtures("no_git")
+class TestMissingGit:
+    """Without a git binary every git path reports the same readable error."""
+
+    def test_github_install_reports_missing_git(self, temp_skills_dir):
+        result = install_skill("owner/repo@skill", str(temp_skills_dir))
+
+        assert result["success"] is False
+        assert result["error"].startswith("git was not found on PATH.")
+
+    def test_bare_name_reports_missing_git_not_missing_path(
+        self, temp_skills_dir, tmp_path, monkeypatch
+    ):
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+        monkeypatch.chdir(tmp_path)
+
+        result = install_skill("no-such-skill-xyz", str(temp_skills_dir))
+
+        assert result["success"] is False
+        assert result["error"].startswith("git was not found on PATH.")
+
+    # Two-part "a/b" is GitHub shorthand by design, so it is not used here.
+    @pytest.mark.parametrize(
+        "source", ["./my-skil", "~/skills/my-skil", "skills/local/my-skil"]
+    )
+    def test_mistyped_path_still_reports_missing_path(
+        self, source, temp_skills_dir, tmp_path, monkeypatch
+    ):
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+        monkeypatch.chdir(tmp_path)
+
+        result = install_skill(source, str(temp_skills_dir))
+
+        assert result["success"] is False
+        assert result["error"] == f"Path does not exist: {source}"
+
+    def test_remote_index_raises_git_not_found(self):
+        from EvoScientist.git_cli import GitNotFoundError
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+
+        with pytest.raises(GitNotFoundError):
+            fetch_remote_skill_index(repo="test/repo")
+
+    def test_local_head_is_unknown(self, tmp_path):
+        from EvoScientist.tools.skills_manager import _resolve_local_head
+
+        assert _resolve_local_head(str(tmp_path)) is None
+
+    def test_agent_install_returns_the_message(self, tmp_path):
+        from EvoScientist.tools.skill_manager import skill_manager
+
+        with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "skills"):
+            result = skill_manager.invoke(
+                {"action": "install", "source": "owner/repo@skill"}
+            )
+
+        assert "git was not found on PATH." in result
+        assert "Traceback" not in result
+
+    def test_agent_browse_returns_the_message(self):
+        from EvoScientist.tools.skill_manager import skill_manager
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+
+        result = skill_manager.invoke({"action": "browse"})
+
+        assert result.startswith(
+            "Failed to fetch skill index: git was not found on PATH."
+        )
+
+
+class TestBareNameIndexFailure:
+    """A bare skill name whose index fetch fails reports that failure."""
+
+    def test_git_that_runs_but_fails(self, temp_skills_dir, tmp_path, monkeypatch):
+        """The macOS Command Line Tools stub (and an offline git) exit non-zero."""
+        from types import SimpleNamespace
+
+        from EvoScientist.tools.skills_manager import _REMOTE_INDEX_CACHE
+
+        _REMOTE_INDEX_CACHE.clear()
+        monkeypatch.chdir(tmp_path)
+        stub = SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="xcode-select: note: No developer tools were found.\n",
+        )
+        with patch("EvoScientist.git_cli.subprocess.run", return_value=stub):
+            result = install_skill("no-such-skill-xyz", str(temp_skills_dir))
+
+        assert result["success"] is False
+        assert result["error"].startswith("git clone failed: xcode-select: note:")
+
+    def test_path_shaped_source_skips_the_index(
+        self, temp_skills_dir, tmp_path, monkeypatch
+    ):
+        """A path can never match an index name: no EvoSkills clone for a typo."""
+        monkeypatch.chdir(tmp_path)
+        with patch(
+            "EvoScientist.tools.skills_manager.fetch_remote_skill_index"
+        ) as fetch:
+            result = install_skill("./my-skil", str(temp_skills_dir))
+
+        fetch.assert_not_called()
+        assert result["error"] == "Path does not exist: ./my-skil"
 
 
 # =============================================================================

@@ -178,3 +178,27 @@ def _no_agent_python_probe(monkeypatch):
 
     monkeypatch.setattr(research_env, "_agent_python", lambda: (None, None))
     monkeypatch.setattr(research_env, "_log_missing_python_hint", lambda: None)
+
+
+@pytest.fixture
+def no_git(tmp_path, monkeypatch):
+    """Run as if git were not installed.
+
+    ``EvoScientist.git_cli.subprocess.run`` is the process-wide
+    ``subprocess.run``, so the fake asserts the command is git: a test must not
+    pass because some other subprocess call failed. ``DATA_DIR`` points at an
+    empty dir, so on Windows the retry with a recorded PortableGit finds none
+    instead of changing this process's ``PATH``.
+    """
+    from unittest.mock import patch
+
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "no-git-data")
+
+    def fake_run(argv, *args, **kwargs):
+        assert argv[0] == "git", f"unexpected subprocess.run call: {argv!r}"
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    with patch("EvoScientist.git_cli.subprocess.run", side_effect=fake_run):
+        yield
