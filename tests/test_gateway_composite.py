@@ -227,6 +227,27 @@ async def test_stream_events_uuid_routes_to_server():
     assert execute.called("stream_events")
 
 
+async def test_stream_events_early_close_closes_the_inner_stream():
+    """Closing the composite stream early closes the server stream with it."""
+    closed: list[bool] = []
+
+    async def _inner():
+        try:
+            yield {"type": "interrupt"}
+            yield {"type": "text", "content": "never reached"}
+        finally:
+            closed.append(True)
+
+    execute = RecordingGateway("e")
+    execute.stream_events = lambda request: _inner()
+    stream = _composite(RecordingGateway("r"), execute).stream_events(
+        RunRequest(message="hi", thread_id=UUID)
+    )
+    assert await stream.__anext__() == {"type": "interrupt"}
+    await stream.aclose()
+    assert closed == [True]
+
+
 async def test_stream_events_legacy_yields_error_then_raises():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
