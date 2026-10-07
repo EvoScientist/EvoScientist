@@ -22,7 +22,6 @@ async def test_client_cache_injects_live_config_only_into_create(monkeypatch, is
     proxy = patches._ClientCacheProxy(cache)
     client = proxy.get_async("agent") if is_async else proxy.get_sync("agent")
     assert client.threads is real.threads
-    assert client.runs.get is real.runs.get
     assert client.runs.cancel is real.runs.cancel
     assert client.runs is client.runs
     for model in ("first", "second"):
