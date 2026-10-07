@@ -173,9 +173,7 @@ def test_run_standalone_registers_ccproxy_shutdown(monkeypatch):
         ),
     )
     fake_proc = object()
-    monkeypatch.setattr(
-        ccproxy_mod, "maybe_start_ccproxy", lambda cfg: fake_proc
-    )
+    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", lambda cfg: fake_proc)
     registered: list[tuple] = []
     monkeypatch.setattr(
         atexit, "register", lambda fn, *args: registered.append((fn, args))
