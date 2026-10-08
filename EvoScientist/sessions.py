@@ -73,6 +73,20 @@ if not hasattr(aiosqlite.Connection, "is_alive"):
 # ---------------------------------------------------------------------------
 
 AGENT_NAME = "EvoScientist"
+
+# The proactive cron's graph (``EvoScientist.proactive.cron.PROACTIVE_GRAPH_ID``).
+# Its thread checkpoints every tick, so it is pruned like the main agent's.
+PROACTIVE_GRAPH_ID = "proactive"
+
+# Rows the pruning checkpointer may delete: (metadata key, value, whether to
+# keep ancestors back to a ``messages`` snapshot, a cap on the rows kept or
+# None for ``keep_per_ns``). A thread matches one rule. The proactive cron
+# state needs only its latest checkpoint; the cap keeps it at two rows instead
+# of the 1000 a conversation keeps by default.
+_PRUNED_ROWS: tuple[tuple[str, str, bool, int | None], ...] = (
+    ("agent_name", AGENT_NAME, True, None),
+    ("graph_id", PROACTIVE_GRAPH_ID, False, 2),
+)
 MAIN_THREAD_FILTER_SQL = (
     "json_extract(metadata, '$.agent_name') = ? "
     "AND (json_extract(metadata, '$.graph_id') IS NULL "
@@ -267,53 +281,65 @@ class PruningCheckpointer(AsyncSqliteSaver):
         alongside the anchor set. Anchors form a contiguous head, so a
         single walk from the oldest one covers all of them.
 
-        Restricted to rows whose ``metadata.agent_name == AGENT_NAME``.
-        ``json_extract(metadata, '$.agent_name') = ?`` evaluates to NULL
-        (and so fails the predicate) for any row whose metadata lacks an
-        ``agent_name`` key — by design, those rows belong to third-party
-        LangGraph users and must never be pruned by us.
+        Restricted to the rows ``_PRUNED_ROWS`` names: the main agent's
+        (``metadata.agent_name == AGENT_NAME``) and the proactive cron
+        thread's (``metadata.graph_id == "proactive"``). ``json_extract``
+        evaluates to NULL (and so fails the predicate) for a row whose
+        metadata lacks the key: by design, other rows belong to third-party
+        LangGraph users and must never be pruned by us. The proactive state
+        has no ``messages`` channel, so it skips the snapshot walk, which
+        would otherwise keep every ancestor up to the walk cap.
 
         Walk + DELETEs held under ``self.lock`` for atomicity with
         concurrent ``aput()`` on the same thread.
         """
         keep = self._keep_per_ns
-        agent = AGENT_NAME
         async with self.lock:
             # ``writes`` table is checked inside ``_delete_outside`` so a
             # legacy DB that only has ``checkpoints`` still gets pruned
             # (writes DELETE silently skipped; checkpoints DELETE runs).
             # The migration sweep depends on this — it walks legacy DBs
             # that often pre-date the ``writes`` table entirely.
-            anchor_ids = await self._fetch_recent_checkpoint_ids(
-                thread_id, checkpoint_ns, agent, keep
-            )
-            if len(anchor_ids) < keep:
-                return  # nothing to prune yet
+            for key, value, walk_to_snapshot, max_keep in _PRUNED_ROWS:
+                rule_keep = keep if max_keep is None else min(keep, max_keep)
+                anchor_ids = await self._fetch_recent_checkpoint_ids(
+                    thread_id, checkpoint_ns, key, value, rule_keep
+                )
+                if not anchor_ids:
+                    continue  # a thread of the other kind
+                if len(anchor_ids) < rule_keep:
+                    return  # nothing to prune yet
 
-            extra_preserve = await self._walk_to_snapshot_ancestor(
-                thread_id, checkpoint_ns, anchor_ids[-1]
-            )
-            kept = set(anchor_ids) | extra_preserve
+                kept = set(anchor_ids)
+                if walk_to_snapshot:
+                    kept |= await self._walk_to_snapshot_ancestor(
+                        thread_id, checkpoint_ns, anchor_ids[-1]
+                    )
 
-            await self._delete_outside(thread_id, checkpoint_ns, agent, kept)
-            await self.conn.commit()
+                await self._delete_outside(thread_id, checkpoint_ns, key, value, kept)
+                await self.conn.commit()
+                return
 
     async def _fetch_recent_checkpoint_ids(
         self,
         thread_id: str,
         checkpoint_ns: str,
-        agent: str,
+        key: str,
+        value: str,
         limit: int,
     ) -> list[str]:
-        """Return the ``limit`` most-recent checkpoint ids (newest first)."""
+        """Return the ``limit`` most-recent ids of rows with ``metadata[key] == value``.
+
+        Newest first. *key* is one of the fixed names in ``_PRUNED_ROWS``.
+        """
         query = (
             "SELECT checkpoint_id FROM checkpoints "
             "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND json_extract(metadata, '$.agent_name') = ? "
+            f"  AND json_extract(metadata, '$.{key}') = ? "
             "ORDER BY checkpoint_id DESC LIMIT ?"
         )
         async with self.conn.execute(
-            query, (thread_id, checkpoint_ns, agent, limit)
+            query, (thread_id, checkpoint_ns, value, limit)
         ) as cur:
             rows = await cur.fetchall()
         return [r[0] for r in rows]
@@ -392,7 +418,8 @@ class PruningCheckpointer(AsyncSqliteSaver):
         self,
         thread_id: str,
         checkpoint_ns: str,
-        agent: str,
+        key: str,
+        value: str,
         kept_ids: set[str],
     ) -> None:
         """DELETE rows whose ``checkpoint_id`` is NOT in ``kept_ids``.
@@ -421,7 +448,7 @@ class PruningCheckpointer(AsyncSqliteSaver):
                 "  AND checkpoint_id IN ("
                 "    SELECT checkpoint_id FROM checkpoints "
                 "    WHERE thread_id = ? AND checkpoint_ns = ? "
-                "      AND json_extract(metadata, '$.agent_name') = ? "
+                f"      AND json_extract(metadata, '$.{key}') = ? "
                 f"     AND checkpoint_id NOT IN ({placeholders})"
                 "  )"
             )
@@ -432,7 +459,7 @@ class PruningCheckpointer(AsyncSqliteSaver):
                     checkpoint_ns,
                     thread_id,
                     checkpoint_ns,
-                    agent,
+                    value,
                     *kept_list,
                 ),
             )
@@ -440,12 +467,12 @@ class PruningCheckpointer(AsyncSqliteSaver):
         del_checkpoints = (
             "DELETE FROM checkpoints "
             "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND json_extract(metadata, '$.agent_name') = ? "
+            f"  AND json_extract(metadata, '$.{key}') = ? "
             f" AND checkpoint_id NOT IN ({placeholders})"
         )
         await self.conn.execute(
             del_checkpoints,
-            (thread_id, checkpoint_ns, agent, *kept_list),
+            (thread_id, checkpoint_ns, value, *kept_list),
         )
 
 

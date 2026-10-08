@@ -1003,6 +1003,52 @@ class TestPruningCheckpointer(unittest.IsolatedAsyncioTestCase):
 
         assert await _check_other()
 
+    async def test_prune_keeps_only_the_latest_proactive_cron_rows(self):
+        """The proactive cron thread checkpoints every tick and carries no
+        ``agent_name``; it is pruned by ``graph_id``, without the snapshot
+        walk (its state has no ``messages``)."""
+        tid = "tproactive1"
+        meta = {"graph_id": "proactive", "step": 0, "writes": {}, "parents": {}}
+
+        async def _body(saver):
+            parent = None
+            for i in range(6):
+                config = self._config(tid)
+                # Chain each tick to the previous one, as real runs do; a
+                # snapshot walk would then keep every ancestor.
+                config["configurable"]["checkpoint_id"] = parent
+                parent = f"cq_{i:04d}"
+                await saver.aput(config, self._checkpoint(parent, step=i), meta, {})
+
+        await self._run_with_wrapper(keep=2, body=_body)
+        assert await self._row_count(tid) == 2
+
+    async def test_proactive_cron_rows_are_capped_below_the_conversation_keep(self):
+        tid = "tproactive2"
+        meta = {"graph_id": "proactive", "step": 0, "writes": {}, "parents": {}}
+
+        async def _body(saver):
+            for i in range(8):
+                await saver.aput(
+                    self._config(tid), self._checkpoint(f"cr_{i:04d}", step=i), meta, {}
+                )
+
+        await self._run_with_wrapper(keep=1000, body=_body)
+        assert await self._row_count(tid) == 2
+
+    async def test_prune_ignores_other_graphs_without_agent_name(self):
+        tid = "tscheduler1"
+        meta = {"graph_id": "scheduler", "step": 0, "writes": {}, "parents": {}}
+
+        async def _body(saver):
+            for i in range(4):
+                await saver.aput(
+                    self._config(tid), self._checkpoint(f"cs_{i:04d}", step=i), meta, {}
+                )
+
+        await self._run_with_wrapper(keep=2, body=_body)
+        assert await self._row_count(tid) == 4
+
     async def test_keep_one_boundary(self):
         """``keep_per_ns=1`` keeps only the latest row, deletes the rest."""
         tid = "tk1_001"

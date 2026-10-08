@@ -9,7 +9,8 @@
         "evomemory-subagent-worker": "EvoScientist.langgraph_dev.graphs:evomemory_subagent_worker",
         "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker",
         "evomemory-observation-linker": "EvoScientist.langgraph_dev.graphs:evomemory_observation_linker",
-        "evomemory-autoskills": "EvoScientist.langgraph_dev.graphs:evomemory_autoskills"
+        "evomemory-autoskills": "EvoScientist.langgraph_dev.graphs:evomemory_autoskills",
+        "proactive": "EvoScientist.langgraph_dev.graphs:proactive"
     },
     "checkpointer": {
         "backend": "custom",
