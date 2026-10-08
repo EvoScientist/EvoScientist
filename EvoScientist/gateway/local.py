@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from .. import sessions as session_store
 from ..langgraph_dev.manager import needs_langgraph_dev
 from .types import (
@@ -249,8 +251,8 @@ class LocalGraphGateway:
             return status
 
         # Only query the dev server when the config says one should exist.
-        # If it's down or was never started, treat as unknown so the notifier
-        # can retry on the next poll instead of blocking on connect retries.
+        # If it's down or was never started, return "unknown" (the notifier
+        # stops polling this id). Timeouts and 5xx propagate for retry.
         from ..EvoScientist import _ensure_config
 
         cfg = _ensure_config()
@@ -262,7 +264,7 @@ class LocalGraphGateway:
             data = await client.http.get(
                 "/api/bg_process_status", params={"process_id": process_id}
             )
-        except Exception:
+        except httpx.ConnectError:
             return "unknown"
         return data["status"]
 

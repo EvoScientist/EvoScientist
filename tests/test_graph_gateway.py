@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import typer
 from langchain_core.messages import AIMessage, HumanMessage
@@ -290,7 +291,7 @@ async def test_local_process_status_connect_error_returns_unknown(monkeypatch):
         "EvoScientist.gateway.local.needs_langgraph_dev", lambda cfg, backend: True
     )
     client = MagicMock()
-    client.http.get = AsyncMock(side_effect=ConnectionError("offline"))
+    client.http.get = AsyncMock(side_effect=httpx.ConnectError("offline"))
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client",
         lambda _: client,
@@ -299,6 +300,21 @@ async def test_local_process_status_connect_error_returns_unknown(monkeypatch):
         await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
         == "unknown"
     )
+
+
+async def test_local_process_status_timeout_propagates(monkeypatch):
+    monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: "unknown")
+    monkeypatch.setattr(
+        "EvoScientist.gateway.local.needs_langgraph_dev", lambda cfg, backend: True
+    )
+    client = MagicMock()
+    client.http.get = AsyncMock(side_effect=TimeoutError("timed out"))
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client",
+        lambda _: client,
+    )
+    with pytest.raises(TimeoutError, match="timed out"):
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
 
 
 @pytest.mark.parametrize("status", ["running", "success", "error", "interrupted"])
