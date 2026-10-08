@@ -87,3 +87,35 @@ class TestUninstallSkill:
             await UninstallSkill().execute(ctx, ["missing"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Failed: not found" in m for m in msgs)
+
+
+class TestNoReloadHint:
+    async def test_install_prints_no_reload_hint(self, workspace):
+        from EvoScientist.commands.implementation.skills import InstallSkill
+
+        ctx, ui = _ctx(workspace)
+        with patch(
+            "EvoScientist.tools.skills_manager.install_skill",
+            return_value={
+                "success": True,
+                "name": "demo-skill",
+                "description": "demo",
+                "path": "/tmp/demo",
+            },
+        ):
+            await InstallSkill().execute(ctx, ["./some-path"])
+        msgs = [c.args[0] for c in ui.append_system.call_args_list]
+        assert any("Installed: demo-skill" in m for m in msgs)
+        assert not any("/new" in m for m in msgs)
+
+    async def test_uninstall_prints_no_reload_hint(self, workspace):
+        from EvoScientist.commands.implementation.skills import UninstallSkill
+
+        ctx, ui = _ctx(workspace)
+        with patch(
+            "EvoScientist.tools.skills_manager.uninstall_skill",
+            return_value={"success": True},
+        ):
+            await UninstallSkill().execute(ctx, ["demo-skill"])
+        msgs = [c.args[0] for c in ui.append_system.call_args_list]
+        assert msgs == ["Uninstalled: demo-skill"]

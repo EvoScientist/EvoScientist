@@ -130,8 +130,7 @@ class InstallSkill(Command):
             installed_count = len(result.get("installed", []))
             if installed_count:
                 ctx.ui.append_system(
-                    f"{installed_count} skill(s) installed. Reload with /new to apply.",
-                    style="dim",
+                    f"{installed_count} skill(s) installed.", style="dim"
                 )
         elif result.get("success"):
             ctx.ui.append_system(f"Installed: {result['name']}", style="green")
@@ -139,7 +138,6 @@ class InstallSkill(Command):
                 f"Description: {result.get('description', '(none)')}", style="dim"
             )
             ctx.ui.append_system(f"Path: {_shorten_path(result['path'])}", style="dim")
-            ctx.ui.append_system("Reload with /new to apply.", style="dim")
         else:
             ctx.ui.append_system(f"Failed: {result['error']}", style="red")
 
@@ -262,8 +260,7 @@ class InstallSkills(Command):
 
         if installed_count > 0:
             ctx.ui.append_system(
-                f"Successfully installed {installed_count} skill(s). Reload with /new to apply.",
-                style="dim",
+                f"Successfully installed {installed_count} skill(s).", style="dim"
             )
         elif not is_channel:
             ctx.ui.append_system("No skills were installed.", style="yellow")
@@ -296,7 +293,6 @@ class UninstallSkill(Command):
         result = uninstall_skill(name, workspace=ctx.workspace)
         if result["success"]:
             ctx.ui.append_system(f"Uninstalled: {name}", style="green")
-            ctx.ui.append_system("Reload with /new to apply.", style="dim")
         else:
             ctx.ui.append_system(f"Failed: {result['error']}", style="red")
 
