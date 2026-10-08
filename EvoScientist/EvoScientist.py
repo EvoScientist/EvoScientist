@@ -989,6 +989,7 @@ def _get_default_middleware(
         create_memory_lifecycle_middleware,
         create_memory_middleware,
         create_per_run_summarization_middleware,
+        create_proactive_mode_middleware,
         create_runtime_context_middleware,
         create_scheduler_middleware,
         create_tool_selector_middleware,
@@ -1128,6 +1129,17 @@ def _get_default_middleware(
     # into its own baked-in persona.
     if not for_async_subagent:
         mw.insert(0, create_active_team_middleware(workspace))
+
+    # Proactive shadow turns (#263) strip every tool, so the model returns a
+    # text-only push or no-push decision. Inserted last at index 0 so it wraps
+    # every middleware in this list: tool_selector, memory and the rest then
+    # see the empty tool list. deepagents places its own core middleware
+    # (skills, filesystem, sub-agents, summarization, tool-call patching)
+    # outside this list; none of them calls the model. It acts only on runs
+    # with configurable.proactive_mode; main agent only, since no async
+    # sub-agent run carries the flag.
+    if not for_async_subagent:
+        mw.insert(0, create_proactive_mode_middleware())
 
     # Background-process tools (run_in_background / check_process / stop_process /
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and

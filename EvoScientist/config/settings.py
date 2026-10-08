@@ -86,6 +86,8 @@ DEFAULT_MEMORY_OBSERVATION_WRITER = MemoryObservationWriter.ALL
 DEFAULT_MEMORY_SKILL_SYNTHESIS_MODE = MemorySkillSynthesisMode.REVIEW
 DEFAULT_MEMORY_SKILL_SYNTHESIS_CADENCE = MemorySkillSynthesisCadence.WEEKLY
 DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME = "03:00"
+DEFAULT_PROACTIVE_IDLE_MINUTES = 120
+DEFAULT_PROACTIVE_QUIET_HOURS = "22:00-08:00"
 
 
 def _normalize_hhmm(value: Any) -> str | None:
@@ -103,6 +105,38 @@ def _normalize_hhmm(value: Any) -> str | None:
     if not (0 <= hour_int <= 23 and 0 <= minute_int <= 59):
         return None
     return f"{hour_int:02d}:{minute_int:02d}"
+
+
+def _normalize_quiet_hours(value: str) -> str | None:
+    """Normalise an ``HH:MM-HH:MM`` window, or ``None`` when it is not one.
+
+    An empty or blank value is ``""`` (no quiet hours).
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    parts = text.split("-")
+    if len(parts) != 2:
+        return None
+    start, end = _normalize_hhmm(parts[0]), _normalize_hhmm(parts[1])
+    if start is None or end is None:
+        return None
+    return f"{start}-{end}"
+
+
+def _valid_timezone(value: str) -> str | None:
+    """The IANA zone name in *value*, ``""`` when blank, ``None`` when unknown."""
+    name = value.strip()
+    if not name:
+        return ""
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(name)
+    except (ValueError, OSError, KeyError):
+        # ZoneInfoNotFoundError is a KeyError; malformed keys raise ValueError.
+        return None
+    return name
 
 
 # =============================================================================
@@ -320,6 +354,19 @@ class EvoScientistConfig:
     gateway_backend_standalone: Literal["inherit", "local", "langgraph_server"] = (
         "inherit"
     )
+
+    # Proactive pushes (#263): a conversation armed for proactive pushes in
+    # ``EvoSci serve`` may get one unprompted message once it has gone quiet.
+    # These settings tune when; arming is per conversation, so there is no
+    # global on/off switch.
+    # Minutes since the conversation's last activity before a push is considered.
+    proactive_idle_minutes: int = DEFAULT_PROACTIVE_IDLE_MINUTES
+    # Window "HH:MM-HH:MM" (may wrap midnight) in which no push is generated.
+    # An empty string, or equal start and end, means no quiet hours.
+    proactive_quiet_hours: str = DEFAULT_PROACTIVE_QUIET_HOURS
+    # IANA timezone the quiet-hours window is evaluated in. Empty string means
+    # the host's local zone.
+    proactive_timezone: str = ""
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -639,6 +686,51 @@ class EvoScientistConfig:
         else:
             self.memory_skill_synthesis_time = synthesis_time
 
+        self._validate_proactive_settings()
+
+    def _validate_proactive_settings(self) -> None:
+        """Replace an invalid proactive setting by its default, with a warning.
+
+        A typo must neither crash startup nor open the quiet hours: a bad
+        window falls back to the default window, not to "no quiet hours".
+        """
+        log = logging.getLogger(__name__)
+
+        idle = self.proactive_idle_minutes
+        if not isinstance(idle, int) or isinstance(idle, bool) or idle < 0:
+            log.warning(
+                "Invalid proactive_idle_minutes %r; falling back to %d.",
+                idle,
+                DEFAULT_PROACTIVE_IDLE_MINUTES,
+            )
+            self.proactive_idle_minutes = DEFAULT_PROACTIVE_IDLE_MINUTES
+
+        quiet_hours = self.proactive_quiet_hours
+        window = (
+            _normalize_quiet_hours(quiet_hours)
+            if isinstance(quiet_hours, str)
+            else None
+        )
+        if window is None:
+            log.warning(
+                "Invalid proactive_quiet_hours %r (expected 'HH:MM-HH:MM'); "
+                "falling back to %s.",
+                quiet_hours,
+                DEFAULT_PROACTIVE_QUIET_HOURS,
+            )
+            window = DEFAULT_PROACTIVE_QUIET_HOURS
+        self.proactive_quiet_hours = window
+
+        timezone = self.proactive_timezone
+        zone = _valid_timezone(timezone) if isinstance(timezone, str) else None
+        if zone is None:
+            log.warning(
+                "Invalid proactive_timezone %r; falling back to the host's zone.",
+                timezone,
+            )
+            zone = ""
+        self.proactive_timezone = zone
+
 
 @dataclass(frozen=True)
 class MemoryControls:
@@ -937,7 +1029,9 @@ def set_config_value(key: str, value: Any) -> bool:
 
     # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
     # (_coerce_value(True, int) would turn it into 1 and slip past).
-    if key == "sandbox_execute_timeout" and isinstance(value, bool):
+    if key in ("sandbox_execute_timeout", "proactive_idle_minutes") and isinstance(
+        value, bool
+    ):
         return False
 
     try:
@@ -949,6 +1043,16 @@ def set_config_value(key: str, value: Any) -> bool:
         return False
     if key == "memory_skill_synthesis_time":
         value = _normalize_hhmm(value)
+        if value is None:
+            return False
+    if key == "proactive_idle_minutes" and value < 0:
+        return False
+    if key == "proactive_quiet_hours":
+        value = _normalize_quiet_hours(value)
+        if value is None:
+            return False
+    if key == "proactive_timezone":
+        value = _valid_timezone(value)
         if value is None:
             return False
 
@@ -1012,6 +1116,9 @@ _ENV_MAPPINGS = {
     "gateway_backend_interactive": "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
     "gateway_backend_tui": "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
     "gateway_backend_standalone": "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
+    "proactive_idle_minutes": "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+    "proactive_quiet_hours": "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+    "proactive_timezone": "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
     "model_retry_wait_seconds": "EVOSCIENTIST_MODEL_RETRY_WAIT_SECONDS",
     "auto_mode_retry_wait_seconds": "EVOSCIENTIST_AUTO_MODE_RETRY_WAIT_SECONDS",
