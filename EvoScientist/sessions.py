@@ -1148,6 +1148,57 @@ async def get_thread_metadata(thread_id: str) -> dict | None:
             }
 
 
+async def latest_origin_checkpoints(limit: int = 50) -> list[dict]:
+    """Per main thread, its newest checkpoint that carries a channel origin.
+
+    Newest thread first. Serve stamps the origin (``origin_*`` keys) on the
+    run metadata of an armed conversation's turns, and the runtime copies run
+    metadata into the run's checkpoints; HITL resumes, ``/compact`` and stop
+    recovery write checkpoints without it, which is why this takes the newest
+    checkpoint *with* the keys rather than the newest one. Keys: ``thread_id``,
+    ``updated_at``, ``workspace_dir``, ``run_dir``, ``proactive`` and the
+    ``origin_*`` keys, as stored.
+    """
+    db_path = str(get_db_path())
+    async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+        if not await _table_exists(conn, "checkpoints"):
+            return []
+        # One MAX() with bare columns: SQLite takes the bare columns from the
+        # row holding the maximum, so every value comes from the same row.
+        query = f"""
+            SELECT thread_id,
+                   MAX(json_extract(metadata, '$.updated_at')) AS updated_at,
+                   json_extract(metadata, '$.workspace_dir'),
+                   json_extract(metadata, '$.run_dir'),
+                   json_extract(metadata, '$.proactive'),
+                   json_extract(metadata, '$.origin_channel_type'),
+                   json_extract(metadata, '$.origin_chat_id'),
+                   json_extract(metadata, '$.origin_sender'),
+                   json_extract(metadata, '$.origin_metadata')
+            FROM checkpoints
+            WHERE checkpoint_ns = ''
+              AND json_extract(metadata, '$.origin_channel_type') IS NOT NULL
+              AND {MAIN_THREAD_FILTER_SQL}
+            GROUP BY thread_id
+            ORDER BY updated_at DESC
+            LIMIT ?
+        """
+        async with conn.execute(query, (*MAIN_THREAD_FILTER_PARAMS, limit)) as cur:
+            rows = await cur.fetchall()
+    keys = (
+        "thread_id",
+        "updated_at",
+        "workspace_dir",
+        "run_dir",
+        "proactive",
+        "origin_channel_type",
+        "origin_chat_id",
+        "origin_sender",
+        "origin_metadata",
+    )
+    return [dict(zip(keys, row, strict=True)) for row in rows]
+
+
 async def get_thread_messages(thread_id: str) -> list:
     """Return the list of LangChain message objects for *thread_id*.
 

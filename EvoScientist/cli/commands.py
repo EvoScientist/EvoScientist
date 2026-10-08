@@ -1548,6 +1548,30 @@ async def _apply_serve_resume_state(
         await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
 
 
+def _serve_turn_metadata(
+    dirs: SessionDirs,
+    model: str | None,
+    thread_id: str,
+    channel_runtime: ChannelRuntime | None,
+) -> dict[str, str]:
+    """Run metadata of a serve turn: ``build_metadata`` plus, for a thread armed
+    for proactive pushes, its channel origin.
+
+    The runtime copies run metadata into the run's checkpoints, which is how
+    the origin survives a restart. ``build_metadata`` itself stays as it is:
+    the TUI, the CLI and single-shot runs share it.
+    """
+    from ..proactive.serve import origin_run_metadata
+
+    meta = build_metadata(dirs, model)
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None and proactive.is_armed(thread_id):
+        origin = get_channel_origin(thread_id)
+        if origin is not None:
+            meta.update(origin_run_metadata(origin))
+    return meta
+
+
 def _serve_proactive_call(call: Callable[[], None]) -> None:
     """Run a proactive-controller call; a failure is logged, never raised.
 
@@ -1599,7 +1623,70 @@ def _serve_proactive_controller(
         unavailable_reason=reason,
         publish=publish_to_channel_origin,
         can_deliver=lambda thread_id: get_channel_origin(thread_id) is not None,
+        forget_origin=forget_channel_origin,
     )
+
+
+def _serve_restore_proactive(proactive: Any, async_runtime: AsyncRuntime) -> None:
+    """Re-arm the conversation that was armed before serve restarted.
+
+    Its channel origin comes back from checkpoint metadata, so a push can
+    reach the chat even though serve starts on a fresh thread.
+    """
+    from ..sessions import latest_origin_checkpoints
+    from .channel import restore_channel_origin
+
+    if not proactive.available:
+        return
+    rows = async_runtime.run_sync(latest_origin_checkpoints)
+    restored = proactive.restore(
+        rows,
+        restore_origin=lambda thread_id, origin: restore_channel_origin(
+            thread_id, **origin
+        ),
+    )
+    if restored is not None:
+        console.print(
+            f"[dim]Proactive follow-ups: waiting on thread {restored[:8]} "
+            "from before the restart.[/dim]"
+        )
+
+
+def _make_serve_proactive_switch(
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None,
+) -> Callable[[str], None]:
+    """Make a thread serve's current one after a push was applied to it.
+
+    Used for the thread restored after a restart: the user's reply to the
+    push then continues that conversation, as after ``/resume``.
+    """
+
+    def _switch(thread_id: str) -> None:
+        import asyncio
+
+        from ..sessions import get_thread_metadata
+
+        async def _go() -> None:
+            stored = await get_thread_metadata(thread_id) or {}
+            dirs = await asyncio.to_thread(
+                SessionDirs.from_stored,
+                stored.get("workspace_dir"),
+                stored.get("run_dir"),
+            )
+            await _apply_serve_resume_state(
+                runtime_state,
+                channel_runtime,
+                thread_id=thread_id,
+                dirs=dirs or runtime_state.dirs,
+            )
+
+        runtime_state.async_runtime.run_sync(_go)
+        console.print(
+            f"[dim][serve] Continuing thread {thread_id} (proactive push)[/dim]"
+        )
+
+    return _switch
 
 
 def _make_serve_handle_session_resume_cb(
@@ -1853,7 +1940,13 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(dirs, model)
+        meta = _serve_turn_metadata(
+            dirs, model, runtime_state.thread_id, channel_runtime
+        )
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            # A turn in serve's fresh thread ends a restored thread's candidacy.
+            _serve_proactive_call(lambda: proactive.on_turn(runtime_state.thread_id))
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1916,8 +2009,8 @@ def _serve_drain_notifications(
             console.print(line_text, style=line_style, markup=False)
         # Use the current folders from runtime_state (updated by /resume's
         # session-rebind callback).
-        meta = build_metadata(runtime_state.dirs, model)
         tid = runtime_state.thread_id
+        meta = _serve_turn_metadata(runtime_state.dirs, model, tid, channel_runtime)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -2132,7 +2225,11 @@ def serve(
         workspace=dirs.workspace,
     )
     channel_runtime.proactive = proactive
+    _serve_proactive_call(lambda: _serve_restore_proactive(proactive, async_runtime))
     _serve_proactive_call(proactive.reconcile)
+    _serve_proactive_switch = _make_serve_proactive_switch(
+        runtime_state, channel_runtime
+    )
 
     # Build the slash-dispatch callbacks once; the poll loop reuses
     # them for every inbound message.  Without this hoist each message
@@ -2287,7 +2384,10 @@ def serve(
 
             # Apply proactive pushes the cron decided (throttled inside).
             _serve_proactive_call(
-                lambda: proactive.poll(current_thread_id=runtime_state.thread_id)
+                lambda: proactive.poll(
+                    current_thread_id=runtime_state.thread_id,
+                    switch_to=_serve_proactive_switch,
+                )
             )
     except KeyboardInterrupt:
         shutdown_event.set()

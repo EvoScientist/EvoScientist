@@ -16,6 +16,7 @@ does not serialise).
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -47,6 +48,73 @@ STALE_TICK_SECONDS = 25 * 60
 MAIN_GRAPH_ID = "EvoScientist"
 # Node of the main graph a push is a reply of, for the fallback write.
 _MODEL_NODE = "model"
+
+# The channel-origin ``metadata`` keys a reply needs to land in place: Slack
+# and Discord threads, Feishu's chat type, QQ's passive-reply handle, personal
+# WeChat's context token. Nothing else is stored: the run metadata also
+# reaches thread metadata and ``/threads``, and channels put personal data
+# (email subjects, Signal numbers, nicknames) in the same dict.
+ORIGIN_METADATA_KEYS = (
+    "thread_ts",
+    "thread_id",
+    "chat_type",
+    "msg_type",
+    "event_id",
+    "context_token",
+)
+
+
+def origin_run_metadata(origin: Any) -> dict[str, str]:
+    """Run metadata keys that persist a channel origin across restarts.
+
+    ``origin`` is a ``cli.channel._ChannelOrigin``. The keys avoid the five the
+    API strips from request metadata (``thread_id``, ``assistant_id``,
+    ``run_id``, ``cron_id``, ``counters_since_delta_snapshot``).
+    """
+    meta = {
+        "origin_channel_type": str(origin.channel_type),
+        "origin_chat_id": str(origin.chat_id),
+        "origin_sender": str(origin.sender or ""),
+    }
+    kept = {
+        key: value
+        for key, value in (origin.metadata or {}).items()
+        if key in ORIGIN_METADATA_KEYS and value is not None
+    }
+    if kept:
+        try:
+            meta["origin_metadata"] = json.dumps(kept, sort_keys=True)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[proactive] channel origin metadata does not encode; a push "
+                "after a restart may land outside the chat's thread"
+            )
+    return meta
+
+
+def origin_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The channel origin stored by :func:`origin_run_metadata`, or None."""
+    channel_type = row.get("origin_channel_type")
+    chat_id = row.get("origin_chat_id")
+    if not channel_type or not chat_id:
+        return None
+    metadata = None
+    raw = row.get("origin_metadata")
+    if raw:
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, dict):
+                metadata = {
+                    k: v for k, v in decoded.items() if k in ORIGIN_METADATA_KEYS
+                }
+        except ValueError:
+            metadata = None
+    return {
+        "channel_type": str(channel_type),
+        "chat_id": str(chat_id),
+        "sender": str(row.get("origin_sender") or ""),
+        "metadata": metadata or None,
+    }
 
 
 @dataclass
@@ -125,6 +193,11 @@ class ProactiveServe:
     publish: Callable[[str, str], bool] | None = None
     # Whether serve can deliver to a thread now (it has a channel origin).
     can_deliver: Callable[[str], bool] | None = None
+    # Drop a thread's channel origin (serve stops delivering to it).
+    forget_origin: Callable[[str], None] | None = None
+    # The armed thread restored at startup, while serve's fresh thread has
+    # had no turn yet.
+    restored_thread_id: str | None = None
     _cron_id: str | None = None
     _cron_thread_id: str | None = None
     _cron_created_at: float = 0.0
@@ -286,7 +359,10 @@ class ProactiveServe:
         """Check the cron's health and apply new decisions; throttled.
 
         Called from serve's idle branch. *switch_to* makes a thread serve's
-        current thread, for a push applied to a thread that is not current.
+        current thread, for a push applied to a thread that is not current
+        (the thread restored after a restart). It runs after the lock is
+        released: switching mirrors the cron input, which takes the lock from
+        another thread.
         """
         if not self.available or not self.armed:
             return
@@ -294,6 +370,7 @@ class ProactiveServe:
         if now - self._last_poll < POLL_INTERVAL_SECONDS:
             return
         self._last_poll = now
+        switch: str | None = None
         with self._lock:
             try:
                 decisions = self._check_cron(now)
@@ -302,17 +379,85 @@ class ProactiveServe:
                 return
             for decision in decisions:
                 try:
-                    self._apply(
-                        decision,
-                        current_thread_id=current_thread_id,
-                        switch_to=switch_to,
-                    )
+                    applied_to = self._apply(decision)
                 except Exception:
                     logger.warning(
                         "[proactive] applying push %s failed",
                         decision.get("proactive_id"),
                         exc_info=True,
                     )
+                    continue
+                if applied_to is not None and applied_to != current_thread_id:
+                    switch = applied_to
+            if switch is not None and switch == self.restored_thread_id:
+                self.restored_thread_id = None
+        if switch is not None and switch_to is not None:
+            switch_to(switch)
+
+    # ---- restart survival --------------------------------------------------
+
+    def restore(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        restore_origin: Callable[[str, dict[str, Any]], None],
+    ) -> str | None:
+        """Re-arm the newest armed thread of this workspace after a restart.
+
+        *rows* come from ``sessions.latest_origin_checkpoints``, newest first:
+        per thread, the stored folders, flag and channel origin of its newest
+        checkpoint that has an origin. The thread's metadata on the server
+        wins over the flag in *rows* when it says ``"off"`` (``/proactive off``
+        after the last turn). The restored thread stays a candidate until the
+        fresh thread serve started on has its first turn.
+        """
+        from langgraph_sdk.errors import NotFoundError
+
+        from ..paths import SessionDirs
+
+        if not self.available:
+            return None
+        with self._lock:
+            for row in rows:
+                if row.get("proactive") != "on":
+                    continue
+                dirs = SessionDirs.from_stored(
+                    row.get("workspace_dir"), row.get("run_dir")
+                )
+                if dirs is None or dirs.workspace.key != self.workspace.key:
+                    continue
+                origin = origin_from_row(row)
+                if origin is None:
+                    continue
+                thread_id = str(row["thread_id"])
+                try:
+                    thread = self.client.threads.get(thread_id)
+                except NotFoundError:
+                    continue
+                if (thread.get("metadata") or {}).get("proactive") == "off":
+                    continue
+                restore_origin(thread_id, origin)
+                self.armed.add(thread_id)
+                self.restored_thread_id = thread_id
+                logger.info("[proactive] restored armed thread %s", thread_id)
+                return thread_id
+        return None
+
+    def on_turn(self, thread_id: str) -> None:
+        """A channel turn ran on *thread_id*.
+
+        After a restart the restored thread is a candidate only until the user
+        talks in the fresh thread: from then on that is the conversation.
+        """
+        with self._lock:
+            restored = self.restored_thread_id
+            if restored is None or restored == thread_id:
+                return
+            self.restored_thread_id = None
+            self.armed.discard(restored)
+            if self.forget_origin is not None:
+                self.forget_origin(restored)
+            self.mirror()
 
     def _check_cron(self, now: float) -> list[dict[str, Any]]:
         """Recreate a missing, failed or stalled cron; return the latest decisions."""
@@ -340,22 +485,17 @@ class ProactiveServe:
 
     # ---- applying a push ---------------------------------------------------
 
-    def _apply(
-        self,
-        decision: dict[str, Any],
-        *,
-        current_thread_id: str,
-        switch_to: Callable[[str], None] | None,
-    ) -> None:
+    def _apply(self, decision: dict[str, Any]) -> str | None:
+        """Apply one decision; return the thread written to, or None if skipped."""
         from ..gateway.server import _state_interrupts
 
         proactive_id = str(decision.get("proactive_id") or "")
         thread_id = str(decision.get("thread_id") or "")
         text = str(decision.get("text") or "")
         if not proactive_id or not thread_id or not text:
-            return
+            return None
         if proactive_id in self._applied:
-            return
+            return None
         # Decided once, applied at most once, whatever the outcome below.
         self._applied.add(proactive_id)
 
@@ -371,8 +511,6 @@ class ProactiveServe:
             return self._skip(proactive_id, thread_id, "stale")
 
         self._append(thread_id, proactive_id, text)
-        if thread_id != current_thread_id and switch_to is not None:
-            switch_to(thread_id)
         publish = self.publish or (lambda _tid, _text: False)
         if publish(thread_id, text):
             logger.info(
@@ -387,6 +525,7 @@ class ProactiveServe:
                 proactive_id,
                 thread_id,
             )
+        return thread_id
 
     @staticmethod
     def _skip(proactive_id: str, thread_id: str, reason: str) -> None:

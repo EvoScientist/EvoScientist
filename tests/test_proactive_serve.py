@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 
 import pytest
 from langgraph_sdk.errors import NotFoundError
@@ -111,7 +112,7 @@ class _Threads:
 
     def get(self, thread_id):
         if thread_id not in self.threads:
-            raise NotFoundError("gone", response=None, body=None)
+            raise NotFoundError("gone", response=MagicMock(), body=None)
         return self.threads[thread_id]
 
     def get_state(self, thread_id):
