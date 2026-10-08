@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -381,6 +382,59 @@ def test_started_resumes_even_when_assigning_raises(monkeypatch):
     assert api.calls[-1] == ("resume", 1234)
 
 
+def test_started_resumes_when_the_job_api_cannot_load(monkeypatch):
+    """Without the API object there is no resume() to call; psutil resumes
+    the process instead, so it never stays suspended."""
+    resumed = []
+
+    def no_api():
+        raise OSError("kernel32 missing")
+
+    launch = _windows_launch(monkeypatch, FakeJobApi())
+    monkeypatch.setattr(agent_shell, "_job_api", no_api)
+    monkeypatch.setattr(
+        psutil,
+        "Process",
+        lambda pid: SimpleNamespace(resume=lambda: resumed.append(pid)),
+    )
+    process = FakeProcess(1234)
+    process.pid = 42
+    with pytest.raises(OSError, match="kernel32 missing"):
+        launch.started(process)
+    assert resumed == [42]
+
+
+def test_jobs_are_registered_and_closed_under_one_lock(monkeypatch):
+    """cleanup() drops its own entry and closes the handle under the lock
+    that terminate_job() takes, from whatever thread."""
+    import threading
+
+    api = FakeJobApi()
+    launches = []
+    for handle in range(50):
+        launch = _windows_launch(monkeypatch, api)
+        launch.started(FakeProcess(handle))
+        launches.append(launch)
+    errors = []
+
+    def churn(group):
+        try:
+            for launch in group:
+                agent_shell.terminate_job(launch.process)
+                launch.cleanup()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=churn, args=(launches[i::5],)) for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert len(agent_shell._JOBS) == 0
+    assert all(launch.job is None for launch in launches)
+
+
 def test_started_does_nothing_without_bash_or_off_windows(monkeypatch):
     api = FakeJobApi()
     monkeypatch.setattr(agent_shell, "_job_api", lambda: api)
@@ -607,6 +661,30 @@ def test_background_failed_spawn_leaves_no_script(
     monkeypatch.setattr(bg.subprocess, "Popen", refuse)
     with pytest.raises(OSError, match="refused"):
         bg.launch("true", str(tmp_path))
+    assert list(scripts.iterdir()) == []
+
+
+def test_background_kills_a_process_it_could_not_finish_starting(
+    fake_bash, scripts, tmp_path, monkeypatch
+):
+    """started() failing after Popen would leave a running process without a
+    record, out of reach of stop_process and list_processes."""
+    killed = []
+
+    def refuse(self, process):
+        raise OSError("no job")
+
+    monkeypatch.setattr(agent_shell.ShellLaunch, "started", refuse)
+    monkeypatch.setattr(
+        bg, "_kill_process_tree", lambda popen, *, forceful: killed.append(popen)
+    )
+    bg._PROCESSES.clear()
+    with pytest.raises(OSError, match="no job"):
+        bg.launch("sleep 30", str(tmp_path))
+    assert len(killed) == 1
+    killed[0].kill()
+    killed[0].wait(timeout=10)
+    assert bg._PROCESSES == {}
     assert list(scripts.iterdir()) == []
 
 

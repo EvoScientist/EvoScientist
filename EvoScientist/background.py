@@ -269,6 +269,7 @@ def launch(
     # Inside the try, after the log opens: a failure at any step closes the log
     # and leaves no script file behind.
     launch: agent_shell.ShellLaunch | None = None
+    popen: subprocess.Popen | None = None
     try:
         launch = agent_shell.prepare(command, env)
         platform_options: dict[str, Any] = {}
@@ -287,6 +288,10 @@ def launch(
         )
         launch.started(popen)
     except BaseException:
+        if popen is not None:
+            # Started but not recorded: stop_process and list_processes could
+            # never reach it, so it must not keep running.
+            _kill_process_tree(popen, forceful=True)
         if launch is not None:
             launch.cleanup()
         raise

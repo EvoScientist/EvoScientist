@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import weakref
 from dataclasses import dataclass
@@ -316,6 +317,7 @@ class ShellLaunch:
     env: dict[str, str] | None
     script: Path | None = None
     job: int | None = None
+    process: subprocess.Popen | None = None
 
     @property
     def bash(self) -> bool:
@@ -350,33 +352,45 @@ class ShellLaunch:
         pipes open. Everything started inside the job stays in it, so
         :func:`terminate_job` stops the whole command. The job does not kill
         on close: a job started with ``&`` outlives the call, as the prompt's
-        background recipe expects. The process is resumed whatever happens.
+        background recipe expects. The process is resumed whatever happens,
+        also when the job API itself cannot be loaded.
         """
         if self.creationflags & _CREATE_SUSPENDED == 0:
             return
-        api = _job_api()
+        self.process = process
+        api: _JobApi | None = None
         try:
+            api = _job_api()
             job = api.create()
             if job and api.assign(job, int(process._handle)):
-                self.job = job
-                _JOBS[process] = job
+                with _JOBS_LOCK:
+                    self.job = job
+                    _JOBS[process] = job
             else:
                 error = api.last_error()
                 if job:
                     api.close(job)
                 _warn_no_job(error)
         finally:
-            api.resume(int(process._handle))
+            if api is not None:
+                api.resume(int(process._handle))
+            else:
+                import psutil
+
+                psutil.Process(process.pid).resume()
 
     def cleanup(self) -> None:
         """Close the job handle and delete the script file. Safe to call more
-        than once; closing the job leaves anything still in it running."""
-        if self.job is not None:
-            for process, job in list(_JOBS.items()):
-                if job == self.job:
-                    del _JOBS[process]
-            _job_api().close(self.job)
-            self.job = None
+        than once, and from any thread; closing the job leaves anything still
+        in it running."""
+        with _JOBS_LOCK:
+            # Under the lock, so terminate_job() never uses a closed handle
+            # whose value Windows may already have given to another job.
+            if self.process is not None:
+                _JOBS.pop(self.process, None)
+            if self.job is not None:
+                _job_api().close(self.job)
+                self.job = None
         if self.script is None:
             return
         try:
@@ -391,6 +405,10 @@ class ShellLaunch:
 _CREATE_SUSPENDED = 0x00000004
 # Process -> its open job handle, while the command runs.
 _JOBS: weakref.WeakKeyDictionary[subprocess.Popen, int] = weakref.WeakKeyDictionary()
+# Commands start, end and are cancelled on different threads (parallel tool
+# calls, background watchers); every read or write of _JOBS and every use of a
+# job handle holds this lock.
+_JOBS_LOCK = threading.Lock()
 
 
 class _JobApi:
@@ -451,10 +469,11 @@ def terminate_job(process: subprocess.Popen) -> bool:
     and the caller stops the process tree as before. Unlike a tree walk this
     does not depend on ``process`` still running or on parent links.
     """
-    job = _JOBS.get(process)
-    if job is None:
-        return False
-    return _job_api().terminate(job)
+    with _JOBS_LOCK:
+        job = _JOBS.get(process)
+        if job is None:
+            return False
+        return _job_api().terminate(job)
 
 
 class BashMissingError(RuntimeError):
