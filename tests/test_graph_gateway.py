@@ -2181,7 +2181,16 @@ async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
 
 @pytest.mark.parametrize(
     "failure",
-    ["input", "resume-validation", "start", "respond", "multi-respond"],
+    [
+        "input",
+        "resume-validation",
+        "non-resume-command",
+        "unmatched-id-keyed",
+        "wrong-hitl-id",
+        "start",
+        "respond",
+        "multi-respond",
+    ],
 )
 async def test_state_repair_requires_this_request_to_attempt_a_run(
     monkeypatch, failure
@@ -2206,6 +2215,17 @@ async def test_state_repair_requires_this_request_to_attempt_a_run(
         )
     elif failure == "resume-validation":
         message = Command(resume={"answer": "yes"})
+    elif failure == "non-resume-command":
+        message = Command(update={"configurable": {"model": "test"}})
+    elif failure == "unmatched-id-keyed":
+        stream.interrupts = [
+            {"interrupt_id": "first"},
+            {"interrupt_id": "second"},
+        ]
+        message = Command(resume={"unknown": {"decisions": [{"type": "approve"}]}})
+    elif failure == "wrong-hitl-id":
+        stream.interrupts = [{"interrupt_id": "first"}]
+        message = Command(resume={"wrong": {"decisions": [{"type": "approve"}]}})
     elif failure == "start":
         stream.run.start = AsyncMock(side_effect=RuntimeError("start attempted"))
     else:
