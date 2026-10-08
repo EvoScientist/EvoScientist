@@ -207,13 +207,13 @@ class TestBashOnWindowsShellGuidelines:
         assert "`/Users/you/Documents/file.txt`" not in result
         assert "The shell is bash from Git for Windows." in result
 
-    def test_agent_prompt_follows_the_shell_decision(self, monkeypatch):
+    def test_agent_prompt_follows_the_shell_decision(self, monkeypatch, tmp_path):
         from types import SimpleNamespace
 
         from EvoScientist import EvoScientist as evo
         from EvoScientist import agent_shell
 
         cfg = SimpleNamespace(dangerous_mode=False)
-        assert "Git for Windows" not in evo._configured_system_prompt(cfg)
+        assert "Git for Windows" not in evo._configured_system_prompt(cfg, tmp_path)
         monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
-        assert "Git for Windows" in evo._configured_system_prompt(cfg)
+        assert "Git for Windows" in evo._configured_system_prompt(cfg, tmp_path)

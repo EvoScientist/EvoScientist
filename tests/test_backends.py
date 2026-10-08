@@ -319,7 +319,6 @@ class TestConvertVirtualPaths:
         builtin_dir = tmp_path / "builtin_skills"
         for name in ("ws_skills", "global_skills", "builtin_skills", "memories"):
             (tmp_path / name).mkdir()
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
         monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
@@ -329,7 +328,7 @@ class TestConvertVirtualPaths:
         monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
 
         result = convert_virtual_paths_in_command(
-            'python "/skills/find skills/tool.py"'
+            'python "/skills/find skills/tool.py"', skills_dir=tmp_path / "ws_skills"
         )
 
         expected = str(builtin_dir / "find skills" / "tool.py").replace("\\", "/")

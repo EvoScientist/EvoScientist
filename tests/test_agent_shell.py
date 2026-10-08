@@ -937,7 +937,7 @@ def test_run_in_background_names_a_missing_bash(scripts, tmp_path, monkeypatch):
     from EvoScientist.middleware.background import _make_run_in_background
 
     bash = _gone_bash(monkeypatch, tmp_path)
-    monkeypatch.setattr("EvoScientist.paths.resolve_virtual_path", lambda _vp: tmp_path)
-    result = _make_run_in_background(False).invoke({"command": "echo hi"})
+    tool = _make_run_in_background(work_dir=tmp_path, skills_dir=None, dangerous=False)
+    result = tool.invoke({"command": "echo hi"})
     assert str(bash) in result
     assert "Run `EvoSci setup`" in result
