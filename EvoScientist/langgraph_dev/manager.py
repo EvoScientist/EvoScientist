@@ -395,7 +395,8 @@ _LOG_OFFSET_AT_START: int = 0
 
 # Cloudflare quick-tunnel public URL, as printed by cloudflared into the
 # langgraph dev log. Mirrors langgraph_api/tunneling/cloudflare.py.
-_TUNNEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.trycloudflare\.com")
+# Exclude api.trycloudflare.com which appears in failure logs but is not a real tunnel URL.
+_TUNNEL_URL_RE = re.compile(r"https://(?!api\.)[A-Za-z0-9.-]+\.trycloudflare\.com")
 
 # Whether async sub-agents are usable in this process.
 #

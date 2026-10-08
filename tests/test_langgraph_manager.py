@@ -873,6 +873,23 @@ class TestReadTunnelUrl:
     """``read_tunnel_url`` scrapes the Cloudflare tunnel URL from the log,
     scanning only bytes written after the current subprocess started."""
 
+    def test_excludes_api_trycloudflare_com_in_failure_log(
+        self, tmp_path, runtime_paths, monkeypatch
+    ):
+        """The failure log line contains api.trycloudflare.com but it's not a real tunnel URL."""
+        log = tmp_path / "langgraph_dev.log"
+        log.write_text(
+            "[cloudflared] INF Requesting new quick Tunnel on trycloudflare.com...\n"
+            '[cloudflared] failed to request quick Tunnel: Post "https://api.trycloudflare.com/tunnel": dial tcp 104.16.231.132:443: i/o timeout\n'
+        )
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        # Should not match api.trycloudflare.com, so returns None
+        assert manager.read_tunnel_url(timeout=1.0) is None
+
     def test_returns_url_when_present(self, tmp_path, runtime_paths, monkeypatch):
         log = tmp_path / "langgraph_dev.log"
         log.write_text(
