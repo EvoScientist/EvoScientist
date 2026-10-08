@@ -137,6 +137,42 @@ class ProactiveServe:
     def available(self) -> bool:
         return self.unavailable_reason is None and self.client is not None
 
+    # ---- arming (``/proactive``) -------------------------------------------------
+
+    def arm(self, thread_id: str) -> None:
+        """Arm *thread_id*: store the flag on the thread and give the cron the thread.
+
+        The flag goes to thread metadata at once (a slash command runs no agent
+        turn, so it writes no checkpoint); the runtime merges thread metadata
+        into every later run, so the flag reaches the checkpoints too.
+        """
+        self._require_available()
+        with self._lock:
+            self.client.threads.update(thread_id, metadata={"proactive": "on"})
+            self.armed.add(thread_id)
+            self.mirror()
+
+    def disarm(self, thread_id: str) -> None:
+        """Disarm *thread_id*; delete the cron when it was the last armed thread.
+
+        Writes ``"off"``: a metadata merge cannot delete the key.
+        """
+        self._require_available()
+        with self._lock:
+            self.client.threads.update(thread_id, metadata={"proactive": "off"})
+            self.armed.discard(thread_id)
+            if self.armed:
+                self.mirror()
+            else:
+                self.reconcile()
+
+    def is_armed(self, thread_id: str) -> bool:
+        return thread_id in self.armed
+
+    def _require_available(self) -> None:
+        if not self.available:
+            raise RuntimeError(self.unavailable_reason or "proactive pushes are off")
+
     # ---- candidates and the cron -----------------------------------------------
 
     def candidates(self) -> list[str]:

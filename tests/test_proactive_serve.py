@@ -503,3 +503,52 @@ def test_the_fallback_clear_leaves_any_other_state_alone(state):
         is False
     )
     assert client.threads.writes == []
+
+
+# ---- arming ------------------------------------------------------------------
+
+
+def test_arm_stores_the_flag_on_the_thread_and_creates_the_cron(setup):
+    controller, client, _, _ = setup
+    updates = []
+    client.threads.update = lambda tid, *, metadata: updates.append((tid, metadata))
+
+    controller.arm("t1")
+
+    assert updates == [("t1", {"proactive": "on"})]
+    assert controller.is_armed("t1")
+    assert client.crons.rows[0]["input"] == {"candidates": [{"thread_id": "t1"}]}
+
+
+def test_disarming_the_last_thread_deletes_the_cron(setup):
+    controller, client, _, _ = setup
+    updates = []
+    client.threads.update = lambda tid, *, metadata: updates.append((tid, metadata))
+    controller.arm("t1")
+
+    controller.disarm("t1")
+
+    assert updates[-1] == ("t1", {"proactive": "off"})
+    assert not controller.is_armed("t1")
+    assert client.crons.rows == []
+
+
+def test_disarming_one_of_two_threads_keeps_the_cron(setup):
+    controller, client, origins, _ = setup
+    client.threads.update = lambda tid, *, metadata: None
+    origins.add("t2")
+    controller.arm("t1")
+    controller.arm("t2")
+
+    controller.disarm("t1")
+
+    assert len(client.crons.rows) == 1
+    assert client.crons.updated[-1][1] == {
+        "input": {"candidates": [{"thread_id": "t2"}]}
+    }
+
+
+def test_arming_needs_an_available_controller(workspace):
+    controller = ProactiveServe(workspace=workspace, unavailable_reason="local backend")
+    with pytest.raises(RuntimeError, match="local backend"):
+        controller.arm("t1")
