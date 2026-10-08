@@ -7,6 +7,7 @@ mounted into a VerticalScroll container.  No timer-based Group rebuilds.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import queue
 import random
@@ -1928,22 +1929,24 @@ def run_textual_interactive(
                     _configurable_extra = (
                         {"active_teams": _active_teams} if _active_teams else None
                     )
-                    async for event in iter_with_stream_cancel(
-                        graph_gateway.stream_events(
-                            RunRequest(
-                                message=_stream_input,
-                                thread_id=(
-                                    thread_id_override or self._conversation_tid
-                                ),
-                                metadata=metadata,
-                                target=GraphTarget(
-                                    local_graph=agent,
-                                    **self._dirs.metadata(),
-                                ),
-                                configurable_extra=_configurable_extra,
-                            )
-                        ),
-                        cancel_scope,
+                    async for event in contextlib.aclosing(
+                        iter_with_stream_cancel(
+                            graph_gateway.stream_events(
+                                RunRequest(
+                                    message=_stream_input,
+                                    thread_id=(
+                                        thread_id_override or self._conversation_tid
+                                    ),
+                                    metadata=metadata,
+                                    target=GraphTarget(
+                                        local_graph=agent,
+                                        **self._dirs.metadata(),
+                                    ),
+                                    configurable_extra=_configurable_extra,
+                                )
+                            ),
+                            cancel_scope,
+                        )
                     ):
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
