@@ -1949,340 +1949,503 @@ def run_textual_interactive(
                         )
                     ) as events:
                         async for event in events:
-                        if is_stream_cancel_requested(cancel_scope):
-                            response = await _mark_cancelled_response()
-                            break
-                        if container.max_scroll_y > 0:
-                            at_end = container.is_vertical_scroll_end
-                            if not _anchor_engaged:
-                                _anchor_engaged = True
-                                if at_end:
-                                    container.anchor()
-                                else:
+                            if is_stream_cancel_requested(cancel_scope):
+                                response = await _mark_cancelled_response()
+                                break
+                            if container.max_scroll_y > 0:
+                                at_end = container.is_vertical_scroll_end
+                                if not _anchor_engaged:
+                                    _anchor_engaged = True
+                                    if at_end:
+                                        container.anchor()
+                                    else:
+                                        self._chat_following = False
+                                        self._new_content_below = True
+                                elif self._chat_following and not at_end:
                                     self._chat_following = False
                                     self._new_content_below = True
-                            elif self._chat_following and not at_end:
-                                self._chat_following = False
-                                self._new_content_below = True
-                            elif not self._chat_following and at_end:
-                                container.anchor()
-                                self._chat_following = True
-                                self._new_content_below = False
-                        elif container.is_anchored:
-                            # Content no longer overflows (e.g. loading widget
-                            # was just removed). Release the anchor so the
-                            # compositor doesn't pin scroll_y to a negative
-                            # value on the next layout pass (issue #301).
-                            self._release_anchor_and_pin_top(container)
-                        event_type = state.handle_event(event)
+                                elif not self._chat_following and at_end:
+                                    container.anchor()
+                                    self._chat_following = True
+                                    self._new_content_below = False
+                            elif container.is_anchored:
+                                # Content no longer overflows (e.g. loading widget
+                                # was just removed). Release the anchor so the
+                                # compositor doesn't pin scroll_y to a negative
+                                # value on the next layout pass (issue #301).
+                                self._release_anchor_and_pin_top(container)
+                            event_type = state.handle_event(event)
 
-                        new_phase = state.compute_phase()
-                        if new_phase != self._status_phase:
-                            self._status_phase = new_phase
-                            self._render_status()
+                            new_phase = state.compute_phase()
+                            if new_phase != self._status_phase:
+                                self._status_phase = new_phase
+                                self._render_status()
 
-                        if event_type == "usage_stats":
-                            self._set_status_usage_baseline(state.last_input_tokens)
+                            if event_type == "usage_stats":
+                                self._set_status_usage_baseline(state.last_input_tokens)
 
-                        if _should_finalize_active_summarization(event_type):
-                            _finalize_active_summarization()
+                            if _should_finalize_active_summarization(event_type):
+                                _finalize_active_summarization()
 
-                        # -- Channel callbacks (thinking, todo, media) --
-                        if (
-                            on_thinking_cb
-                            and not _thinking_sent
-                            and state.thinking_text
-                            and event_type != "thinking"
-                            and len(state.thinking_text) >= _MIN_THINKING_LEN
-                        ):
-                            on_thinking_cb(state.thinking_text.rstrip())
-                            _thinking_sent = True
-
-                        if (
-                            on_todo_cb
-                            and not _todo_sent
-                            and event_type == "tool_call"
-                            and event.get("name") == "write_todos"
-                            and state.todo_items
-                        ):
+                            # -- Channel callbacks (thinking, todo, media) --
                             if (
                                 on_thinking_cb
                                 and not _thinking_sent
                                 and state.thinking_text
+                                and event_type != "thinking"
                                 and len(state.thinking_text) >= _MIN_THINKING_LEN
                             ):
                                 on_thinking_cb(state.thinking_text.rstrip())
                                 _thinking_sent = True
-                            on_todo_cb(state.todo_items)
-                            _todo_sent = True
 
-                        if (
-                            on_media_cb
-                            and event_type == "tool_result"
-                            and event.get("success")
-                        ):
-                            tool_name = event.get("name", "")
-                            if tool_name in ("write_file", "read_file"):
-                                _forward_media_to_channel(
-                                    state,
-                                    tool_name,
-                                    _media_sent,
-                                    on_media_cb,
-                                    str(self._dirs.work_dir),
-                                )
-
-                        # -- Remove loading spinner on first content event --
-                        if not loading_removed and event_type in (
-                            "thinking",
-                            "text",
-                            "tool_call",
-                            "summarization_start",
-                            "summarization",
-                        ):
-                            await loading.cleanup()
-                            loading_removed = True
-
-                        # -- Widget dispatch --
-                        if event_type == "thinking":
-                            if thinking_w is None:
-                                thinking_w = ThinkingWidget(show_thinking=show_thinking)
-                                await container.mount(thinking_w)
-                            thinking_w.append_text(event.get("content", ""))
-
-                        elif event_type == "summarization_start":
                             if (
-                                summarization_w is not None
-                                and not summarization_w._is_active
-                            ):
-                                summarization_w = None
-                            if summarization_w is None:
-                                summarization_w = SummarizationWidget()
-                                await container.mount(summarization_w)
-
-                        elif event_type == "summarization":
-                            content = event.get("content", "")
-                            if (
-                                summarization_w is not None
-                                and not summarization_w._is_active
-                            ):
-                                summarization_w = None
-                            if summarization_w is None:
-                                summarization_w = SummarizationWidget()
-                                await container.mount(summarization_w)
-                            if content:
-                                summarization_w.append_text(content)
-
-                        elif event_type == "tool_selection":
-                            tools = event.get("tools", [])
-                            if tools:
-                                from .widgets.tool_selection_widget import (
-                                    ToolSelectionWidget,
-                                )
-
-                                await container.mount(ToolSelectionWidget(tools))
-
-                        elif event_type == "text":
-                            chunk = event.get("content", "")
-                            if thinking_w is not None and thinking_w._is_active:
-                                thinking_w.finalize()
-                            # Clear processing indicator
-                            await _remove_w(processing_w)
-                            processing_w = None
-
-                            if not _is_final_response(state):
-                                await _mount_or_update_narration(state.latest_text)
-                                self._set_status_streaming_text(state.latest_text)
-                            else:
-                                # Stream final response incrementally (both
-                                # text-only replies and post-tool responses).
-                                await _preserve_active_narration()
-                                if response_display.assistant is None:
-                                    response_display.assistant_start = max(
-                                        response_display.narrated_end,
-                                        len(state.response_text) - len(chunk),
-                                    )
-                                    response_display.assistant = AssistantMessage(
-                                        state.response_text[
-                                            response_display.assistant_start :
-                                        ]
-                                    )
-                                    await container.mount(response_display.assistant)
-                                else:
-                                    await response_display.assistant.append_content(
-                                        chunk
-                                    )
-                                self._set_status_streaming_text(
-                                    response_display.assistant._content
-                                )
-
-                        elif event_type == "tool_call":
-                            tool_name = event.get("name", "unknown")
-                            tool_id = event["id"]
-                            tool_args = event.get("args", {})
-                            # Finalize thinking if still active
-                            if thinking_w is not None and thinking_w._is_active:
-                                thinking_w.finalize()
-                            # Clear transient indicators
-                            await _preserve_active_narration()
-                            await _remove_w(processing_w)
-                            processing_w = None
-                            existing_tool = bool(tool_id and tool_id in tool_widgets)
-                            if response_display.assistant is not None and (
-                                tool_name == "task" or not existing_tool
-                            ):
-                                await _convert_assistant_to_narration()
-                            # Task tools are handled by SubAgentWidget.
-                            if tool_name != "task":
-                                if existing_tool:
-                                    # Re-emitted with updated args — update in place
-                                    existing = tool_widgets[tool_id]
-                                    existing._tool_name = tool_name
-                                    existing._tool_args = tool_args
-                                    try:
-                                        existing._render_header()
-                                    except Exception:
-                                        pass
-                                else:
-                                    w = ToolCallWidget(tool_name, tool_args, tool_id)
-                                    await container.mount(w)
-                                    tool_widgets[tool_id] = w
-                            # Update todo widget on write_todos.
-                            # Insert before tool call widget so Task List
-                            # panel appears above the tool call.
-                            if tool_name == "write_todos" and state.todo_items:
-                                if todo_w is None:
-                                    todo_w = TodoWidget(state.todo_items)
-                                    if tool_id and tool_id in tool_widgets:
-                                        await container.mount(
-                                            todo_w,
-                                            before=tool_widgets[tool_id],
-                                        )
-                                    else:
-                                        await container.mount(todo_w)
-                                else:
-                                    todo_w.update_items(state.todo_items)
-
-                        elif event_type == "tool_result":
-                            result_name = event.get("name", "unknown")
-                            result_content = event.get("content", "")
-                            result_success = event.get("success", True)
-                            matched_tid = event["id"]
-                            tw = tool_widgets.get(matched_tid)
-                            if tw is not None and tw._status == "running":
-                                if result_success:
-                                    tw.set_success(result_content)
-                                else:
-                                    tw.set_error(result_content)
-                            # Track completion order for collapsing
-                            if (
-                                tw is not None
-                                and matched_tid not in completed_tool_order
-                            ):
-                                completed_tool_order.append(matched_tid)
-                                await _collapse_completed_tools()
-                            # Update todo from results
-                            if (
-                                result_name in ("write_todos", "read_todos")
+                                on_todo_cb
+                                and not _todo_sent
+                                and event_type == "tool_call"
+                                and event.get("name") == "write_todos"
                                 and state.todo_items
                             ):
-                                if todo_w is None:
-                                    todo_w = TodoWidget(state.todo_items)
-                                    await container.mount(todo_w)
-                                else:
-                                    todo_w.update_items(state.todo_items)
-                            # Show "Analyzing results..." if all tools done, no text yet
+                                if (
+                                    on_thinking_cb
+                                    and not _thinking_sent
+                                    and state.thinking_text
+                                    and len(state.thinking_text) >= _MIN_THINKING_LEN
+                                ):
+                                    on_thinking_cb(state.thinking_text.rstrip())
+                                    _thinking_sent = True
+                                on_todo_cb(state.todo_items)
+                                _todo_sent = True
+
                             if (
-                                _is_final_response(state)
-                                and not state.response_text
-                                and processing_w is None
+                                on_media_cb
+                                and event_type == "tool_result"
+                                and event.get("success")
                             ):
-                                processing_w = Static(
-                                    Text("\u25cf Analyzing results...", style="cyan"),
+                                tool_name = event.get("name", "")
+                                if tool_name in ("write_file", "read_file"):
+                                    _forward_media_to_channel(
+                                        state,
+                                        tool_name,
+                                        _media_sent,
+                                        on_media_cb,
+                                        str(self._dirs.work_dir),
+                                    )
+
+                            # -- Remove loading spinner on first content event --
+                            if not loading_removed and event_type in (
+                                "thinking",
+                                "text",
+                                "tool_call",
+                                "summarization_start",
+                                "summarization",
+                            ):
+                                await loading.cleanup()
+                                loading_removed = True
+
+                            # -- Widget dispatch --
+                            if event_type == "thinking":
+                                if thinking_w is None:
+                                    thinking_w = ThinkingWidget(show_thinking=show_thinking)
+                                    await container.mount(thinking_w)
+                                thinking_w.append_text(event.get("content", ""))
+
+                            elif event_type == "summarization_start":
+                                if (
+                                    summarization_w is not None
+                                    and not summarization_w._is_active
+                                ):
+                                    summarization_w = None
+                                if summarization_w is None:
+                                    summarization_w = SummarizationWidget()
+                                    await container.mount(summarization_w)
+
+                            elif event_type == "summarization":
+                                content = event.get("content", "")
+                                if (
+                                    summarization_w is not None
+                                    and not summarization_w._is_active
+                                ):
+                                    summarization_w = None
+                                if summarization_w is None:
+                                    summarization_w = SummarizationWidget()
+                                    await container.mount(summarization_w)
+                                if content:
+                                    summarization_w.append_text(content)
+
+                            elif event_type == "tool_selection":
+                                tools = event.get("tools", [])
+                                if tools:
+                                    from .widgets.tool_selection_widget import (
+                                        ToolSelectionWidget,
+                                    )
+
+                                    await container.mount(ToolSelectionWidget(tools))
+
+                            elif event_type == "text":
+                                chunk = event.get("content", "")
+                                if thinking_w is not None and thinking_w._is_active:
+                                    thinking_w.finalize()
+                                # Clear processing indicator
+                                await _remove_w(processing_w)
+                                processing_w = None
+
+                                if not _is_final_response(state):
+                                    await _mount_or_update_narration(state.latest_text)
+                                    self._set_status_streaming_text(state.latest_text)
+                                else:
+                                    # Stream final response incrementally (both
+                                    # text-only replies and post-tool responses).
+                                    await _preserve_active_narration()
+                                    if response_display.assistant is None:
+                                        response_display.assistant_start = max(
+                                            response_display.narrated_end,
+                                            len(state.response_text) - len(chunk),
+                                        )
+                                        response_display.assistant = AssistantMessage(
+                                            state.response_text[
+                                                response_display.assistant_start :
+                                            ]
+                                        )
+                                        await container.mount(response_display.assistant)
+                                    else:
+                                        await response_display.assistant.append_content(
+                                            chunk
+                                        )
+                                    self._set_status_streaming_text(
+                                        response_display.assistant._content
+                                    )
+
+                            elif event_type == "tool_call":
+                                tool_name = event.get("name", "unknown")
+                                tool_id = event["id"]
+                                tool_args = event.get("args", {})
+                                # Finalize thinking if still active
+                                if thinking_w is not None and thinking_w._is_active:
+                                    thinking_w.finalize()
+                                # Clear transient indicators
+                                await _preserve_active_narration()
+                                await _remove_w(processing_w)
+                                processing_w = None
+                                existing_tool = bool(tool_id and tool_id in tool_widgets)
+                                if response_display.assistant is not None and (
+                                    tool_name == "task" or not existing_tool
+                                ):
+                                    await _convert_assistant_to_narration()
+                                # Task tools are handled by SubAgentWidget.
+                                if tool_name != "task":
+                                    if existing_tool:
+                                        # Re-emitted with updated args — update in place
+                                        existing = tool_widgets[tool_id]
+                                        existing._tool_name = tool_name
+                                        existing._tool_args = tool_args
+                                        try:
+                                            existing._render_header()
+                                        except Exception:
+                                            pass
+                                    else:
+                                        w = ToolCallWidget(tool_name, tool_args, tool_id)
+                                        await container.mount(w)
+                                        tool_widgets[tool_id] = w
+                                # Update todo widget on write_todos.
+                                # Insert before tool call widget so Task List
+                                # panel appears above the tool call.
+                                if tool_name == "write_todos" and state.todo_items:
+                                    if todo_w is None:
+                                        todo_w = TodoWidget(state.todo_items)
+                                        if tool_id and tool_id in tool_widgets:
+                                            await container.mount(
+                                                todo_w,
+                                                before=tool_widgets[tool_id],
+                                            )
+                                        else:
+                                            await container.mount(todo_w)
+                                    else:
+                                        todo_w.update_items(state.todo_items)
+
+                            elif event_type == "tool_result":
+                                result_name = event.get("name", "unknown")
+                                result_content = event.get("content", "")
+                                result_success = event.get("success", True)
+                                matched_tid = event["id"]
+                                tw = tool_widgets.get(matched_tid)
+                                if tw is not None and tw._status == "running":
+                                    if result_success:
+                                        tw.set_success(result_content)
+                                    else:
+                                        tw.set_error(result_content)
+                                # Track completion order for collapsing
+                                if (
+                                    tw is not None
+                                    and matched_tid not in completed_tool_order
+                                ):
+                                    completed_tool_order.append(matched_tid)
+                                    await _collapse_completed_tools()
+                                # Update todo from results
+                                if (
+                                    result_name in ("write_todos", "read_todos")
+                                    and state.todo_items
+                                ):
+                                    if todo_w is None:
+                                        todo_w = TodoWidget(state.todo_items)
+                                        await container.mount(todo_w)
+                                    else:
+                                        todo_w.update_items(state.todo_items)
+                                # Show "Analyzing results..." if all tools done, no text yet
+                                if (
+                                    _is_final_response(state)
+                                    and not state.response_text
+                                    and processing_w is None
+                                ):
+                                    processing_w = Static(
+                                        Text("\u25cf Analyzing results...", style="cyan"),
+                                    )
+                                    await container.mount(processing_w)
+
+                            elif event_type == "subagent_start":
+                                sa_name = event["name"]
+                                sa_desc = event.get("description", "")
+                                instance_id = event["instance_id"]
+                                existing = _get_sa_widget(instance_id, sa_name, sa_desc)
+                                if existing is None:
+                                    sa_w = SubAgentWidget(sa_name, sa_desc)
+                                    await container.mount(sa_w)
+                                    subagent_widgets[instance_id] = sa_w
+
+                            elif event_type == "subagent_tool_call":
+                                instance_id = event["instance_id"]
+                                sa_w = _get_sa_widget(
+                                    instance_id, event.get("subagent", "")
                                 )
-                                await container.mount(processing_w)
-
-                        elif event_type == "subagent_start":
-                            sa_name = event["name"]
-                            sa_desc = event.get("description", "")
-                            instance_id = event["instance_id"]
-                            existing = _get_sa_widget(instance_id, sa_name, sa_desc)
-                            if existing is None:
-                                sa_w = SubAgentWidget(sa_name, sa_desc)
-                                await container.mount(sa_w)
-                                subagent_widgets[instance_id] = sa_w
-
-                        elif event_type == "subagent_tool_call":
-                            instance_id = event["instance_id"]
-                            sa_w = _get_sa_widget(
-                                instance_id, event.get("subagent", "")
-                            )
-                            if sa_w is None:
-                                continue
-                            await sa_w.add_tool_call(
-                                event.get("name", "unknown"),
-                                event.get("args", {}),
-                                event["id"],
-                            )
-
-                        elif event_type == "subagent_tool_result":
-                            instance_id = event["instance_id"]
-                            sa_w = _get_sa_widget(
-                                instance_id, event.get("subagent", "")
-                            )
-                            if sa_w is not None:
-                                sa_w.complete_tool(
+                                if sa_w is None:
+                                    continue
+                                await sa_w.add_tool_call(
                                     event.get("name", "unknown"),
-                                    event.get("content", ""),
-                                    event.get("success", True),
+                                    event.get("args", {}),
                                     event["id"],
                                 )
 
-                        elif event_type == "subagent_end":
-                            instance_id = event["instance_id"]
-                            sa_w = _get_sa_widget(instance_id, event.get("name", ""))
-                            if sa_w is not None:
-                                sa_w.finalize()
-
-                        elif event_type == "panel_dispatch_start":
-                            eval_id = event.get("eval_id", "") or "_unbatched"
-                            panel_w = panel_widgets.get(eval_id)
-                            if panel_w is None:
-                                panel_w = PanelWidget(eval_id)
-                                # Register before awaiting mount: a cancel
-                                # during the await would otherwise orphan a
-                                # ticking panel outside the cleanup loop.
-                                panel_widgets[eval_id] = panel_w
-                                await container.mount(panel_w)
-                            await panel_w.start_dispatch(
-                                event["id"],
-                                event.get("subagent_type", ""),
-                                event.get("label", "") or event.get("description", ""),
-                            )
-
-                        elif event_type == "panel_dispatch_complete":
-                            eval_id = event.get("eval_id", "") or "_unbatched"
-                            panel_w = panel_widgets.get(eval_id)
-                            if panel_w is not None:
-                                panel_w.complete_dispatch(
-                                    event["id"], int(event.get("duration_ms", 0))
+                            elif event_type == "subagent_tool_result":
+                                instance_id = event["instance_id"]
+                                sa_w = _get_sa_widget(
+                                    instance_id, event.get("subagent", "")
                                 )
+                                if sa_w is not None:
+                                    sa_w.complete_tool(
+                                        event.get("name", "unknown"),
+                                        event.get("content", ""),
+                                        event.get("success", True),
+                                        event["id"],
+                                    )
 
-                        elif event_type == "panel_dispatch_error":
-                            eval_id = event.get("eval_id", "") or "_unbatched"
-                            panel_w = panel_widgets.get(eval_id)
-                            if panel_w is not None:
-                                panel_w.fail_dispatch(
+                            elif event_type == "subagent_end":
+                                instance_id = event["instance_id"]
+                                sa_w = _get_sa_widget(instance_id, event.get("name", ""))
+                                if sa_w is not None:
+                                    sa_w.finalize()
+
+                            elif event_type == "panel_dispatch_start":
+                                eval_id = event.get("eval_id", "") or "_unbatched"
+                                panel_w = panel_widgets.get(eval_id)
+                                if panel_w is None:
+                                    panel_w = PanelWidget(eval_id)
+                                    # Register before awaiting mount: a cancel
+                                    # during the await would otherwise orphan a
+                                    # ticking panel outside the cleanup loop.
+                                    panel_widgets[eval_id] = panel_w
+                                    await container.mount(panel_w)
+                                await panel_w.start_dispatch(
                                     event["id"],
-                                    int(event.get("duration_ms", 0)),
-                                    event.get("error", ""),
+                                    event.get("subagent_type", ""),
+                                    event.get("label", "") or event.get("description", ""),
                                 )
 
-                        elif event_type == "ask_user":
-                            questions = event.get("questions", [])
-                            if questions:
-                                # Budget refusal must precede the prompt:
-                                # the 50th answer was already resumed; this
-                                # pending is the one we refuse (issue #469).
+                            elif event_type == "panel_dispatch_complete":
+                                eval_id = event.get("eval_id", "") or "_unbatched"
+                                panel_w = panel_widgets.get(eval_id)
+                                if panel_w is not None:
+                                    panel_w.complete_dispatch(
+                                        event["id"], int(event.get("duration_ms", 0))
+                                    )
+
+                            elif event_type == "panel_dispatch_error":
+                                eval_id = event.get("eval_id", "") or "_unbatched"
+                                panel_w = panel_widgets.get(eval_id)
+                                if panel_w is not None:
+                                    panel_w.fail_dispatch(
+                                        event["id"],
+                                        int(event.get("duration_ms", 0)),
+                                        event.get("error", ""),
+                                    )
+
+                            elif event_type == "ask_user":
+                                questions = event.get("questions", [])
+                                if questions:
+                                    # Budget refusal must precede the prompt:
+                                    # the 50th answer was already resumed; this
+                                    # pending is the one we refuse (issue #469).
+                                    if hitl_budget_stop(
+                                        human_rounds=_human_rounds,
+                                        total_rounds=_hitl_round,
+                                        needs_human=True,
+                                    ):
+                                        _hitl_budget_exhausted = True
+                                        break
+                                    _human_rounds += 1  # ask_user always prompts a human
+                                    # Channel messages: use channel-based text prompt
+                                    if channel_ask_user_fn is not None:
+                                        self._append_system(
+                                            "Waiting for channel user input...",
+                                            style="dim italic",
+                                        )
+                                        _ask_fn = channel_ask_user_fn
+                                        result = await asyncio.to_thread(
+                                            lambda f=_ask_fn, e=event: f(e),
+                                        )
+                                        if is_stream_cancel_requested(cancel_scope):
+                                            state.pending_ask_user = None
+                                            response = await _mark_cancelled_response()
+                                            break
+                                    else:
+                                        # Interactive TUI: display widget, collect via arrow keys
+                                        from .widgets.ask_user_widget import AskUserWidget
+
+                                        _prompt = self.query_one("#prompt", ChatTextArea)
+                                        _prompt.disabled = True
+                                        ask_w = AskUserWidget(questions)
+                                        await container.mount(ask_w)
+                                        self.call_after_refresh(ask_w.focus_active)
+                                        result = await self._wait_for_ask_user(ask_w)
+                                        try:
+                                            await ask_w.remove()
+                                        except Exception:
+                                            pass
+                                        _prompt.disabled = False
+                                    from langgraph.types import (
+                                        Command,  # type: ignore[import-untyped]
+                                    )
+
+                                    _stream_input = Command(resume=result)
+                                    _hitl_resuming = True
+                                    break  # re-enter outer HITL loop
+
+                            elif event_type == "interrupt":
+                                action_reqs = event.get("action_requests", [])
+                                interrupt_id = event.get("interrupt_id")
+
+                                # HITL: session "approve all" blanket-approves.
+                                # The human budget does not apply; the total cap
+                                # does, and it is checked before a resume is built
+                                # so the loop cannot exit holding an unsent one.
+                                if self._hitl_auto_approve:
+                                    if hitl_budget_stop(
+                                        human_rounds=_human_rounds,
+                                        total_rounds=_hitl_round,
+                                        needs_human=False,
+                                    ):
+                                        _hitl_budget_exhausted = True
+                                        break
+                                    from ..backends import build_hitl_resume
+
+                                    decisions = _session_auto_approve_decisions(action_reqs)
+                                    _stream_input = build_hitl_resume(
+                                        interrupt_id, decisions
+                                    )
+                                    _hitl_resuming = True
+                                    break  # re-enter outer HITL loop
+
+                                # Channel messages: use channel-based text approval.
+                                # The bridge owns the channel session grant, so it
+                                # applies the human budget after that fast path and
+                                # reports whether it prompted.
+                                if channel_hitl_fn is not None:
+                                    self._append_system(
+                                        "Waiting for channel user approval...",
+                                        style="dim italic",
+                                    )
+                                    outcome = await asyncio.to_thread(
+                                        channel_hitl_fn,
+                                        action_reqs,
+                                        human_budget_exhausted=hitl_budget_stop(
+                                            human_rounds=_human_rounds,
+                                            total_rounds=_hitl_round,
+                                            needs_human=True,
+                                        ),
+                                    )
+                                    if outcome.budget_exhausted:
+                                        _hitl_budget_exhausted = True
+                                        break
+                                    if outcome.prompted:
+                                        _human_rounds += 1
+                                    decisions = outcome.decisions
+                                    if is_stream_cancel_requested(cancel_scope):
+                                        state.pending_interrupt = None
+                                        response = await _mark_cancelled_response()
+                                        break
+                                    if decisions is not None:
+                                        from ..backends import build_hitl_resume
+
+                                        _stream_input = build_hitl_resume(
+                                            interrupt_id, decisions
+                                        )
+                                        _hitl_resuming = True
+                                        break  # re-enter outer HITL loop
+                                    else:
+                                        state.pending_interrupt = None
+                                        for tw in tool_widgets.values():
+                                            if tw._status == "running":
+                                                tw.set_rejected()
+                                        self._append_system(
+                                            "Tool execution rejected by channel user.",
+                                            style="yellow",
+                                        )
+                                    continue
+
+                                # Config-rule fast path (shared with CLI display):
+                                # an allow-listed / auto-approvable command resolves
+                                # without mounting the widget, closing the
+                                # shell_allow_list gap on the attended TUI. Returns
+                                # None when a human decision is genuinely needed.
+                                from ..channels.interaction import (
+                                    config_policy_snapshot,
+                                )
+
+                                # Keep the rejections so a human "approve all" on the
+                                # widget cannot override a policy REJECT in a mixed
+                                # batch (parity with the Rich CLI resolver).
+                                _cfg_decisions, _cfg_rejections = config_policy_snapshot(
+                                    action_reqs
+                                )
+                                if _cfg_decisions is not None:
+                                    if hitl_budget_stop(
+                                        human_rounds=_human_rounds,
+                                        total_rounds=_hitl_round,
+                                        needs_human=False,
+                                    ):
+                                        _hitl_budget_exhausted = True
+                                        break
+                                    # A config-level rejection (e.g. auto_approve
+                                    # refusing a dangerous command) must be visible
+                                    # before the silent resume - otherwise the
+                                    # spinner just turns into a rejection with no
+                                    # indication of who rejected it or why.
+                                    for _d in _cfg_decisions:
+                                        if _d.get("type") == "reject":
+                                            self._append_system(
+                                                f"Auto-rejected: {_d.get('message', '')}",
+                                                style="yellow",
+                                            )
+                                            break
+                                    from ..backends import build_hitl_resume
+
+                                    _stream_input = build_hitl_resume(
+                                        interrupt_id, _cfg_decisions
+                                    )
+                                    _hitl_resuming = True
+                                    break  # re-enter outer HITL loop with resume
+
+                                # Refuse BEFORE mounting the approval widget, so
+                                # the user's choice cannot be collected and then
+                                # discarded (issue #469).
                                 if hitl_budget_stop(
                                     human_rounds=_human_rounds,
                                     total_rounds=_hitl_round,
@@ -2290,256 +2453,93 @@ def run_textual_interactive(
                                 ):
                                     _hitl_budget_exhausted = True
                                     break
-                                _human_rounds += 1  # ask_user always prompts a human
-                                # Channel messages: use channel-based text prompt
-                                if channel_ask_user_fn is not None:
-                                    self._append_system(
-                                        "Waiting for channel user input...",
-                                        style="dim italic",
-                                    )
-                                    _ask_fn = channel_ask_user_fn
-                                    result = await asyncio.to_thread(
-                                        lambda f=_ask_fn, e=event: f(e),
-                                    )
-                                    if is_stream_cancel_requested(cancel_scope):
-                                        state.pending_ask_user = None
-                                        response = await _mark_cancelled_response()
-                                        break
-                                else:
-                                    # Interactive TUI: display widget, collect via arrow keys
-                                    from .widgets.ask_user_widget import AskUserWidget
+                                # Interactive TUI: mount approval widget
+                                # Disable main prompt so it can't steal focus
+                                _human_rounds += 1  # a human answers the widget
+                                _prompt = self.query_one("#prompt", ChatTextArea)
+                                _prompt.disabled = True
+                                from .widgets.approval_widget import ApprovalWidget
 
-                                    _prompt = self.query_one("#prompt", ChatTextArea)
-                                    _prompt.disabled = True
-                                    ask_w = AskUserWidget(questions)
-                                    await container.mount(ask_w)
-                                    self.call_after_refresh(ask_w.focus_active)
-                                    result = await self._wait_for_ask_user(ask_w)
-                                    try:
-                                        await ask_w.remove()
-                                    except Exception:
-                                        pass
-                                    _prompt.disabled = False
-                                from langgraph.types import (
-                                    Command,  # type: ignore[import-untyped]
-                                )
-
-                                _stream_input = Command(resume=result)
-                                _hitl_resuming = True
-                                break  # re-enter outer HITL loop
-
-                        elif event_type == "interrupt":
-                            action_reqs = event.get("action_requests", [])
-                            interrupt_id = event.get("interrupt_id")
-
-                            # HITL: session "approve all" blanket-approves.
-                            # The human budget does not apply; the total cap
-                            # does, and it is checked before a resume is built
-                            # so the loop cannot exit holding an unsent one.
-                            if self._hitl_auto_approve:
-                                if hitl_budget_stop(
-                                    human_rounds=_human_rounds,
-                                    total_rounds=_hitl_round,
-                                    needs_human=False,
-                                ):
-                                    _hitl_budget_exhausted = True
-                                    break
-                                from ..backends import build_hitl_resume
-
-                                decisions = _session_auto_approve_decisions(action_reqs)
-                                _stream_input = build_hitl_resume(
-                                    interrupt_id, decisions
-                                )
-                                _hitl_resuming = True
-                                break  # re-enter outer HITL loop
-
-                            # Channel messages: use channel-based text approval.
-                            # The bridge owns the channel session grant, so it
-                            # applies the human budget after that fast path and
-                            # reports whether it prompted.
-                            if channel_hitl_fn is not None:
-                                self._append_system(
-                                    "Waiting for channel user approval...",
-                                    style="dim italic",
-                                )
-                                outcome = await asyncio.to_thread(
-                                    channel_hitl_fn,
-                                    action_reqs,
-                                    human_budget_exhausted=hitl_budget_stop(
-                                        human_rounds=_human_rounds,
-                                        total_rounds=_hitl_round,
-                                        needs_human=True,
-                                    ),
-                                )
-                                if outcome.budget_exhausted:
-                                    _hitl_budget_exhausted = True
-                                    break
-                                if outcome.prompted:
-                                    _human_rounds += 1
-                                decisions = outcome.decisions
-                                if is_stream_cancel_requested(cancel_scope):
-                                    state.pending_interrupt = None
-                                    response = await _mark_cancelled_response()
-                                    break
-                                if decisions is not None:
+                                approval_w = ApprovalWidget(action_reqs)
+                                await container.mount(approval_w)
+                                decided_event = await self._wait_for_approval(approval_w)
+                                await approval_w.remove()
+                                _prompt.disabled = False
+                                if decided_event and decided_event.decisions is not None:
+                                    if decided_event.auto_approve_session:
+                                        self._hitl_auto_approve = True
                                     from ..backends import build_hitl_resume
-
-                                    _stream_input = build_hitl_resume(
-                                        interrupt_id, decisions
+                                    from ..channels.interaction import (
+                                        decisions_after_human_approval,
                                     )
+
+                                    _human = decided_event.decisions
+                                    if all(_d.get("type") == "approve" for _d in _human):
+                                        # An approve-all keeps the policy's REJECTs.
+                                        _human = decisions_after_human_approval(
+                                            action_reqs, _cfg_rejections
+                                        )
+                                    _stream_input = build_hitl_resume(interrupt_id, _human)
                                     _hitl_resuming = True
-                                    break  # re-enter outer HITL loop
+                                    break  # re-enter outer HITL loop with resume
                                 else:
                                     state.pending_interrupt = None
                                     for tw in tool_widgets.values():
                                         if tw._status == "running":
                                             tw.set_rejected()
                                     self._append_system(
-                                        "Tool execution rejected by channel user.",
+                                        "Tool execution rejected.",
                                         style="yellow",
                                     )
-                                continue
 
-                            # Config-rule fast path (shared with CLI display):
-                            # an allow-listed / auto-approvable command resolves
-                            # without mounting the widget, closing the
-                            # shell_allow_list gap on the attended TUI. Returns
-                            # None when a human decision is genuinely needed.
-                            from ..channels.interaction import (
-                                config_policy_snapshot,
-                            )
-
-                            # Keep the rejections so a human "approve all" on the
-                            # widget cannot override a policy REJECT in a mixed
-                            # batch (parity with the Rich CLI resolver).
-                            _cfg_decisions, _cfg_rejections = config_policy_snapshot(
-                                action_reqs
-                            )
-                            if _cfg_decisions is not None:
-                                if hitl_budget_stop(
-                                    human_rounds=_human_rounds,
-                                    total_rounds=_hitl_round,
-                                    needs_human=False,
-                                ):
-                                    _hitl_budget_exhausted = True
-                                    break
-                                # A config-level rejection (e.g. auto_approve
-                                # refusing a dangerous command) must be visible
-                                # before the silent resume - otherwise the
-                                # spinner just turns into a rejection with no
-                                # indication of who rejected it or why.
-                                for _d in _cfg_decisions:
-                                    if _d.get("type") == "reject":
-                                        self._append_system(
-                                            f"Auto-rejected: {_d.get('message', '')}",
-                                            style="yellow",
+                            elif event_type == "done":
+                                # Clean up transient indicators
+                                await _preserve_active_narration()
+                                await _remove_w(processing_w)
+                                processing_w = None
+                                _expand_completed_tools()
+                                # Mount final response
+                                final_response_text = _response_after_narration(
+                                    state.response_text,
+                                    response_display.narrated_end,
+                                )
+                                clean = _strip_trailing_placeholder_ellipsis(
+                                    final_response_text
+                                )
+                                if clean:
+                                    response_display.assistant_start = len(
+                                        state.response_text
+                                    ) - len(final_response_text)
+                                    if response_display.assistant is None:
+                                        response_display.assistant = AssistantMessage(clean)
+                                        await container.mount(response_display.assistant)
+                                    elif response_display.assistant._content != clean:
+                                        response_display.assistant._content = clean
+                                        await response_display.assistant.stop_stream()
+                                elif response_display.assistant is not None:
+                                    try:
+                                        await response_display.assistant.remove()
+                                    except Exception:
+                                        pass
+                                    response_display.assistant = None
+                                # Mount token usage stats with elapsed time
+                                if state.total_input_tokens or state.total_output_tokens:
+                                    elapsed = None
+                                    if self._turn_started_at:
+                                        elapsed = format_duration_compact(
+                                            self._turn_started_at
                                         )
-                                        break
-                                from ..backends import build_hitl_resume
-
-                                _stream_input = build_hitl_resume(
-                                    interrupt_id, _cfg_decisions
-                                )
-                                _hitl_resuming = True
-                                break  # re-enter outer HITL loop with resume
-
-                            # Refuse BEFORE mounting the approval widget, so
-                            # the user's choice cannot be collected and then
-                            # discarded (issue #469).
-                            if hitl_budget_stop(
-                                human_rounds=_human_rounds,
-                                total_rounds=_hitl_round,
-                                needs_human=True,
-                            ):
-                                _hitl_budget_exhausted = True
-                                break
-                            # Interactive TUI: mount approval widget
-                            # Disable main prompt so it can't steal focus
-                            _human_rounds += 1  # a human answers the widget
-                            _prompt = self.query_one("#prompt", ChatTextArea)
-                            _prompt.disabled = True
-                            from .widgets.approval_widget import ApprovalWidget
-
-                            approval_w = ApprovalWidget(action_reqs)
-                            await container.mount(approval_w)
-                            decided_event = await self._wait_for_approval(approval_w)
-                            await approval_w.remove()
-                            _prompt.disabled = False
-                            if decided_event and decided_event.decisions is not None:
-                                if decided_event.auto_approve_session:
-                                    self._hitl_auto_approve = True
-                                from ..backends import build_hitl_resume
-                                from ..channels.interaction import (
-                                    decisions_after_human_approval,
-                                )
-
-                                _human = decided_event.decisions
-                                if all(_d.get("type") == "approve" for _d in _human):
-                                    # An approve-all keeps the policy's REJECTs.
-                                    _human = decisions_after_human_approval(
-                                        action_reqs, _cfg_rejections
+                                    await container.mount(
+                                        UsageWidget(
+                                            state.total_input_tokens,
+                                            state.total_output_tokens,
+                                            elapsed=elapsed,
+                                        )
                                     )
-                                _stream_input = build_hitl_resume(interrupt_id, _human)
-                                _hitl_resuming = True
-                                break  # re-enter outer HITL loop with resume
-                            else:
-                                state.pending_interrupt = None
-                                for tw in tool_widgets.values():
-                                    if tw._status == "running":
-                                        tw.set_rejected()
-                                self._append_system(
-                                    "Tool execution rejected.",
-                                    style="yellow",
-                                )
 
-                        elif event_type == "done":
-                            # Clean up transient indicators
-                            await _preserve_active_narration()
-                            await _remove_w(processing_w)
-                            processing_w = None
-                            _expand_completed_tools()
-                            # Mount final response
-                            final_response_text = _response_after_narration(
-                                state.response_text,
-                                response_display.narrated_end,
-                            )
-                            clean = _strip_trailing_placeholder_ellipsis(
-                                final_response_text
-                            )
-                            if clean:
-                                response_display.assistant_start = len(
-                                    state.response_text
-                                ) - len(final_response_text)
-                                if response_display.assistant is None:
-                                    response_display.assistant = AssistantMessage(clean)
-                                    await container.mount(response_display.assistant)
-                                elif response_display.assistant._content != clean:
-                                    response_display.assistant._content = clean
-                                    await response_display.assistant.stop_stream()
-                            elif response_display.assistant is not None:
-                                try:
-                                    await response_display.assistant.remove()
-                                except Exception:
-                                    pass
-                                response_display.assistant = None
-                            # Mount token usage stats with elapsed time
-                            if state.total_input_tokens or state.total_output_tokens:
-                                elapsed = None
-                                if self._turn_started_at:
-                                    elapsed = format_duration_compact(
-                                        self._turn_started_at
-                                    )
-                                await container.mount(
-                                    UsageWidget(
-                                        state.total_input_tokens,
-                                        state.total_output_tokens,
-                                        elapsed=elapsed,
-                                    )
-                                )
-
-                        elif event_type == "error":
-                            error_msg = event.get("message", "Unknown error")
-                            self._append_system(f"Error: {error_msg}", style="red")
+                            elif event_type == "error":
+                                error_msg = event.get("message", "Unknown error")
+                                self._append_system(f"Error: {error_msg}", style="red")
 
                     response = (state.response_text or "").strip()
 
