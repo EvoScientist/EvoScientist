@@ -1,0 +1,505 @@
+"""Tests for EvoScientist.proactive.serve (serve's proactive controller)."""
+
+from __future__ import annotations
+
+import itertools
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from langgraph_sdk.errors import NotFoundError
+
+from EvoScientist.proactive.commit import read_proactive_tag
+from EvoScientist.proactive.serve import (
+    POLL_INTERVAL_SECONDS,
+    STALE_TICK_SECONDS,
+    ProactiveServe,
+    clear_post_append_next,
+    terminal_node,
+)
+
+MAIN_GRAPH = {
+    "nodes": [],
+    "edges": [
+        {"source": "__start__", "target": "model"},
+        {"source": "model", "target": "HumanInTheLoopMiddleware.after_model"},
+        {
+            "source": "HumanInTheLoopMiddleware.after_model",
+            "target": "Todo.after_model",
+        },
+        {"source": "Todo.after_model", "target": "tools", "conditional": True},
+        {
+            "source": "Todo.after_model",
+            "target": "memory.after_agent",
+            "conditional": True,
+        },
+        {"source": "tools", "target": "model"},
+        {"source": "memory.after_agent", "target": "Interp.after_agent"},
+        {"source": "Interp.after_agent", "target": "__end__"},
+    ],
+}
+
+
+# ---- terminal node ----------------------------------------------------------
+
+
+def test_terminal_node_is_the_only_unconditional_edge_to_end():
+    assert terminal_node(MAIN_GRAPH) == "Interp.after_agent"
+
+
+def test_terminal_node_ignores_conditional_edges_to_end():
+    graph = {
+        "edges": [
+            {"source": "__start__", "target": "a"},
+            {"source": "a", "target": "__end__", "conditional": True},
+        ]
+    }
+    assert terminal_node(graph) is None
+
+
+def test_terminal_node_is_none_when_not_unique():
+    graph = {
+        "edges": [
+            {"source": "a", "target": "__end__"},
+            {"source": "b", "target": "__end__"},
+        ]
+    }
+    assert terminal_node(graph) is None
+
+
+# ---- a fake dev server -------------------------------------------------------
+
+
+class _Crons:
+    def __init__(self):
+        self.rows = []
+        self.created = []
+        self.updated = []
+        self._ids = itertools.count(1)
+
+    def search(self, *, metadata, limit, offset):
+        rows = [
+            r
+            for r in self.rows
+            if all(r["metadata"].get(k) == v for k, v in metadata.items())
+        ]
+        return rows[offset : offset + limit]
+
+    def delete(self, cron_id):
+        self.rows = [r for r in self.rows if r["cron_id"] != cron_id]
+
+    def create_for_thread(self, thread_id, assistant_id, **kwargs):
+        row = {
+            "cron_id": f"c{next(self._ids)}",
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            **kwargs,
+        }
+        self.rows.append(row)
+        self.created.append(row)
+        return row
+
+    def update(self, cron_id, **kwargs):
+        self.updated.append((cron_id, kwargs))
+
+
+class _Threads:
+    def __init__(self):
+        self.threads = {}
+        self.states = {}
+        self.created = []
+        self.writes = []
+
+    def get(self, thread_id):
+        if thread_id not in self.threads:
+            raise NotFoundError("gone", response=None, body=None)
+        return self.threads[thread_id]
+
+    def get_state(self, thread_id):
+        return self.states[thread_id]
+
+    def search(self, *, metadata, limit):
+        return [
+            {"thread_id": tid}
+            for tid, t in self.threads.items()
+            if all((t.get("metadata") or {}).get(k) == v for k, v in metadata.items())
+        ][:limit]
+
+    def create(self, *, metadata):
+        tid = f"cron-thread-{len(self.created) + 1}"
+        self.threads[tid] = {"thread_id": tid, "metadata": metadata, "status": "idle"}
+        self.created.append(tid)
+        return {"thread_id": tid}
+
+    def update_state(self, thread_id, values, *, as_node):
+        self.writes.append((thread_id, values, as_node))
+        return {"checkpoint": {"checkpoint_id": f"after-{len(self.writes)}"}}
+
+
+class _Runs:
+    def __init__(self):
+        self.running = {}
+        self.cancelled = []
+
+    def list(self, thread_id, *, status):
+        return self.running.get(thread_id, []) if status == "running" else []
+
+    def cancel(self, thread_id, run_id, *, action):
+        self.cancelled.append((thread_id, run_id, action))
+
+
+class _Assistants:
+    def __init__(self, graph):
+        self.graph = graph
+
+    def get_graph(self, assistant_id):
+        assert assistant_id == "EvoScientist"
+        return self.graph
+
+
+class _Client:
+    def __init__(self, graph=MAIN_GRAPH):
+        self.crons = _Crons()
+        self.threads = _Threads()
+        self.runs = _Runs()
+        self.assistants = _Assistants(graph)
+
+
+@pytest.fixture
+def setup(workspace):
+    client = _Client()
+    origins = {"t1"}
+    published = []
+    controller = ProactiveServe(
+        workspace=workspace,
+        client=client,
+        timezone="UTC",
+        publish=lambda tid, text: published.append((tid, text)) or True,
+        can_deliver=lambda tid: tid in origins,
+    )
+    return controller, client, origins, published
+
+
+def _source(client, tid="t1", *, head="h1", status="idle", interrupts=()):
+    client.threads.threads[tid] = {"thread_id": tid, "status": status, "metadata": {}}
+    client.threads.states[tid] = {
+        "checkpoint": {"checkpoint_id": head},
+        "next": [],
+        "interrupts": list(interrupts),
+    }
+
+
+def _tick(client, controller, *, decisions=(), age=0.0, status="idle"):
+    """Make the cron thread look like it just ticked (``age`` seconds ago)."""
+    tid = controller._cron_thread_id
+    client.threads.threads[tid]["status"] = status
+    client.threads.states[tid] = {
+        "created_at": (datetime.now(UTC) - timedelta(seconds=age)).isoformat(),
+        "values": {"decisions": list(decisions)},
+    }
+
+
+def _decision(pid="p1", tid="t1", head="h1", text="The run finished."):
+    return {"proactive_id": pid, "thread_id": tid, "head": head, "text": text}
+
+
+# ---- unavailable ---------------------------------------------------------------
+
+
+def test_unavailable_controller_does_nothing(workspace):
+    controller = ProactiveServe(
+        workspace=workspace, client=None, unavailable_reason="local backend"
+    )
+    controller.armed.add("t1")
+    controller.reconcile()
+    controller.mirror()
+    controller.poll(current_thread_id="t1")
+    controller.stop()
+    assert controller.available is False
+
+
+# ---- reconcile / mirror / stop -------------------------------------------------
+
+
+def test_reconcile_with_nothing_armed_deletes_leftover_crons(setup, workspace):
+    controller, client, _, _ = setup
+    client.crons.rows.append(
+        {
+            "cron_id": "old",
+            "metadata": {"run_kind": "proactive_check", "workspace_dir": workspace.key},
+        }
+    )
+    controller.reconcile()
+    assert client.crons.rows == []
+    assert client.crons.created == []
+
+
+def test_reconcile_creates_one_cron_on_a_new_cron_thread(setup, workspace):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    [cron] = client.crons.rows
+    assert cron["thread_id"] == "cron-thread-1"
+    assert cron["input"] == {"candidates": [{"thread_id": "t1"}]}
+    assert cron["multitask_strategy"] == "reject"
+    assert cron["durability"] == "exit"
+    assert cron["metadata"]["workspace_dir"] == workspace.key
+    assert client.threads.threads["cron-thread-1"]["metadata"]["run_kind"] == (
+        "proactive_check"
+    )
+
+
+def test_reconcile_recreates_instead_of_keeping_and_reuses_the_cron_thread(setup):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    first = client.crons.rows[0]["cron_id"]
+    controller._cron_thread_id = None  # a new serve process
+
+    controller.reconcile()
+
+    assert [r["cron_id"] for r in client.crons.rows] != [first]
+    assert len(client.crons.rows) == 1
+    assert client.crons.rows[0]["thread_id"] == "cron-thread-1"
+    assert client.threads.created == ["cron-thread-1"]
+
+
+def test_reconcile_cancels_a_tick_left_running(setup):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    client.runs.running["cron-thread-1"] = [{"run_id": "r9"}]
+
+    controller.reconcile()
+
+    assert client.runs.cancelled == [("cron-thread-1", "r9", "interrupt")]
+
+
+def test_candidates_are_the_armed_threads_serve_can_deliver_to(setup):
+    controller, _, origins, _ = setup
+    controller.armed.update({"t1", "t2"})
+    assert controller.candidates() == ["t1"]
+    origins.add("t2")
+    assert controller.candidates() == ["t1", "t2"]
+
+
+def test_mirror_sends_the_whole_candidate_list(setup):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    controller.mirror()
+    controller.mirror()
+    assert (
+        client.crons.updated
+        == [
+            (
+                client.crons.rows[0]["cron_id"],
+                {"input": {"candidates": [{"thread_id": "t1"}]}},
+            )
+        ]
+        * 2
+    )
+
+
+def test_mirror_creates_the_cron_when_armed_and_none_exists(setup):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.mirror()
+    assert len(client.crons.rows) == 1
+
+
+def test_mirror_with_nothing_armed_and_no_cron_does_nothing(setup):
+    controller, client, _, _ = setup
+    controller.mirror()
+    assert client.crons.rows == []
+    assert client.crons.updated == []
+
+
+def test_stop_deletes_the_cron(setup):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    controller.stop()
+    assert client.crons.rows == []
+
+
+# ---- poll: liveness ----------------------------------------------------------
+
+
+@pytest.fixture
+def armed(setup):
+    controller, client, origins, published = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    _source(client)
+    return controller, client, origins, published
+
+
+def test_poll_is_throttled(armed):
+    controller, client, _, published = armed
+    _tick(client, controller, decisions=[_decision()])
+    controller.poll(current_thread_id="t1", now=1000.0)
+    _tick(client, controller, decisions=[_decision(pid="p2")])
+    controller.poll(current_thread_id="t1", now=1000.0 + POLL_INTERVAL_SECONDS - 1)
+    assert [p[1] for p in published] == ["The run finished."]
+
+
+def test_poll_recreates_a_missing_cron(armed):
+    controller, client, _, _ = armed
+    client.crons.rows.clear()
+    controller.poll(current_thread_id="t1")
+    assert len(client.crons.rows) == 1
+
+
+def test_poll_recreates_the_cron_after_a_failed_tick(armed):
+    controller, client, _, published = armed
+    before = client.crons.rows[0]["cron_id"]
+    _tick(client, controller, decisions=[_decision()], status="error")
+    controller.poll(current_thread_id="t1")
+    assert client.crons.rows[0]["cron_id"] != before
+    assert published == []
+
+
+def test_poll_recreates_a_stalled_cron(armed):
+    controller, client, _, _ = armed
+    before = client.crons.rows[0]["cron_id"]
+    controller._cron_created_at = 0.0
+    _tick(client, controller, age=STALE_TICK_SECONDS + 60)
+    controller.poll(current_thread_id="t1")
+    assert client.crons.rows[0]["cron_id"] != before
+
+
+def test_poll_does_not_recreate_a_cron_that_has_not_ticked_yet(armed):
+    controller, client, _, _ = armed
+    before = client.crons.rows[0]["cron_id"]
+    _tick(client, controller, age=STALE_TICK_SECONDS + 60)  # cron created just now
+    controller.poll(current_thread_id="t1")
+    assert client.crons.rows[0]["cron_id"] == before
+
+
+# ---- poll: applying a push ---------------------------------------------------
+
+
+def test_push_is_appended_in_one_write_as_the_terminal_node_and_delivered(armed):
+    controller, client, _, published = armed
+    _tick(client, controller, decisions=[_decision()])
+
+    controller.poll(current_thread_id="t1")
+
+    [(tid, values, as_node)] = client.threads.writes
+    assert (tid, as_node) == ("t1", "Interp.after_agent")
+    [message] = values["messages"]
+    assert message["type"] == "ai"
+    assert message["content"] == "The run finished."
+    assert message["id"] == "proactive-p1"
+    assert read_proactive_tag(message["additional_kwargs"])["proactive_id"] == "p1"
+    assert published == [("t1", "The run finished.")]
+
+
+def test_a_decision_is_applied_once(armed):
+    controller, client, _, published = armed
+    _tick(client, controller, decisions=[_decision()])
+    controller.poll(current_thread_id="t1", now=1000.0)
+    controller.poll(current_thread_id="t1", now=1000.0 + POLL_INTERVAL_SECONDS)
+    assert len(client.threads.writes) == 1
+    assert len(published) == 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["disarmed", "no_origin", "busy", "interrupted", "interrupt", "stale"],
+)
+def test_guards_skip_the_write(armed, change):
+    controller, client, origins, published = armed
+    if change == "disarmed":
+        controller.armed.discard("t1")
+        controller.armed.add("other")  # keep the poll running
+    elif change == "no_origin":
+        origins.clear()
+    elif change in ("busy", "interrupted"):
+        _source(client, status=change)
+    elif change == "interrupt":
+        _source(client, interrupts=[{"id": "i1"}])
+    else:
+        _source(client, head="h2")
+    _tick(client, controller, decisions=[_decision()])
+
+    controller.poll(current_thread_id="t1")
+
+    assert client.threads.writes == []
+    assert published == []
+
+
+def test_a_push_to_another_thread_switches_serve_to_it(armed):
+    controller, client, origins, _ = armed
+    origins.add("t0")
+    controller.armed.add("t0")
+    _source(client, "t0")
+    _tick(client, controller, decisions=[_decision(tid="t0")])
+    switched = []
+
+    controller.poll(current_thread_id="t1", switch_to=switched.append)
+
+    assert switched == ["t0"]
+
+
+def test_without_a_unique_terminal_node_the_push_is_appended_as_model_and_cleared(
+    workspace,
+):
+    graph = {"edges": [{"source": "model", "target": "after"}]}
+    client = _Client(graph=graph)
+    controller = ProactiveServe(
+        workspace=workspace,
+        client=client,
+        publish=lambda tid, text: True,
+        can_deliver=lambda tid: True,
+    )
+    controller.armed.add("t1")
+    controller.reconcile()
+    _source(client)
+    _tick(client, controller, decisions=[_decision()])
+    original_update = client.threads.update_state
+
+    def update_state(thread_id, values, *, as_node):
+        result = original_update(thread_id, values, as_node=as_node)
+        if as_node == "model":
+            client.threads.states["t1"] = {
+                "checkpoint": {"checkpoint_id": result["checkpoint"]["checkpoint_id"]},
+                "next": ["after"],
+                "interrupts": [],
+            }
+        return result
+
+    client.threads.update_state = update_state
+
+    controller.poll(current_thread_id="t1")
+
+    assert [(w[2], w[1]) for w in client.threads.writes][1] == ("__end__", None)
+    assert client.threads.writes[0][2] == "model"
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {
+            "checkpoint": {"checkpoint_id": "someone-else"},
+            "next": ["after"],
+            "interrupts": [],
+        },
+        {"checkpoint": {"checkpoint_id": "w1"}, "next": ["tools"], "interrupts": []},
+        {
+            "checkpoint": {"checkpoint_id": "w1"},
+            "next": ["after"],
+            "interrupts": [{"id": "i"}],
+        },
+    ],
+)
+def test_the_fallback_clear_leaves_any_other_state_alone(state):
+    client = _Client()
+    client.threads.states["t1"] = state
+    assert (
+        clear_post_append_next(
+            client, "t1", written_checkpoint_id="w1", after_model=frozenset({"after"})
+        )
+        is False
+    )
+    assert client.threads.writes == []

@@ -1505,6 +1505,12 @@ async def _apply_serve_resume_state(
             config=effective_config,
             runtime=runtime_state.async_runtime,
         )
+        proactive = getattr(channel_runtime, "proactive", None)
+        moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace
+        if proactive is not None and moves_workspace:
+            # Until C17 each workspace has its own cron store: delete this
+            # workspace's proactive cron while its store is still the served one.
+            await asyncio.to_thread(_serve_proactive_call, proactive.stop)
         if not await _move_server_or_keep_session(
             effective_config,
             target=new_dirs,
@@ -1515,6 +1521,12 @@ async def _apply_serve_resume_state(
                 "[yellow]Background agent server sync failed; async "
                 "subagents and EvoMemory workers may be unavailable.[/yellow]"
             )
+            if proactive is not None and moves_workspace:
+                proactive.unavailable_reason = (
+                    "the background agent server did not move to this workspace"
+                )
+        elif proactive is not None and moves_workspace:
+            proactive.move_to(new_dirs.workspace)
         workspace_update = (new_dirs, new_agent)
 
     old_thread_id = runtime_state.thread_id
@@ -1527,6 +1539,67 @@ async def _apply_serve_resume_state(
         runtime_state.dirs = updated_dirs
         _set_channels_media_dir(updated_dirs.workspace.media_dir)
         runtime_state.set_agent(updated_agent, channel_runtime)
+
+    # Tell the proactive cron which threads serve can now deliver to. Last, so
+    # the thread, folders and agent are already the new ones. Idempotent:
+    # ``/resume`` reaches this function twice.
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None:
+        await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+
+
+def _serve_proactive_call(call: Callable[[], None]) -> None:
+    """Run a proactive-controller call; a failure is logged, never raised.
+
+    Proactive pushes are best effort: a dev-server error must not break the
+    channel turn or the ``/new`` / ``/resume`` that triggered the call.
+    """
+    try:
+        call()
+    except Exception:
+        _serve_logger.warning("Proactive push bookkeeping failed", exc_info=True)
+
+
+def _serve_proactive_controller(
+    config: "EvoScientistConfig",
+    runtime_gateways: "RuntimeGateways",
+    *,
+    gateway_backend: str | None,
+    workspace: Workspace,
+) -> Any:
+    """Build serve's proactive controller, marked unavailable with the reason.
+
+    The cron runs on the dev server, so the feature needs serve's gateway to
+    be the server one: not the ``local`` backend, and not #470's fallback to
+    the in-process gateway when the dev server was unavailable at startup.
+    """
+    from ..gateway.composite import CompositeGraphGateway
+    from ..langgraph_dev.sdk import (
+        configured_langgraph_dev_url,
+        default_scheduler_timezone,
+        get_langgraph_sync_client,
+    )
+    from ..proactive.serve import ProactiveServe
+
+    reason = None
+    client = None
+    if gateway_backend != "langgraph_server":
+        reason = "proactive follow-ups need `gateway_backend_serve: langgraph_server`"
+    elif not isinstance(runtime_gateways.graph_gateway, CompositeGraphGateway):
+        reason = (
+            "the dev server was unavailable when serve started, so serve runs "
+            "in-process; restart serve to use proactive follow-ups"
+        )
+    else:
+        client = get_langgraph_sync_client(url=configured_langgraph_dev_url())
+    return ProactiveServe(
+        workspace=workspace,
+        client=client,
+        timezone=default_scheduler_timezone(config),
+        unavailable_reason=reason,
+        publish=publish_to_channel_origin,
+        can_deliver=lambda thread_id: get_channel_origin(thread_id) is not None,
+    )
 
 
 def _make_serve_handle_session_resume_cb(
@@ -2049,6 +2122,18 @@ def serve(
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
 
+    # Proactive pushes (#263): serve owns the workspace's proactive cron.
+    # Recreate or delete it now: a cron kept from an earlier run fails every
+    # tick after a dev-server restart, and nothing is armed yet in this one.
+    proactive = _serve_proactive_controller(
+        config,
+        runtime_gateways,
+        gateway_backend=gateway_backend,
+        workspace=dirs.workspace,
+    )
+    channel_runtime.proactive = proactive
+    _serve_proactive_call(proactive.reconcile)
+
     # Build the slash-dispatch callbacks once; the poll loop reuses
     # them for every inbound message.  Without this hoist each message
     # would allocate a fresh closure pair.
@@ -2199,12 +2284,20 @@ def serve(
                 # finished -> start writing) that would otherwise sit in state
                 # with the reader disarmed until an inbound channel message.
                 runtime_state.async_runtime.run_sync(_serve_enqueue_completions)
+
+            # Apply proactive pushes the cron decided (throttled inside).
+            _serve_proactive_call(
+                lambda: proactive.poll(current_thread_id=runtime_state.thread_id)
+            )
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
+        # Before the atexit hook stops the dev server serve started: without
+        # serve nothing can be delivered, so the cron would only cost calls.
+        _serve_proactive_call(proactive.stop)
         _channels_stop(runtime=channel_runtime)
         console.print("[dim]Stopped.[/dim]")
 
