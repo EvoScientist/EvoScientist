@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from EvoScientist.gateway import (
+    GraphGateway,
+    LangGraphServerGateway,
     LocalGraphGateway,
     LocalThreadStore,
     RunRequest,
@@ -322,13 +325,15 @@ async def test_state_snapshot_uuid_server_legacy_local():
 
 
 async def test_close_parked_checkpoint_through_composite():
-    """HITL close on the server backend reads and writes via the composite (#600)."""
+    """HITL close on the server backend completes via the composite (#600).
+
+    The recover sequence itself is covered in ``tests/test_hitl_loop.py``;
+    here only the routing matters: the close succeeds and never reads or
+    writes through the local reader.
+    """
     from langchain_core.messages import AIMessage
 
-    from EvoScientist.backends import (
-        HITL_ROUND_LIMIT_REJECT_MESSAGE,
-        close_parked_checkpoint,
-    )
+    from EvoScientist.backends import close_parked_checkpoint
     from EvoScientist.gateway import GraphTarget
     from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
 
@@ -355,21 +360,39 @@ async def test_close_parked_checkpoint_through_composite():
 
     await close_parked_checkpoint(comp, GraphTarget(local_graph=None), UUID)
 
-    assert [as_node for _values, as_node in agent.updates] == [
-        "__end__",
-        "tools",
-        "__end__",
-    ]
     assert not read.called("get_state_snapshot")
     assert not read.called("update_state_values")
-    patched = [
-        m for m in agent.values["messages"] if getattr(m, "type", None) == "tool"
+
+
+def _protocol_methods() -> list[str]:
+    return [
+        name
+        for name, value in vars(GraphGateway).items()
+        if not name.startswith("_") and inspect.isfunction(value)
     ]
-    assert [m.tool_call_id for m in patched] == ["exec-1"]
-    assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patched[0].content
-    verify = await agent.aget_state({})
-    assert verify.next == ()
-    assert not verify.interrupts
+
+
+def _signature_shape(fn) -> list[tuple[str, Any, bool]]:
+    return [
+        (param.name, param.kind, param.default is not inspect.Parameter.empty)
+        for param in inspect.signature(fn).parameters.values()
+    ]
+
+
+@pytest.mark.parametrize(
+    "gateway_cls",
+    [CompositeGraphGateway, LocalGraphGateway, LangGraphServerGateway],
+)
+@pytest.mark.parametrize("method", _protocol_methods())
+def test_gateway_matches_protocol_signature(gateway_cls, method):
+    """Every gateway implements each GraphGateway method with the same shape.
+
+    Subclassing the protocol would not catch a missing override: its bodies
+    are docstring-only, so the inherited method would silently return None.
+    """
+    impl = getattr(gateway_cls, method, None)
+    assert impl is not None, f"{gateway_cls.__name__} is missing {method}"
+    assert _signature_shape(impl) == _signature_shape(getattr(GraphGateway, method))
 
 
 async def test_clone_thread_uuid_server_legacy_refused():
