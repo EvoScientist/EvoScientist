@@ -2,28 +2,32 @@
 
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
 
-def _ctx():
+
+def _ctx(workspace):
     from EvoScientist.commands.base import CommandContext
 
     ui = MagicMock()
     ui.supports_interactive = True
-    return CommandContext(agent=None, thread_id="tid", ui=ui), ui
+    return CommandContext(
+        agent=None, thread_id="tid", ui=ui, dirs=SessionDirs(workspace)
+    ), ui
 
 
 class TestInstallSkill:
-    async def test_usage_message_when_no_args(self):
+    async def test_usage_message_when_no_args(self, workspace):
         from EvoScientist.commands.implementation.skills import InstallSkill
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         await InstallSkill().execute(ctx, [])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Usage:" in m for m in msgs)
 
-    async def test_happy_path(self):
+    async def test_happy_path(self, workspace):
         from EvoScientist.commands.implementation.skills import InstallSkill
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.install_skill",
             return_value={
@@ -32,15 +36,18 @@ class TestInstallSkill:
                 "description": "demo",
                 "path": "/tmp/demo",
             },
-        ):
+        ) as install_mock:
             await InstallSkill().execute(ctx, ["./some-path"])
+        assert install_mock.call_args.kwargs["workspace"] is workspace
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Installed: demo-skill" in m for m in msgs)
 
-    async def test_missing_git_prints_the_git_message(self, tmp_path, no_git):
+    async def test_missing_git_prints_the_git_message(
+        self, tmp_path, workspace, no_git
+    ):
         from EvoScientist.commands.implementation.skills import InstallSkill
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         with patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", tmp_path / "skills"):
             await InstallSkill().execute(ctx, ["owner/repo@skill"])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
@@ -48,30 +55,31 @@ class TestInstallSkill:
 
 
 class TestUninstallSkill:
-    async def test_usage_message_when_no_args(self):
+    async def test_usage_message_when_no_args(self, workspace):
         from EvoScientist.commands.implementation.skills import UninstallSkill
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         await UninstallSkill().execute(ctx, [])
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Usage:" in m for m in msgs)
 
-    async def test_uninstall_success(self):
+    async def test_uninstall_success(self, workspace):
         from EvoScientist.commands.implementation.skills import UninstallSkill
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.uninstall_skill",
             return_value={"success": True},
-        ):
+        ) as uninstall_mock:
             await UninstallSkill().execute(ctx, ["demo-skill"])
+        uninstall_mock.assert_called_once_with("demo-skill", workspace=workspace)
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert any("Uninstalled: demo-skill" in m for m in msgs)
 
-    async def test_uninstall_failure(self):
+    async def test_uninstall_failure(self, workspace):
         from EvoScientist.commands.implementation.skills import UninstallSkill
 
-        ctx, ui = _ctx()
+        ctx, ui = _ctx(workspace)
         with patch(
             "EvoScientist.tools.skills_manager.uninstall_skill",
             return_value={"success": False, "error": "not found"},

@@ -578,11 +578,14 @@ class ChannelManager:
         self,
         bus: MessageBus,
         *,
+        media_dir: Path,
         health_port: int = 8080,
         drain_timeout: float = 30.0,
         shared_webhook_port: int = 0,
     ):
         self.bus = bus
+        # Where registered channels store inbound attachments.
+        self._media_dir = media_dir
         self._channels: dict[str, Channel] = {}
         self._tasks: list[asyncio.Task] = []
         self._dispatch_task: asyncio.Task | None = None
@@ -602,7 +605,9 @@ class ChannelManager:
         self._shared_webhook_server: SharedWebhookServer | None = None
 
     @classmethod
-    def from_config(cls, config, bus: MessageBus | None = None) -> ChannelManager:
+    def from_config(
+        cls, config, bus: MessageBus | None = None, *, media_dir: Path
+    ) -> ChannelManager:
         """Create a ChannelManager from application config.
 
         Parses ``config.channel_enabled`` (comma-separated channel types),
@@ -611,6 +616,8 @@ class ChannelManager:
         Args:
             config: Application config with channel settings.
             bus: Optional MessageBus instance. A new one is created if not provided.
+            media_dir: Where channels store inbound attachments (the
+                workspace's ``media`` folder).
 
         Returns:
             A fully configured ChannelManager.
@@ -618,7 +625,7 @@ class ChannelManager:
         if bus is None:
             bus = MessageBus()
         shared_webhook_port = getattr(config, "shared_webhook_port", 0) or 0
-        manager = cls(bus, shared_webhook_port=shared_webhook_port)
+        manager = cls(bus, media_dir=media_dir, shared_webhook_port=shared_webhook_port)
         types = [
             t.strip() for t in (config.channel_enabled or "").split(",") if t.strip()
         ]
@@ -629,6 +636,15 @@ class ChannelManager:
             channel = create_channel(ct, config)
             manager.register(channel, config=config)
         return manager
+
+    def set_media_dir(self, media_dir: Path) -> None:
+        """Store inbound attachments of every channel in *media_dir* from now on.
+
+        Called when the session moves to another workspace (``/resume``).
+        """
+        self._media_dir = media_dir
+        for channel in self._channels.values():
+            channel.set_media_dir(media_dir)
 
     # ── registration ──
 
@@ -659,6 +675,7 @@ class ChannelManager:
             raise ValueError(f"Channel '{name}' already registered")
 
         channel.set_bus(self.bus)
+        channel.set_media_dir(self._media_dir)
         for key, value in kwargs.items():
             if hasattr(channel, key):
                 setattr(channel, key, value)

@@ -42,7 +42,15 @@ ERROR_CODES = frozenset(
         "probe_failed",
         "unsupported_platform",
         "install_failed",
+        # The registry has no release inside the supported WebUI range.
+        "no_compatible_version",
     }
+)
+
+# Added to an error a stage cannot tell from an unreachable source while
+# ``mirror: cn`` is off. There is no automatic switch between sources.
+CN_MIRROR_HINT = (
+    "From mainland China, run `EvoSci setup --cn` to download from mirrors there."
 )
 
 

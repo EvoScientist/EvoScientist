@@ -68,6 +68,8 @@ PREFIX_CHANNELS: dict[str, str] = {
     "qq_": "messaging channel adapter (CLI process)",
     "signal_": "messaging channel adapter (CLI process)",
     "stt_": "speech-to-text (CLI process)",
+    "gateway_backend": "client-side gateway selection; only decides whether the"
+    " CLI starts a server",
 }
 
 

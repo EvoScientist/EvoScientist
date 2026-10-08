@@ -272,6 +272,109 @@ def _patch_mcp_stdio_errlog_safe() -> None:
 _patch_mcp_stdio_errlog_safe()
 
 
+def _mcp_major_version() -> int | None:
+    """Return the installed MCP SDK's major version, or None if unknown."""
+    try:
+        from importlib.metadata import version
+
+        return int(version("mcp").split(".")[0])
+    except Exception:
+        return None
+
+
+def _patch_mcp_stdio_kill_on_cancel() -> None:
+    """Kill a stdio server whose shutdown wait is cancelled.
+
+    Idempotent. A no-op when the MCP SDK is absent (optional dependency).
+    In mcp 1.x the stdio shutdown closes the server's stdin, waits up to 2s
+    for it to exit, and kills the process tree only when that wait times
+    out. A cancellation that lands inside the wait (for example our
+    ``get_tools`` deadline) skips the kill, and a server that ignores stdin
+    closing is then waited on with nothing left to stop it. Wrapping the
+    process's ``wait`` kills the tree in that case before the cancellation
+    carries on.
+
+    The SDK's own 2s limit also cancels ``wait``, and its kill fallback
+    calls ``wait`` again, so each process is killed at most once: whichever
+    of the wrapper and the SDK gets there first does the kill, and the
+    other does nothing.
+
+    Skipped on mcp 2.x, which runs its whole shutdown shielded and polls
+    ``returncode`` instead of calling ``wait``.
+    """
+    major = _mcp_major_version()
+    if major is not None and major >= 2:
+        return
+
+    try:
+        import anyio
+        import mcp.client.stdio as _stdio_mod
+    except ImportError:
+        return  # MCP SDK not installed — nothing to patch.
+
+    create = getattr(_stdio_mod, "_create_platform_compatible_process", None)
+    terminate = getattr(_stdio_mod, "_terminate_process_tree", None)
+    if create is None or terminate is None:
+        logger.debug(
+            "MCP SDK layout changed: stdio process helpers are missing; "
+            "the stdio kill-on-cancel patch was not applied"
+        )
+        return
+
+    if getattr(create, "_evosci_kill_on_cancel", False):
+        return  # Already patched.
+
+    def _claim_kill(process: Any) -> bool:
+        """Mark ``process`` as killed; False if it already was."""
+        if getattr(process, "_evosci_killed", False):
+            return False
+        try:
+            process._evosci_killed = True
+        except AttributeError:
+            pass  # Can't track it; kill as the SDK would.
+        return True
+
+    @wraps(create)
+    async def _create_killable_process(*args: Any, **kwargs: Any):
+        process = await create(*args, **kwargs)
+        wait = process.wait
+
+        async def _wait_or_kill():
+            try:
+                return await wait()
+            except anyio.get_cancelled_exc_class():
+                if _claim_kill(process):
+                    # Bounded by the SDK's own termination timeout.
+                    with anyio.CancelScope(shield=True):
+                        try:
+                            await terminate(process)
+                        except Exception:
+                            logger.debug(
+                                "Failed to kill cancelled MCP stdio server",
+                                exc_info=True,
+                            )
+                raise
+
+        try:
+            process.wait = _wait_or_kill
+        except AttributeError:
+            logger.debug("MCP stdio process does not allow wrapping wait()")
+        return process
+
+    @wraps(terminate)
+    async def _terminate_once(process: Any, *args: Any, **kwargs: Any):
+        if _claim_kill(process):
+            await terminate(process, *args, **kwargs)
+
+    _create_killable_process._evosci_kill_on_cancel = True  # type: ignore[attr-defined]
+    _stdio_mod._create_platform_compatible_process = _create_killable_process
+    _stdio_mod._terminate_process_tree = _terminate_once
+    logger.debug("Applied MCP stdio kill-on-cancel patch")
+
+
+_patch_mcp_stdio_kill_on_cancel()
+
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -813,11 +916,11 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
     the server then fails to start as it would without Node. Never runs inside
-    ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set): a download there would
+    ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set): a download there would
     race the server's health deadline with its progress hidden in the server
     log, so ``start_langgraph_dev`` runs this before spawning instead.
     """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
     missing = [
         name
@@ -985,11 +1088,11 @@ ProgressCallback = Callable[[str, str, str], None]
 def _get_tools_timeout() -> float | None:
     """The per-server ``get_tools`` limit for this process.
 
-    Only ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set) has a deadline:
+    Only ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set) has a deadline:
     its health check gives up after 60s.  The CLI and TUI have none, so there a
     slow server only makes startup slower and is left to finish.
     """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
     return None
 

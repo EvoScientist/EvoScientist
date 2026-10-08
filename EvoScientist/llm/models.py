@@ -3,9 +3,9 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine, DashScope,
-DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-compatible
-endpoints) and convenient short names for common models.
+Novita, Opper, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine,
+DashScope, DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-
+compatible endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -168,6 +168,14 @@ def _apply_openai_compat_reasoning_config(
             kwargs["reasoning_effort"] = effort
         return
 
+    if provider == "opper" and configured:
+        # Opper's compat ChatRequest accepts the standard OpenAI
+        # ``reasoning_effort`` field, but the pool spans reasoning and
+        # non-reasoning models, so forward an explicit setting only rather
+        # than defaulting one on the user's behalf.
+        kwargs.setdefault("reasoning_effort", configured)
+        return
+
     if provider == "custom-openai" and configured:
         kwargs.setdefault("reasoning_effort", configured)
 
@@ -208,11 +216,16 @@ def _supports_openrouter_anthropic_prompt_cache(
 ) -> bool:
     """Return whether EvoScientist should declare Claude caching for a router.
 
-    Both OpenRouter and Requesty are OpenAI-compatible routers that forward an
+    OpenRouter and Requesty are OpenAI-compatible routers that forward an
     Anthropic-style ``cache_control`` declaration through to Claude models
-    addressed as ``anthropic/...``. Implicit caching is handled upstream for
-    most providers, but Claude prompt caching needs the explicit declaration.
+    addressed as ``anthropic/...``. Opper takes the same top-level declaration,
+    but addresses Claude by bare pool id (``claude-sonnet-4-6``) or by a
+    route-pinned ``provider/claude-...`` id, so it matches on the short name.
+    Implicit caching is handled upstream for most providers, but Claude prompt
+    caching needs the explicit declaration.
     """
+    if provider == "opper":
+        return model_id.rsplit("/", 1)[-1].startswith("claude-")
     return provider in ("openrouter", "requesty") and model_id.startswith(
         ("anthropic/", "~anthropic/")
     )
@@ -244,17 +257,19 @@ def _apply_openrouter_anthropic_prompt_cache(
 ) -> None:
     """Declare router Claude prompt caching unless explicitly disabled.
 
-    OpenRouter and Requesty both handle implicit caching for most providers,
+    OpenRouter, Requesty and Opper handle implicit caching for most providers,
     but Claude prompt caching needs an Anthropic-style cache-control
     declaration. Each router honours its own opt-out env flag
     (``EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE`` /
-    ``EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE``).
+    ``EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE`` /
+    ``EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE``).
     """
     if provider is None:
         return
     disable_flag = {
         "openrouter": "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
         "requesty": "EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE",
+        "opper": "EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE",
     }.get(provider)
     if disable_flag is not None and _env_flag_disabled(disable_flag):
         return

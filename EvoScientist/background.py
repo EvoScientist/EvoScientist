@@ -256,8 +256,10 @@ def launch(
     from . import agent_shell
     from .setup.research_env import research_env_overrides
 
+    # PWD as in the execute shell: the folder the job runs in, not a symlink
+    # this process was started in.
     overrides = research_env_overrides()
-    env = {**os.environ, **overrides} if overrides else None
+    env = {**os.environ, **(overrides or {}), "PWD": cwd}
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
     log_dir.mkdir(parents=True, exist_ok=True)

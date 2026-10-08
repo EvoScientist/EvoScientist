@@ -23,6 +23,7 @@ signature to wire the injected runtime — PEP 563 stringized annotations break 
 detection (same reason as ``middleware/expert_async_subagent.py``).
 """
 
+from pathlib import Path
 from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain.agents.middleware import AgentMiddleware
@@ -32,7 +33,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from .. import agent_shell, background, paths
+from .. import agent_shell, background
 from ..backends import is_hitl_suppressed, prepare_sandbox_command
 
 
@@ -105,8 +106,19 @@ def _bg_command(
     )
 
 
-def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
-    """Build the ``run_in_background`` tool bound to the sandbox policy.
+def _make_run_in_background(
+    *,
+    work_dir: str | Path,
+    skills_dir: str | Path | None,
+    dangerous: bool,
+    guard_dangerous: bool = False,
+    media_dir: str | Path | None = None,
+):
+    """Build the ``run_in_background`` tool bound to a work directory and sandbox policy.
+
+    Processes start in ``work_dir``; ``/skills/...`` paths resolve through
+    ``skills_dir`` first, and ``media_dir`` (set for a ``--mode=run`` folder)
+    is reachable, as they are for ``execute``.
 
     ``dangerous`` is captured from ``cfg.dangerous_mode`` at assembly (the agent is
     rebuilt when config changes, so the captured value never goes stale).
@@ -132,7 +144,7 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
             command: The shell command to run in the background.
             name: Optional short label to recognize the process later.
         """
-        cwd = str(paths.resolve_virtual_path("/"))
+        cwd = str(Path(work_dir).resolve())
         # Same path-rewriting + validation as execute (shared helper) so virtual paths
         # resolve to the workspace and the command can't bypass the sandbox checks.
         command, error = prepare_sandbox_command(
@@ -141,6 +153,8 @@ def _make_run_in_background(dangerous: bool, guard_dangerous: bool = False):
             virtual_mode=not dangerous,
             dangerous=dangerous,
             guard_dangerous=guard_dangerous or is_hitl_suppressed(),
+            skills_dir=skills_dir,
+            media_dir=media_dir,
         )
         if error:
             return error
@@ -246,12 +260,21 @@ class BackgroundExecutionMiddleware(AgentMiddleware):
     def __init__(
         self,
         *,
+        work_dir: str | Path,
+        skills_dir: str | Path | None,
         dangerous: bool = False,
         guard_dangerous: bool = False,
+        media_dir: str | Path | None = None,
     ) -> None:
         super().__init__()
         self.tools = [
-            _make_run_in_background(dangerous, guard_dangerous),
+            _make_run_in_background(
+                work_dir=work_dir,
+                skills_dir=skills_dir,
+                dangerous=dangerous,
+                guard_dangerous=guard_dangerous,
+                media_dir=media_dir,
+            ),
             check_process,
             stop_process,
             list_processes,

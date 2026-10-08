@@ -44,6 +44,7 @@ def test_manifest_shape(monkeypatch, plat):
         "stages": [
             {"id": "node", "title": "Node.js"},
             {"id": "research-env", "title": "Python research environment"},
+            {"id": "webui", "title": "WebUI"},
         ],
     }
 
@@ -54,6 +55,7 @@ def test_manifest_lists_git_on_windows_only(monkeypatch):
         {"id": "node", "title": "Node.js"},
         {"id": "git", "title": "Git for Windows"},
         {"id": "research-env", "title": "Python research environment"},
+        {"id": "webui", "title": "WebUI"},
     ]
 
 
@@ -174,7 +176,7 @@ def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
     )
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(setup_pkg, "STAGES", (*setup_pkg.STAGES, other))
-    assert [s["id"] for s in manifest()["stages"]] == ["node", "research-env"]
+    assert [s["id"] for s in manifest()["stages"]] == ["node", "research-env", "webui"]
 
 
 def test_json_emitter_writes_one_line_per_event(tmp_path):
@@ -463,3 +465,68 @@ def test_wait_with_heartbeat_activity_resets_the_silence_limit():
         == 0
     )
     assert clock.now == 55
+
+
+# --------------------------------------------------------------------------- #
+# --skip
+# --------------------------------------------------------------------------- #
+def test_run_stages_skips_with_a_reason_and_runs_the_rest():
+    ran: list[str] = []
+
+    def stage(stage_id):
+        def run(emit, mirror):
+            ran.append(stage_id)
+            return StageResult("ok", {})
+
+        return Stage(stage_id, stage_id, None, run)
+
+    events, emit = _collect()
+    code = run_stages(
+        (stage("node"), stage("webui")), emit, "default", skip=frozenset({"webui"})
+    )
+    assert code == 0
+    assert ran == ["node"]
+    assert events[-1] == make_event(
+        "webui",
+        "skipped",
+        message="Skipped (--skip)",
+        detail={"reason": "skip_option"},
+    )
+
+
+def test_cli_skip_emits_skipped_and_runs_the_other_stages(cli, monkeypatch):
+    ran: list[str] = []
+
+    def stage(stage_id):
+        def run(emit, mirror):
+            ran.append(stage_id)
+            return StageResult("ok", {})
+
+        return Stage(stage_id, stage_id, None, run)
+
+    monkeypatch.setattr(
+        setup_pkg, "STAGES", (stage("node"), stage("research-env"), stage("webui"))
+    )
+    result = cli("--json", "--skip", "webui", "--skip", "research-env")
+    assert result.exit_code == 0
+    assert ran == ["node"]
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [(e["stage"], e["status"]) for e in events] == [
+        ("node", "done"),
+        ("research-env", "skipped"),
+        ("webui", "skipped"),
+    ]
+    assert events[-1]["detail"] == {"reason": "skip_option"}
+
+
+def test_cli_skip_unknown_stage_exits_2(cli):
+    result = cli("--json", "--skip", "nope")
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "nope" in result.stderr
+
+
+def test_cli_skip_with_stage_exits_2(cli):
+    result = cli("--stage", "node", "--skip", "webui")
+    assert result.exit_code == 2
+    assert result.stdout == ""

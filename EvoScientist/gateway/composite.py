@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
 from .server import _is_uuid
@@ -226,8 +227,13 @@ class CompositeGraphGateway:
             exc = LegacyThreadServerExecutionError(request.thread_id)
             yield {"type": "error", "message": str(exc)}
             raise exc
-        async for event in self._execute.stream_events(request):
-            yield event
+        # ``aclosing`` forwards an early close (the consumer leaving the stream
+        # at an approval or a question) to the inner iterator, so it is closed
+        # in the consumer's task and context rather than by the loop's
+        # generator finalizer.
+        async with aclosing(self._execute.stream_events(request)) as events:
+            async for event in events:
+                yield event
 
     async def update_state_values(
         self,

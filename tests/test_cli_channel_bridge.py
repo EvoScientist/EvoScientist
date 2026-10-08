@@ -50,12 +50,12 @@ def _clean_bridge_state():
 
 
 class TestReplyInterceptionOrdering:
-    async def test_pending_reply_intercepted_not_enqueued(self):
+    async def test_pending_reply_intercepted_not_enqueued(self, tmp_path):
         """A reply to a pending prompt resolves the wait and is NOT enqueued."""
         from EvoScientist.cli.channel import _bus_inbound_consumer, _message_queue
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         manager.register(QueueFakeChannel())
 
         # A prompt is waiting on fake:chat1 (as the engine's wait_reply would).
@@ -88,12 +88,12 @@ class TestReplyInterceptionOrdering:
         except asyncio.CancelledError:
             pass
 
-    async def test_message_without_pending_wait_is_enqueued(self):
+    async def test_message_without_pending_wait_is_enqueued(self, tmp_path):
         """With no pending prompt, a normal message flows to enqueue as before."""
         from EvoScientist.cli.channel import _bus_inbound_consumer, _message_queue
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         manager.register(QueueFakeChannel())
 
         consumer = asyncio.create_task(_bus_inbound_consumer(bus, manager))

@@ -245,6 +245,8 @@ def test_ensure_langgraph_dev_reuses_when_sidecar_missing(
     cfg.enable_async_subagents = True
     # Should NOT raise — degrades to the prior reuse-with-warning branch.
     manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "B")
+    # Nothing says which workspace's store it holds.
+    assert manager.SERVED_WORKSPACE is None
 
 
 def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths):
@@ -266,6 +268,15 @@ def test_stop_langgraph_dev_removes_sidecar(tmp_path, monkeypatch, runtime_paths
     monkeypatch.setattr(manager, "_PROCESS", None)
     manager.stop_langgraph_dev()
     assert not sidecar.exists()
+
+
+def test_stop_langgraph_dev_forgets_served_workspace(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(manager, "SERVED_WORKSPACE", tmp_path / "A")
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    manager.stop_langgraph_dev()
+    assert manager.SERVED_WORKSPACE is None
 
 
 def test_keepalive_skips_atexit_registration(tmp_path, monkeypatch, runtime_paths):
@@ -354,12 +365,100 @@ def _reuse_setup(tmp_path, monkeypatch, runtime_paths, fingerprint):
     return cfg
 
 
+def test_reuse_confirms_workspace_from_sidecar(tmp_path, monkeypatch, runtime_paths):
+    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "fp")
+    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
+    assert manager.SERVED_WORKSPACE == tmp_path / "A"
+
+
 def test_reuse_sets_drift_flag_on_fingerprint_mismatch(
     tmp_path, monkeypatch, runtime_paths
 ):
     cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "stale-fingerprint")
     manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+
+
+def test_reuse_sets_drift_flag_for_older_stripped_server(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A server an older version started without MCP (``deploy_mode: false``)
+    is reused with the drift warning, also by a server-backend session."""
+    cfg = _reuse_setup(tmp_path, monkeypatch, runtime_paths, "old-version-fingerprint")
+    sidecar = tmp_path / "ws.json"
+    sidecar.write_text(
+        json.dumps({**json.loads(sidecar.read_text()), "deploy_mode": False})
+    )
+
+    reused = manager.ensure_langgraph_dev(
+        cfg, workspace_dir=tmp_path / "A", backend="langgraph_server"
+    )
+
+    assert reused is None
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+    assert manager.is_async_subagents_available() is True
+
+
+def test_reuse_sets_drift_flag_on_version_change(tmp_path, monkeypatch, runtime_paths):
+    """A server left running across an upgrade counts as drift: the session
+    reuses it and warns, and the server is not stopped."""
+    import importlib.metadata
+
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.4")
+    old_fp = manager._server_config_fingerprint(cfg)
+    cfg2 = _reuse_setup(tmp_path, monkeypatch, runtime_paths, old_fp)
+    stopped = []
+    monkeypatch.setattr(manager, "stop_langgraph_dev", lambda *a: stopped.append(a))
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.5")
+    assert manager.ensure_langgraph_dev(cfg2, workspace_dir=tmp_path / "A") is None
+
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+    assert manager.is_async_subagents_available() is True
+    assert stopped == []
+
+
+def test_started_server_recorded_for_next_version(tmp_path, monkeypatch, runtime_paths):
+    """A server the CLI starts records what the next version compares: the
+    marker, the PID file for ``EvoSci server stop`` and the fingerprint."""
+    import importlib.metadata
+    import subprocess
+    from types import SimpleNamespace
+
+    from EvoScientist.mcp import client as mcp_client
+
+    up = {"running": False}
+    spawned = []
+
+    def _popen(*_a, **kw):
+        spawned.append(kw["env"])
+        up["running"] = True
+        return SimpleNamespace(pid=4242, poll=lambda: None)
+
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {})
+    monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/usr/bin/langgraph")
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_: up["running"])
+    monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
+    monkeypatch.setattr(manager, "_wait_for_port_bindable", lambda *_a, **_kw: True)
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    cfg.langgraph_dev_keepalive = True
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.5")
+    manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A")
+    assert spawned[0]["EVOSCIENTIST_SERVER_PROCESS"] == "1"
+    assert runtime_paths.pid_file.read_text() == "4242"
+
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(importlib.metadata, "version", lambda _name: "0.3.6")
+    assert manager.ensure_langgraph_dev(cfg, workspace_dir=tmp_path / "A") is None
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+    assert len(spawned) == 1
 
 
 def test_reuse_clears_drift_flag_on_matching_fingerprint(
@@ -686,24 +785,22 @@ def test_server_config_fingerprint_ignores_cli_only_fields():
     assert manager._server_config_fingerprint(cfg) == base
 
 
-def test_sidecar_records_deploy_mode(tmp_path, monkeypatch, runtime_paths):
-    monkeypatch.setattr(
-        manager,
-        "RUNTIME",
-        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
-    )
-    manager._write_workspace_sidecar(
-        workspace_dir=tmp_path / "ws", pid=1, deploy_mode=False
-    )
-    assert json.loads((tmp_path / "ws.json").read_text())["deploy_mode"] is False
-
-
 def test_server_config_fingerprint_ignores_shell_allow_list():
     """shell_allow_list is read only by CLI/channel approval resolvers —
     it never reaches the subprocess, so it must not cause drift."""
     cfg = manager.EvoScientistConfig()
     base = manager._server_config_fingerprint(cfg)
     cfg.shell_allow_list = "git status,ls"
+    assert manager._server_config_fingerprint(cfg) == base
+
+
+def test_server_config_fingerprint_ignores_gateway_backend():
+    """The gateway settings only decide, in the CLI, whether a server is
+    needed; nothing in the server reads them, so they must not cause drift."""
+    cfg = manager.EvoScientistConfig()
+    base = manager._server_config_fingerprint(cfg)
+    cfg.gateway_backend_serve = "langgraph_server"
+    cfg.gateway_backend_tui = "langgraph_server"
     assert manager._server_config_fingerprint(cfg) == base
 
 
