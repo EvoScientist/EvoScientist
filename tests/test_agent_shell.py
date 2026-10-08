@@ -287,46 +287,6 @@ def test_bash_env_inherits_ours_when_none_is_given(fake_bash, monkeypatch):
     launch.cleanup()
 
 
-@pytest.mark.parametrize(
-    ("value", "stray"),
-    [
-        ("/hi", "/hi"),
-        ("/api/v1", "/api/v1"),
-        ("--root=/api", "/api"),
-        ("/", "/"),
-        # Drive paths ($(pwd), ~, $HOME expand to these) and Git Bash's own tree.
-        ("/c/Users/me/x.py", None),
-        ("/d", None),
-        ("/usr/bin/env", None),
-        ("/tmp/x", None),
-        ("/ucrt64/bin/git", None),
-        # Escaped, not a path, or a URL.
-        ("//hi", None),
-        ("hi", None),
-        ("a/b", None),
-        ("https://example.org/a", None),
-        ("--url=https://example.org/a", None),
-    ],
-)
-def test_converted_by_mistake(value, stray):
-    assert agent_shell._converted_by_mistake(value) == stray
-
-
-def test_path_conversion_note_names_each_stray_argument(fake_bash):
-    note = agent_shell.path_conversion_note(
-        'python x.py "/hi" --root=/api "$(pwd)/o" /c/Users/me ~/a //lit "/hi"'
-    )
-    root = fake_bash.bash.parent.parent.as_posix()
-    assert note.startswith("Note: Git Bash passes `/hi`, `/api` to Windows programs")
-    assert f"`/hi` as `{root}/hi`" in note
-    assert "write `//hi` or start the command with `MSYS_NO_PATHCONV=1`" in note
-
-
-def test_path_conversion_note_only_with_git_bash():
-    # conftest pins "no bash": cmd.exe on Windows, /bin/sh elsewhere.
-    assert agent_shell.path_conversion_note('python x.py "/hi"') is None
-
-
 def test_bash_starts_suspended_without_a_console_window(fake_bash, monkeypatch):
     launch = agent_shell.prepare("true", None)
     assert launch.creationflags == 0  # POSIX: no Windows flags
@@ -605,14 +565,6 @@ def test_execute_runs_the_script_and_deletes_it(fake_bash, scripts, tmp_path):
     assert list(scripts.iterdir()) == []
 
 
-def test_execute_output_carries_the_path_conversion_note(fake_bash, tmp_path):
-    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
-    resp = backend.execute('echo "/api/v1"')
-    assert resp.output.startswith("/api/v1\n")
-    assert "Note: Git Bash passes `/api/v1`" in resp.output
-    assert "Note:" not in backend.execute("echo ok").output
-
-
 def test_execute_deletes_the_script_after_a_timeout(fake_bash, scripts, tmp_path):
     backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"), timeout=1)
     resp = backend.execute("sleep 10")
@@ -685,13 +637,15 @@ def test_windows_bash_paths_reach_native_programs_converted(real_bash, tmp_path)
 
 
 @windows_bash
-def test_windows_literal_slash_argument_gets_a_note(real_bash, tmp_path):
+def test_windows_literal_slash_argument_as_the_prompt_says(real_bash, tmp_path):
+    """What the shell guidelines tell the model: a leading `/` reaches a
+    Windows program as a path inside the Git install, unless the command
+    starts with MSYS_NO_PATHCONV=1."""
     backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
-    resp = backend.execute(f'"{_py()}" -c "import sys; print(sys.argv[1])" "/hi"')
+    show = f'"{_py()}" -c "import sys; print(sys.argv[1])" "/hi"'
     converted = (_SYSTEM_GIT / "hi").as_posix()
-    assert resp.output.splitlines()[0].lower() == converted.lower(), resp.output
-    assert "Note: Git Bash passes `/hi`" in resp.output
-    resp = backend.execute(f'"{_py()}" -c "import sys; print(sys.argv[1])" "//hi"')
+    assert backend.execute(show).output.strip().lower() == converted.lower()
+    resp = backend.execute(f"MSYS_NO_PATHCONV=1 {show}")
     assert resp.output.strip() == "/hi", resp.output
 
 

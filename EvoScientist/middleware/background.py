@@ -188,9 +188,6 @@ def _make_run_in_background(
                 f"(code {record.get('returncode')}). "
                 f"Output -> {log_path}."
             )
-        note = agent_shell.path_conversion_note(command)
-        if note is not None:
-            text = f"{text}\n\n{note}"
         return _bg_command(text, [record], runtime)
 
     return run_in_background

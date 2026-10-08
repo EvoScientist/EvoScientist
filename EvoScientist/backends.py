@@ -2159,9 +2159,6 @@ class CustomSandboxBackend(LocalShellBackend):
                     truncated = True
                 if process.returncode != 0:
                     output = f"{output.rstrip()}\n\nExit code: {process.returncode}"
-                note = agent_shell.path_conversion_note(command)
-                if note is not None:
-                    output = f"{output.rstrip()}\n\n{note}"
                 response = ExecuteResponse(
                     output=output,
                     exit_code=process.returncode,

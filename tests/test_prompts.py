@@ -1,5 +1,7 @@
 """Tests for EvoScientist/prompts.py."""
 
+import pytest
+
 from EvoScientist.prompts import (
     DELEGATION_STRATEGY,
     EVOSCIENTIST_IDENTITY,
@@ -193,8 +195,17 @@ class TestBashOnWindowsShellGuidelines:
     def test_sandbox_names_the_shell_without_windows_paths(self):
         result = get_system_prompt(bash_on_windows=True)
         assert "The shell is bash (Git for Windows)." in result
-        assert "C:/" not in result
+        assert "Write Windows paths" not in result
+        assert "C:/Users/you" not in result
         assert "> /output.log" in result
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_both_modes_explain_git_bash_path_conversion(self, dangerous):
+        result = get_system_prompt(dangerous=dangerous, bash_on_windows=True)
+        assert "any other argument starting with `/` arrives as a path" in result
+        assert "start the command with `MSYS_NO_PATHCONV=1`" in result
+        assert "GNU tools (grep, sed, awk, ...) get arguments unchanged" in result
+        assert "MSYS_NO_PATHCONV" not in get_system_prompt(dangerous=dangerous)
 
     def test_dangerous_shows_windows_paths_with_forward_slashes(self):
         result = get_system_prompt(

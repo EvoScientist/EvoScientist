@@ -293,11 +293,22 @@ _SHELL_GUIDELINES_DANGEROUS_FOOTER = """
 
 # Windows with the recorded Git Bash (EvoScientist.agent_shell). The sandbox
 # line leaves out Windows paths: there the agent uses the virtual `/` paths, and
-# the command checks do not confine `C:/...` paths.
-_SHELL_BASH_ON_WINDOWS_SANDBOX = "**Shell**: The shell is bash (Git for Windows)."
+# the command checks do not confine `C:/...` paths. Both explain Git Bash's
+# path conversion, which no switch in Git Bash reports when it happens.
+_SHELL_PATH_CONVERSION = (
+    "When bash starts a Windows program (python, pip, git, ...), it turns "
+    "arguments that look like POSIX paths into Windows paths: `$(pwd)` and `~` "
+    "arrive as `C:/...`, and any other argument starting with `/` arrives as a "
+    "path inside the Git install. Bash builtins and the GNU tools (grep, sed, "
+    "awk, ...) get arguments unchanged. To pass a literal leading `/` to a "
+    "Windows program, start the command with `MSYS_NO_PATHCONV=1`."
+)
+_SHELL_BASH_ON_WINDOWS_SANDBOX = (
+    f"**Shell**: The shell is bash (Git for Windows). {_SHELL_PATH_CONVERSION}"
+)
 _SHELL_BASH_ON_WINDOWS_DANGEROUS = (
     "**Shell**: The shell is bash from Git for Windows. Write Windows paths with "
-    "forward slashes (e.g. `C:/Users/you/Documents/file.txt`)."
+    f"forward slashes (e.g. `C:/Users/you/Documents/file.txt`). {_SHELL_PATH_CONVERSION}"
 )
 
 
