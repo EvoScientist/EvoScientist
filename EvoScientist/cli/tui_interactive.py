@@ -1929,7 +1929,7 @@ def run_textual_interactive(
                     _configurable_extra = (
                         {"active_teams": _active_teams} if _active_teams else None
                     )
-                    async for event in contextlib.aclosing(
+                    async with contextlib.aclosing(
                         iter_with_stream_cancel(
                             graph_gateway.stream_events(
                                 RunRequest(
@@ -1947,7 +1947,8 @@ def run_textual_interactive(
                             ),
                             cancel_scope,
                         )
-                    ):
+                    ) as events:
+                        async for event in events:
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
                             break
