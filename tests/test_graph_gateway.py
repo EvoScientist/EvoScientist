@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import typer
@@ -1428,7 +1428,9 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monke
     )
     assert len(threads.created) == 1
     if resume:
-        respond.assert_awaited_once_with(stream, "abc12345", {"answer": "yes"})
+        respond.assert_awaited_once_with(
+            stream, "abc12345", {"answer": "yes"}, on_run_attempt=ANY
+        )
         assert stream.run.starts == []
     else:
         assert stream.run.starts[0]["input"] == {
