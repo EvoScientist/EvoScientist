@@ -30,6 +30,12 @@ if TYPE_CHECKING:
     from ...paths import Workspace
     from ...tools.skills_manager import SkillInfo
 
+NEW_EXPERT_DISPATCH_HINT = (
+    "Newly installed experts: background dispatch is available "
+    "immediately; in-turn task dispatch needs /new."
+)
+REMOVED_EXPERT_DISPATCH_HINT = "Removed experts stay dispatchable in-turn until /new."
+
 # Dispatchable experts per workspace, keyed by ``Workspace.key``.
 _dispatchable_experts_cache: dict[str, list[SkillInfo]] = {}
 
@@ -245,11 +251,7 @@ class ExpertCommand(Command):
             # works without a rebuild — so the hint scopes the /new boundary
             # to newly installed experts instead of stating it
             # unconditionally.
-            ctx.ui.append_system(
-                "Newly installed experts: background dispatch is available "
-                "immediately; in-turn task dispatch needs /new.",
-                style="dim",
-            )
+            ctx.ui.append_system(NEW_EXPERT_DISPATCH_HINT, style="dim")
         if runtime.active_teams:
             ctx.ui.append_system(
                 f"Active: {', '.join(runtime.active_teams)}", style="dim"
