@@ -260,8 +260,8 @@ def _agent_gitconfig(root: Path, source: str) -> Path | None:
             atomic_write_text(path, text)
     except OSError as exc:
         logger.warning(
-            f"Could not write {path}: {exc}. The agent's git uses PortableGit's "
-            "own settings (CRLF checkouts, credential picker)."
+            f"Could not write {path}: {exc}. The agent's git keeps the recorded "
+            "Git's own settings (core.autocrlf, credential.helper)."
         )
         return None
     return path

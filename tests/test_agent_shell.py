@@ -400,14 +400,20 @@ _SHIPPED_GITCONFIG = (
 )
 
 
+def _placeholder_bash(root: Path) -> Path:
+    """An empty ``bin/bash.exe``: ``prepare()`` only checks that it exists,
+    and these tests never start it, so they run on every OS."""
+    bash = root / "bin" / "bash.exe"
+    bash.parent.mkdir(parents=True, exist_ok=True)
+    bash.write_bytes(b"")
+    return bash
+
+
 @pytest.fixture
 def portablegit(scripts, tmp_path, monkeypatch) -> GitInfo:
-    """A recorded PortableGit (bash is /bin/bash) under a path that needs quoting."""
+    """A recorded PortableGit under a path that needs quoting."""
     from EvoScientist import paths
 
-    bash = shutil.which("bash")
-    if bash is None or sys.platform == "win32":
-        pytest.skip("needs a POSIX bash")
     data = tmp_path / "Jan #1; ąę" / ".evoscientist"
     root = data / "tools" / "git-2.56.0.windows.1"
     (root / "etc").mkdir(parents=True)
@@ -415,7 +421,10 @@ def portablegit(scripts, tmp_path, monkeypatch) -> GitInfo:
     monkeypatch.setattr(paths, "DATA_DIR", data)
     agent_shell._agent_gitconfig.cache_clear()
     info = GitInfo(
-        "portablegit", "2.56.0.windows.1", root / "cmd" / "git.exe", Path(bash)
+        "portablegit",
+        "2.56.0.windows.1",
+        root / "cmd" / "git.exe",
+        _placeholder_bash(root),
     )
     monkeypatch.setattr(agent_shell, "agent_bash", lambda: info)
     yield info
@@ -447,7 +456,9 @@ def test_agent_gitconfig_overrides_the_shipped_settings(portablegit, tmp_path):
     assert _git_config(env, "--get", "core.autocrlf").strip() == "input"
     # The shipped file is included; the empty entry then resets the list, so
     # git asks only `manager`.
-    assert _git_config(env, "--get-all", "credential.helper").splitlines() == [
+    assert _git_config(
+        env, "--system", "--includes", "--get-all", "credential.helper"
+    ).splitlines() == [
         "helper-selector",
         "",
         "manager",
@@ -469,17 +480,16 @@ def test_users_own_system_config_is_kept(portablegit):
 
 @pytest.fixture
 def system_git(scripts, tmp_path, monkeypatch) -> GitInfo:
-    """A recorded system Git for Windows (bash is /bin/bash) whose installer
-    config preselects autocrlf = true and Git Credential Manager."""
-    bash = shutil.which("bash")
-    if bash is None or sys.platform == "win32":
-        pytest.skip("needs a POSIX bash")
+    """A recorded system Git for Windows whose installer config preselects
+    autocrlf = true and Git Credential Manager."""
     root = tmp_path / "Program Files" / "Git"
     (root / "etc").mkdir(parents=True)
     (root / "etc" / "gitconfig").write_text(
         "[core]\n\tautocrlf = true\n[credential]\n\thelper = manager\n"
     )
-    info = GitInfo("system", "2.55.0.windows.3", root / "cmd" / "git.exe", Path(bash))
+    info = GitInfo(
+        "system", "2.55.0.windows.3", root / "cmd" / "git.exe", _placeholder_bash(root)
+    )
     monkeypatch.setattr(agent_shell, "agent_bash", lambda: info)
     return info
 
@@ -500,20 +510,21 @@ def test_system_git_config_resolves(system_git):
     launch.cleanup()
     env = {**os.environ, **launch.env}
     assert _git_config(env, "--get", "core.autocrlf").strip() == "input"
-    assert _git_config(env, "--get-all", "credential.helper").splitlines() == [
-        "manager"
-    ]
+    assert _git_config(
+        env, "--system", "--includes", "--get-all", "credential.helper"
+    ).splitlines() == ["manager"]
 
 
 def test_agent_gitconfig_follows_the_record(system_git, portablegit):
     """Written at every start from the record: a later PortableGit replaces
-    the system Git's include and adds the helper lines."""
-    first = agent_shell._agent_gitconfig_text(system_git.git.parent.parent, "system")
-    second = agent_shell._agent_gitconfig_text(
-        portablegit.git.parent.parent, "portablegit"
-    )
-    assert first != second
-    assert "helper = manager" in second
+    the system Git's include and adds the helper lines in the existing file."""
+    first = agent_shell._agent_gitconfig(system_git.git.parent.parent, "system")
+    agent_shell._agent_gitconfig.cache_clear()
+    root = portablegit.git.parent.parent
+    second = agent_shell._agent_gitconfig(root, "portablegit")
+    assert second == first
+    text = second.read_text(encoding="utf-8")
+    assert text == agent_shell._agent_gitconfig_text(root, "portablegit")
 
 
 def test_unwritable_agent_gitconfig_is_skipped_with_a_warning(
