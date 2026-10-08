@@ -941,6 +941,7 @@ def _get_default_middleware(
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
         ModelFallbackMiddleware,
+        SkillPinMiddleware,
         SkillsReloadMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
@@ -1104,8 +1105,9 @@ def _get_default_middleware(
         )
 
     # Main agent only: sync sub-agents never inherit skills_metadata, so each
-    # task call rescans anyway.
+    # task call rescans anyway; /skill-name input only comes from the user.
     if not for_async_subagent:
+        mw.append(SkillPinMiddleware())
         mw.append(SkillsReloadMiddleware())
 
     # SummarizationMiddleware with per-run context limits (#466): deepagents

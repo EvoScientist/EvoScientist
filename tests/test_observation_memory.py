@@ -3794,3 +3794,29 @@ class TestObservationCache:
         assert all(count > 0 for count in iterations), (
             f"every worker must make progress, got iterations={iterations}"
         )
+
+
+def test_turn_compaction_starts_at_the_user_message_not_a_pinned_skill():
+    messages = [
+        HumanMessage("/alpha draft the intro"),
+        HumanMessage(
+            '<skill name="alpha" path="/skills/alpha/SKILL.md">\nSECRET BODY\n</skill>',
+            additional_kwargs={
+                "lc_source": "pinned_skill",
+                "skill": {"name": "alpha", "path": "/skills/alpha/SKILL.md"},
+            },
+        ),
+        AIMessage("intro drafted", name="EvoScientist"),
+    ]
+
+    compact = source_context._compact_turn_messages(
+        messages,
+        source_agent="EvoScientist",
+    )
+
+    assert compact == [
+        {"role": "human", "content": "/alpha draft the intro"},
+        {"role": "human", "content": "[pinned skill: alpha]"},
+        {"role": "ai", "content": "intro drafted", "name": "EvoScientist"},
+    ]
+    assert "SECRET BODY" not in str(compact)
