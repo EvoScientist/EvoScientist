@@ -107,16 +107,16 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
-def _agent_python_notices() -> list[str]:
-    """The missing-python hint and the server-python warning, when they apply.
+def _agent_shell_notices() -> list[str]:
+    """The agent shell's setup hint and the server drift warning, when they apply.
 
     Both also go to the terminal or the log, which Textual hides while the
     app runs, so the TUI shows them as notifications.
     """
+    from ..agent_shell import setup_hint
     from ..langgraph_dev import manager as lg_manager
-    from ..setup.research_env import missing_python_hint
 
-    notices = [missing_python_hint(), lg_manager.AGENT_PYTHON_DRIFT]
+    notices = [setup_hint(), lg_manager.AGENT_SHELL_DRIFT]
     return [n for n in notices if n is not None]
 
 
@@ -1114,7 +1114,7 @@ def run_textual_interactive(
                 self._check_for_updates, exclusive=True, group="update-check"
             )
             self.run_worker(
-                self._check_agent_python, exclusive=True, group="agent-python"
+                self._check_agent_shell, exclusive=True, group="agent-shell"
             )
 
             # Auto-start channels — needs the agent, so defer to after load
@@ -1163,15 +1163,15 @@ def run_textual_interactive(
             except Exception:
                 _channel_logger.debug("Background update check failed", exc_info=True)
 
-        async def _check_agent_python(self) -> None:
-            """Notify the notices from :func:`_agent_python_notices`."""
+        async def _check_agent_shell(self) -> None:
+            """Notify the notices from :func:`_agent_shell_notices`."""
             try:
-                notices = await asyncio.to_thread(_agent_python_notices)
+                notices = await asyncio.to_thread(_agent_shell_notices)
                 for message in notices:
                     # Paths may contain "[", which markup would eat.
                     self.notify(message, severity="warning", timeout=20, markup=False)
             except Exception:
-                _channel_logger.debug("Agent python check failed", exc_info=True)
+                _channel_logger.debug("Agent shell check failed", exc_info=True)
 
         # ── Channel integration ────────────────────────────────
 

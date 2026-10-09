@@ -33,7 +33,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from .. import background
+from .. import agent_shell, background
 from ..backends import is_hitl_suppressed, prepare_sandbox_command
 
 
@@ -159,7 +159,10 @@ def _make_run_in_background(
         if error:
             return error
         tid = _origin_thread_id(runtime)
-        process_id = background.launch(command, cwd, name, origin_thread_id=tid)
+        try:
+            process_id = background.launch(command, cwd, name, origin_thread_id=tid)
+        except agent_shell.BashMissingError as exc:
+            return str(exc)
         label = f" (name={name!r})" if name else ""
         # In dangerous mode `/` is the real root, so advertise the real log path;
         # in virtual mode `/.bg_processes/...` correctly maps to the workspace.

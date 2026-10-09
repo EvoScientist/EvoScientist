@@ -68,6 +68,8 @@ _PATH_PATTERNS = [
 # Destructive patterns: catastrophic regardless of mode — always enforced.
 _DESTRUCTIVE_PATTERNS = [
     r"\brm\s+-rf\s+/",  # rm -rf with absolute path
+    # The same with a Windows drive path, which Git Bash's rm accepts.
+    r"\brm\s+-rf\s+['\"]?[A-Za-z]:[\\/]",
 ]
 
 # Dangerous commands that should never be executed
@@ -89,6 +91,13 @@ _PROCESS_DRAIN_GRACE_SECONDS = 1.0
 
 def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
     """Force-stop a shell and its descendants without waiting for reaping."""
+    from . import agent_shell
+
+    # Git Bash on Windows runs in a job object: stop all of it, including MSYS
+    # programs whose parent bash has exited. A job handle cannot be reused, so
+    # this also works after the shell itself has exited.
+    if agent_shell.terminate_job(process):
+        return
     # A completed Popen has already reaped its PID, which the OS may reuse.
     # Inspect the recorded state rather than calling poll(): an exited but
     # unreaped shell can still have live descendants in its process group.
@@ -99,11 +108,13 @@ def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
         if os.name == "nt":
             # CREATE_NEW_PROCESS_GROUP alone does not make terminate() recursive.
             # taskkill is the native way to stop the complete descendant tree.
+            # No window: the parent may have no console (desktop app).
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 check=False,
                 capture_output=True,
                 timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
         else:
             os.killpg(process.pid, signal.SIGKILL)
@@ -1094,17 +1105,24 @@ def _cmd_quote(s: str) -> str:
 
 
 def _platform_quote(s: str) -> str:
-    """Quote *s* for the host's default shell.
+    """Quote *s* for the agent's shell.
 
     On POSIX, delegates to :func:`shlex.quote` (single-quote wrapping).
-    On Windows, uses double-quote wrapping compatible with cmd.exe —
-    see :func:`_cmd_quote`. The platform check is read at call time, so
-    tests can swap it via ``monkeypatch.setattr(backends, "_is_windows", ...)``
-    without mutating :mod:`sys` module state.
+    On Windows with the recorded Git Bash (:mod:`EvoScientist.agent_shell`),
+    :func:`shlex.quote` of the path with forward slashes (``C:/Users/...``),
+    which bash and native programs both accept. On Windows without it,
+    double-quote wrapping compatible with cmd.exe — see :func:`_cmd_quote`.
+    The platform check is read at call time, so tests can swap it via
+    ``monkeypatch.setattr(backends, "_is_windows", ...)`` without mutating
+    :mod:`sys` module state.
     """
-    if _is_windows():
-        return _cmd_quote(s)
-    return shlex.quote(s)
+    if not _is_windows():
+        return shlex.quote(s)
+    from . import agent_shell
+
+    if agent_shell.uses_bash():
+        return shlex.quote(s.replace("\\", "/"))
+    return _cmd_quote(s)
 
 
 def _resolve_virtual_mount_path(
@@ -2030,27 +2048,35 @@ class CustomSandboxBackend(LocalShellBackend):
                 truncated=False,
             )
 
+        from . import agent_shell
+
         process: subprocess.Popen[str] | None = None
         termination_reason: str | None = None
         output_abandoned = False
+        launch: agent_shell.ShellLaunch | None = None
         try:
+            launch = agent_shell.prepare(command, self._env)
             process_options: dict[str, object] = {}
             if os.name == "nt":
-                process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                process_options["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | launch.creationflags
+                )
             else:
                 process_options["start_new_session"] = True
 
             process = subprocess.Popen(
-                command,
-                shell=True,
+                launch.args,
+                shell=launch.shell,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
                 text=True,
-                env=self._env,
+                env=launch.env,
                 cwd=str(self.cwd),
+                **launch.text_options,
                 **process_options,
             )
+            launch.started(process)
             _register_shell_process(cancel_event, process)
             deadline = time.monotonic() + effective_timeout
             drain_deadline: float | None = None
@@ -2138,6 +2164,8 @@ class CustomSandboxBackend(LocalShellBackend):
                     exit_code=process.returncode,
                     truncated=truncated,
                 )
+        except agent_shell.BashMissingError as exc:
+            response = ExecuteResponse(output=str(exc), exit_code=1, truncated=False)
         except Exception as exc:
             if process is not None:
                 _terminate_process_tree(process)
@@ -2149,6 +2177,10 @@ class CustomSandboxBackend(LocalShellBackend):
         finally:
             if process is not None:
                 _unregister_shell_process(cancel_event, process)
+            # The shell has exited or been stopped: its script can go, even if
+            # a detached descendant still holds the pipes.
+            if launch is not None:
+                launch.cleanup()
 
         # Enhance timeout errors with actionable recovery guidance
         if response.exit_code == 124:

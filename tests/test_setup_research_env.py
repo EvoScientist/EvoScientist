@@ -12,21 +12,25 @@ from pathlib import Path
 
 import pytest
 
+from EvoScientist import agent_shell
 from EvoScientist.setup import research_env as re_env
 from EvoScientist.setup.protocol import StageError
 
 # Captured at import, before conftest's autouse stub replaces them per test.
 _REAL_AGENT_PYTHON = re_env._agent_python
-_REAL_LOG_MISSING_PYTHON_HINT = re_env._log_missing_python_hint
+_REAL_LOG_SETUP_HINT = agent_shell.log_setup_hint
 
 
 @pytest.fixture(autouse=True)
 def _real_agent_python_decision(monkeypatch):
-    """This module tests the decision itself; undo conftest's stub."""
+    """This module tests the decision itself; undo conftest's stub.
+
+    The setup hint stays python-only on every OS here (conftest); the Git Bash
+    part is tested in ``tests/test_agent_shell.py``.
+    """
     monkeypatch.setattr(re_env, "_agent_python", _REAL_AGENT_PYTHON)
-    monkeypatch.setattr(
-        re_env, "_log_missing_python_hint", _REAL_LOG_MISSING_PYTHON_HINT
-    )
+    monkeypatch.setattr(agent_shell, "log_setup_hint", _REAL_LOG_SETUP_HINT)
+    _REAL_LOG_SETUP_HINT.cache_clear()
 
 
 class FakeRunner:
@@ -192,7 +196,7 @@ def _same_path(found: str | None, exe: Path) -> bool:
 def _forget_decision() -> None:
     """Start the once-per-process decision and hint over."""
     re_env._agent_python.cache_clear()
-    re_env._log_missing_python_hint.cache_clear()
+    agent_shell.log_setup_hint.cache_clear()
 
 
 def _fake_python(directory: Path) -> Path:
@@ -377,6 +381,26 @@ def test_system_python_probe_runs_on_python_3():
     ]
 
 
+def test_run_opens_no_console_window(monkeypatch):
+    """The probes also run when an agent is built; from a process without a
+    console (the desktop app) each would flash a console window."""
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "")
+
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(re_env.subprocess, "run", fake_run)
+    re_env._run(["python", "-c", "pass"], 5)
+    assert seen["creationflags"] == 0x08000000
+
+
+def test_run_works_for_real():
+    result = re_env._run([sys.executable, "-c", "print('ok')"], 30)
+    assert result.stdout.strip() == "ok"
+
+
 @pytest.mark.parametrize(("in_venv", "flag"), [(False, "1"), (True, "0")])
 def test_system_python_probe_flags_an_externally_managed_python(
     monkeypatch, tmp_path, capsys, in_venv, flag
@@ -485,7 +509,7 @@ def test_broken_own_environment_first_on_path_gives_the_hint(env, monkeypatch):
     _own_env_before_a_system_python(env, monkeypatch)
     env["run"].env_starts = False
     assert re_env.research_env_overrides() is None
-    assert re_env.missing_python_hint() == re_env.MISSING_PYTHON_HINT
+    assert agent_shell.setup_hint() == re_env.MISSING_PYTHON_HINT
 
 
 # --------------------------------------------------------------------------- #
@@ -1005,7 +1029,7 @@ def test_ready_environment_whose_python_does_not_start_is_not_injected(env):
     env["run"].env_starts = False
     _forget_decision()
     assert re_env.research_env_overrides() is None
-    assert re_env.missing_python_hint() == re_env.MISSING_PYTHON_HINT
+    assert agent_shell.setup_hint() == re_env.MISSING_PYTHON_HINT
 
 
 def test_overrides_prepend_the_environment_and_follow_path(env, monkeypatch):
@@ -1058,18 +1082,18 @@ def test_decision_is_logged_once_with_a_setup_hint(env, caplog):
         (None, "/usr/bin/python", False),
     ],
 )
-def test_server_missing_python_hint(monkeypatch, sidecar, own, shown):
+def test_server_setup_hint_for_python(monkeypatch, sidecar, own, shown):
     monkeypatch.setattr(re_env, "agent_python", lambda: own)
-    assert (re_env.server_missing_python_hint(sidecar) is not None) is shown
+    assert (agent_shell.server_setup_hint(sidecar) is not None) is shown
 
 
-def test_missing_python_hint_is_returned_but_not_logged(env, caplog):
-    with caplog.at_level(logging.INFO, logger=re_env.__name__):
-        assert re_env.missing_python_hint() == re_env.MISSING_PYTHON_HINT
+def test_setup_hint_is_returned_but_not_logged(env, caplog):
+    with caplog.at_level(logging.INFO):
+        assert agent_shell.setup_hint() == re_env.MISSING_PYTHON_HINT
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
     re_env.ensure_research_env("default")
     _forget_decision()
-    assert re_env.missing_python_hint() is None
+    assert agent_shell.setup_hint() is None
 
 
 @pytest.mark.parametrize(

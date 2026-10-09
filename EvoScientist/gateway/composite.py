@@ -28,10 +28,10 @@ Routing table (read = local, execute = langgraph server):
   server thread created but not yet run, until its first run writes a checkpoint;
   the execution surfaces go create -> stream without resolving in between, so this
   is unreachable on the current paths.)
-- Live state: ``get_state_values`` routes UUIDs to the server with NO local
-  fallback (local ``get_state_values`` needs a local graph the server-execute
-  caller does not supply); it reflects the run's live ``next`` / interrupts, which
-  only the executor holds. Legacy ids read local.
+- Live state: ``get_state_values`` and ``get_state_snapshot`` route UUIDs to the
+  server with NO local fallback (the local versions need a local graph the
+  server-execute caller does not supply); they reflect the run's live ``next`` /
+  interrupts, which only the executor holds. Legacy ids read local.
 - Execution: ``create_thread`` goes to the server (it mints the id, so there is
   no id to guard); ``stream_events`` / ``update_state_values`` / ``clone_thread``
   go to the server guarded on a UUID id; ``get_run_status`` / ``get_process_status``
@@ -159,6 +159,18 @@ class CompositeGraphGateway:
             return await self._execute.get_state_values(target, thread_id)
         return await self._read.get_state_values(target, thread_id)
 
+    async def get_state_snapshot(
+        self,
+        target: GraphTarget,
+        thread_id: str,
+    ) -> Any:
+        # Same routing as get_state_values: HITL close reads ``next`` / tasks /
+        # interrupts and then writes through the server, so the snapshot must
+        # come from the executor too.
+        if _is_uuid(thread_id):
+            return await self._execute.get_state_snapshot(target, thread_id)
+        return await self._read.get_state_snapshot(target, thread_id)
+
     async def thread_exists(
         self,
         thread_id: str,
@@ -239,11 +251,15 @@ class CompositeGraphGateway:
         self,
         target: GraphTarget,
         thread_id: str,
-        values: GraphStateValues,
+        values: GraphStateValues | None,
+        *,
+        as_node: str | None = None,
     ) -> None:
         if not _is_uuid(thread_id):
             raise LegacyThreadServerExecutionError(thread_id)
-        await self._execute.update_state_values(target, thread_id, values)
+        await self._execute.update_state_values(
+            target, thread_id, values, as_node=as_node
+        )
 
     async def get_run_status(
         self,

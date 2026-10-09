@@ -254,9 +254,9 @@ def deploy(
     # server log; show it here.
     from rich.markup import escape
 
-    from ..setup.research_env import missing_python_hint
+    from ..agent_shell import setup_hint
 
-    hint = missing_python_hint()
+    hint = setup_hint()
     if hint is not None:
         console.print(f"[yellow]⚠ {escape(hint)}[/yellow]")
 

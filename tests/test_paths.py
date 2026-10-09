@@ -211,6 +211,12 @@ class TestSessionDirsFromStored:
     def test_unreadable_value_reads_as_nothing_stored(self):
         assert SessionDirs.from_stored("/tmp/evil\x00x") is None
 
+    def test_non_string_value_reads_as_nothing_stored(self, tmp_path):
+        """Metadata is caller-supplied JSON, so a folder can be stored as a
+        number or a list; one bad row must not break listing the rest."""
+        assert SessionDirs.from_stored(123) is None
+        assert SessionDirs.from_stored(str(tmp_path), ["runs", "x"]) is None
+
 
 class TestSessionDirsFromLegacy:
     def test_generated_run_folder_is_split_into_workspace_and_run_dir(self, tmp_path):

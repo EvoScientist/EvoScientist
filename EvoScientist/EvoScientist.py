@@ -28,6 +28,7 @@ from langchain.agents.middleware import (
 )
 
 from . import paths as _paths_mod
+from .agent_shell import uses_bash
 from .config import (
     MemoryControls,
     MemoryObservationTarget,
@@ -312,6 +313,7 @@ def _configured_system_prompt(cfg, work_dir: str | Path) -> str:
     return get_system_prompt(
         dangerous=cfg.dangerous_mode,
         cwd=real_cwd,
+        bash_on_windows=uses_bash(),
     )
 
 

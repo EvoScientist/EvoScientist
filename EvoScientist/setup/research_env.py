@@ -162,7 +162,12 @@ def is_ready(env: Path | None = None) -> bool:
 # Subprocesses
 # --------------------------------------------------------------------------- #
 def _run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
-    """Run ``cmd`` capturing combined output. Raises OSError / SubprocessError."""
+    """Run ``cmd`` capturing combined output. Raises OSError / SubprocessError.
+
+    No console window on Windows: the python probes also run when an agent is
+    built, and a process without a console (the desktop app) would otherwise
+    flash one for every probe.
+    """
     return subprocess.run(
         list(cmd),
         stdout=subprocess.PIPE,
@@ -171,6 +176,7 @@ def _run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]
         text=True,
         errors="replace",
         timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
 
 
@@ -683,43 +689,12 @@ def _agent_python() -> tuple[str | None, Path | None]:
     return None, None
 
 
+# Shown through ``agent_shell.setup_hint``, which joins it with the Git Bash
+# hint on Windows.
 MISSING_PYTHON_HINT = (
     "The agent's shell has no usable `python`. Run `EvoSci setup`, then restart "
     f"EvoScientist, to give it a Python with {', '.join(PACKAGES)}."
 )
-
-
-def missing_python_hint() -> str | None:
-    """The setup hint when the agent's shell has no ``python``, else None.
-
-    For callers that show it themselves (the TUI, the WebUI launcher,
-    ``EvoSci deploy``); it is not logged here.
-    """
-    return MISSING_PYTHON_HINT if agent_python() is None else None
-
-
-def server_missing_python_hint(sidecar: dict | None) -> str | None:
-    """The setup hint for the agents of a server this process reuses.
-
-    Those agents got the ``python`` recorded in the server's sidecar: None
-    when it records one, else :func:`missing_python_hint`. When the server
-    recorded none but this session has a python, ``EvoSci setup`` and a
-    restart would not help; :func:`python_drift_message` names the fix.
-    Without a reused server, or without a record (a server started by an
-    older version), this is :func:`missing_python_hint` too.
-    """
-    if sidecar is not None and sidecar.get(SIDECAR_KEY) is not None:
-        return None
-    return missing_python_hint()
-
-
-@functools.cache
-def _log_missing_python_hint() -> None:
-    """Log the hint once per process where the agent is built, so the Rich
-    CLI, ``-p`` and ``EvoSci serve`` show it."""
-    hint = missing_python_hint()
-    if hint is not None:
-        logger.warning(hint)
 
 
 def research_env_overrides() -> dict[str, str] | None:
@@ -728,9 +703,12 @@ def research_env_overrides() -> dict[str, str] | None:
     None when a usable ``python`` is on PATH or the environment is not ready.
     ``PATH`` is built from the current ``os.environ`` on every call, so changes
     made after the decision (e.g. the private Node from ``activate_runtime``)
-    are kept.
+    are kept. Called where the agent is built, so it also logs the setup hint
+    for the agent's shell once (:func:`~EvoScientist.agent_shell.log_setup_hint`).
     """
-    _log_missing_python_hint()
+    from ..agent_shell import log_setup_hint
+
+    log_setup_hint()
     _python, env = _agent_python()
     if env is None:
         return None

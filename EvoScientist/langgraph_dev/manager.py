@@ -140,9 +140,9 @@ _LOCK = threading.RLock()
 CONFIG_DRIFT_SINCE_LAUNCH = False
 
 # Set by ``ensure_langgraph_dev`` to the warning text when it reuses a server
-# whose agents got another ``python`` than this session resolves (see
-# ``research_env.python_drift_message``). The CLI prints it after startup.
-AGENT_PYTHON_DRIFT: str | None = None
+# whose agents got another ``python`` or shell than this session resolves (see
+# ``agent_shell.shell_drift_message``). The CLI prints it after startup.
+AGENT_SHELL_DRIFT: str | None = None
 
 # Set by ``ensure_langgraph_dev``: the workspace root the server it started or
 # reused is known to serve (this process started it, or its sidecar names that
@@ -275,6 +275,7 @@ def _write_workspace_sidecar(
     pid: int,
     config_fingerprint: str | None = None,
     agent_python: str | object | None = _NOT_RECORDED,
+    agent_bash: str | object | None = _NOT_RECORDED,
     run_dir: Path | None = None,
 ) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
@@ -286,7 +287,9 @@ def _write_workspace_sidecar(
     the server consumed; keepalive reuse compares it to detect drift.
     ``agent_python`` (optional) is the ``python`` the server's agents got,
     None when they have none; reuse compares it to warn about a session whose
-    PATH resolves another one.
+    PATH resolves another one. ``agent_bash`` (optional) is the Git Bash
+    their commands run in, None for cmd.exe or a POSIX shell; compared the
+    same way.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -311,6 +314,10 @@ def _write_workspace_sidecar(
             from EvoScientist.setup.research_env import SIDECAR_KEY
 
             payload[SIDECAR_KEY] = agent_python
+        if agent_bash is not _NOT_RECORDED:
+            from EvoScientist.agent_shell import SIDECAR_KEY as BASH_KEY
+
+            payload[BASH_KEY] = agent_bash
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(tmp, RUNTIME.workspace_sidecar)
     except OSError as exc:
@@ -1128,15 +1135,17 @@ def start_langgraph_dev(
         except Exception:
             pass
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
+    from EvoScientist.agent_shell import sidecar_bash
     from EvoScientist.setup.research_env import agent_python
 
     _write_workspace_sidecar(
         workspace_dir=workspace_dir,
         pid=proc.pid,
         config_fingerprint=config_fingerprint,
-        # The server inherits this process's environment, so it resolves the
-        # same python.
+        # The server inherits this process's environment and data dir, so it
+        # resolves the same python and reads the same Git Bash record.
         agent_python=agent_python(),
+        agent_bash=sidecar_bash(),
         run_dir=run_dir,
     )
     global _PROCESS_WORKSPACE, _PROCESS_RUN_DIR
@@ -1383,10 +1392,10 @@ def ensure_langgraph_dev(
     still chat with sync sub-agents; only async sub-agent calls and EvoMemory
     background workers will fail.
     """
-    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
+    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT
     global SERVED_WORKSPACE
     CONFIG_DRIFT_SINCE_LAUNCH = False
-    AGENT_PYTHON_DRIFT = None
+    AGENT_SHELL_DRIFT = None
     SERVED_WORKSPACE = None
 
     if not needs_langgraph_dev(config, backend=backend):
@@ -1430,7 +1439,7 @@ def _ensure_langgraph_dev_locked(
     run_dir: Path | str | None = None,
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
-    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_PYTHON_DRIFT
+    global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT
     global SERVED_WORKSPACE
     config_fp = _server_config_fingerprint(config)
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
@@ -1511,13 +1520,13 @@ def _ensure_langgraph_dev_locked(
                         "settings or version until it is restarted "
                         "(EvoSci server stop)."
                     )
-                from EvoScientist.setup.research_env import python_drift_message
+                from EvoScientist.agent_shell import shell_drift_message
 
-                AGENT_PYTHON_DRIFT = python_drift_message(sidecar)
-                if AGENT_PYTHON_DRIFT is not None:
+                AGENT_SHELL_DRIFT = shell_drift_message(sidecar)
+                if AGENT_SHELL_DRIFT is not None:
                     # INFO: the CLI prints it after startup and the TUI shows
                     # it in the app; a WARNING here would print it twice.
-                    logger.info(AGENT_PYTHON_DRIFT)
+                    logger.info(AGENT_SHELL_DRIFT)
                 if requested is not None:
                     logger.info(
                         "Reusing externally-managed langgraph dev on %s; sidecar "

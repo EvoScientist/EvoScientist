@@ -373,8 +373,8 @@ class WebUILauncher:
         failed CLI launch (``atexit`` not yet registered) or a caller that
         stops mid-boot would orphan the backend holding the port.
         """
+        from ..agent_shell import server_setup_hint
         from ..langgraph_dev.manager import _is_port_occupied, _read_workspace_sidecar
-        from ..setup.research_env import server_missing_python_hint
 
         self._runner.preflight(self._cfg)
 
@@ -385,7 +385,7 @@ class WebUILauncher:
             # the server log; the launching process shows it, for the server
             # it reuses or the one it starts.
             reused = _read_workspace_sidecar() if decision.action == "reuse" else None
-            hint = server_missing_python_hint(reused)
+            hint = server_setup_hint(reused)
             if hint is not None:
                 self._warnings.append(hint)
             if decision.action == "start":
@@ -671,9 +671,9 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
             "launched — it still serves the old settings or version. Apply them with "
             "'EvoSci server stop', then re-run EvoSci."
         )
-    from ..setup.research_env import python_drift_message
+    from ..agent_shell import shell_drift_message
 
-    drift = python_drift_message(sidecar)
+    drift = shell_drift_message(sidecar)
     if drift is not None:
         warnings.append(drift)
     return _BackendDecision(action="reuse", warnings=warnings)

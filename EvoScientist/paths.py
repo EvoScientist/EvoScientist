@@ -131,7 +131,7 @@ class SessionDirs:
             return None
         try:
             dirs = cls(Workspace(workspace_dir), Path(run_dir) if run_dir else None)
-        except (ValueError, OSError, RuntimeError):
+        except (TypeError, ValueError, OSError, RuntimeError):
             return None
         if dirs.run_dir is not None and not dirs.run_dir.is_relative_to(
             dirs.workspace.root
