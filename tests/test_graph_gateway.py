@@ -935,6 +935,11 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert isinstance(created_metadata["updated_at"], str)
     assert threads.metadata_updates == [("abc12345", threads.created[0]["metadata"])]
     assert threads.stream_calls == [("abc12345", "writing-agent")]
+    run_request_id = stream.run.starts[0]["metadata"].get(
+        "_evoscientist_gateway_request_id"
+    )
+    assert isinstance(run_request_id, str)
+    assert run_request_id
     assert stream.run.starts == [
         {
             "input": {"messages": [{"role": "user", "content": "hi"}]},
@@ -947,7 +952,10 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
                 },
                 "recursion_limit": 4242,
             },
-            "metadata": {"workspace_dir": "/tmp/ws"},
+            "metadata": {
+                "workspace_dir": "/tmp/ws",
+                "_evoscientist_gateway_request_id": run_request_id,
+            },
         }
     ]
     assert events == [
@@ -1011,6 +1019,11 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
     with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
         events = await _collect()
 
+    run_request_id = stream.run.starts[0]["metadata"].get(
+        "_evoscientist_gateway_request_id"
+    )
+    assert isinstance(run_request_id, str)
+    assert run_request_id
     assert stream.run.starts == [
         {
             "input": {"messages": [{"role": "user", "content": "hi"}]},
@@ -1025,7 +1038,7 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
                 },
                 "recursion_limit": 4242,
             },
-            "metadata": None,
+            "metadata": {"_evoscientist_gateway_request_id": run_request_id},
         }
     ]
     assert events == [
@@ -2355,7 +2368,7 @@ async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
     )
 
 
-async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
+async def test_langgraph_server_gateway_cancels_only_its_run_on_consumer_abort():
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[
@@ -2383,7 +2396,10 @@ async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
     class _FakeRunsClient:
         async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
             if status == "running":
-                return [{"run_id": "run-active", "status": "running"}]
+                return [
+                    {"run_id": "run-1", "status": "running"},
+                    {"run_id": "other-run", "status": "running"},
+                ]
             return []
 
         async def cancel_many(self, *, thread_id: str, run_ids):
@@ -2399,7 +2415,99 @@ async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
     await gen.__anext__()
     await gen.aclose()
 
-    assert cancel_calls == [("abc12345", ["run-active"])]
+    assert cancel_calls == [("abc12345", ["run-1"])]
+
+
+async def test_server_gateway_failure_does_not_cancel_or_repair_another_run():
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            raise RuntimeError("subscription failed")
+            yield  # pragma: no cover
+
+    stream = _FailingStream("abc12345")
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}, "next": ("slow",)}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "running":
+                return [{"run_id": "other-run", "status": "running"}]
+            if status == "pending":
+                return [{"run_id": "run-1", "status": "pending"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    with pytest.raises(RuntimeError, match="subscription failed"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert cancel_calls == [("abc12345", ["run-1"])]
+    assert threads.state_updates == []
+
+
+async def test_server_gateway_recovers_run_accepted_before_start_timeout():
+    stream = FakeLangGraphThreadStream("abc12345")
+
+    async def _accepted_then_timeout(**kwargs):
+        stream.run.starts.append(kwargs)
+        raise TimeoutError("run.start response timed out")
+
+    stream.run.start = _accepted_then_timeout
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[tuple[str, list[str]]] = []
+    cancelled = False
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if cancelled or status != "running":
+                return []
+            return [
+                {
+                    "run_id": "accepted-run",
+                    "status": "running",
+                    "metadata": stream.run.starts[0]["metadata"],
+                },
+                {
+                    "run_id": "other-run",
+                    "status": "success",
+                    "metadata": {},
+                },
+            ]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            nonlocal cancelled
+            cancel_calls.append((thread_id, list(run_ids)))
+            cancelled = True
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    with pytest.raises(TimeoutError, match=r"run\.start response timed out"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert cancel_calls == [("abc12345", ["accepted-run"])]
+    metadata = stream.run.starts[0]["metadata"]
+    assert metadata["_evoscientist_gateway_request_id"]
 
 
 async def test_langgraph_server_gateway_does_not_cancel_on_normal_completion():

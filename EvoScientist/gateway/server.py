@@ -56,6 +56,9 @@ _RUN_SUBSCRIBE_CHANNELS = [
     "input",
     "custom",
 ]
+_RUN_REQUEST_ID_METADATA_KEY = "_evoscientist_gateway_request_id"
+_RUN_LOOKUP_PAGE_SIZE = 100
+_ACTIVE_RUN_STATUSES = ("pending", "running")
 
 
 def _thread_metadata(thread: Thread) -> dict[str, Any]:
@@ -695,7 +698,8 @@ class LangGraphServerGateway:
         request: RunRequest,
         *,
         thread_ready: bool = False,
-    ) -> None:
+        run_metadata: Mapping[str, object] | None = None,
+    ) -> str | None:
         config = self._resolve_run_config(
             request.thread_id, request.configurable_extra, target=request.target
         )
@@ -731,10 +735,9 @@ class LangGraphServerGateway:
                 # primitive that would carry config on a resume is
                 # run.start with Command(resume=...); switching to it needs
                 # live-server verification first.
-                await self._respond_to_interrupt(
+                return await self._respond_to_interrupt(
                     stream, request.thread_id, request.message.resume
                 )
-                return
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
             )
@@ -743,18 +746,20 @@ class LangGraphServerGateway:
             request.message,
             media=request.media,
         )
-        await stream.run.start(
+        result = await stream.run.start(
             input=run_input,
             config=config,
-            metadata=request.metadata,
+            metadata=dict(run_metadata) if run_metadata is not None else None,
         )
+        run_id = result.get("run_id") if isinstance(result, Mapping) else None
+        return str(run_id) if run_id else None
 
     async def _respond_to_interrupt(
         self,
         stream: AsyncThreadStream,
         thread_id: str,
         response: object,
-    ) -> None:
+    ) -> str | None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
         while not stream.interrupts and loop.time() < deadline:
@@ -781,8 +786,13 @@ class LangGraphServerGateway:
                     str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
                 }
                 if str(key) in ids:
-                    await stream.run.respond(response[key], interrupt_id=str(key))
-                    return
+                    result = await stream.run.respond(
+                        response[key], interrupt_id=str(key)
+                    )
+                    run_id = (
+                        result.get("run_id") if isinstance(result, Mapping) else None
+                    )
+                    return str(run_id) if run_id else None
             raise RuntimeError(
                 f"Thread {thread_id} has {len(interrupts)} pending interrupts; "
                 "resume requires an id-keyed payload matching one of them"
@@ -827,7 +837,99 @@ class LangGraphServerGateway:
                 interrupt_id,
                 thread_id,
             )
-        await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
+        result = await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
+        run_id = result.get("run_id") if isinstance(result, Mapping) else None
+        return str(run_id) if run_id else None
+
+    async def _find_active_run_for_request(
+        self,
+        thread_id: str,
+        request_id: str,
+    ) -> str | None:
+        """Recover a run accepted before ``run.start`` lost its response."""
+        try:
+            for status in _ACTIVE_RUN_STATUSES:
+                offset = 0
+                while True:
+                    page = await self.thread_store.client.runs.list(
+                        thread_id,
+                        limit=_RUN_LOOKUP_PAGE_SIZE,
+                        offset=offset,
+                        status=status,
+                    )
+                    for run in page:
+                        metadata = run.get("metadata")
+                        if (
+                            isinstance(metadata, Mapping)
+                            and metadata.get(_RUN_REQUEST_ID_METADATA_KEY) == request_id
+                        ):
+                            run_id = run.get("run_id")
+                            return str(run_id) if run_id else None
+                    if len(page) < _RUN_LOOKUP_PAGE_SIZE:
+                        break
+                    offset += _RUN_LOOKUP_PAGE_SIZE
+        except Exception:
+            logger.warning(
+                "Failed to recover incomplete run on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+        return None
+
+    async def _cancel_incomplete_run(
+        self,
+        thread_id: str,
+        run_id: str | None,
+        request_id: str | None,
+    ) -> str | None:
+        """Cancel only the run owned by this request, never its neighbours."""
+        resolved_run_id = run_id
+        if resolved_run_id is None and request_id is not None:
+            resolved_run_id = await self._find_active_run_for_request(
+                thread_id, request_id
+            )
+        if resolved_run_id is None:
+            return None
+        try:
+            await self.thread_store.client.runs.cancel_many(
+                thread_id=thread_id,
+                run_ids=[resolved_run_id],
+            )
+        except Exception:
+            logger.warning(
+                "Failed to cancel incomplete run %s on thread %s",
+                resolved_run_id,
+                thread_id,
+                exc_info=True,
+            )
+            return None
+        return resolved_run_id
+
+    async def _has_other_active_runs(self, thread_id: str, run_id: str) -> bool:
+        """Conservatively protect another request before repairing thread state."""
+        try:
+            for status in _ACTIVE_RUN_STATUSES:
+                offset = 0
+                while True:
+                    page = await self.thread_store.client.runs.list(
+                        thread_id,
+                        limit=_RUN_LOOKUP_PAGE_SIZE,
+                        offset=offset,
+                        status=status,
+                    )
+                    if any(str(run.get("run_id") or "") != run_id for run in page):
+                        return True
+                    if len(page) < _RUN_LOOKUP_PAGE_SIZE:
+                        break
+                    offset += _RUN_LOOKUP_PAGE_SIZE
+        except Exception:
+            logger.warning(
+                "Could not verify active runs on thread %s; skipping state repair",
+                thread_id,
+                exc_info=True,
+            )
+            return True
+        return False
 
     async def _repair_stuck_thread_state(self, thread_id: str) -> None:
         """Clear a non-empty ``next`` left by a failed run, preserving HITL pauses.
@@ -1094,13 +1196,27 @@ class LangGraphServerGateway:
             assistant_id=self._target_graph_id(request.target),
         )
 
-        run_started = False
+        request_id = (
+            uuid.uuid4().hex if not isinstance(request.message, Command) else None
+        )
+        run_metadata: dict[str, object] | None = None
+        if request_id is not None:
+            run_metadata = dict(request.metadata or {})
+            run_metadata[_RUN_REQUEST_ID_METADATA_KEY] = request_id
+        run_start_attempted = False
+        run_id: str | None = None
         run_completed = False
         emitted_interrupt = False
+        run_cleaned_up = False
         try:
             async with stream:
-                await self._start_or_resume(stream, request, thread_ready=thread_ready)
-                run_started = True
+                run_start_attempted = True
+                run_id = await self._start_or_resume(
+                    stream,
+                    request,
+                    thread_ready=thread_ready,
+                    run_metadata=run_metadata,
+                )
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
@@ -1133,16 +1249,30 @@ class LangGraphServerGateway:
             # at the yield, so any repair after it never runs and the thread
             # keeps its non-empty ``next`` — the failed step would replay on
             # the next request.
-            await self._repair_stuck_thread_state(request.thread_id)
+            cancelled_run_id = await self._cancel_incomplete_run(
+                request.thread_id,
+                run_id,
+                request_id if run_start_attempted else None,
+            )
+            run_cleaned_up = True
+            if cancelled_run_id is not None and not await self._has_other_active_runs(
+                request.thread_id, cancelled_run_id
+            ):
+                await self._repair_stuck_thread_state(request.thread_id)
             yield emitter.error(str(exc)).data
             for event in tracker.finish():
                 yield event
             raise
         finally:
-            if run_started and not run_completed and not emitted_interrupt:
-                await _acancel_thread_runs(
-                    self.thread_store.client,
+            if (
+                run_start_attempted
+                and not run_completed
+                and not emitted_interrupt
+                and not run_cleaned_up
+            ):
+                await self._cancel_incomplete_run(
                     request.thread_id,
-                    name="incomplete run",
+                    run_id,
+                    request_id,
                 )
         yield emitter.done(processor.full_response).data
