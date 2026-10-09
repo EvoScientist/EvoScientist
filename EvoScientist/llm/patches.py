@@ -1070,32 +1070,13 @@ def _patch_anthropic_structured_output() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Patch: forward CLI's live (model, model_provider) into deepagents'
-# start_async_task / update_async_task tool calls so the deployed graph
-# (running in a separate ``langgraph dev`` subprocess) re-resolves the
-# chat model per run.
+# Explicit client composition for EvoAsyncSubAgentMiddleware and memory runs.
+# Inject the live model into runs.create without mutating upstream factories.
 #
-# Without this, async sub-agents stay on the model their graph was compiled
-# with at langgraph dev boot — `/model` switches in the CLI never reach
-# them because they live in another process.
-#
-# Mechanism: wrap deepagents' ``_build_start_tool`` and ``_build_update_tool``
-# factories. Each wrapped factory calls the original with a proxied client
-# cache that intercepts ``runs.create(...)`` calls only and injects
-# ``config={"configurable": {"model": <cfg.model>, "model_provider": <cfg.provider>}}``.
-# All other client methods (``threads.create``, ``runs.get``, ``runs.cancel``,
-# ``runs.join_stream``) pass through unchanged. The deployed graph picks up
-# ``configurable.model`` via ``ConfigurableModelMiddleware``.
-#
-# Reads ``_ensure_config()`` at tool-call time (not patch time) so a
-# ``/model`` switch in the CLI is reflected on the very next async tool
-# call without an agent rebuild.
-#
-# Upstream PR opportunity: passing ``config`` through ``client.runs.create``
-# is generic functionality; worth contributing back to ``langchain-ai/deepagents``
-# so this patch can be retired.
+# The failed-run reason (``_RunErrors``) retires once deepagents' check tool
+# reads the thread's error: it reads ``run["error"]``, which langgraph-api
+# never fills.
 # ---------------------------------------------------------------------------
-_model_passthrough_patched = False
 
 # The launching run's per-run (model, provider), set by the async-task tools
 # from ``runtime.config`` for the duration of a single ``runs.create`` call.
@@ -1106,8 +1087,7 @@ _model_passthrough_patched = False
 # ``update_async_task``), but only the tool functions can see the caller's
 # per-run model (via ``runtime.config``, the config langgraph's ToolNode
 # injects into tool calls). Threading it through a ContextVar
-# lets the single merge point below inject it, so ``update_async_task`` (whose
-# body we delegate to upstream unchanged) is covered without reimplementing it.
+# lets start and update share a single merge point.
 _caller_configurable: ContextVar[dict[str, str] | None] = ContextVar(
     "_evo_caller_configurable", default=None
 )
@@ -1138,7 +1118,7 @@ def _read_cfg_configurable() -> dict[str, str]:
 
     Returns a dict suitable for inserting under
     ``RunnableConfig.configurable``. Empty dict on any failure (so the
-    patch degrades to a no-op rather than breaking async tool calls).
+    proxy degrades to a no-op rather than breaking async tool calls).
     """
     try:
         from EvoScientist.EvoScientist import _ensure_config
@@ -1157,8 +1137,14 @@ def _read_cfg_configurable() -> dict[str, str]:
     return out
 
 
-def _merge_runs_config_kwargs(kwargs: dict) -> dict:
+def _merge_runs_config_kwargs(
+    kwargs: dict, folders: dict[str, str] | None = None
+) -> dict:
     """Merge the live model override into ``kwargs`` for ``runs.create``.
+
+    ``folders`` are the launching graph's ``workspace_dir`` / ``run_dir``;
+    they replace any the caller passed, so the server can refuse a run meant
+    for other folders.
 
     Model source, in increasing precedence:
 
@@ -1174,7 +1160,11 @@ def _merge_runs_config_kwargs(kwargs: dict) -> dict:
 
     Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
-    overrides = {**_read_cfg_configurable(), **(_caller_configurable.get() or {})}
+    overrides = {
+        **(folders or {}),
+        **_read_cfg_configurable(),
+        **(_caller_configurable.get() or {}),
+    }
     if not overrides:
         return kwargs
     existing = kwargs.get("config")
@@ -1183,36 +1173,130 @@ def _merge_runs_config_kwargs(kwargs: dict) -> dict:
     existing_configurable = existing.get("configurable")
     if not isinstance(existing_configurable, dict):
         existing_configurable = {}
+    if folders:
+        # The launching graph's folders are authoritative; in daemon mode they
+        # carry no run_dir, so a caller's stale one must not survive.
+        existing_configurable = {
+            key: value
+            for key, value in existing_configurable.items()
+            if key not in ("workspace_dir", "run_dir")
+        }
     merged_configurable = {**existing_configurable, **overrides}
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
     return kwargs
 
 
-class _SyncRunsProxy:
-    """Wraps a sync ``RunsClient`` and injects config into ``create`` only."""
+def _thread_error_message(thread: Any) -> str | None:
+    """The error message langgraph-api records on a thread whose run failed."""
+    error = thread.get("error") if isinstance(thread, dict) else None
+    if isinstance(error, dict):
+        # langgraph-api stores {"error": <type>, "message": <text>}; for most
+        # exception types the text is a placeholder, so keep the type.
+        kind, message = error.get("error"), error.get("message")
+        error = f"{kind}: {message}" if kind and message else (message or kind)
+    return str(error) if error else None
 
-    def __init__(self, real: Any) -> None:
+
+class _RunErrors:
+    """Why failed runs failed, looked up once from their thread.
+
+    langgraph-api records a failed run's error on its thread, not on the run,
+    so the async-task check would otherwise report no reason. A failed run's
+    error never changes, so each is looked up once.
+    """
+
+    def __init__(self) -> None:
+        self._by_run: dict[str, str] = {}
+
+    @staticmethod
+    def _missing(run: Any) -> bool:
+        return (
+            isinstance(run, dict)
+            and run.get("status") == "error"
+            and not run.get("error")
+        )
+
+    def needs_lookup(self, run: Any) -> bool:
+        return self._missing(run) and run.get("run_id") not in self._by_run
+
+    def attach(self, run: Any, thread: Any = None) -> Any:
+        run_id = run.get("run_id") if self._missing(run) else None
+        if run_id is None:
+            return run
+        message = _thread_error_message(thread)
+        if message:
+            self._by_run[run_id] = message
+        message = self._by_run.get(run_id)
+        return {**run, "error": message} if message else run
+
+
+class _SyncRunsProxy:
+    """Wraps a sync ``RunsClient``: injects config into ``create`` and adds
+    the failure reason to failed runs returned by ``get``."""
+
+    def __init__(
+        self,
+        real: Any,
+        folders: dict[str, str] | None = None,
+        threads: Any = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_folders", folders)
+        object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     def create(self, **kwargs: Any) -> Any:
-        return self._real.create(**_merge_runs_config_kwargs(kwargs))
+        return self._real.create(**_merge_runs_config_kwargs(kwargs, self._folders))
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        run = self._real.get(*args, **kwargs)
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
+            try:
+                thread = self._threads.get(run["thread_id"])
+            except Exception:
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _AsyncRunsProxy:
-    """Wraps an async ``RunsClient`` and injects config into ``create`` only."""
+    """Wraps an async ``RunsClient``: injects config into ``create`` and adds
+    the failure reason to failed runs returned by ``get``."""
 
-    def __init__(self, real: Any) -> None:
+    def __init__(
+        self,
+        real: Any,
+        folders: dict[str, str] | None = None,
+        threads: Any = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_folders", folders)
+        object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     async def create(self, **kwargs: Any) -> Any:
-        return await self._real.create(**_merge_runs_config_kwargs(kwargs))
+        return await self._real.create(
+            **_merge_runs_config_kwargs(kwargs, self._folders)
+        )
+
+    async def get(self, *args: Any, **kwargs: Any) -> Any:
+        run = await self._real.get(*args, **kwargs)
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
+            try:
+                thread = await self._threads.get(run["thread_id"])
+            except Exception:
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _ClientProxy:
@@ -1234,10 +1318,21 @@ class _ClientProxy:
     sync/async and instantiating a new ``_RunsProxy`` per attribute access.
     """
 
-    def __init__(self, real: Any, *, is_async: bool) -> None:
+    def __init__(
+        self,
+        real: Any,
+        *,
+        is_async: bool,
+        folders: dict[str, str] | None = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         runs_proxy_cls = _AsyncRunsProxy if is_async else _SyncRunsProxy
         object.__setattr__(self, "_real", real)
-        object.__setattr__(self, "_runs_proxy", runs_proxy_cls(real.runs))
+        object.__setattr__(
+            self,
+            "_runs_proxy",
+            runs_proxy_cls(real.runs, folders, real.threads, errors),
+        )
 
     def __getattr__(self, name: str) -> Any:
         if name == "runs":
@@ -1246,55 +1341,32 @@ class _ClientProxy:
 
 
 class _ClientCacheProxy:
-    """Proxy a ``_ClientCache`` so callers receive config-injecting clients."""
+    """Proxy a ``_ClientCache`` so callers receive config-injecting clients.
 
-    def __init__(self, real: Any) -> None:
+    ``folders`` (``SessionDirs.metadata()`` of the launching graph) go into the
+    ``configurable`` of every run these clients create.
+    """
+
+    def __init__(self, real: Any, folders: dict[str, str] | None = None) -> None:
         self._real = real
+        self._folders = folders
+        self._errors = _RunErrors()
 
     def get_sync(self, name: str) -> Any:
-        return _ClientProxy(self._real.get_sync(name), is_async=False)
+        return _ClientProxy(
+            self._real.get_sync(name),
+            is_async=False,
+            folders=self._folders,
+            errors=self._errors,
+        )
 
     def get_async(self, name: str) -> Any:
-        return _ClientProxy(self._real.get_async(name), is_async=True)
-
-
-def _patch_deepagents_model_passthrough() -> None:
-    """Wrap deepagents' async-launch tool factories to inject CLI model.
-
-    Idempotent: re-invocation is a no-op once the patch is active. Safe to
-    call from ``_maybe_swap_async_subagents`` on every CLI startup; both
-    that hook and this patch turn on together when async sub-agents are
-    enabled.
-    """
-    global _model_passthrough_patched
-    if _model_passthrough_patched:
-        return
-
-    try:
-        from deepagents.middleware import async_subagents as ds_mod
-    except ImportError:
-        return
-
-    # Defensive ``getattr`` lookups mirror the rest of this file (lines 254,
-    # 266, 279, 290, 339, 351, 362, 373, 473): a deepagents update that
-    # renames or removes either private helper degrades to a no-op instead
-    # of raising ``AttributeError`` at CLI startup.
-    orig_build_start = getattr(ds_mod, "_build_start_tool", None)
-    orig_build_update = getattr(ds_mod, "_build_update_tool", None)
-    if orig_build_start is None or orig_build_update is None:
-        return
-
-    def _patched_build_start(
-        agent_map: Any, clients: Any, tool_description: str
-    ) -> Any:
-        return orig_build_start(agent_map, _ClientCacheProxy(clients), tool_description)
-
-    def _patched_build_update(agent_map: Any, clients: Any) -> Any:
-        return orig_build_update(agent_map, _ClientCacheProxy(clients))
-
-    ds_mod._build_start_tool = _patched_build_start
-    ds_mod._build_update_tool = _patched_build_update
-    _model_passthrough_patched = True
+        return _ClientProxy(
+            self._real.get_async(name),
+            is_async=True,
+            folders=self._folders,
+            errors=self._errors,
+        )
 
 
 # ---------------------------------------------------------------------------

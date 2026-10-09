@@ -64,6 +64,7 @@ class TestModelsRegistry:
             "siliconflow",
             "openrouter",
             "requesty",
+            "opper",
             "zhipu",
             "zhipu-code",
             "volcengine",
@@ -522,6 +523,116 @@ class TestThirdPartyRouting:
         )
 
         get_chat_model("openai/gpt-4o-mini", provider="requesty")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_routes_through_openai(self, mock_init, monkeypatch):
+        """The short name resolves through the registry to Opper's pool id."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key-123")
+
+        # Short name is dotted (``claude-sonnet-4.6``); the pool id Opper
+        # serves is dashed (``claude-sonnet-4-6``). Go through the short name
+        # so the registry lookup is actually exercised.
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
+        assert call_kwargs["api_key"] == "op-key-123"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_accepts_route_pinned_model_ids(self, mock_init, monkeypatch):
+        """A provider/model id pins one route and is passed through unchanged."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+
+        get_chat_model("azure/gpt-5.5", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "azure/gpt-5.5"
+        assert call_kwargs["model_provider"] == "openai"
+        assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_forwards_explicit_reasoning_effort(self, mock_init, monkeypatch):
+        """An explicit effort reaches Opper's compat request unchanged."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
+        assert call_kwargs["reasoning_effort"] == "low"
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_omits_unconfigured_reasoning_effort(self, mock_init, monkeypatch):
+        """Opper's pools mix reasoning and non-reasoning models, so no default."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        assert "reasoning_effort" not in mock_init.call_args[1]
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_anthropic_prompt_cache_enabled_by_default(
+        self, mock_init, monkeypatch
+    ):
+        """Opper takes the same top-level cache_control for Claude pool ids."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_prompt_cache_covers_route_pinned_claude(
+        self, mock_init, monkeypatch
+    ):
+        """A provider/claude-... id pins a route and is still a Claude model."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("aws/claude-sonnet-4-6-eu", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert call_kwargs["model"] == "aws/claude-sonnet-4-6-eu"
+        assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_anthropic_prompt_cache_opt_out(self, mock_init, monkeypatch):
+        """The opt-out flag should skip caching for Opper Claude models."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.setenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", "false")
+
+        get_chat_model("claude-sonnet-4.6", provider="opper")
+
+        call_kwargs = mock_init.call_args[1]
+        assert "cache_control" not in call_kwargs
+        assert "cache_control" not in call_kwargs.get("model_kwargs", {})
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_opper_prompt_cache_skips_non_claude(self, mock_init, monkeypatch):
+        """Opper caching should not touch non-Claude pools."""
+        mock_init.return_value = "mock_model"
+        monkeypatch.setenv("OPPER_API_KEY", "op-key")
+        monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
+
+        get_chat_model("gpt-5.5", provider="opper")
 
         call_kwargs = mock_init.call_args[1]
         assert "cache_control" not in call_kwargs
@@ -4073,3 +4184,74 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
     assert captured["body"]["model"] == "mimo-v2.6-pro"
     assert captured["body"]["max_tokens"] == 131072
     assert captured["body"]["thinking"]["type"] == "enabled"
+
+
+# =============================================================================
+# Test validate_opper_key
+# =============================================================================
+
+
+class TestValidateOpperKey:
+    """The Opper key validator probes the authenticated model catalog.
+
+    Opper's ``/v3/compat/models`` requires a key (401 without one, verified
+    against the live endpoint), so a plain GET distinguishes a good key from
+    a bad one without a sentinel-model request. All HTTP calls are mocked, so
+    the unit tests hit no network.
+    """
+
+    def test_empty_key_skipped(self):
+        """No key provided is skipped, not an error."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        is_valid, msg = validate_opper_key("")
+        assert is_valid is True
+        assert "Skipped" in msg
+
+    def test_probes_the_authenticated_model_catalog(self):
+        """The probe is a bearer-authenticated GET against /v3/compat/models."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = 200
+            validate_opper_key("op-key")
+
+        assert mock_get.call_args.args[0] == "https://api.opper.ai/v3/compat/models"
+        headers = mock_get.call_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer op-key"
+
+    def test_success_means_valid(self):
+        """200 (catalog returned) means the key is valid."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = 200
+            is_valid, msg = validate_opper_key("op-key")
+
+        assert is_valid is True
+        assert msg == "Valid"
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_auth_rejected_means_invalid(self, status):
+        """401/403 mean the key was rejected by the auth layer."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_opper_key("bad-key")
+
+        assert is_valid is False
+        assert msg == "Invalid API key"
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503])
+    def test_transient_status_is_inconclusive(self, status):
+        """Rate-limit / 5xx leave key validity unknown, not rejected."""
+        from EvoScientist.config.onboard.validators import validate_opper_key
+
+        with patch("httpx.get") as mock_get:
+            mock_get.return_value.status_code = status
+            is_valid, msg = validate_opper_key("op-key")
+
+        assert is_valid is False
+        assert "inconclusive" in msg.lower()
+        assert str(status) in msg

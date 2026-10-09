@@ -20,12 +20,13 @@ def _patch_client(monkeypatch):
     return crons, fake
 
 
-def test_create_schedule_targets_scheduler(monkeypatch):
+def test_create_schedule_targets_scheduler(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch)
     rec = crons.create_schedule(
         name="weather",
         schedule="*/10 * * * *",
         prompt="search uk weather and summarize",
+        workspace=workspace,
     )
     assert rec["cron_id"] == "c-1"
     kw = fake.crons.create.call_args.kwargs
@@ -39,33 +40,33 @@ def test_create_schedule_targets_scheduler(monkeypatch):
     assert kw["timezone"] == "Europe/London"
 
 
-def test_list_schedules_uses_server_side_filter(monkeypatch):
+def test_list_schedules_uses_server_side_filter(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch)
-    out = crons.list_schedules()
+    out = crons.list_schedules(workspace=workspace)
     assert [c["cron_id"] for c in out] == ["c-1"]
-    # Filtered server-side by run_kind metadata (no client filter); high limit so
-    # users with >10 schedules still see them all.
-    fake.crons.search.assert_called_once_with(
-        metadata={"run_kind": crons.SCHEDULED_RUN_KIND},
-        limit=1000,
-    )
+    # Filtered server-side by run_kind metadata (the workspace is filtered
+    # client-side).
+    assert fake.crons.search.call_args.kwargs["metadata"] == {
+        "run_kind": crons.SCHEDULED_RUN_KIND
+    }
 
 
-def test_delete_and_set_enabled(monkeypatch):
+def test_delete_and_set_enabled(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch)
-    crons.delete_schedule("c-1")
+    (row,) = crons.list_schedules(workspace=workspace)
+    crons.delete_schedule(row, workspace=workspace)
     fake.crons.delete.assert_called_once_with("c-1")
-    crons.set_enabled("c-1", False)
+    crons.set_enabled(row, False, workspace=workspace)
     assert fake.crons.update.call_args.kwargs["enabled"] is False
 
 
-def test_run_now_dispatches_thread_then_run(monkeypatch):
+def test_run_now_dispatches_thread_then_run(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch)
     fake.threads.create.return_value = {"thread_id": "t-1"}
     fake.runs.create.return_value = {"run_id": "r-1"}
-    rec = crons.run_now("do the thing")
+    rec = crons.run_now("do the thing", workspace=workspace)
     assert rec["run_id"] == "r-1"
-    fake.threads.create.assert_called_once_with(graph_id=crons.SCHEDULER_GRAPH_ID)
+    assert fake.threads.create.call_args.kwargs["graph_id"] == crons.SCHEDULER_GRAPH_ID
     run_kw = fake.runs.create.call_args.kwargs
     assert run_kw["thread_id"] == "t-1"
     assert run_kw["assistant_id"] == crons.SCHEDULER_GRAPH_ID
@@ -230,7 +231,9 @@ requirements = [
 # ---------------------------------------------------------------------------
 
 
-def test_create_schedule_with_rubric_sends_it_in_input_and_metadata(monkeypatch):
+def test_create_schedule_with_rubric_sends_it_in_input_and_metadata(
+    monkeypatch, workspace
+):
     crons, fake = _patch_client(monkeypatch)
     rubric = "- scheduled/digest.md exists\n- it contains today's date"
     crons.create_schedule(
@@ -238,6 +241,7 @@ def test_create_schedule_with_rubric_sends_it_in_input_and_metadata(monkeypatch)
         schedule="0 8 * * 1-5",
         prompt="write scheduled/digest.md",
         rubric=rubric,
+        workspace=workspace,
     )
     kw = fake.crons.create.call_args.kwargs
     assert kw["input"] == {
@@ -247,21 +251,25 @@ def test_create_schedule_with_rubric_sends_it_in_input_and_metadata(monkeypatch)
     assert kw["metadata"]["rubric"] == rubric
 
 
-def test_create_schedule_blank_rubric_omits_the_key(monkeypatch):
+def test_create_schedule_blank_rubric_omits_the_key(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch)
     crons.create_schedule(
-        name="weather", schedule="*/10 * * * *", prompt="search", rubric="  \n"
+        name="weather",
+        schedule="*/10 * * * *",
+        prompt="search",
+        rubric="  \n",
+        workspace=workspace,
     )
     kw = fake.crons.create.call_args.kwargs
     assert "rubric" not in kw["input"]
     assert "rubric" not in kw["metadata"]
 
 
-def test_run_now_with_rubric_sends_it_in_input_and_metadata(monkeypatch):
+def test_run_now_with_rubric_sends_it_in_input_and_metadata(monkeypatch, workspace):
     crons, fake = _patch_client(monkeypatch)
     fake.threads.create.return_value = {"thread_id": "t-1"}
     fake.runs.create.return_value = {"run_id": "r-1"}
-    crons.run_now("do the thing", rubric="- output.md exists")
+    crons.run_now("do the thing", workspace=workspace, rubric="- output.md exists")
     run_kw = fake.runs.create.call_args.kwargs
     assert run_kw["input"]["rubric"] == "- output.md exists"
     assert run_kw["metadata"]["rubric"] == "- output.md exists"

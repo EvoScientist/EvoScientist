@@ -6,7 +6,7 @@ Verifies the orchestration:
 - host resolution (CLI > config > default) + the public-bind warning
 - port collision pre-flight
 - ccproxy lifecycle (only if OAuth configured)
-- ``start_langgraph_dev(deploy_mode=True)`` invocation
+- ``start_langgraph_dev`` invocation
 - clean shutdown via signal handler / KeyboardInterrupt
 """
 
@@ -90,7 +90,6 @@ def _run_deploy_once(
         "ccproxy_stopped": False,
         "langgraph_dev_started": False,
         "langgraph_dev_stopped": False,
-        "deploy_mode_passed": None,
         "workspace_passed": None,
         "port_passed": None,
         "host_passed": None,
@@ -109,12 +108,6 @@ def _run_deploy_once(
 
     monkeypatch.setattr(deploy_server, "console", _SilentConsole(captured["printed"]))
 
-    # Workspace setup mocks
-    from EvoScientist import paths as paths_mod
-
-    monkeypatch.setattr(paths_mod, "set_workspace_root", lambda _p: None)
-    monkeypatch.setattr(paths_mod, "ensure_dirs", lambda: None)
-
     # langgraph_dev.manager mocks
     from EvoScientist.langgraph_dev import manager as lgm
 
@@ -132,7 +125,6 @@ def _run_deploy_once(
         host=None,
         file_persistence=True,
         jobs_per_worker=10,
-        deploy_mode=False,
         tunnel=False,
         config_fingerprint=None,
     ):
@@ -140,7 +132,6 @@ def _run_deploy_once(
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
         captured["port_passed"] = port
         captured["host_passed"] = host
-        captured["deploy_mode_passed"] = deploy_mode
         captured["jobs_per_worker_passed"] = jobs_per_worker
         captured["file_persistence_passed"] = file_persistence
         captured["tunnel_passed"] = tunnel
@@ -249,16 +240,6 @@ class _SilentConsole:
 # =============================================================================
 # Tests
 # =============================================================================
-
-
-def test_deploy_starts_langgraph_dev_with_deploy_mode_true(monkeypatch, tmp_path):
-    config = _make_config(default_workdir=str(tmp_path))
-    captured = _run_deploy_once(monkeypatch, config)
-
-    assert captured["langgraph_dev_started"] is True
-    assert captured["deploy_mode_passed"] is True, (
-        "deploy command MUST call start_langgraph_dev with deploy_mode=True"
-    )
 
 
 def test_deploy_tunnel_default_off(monkeypatch, tmp_path):
@@ -562,10 +543,10 @@ def test_handle_shutdown_sigterm_sets_shutdown_event(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("hint", [None, "Run `EvoSci setup`, then restart."])
-def test_deploy_prints_the_missing_python_hint(monkeypatch, tmp_path, hint):
-    from EvoScientist.setup import research_env
+def test_deploy_prints_the_setup_hint(monkeypatch, tmp_path, hint):
+    from EvoScientist import agent_shell
 
-    monkeypatch.setattr(research_env, "missing_python_hint", lambda: hint)
+    monkeypatch.setattr(agent_shell, "setup_hint", lambda: hint)
     captured = _run_deploy_once(
         monkeypatch, _make_config(default_workdir=str(tmp_path))
     )

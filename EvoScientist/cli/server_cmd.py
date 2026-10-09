@@ -38,13 +38,15 @@ def server_status() -> None:
     state = "[green]running[/green]" if running else "[red]not responding[/red]"
     console.print(f"[bold]langgraph dev[/bold] on port {port}: {state}")
     if sidecar is not None:
-        console.print(f"  workspace: {sidecar.get('workspace')}")
+        console.print(f"  workspace:  {sidecar.get('workspace')}")
+        if sidecar.get("run_dir"):
+            console.print(f"  run folder: {sidecar['run_dir']}")
         pid = sidecar.get("pid")
         if _pid_serves_port(pid, port):
-            console.print(f"  pid:       {pid}")
+            console.print(f"  pid:        {pid}")
         else:
             console.print(
-                f"  pid:       {pid} [yellow](stale record — this pid does "
+                f"  pid:        {pid} [yellow](stale record — this pid does "
                 f"not serve port {port})[/yellow]"
             )
     elif running:

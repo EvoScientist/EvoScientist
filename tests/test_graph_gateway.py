@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,8 +23,10 @@ from EvoScientist.gateway import (
 )
 from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
 from EvoScientist.gateway.types import DEFAULT_GRAPH_ID
+from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.stream import display as display_mod
 from tests.fakes import (
+    TEST_WORKSPACE,
     FakeGraphGateway,
     FakeLangGraphClient,
     FakeLangGraphThreadsClient,
@@ -330,18 +334,19 @@ async def test_resume_command_consumes_context_gateway():
         metadata={"workspace_dir": "/restored"},
     )
     ctx = CommandContext(
+        dirs=SessionDirs(TEST_WORKSPACE, Path("/old")),
         agent=None,
         thread_id="current",
         ui=ui,
-        workspace_dir="/old",
         graph_gateway=FakeGraphGateway(thread_store=thread_store),
     )
 
     await ResumeCommand().execute(ctx, ["abc"])
 
+    restored = SessionDirs(Workspace("/restored"))
     assert ctx.thread_id == "abc12345"
-    assert ctx.workspace_dir == "/restored"
-    ui.handle_session_resume.assert_awaited_once_with("abc12345", "/restored")
+    assert ctx.dirs == restored
+    ui.handle_session_resume.assert_awaited_once_with("abc12345", restored)
 
 
 def test_cmd_run_passes_local_graph_gateway(monkeypatch):
@@ -367,7 +372,7 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
         "hello",
         thread_id="generated-thread",
         show_thinking=False,
-        workspace_dir="/tmp/ws",
+        dirs=SessionDirs(Workspace("/tmp/ws")),
         model="test-model",
         runtime_gateways=runtime_gateways,
     )
@@ -398,6 +403,7 @@ def test_cmd_run_converts_stream_failure_to_controlled_exit(monkeypatch):
             "hello",
             thread_id="failed-thread",
             show_thinking=False,
+            dirs=SessionDirs(Workspace("/tmp/ws")),
             runtime_gateways=runtime_gateways,
         )
 
@@ -470,6 +476,7 @@ async def test_langgraph_server_thread_store_delegates_to_sdk_threads():
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-02T00:00:00Z",
             "workspace_dir": "/tmp/ws",
+            "run_dir": None,
             "model": None,
             "metadata": {"graph_id": "EvoScientist", "workspace_dir": "/tmp/ws"},
             "message_count": 2,
@@ -480,6 +487,7 @@ async def test_langgraph_server_thread_store_delegates_to_sdk_threads():
             "created_at": None,
             "updated_at": None,
             "workspace_dir": "/tmp/new-ws",
+            "run_dir": None,
             "model": "test-model",
             "metadata": created_metadata,
             "message_count": 0,
@@ -1395,6 +1403,66 @@ async def test_server_gateway_forwards_valid_recursion_limit_per_run():
 
     (start,) = stream.run.starts
     assert start["config"]["recursion_limit"] == 100
+
+
+@pytest.mark.parametrize("resume", [False, True])
+async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    if resume:
+        stream.interrupts = [{"interrupt_id": "first"}]
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    threads.update = AsyncMock(side_effect=RuntimeError("metadata unavailable"))
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    message = Command(resume={"answer": "yes"}) if resume else "hi"
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message=message, thread_id="abc12345")
+        )
+    ]
+    assert events[-1]["type"] == "done"
+    records = [r for r in caplog.records if r.name == "EvoScientist.gateway.server"]
+    assert any(
+        r.levelno == logging.WARNING and "abc12345" in r.getMessage() for r in records
+    )
+    assert len(threads.created) == 1
+    if resume:
+        assert stream.run.responses == [
+            {"response": {"answer": "yes"}, "interrupt_id": "first"}
+        ]
+        assert stream.run.starts == []
+    else:
+        assert stream.run.starts[0]["input"] == {
+            "messages": [{"role": "user", "content": "hi"}]
+        }
+
+
+async def test_metadata_best_effort_does_not_swallow_thread_registration_failure():
+    """Guard against a future over-wide try that swallows registration errors."""
+    stream = FakeLangGraphThreadStream("thread", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"thread": {"values": {}}},
+        streams={"thread": stream},
+    )
+    threads.create = AsyncMock(side_effect=RuntimeError("registration failed"))
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    with pytest.raises(RuntimeError, match="registration failed"):
+        async for _ in gateway.stream_events(
+            RunRequest(message="hi", thread_id="thread")
+        ):
+            pass
+    assert stream.run.starts == []
 
 
 async def test_server_gateway_suppresses_hitl_for_auto_mode_session():

@@ -3,8 +3,9 @@ name: Publish to PyPI
 # Publishes EvoScientist to PyPI via OpenID Connect (trusted publishing) — no
 # API token or password involved. Fires when a GitHub Release is published
 # (i.e. after `gh release create vX.Y.Z`), builds the sdist + wheel, guards
-# that the package version matches the release tag, then uploads with a
-# short-lived OIDC token.
+# that the package version matches the release tag, that uv.lock is up to date
+# and that constraints.txt matches it, then uploads with a short-lived OIDC
+# token.
 #
 # One-time PyPI setup (Manage project -> Publishing -> Add a new publisher):
 #   Owner:            EvoScientist
@@ -46,19 +47,9 @@ jobs:
       - name: Build sdist + wheel
         run: uv build
 
-      - name: Guard — package version must match the release tag
-        run: |
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
-            echo "::error::This workflow must run from a version tag (got ${GITHUB_REF_TYPE} '${GITHUB_REF_NAME}'); dispatch it from the release tag."
-            exit 1
-          fi
-          VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "(.*)"/\1/')
-          TAG="${GITHUB_REF_NAME#v}"
-          echo "pyproject version: $VERSION | release tag: $TAG"
-          if [ "$VERSION" != "$TAG" ]; then
-            echo "::error::pyproject version ($VERSION) does not match release tag ($TAG); refusing to publish."
-            exit 1
-          fi
+      # Shared with docker.yml, so PyPI and the versioned images pass the same checks.
+      - name: Guard — release tag, package version, uv.lock and constraints.txt
+        run: bash .github/scripts/release_guard.sh release
 
       - name: Twine metadata check
         run: uvx twine check dist/*

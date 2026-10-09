@@ -24,6 +24,7 @@ from ...config import (
     MemoryObservationWriter,
     get_effective_config,
 )
+from ...paths import Workspace
 from ..types import MemorySourceType
 from ._factory import (
     build_memory_agent_graph,
@@ -578,8 +579,8 @@ class _SubagentSummaryWriterMiddleware(AgentMiddleware):
 def build_memory_worker_graph(
     source_type: MemorySourceType,
     *,
+    workspace: Workspace,
     memory_dir: str | Path | None = None,
-    workspace_dir: str | Path | None = None,
 ) -> CompiledStateGraph:
     """Build the registered LangGraph worker for one memory source type."""
     memory_controls = MemoryControls.from_config(get_effective_config())
@@ -588,8 +589,8 @@ def build_memory_worker_graph(
     )
 
     agent_paths = resolve_memory_agent_paths(
+        workspace=workspace,
         memory_dir=memory_dir,
-        workspace_dir=workspace_dir,
     )
     middleware: list[AgentMiddleware] = []
     response_format: type[BaseModel] | None = None

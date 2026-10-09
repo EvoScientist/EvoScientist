@@ -272,6 +272,109 @@ def _patch_mcp_stdio_errlog_safe() -> None:
 _patch_mcp_stdio_errlog_safe()
 
 
+def _mcp_major_version() -> int | None:
+    """Return the installed MCP SDK's major version, or None if unknown."""
+    try:
+        from importlib.metadata import version
+
+        return int(version("mcp").split(".")[0])
+    except Exception:
+        return None
+
+
+def _patch_mcp_stdio_kill_on_cancel() -> None:
+    """Kill a stdio server whose shutdown wait is cancelled.
+
+    Idempotent. A no-op when the MCP SDK is absent (optional dependency).
+    In mcp 1.x the stdio shutdown closes the server's stdin, waits up to 2s
+    for it to exit, and kills the process tree only when that wait times
+    out. A cancellation that lands inside the wait (for example our
+    ``get_tools`` deadline) skips the kill, and a server that ignores stdin
+    closing is then waited on with nothing left to stop it. Wrapping the
+    process's ``wait`` kills the tree in that case before the cancellation
+    carries on.
+
+    The SDK's own 2s limit also cancels ``wait``, and its kill fallback
+    calls ``wait`` again, so each process is killed at most once: whichever
+    of the wrapper and the SDK gets there first does the kill, and the
+    other does nothing.
+
+    Skipped on mcp 2.x, which runs its whole shutdown shielded and polls
+    ``returncode`` instead of calling ``wait``.
+    """
+    major = _mcp_major_version()
+    if major is not None and major >= 2:
+        return
+
+    try:
+        import anyio
+        import mcp.client.stdio as _stdio_mod
+    except ImportError:
+        return  # MCP SDK not installed — nothing to patch.
+
+    create = getattr(_stdio_mod, "_create_platform_compatible_process", None)
+    terminate = getattr(_stdio_mod, "_terminate_process_tree", None)
+    if create is None or terminate is None:
+        logger.debug(
+            "MCP SDK layout changed: stdio process helpers are missing; "
+            "the stdio kill-on-cancel patch was not applied"
+        )
+        return
+
+    if getattr(create, "_evosci_kill_on_cancel", False):
+        return  # Already patched.
+
+    def _claim_kill(process: Any) -> bool:
+        """Mark ``process`` as killed; False if it already was."""
+        if getattr(process, "_evosci_killed", False):
+            return False
+        try:
+            process._evosci_killed = True
+        except AttributeError:
+            pass  # Can't track it; kill as the SDK would.
+        return True
+
+    @wraps(create)
+    async def _create_killable_process(*args: Any, **kwargs: Any):
+        process = await create(*args, **kwargs)
+        wait = process.wait
+
+        async def _wait_or_kill():
+            try:
+                return await wait()
+            except anyio.get_cancelled_exc_class():
+                if _claim_kill(process):
+                    # Bounded by the SDK's own termination timeout.
+                    with anyio.CancelScope(shield=True):
+                        try:
+                            await terminate(process)
+                        except Exception:
+                            logger.debug(
+                                "Failed to kill cancelled MCP stdio server",
+                                exc_info=True,
+                            )
+                raise
+
+        try:
+            process.wait = _wait_or_kill
+        except AttributeError:
+            logger.debug("MCP stdio process does not allow wrapping wait()")
+        return process
+
+    @wraps(terminate)
+    async def _terminate_once(process: Any, *args: Any, **kwargs: Any):
+        if _claim_kill(process):
+            await terminate(process, *args, **kwargs)
+
+    _create_killable_process._evosci_kill_on_cancel = True  # type: ignore[attr-defined]
+    _stdio_mod._create_platform_compatible_process = _create_killable_process
+    _stdio_mod._terminate_process_tree = _terminate_once
+    logger.debug("Applied MCP stdio kill-on-cancel patch")
+
+
+_patch_mcp_stdio_kill_on_cancel()
+
+
 # =============================================================================
 # Constants
 # =============================================================================
@@ -289,6 +392,21 @@ _URL_TRANSPORTS = {"http", "streamable_http", "sse", "websocket"}
 # Keeps stdio-server fleets from spawning 20+ subprocesses at once while
 # still parallelizing the common 3–7 server case to completion.
 _MAX_CONCURRENT_CONNECTIONS = 8
+
+# Per-server time limit for ``get_tools`` inside ``langgraph dev`` (see
+# :func:`_get_tools_timeout`).  A server that hasn't answered by then is
+# skipped like one that failed, so a single slow server can't hold up the
+# rest.  The server builds its graphs, and so loads MCP tools, before
+# answering ``/ok``, so this is sized for the 60s health budget in
+# ``start_langgraph_dev`` while still leaving room for a first ``npx -y``
+# launch that downloads its package.  Shutting down a stdio server that timed
+# out adds up to ~4s on top (the MCP SDK's termination waits).
+#
+# It is not a hard bound on the whole load: the limit starts once a server
+# gets a slot under ``_MAX_CONCURRENT_CONNECTIONS``, so with more than that
+# many servers hanging, the ones queued behind them can still push the load
+# past 60s.
+_SERVER_GET_TOOLS_TIMEOUT_SECONDS = 40
 
 # Env vars forwarded to stdio MCP subprocesses on top of the MCP SDK's
 # minimal default set (HOME/PATH/USER/…). Without this, servers behind
@@ -798,11 +916,11 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
 
     Covers users who never ran ``EvoSci setup``. A failed install is logged and
     the server then fails to start as it would without Node. Never runs inside
-    ``langgraph dev`` (``EVOSCIENTIST_DEPLOY_MODE`` set): a download there would
+    ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set): a download there would
     race the server's health deadline with its progress hidden in the server
     log, so ``start_langgraph_dev`` runs this before spawning instead.
     """
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
     missing = [
         name
@@ -967,14 +1085,31 @@ ProgressCallback = Callable[[str, str, str], None]
 """
 
 
+def _get_tools_timeout() -> float | None:
+    """The per-server ``get_tools`` limit for this process.
+
+    Only ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set) has a deadline:
+    its health check gives up after 60s.  The CLI and TUI have none, so there a
+    slow server only makes startup slower and is left to finish.
+    """
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
+        return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
+    return None
+
+
 async def _load_tools(
     config: dict[str, Any],
     *,
     on_progress: ProgressCallback | None = None,
+    timeout: float | None = None,
 ) -> dict[str, list]:
     """Connect to MCP servers and retrieve tools.
 
     Returns a dict of server name -> list of LangChain tools.
+
+    Args:
+        timeout: Seconds each server gets to return its tools before it is
+            skipped like a failed one.  ``None`` waits as long as it takes.
 
     Raises:
         ImportError: if ``langchain-mcp-adapters`` is not installed.
@@ -1015,20 +1150,33 @@ async def _load_tools(
     async def _fetch(name: str) -> tuple[str, list]:
         async with sem:
             _report("start", name)
+            deadline = asyncio.timeout(timeout)
             try:
-                tools = await client.get_tools(server_name=name)
+                async with deadline:
+                    tools = await client.get_tools(server_name=name)
                 logger.info("MCP server %r: loaded %d tool(s)", name, len(tools))
                 _report("success", name, str(len(tools)))
                 return name, tools
             except Exception as exc:
+                # Only our own deadline gets the "timed out" message.  A
+                # TimeoutError raised inside ``get_tools`` (a websocket
+                # handshake, ``socket.timeout``) keeps its real error.
+                if isinstance(exc, TimeoutError) and deadline.expired():
+                    detail = f"timed out after {timeout}s"
+                else:
+                    detail = str(exc)
                 # When the caller wired up ``on_progress`` they own the
                 # user-facing display; downgrade the logger so we don't
                 # double-print.
                 if on_progress is None:
-                    logger.warning("MCP server %r: failed to load tools: %s", name, exc)
+                    logger.warning(
+                        "MCP server %r: failed to load tools: %s", name, detail
+                    )
                 else:
-                    logger.debug("MCP server %r: failed to load tools: %s", name, exc)
-                _report("error", name, str(exc))
+                    logger.debug(
+                        "MCP server %r: failed to load tools: %s", name, detail
+                    )
+                _report("error", name, detail)
                 return name, []
 
     # ``return_exceptions=False`` is fine because ``_fetch`` already
@@ -1057,7 +1205,9 @@ async def aload_mcp_tools(
     if not config:
         return {}
     try:
-        server_tools = await _load_tools(config, on_progress=on_progress)
+        server_tools = await _load_tools(
+            config, on_progress=on_progress, timeout=_get_tools_timeout()
+        )
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}
@@ -1110,7 +1260,9 @@ def load_mcp_tools(
 
     try:
         server_tools = runtime.run_sync(
-            lambda: _load_tools(config, on_progress=on_progress)
+            lambda: _load_tools(
+                config, on_progress=on_progress, timeout=_get_tools_timeout()
+            )
         )
     except AsyncRuntimeError as exc:
         # A bridge lifecycle/call-site error is not an MCP availability

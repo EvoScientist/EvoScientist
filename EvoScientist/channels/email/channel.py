@@ -180,7 +180,7 @@ class EmailChannel(Channel, PollingMixin):
                             filename = _decode_hdr(filename)
                             payload_data = part.get_payload(decode=True)
                             if payload_data:
-                                from ..base import MAX_ATTACHMENT_BYTES, MEDIA_DIR
+                                from ..base import MAX_ATTACHMENT_BYTES
 
                                 if len(payload_data) > MAX_ATTACHMENT_BYTES:
                                     attachments.append(
@@ -189,9 +189,8 @@ class EmailChannel(Channel, PollingMixin):
                                         }
                                     )
                                 else:
-                                    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-                                    local_path = (
-                                        MEDIA_DIR / f"email_{mid.decode()}_{filename}"
+                                    local_path = self._media_path(
+                                        f"email_{mid.decode()}_{filename}"
                                     )
                                     local_path.write_bytes(payload_data)
                                     label = (

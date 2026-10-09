@@ -84,6 +84,28 @@ def tmp_workspace(tmp_path):
     return str(ws)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_process_workspace():
+    """``process_workspace()`` is read once per process; tests change env/cwd."""
+    from EvoScientist.paths import process_session_dirs, process_workspace
+
+    process_workspace.cache_clear()
+    process_session_dirs.cache_clear()
+    yield
+    process_workspace.cache_clear()
+    process_session_dirs.cache_clear()
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    """A ``Workspace`` rooted at a fresh temporary folder."""
+    from EvoScientist.paths import Workspace
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    return Workspace(root)
+
+
 @pytest.fixture
 def runtime_paths(tmp_path, monkeypatch):
     """Isolate ``langgraph_dev.manager.RUNTIME`` under a temp directory.
@@ -102,52 +124,6 @@ def runtime_paths(tmp_path, monkeypatch):
     runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
     monkeypatch.setattr(manager, "RUNTIME", runtime)
     return runtime
-
-
-# Capture deepagents tool factories at conftest load time — BEFORE any test
-# imports EvoScientist, which can trigger ``_patch_deepagents_model_passthrough``
-# during agent construction. Once captured here, the ``restore_model_passthrough_patch``
-# fixture has a stable "truly unpatched" baseline to reset to between tests, even
-# if upstream code paths apply the patch as a side effect.
-try:
-    from deepagents.middleware import async_subagents as _ds_async_subagents
-
-    _DEEPAGENTS_ORIGINAL_BUILD_START = _ds_async_subagents._build_start_tool
-    _DEEPAGENTS_ORIGINAL_BUILD_UPDATE = _ds_async_subagents._build_update_tool
-except Exception:
-    _ds_async_subagents = None
-    _DEEPAGENTS_ORIGINAL_BUILD_START = None
-    _DEEPAGENTS_ORIGINAL_BUILD_UPDATE = None
-
-
-@pytest.fixture
-def restore_model_passthrough_patch():
-    """Reset deepagents internals + ``_model_passthrough_patched`` to unpatched.
-
-    The model-passthrough patch wraps ``deepagents.middleware.async_subagents``
-    module-level functions in place. The originals are captured at conftest
-    load time (above) so this fixture can always start each test from a
-    known-unpatched state regardless of what other tests / agent fixtures
-    did to the module before.
-    """
-    from EvoScientist.llm import patches as patches_mod
-
-    if _ds_async_subagents is None:
-        # deepagents not importable — fixture is a no-op (the patch fn itself
-        # returns early in that case).
-        yield
-        return
-
-    def _reset() -> None:
-        _ds_async_subagents._build_start_tool = _DEEPAGENTS_ORIGINAL_BUILD_START
-        _ds_async_subagents._build_update_tool = _DEEPAGENTS_ORIGINAL_BUILD_UPDATE
-        patches_mod._model_passthrough_patched = False
-
-    _reset()
-    try:
-        yield
-    finally:
-        _reset()
 
 
 @pytest.fixture(autouse=True)
@@ -177,4 +153,46 @@ def _no_agent_python_probe(monkeypatch):
     from EvoScientist.setup import research_env
 
     monkeypatch.setattr(research_env, "_agent_python", lambda: (None, None))
-    monkeypatch.setattr(research_env, "_log_missing_python_hint", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_bash(monkeypatch):
+    """Keep the agent-shell bash decision away from the real machine.
+
+    It is cached per process and reads ``tools/git.json`` from the real data
+    dir, so on a Windows developer machine every ``execute`` test would run in
+    that Git Bash. Pinned to "no bash" (``cmd.exe`` on Windows, ``/bin/sh``
+    elsewhere); ``tests/test_agent_shell.py`` opts into a real bash. The setup
+    hint leaves out the Git Bash part, so hint tests read the same on every
+    OS, and its once-per-process log is silenced
+    (``tests/test_setup_research_env.py`` restores it).
+    """
+    from EvoScientist import agent_shell
+
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: None)
+    monkeypatch.setattr(agent_shell, "_bash_missing", lambda: False)
+    monkeypatch.setattr(agent_shell, "log_setup_hint", lambda: None)
+
+
+@pytest.fixture
+def no_git(tmp_path, monkeypatch):
+    """Run as if git were not installed.
+
+    ``EvoScientist.git_cli.subprocess.run`` is the process-wide
+    ``subprocess.run``, so the fake asserts the command is git: a test must not
+    pass because some other subprocess call failed. ``DATA_DIR`` points at an
+    empty dir, so on Windows the retry with a recorded PortableGit finds none
+    instead of changing this process's ``PATH``.
+    """
+    from unittest.mock import patch
+
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "no-git-data")
+
+    def fake_run(argv, *args, **kwargs):
+        assert argv[0] == "git", f"unexpected subprocess.run call: {argv!r}"
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    with patch("EvoScientist.git_cli.subprocess.run", side_effect=fake_run):
+        yield

@@ -94,8 +94,10 @@ def _expert_spec():
 
 
 class TestMiddlewareConstruction:
-    def test_middleware_has_five_tools(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    def test_middleware_has_five_tools(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         names = [t.name for t in mw.tools]
         assert set(names) == {
             "start_async_task",
@@ -105,24 +107,27 @@ class TestMiddlewareConstruction:
             "list_async_tasks",
         }
 
-    def test_start_tool_schema_matches_upstream(self):
+    def test_start_tool_schema_matches_upstream(self, workspace):
         """The tool signature returned to upstream's exact shape when
         ``payload`` was dropped — schema is now ``deepagents``'s
         ``StartAsyncTaskSchema``."""
         from deepagents.middleware.async_subagents import StartAsyncTaskSchema
 
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
         assert start.args_schema is StartAsyncTaskSchema
 
-    def test_construction_rejects_empty_subagents(self):
+    def test_construction_rejects_empty_subagents(self, workspace):
         with pytest.raises(ValueError, match="At least one async subagent"):
-            EvoAsyncSubAgentMiddleware(async_subagents=[])
+            EvoAsyncSubAgentMiddleware(workspace=workspace, async_subagents=[])
 
-    def test_construction_rejects_duplicate_names(self):
+    def test_construction_rejects_duplicate_names(self, workspace):
         with pytest.raises(ValueError, match="Duplicate"):
             EvoAsyncSubAgentMiddleware(
-                async_subagents=[_standard_spec(), _standard_spec()]
+                workspace=workspace,
+                async_subagents=[_standard_spec(), _standard_spec()],
             )
 
 
@@ -147,11 +152,13 @@ class TestStartToolInvocation:
     handed to ``runs.create`` without any real network round-trip.
     """
 
-    def test_start_injects_skill_name_for_expert_spec(self):
+    def test_start_injects_skill_name_for_expert_spec(self, workspace):
         """The middleware sets ``input_dict['skill_name'] = subagent_type``
         by construction — the shared container graph resolves the right
         persona without a payload dict crossing the LLM channel."""
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_sync_client()
@@ -183,11 +190,13 @@ class TestStartToolInvocation:
         assert "async_tasks" in result.update
         assert "task-abc" in result.update["async_tasks"]
 
-    def test_start_records_description_in_task_envelope(self):
+    def test_start_records_description_in_task_envelope(self, workspace):
         """The launch-time description is stamped into ``async_tasks`` state so
         a completion notification can name which task finished (read back in
         ``cli/async_notifier``); bounded to 200 chars to cap state size."""
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_sync_client()
@@ -212,7 +221,7 @@ class TestStartToolInvocation:
         )
         assert long.update["async_tasks"]["task-abc"]["description"] == "x" * 200
 
-    def test_start_injects_cfg_model_into_configurable(self):
+    def test_start_injects_cfg_model_into_configurable(self, workspace):
         """cfg.model / cfg.provider land in ``config.configurable`` on every
         ``runs.create`` so the deployed graph re-resolves its chat model per
         run instead of using whatever was baked at container-build time.
@@ -221,7 +230,9 @@ class TestStartToolInvocation:
         """
         from EvoScientist.config.settings import EvoScientistConfig
 
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_sync_client()
@@ -245,10 +256,12 @@ class TestStartToolInvocation:
         assert configurable["model"] == "test-model-abc"
         assert configurable["model_provider"] == "test-provider"
 
-    def test_start_standard_spec_matches_upstream_input_shape(self):
+    def test_start_standard_spec_matches_upstream_input_shape(self, workspace):
         """Standard subagents (writing-agent, scheduler, ...) reach
         ``runs.create`` with the upstream single-key ``messages`` shape."""
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_sync_client()
@@ -264,8 +277,10 @@ class TestStartToolInvocation:
         kwargs = client.runs.create.call_args.kwargs
         assert kwargs["input"] == {"messages": [{"role": "user", "content": "hi"}]}
 
-    def test_start_unknown_subagent_returns_error(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    def test_start_unknown_subagent_returns_error(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         # Patch the resolve-on-miss walk so the negative-miss path stays
@@ -291,8 +306,10 @@ class TestAstartToolInvocation:
     would leave tests green and production broken."""
 
     @pytest.mark.asyncio
-    async def test_astart_injects_skill_name_for_expert_spec(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+    async def test_astart_injects_skill_name_for_expert_spec(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_async_client()
@@ -318,10 +335,12 @@ class TestAstartToolInvocation:
         assert "task-abc" in result.update["async_tasks"]
 
     @pytest.mark.asyncio
-    async def test_astart_injects_cfg_model_into_configurable(self):
+    async def test_astart_injects_cfg_model_into_configurable(self, workspace):
         from EvoScientist.config.settings import EvoScientistConfig
 
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_async_client()
@@ -346,8 +365,10 @@ class TestAstartToolInvocation:
         assert configurable["model_provider"] == "test-provider"
 
     @pytest.mark.asyncio
-    async def test_astart_standard_spec_matches_upstream_input_shape(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    async def test_astart_standard_spec_matches_upstream_input_shape(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_async_client()
@@ -364,8 +385,10 @@ class TestAstartToolInvocation:
         assert kwargs["input"] == {"messages": [{"role": "user", "content": "hi"}]}
 
     @pytest.mark.asyncio
-    async def test_astart_unknown_subagent_returns_error(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    async def test_astart_unknown_subagent_returns_error(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         # Patch the resolve-on-miss walk — see the sync twin.
@@ -400,8 +423,10 @@ class TestResolveOnMiss:
     no agent rebuild, no restart. A name that is still unknown after one
     resolution walk gets upstream's error with the refreshed type list."""
 
-    def test_unknown_expert_resolves_and_dispatches(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    def test_unknown_expert_resolves_and_dispatches(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_sync_client()
@@ -427,14 +452,16 @@ class TestResolveOnMiss:
         kwargs = client.runs.create.call_args.kwargs
         assert kwargs["input"]["skill_name"] == "brand-new-expert"
 
-    def test_resolution_updates_the_watcher_dict(self):
+    def test_resolution_updates_the_watcher_dict(self, workspace):
         """The watcher holds a SEPARATE agent dict from ``agent_map``; the
         resolution must land in both or the completion notification for the
         newly resolved expert silently never fires (the watcher's
         ``get_async`` KeyError is swallowed by its ``try/except``)."""
         watcher_agents: dict = {}
         mw = EvoAsyncSubAgentMiddleware(
-            async_subagents=[_standard_spec()], watcher_agents=watcher_agents
+            workspace=workspace,
+            async_subagents=[_standard_spec()],
+            watcher_agents=watcher_agents,
         )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
@@ -458,7 +485,7 @@ class TestResolveOnMiss:
 
         assert "brand-new-expert" in watcher_agents
 
-    def test_resolution_never_overwrites_existing_entries(self):
+    def test_resolution_never_overwrites_existing_entries(self, workspace):
         """``setdefault`` semantics: a spec already in ``agent_map`` keeps its
         identity — an overwrite could smuggle in a spec the running agent
         was not validated against (the constructor already raised on
@@ -475,7 +502,9 @@ class TestResolveOnMiss:
             "graph_id": "challenger-graph",
             "is_expert": True,
         }
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[incumbent])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[incumbent]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         # The miss-walk returns BOTH a new expert and a same-name challenger
@@ -513,12 +542,14 @@ class TestResolveOnMiss:
         assert "incumbent-graph" in assistant_ids
         assert "challenger-graph" not in assistant_ids
 
-    def test_negative_miss_returns_error_with_refreshed_list(self):
+    def test_negative_miss_returns_error_with_refreshed_list(self, workspace):
         """A hallucinated name is still an error after the one resolution
         walk — and the message's allowed-type list now includes names the
         walk just added (the second ``_validate_agent_type`` call reads the
         mutated map)."""
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         with patch(
@@ -535,7 +566,7 @@ class TestResolveOnMiss:
         assert "Unknown async subagent type" in result
         assert "brand-new-expert" in result
 
-    def test_resolution_uses_the_construction_cfg(self):
+    def test_resolution_uses_the_construction_cfg(self, workspace):
         """The miss-walk must spec against the cfg the agent was constructed
         with, not a fresh ``get_effective_config()`` read. Re-deriving config
         at dispatch time would let a mid-session ``langgraph_dev_port`` change
@@ -543,7 +574,9 @@ class TestResolveOnMiss:
         is not on — dispatch accepts the name, only ``runs.create`` fails."""
         construction_cfg = SimpleNamespace(enable_async_subagents=True)
         mw = EvoAsyncSubAgentMiddleware(
-            async_subagents=[_standard_spec()], cfg=construction_cfg
+            workspace=workspace,
+            async_subagents=[_standard_spec()],
+            cfg=construction_cfg,
         )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
@@ -572,8 +605,10 @@ class TestAstartResolveOnMiss:
     actually runs in production."""
 
     @pytest.mark.asyncio
-    async def test_astart_unknown_expert_resolves_and_dispatches(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    async def test_astart_unknown_expert_resolves_and_dispatches(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_async_client()
@@ -609,10 +644,12 @@ class TestAstartResolveOnMiss:
         assert to_thread_calls == ["_resolve_merge_validate"]
 
     @pytest.mark.asyncio
-    async def test_astart_resolution_updates_the_watcher_dict(self):
+    async def test_astart_resolution_updates_the_watcher_dict(self, workspace):
         watcher_agents: dict = {}
         mw = EvoAsyncSubAgentMiddleware(
-            async_subagents=[_standard_spec()], watcher_agents=watcher_agents
+            workspace=workspace,
+            async_subagents=[_standard_spec()],
+            watcher_agents=watcher_agents,
         )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
@@ -637,8 +674,10 @@ class TestAstartResolveOnMiss:
         assert "brand-new-expert" in watcher_agents
 
     @pytest.mark.asyncio
-    async def test_astart_negative_miss_returns_error(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    async def test_astart_negative_miss_returns_error(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         with patch(
@@ -655,14 +694,16 @@ class TestAstartResolveOnMiss:
         assert "Unknown async subagent type" in result
 
     @pytest.mark.asyncio
-    async def test_astart_negative_miss_returns_refreshed_error(self):
+    async def test_astart_negative_miss_returns_refreshed_error(self, workspace):
         """The async miss path must honor the threaded call's return value:
         the error comes from the worker's merge-and-validate under the
         lock, so its allowed-type list already includes the names the walk
         just merged. A caller that dropped the ``to_thread`` result and
         re-derived the error from a stale message would lose the new
         names."""
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         with patch(
@@ -680,14 +721,16 @@ class TestAstartResolveOnMiss:
         assert "brand-new-expert" in result
 
     @pytest.mark.asyncio
-    async def test_astart_known_name_dispatch_skips_the_lock(self):
+    async def test_astart_known_name_dispatch_skips_the_lock(self, workspace):
         """A known-name dispatch on the event loop must never touch
         ``_resolve_lock``: the miss check is a keyed lookup, and all lock
         work lives on the ``to_thread`` worker. Holding the lock from this
         coroutine pins the property — the dispatch completes while the
         lock is unavailable. The pre-reshape shape ran its validation
         under the lock on the loop and hung here until the timeout."""
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_async_client()
@@ -717,7 +760,7 @@ class TestResolveOnMissLocking:
     blocks a participant on an event we control and asserts the other side
     genuinely waits for the lock."""
 
-    def test_resolver_merge_waits_for_the_lock(self):
+    def test_resolver_merge_waits_for_the_lock(self, workspace):
         """With the lock held by an unrelated holder, the resolver's merge
         must not insert into ``agent_map`` until the lock is released.
         Without the lock parameter (or without locking in the resolver),
@@ -743,7 +786,7 @@ class TestResolveOnMissLocking:
                 return_value=[_newly_installed_expert_spec()],
             ):
                 result = _resolve_merge_validate(
-                    agent_map, watcher_agents, None, "brand-new-expert", lock
+                    agent_map, watcher_agents, None, workspace, "brand-new-expert", lock
                 )
             assert result is None
             done.set()
@@ -760,7 +803,7 @@ class TestResolveOnMissLocking:
         assert "brand-new-expert" in agent_map
         assert "brand-new-expert" in watcher_agents
 
-    def test_validate_blocks_while_resolver_holds_the_lock(self):
+    def test_validate_blocks_while_resolver_holds_the_lock(self, workspace):
         """End to end through the middleware's own lock, on the SYNC tool
         path (a blocked coroutine would freeze the event loop, making the
         blocking unobservable from the same loop; the sync variant shares
@@ -777,7 +820,9 @@ class TestResolveOnMissLocking:
 
         from EvoScientist.middleware import expert_async_subagent as mod
 
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         resolver_entered = threading.Event()
@@ -878,8 +923,10 @@ class TestCallerModelInheritance:
             "last_updated_at": "2026-05-07T00:00:00Z",
         }
 
-    def test_start_forwards_caller_model_over_cfg(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+    def test_start_forwards_caller_model_over_cfg(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_sync_client()
@@ -904,8 +951,10 @@ class TestCallerModelInheritance:
         assert configurable["model_provider"] == "openrouter"
 
     @pytest.mark.asyncio
-    async def test_astart_forwards_caller_model_over_cfg(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+    async def test_astart_forwards_caller_model_over_cfg(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_async_client()
@@ -929,8 +978,10 @@ class TestCallerModelInheritance:
         assert configurable["model"] == "free"
         assert configurable["model_provider"] == "openrouter"
 
-    def test_update_forwards_caller_model_over_cfg(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    def test_update_forwards_caller_model_over_cfg(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         update = next(t for t in mw.tools if t.name == "update_async_task")
 
         client = _fake_sync_client()
@@ -957,8 +1008,10 @@ class TestCallerModelInheritance:
         assert kwargs["multitask_strategy"] == "interrupt"
 
     @pytest.mark.asyncio
-    async def test_aupdate_forwards_caller_model_over_cfg(self):
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_standard_spec()])
+    async def test_aupdate_forwards_caller_model_over_cfg(self, workspace):
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_standard_spec()]
+        )
         update = next(t for t in mw.tools if t.name == "update_async_task")
 
         client = _fake_async_client()
@@ -983,13 +1036,15 @@ class TestCallerModelInheritance:
         assert kwargs["config"]["configurable"]["model"] == "free"
         assert kwargs["multitask_strategy"] == "interrupt"
 
-    def test_caller_scope_reset_after_start(self):
+    def test_caller_scope_reset_after_start(self, workspace):
         """The contextvar must not leak past the tool call — a later launch
         with no override falls back to the config-default, not the prior
         caller's model."""
         from EvoScientist.llm import patches as patches_mod
 
-        mw = EvoAsyncSubAgentMiddleware(async_subagents=[_expert_spec()])
+        mw = EvoAsyncSubAgentMiddleware(
+            workspace=workspace, async_subagents=[_expert_spec()]
+        )
         start = next(t for t in mw.tools if t.name == "start_async_task")
 
         client = _fake_sync_client()

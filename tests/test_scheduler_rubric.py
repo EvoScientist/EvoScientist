@@ -80,9 +80,10 @@ def _build(name: str, workspace, aux_model=None):
         create = stack.enter_context(patch("deepagents.create_deep_agent"))
         create.return_value.with_config.return_value = MagicMock()
 
+        from EvoScientist.paths import Workspace
         from EvoScientist.subagents._factory import build_async_subagent_graph
 
-        build_async_subagent_graph(name)
+        build_async_subagent_graph(name, workspace=Workspace(workspace))
         return create.call_args.kwargs, backend, aux.return_value, lifecycle_stub
 
 

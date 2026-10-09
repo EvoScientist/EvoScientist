@@ -8,6 +8,17 @@ from ..base import Argument, Command, CommandContext
 from ..manager import manager
 
 
+def _announce_expert_install(ctx: CommandContext, results: list[dict]) -> None:
+    """Print the /new hint once if any installed directory declares an expert."""
+    from pathlib import Path
+
+    from ...tools.skills_manager import is_expert_skill_dir
+    from .experts import NEW_EXPERT_DISPATCH_HINT
+
+    if any(r.get("path") and is_expert_skill_dir(Path(r["path"])) for r in results):
+        ctx.ui.append_system(NEW_EXPERT_DISPATCH_HINT, style="dim")
+
+
 class SkillsCommand(Command):
     """List installed skills."""
 
@@ -17,10 +28,11 @@ class SkillsCommand(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...cli.agent import _shorten_path
-        from ...paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
+        from ...paths import GLOBAL_SKILLS_DIR
         from ...tools.skills_manager import list_skills
 
-        skills = list_skills(include_system=True)
+        workspace = ctx.workspace
+        skills = list_skills(include_system=True, workspace=workspace)
         if not skills:
             ctx.ui.append_system("No skills available.", style="dim")
             ctx.ui.append_system(
@@ -56,7 +68,7 @@ class SkillsCommand(Command):
 
         ctx.ui.append_system(
             f"Global: {_shorten_path(str(GLOBAL_SKILLS_DIR))}  "
-            f"Workspace: {_shorten_path(str(USER_SKILLS_DIR))}",
+            f"Workspace: {_shorten_path(str(workspace.skills_dir))}",
             style="dim",
         )
 
@@ -100,16 +112,22 @@ class InstallSkill(Command):
             )
             return
 
-        from ...paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
+        from ...paths import GLOBAL_SKILLS_DIR
 
-        dest = USER_SKILLS_DIR if local else GLOBAL_SKILLS_DIR
+        workspace = ctx.workspace
+        dest = workspace.skills_dir if local else GLOBAL_SKILLS_DIR
         ctx.ui.append_system(f"Installing skill from: {source}", style="dim")
         ctx.ui.append_system(
             f"Destination: {_shorten_path(str(dest))} "
             f"({'workspace' if local else 'global'})",
             style="dim",
         )
-        result = install_skill(source, global_install=not local)
+        result = install_skill(
+            source,
+            global_install=not local,
+            workspace=workspace,
+            work_dir=ctx.work_dir,
+        )
         if result.get("batch"):
             for item in result.get("installed", []):
                 ctx.ui.append_system(f"Installed: {item['name']}", style="green")
@@ -123,16 +141,16 @@ class InstallSkill(Command):
             installed_count = len(result.get("installed", []))
             if installed_count:
                 ctx.ui.append_system(
-                    f"{installed_count} skill(s) installed. Reload with /new to apply.",
-                    style="dim",
+                    f"{installed_count} skill(s) installed.", style="dim"
                 )
+            _announce_expert_install(ctx, result.get("installed", []))
         elif result.get("success"):
             ctx.ui.append_system(f"Installed: {result['name']}", style="green")
             ctx.ui.append_system(
                 f"Description: {result.get('description', '(none)')}", style="dim"
             )
             ctx.ui.append_system(f"Path: {_shorten_path(result['path'])}", style="dim")
-            ctx.ui.append_system("Reload with /new to apply.", style="dim")
+            _announce_expert_install(ctx, [result])
         else:
             ctx.ui.append_system(f"Failed: {result['error']}", style="red")
 
@@ -154,8 +172,10 @@ class InstallSkills(Command):
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from pathlib import Path as _Path
 
-        from ...paths import USER_SKILLS_DIR
+        from ...git_cli import GitNotFoundError
         from ...tools.skills_manager import fetch_remote_skill_index, install_skill
+
+        workspace = ctx.workspace
 
         tag = args[0] if args else ""
         ctx.ui.append_system(
@@ -166,9 +186,11 @@ class InstallSkills(Command):
             index = fetch_remote_skill_index()
         except Exception as e:
             ctx.ui.append_system(f"Failed to fetch skill index: {e}", style="red")
-            ctx.ui.append_system(
-                "Try: /install-skill EvoScientist/EvoSkills@skills", style="dim"
-            )
+            if not isinstance(e, GitNotFoundError):
+                # The suggested install needs git too.
+                ctx.ui.append_system(
+                    "Try: /install-skill EvoScientist/EvoSkills@skills", style="dim"
+                )
             return
 
         if not index:
@@ -179,7 +201,7 @@ class InstallSkills(Command):
         from ...paths import GLOBAL_SKILLS_DIR
 
         installed_names: set[str] = set()
-        for skills_dir in (_Path(GLOBAL_SKILLS_DIR), _Path(USER_SKILLS_DIR)):
+        for skills_dir in (_Path(GLOBAL_SKILLS_DIR), workspace.skills_dir):
             if skills_dir.exists():
                 installed_names.update(
                     e.name for e in skills_dir.iterdir() if e.is_dir()
@@ -230,15 +252,23 @@ class InstallSkills(Command):
 
         # Install selected skills
         installed_count = 0
+        installed_results: list[dict] = []
         for source in selected_sources:
-            result = install_skill(source, global_install=True)
+            result = install_skill(
+                source,
+                global_install=True,
+                workspace=workspace,
+                work_dir=ctx.work_dir,
+            )
             if result.get("batch"):
                 for item in result.get("installed", []):
                     ctx.ui.append_system(f"Installed: {item['name']}", style="green")
                     installed_count += 1
+                    installed_results.append(item)
             elif result.get("success"):
                 ctx.ui.append_system(f"Installed: {result['name']}", style="green")
                 installed_count += 1
+                installed_results.append(result)
             else:
                 ctx.ui.append_system(
                     f"Failed: {result.get('error', 'unknown')}", style="red"
@@ -246,9 +276,9 @@ class InstallSkills(Command):
 
         if installed_count > 0:
             ctx.ui.append_system(
-                f"Successfully installed {installed_count} skill(s). Reload with /new to apply.",
-                style="dim",
+                f"Successfully installed {installed_count} skill(s).", style="dim"
             )
+            _announce_expert_install(ctx, installed_results)
         elif not is_channel:
             ctx.ui.append_system("No skills were installed.", style="yellow")
 
@@ -270,6 +300,7 @@ class UninstallSkill(Command):
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         from ...tools.skills_manager import uninstall_skill
+        from .experts import REMOVED_EXPERT_DISPATCH_HINT
 
         name = args[0] if args else ""
         if not name:
@@ -277,10 +308,11 @@ class UninstallSkill(Command):
             ctx.ui.append_system("Use /skills to see installed skills.", style="dim")
             return
 
-        result = uninstall_skill(name)
+        result = uninstall_skill(name, workspace=ctx.workspace)
         if result["success"]:
             ctx.ui.append_system(f"Uninstalled: {name}", style="green")
-            ctx.ui.append_system("Reload with /new to apply.", style="dim")
+            if result.get("expert"):
+                ctx.ui.append_system(REMOVED_EXPERT_DISPATCH_HINT, style="dim")
         else:
             ctx.ui.append_system(f"Failed: {result['error']}", style="red")
 

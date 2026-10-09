@@ -2,13 +2,18 @@
 
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+from tests.fakes import TEST_WORKSPACE
+
 
 def _ctx():
     from EvoScientist.commands.base import CommandContext
 
     ui = MagicMock()
     ui.supports_interactive = True
-    return CommandContext(agent=None, thread_id="tid", ui=ui), ui
+    return CommandContext(
+        dirs=SessionDirs(TEST_WORKSPACE), agent=None, thread_id="tid", ui=ui
+    ), ui
 
 
 class TestMCPCommandDispatch:
@@ -101,6 +106,23 @@ class TestMCPCommandDispatch:
             klass.return_value = instance
             await MCPCommand().execute(ctx, ["install", "foo"])
         klass.assert_called_once()
+
+    async def test_install_without_git_prints_the_git_message(self, no_git):
+        """The real /mcp install route (the test above mocks the class out)."""
+        from unittest.mock import AsyncMock
+
+        from EvoScientist.commands.implementation.mcp import MCPCommand
+        from EvoScientist.mcp.registry import _MARKETPLACE_CACHE
+
+        _MARKETPLACE_CACHE.clear()
+        ctx, ui = _ctx()
+        ui.flush = AsyncMock()
+        await MCPCommand().execute(ctx, ["install"])
+        msgs = [c.args[0] for c in ui.append_system.call_args_list]
+        assert any(
+            m.startswith("Failed to fetch server index: git was not found on PATH.")
+            for m in msgs
+        )
 
     async def test_unknown_subcommand_prints_help(self):
         from EvoScientist.commands.implementation.mcp import MCPCommand

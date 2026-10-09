@@ -15,6 +15,7 @@ import threading
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from rich.console import Group  # type: ignore[import-untyped]
@@ -80,12 +81,13 @@ def _graph_target_for_local_agent(
     agent: "CompiledStateGraph",
     metadata: dict[str, object] | None = None,
 ) -> GraphTarget:
-    workspace = None
+    folders: dict[str, str] = {}
     if metadata is not None:
-        raw_workspace = metadata.get("workspace_dir")
-        if isinstance(raw_workspace, str) and raw_workspace:
-            workspace = raw_workspace
-    return GraphTarget(local_graph=agent, workspace_dir=workspace)
+        for key in ("workspace_dir", "run_dir"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value:
+                folders[key] = value
+    return GraphTarget(local_graph=agent, **folders)
 
 
 # LLM output sometimes omits the CommonMark-required space after `#` (e.g.
@@ -1442,6 +1444,7 @@ def _run_streaming(
     on_thinking: Callable[[str], None] | None = None,
     on_todo: Callable[[list[dict]], None] | None = None,
     on_file_write: Callable[[str], None] | None = None,
+    work_dir: str | Path | None = None,
     on_stream_event: Callable[[str, Any], Any] | None = None,
     status_footer_builder: Callable[[], Any] | None = None,
     metadata: dict[str, object] | None = None,
@@ -1476,6 +1479,8 @@ def _run_streaming(
             Called once when write_todos tool_call is detected.
         on_file_write: Optional sync callback receiving the real filesystem path
             when the agent writes a media file (image/pdf) via write_file.
+        work_dir: The folder the agent works in; virtual paths in tool calls
+            resolve against it before ``on_file_write`` is called.
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
@@ -1494,6 +1499,7 @@ def _run_streaming(
                 on_thinking=on_thinking,
                 on_todo=on_todo,
                 on_file_write=on_file_write,
+                work_dir=work_dir,
                 on_stream_event=on_stream_event,
                 status_footer_builder=status_footer_builder,
                 metadata=metadata,
@@ -1586,7 +1592,11 @@ def _run_streaming(
                     if wf_path:
                         ext = os.path.splitext(wf_path)[1].lower()
                         if ext in _MEDIA_EXTENSIONS:
-                            real_path = str(resolve_virtual_path(wf_path))
+                            real_path = (
+                                str(resolve_virtual_path(work_dir, wf_path))
+                                if work_dir is not None
+                                else wf_path
+                            )
                             if os.path.isfile(real_path):
                                 _media_sent.add(wf_path)
                                 on_file_write(real_path)
@@ -1611,8 +1621,8 @@ def _run_streaming(
                         ext = os.path.splitext(rf_path)[1].lower()
                         if ext in _MEDIA_EXTENSIONS:
                             real_path = rf_path
-                            if not os.path.isfile(real_path):
-                                real_path = str(resolve_virtual_path(rf_path))
+                            if not os.path.isfile(real_path) and work_dir is not None:
+                                real_path = str(resolve_virtual_path(work_dir, rf_path))
                             if os.path.isfile(real_path):
                                 _media_sent.add(rf_path)
                                 on_file_write(real_path)

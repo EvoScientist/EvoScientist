@@ -620,6 +620,243 @@ class TestStdioErrlogSafetyPatch:
         assert getattr(adapter_sessions.stdio_client, "_evosci_errlog_safe", False)
 
 
+# ---- stdio kill-on-cancel patch ----
+
+# Answers tools/list after a delay, then keeps running after its stdin closes,
+# so the SDK's 2s "wait for exit" never ends on its own.
+_STUBBORN_STDIO_SERVER = textwrap.dedent(
+    """
+    import json, os, sys, time
+
+    delay, pidfile = float(sys.argv[1]), sys.argv[2]
+    with open(pidfile, "w") as f:
+        f.write(str(os.getpid()))
+
+    def send(msg):
+        sys.stdout.write(json.dumps(msg) + "\\n")
+        sys.stdout.flush()
+
+    for line in sys.stdin:
+        msg = json.loads(line)
+        method, mid = msg.get("method"), msg.get("id")
+        if method == "initialize":
+            send({"jsonrpc": "2.0", "id": mid, "result": {
+                "protocolVersion": msg["params"]["protocolVersion"],
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "stubborn", "version": "0"}}})
+        elif method == "tools/list":
+            time.sleep(delay)
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [
+                {"name": "ping", "inputSchema": {"type": "object"}}]}})
+        elif mid is not None:
+            send({"jsonrpc": "2.0", "id": mid, "result": {}})
+
+    while True:
+        time.sleep(1)
+    """
+)
+
+
+class TestStdioKillOnCancelPatch:
+    """A deadline that lands while the SDK waits for a stdio server to exit
+    must still kill the server (#580)."""
+
+    @staticmethod
+    def _patch_with(monkeypatch, process, on_terminate=None):
+        import mcp.client.stdio as stdio_mod
+
+        from EvoScientist.mcp import client as mcp_client
+
+        terminated: list = []
+
+        async def fake_create(*args, **kwargs):
+            return process
+
+        async def fake_terminate(proc, *args, **kwargs):
+            terminated.append(proc)
+            if on_terminate is not None:
+                await on_terminate(proc)
+
+        monkeypatch.setattr(
+            stdio_mod, "_create_platform_compatible_process", fake_create
+        )
+        monkeypatch.setattr(stdio_mod, "_terminate_process_tree", fake_terminate)
+        mcp_client._patch_mcp_stdio_kill_on_cancel()
+        return stdio_mod, terminated
+
+    async def test_cancelled_wait_kills_the_process_tree(self, monkeypatch):
+        import anyio
+
+        class _NeverExits:
+            async def wait(self):
+                await anyio.sleep_forever()
+
+        process = _NeverExits()
+        stdio_mod, terminated = self._patch_with(monkeypatch, process)
+
+        created = await stdio_mod._create_platform_compatible_process("demo", [])
+        with anyio.move_on_after(0.05):
+            await created.wait()
+
+        assert terminated == [process]
+
+    async def test_wait_that_finishes_does_not_kill(self, monkeypatch):
+        class _Exits:
+            async def wait(self):
+                return 0
+
+        stdio_mod, terminated = self._patch_with(monkeypatch, _Exits())
+
+        created = await stdio_mod._create_platform_compatible_process("demo", [])
+
+        assert await created.wait() == 0
+        assert terminated == []
+
+    async def test_sdk_kill_after_its_own_timeout_is_skipped(self, monkeypatch):
+        """The SDK's 2s limit cancels ``wait`` and then kills the tree itself.
+        The wrapper has already killed it by then, so the SDK's kill must do
+        nothing rather than run a second time."""
+        import anyio
+
+        class _NeverExits:
+            async def wait(self):
+                await anyio.sleep_forever()
+
+        process = _NeverExits()
+        stdio_mod, terminated = self._patch_with(monkeypatch, process)
+
+        created = await stdio_mod._create_platform_compatible_process("demo", [])
+        # Same order as the SDK: a timed out wait, then its own kill.
+        with anyio.move_on_after(0.05):
+            await created.wait()
+        await stdio_mod._terminate_process_tree(created)
+
+        assert terminated == [process]
+
+    async def test_kill_that_waits_again_does_not_kill_again(self, monkeypatch):
+        """The SDK's POSIX kill fallback calls ``wait`` with its own time
+        limit. That cancelled wait must not start another kill, or a server
+        that ignores SIGTERM keeps the two re-entering each other."""
+        import anyio
+
+        class _NeverExits:
+            async def wait(self):
+                await anyio.sleep_forever()
+
+        calls: list = []
+
+        async def wait_like_the_fallback(proc):
+            calls.append(proc)
+            if len(calls) < 3:  # Bound the recursion if it comes back.
+                with anyio.move_on_after(0.05):
+                    await proc.wait()
+
+        process = _NeverExits()
+        stdio_mod, terminated = self._patch_with(
+            monkeypatch, process, on_terminate=wait_like_the_fallback
+        )
+
+        created = await stdio_mod._create_platform_compatible_process("demo", [])
+        with anyio.move_on_after(0.05):
+            await created.wait()
+
+        assert terminated == [process]
+
+    def test_skipped_on_mcp_2(self, monkeypatch):
+        """mcp 2.x shields its shutdown and never calls ``wait`` there."""
+        import mcp.client.stdio as stdio_mod
+
+        from EvoScientist.mcp import client as mcp_client
+
+        async def fake_create(*args, **kwargs):
+            return None
+
+        async def fake_terminate(proc, *args, **kwargs):
+            return None
+
+        monkeypatch.setattr(
+            stdio_mod, "_create_platform_compatible_process", fake_create
+        )
+        monkeypatch.setattr(stdio_mod, "_terminate_process_tree", fake_terminate)
+        monkeypatch.setattr(mcp_client, "_mcp_major_version", lambda: 2)
+
+        mcp_client._patch_mcp_stdio_kill_on_cancel()
+
+        assert stdio_mod._create_platform_compatible_process is fake_create
+        assert stdio_mod._terminate_process_tree is fake_terminate
+
+    async def test_deadline_during_shutdown_does_not_hang(self, tmp_path):
+        """End to end with a real subprocess: the server answers at 0.5s, so
+        the 1s limit lands inside the SDK's 2s wait for it to exit."""
+        import asyncio
+
+        import psutil
+
+        from EvoScientist.mcp import client as mcp_client
+
+        script = tmp_path / "stubborn_server.py"
+        script.write_text(_STUBBORN_STDIO_SERVER)
+        pidfile = tmp_path / "server.pid"
+        config = {
+            "stubborn": {
+                "transport": "stdio",
+                "command": sys.executable,
+                "args": [str(script), "0.5", str(pidfile)],
+            }
+        }
+
+        result = await asyncio.wait_for(
+            mcp_client._load_tools(config, timeout=1.0), timeout=15
+        )
+
+        assert result == {"stubborn": []}
+        # The kill can still be finishing when ``_load_tools`` returns, so
+        # wait for the process to go away rather than check it only once.
+        pid = int(pidfile.read_text())
+        try:
+            psutil.Process(pid).wait(timeout=5)
+        except psutil.NoSuchProcess:
+            pass  # Already gone.
+        except psutil.TimeoutExpired:
+            pytest.fail(f"stdio server {pid} is still running after the kill")
+
+    async def test_sdk_timeout_kills_once_without_logging(self, tmp_path, caplog):
+        """End to end with no time limit: the SDK's own 2s wait runs out on a
+        server that ignores stdin closing. The server must be killed, and the
+        kill must not log anything."""
+        import asyncio
+        import logging
+
+        import psutil
+
+        from EvoScientist.mcp import client as mcp_client
+
+        script = tmp_path / "stubborn_server.py"
+        script.write_text(_STUBBORN_STDIO_SERVER)
+        pidfile = tmp_path / "server.pid"
+        config = {
+            "stubborn": {
+                "transport": "stdio",
+                "command": sys.executable,
+                "args": [str(script), "0", str(pidfile)],
+            }
+        }
+        caplog.set_level(logging.WARNING)
+
+        result = await asyncio.wait_for(mcp_client._load_tools(config), timeout=15)
+
+        assert [tool.name for tool in result["stubborn"]] == ["ping"]
+        pid = int(pidfile.read_text())
+        try:
+            psutil.Process(pid).wait(timeout=5)
+        except psutil.NoSuchProcess:
+            pass  # Already gone.
+        except psutil.TimeoutExpired:
+            pytest.fail(f"stdio server {pid} is still running after the kill")
+        if sys.platform != "darwin":
+            assert [r.getMessage() for r in caplog.records] == []
+
+
 # ---- _filter_tools ----
 
 
@@ -633,7 +870,7 @@ class TestOwnedRuntimeLoading:
         executions: list[tuple[str, asyncio.AbstractEventLoop]] = []
         tool = _make_tool("search")
 
-        async def fake_load(_config, *, on_progress=None):
+        async def fake_load(_config, *, on_progress=None, timeout=None):
             executions.append(
                 (threading.current_thread().name, asyncio.get_running_loop())
             )
@@ -657,7 +894,7 @@ class TestOwnedRuntimeLoading:
     def test_direct_caller_gets_a_scoped_runtime(self, monkeypatch):
         execution: dict[str, object] = {}
 
-        async def fake_load(_config, *, on_progress=None):
+        async def fake_load(_config, *, on_progress=None, timeout=None):
             execution["thread"] = threading.current_thread().name
             execution["loop"] = asyncio.get_running_loop()
             return {"server": []}
@@ -1904,6 +2141,179 @@ class TestLoadToolsProgressCallback:
         assert inflight["peak"] <= 3
         assert inflight["peak"] > 1  # sanity: we *are* parallelizing
 
+    async def test_slow_server_is_skipped_after_timeout(self, monkeypatch):
+        """A server that never answers is cancelled, reported as an error and
+        left out, and the other servers still load."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        cancelled = asyncio.Event()
+
+        class _HangingClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                if server_name == "slow_srv":
+                    # Cancellation is what makes the MCP SDK shut a stdio
+                    # subprocess down, so check it happens, not just that the
+                    # load returns.
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.set()
+                        raise
+                return ["a"]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _HangingClient)
+
+        events: list[tuple[str, str, str]] = []
+
+        def record(event, name, detail):
+            events.append((event, name, detail))
+
+        config = {
+            "ok_srv": {"transport": "stdio", "command": "demo"},
+            "slow_srv": {"transport": "stdio", "command": "demo"},
+        }
+        result = await asyncio.wait_for(
+            mcp_client._load_tools(config, on_progress=record, timeout=0.05),
+            timeout=5,
+        )
+
+        assert result == {"ok_srv": ["a"], "slow_srv": []}
+        assert cancelled.is_set()
+        by_server = {}
+        for ev, name, detail in events:
+            by_server.setdefault(name, []).append((ev, detail))
+        assert by_server["ok_srv"] == [("start", ""), ("success", "1")]
+        assert by_server["slow_srv"] == [
+            ("start", ""),
+            ("error", "timed out after 0.05s"),
+        ]
+
+    async def test_timeout_raised_inside_get_tools_keeps_its_message(self, monkeypatch):
+        """A TimeoutError from the server itself (e.g. a websocket handshake)
+        is not reported as our own deadline."""
+        from EvoScientist.mcp.client import _load_tools
+
+        events: list[tuple[str, str, str]] = []
+        self._patch_client(
+            monkeypatch, {"srv": TimeoutError("opening handshake timed out")}
+        )
+
+        config = {"srv": {"transport": "websocket", "url": "ws://localhost:1"}}
+
+        def record(event, name, detail):
+            events.append((event, name, detail))
+
+        await _load_tools(config, on_progress=record, timeout=5)
+
+        assert events == [
+            ("start", "srv", ""),
+            ("error", "srv", "opening handshake timed out"),
+        ]
+
+    def test_no_timeout_outside_langgraph_dev(self, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        assert mcp_client._get_tools_timeout() is None
+
+    async def test_langgraph_dev_loads_with_the_server_timeout(self, monkeypatch):
+        """Inside ``langgraph dev`` the loaders pass the server limit through."""
+        from EvoScientist.mcp import client as mcp_client
+
+        seen: list[float | None] = []
+
+        async def fake_load_tools(config, *, on_progress=None, timeout=None):
+            seen.append(timeout)
+            return {}
+
+        monkeypatch.setattr(mcp_client, "_load_tools", fake_load_tools)
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+
+        config = {"srv": {"transport": "stdio", "command": "demo"}}
+        await mcp_client.aload_mcp_tools(config)
+
+        assert seen == [mcp_client._SERVER_GET_TOOLS_TIMEOUT_SECONDS]
+
+    @pytest.mark.parametrize(
+        ("server_process", "expected_tools"),
+        [("1", []), (None, ["ping"])],
+    )
+    def test_sync_loader_cuts_off_slow_stdio_only_in_langgraph_dev(
+        self, monkeypatch, server_process, expected_tools
+    ):
+        """``langgraph dev`` reaches ``_load_tools`` through the sync loader
+        (via ``_load_mcp_tools_cached``). A slow stdio server is cut off there
+        and left to finish everywhere else."""
+        import asyncio
+
+        from EvoScientist.mcp import client as mcp_client
+
+        class _SlowClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                await asyncio.sleep(0.5)
+                return [SimpleNamespace(name="ping")]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _SlowClient)
+        monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
+        if server_process is None:
+            monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
+        else:
+            monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", server_process)
+
+        config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
+        result = mcp_client.load_mcp_tools(config)
+
+        tools = [tool.name for agent_tools in result.values() for tool in agent_tools]
+        assert tools == expected_tools
+
+    def test_sync_loader_warns_with_the_timeout_reason(self, monkeypatch, caplog):
+        """With no ``on_progress`` (the ``langgraph dev`` path), a server that
+        runs out of time is logged with the timeout, not an empty reason."""
+        import asyncio
+        import logging
+
+        from EvoScientist.mcp import client as mcp_client
+
+        class _HangingClient:
+            def __init__(self, connections):
+                self.connections = connections
+
+            async def get_tools(self, server_name):
+                # Long enough to outlast the 0.05s limit, short enough that a
+                # missing limit fails the test instead of hanging it.
+                await asyncio.sleep(2)
+                return ["late"]
+
+        import langchain_mcp_adapters.client as lc_client
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", _HangingClient)
+        monkeypatch.setattr(mcp_client, "_SERVER_GET_TOOLS_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
+
+        config = {"slow_srv": {"transport": "stdio", "command": "demo"}}
+        with caplog.at_level(logging.WARNING, logger=mcp_client.logger.name):
+            mcp_client.load_mcp_tools(config)
+
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "'slow_srv'" in message and "timed out after 0.05s" in message
+            for message in warnings
+        ), warnings
+
 
 # ---- _ensure_node_for_stdio ----
 
@@ -1914,7 +2324,7 @@ class TestEnsureNodeForStdio:
         from EvoScientist.setup import node as setup_node
 
         calls = {"ensure": 0, "activate": 0}
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
 
         def ensure(*_a, **_k):
             calls["ensure"] += 1
@@ -1962,7 +2372,7 @@ class TestEnsureNodeForStdio:
         def offline(*_a, **_k):
             raise StageError("download_failed", "offline")
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
@@ -1981,7 +2391,7 @@ class TestEnsureNodeForStdio:
         def broken(*_a, **_k):
             raise NotImplementedError("compression type 99")
 
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
@@ -1993,7 +2403,7 @@ class TestEnsureNodeForStdio:
     def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
         monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}

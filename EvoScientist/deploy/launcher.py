@@ -17,30 +17,30 @@ Design rules that keep it shell-agnostic:
   :meth:`WebUILauncher.wait_ready`, :meth:`WebUILauncher.poll` and
   :meth:`WebUILauncher.stop`; the caller wires those into its own lifecycle.
 - **The front-end is pluggable.** Backend (langgraph dev) handling is shared;
-  only the front-end differs, behind :class:`WebUIRunner`. Today's npm-fetched
-  front-end is :class:`NpxWebUIRunner`; a locally installed front-end
-  (``node dist/server.js``) runs through :class:`BundledWebUIRunner`.
+  only the front-end differs, behind :class:`WebUIRunner`. The front-end runs
+  as ``node dist/server.js``: :class:`BundledWebUIRunner` for a given copy,
+  :class:`InstalledWebUIRunner` for the copy ``EvoSci setup`` installs.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
-import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
 import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-# Front-end npm package + spec. ``@latest`` → always the newest published UI.
-_WEBUI_PACKAGE = "@evoscientist/webui@latest"
 _DEFAULT_WEBUI_PORT = 4716
 _DEFAULT_WEBUI_HOST = "127.0.0.1"
 
@@ -58,10 +58,9 @@ class LauncherConfig:
     backend_port: int
     webui_host: str
     webui_port: int
-    deploy_mode: bool = True
     keepalive: bool = False
-    # Honoured only by front-ends whose ``handles_browser_open`` is False
-    # (e.g. the bundled runner). The npx runner opens the browser itself.
+    # Honoured by :meth:`WebUILauncher.wait_ready` for front-ends whose
+    # ``handles_browser_open`` is False (every runner in this module).
     open_browser: bool = False
 
 
@@ -73,6 +72,8 @@ class LaunchResult:
     webui_url: str
     backend_started: bool  # True = we own backend teardown; False = reused
     warnings: list[str] = field(default_factory=list)
+    # True when wait_ready() opened a browser (False on a host without one).
+    browser_opened: bool = False
 
 
 class LauncherError(Exception):
@@ -95,7 +96,7 @@ class LauncherError(Exception):
 # --------------------------------------------------------------------------- #
 class WebUIRunner(Protocol):
     """A front-end process strategy. Backend handling is shared; this is the
-    only part that differs between the npx front-end and a locally installed one."""
+    only part that differs between front-ends."""
 
     # True → the runner opens the system browser itself (so the launcher must
     # not). False → the launcher opens it when ``cfg.open_browser`` is set.
@@ -109,79 +110,6 @@ class WebUIRunner(Protocol):
 
     def stop(self, proc: subprocess.Popen) -> None:
         """Terminate the front-end process tree (idempotent)."""
-
-
-class NpxWebUIRunner:
-    """Today's behaviour: ``npx --yes @evoscientist/webui@latest``.
-
-    The published package's launcher prints progress and opens the browser
-    itself, so ``handles_browser_open`` is True.
-    """
-
-    handles_browser_open = True
-
-    def preflight(self, cfg: LauncherConfig) -> None:
-        if shutil.which("npx") is not None:
-            return
-        # Users who installed with pip / uv may never have run `EvoSci setup`:
-        # install the private Node now instead of failing.
-        from ..setup.node import activate_runtime, ensure_node, log_progress, tools_dir
-        from ..setup.protocol import StageError
-
-        logger.warning(f"Node.js not found on PATH; installing it into {tools_dir()}")
-        try:
-            ensure_node(progress=log_progress(logger))
-        except StageError as exc:
-            raise LauncherError(
-                "node_missing",
-                "Node.js / npx was not found on PATH and installing it failed: "
-                f"{exc.message}",
-                "Run 'EvoSci setup' to retry (add --cn for mainland China "
-                "mirrors), or install Node.js 24 LTS yourself — or switch UI "
-                "modes with 'EvoSci config set ui_backend tui'.",
-            ) from exc
-        activate_runtime()
-        if shutil.which("npx") is None:
-            raise LauncherError(
-                "node_missing",
-                "Node.js was found but npx is not on PATH. The WebUI front-end "
-                "ships as the npm package @evoscientist/webui and is launched "
-                "with npx.",
-                "Install Node.js 24 LTS (which includes npx), then re-run "
-                "EvoSci — or switch UI modes with "
-                "'EvoSci config set ui_backend tui'.",
-            )
-
-    def start(self, cfg: LauncherConfig, env: dict[str, str]) -> subprocess.Popen:
-        from ..setup.node import (
-            NPM_REGISTRIES,
-            configured_mirror,
-            is_private,
-            node_child_env,
-        )
-
-        npx = shutil.which("npx")
-        if npx is None:  # narrowed for type-checkers; preflight already ran
-            raise LauncherError("node_missing", "npx disappeared after preflight.")
-        run_env = node_child_env(env, private=is_private(npx))
-        registry = NPM_REGISTRIES.get(configured_mirror())
-        if registry:
-            # `--cn` downloads Node from npmmirror; fetch the WebUI package from
-            # there too. A registry the user set in the environment wins.
-            run_env.setdefault("npm_config_registry", registry)
-        try:
-            return subprocess.Popen(
-                [npx, "--yes", _WEBUI_PACKAGE, "--port", str(cfg.webui_port)],
-                env=run_env,
-                **_popen_group_kwargs(),
-            )
-        except Exception as exc:  # pragma: no cover - OS-level failure
-            raise LauncherError(
-                "webui_start_failed", f"Failed to launch WebUI via npx: {exc}"
-            ) from exc
-
-    def stop(self, proc: subprocess.Popen) -> None:
-        _stop_process_tree(proc)
 
 
 class BundledWebUIRunner:
@@ -218,20 +146,25 @@ class BundledWebUIRunner:
         if not self.node_exe.exists():
             raise LauncherError(
                 "node_missing",
-                f"Bundled Node runtime not found at {self.node_exe}.",
-                "This indicates a broken installation — reinstall EvoScientist.",
+                f"Node runtime not found at {self.node_exe}.",
+                "Run `EvoSci setup` to install it.",
             )
         if not self.server_entry.exists():
             raise LauncherError(
                 "node_missing",
-                f"Bundled WebUI server not found at {self.server_entry}.",
-                "This indicates a broken installation — reinstall EvoScientist.",
+                f"WebUI server not found at {self.server_entry}.",
+                "Run `EvoSci setup` to install it.",
             )
 
     def start(self, cfg: LauncherConfig, env: dict[str, str]) -> subprocess.Popen:
+        from ..setup.node import is_private, node_child_env
+
         # The standalone server reads PORT / HOSTNAME / NODE_ENV; the base env
-        # already carries PORT + HOSTNAME, we add production mode here.
-        run_env = {**env, "NODE_ENV": "production"}
+        # already carries PORT + HOSTNAME, we add production mode here. Our
+        # private Node runs without the user's npm / Node options.
+        run_env = node_child_env(
+            {**env, "NODE_ENV": "production"}, private=is_private(self.node_exe)
+        )
         kwargs = _popen_group_kwargs()
         if os.name == "nt":
             # Keep the node process off any console so no window flashes. OR it
@@ -243,7 +176,10 @@ class BundledWebUIRunner:
         if self.log_path is not None:
             # Persist front-end diagnostics: without a console the node output
             # would be lost, leaving a WebUI failure with no trace to report.
+            from ..langgraph_dev.manager import _rotate_log_if_needed
+
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            _rotate_log_if_needed(self.log_path)
             self._log_fh = open(self.log_path, "ab")
             kwargs["stdout"] = self._log_fh
             kwargs["stderr"] = subprocess.STDOUT
@@ -257,7 +193,7 @@ class BundledWebUIRunner:
             self._close_log()
             raise LauncherError(
                 "webui_start_failed",
-                f"Failed to launch bundled WebUI (node {self.server_entry}): {exc}",
+                f"Failed to launch the WebUI (node {self.server_entry}): {exc}",
             ) from exc
 
     def _close_log(self) -> None:
@@ -270,6 +206,104 @@ class BundledWebUIRunner:
     def stop(self, proc: subprocess.Popen) -> None:
         _stop_process_tree(proc)
         self._close_log()
+
+
+class InstalledWebUIRunner:
+    """The front-end ``EvoSci setup`` installs under ``tools/webui/``.
+
+    :meth:`preflight` provides it on demand: a Node from ``ensure_node()``, then
+    the WebUI from ``ensure_webui()``, which first switches to a copy the
+    background check staged, and installs one when nothing is recorded (a pip
+    user who never ran ``EvoSci setup``). It runs before the launcher starts
+    the backend, so a failed install leaves nothing running. The copy is then
+    marked in use for this process, older copies nobody runs are removed, and
+    the launch itself goes through :class:`BundledWebUIRunner`.
+
+    Args:
+        progress: ``(fraction, message)`` callback for an on-demand install.
+        log_path: Passed to :class:`BundledWebUIRunner`.
+    """
+
+    handles_browser_open = False
+
+    def __init__(
+        self,
+        progress: Callable[[float, str], None] | None = None,
+        log_path: Path | None = None,
+    ) -> None:
+        self._progress = progress
+        self._log_path = log_path
+        self._bundled: BundledWebUIRunner | None = None
+        self._marker: Path | None = None
+        self.node_exe: Path | None = None
+        self.version: str | None = None
+
+    def preflight(self, cfg: LauncherConfig) -> None:
+        from ..setup.node import activate_runtime, ensure_node
+        from ..setup.protocol import StageError
+        from ..setup.webui import cleanup_old_versions, ensure_webui, mark_in_use
+
+        try:
+            node = ensure_node(progress=self._progress)
+        except StageError as exc:
+            raise LauncherError(
+                "node_missing", exc.message, "Run `EvoSci setup` when online."
+            ) from exc
+        # A Node installed just now is not on PATH yet; the backend started
+        # next, and the agent's shell inside it, need it there.
+        activate_runtime()
+        try:
+            info = ensure_webui(node.path, progress=self._progress)
+        except StageError as exc:
+            raise LauncherError(
+                exc.code, exc.message, "Run `EvoSci setup` when online."
+            ) from exc
+        self.node_exe, self.version = node.path, info.version
+        if self._progress is not None:
+            self._progress(1.0, f"WebUI {info.version}")
+        if self._marker is None:
+            self._marker = mark_in_use(info)
+        cleanup_old_versions()
+        self._bundled = BundledWebUIRunner(info.path, node.path, self._log_path)
+        try:
+            self._bundled.preflight(cfg)
+        except BaseException:
+            self.release()
+            raise
+
+    def start(self, cfg: LauncherConfig, env: dict[str, str]) -> subprocess.Popen:
+        if self._bundled is None:  # narrowed for type-checkers
+            raise LauncherError("node_missing", "preflight() did not run.")
+        return self._bundled.start(cfg, env)
+
+    def stop(self, proc: subprocess.Popen) -> None:
+        if self._bundled is not None:
+            self._bundled.stop(proc)
+        self.release()
+
+    def release(self) -> None:
+        """Drop this process's in-use marker (idempotent). The launcher calls
+        it on every teardown, also when the front-end never started."""
+        from ..setup.webui import release_in_use
+
+        release_in_use(self._marker)
+        self._marker = None
+
+    def start_update_check(self) -> threading.Thread | None:
+        """Look for a newer WebUI in range in a daemon thread; a download is
+        used from the next launch. Call once the UI is up."""
+        from ..setup.webui import stage_update
+
+        if self.node_exe is None:
+            return None
+        thread = threading.Thread(
+            target=stage_update,
+            args=(self.node_exe,),
+            name="webui-update-check",
+            daemon=True,
+        )
+        thread.start()
+        return thread
 
 
 # --------------------------------------------------------------------------- #
@@ -286,7 +320,7 @@ class WebUILauncher:
 
     Lifecycle owned by the caller:
 
-        launcher = WebUILauncher(config, cfg, NpxWebUIRunner())
+        launcher = WebUILauncher(config, cfg, InstalledWebUIRunner())
         result = launcher.start()          # blocks while the backend starts (~60s max)
         result = launcher.wait_ready(60)   # poll both, or raise LauncherError
         ...                                # caller's own main loop / window
@@ -339,8 +373,8 @@ class WebUILauncher:
         failed CLI launch (``atexit`` not yet registered) or a caller that
         stops mid-boot would orphan the backend holding the port.
         """
+        from ..agent_shell import server_setup_hint
         from ..langgraph_dev.manager import _is_port_occupied, _read_workspace_sidecar
-        from ..setup.research_env import server_missing_python_hint
 
         self._runner.preflight(self._cfg)
 
@@ -351,7 +385,7 @@ class WebUILauncher:
             # the server log; the launching process shows it, for the server
             # it reuses or the one it starts.
             reused = _read_workspace_sidecar() if decision.action == "reuse" else None
-            hint = server_missing_python_hint(reused)
+            hint = server_setup_hint(reused)
             if hint is not None:
                 self._warnings.append(hint)
             if decision.action == "start":
@@ -421,10 +455,23 @@ class WebUILauncher:
         if self._cfg.open_browser and not getattr(
             self._runner, "handles_browser_open", False
         ):
-            try:
-                webbrowser.open(self.webui_url)
-            except Exception:  # pragma: no cover - best-effort
-                pass
+            # Without a display (an SSH session), Python's webbrowser falls
+            # back to console browsers on PATH (w3m, lynx, ...) and runs them
+            # in the foreground; skip the open there unless BROWSER says
+            # which one to use.
+            opened = False
+            headless = (
+                sys.platform not in ("darwin", "win32")
+                and not os.environ.get("BROWSER")
+                and not os.environ.get("DISPLAY")
+                and not os.environ.get("WAYLAND_DISPLAY")
+            )
+            if not headless:
+                try:
+                    opened = bool(webbrowser.open(self.webui_url))
+                except Exception:  # pragma: no cover - best-effort
+                    pass
+            return dataclasses.replace(self._result(), browser_opened=opened)
 
         return self._result()
 
@@ -453,6 +500,12 @@ class WebUILauncher:
             if self._webui_proc is not None:
                 proc, self._webui_proc = self._webui_proc, None
                 self._runner.stop(proc)
+            # A runner that marks its copy in use in preflight (the installed
+            # one) releases it here too when a later step failed before the
+            # front-end started.
+            release = getattr(self._runner, "release", None)
+            if release is not None:
+                release()
             if self._backend_proc is not None and not self._cfg.keepalive:
                 from ..langgraph_dev.manager import stop_langgraph_dev
 
@@ -502,7 +555,6 @@ class WebUILauncher:
                 host=self._cfg.backend_host,
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
-                deploy_mode=self._cfg.deploy_mode,
                 config_fingerprint=_server_config_fingerprint(self._config),
             )
         except Exception as exc:
@@ -539,9 +591,9 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     """Decide whether to reuse an already-running backend or start a fresh one.
 
     Pure decision logic: raises :class:`LauncherError` for foreign occupants,
-    workspace mismatch, stripped (CLI-mode) servers and sidecar port
-    mismatches; returns ``reuse`` or ``start`` otherwise.
-    Config-fingerprint drift is a warning, not an error.
+    workspace mismatch and sidecar port mismatches; returns ``reuse`` or
+    ``start`` otherwise. Config-fingerprint drift (configuration or version)
+    is a warning, not an error.
     """
     from ..langgraph_dev.manager import (
         _is_port_occupied,
@@ -564,7 +616,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
         )
 
     # An EvoSci server is already there — reuse only if it serves THIS
-    # workspace, is full deploy-mode, and (soft) matches the current config.
+    # workspace, and (soft) matches the current config and version.
     sidecar = _read_workspace_sidecar()
     ws = Path(cfg.workspace_dir).resolve()
     if sidecar is None:
@@ -595,26 +647,33 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
             f"Stop that EvoSci session, or launch from that workspace "
             f"(--workdir {sidecar['workspace']}).",
         )
-    if sidecar.get("deploy_mode") is False:
+    # The WebUI works in the workspace root; a server started for a
+    # ``--mode=run`` session works in one of its run folders.
+    if sidecar.get("run_dir"):
         raise LauncherError(
-            "stripped_backend",
-            f"Port {cfg.backend_port} is serving a stripped (CLI-mode) "
-            f"langgraph dev — the WebUI needs the full deploy-mode server "
-            f"(MCP + async sub-agents).",
-            "Stop it with 'EvoSci server stop', then re-run EvoSci.",
+            "workspace_mismatch",
+            f"Port {cfg.backend_port} is already serving a langgraph dev "
+            f"for a run folder of this workspace ({sidecar['run_dir']}).",
+            "Stop that EvoSci --mode=run session, then launch again."
+            + (
+                " If that session already ended, stop its kept-alive server "
+                "with 'EvoSci server stop'."
+                if cfg.keepalive
+                else ""
+            ),
         )
     recorded_fp = sidecar.get("config_fingerprint")
     if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
         config
     ):
         warnings.append(
-            "Config changed since this server was launched — it still "
-            "serves the old settings. Apply them with 'EvoSci server "
-            "stop', then re-run EvoSci."
+            "Configuration or version changed since this server was "
+            "launched — it still serves the old settings or version. Apply them with "
+            "'EvoSci server stop', then re-run EvoSci."
         )
-    from ..setup.research_env import python_drift_message
+    from ..agent_shell import shell_drift_message
 
-    drift = python_drift_message(sidecar)
+    drift = shell_drift_message(sidecar)
     if drift is not None:
         warnings.append(drift)
     return _BackendDecision(action="reuse", warnings=warnings)
@@ -625,7 +684,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
 # --------------------------------------------------------------------------- #
 def _popen_group_kwargs() -> dict[str, Any]:
     """Popen kwargs that put the front-end in its own process group so the
-    whole tree (npx/node → next server) tears down as a unit."""
+    whole tree (node and anything it spawns) tears down as a unit."""
     kwargs: dict[str, Any] = {}
     if os.name == "posix":
         kwargs["start_new_session"] = True
@@ -642,7 +701,7 @@ def _stop_process_tree(proc: subprocess.Popen) -> None:
         if os.name == "posix":
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         elif os.name == "nt":
-            # taskkill /T terminates the whole child tree (node + next server).
+            # taskkill /T terminates the whole child tree (node and its children).
             # CREATE_NO_WINDOW: a caller without a console (a windowed app)
             # would otherwise flash a blank terminal window when spawning the
             # console app taskkill on shutdown.
@@ -749,15 +808,14 @@ def build_launcher_config(
     workspace_dir: str | None,
 ) -> LauncherConfig:
     """Resolve a :class:`LauncherConfig` from an ``EvoScientistConfig`` the
-    same way ``run_webui`` does, so every entrypoint agrees."""
+    same way ``run_webui`` does, so every entrypoint agrees. The launcher
+    opens the browser once the WebUI answers."""
     from ..langgraph_dev.manager import _DEFAULT_HOST, _DEFAULT_PORT
+    from ..paths import start_workspace_path
 
-    if workspace_dir:
-        ws = os.path.abspath(os.path.expanduser(workspace_dir))
-    elif getattr(config, "default_workdir", ""):
-        ws = os.path.abspath(os.path.expanduser(config.default_workdir))
-    else:
-        ws = os.getcwd()
+    ws = str(
+        start_workspace_path(workspace_dir, getattr(config, "default_workdir", ""))
+    )
     os.makedirs(ws, exist_ok=True)
 
     backend_port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
@@ -774,7 +832,6 @@ def build_launcher_config(
         backend_port=backend_port,
         webui_host=webui_host,
         webui_port=webui_port,
-        deploy_mode=True,
         keepalive=bool(getattr(config, "langgraph_dev_keepalive", False)),
-        open_browser=False,
+        open_browser=True,
     )
