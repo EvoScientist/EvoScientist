@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1402,6 +1403,66 @@ async def test_server_gateway_forwards_valid_recursion_limit_per_run():
 
     (start,) = stream.run.starts
     assert start["config"]["recursion_limit"] == 100
+
+
+@pytest.mark.parametrize("resume", [False, True])
+async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    if resume:
+        stream.interrupts = [{"interrupt_id": "first"}]
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    threads.update = AsyncMock(side_effect=RuntimeError("metadata unavailable"))
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    message = Command(resume={"answer": "yes"}) if resume else "hi"
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message=message, thread_id="abc12345")
+        )
+    ]
+    assert events[-1]["type"] == "done"
+    records = [r for r in caplog.records if r.name == "EvoScientist.gateway.server"]
+    assert any(
+        r.levelno == logging.WARNING and "abc12345" in r.getMessage() for r in records
+    )
+    assert len(threads.created) == 1
+    if resume:
+        assert stream.run.responses == [
+            {"response": {"answer": "yes"}, "interrupt_id": "first"}
+        ]
+        assert stream.run.starts == []
+    else:
+        assert stream.run.starts[0]["input"] == {
+            "messages": [{"role": "user", "content": "hi"}]
+        }
+
+
+async def test_metadata_best_effort_does_not_swallow_thread_registration_failure():
+    """Guard against a future over-wide try that swallows registration errors."""
+    stream = FakeLangGraphThreadStream("thread", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"thread": {"values": {}}},
+        streams={"thread": stream},
+    )
+    threads.create = AsyncMock(side_effect=RuntimeError("registration failed"))
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    with pytest.raises(RuntimeError, match="registration failed"):
+        async for _ in gateway.stream_events(
+            RunRequest(message="hi", thread_id="thread")
+        ):
+            pass
+    assert stream.run.starts == []
 
 
 async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
