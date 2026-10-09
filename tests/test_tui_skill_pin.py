@@ -27,7 +27,7 @@ def _isolated_skills(monkeypatch, tmp_path):
     from EvoScientist.tools import skills_manager
 
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "noglobal")
-    monkeypatch.setattr(tui_mod, "_agent_python_notices", lambda: [])
+    monkeypatch.setattr(tui_mod, "_agent_shell_notices", lambda: [])
     skills_manager._skill_index_cache.clear()
     yield
     skills_manager._skill_index_cache.clear()
