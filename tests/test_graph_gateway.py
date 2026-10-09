@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import typer
@@ -1406,10 +1406,12 @@ async def test_server_gateway_forwards_valid_recursion_limit_per_run():
 
 
 @pytest.mark.parametrize("resume", [False, True])
-async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monkeypatch):
+async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
     from langgraph.types import Command
 
     stream = FakeLangGraphThreadStream("abc12345", events=[])
+    if resume:
+        stream.interrupts = [{"interrupt_id": "first"}]
     threads = FakeLangGraphThreadsClient(
         threads=[],
         states={"abc12345": {"values": {}}},
@@ -1419,8 +1421,6 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monke
     gateway = LangGraphServerGateway(
         LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
     )
-    respond = AsyncMock()
-    monkeypatch.setattr(LangGraphServerGateway, "_respond_to_interrupt", respond)
     message = Command(resume={"answer": "yes"}) if resume else "hi"
     events = [
         event
@@ -1435,9 +1435,9 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monke
     )
     assert len(threads.created) == 1
     if resume:
-        respond.assert_awaited_once_with(
-            stream, "abc12345", {"answer": "yes"}, on_run_attempt=ANY
-        )
+        assert stream.run.responses == [
+            {"response": {"answer": "yes"}, "interrupt_id": "first"}
+        ]
         assert stream.run.starts == []
     else:
         assert stream.run.starts[0]["input"] == {
@@ -1445,22 +1445,24 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog, monke
         }
 
 
-async def test_metadata_best_effort_does_not_swallow_thread_registration_failure(
-    monkeypatch,
-):
+async def test_metadata_best_effort_does_not_swallow_thread_registration_failure():
     """Guard against a future over-wide try that swallows registration errors."""
-    gateway = LangGraphServerGateway(thread_store=MagicMock())
-    monkeypatch.setattr(
-        LangGraphServerGateway,
-        "_ensure_thread",
-        AsyncMock(side_effect=RuntimeError("registration failed")),
+    stream = FakeLangGraphThreadStream("thread", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"thread": {"values": {}}},
+        streams={"thread": stream},
     )
-    stream = MagicMock()
+    threads.create = AsyncMock(side_effect=RuntimeError("registration failed"))
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
     with pytest.raises(RuntimeError, match="registration failed"):
-        await gateway._start_or_resume(
-            stream, RunRequest(message="hi", thread_id="thread")
-        )
-    stream.run.start.assert_not_called()
+        async for _ in gateway.stream_events(
+            RunRequest(message="hi", thread_id="thread")
+        ):
+            pass
+    assert stream.run.starts == []
 
 
 async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
