@@ -1922,13 +1922,14 @@ def run_textual_interactive(
                     thinking_w = None
                     summarization_w = None
                 _hitl_round += 1
+                events = None
                 try:
                     _anchor_engaged = False
                     _active_teams = list(self._channel_runtime.active_teams)
                     _configurable_extra = (
                         {"active_teams": _active_teams} if _active_teams else None
                     )
-                    async for event in iter_with_stream_cancel(
+                    events = iter_with_stream_cancel(
                         graph_gateway.stream_events(
                             RunRequest(
                                 message=_stream_input,
@@ -1944,7 +1945,8 @@ def run_textual_interactive(
                             )
                         ),
                         cancel_scope,
-                    ):
+                    )
+                    async for event in events:
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
                             break
@@ -2562,6 +2564,12 @@ def run_textual_interactive(
                         self._append_system(f"Error: {exc}", style="red")
                     response = f"Error: {exc}"
                 finally:
+                    # A HITL or ask_user event leaves the loop early. Close the
+                    # iterator here, in the turn task and its ContextVar
+                    # context, instead of leaving cleanup to the event loop's
+                    # async-generator finalizer (issue #595).
+                    if events is not None:
+                        await events.aclose()
                     # Clean up loading widget if it wasn't removed yet
                     if not loading_removed:
                         try:
