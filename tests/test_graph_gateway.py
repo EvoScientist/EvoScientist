@@ -2250,6 +2250,7 @@ async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
 @pytest.mark.parametrize(
     "failure",
     [
+        "registration",
         "input",
         "resume-validation",
         "non-resume-command",
@@ -2276,7 +2277,9 @@ async def test_state_repair_requires_this_request_to_attempt_a_run(
         interrupt_wait_seconds=0,
     )
     message = "hi"
-    if failure == "input":
+    if failure == "registration":
+        threads.create = AsyncMock(side_effect=RuntimeError("before run"))
+    elif failure == "input":
         monkeypatch.setattr(
             "EvoScientist.gateway.server.build_agent_stream_input",
             AsyncMock(side_effect=RuntimeError("before run")),
