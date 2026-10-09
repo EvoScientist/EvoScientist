@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.5" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 10 月 9 日]** **[v0.3.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.6)** — 新增模型：Claude Haiku 5.5（OpenRouter）；新增 Opper 提供商；安装的 skill 从下一条消息起生效，无需 `/new`，`/skill-name` 可在消息中点名使用某个 skill；WebUI 改为本地安装，可离线启动；Windows 下 agent 的命令改在 `EvoSci setup` 配置的 Git Bash 中运行；会话、记忆与定时任务按项目隔离，`/threads` 显示每个会话所属的工作区；响应慢的 MCP 服务不再拖住服务启动；deepagents 0.7.23。
 - **[2026 年 10 月 3 日]** **[v0.3.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.5)** — 新增模型：GPT-6.1 Sol（OpenAI 与 OpenRouter）；新增 `EvoSci setup` 命令，为安装分发做准备；优化 profile 记忆注入，超出预算时只截断超出的文件，不再整体丢弃；优化 observation 索引，最新的条目优先；deepagents 0.7.21。
 - **[2026 年 9 月 29 日]** **[v0.3.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.4)** — 新增模型：Claude Sonnet 5.5（Anthropic 与 OpenRouter）；桌面端铺垫：WebUI 启动器重构为与 shell 无关的核心，并提供后台任务检测；Windows 修复：系统代理下能正确识别本地服务、langgraph dev 服务不再被终端 Ctrl+C 波及、`EvoSci server stop` 命令可用；修复原生 DeepSeek 下的记忆 worker 与定时任务验收评分。
 - **[2026 年 9 月 26 日]** **[v0.3.3](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.3)** — Codex OAuth（ChatGPT Plus/Pro）端到端可用，并能捕获 vLLM 风格端点返回的推理内容；HITL 恢复轮次上限只统计真正提示过人的轮次；上下文压缩按实际运行的模型计算上下文窗口；各入口可单独选择网关后端（默认关闭）；修复异步 expert 调度；deepagents 0.7.19。
@@ -341,6 +342,8 @@ docker run -it --rm \
 | `--env-file .env` | API 密钥（`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 等） |
 | `./workspace:/workspace` | 智能体的工作目录 |
 | `evosci-data:/home/evosci/.evoscientist` | 持久化应用状态：会话数据库、全局技能、记忆，以及 `config.yaml` / `mcp.yaml` |
+
+镜像不包含 agent 使用的研究用 Python；请在挂载同一个 `evosci-data` 卷的容器里运行一次 `EvoSci setup`（镜像的入口是 `evosci`，所以用 `docker run --rm -v evosci-data:/home/evosci/.evoscientist ghcr.io/evoscientist/evoscientist:latest setup`；使用 compose 时为 `docker compose run --rm evoscientist setup`），它会把环境建在这个卷里，镜像升级后依然保留。
 
 > [!IMPORTANT]
 > 镜像以非 root 用户运行（`evosci`，UID `1000`）。`./workspace` bind 挂载的宿主目录必须可被该 UID 写入。如果你的宿主用户 ID 不同，可以一次性 `chown -R 1000:1000 ./workspace`，或在每次 `docker run` 时加上 `--user "$(id -u):$(id -g)"`，让容器使用你的 UID。
