@@ -119,12 +119,46 @@ def _normalize_operation(value: object) -> str | None:
 
 
 def _normalize_workspace_dir(workspace_dir: str | Path | None) -> str | None:
+    """The workspace a proposal belongs to, in the stored form."""
     if workspace_dir is None:
         return None
     text = str(workspace_dir).strip()
     if not text:
         return None
-    return str(Path(text).expanduser().resolve())
+    try:
+        return paths.Workspace(text).key
+    except (ValueError, OSError, RuntimeError):
+        # Matches no workspace filter instead of breaking the listing.
+        return text
+
+
+def upgrade_proposal_workspaces(memory_dir: str | Path) -> int:
+    """Rewrite the ``workspace_dir`` of proposals stored before ``run_dir``.
+
+    Proposals made by ``--mode=run`` sessions named the run folder; they
+    belong to its workspace. Other proposals, and folders that cannot be
+    resolved, are left as they are. Part of the one-time upgrade of stored
+    values (see ``sessions._upgrade_stored_dirs``). Returns the number
+    rewritten.
+    """
+    root = _proposal_root(memory_dir)
+    if not root.exists():
+        return 0
+    rewritten = 0
+    for manifest_path in sorted(root.glob("*/manifest.json")):
+        manifest = _read_manifest(manifest_path)
+        stored = manifest.get("workspace_dir") if manifest else None
+        if not isinstance(stored, str) or not stored.strip():
+            continue
+        try:
+            dirs = paths.SessionDirs.from_legacy(stored.strip())
+        except (ValueError, OSError, RuntimeError):
+            continue
+        if dirs.run_dir is not None:
+            manifest["workspace_dir"] = dirs.workspace.key
+            _write_manifest(manifest_path, manifest)
+            rewritten += 1
+    return rewritten
 
 
 def _proposal_from_manifest(
@@ -191,7 +225,7 @@ def list_skill_proposals(
             continue
         if (
             normalized_workspace is not None
-            and proposal.workspace_dir != normalized_workspace
+            and _normalize_workspace_dir(proposal.workspace_dir) != normalized_workspace
         ):
             continue
         if status is not None and proposal.status != status:
@@ -347,13 +381,8 @@ def _skill_frontmatter_name(skill_dir: Path) -> str | None:
 def _find_installed_user_skill(
     skill_name: str,
     *,
-    skills_dir: str | Path | None = None,
+    roots: list[Path],
 ) -> Path | None:
-    roots = (
-        [Path(skills_dir).expanduser()]
-        if skills_dir is not None
-        else [Path(paths.USER_SKILLS_DIR).expanduser(), Path(paths.GLOBAL_SKILLS_DIR)]
-    )
     for root in roots:
         if not root.exists():
             continue
@@ -400,10 +429,15 @@ def submit_autoskill_proposal(
     rationale: str,
     operation: str = "create",
     target_skill_name: str | None = None,
+    skills_dir: str | Path,
     workspace_dir: str | Path | None = None,
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Validate and register a skill proposal folder written by the agent."""
+    """Validate and register a skill proposal folder written by the agent.
+
+    ``skills_dir`` is the workspace skills tier; an update proposal must
+    target a skill installed there or in the global tier.
+    """
     normalized_name = sanitize_skill_name(skill_name)
     if normalized_name != skill_name:
         return {
@@ -439,7 +473,13 @@ def submit_autoskill_proposal(
                 "skill_name": skill_name,
                 "target_skill_name": target_name,
             }
-        if _find_installed_user_skill(skill_name) is None:
+        if (
+            _find_installed_user_skill(
+                skill_name,
+                roots=[Path(skills_dir).expanduser(), Path(paths.GLOBAL_SKILLS_DIR)],
+            )
+            is None
+        ):
             return {
                 "submitted": False,
                 "error": f"No installed workspace/global skill named {skill_name!r} to update",
@@ -560,14 +600,20 @@ def _proposal_dir_by_id(
     return matches[0] if len(matches) == 1 else None
 
 
+def _notify_approved_skill() -> None:
+    from ...tools.skills_manager import _notify_skills_changed
+
+    _notify_skills_changed()
+
+
 def approve_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
     *,
-    skills_dir: str | Path | None = None,
+    skills_dir: str | Path,
     workspace_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Promote one pending proposal into the workspace-local skills tier."""
+    """Promote one pending proposal into the workspace skills tier (``skills_dir``)."""
     proposal_dir = _proposal_dir_by_id(
         memory_dir,
         proposal_id,
@@ -606,10 +652,7 @@ def approve_skill_proposal(
             "error": "Proposal skill folder is invalid",
             "errors": errors,
         }
-    if skills_dir is not None:
-        destination_root = Path(skills_dir).expanduser()
-    else:
-        destination_root = Path(paths.USER_SKILLS_DIR).expanduser()
+    destination_root = Path(skills_dir).expanduser()
     destination = destination_root / skill_name
     base_skill_dir: Path | None = None
     if operation == "create" and destination.exists():
@@ -627,12 +670,15 @@ def approve_skill_proposal(
             }
         local_match = _find_installed_user_skill(
             skill_name,
-            skills_dir=destination_root,
+            roots=[destination_root],
         )
         if local_match is not None:
             destination = local_match
         else:
-            existing_global = _find_installed_user_skill(skill_name)
+            existing_global = _find_installed_user_skill(
+                skill_name,
+                roots=[Path(paths.GLOBAL_SKILLS_DIR)],
+            )
             if existing_global is None:
                 return {
                     "approved": False,
@@ -657,6 +703,7 @@ def approve_skill_proposal(
     manifest["approved_skill_path"] = str(destination)
     _write_manifest(manifest_path, manifest)
     mark_cluster_processed(memory_dir, str(manifest["cluster_hash"]))
+    _notify_approved_skill()
     return {
         "approved": True,
         "proposal_id": manifest["proposal_id"],

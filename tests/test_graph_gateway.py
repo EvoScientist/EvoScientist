@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
@@ -22,8 +23,10 @@ from EvoScientist.gateway import (
 )
 from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
 from EvoScientist.gateway.types import DEFAULT_GRAPH_ID
+from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.stream import display as display_mod
 from tests.fakes import (
+    TEST_WORKSPACE,
     FakeGraphGateway,
     FakeLangGraphClient,
     FakeLangGraphThreadsClient,
@@ -331,18 +334,19 @@ async def test_resume_command_consumes_context_gateway():
         metadata={"workspace_dir": "/restored"},
     )
     ctx = CommandContext(
+        dirs=SessionDirs(TEST_WORKSPACE, Path("/old")),
         agent=None,
         thread_id="current",
         ui=ui,
-        workspace_dir="/old",
         graph_gateway=FakeGraphGateway(thread_store=thread_store),
     )
 
     await ResumeCommand().execute(ctx, ["abc"])
 
+    restored = SessionDirs(Workspace("/restored"))
     assert ctx.thread_id == "abc12345"
-    assert ctx.workspace_dir == "/restored"
-    ui.handle_session_resume.assert_awaited_once_with("abc12345", "/restored")
+    assert ctx.dirs == restored
+    ui.handle_session_resume.assert_awaited_once_with("abc12345", restored)
 
 
 def test_cmd_run_passes_local_graph_gateway(monkeypatch):
@@ -368,7 +372,7 @@ def test_cmd_run_passes_local_graph_gateway(monkeypatch):
         "hello",
         thread_id="generated-thread",
         show_thinking=False,
-        workspace_dir="/tmp/ws",
+        dirs=SessionDirs(Workspace("/tmp/ws")),
         model="test-model",
         runtime_gateways=runtime_gateways,
     )
@@ -399,6 +403,7 @@ def test_cmd_run_converts_stream_failure_to_controlled_exit(monkeypatch):
             "hello",
             thread_id="failed-thread",
             show_thinking=False,
+            dirs=SessionDirs(Workspace("/tmp/ws")),
             runtime_gateways=runtime_gateways,
         )
 
@@ -471,6 +476,7 @@ async def test_langgraph_server_thread_store_delegates_to_sdk_threads():
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-02T00:00:00Z",
             "workspace_dir": "/tmp/ws",
+            "run_dir": None,
             "model": None,
             "metadata": {"graph_id": "EvoScientist", "workspace_dir": "/tmp/ws"},
             "message_count": 2,
@@ -481,6 +487,7 @@ async def test_langgraph_server_thread_store_delegates_to_sdk_threads():
             "created_at": None,
             "updated_at": None,
             "workspace_dir": "/tmp/new-ws",
+            "run_dir": None,
             "model": "test-model",
             "metadata": created_metadata,
             "message_count": 0,

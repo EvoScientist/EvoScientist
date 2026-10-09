@@ -13,6 +13,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -60,12 +61,18 @@ async def _timeout_aiter(
     seconds, :class:`asyncio.TimeoutError` is raised.  Continuous
     yielding resets the timer each time, so only a truly stalled
     generator will trigger the timeout.
+
+    The timeout uses :func:`asyncio.timeout` rather than
+    :func:`asyncio.wait_for`: before Python 3.12 ``wait_for`` runs the
+    awaitable in a child task, so the wrapped generator would advance in a
+    different task and context than the one that later closes it.
     """
     ait = agen.__aiter__()
     try:
         while True:
             try:
-                item = await asyncio.wait_for(ait.__anext__(), timeout=idle_timeout)
+                async with asyncio.timeout(idle_timeout):
+                    item = await ait.__anext__()
             except StopAsyncIteration:
                 return
             yield item
@@ -477,68 +484,71 @@ class InboundConsumer:
                     _last_sent_thinking = full_thinking
                     return True
 
-                async for event in _timeout_aiter(
-                    self.graph_gateway.stream_events(
-                        RunRequest(
-                            message=stream_input,
-                            thread_id=thread_id,
-                            media=msg.media or None
-                            if isinstance(stream_input, str)
-                            else None,
-                            target=GraphTarget(local_graph=self.agent),
-                        )
-                    ),
-                    self._inference_timeout,
-                ):
-                    event_type = event.get("type")
+                async with aclosing(
+                    _timeout_aiter(
+                        self.graph_gateway.stream_events(
+                            RunRequest(
+                                message=stream_input,
+                                thread_id=thread_id,
+                                media=msg.media or None
+                                if isinstance(stream_input, str)
+                                else None,
+                                target=GraphTarget(local_graph=self.agent),
+                            )
+                        ),
+                        self._inference_timeout,
+                    )
+                ) as events:
+                    async for event in events:
+                        event_type = event.get("type")
 
-                    if self._on_streaming_event:
-                        try:
-                            self._on_streaming_event(event)
-                        except Exception:
-                            pass
+                        if self._on_streaming_event:
+                            try:
+                                self._on_streaming_event(event)
+                            except Exception:
+                                pass
 
-                    if event_type == "thinking":
-                        thinking_text = event.get("content", "")
-                        if thinking_text:
-                            thinking_buffer.append(thinking_text)
+                        if event_type == "thinking":
+                            thinking_text = event.get("content", "")
+                            if thinking_text:
+                                thinking_buffer.append(thinking_text)
 
-                    elif event_type == "tool_call":
-                        if event.get("name") == "write_todos" and not todo_sent:
-                            todos = event.get("args", {}).get("todos", [])
-                            if todos and channel:
-                                await _flush_thinking_buffer()
-                                await channel.send_todo_message(
-                                    msg.sender_id,
-                                    _format_todo_list(todos),
-                                    msg.metadata,
-                                )
-                                todo_sent = True
+                        elif event_type == "tool_call":
+                            if event.get("name") == "write_todos" and not todo_sent:
+                                todos = event.get("args", {}).get("todos", [])
+                                if todos and channel:
+                                    await _flush_thinking_buffer()
+                                    await channel.send_todo_message(
+                                        msg.sender_id,
+                                        _format_todo_list(todos),
+                                        msg.metadata,
+                                    )
+                                    todo_sent = True
 
-                    elif event_type == "text":
-                        final_content += event.get("content", "")
+                        elif event_type == "text":
+                            final_content += event.get("content", "")
 
-                    elif event_type == "subagent_text":
-                        sa_name = event.get("subagent", "unknown")
-                        instance_id = event.get("instance_id")
-                        if not instance_id:
-                            continue
-                        if instance_id not in subagent_text_buffers:
-                            subagent_text_buffers[instance_id] = (sa_name, [])
-                        subagent_text_buffers[instance_id][1].append(
-                            event.get("content", "")
-                        )
+                        elif event_type == "subagent_text":
+                            sa_name = event.get("subagent", "unknown")
+                            instance_id = event.get("instance_id")
+                            if not instance_id:
+                                continue
+                            if instance_id not in subagent_text_buffers:
+                                subagent_text_buffers[instance_id] = (sa_name, [])
+                            subagent_text_buffers[instance_id][1].append(
+                                event.get("content", "")
+                            )
 
-                    elif event_type == "done":
-                        final_content = event.get("content", "") or final_content
+                        elif event_type == "done":
+                            final_content = event.get("content", "") or final_content
 
-                    elif event_type == "interrupt":
-                        interrupt_data = event
-                        break  # exit async for to handle interrupt
+                        elif event_type == "interrupt":
+                            interrupt_data = event
+                            break  # exit async for to handle interrupt
 
-                    elif event_type == "ask_user":
-                        interrupt_data = event
-                        break  # exit async for to handle ask_user
+                        elif event_type == "ask_user":
+                            interrupt_data = event
+                            break  # exit async for to handle ask_user
 
                 # Flush thinking
                 await _flush_thinking_buffer()

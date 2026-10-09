@@ -1,131 +1,317 @@
-"""Tests for EvoScientist.paths — set_workspace_root and ensure_dirs."""
+"""Tests for EvoScientist.paths — the Workspace type, start resolution, ensure_dirs."""
 
 import os
+from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from EvoScientist import paths
+from EvoScientist.paths import (
+    SessionDirs,
+    Workspace,
+    normalize_path,
+    process_session_dirs,
+    process_workspace,
+    resolve_virtual_path,
+    start_workspace_path,
+)
 
 
 @pytest.fixture(autouse=True)
 def _restore_paths():
     """Snapshot module-level path globals and restore after each test."""
     orig = {
-        "WORKSPACE_ROOT": paths.WORKSPACE_ROOT,
-        "RUNS_DIR": paths.RUNS_DIR,
         "DATA_DIR": paths.DATA_DIR,
         "MEMORIES_DIR": paths.MEMORIES_DIR,
-        "MEMORY_DIR": paths.MEMORY_DIR,
         "GLOBAL_SKILLS_DIR": paths.GLOBAL_SKILLS_DIR,
         "GLOBAL_MEMORIES_DIR": paths.GLOBAL_MEMORIES_DIR,
-        "USER_SKILLS_DIR": paths.USER_SKILLS_DIR,
-        "_active_workspace": paths._active_workspace,
     }
     yield
-    paths.WORKSPACE_ROOT = orig["WORKSPACE_ROOT"]
-    paths.RUNS_DIR = orig["RUNS_DIR"]
-    paths.DATA_DIR = orig["DATA_DIR"]
-    paths.MEMORIES_DIR = orig["MEMORIES_DIR"]
-    paths.MEMORY_DIR = orig["MEMORY_DIR"]
-    paths.GLOBAL_SKILLS_DIR = orig["GLOBAL_SKILLS_DIR"]
-    paths.GLOBAL_MEMORIES_DIR = orig["GLOBAL_MEMORIES_DIR"]
-    paths.USER_SKILLS_DIR = orig["USER_SKILLS_DIR"]
-    paths._active_workspace = orig["_active_workspace"]
+    for name, value in orig.items():
+        setattr(paths, name, value)
 
 
-class TestSetWorkspaceRoot:
-    """Tests for set_workspace_root()."""
+def _fake_home(monkeypatch, home: Path) -> None:
+    """Point ``~`` at *home* (Windows reads USERPROFILE, not HOME)."""
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
-    def test_updates_derived_dirs(self, tmp_path, monkeypatch):
-        """set_workspace_root should update WORKSPACE_ROOT and all derived dirs."""
-        monkeypatch.delenv("EVOSCIENTIST_MEMORIES_DIR", raising=False)
-        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
-        monkeypatch.delenv("EVOSCIENTIST_RUNS_DIR", raising=False)
-        monkeypatch.delenv("EVOSCIENTIST_SKILLS_DIR", raising=False)
 
-        new_root = tmp_path / "my_workspace"
-        new_root.mkdir()
+class TestWorkspace:
+    """The Workspace value object."""
 
-        paths.set_workspace_root(new_root)
-
-        assert paths.WORKSPACE_ROOT == new_root.resolve()
-        assert paths.RUNS_DIR == new_root.resolve() / "runs"
-        # MEMORIES_DIR is global — not derived from workspace root
-        assert paths.MEMORIES_DIR == paths.GLOBAL_MEMORIES_DIR
-        assert paths.USER_SKILLS_DIR == new_root.resolve() / "skills"
-
-    def test_resets_active_workspace(self, tmp_path):
-        """set_workspace_root should reset _active_workspace to new root."""
-        new_root = tmp_path / "ws"
-        new_root.mkdir()
-
-        # Set active workspace to something different first
-        paths._active_workspace = tmp_path / "other"
-
-        paths.set_workspace_root(new_root)
-
-        assert paths._active_workspace == new_root.resolve()
-
-    def test_preserves_env_overrides(self, tmp_path):
-        """Dirs set via env vars should NOT be overwritten by set_workspace_root."""
-        custom_mem = tmp_path / "custom_memory"
-        custom_skills = tmp_path / "custom_skills"
-        custom_runs = tmp_path / "custom_runs"
-
-        env = {
-            "EVOSCIENTIST_MEMORIES_DIR": str(custom_mem),
-            "EVOSCIENTIST_SKILLS_DIR": str(custom_skills),
-            "EVOSCIENTIST_RUNS_DIR": str(custom_runs),
-        }
-
-        new_root = tmp_path / "ws"
-        new_root.mkdir()
-
-        with mock.patch.dict(os.environ, env):
-            paths.set_workspace_root(new_root)
-
-            # WORKSPACE_ROOT and _active_workspace should still update
-            assert paths.WORKSPACE_ROOT == new_root.resolve()
-            assert paths._active_workspace == new_root.resolve()
-
-            # MEMORIES_DIR respects env override
-            assert paths.MEMORIES_DIR == custom_mem.expanduser()
-            assert paths.USER_SKILLS_DIR == custom_skills.expanduser()
-            assert paths.RUNS_DIR == custom_runs.expanduser()
+    def test_derived_dirs(self, tmp_path):
+        ws = Workspace(tmp_path)
+        root = tmp_path.resolve()
+        assert ws.root == root
+        assert ws.skills_dir == root / "skills"
+        assert ws.runs_dir == root / "runs"
+        assert ws.media_dir == root / "media"
 
     def test_accepts_string_path(self, tmp_path):
-        """set_workspace_root should accept str as well as Path."""
-        new_root = tmp_path / "str_ws"
-        new_root.mkdir()
+        assert Workspace(str(tmp_path)).root == tmp_path.resolve()
 
-        paths.set_workspace_root(str(new_root))
+    def test_resolves_symlinks(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        assert Workspace(link) == Workspace(real)
+        assert Workspace(link).root == real.resolve()
 
-        assert paths.WORKSPACE_ROOT == new_root.resolve()
+    def test_expands_user(self, monkeypatch, tmp_path):
+        _fake_home(monkeypatch, tmp_path)
+        assert Workspace("~/proj").root == (tmp_path / "proj").resolve()
+
+    def test_does_not_create_the_folder(self, tmp_path):
+        missing = tmp_path / "not-there"
+        ws = Workspace(missing)
+        assert ws.root == missing.resolve()
+        assert not missing.exists()
+
+    def test_key_is_posix_without_trailing_slash(self, tmp_path):
+        ws = Workspace(f"{tmp_path}/proj/")
+        assert ws.key == (tmp_path / "proj").resolve().as_posix()
+        assert not ws.key.endswith("/")
+
+    @pytest.mark.parametrize(
+        ("spelling", "expected"),
+        [
+            ("proj/", "proj"),
+            ("proj/./sub/..", "proj"),
+            ("with space", "with space"),
+            ("項目 ü", "項目 ü"),
+        ],
+    )
+    def test_key_normalises_shared_spellings(self, tmp_path, spelling, expected):
+        """Spellings the WebUI normalises to the same key as the core."""
+        ws = Workspace(f"{tmp_path}/{spelling}")
+        assert ws.key == (tmp_path.resolve() / expected).as_posix()
+
+    def test_is_immutable_and_hashable(self, tmp_path):
+        ws = Workspace(tmp_path)
+        with pytest.raises(AttributeError):
+            ws.root = tmp_path / "other"  # type: ignore[misc]
+        assert {ws: 1}[Workspace(tmp_path)] == 1
+
+    def test_ignores_removed_dir_overrides(self, tmp_path, monkeypatch):
+        """The per-workspace folders always derive from the root."""
+        monkeypatch.setenv("EVOSCIENTIST_SKILLS_DIR", str(tmp_path / "s"))
+        monkeypatch.setenv("EVOSCIENTIST_RUNS_DIR", str(tmp_path / "r"))
+        monkeypatch.setenv("EVOSCIENTIST_MEDIA_DIR", str(tmp_path / "m"))
+        ws = Workspace(tmp_path / "proj")
+        assert ws.skills_dir == ws.root / "skills"
+        assert ws.runs_dir == ws.root / "runs"
+        assert ws.media_dir == ws.root / "media"
 
 
-class TestEnsureDirsUsesUpdatedPaths:
-    """ensure_dirs should create dirs at the currently set paths."""
+class TestNormalizePath:
+    def test_equal_spellings_normalise_equal(self, tmp_path):
+        a = normalize_path(f"{tmp_path}/x/../y")
+        b = normalize_path(tmp_path / "y")
+        assert a == b
 
-    def test_ensure_dirs_uses_updated_paths(self, tmp_path):
-        """ensure_dirs creates the global memories dir (not workspace-local)."""
-        new_root = tmp_path / "workspace"
-        new_root.mkdir()
+    def test_nul_byte_is_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="NUL byte"):
+            normalize_path(f"{tmp_path}/evil\x00x")
 
-        custom_mem = tmp_path / "memories"
 
-        with mock.patch.dict(
-            os.environ, {"EVOSCIENTIST_MEMORIES_DIR": str(custom_mem)}
+class TestStartWorkspacePath:
+    """Which folder a process starts in: workdir, then default_workdir, then cwd."""
+
+    def test_workdir_wins(self, tmp_path):
+        got = start_workspace_path(tmp_path / "a", tmp_path / "b")
+        assert got == tmp_path / "a"
+
+    def test_default_workdir_when_no_workdir(self, tmp_path):
+        assert start_workspace_path(None, tmp_path / "b") == tmp_path / "b"
+
+    def test_cwd_when_neither(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert start_workspace_path() == Path(os.getcwd())
+
+    def test_expands_user_and_is_absolute(self, tmp_path, monkeypatch):
+        _fake_home(monkeypatch, tmp_path)
+        got = start_workspace_path("~/proj")
+        assert got == tmp_path / "proj"
+        assert got.is_absolute()
+
+    def test_relative_workdir_is_made_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert start_workspace_path("rel") == tmp_path / "rel"
+
+    def test_empty_strings_fall_through(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert start_workspace_path("", "") == Path(os.getcwd())
+
+
+class TestProcessWorkspace:
+    def test_env_var(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
+        assert process_workspace() == Workspace(tmp_path)
+
+    def test_cwd_without_env(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("EVOSCIENTIST_WORKSPACE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert process_workspace() == Workspace(tmp_path)
+
+    def test_read_once_per_process(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "first"))
+        first = process_workspace()
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "second"))
+        assert process_workspace() == first
+
+
+class TestSessionDirs:
+    def test_daemon_session_works_in_the_root(self, tmp_path):
+        dirs = SessionDirs(Workspace(tmp_path))
+        assert dirs.run_dir is None
+        assert dirs.work_dir == tmp_path.resolve()
+        assert dirs.metadata() == {"workspace_dir": tmp_path.resolve().as_posix()}
+
+    def test_run_session_works_in_its_run_folder(self, tmp_path):
+        ws = Workspace(tmp_path)
+        dirs = SessionDirs(ws, ws.runs_dir / "exp")
+        assert dirs.work_dir == ws.runs_dir / "exp"
+        assert dirs.metadata() == {
+            "workspace_dir": ws.key,
+            "run_dir": (ws.runs_dir / "exp").as_posix(),
+        }
+
+    def test_run_dir_equal_to_root_is_no_run_dir(self, tmp_path):
+        dirs = SessionDirs(Workspace(tmp_path), tmp_path / "." / "")
+        assert dirs.run_dir is None
+        assert "run_dir" not in dirs.metadata()
+
+
+class TestSessionDirsFromStored:
+    def test_nothing_stored(self):
+        assert SessionDirs.from_stored(None) is None
+        assert SessionDirs.from_stored("") is None
+
+    def test_a_timestamp_named_root_stays_a_root(self, tmp_path):
+        """New rows carry ``run_dir`` themselves; reading never guesses."""
+        folder = tmp_path / "runs" / "20260930_120000"
+        assert SessionDirs.from_stored(str(folder)) == SessionDirs(Workspace(folder))
+
+    def test_unresolved_values_are_normalised(self, tmp_path, monkeypatch):
+        _fake_home(monkeypatch, tmp_path)
+        assert SessionDirs.from_stored("~/proj/") == SessionDirs(
+            Workspace(tmp_path / "proj")
+        )
+
+    def test_run_dir_outside_workspace_is_dropped(self, tmp_path):
+        """Run folders live under ``<root>/runs``; anything else is not one."""
+        dirs = SessionDirs.from_stored(
+            str(tmp_path / "a"), str(tmp_path / "b" / "runs" / "20260930_120000")
+        )
+        assert dirs == SessionDirs(Workspace(tmp_path / "a"))
+
+    def test_unreadable_value_reads_as_nothing_stored(self):
+        assert SessionDirs.from_stored("/tmp/evil\x00x") is None
+
+    def test_non_string_value_reads_as_nothing_stored(self, tmp_path):
+        """Metadata is caller-supplied JSON, so a folder can be stored as a
+        number or a list; one bad row must not break listing the rest."""
+        assert SessionDirs.from_stored(123) is None
+        assert SessionDirs.from_stored(str(tmp_path), ["runs", "x"]) is None
+
+
+class TestSessionDirsFromLegacy:
+    def test_generated_run_folder_is_split_into_workspace_and_run_dir(self, tmp_path):
+        run = tmp_path / "runs" / "20260930_120000"
+        assert SessionDirs.from_legacy(str(run)) == SessionDirs(
+            Workspace(tmp_path), run
+        )
+
+    def test_named_run_folder_is_left_as_its_own_workspace(self, tmp_path):
+        """A project can live in a folder called ``runs``; only generated
+        names are known to be run folders."""
+        folder = tmp_path / "runs" / "exp"
+        assert SessionDirs.from_legacy(str(folder)) == SessionDirs(Workspace(folder))
+
+    def test_names_the_cli_does_not_generate_are_not_split(self, tmp_path):
+        for name in (
+            "20260930_120000_1",
+            "2026093_120000",
+            "x20260930_120000",
+            "99999999_999999",
         ):
-            paths.set_workspace_root(new_root)
-            paths.ensure_dirs()
+            folder = tmp_path / "runs" / name
+            assert SessionDirs.from_legacy(str(folder)).run_dir is None, name
 
-            assert custom_mem.is_dir()
-            assert not (new_root / "memory").exists()  # no longer workspace-local
-            assert not (new_root / "memories").exists()
-            assert not (
-                new_root / "skills"
-            ).exists()  # skills created on demand by install_skill()
+    def test_timestamp_folder_outside_runs_is_not_split(self, tmp_path):
+        folder = tmp_path / "other" / "20260930_120000"
+        assert SessionDirs.from_legacy(str(folder)) == SessionDirs(Workspace(folder))
+
+    def test_generated_names_round_trip(self):
+        from datetime import datetime
+
+        name = datetime(2026, 9, 30, 12, 0, 0).strftime(paths.RUN_NAME_FORMAT)
+        assert paths.is_generated_run_name(name)
+
+
+class TestProcessSessionDirs:
+    def test_with_run_dir(self, tmp_path, monkeypatch):
+        run = tmp_path / "runs" / "exp"
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", str(run))
+        assert process_session_dirs() == SessionDirs(Workspace(tmp_path), run)
+
+
+class TestReloadEnvDirs:
+    """An override merged into the environment after import (project .env)."""
+
+    def test_picks_up_a_late_memories_override(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
+        monkeypatch.setenv("EVOSCIENTIST_MEMORIES_DIR", str(tmp_path / "mem"))
+        paths.reload_env_dirs()
+        assert paths.MEMORIES_DIR == tmp_path / "mem"
+
+    def test_falls_back_to_global_memories(self, monkeypatch):
+        monkeypatch.delenv("EVOSCIENTIST_MEMORIES_DIR", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_MEMORY_DIR", raising=False)
+        paths.reload_env_dirs()
+        assert paths.MEMORIES_DIR == paths.GLOBAL_MEMORIES_DIR
+
+
+class TestResolveVirtualPath:
+    def test_absolute_virtual_path(self, tmp_path):
+        assert (
+            resolve_virtual_path(tmp_path, "/a/b.png")
+            == (tmp_path / "a/b.png").resolve()
+        )
+
+    def test_relative_virtual_path(self, tmp_path):
+        assert resolve_virtual_path(tmp_path, "a.png") == (tmp_path / "a.png").resolve()
+
+    def test_root(self, tmp_path):
+        assert resolve_virtual_path(tmp_path, "/") == tmp_path.resolve()
+
+    def test_depends_only_on_the_given_work_dir(self, tmp_path):
+        a, b = tmp_path / "a", tmp_path / "b"
+        assert resolve_virtual_path(a, "/f") != resolve_virtual_path(b, "/f")
+
+
+class TestEnsureDirs:
+    """ensure_dirs creates the global data and memories folders only."""
+
+    def test_creates_global_dirs_not_workspace_dirs(self, tmp_path, monkeypatch):
+        data = tmp_path / "data"
+        memories = tmp_path / "memories"
+        ws_root = tmp_path / "workspace"
+        ws_root.mkdir()
+        monkeypatch.setattr(paths, "DATA_DIR", data)
+        monkeypatch.setattr(paths, "MEMORIES_DIR", memories)
+        monkeypatch.chdir(ws_root)
+
+        paths.ensure_dirs()
+
+        assert data.is_dir()
+        assert memories.is_dir()
+        assert not (ws_root / "memories").exists()
+        assert not (ws_root / "skills").exists()  # created on demand by install_skill()
 
 
 class TestDataDir:

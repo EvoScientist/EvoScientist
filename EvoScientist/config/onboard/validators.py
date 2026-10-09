@@ -321,6 +321,49 @@ def validate_openrouter_key(api_key: str) -> tuple[bool, str]:
         return False, f"Error: {e}"
 
 
+def validate_opper_key(api_key: str) -> tuple[bool, str]:
+    """Validate an Opper API key via the authenticated ``/models`` endpoint.
+
+    Unlike the Requesty/Atlas Cloud/Novita routers, Opper's OpenAI-compatible
+    ``/v3/compat/models`` endpoint is authenticated: a missing or invalid key
+    returns 401 (verified against the live endpoint), so no sentinel-model
+    request is needed.
+
+    - valid key → 200 (the account's model catalog);
+    - invalid/missing key → 401/403;
+    - 429 (rate-limit) / 5xx (gateway incident) leave validity unknown, so a
+      transient outage doesn't reject a good key.
+
+    Returns:
+        Tuple of (is_valid, message).
+    """
+    if not api_key:
+        return True, "Skipped (no key provided)"
+
+    try:
+        import httpx
+
+        resp = httpx.get(
+            "https://api.opper.ai/v3/compat/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, "Valid"
+        # Only 401/403 mean the key is actually rejected. 429 (rate-limit)
+        # and 5xx (gateway incident) leave the key validity unknown — surface
+        # the real status so the user doesn't go re-roll a good key during an
+        # outage.
+        if resp.status_code in (401, 403):
+            return False, "Invalid API key"
+        return False, f"Validation inconclusive (HTTP {resp.status_code})"
+    except Exception as e:
+        classified = _classify_validation_error(e)
+        if classified is not None:
+            return classified
+        return False, f"Error: {e}"
+
+
 def validate_atlascloud_key(api_key: str) -> tuple[bool, str]:
     """Validate an Atlas Cloud key with a nonexistent sentinel model.
 

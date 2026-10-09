@@ -52,6 +52,9 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Overwrite
 
+from .message_meta import is_pinned_skill
+from .paths import SessionDirs, process_session_dirs
+
 _logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -474,9 +477,9 @@ async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
     yielding the saver when needed. Sequencing sweep ahead of any agent
     ``aput()`` eliminates the SQLite file-lock contention that produced
     "database is locked" when channel inbound raced the sweep mid-DELETE.
-    The sweep is gated by ``PRAGMA user_version`` so it runs at most
-    once across all future launches; subsequent invocations cost nothing.
-    On failure ``user_version`` is NOT bumped, so the next launch retries.
+    The sweep is gated by its bit of ``PRAGMA user_version`` so it runs at
+    most once across all future launches; subsequent invocations cost
+    nothing. On failure the bit is NOT set, so the next launch retries.
     """
     keep = _resolve_keep_per_ns()
     async with PruningCheckpointer.from_conn_string_with_keep(
@@ -530,6 +533,7 @@ async def get_checkpointer() -> AsyncIterator[PruningCheckpointer]:
                     )
             except Exception as exc:
                 _logger.warning("migration sweep failed: %s", exc, exc_info=True)
+        await _upgrade_stored_dirs_safely()
         yield saver
 
 
@@ -869,7 +873,7 @@ def _apply_summarization_event(messages: list, event: dict | None) -> list:
 def _extract_preview(messages: list, max_len: int = 50) -> str:
     """Extract the first human message as a preview string."""
     for msg in messages:
-        if getattr(msg, "type", None) != "human":
+        if getattr(msg, "type", None) != "human" or is_pinned_skill(msg):
             continue
         content = getattr(msg, "content", "") or ""
         if isinstance(content, list):
@@ -926,8 +930,9 @@ async def list_threads(
     """List EvoScientist threads, most-recent first.
 
     Returns list of dicts with keys: ``thread_id``, ``updated_at``,
-    ``workspace_dir``, ``model``, and optionally ``message_count``
-    and ``preview``.
+    ``workspace_dir``, ``run_dir``, ``model``, and optionally
+    ``message_count`` and ``preview``. The folders are returned as stored;
+    read them with ``SessionDirs.from_stored``.
     """
     db_path = str(get_db_path())
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
@@ -939,7 +944,8 @@ async def list_threads(
             SELECT thread_id,
                    MAX(json_extract(metadata, '$.updated_at')) as updated_at,
                    json_extract(metadata, '$.workspace_dir') as workspace_dir,
-                   json_extract(metadata, '$.model') as model
+                   json_extract(metadata, '$.model') as model,
+                   json_extract(metadata, '$.run_dir') as run_dir
             FROM checkpoints
             WHERE {MAIN_THREAD_FILTER_SQL}
             GROUP BY thread_id
@@ -957,6 +963,7 @@ async def list_threads(
                 "thread_id": r[0],
                 "updated_at": r[1],
                 "workspace_dir": r[2],
+                "run_dir": r[4],
                 "model": r[3],
             }
             for r in rows
@@ -1080,7 +1087,8 @@ async def delete_thread(thread_id: str) -> bool:
 async def get_thread_metadata(thread_id: str) -> dict | None:
     """Return metadata dict for *thread_id*, or ``None`` if not found.
 
-    Keys: ``workspace_dir``, ``model``, ``updated_at``.
+    Keys: ``workspace_dir``, ``run_dir``, ``model``, ``updated_at``. The
+    folders are returned as stored; read them with ``SessionDirs.from_stored``.
     """
     db_path = str(get_db_path())
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
@@ -1089,7 +1097,8 @@ async def get_thread_metadata(thread_id: str) -> dict | None:
         query = f"""
             SELECT json_extract(metadata, '$.workspace_dir') as workspace_dir,
                    json_extract(metadata, '$.model') as model,
-                   json_extract(metadata, '$.updated_at') as updated_at
+                   json_extract(metadata, '$.updated_at') as updated_at,
+                   json_extract(metadata, '$.run_dir') as run_dir
             FROM checkpoints
             WHERE thread_id = ?
               AND {MAIN_THREAD_FILTER_SQL}
@@ -1102,6 +1111,7 @@ async def get_thread_metadata(thread_id: str) -> dict | None:
                 return None
             return {
                 "workspace_dir": row[0],
+                "run_dir": row[3],
                 "model": row[1],
                 "updated_at": row[2],
             }
@@ -1140,9 +1150,10 @@ async def get_thread_messages(thread_id: str) -> list:
 # Migration sweep & VACUUM (one-time legacy cleanup)
 # ---------------------------------------------------------------------------
 
-# PRAGMA user_version is a 32-bit int slot in the SQLite file header. We
-# bump this to 1 once the legacy-bloat sweep has run successfully so it
-# never runs again. Future structural migrations can use 2, 3, ...
+# PRAGMA user_version is a 32-bit int slot in the SQLite file header. Each
+# one-time job owns one bit of it and is gated on its own bit, so one job
+# can never mark another as done: the legacy-bloat sweep sets bit 1 once it
+# has run successfully, the stored-folders upgrade below sets bit 2.
 _MIGRATION_VERSION = 1
 
 # Threshold below which the sweep is skipped (DB is already small enough
@@ -1242,7 +1253,8 @@ async def _needs_migration() -> bool:
     """Return True if the legacy-bloat sweep should run now.
 
     True iff the DB exists, is larger than ``_MIGRATION_THRESHOLD_BYTES``,
-    and ``PRAGMA user_version`` is below ``_MIGRATION_VERSION``.
+    and the sweep's ``_MIGRATION_VERSION`` bit of ``PRAGMA user_version``
+    is not set.
     """
     db_path = get_db_path()
     if not db_path.exists():
@@ -1257,7 +1269,7 @@ async def _needs_migration() -> bool:
         async with aiosqlite.connect(str(db_path), timeout=30.0) as conn:
             if not await _table_exists(conn, "checkpoints"):
                 return False
-            return await _get_user_version(conn) < _MIGRATION_VERSION
+            return not await _get_user_version(conn) & _MIGRATION_VERSION
     except aiosqlite.Error:
         return False
 
@@ -1270,8 +1282,8 @@ async def _run_migration_sweep(
 
     Iterates pairs in deterministic order, applies the same DELETE pattern
     the per-step pruner uses, and yields to the event loop between pairs
-    so the agent stays responsive. On success bumps ``PRAGMA user_version``
-    so the sweep never reruns.
+    so the agent stays responsive. On success sets the sweep's bit of
+    ``PRAGMA user_version`` so the sweep never reruns.
 
     ``progress_cb``: optional ``async (done: int, total: int) -> None``
     fired after each pair is committed; used by callers to drive a live
@@ -1286,7 +1298,7 @@ async def _run_migration_sweep(
     async with aiosqlite.connect(db_path, timeout=60.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return 0
-        if await _get_user_version(conn) >= _MIGRATION_VERSION:
+        if await _get_user_version(conn) & _MIGRATION_VERSION:
             return 0
 
         async with conn.execute(
@@ -1322,7 +1334,9 @@ async def _run_migration_sweep(
             if _SWEEP_YIELD_SECONDS >= 0:
                 await asyncio.sleep(_SWEEP_YIELD_SECONDS)
 
-        await _set_user_version(conn, _MIGRATION_VERSION)
+        await _set_user_version(
+            conn, await _get_user_version(conn) | _MIGRATION_VERSION
+        )
 
     # Schedule VACUUM at process exit (must run after the long-lived saver
     # connection closes to acquire the exclusive lock VACUUM requires).
@@ -1330,6 +1344,131 @@ async def _run_migration_sweep(
     # ``get_db_path`` don't leak into atexit and hit the real DB.
     _schedule_vacuum_atexit(db_path)
     return pairs_pruned
+
+
+# ---------------------------------------------------------------------------
+# Stored workspace folders (one-time upgrade)
+# ---------------------------------------------------------------------------
+
+# ``user_version`` bit set once stored ``workspace_dir`` values name the
+# workspace root, with a ``--mode=run`` session's folder in ``run_dir``.
+_STORED_DIRS_VERSION = 2
+
+
+def _upgraded_dir_fields(values: list[str]) -> dict[str, dict[str, str]]:
+    """New metadata fields for each stored ``workspace_dir`` naming a run folder.
+
+    Every other value is left as it is: readers normalise the stored string
+    themselves, and cannot resolve a value this cannot resolve either.
+    Resolves paths; run it off the event loop.
+    """
+    upgraded: dict[str, dict[str, str]] = {}
+    for value in values:
+        try:
+            fields = SessionDirs.from_legacy(value).metadata()
+        except (ValueError, OSError, RuntimeError) as exc:
+            _logger.warning("Leaving stored workspace folder %r as is: %s", value, exc)
+            continue
+        if fields.get("run_dir"):
+            upgraded[value] = fields
+    return upgraded
+
+
+async def _apply_dir_upgrade(
+    conn: aiosqlite.Connection, upgraded: dict[str, dict[str, str]]
+) -> None:
+    """Split every upgraded ``workspace_dir`` in one pass over the table."""
+    await conn.execute(
+        "CREATE TEMP TABLE _dir_upgrade "
+        "(old TEXT PRIMARY KEY, workspace_dir TEXT NOT NULL, run_dir TEXT NOT NULL)"
+    )
+    await conn.executemany(
+        "INSERT INTO _dir_upgrade VALUES (?, ?, ?)",
+        [
+            (old, fields["workspace_dir"], fields["run_dir"])
+            for old, fields in upgraded.items()
+        ],
+    )
+    # ``metadata`` is stored as a BLOB of JSON text; keep it one. A correlated
+    # subquery rather than ``UPDATE ... FROM``, which needs SQLite 3.33.
+    await conn.execute(
+        """
+        UPDATE checkpoints SET metadata = CAST(
+            (SELECT json_set(CAST(checkpoints.metadata AS TEXT),
+                             '$.workspace_dir', u.workspace_dir,
+                             '$.run_dir', u.run_dir)
+             FROM _dir_upgrade AS u
+             WHERE u.old = json_extract(checkpoints.metadata, '$.workspace_dir'))
+            AS BLOB)
+        WHERE json_valid(metadata)
+          AND json_extract(metadata, '$.workspace_dir')
+              IN (SELECT old FROM _dir_upgrade)
+          AND json_extract(metadata, '$.run_dir') IS NULL
+        """
+    )
+    await conn.execute("DROP TABLE _dir_upgrade")
+
+
+async def _upgrade_stored_dirs_safely() -> None:
+    """:func:`_upgrade_stored_dirs`, never blocking startup on failure."""
+    try:
+        await _upgrade_stored_dirs()
+    except Exception as exc:
+        _logger.warning(
+            "Upgrading stored workspace folders failed; will retry on the next "
+            "start: %s",
+            exc,
+            exc_info=True,
+        )
+
+
+async def _upgrade_stored_dirs() -> None:
+    """Rewrite the folders stored before ``run_dir`` existed, once per DB.
+
+    Run-mode sessions stored their run folder as ``workspace_dir``. Rows
+    whose folder has the name ``--mode=run`` generates get the workspace
+    root plus ``run_dir``; no other row is rewritten, since readers
+    normalise the stored folder themselves. Rows whose metadata is not
+    valid JSON, or whose folder cannot be resolved, are skipped. AutoSkills
+    proposals get the same upgrade.
+
+    Runs in one ``BEGIN IMMEDIATE`` transaction that also sets the
+    ``_STORED_DIRS_VERSION`` bit of ``user_version``, so concurrent
+    processes upgrade once. On failure nothing is committed and the next
+    start retries.
+    """
+    from . import paths
+    from .memory.autoskills.proposals import upgrade_proposal_workspaces
+
+    async with aiosqlite.connect(str(get_db_path()), timeout=30.0) as conn:
+        if await _get_user_version(conn) & _STORED_DIRS_VERSION:
+            return
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            version = await _get_user_version(conn)
+            if version & _STORED_DIRS_VERSION:
+                await conn.rollback()
+                return
+            if await _table_exists(conn, "checkpoints"):
+                async with conn.execute(
+                    "SELECT DISTINCT json_extract(metadata, '$.workspace_dir') "
+                    "FROM checkpoints "
+                    "WHERE json_valid(metadata) "
+                    "AND json_extract(metadata, '$.run_dir') IS NULL"
+                ) as cur:
+                    values = [
+                        row[0]
+                        for row in await cur.fetchall()
+                        if isinstance(row[0], str) and row[0]
+                    ]
+                upgraded = await asyncio.to_thread(_upgraded_dir_fields, values)
+                if upgraded:
+                    await _apply_dir_upgrade(conn, upgraded)
+            await asyncio.to_thread(upgrade_proposal_workspaces, paths.MEMORIES_DIR)
+            await _set_user_version(conn, version | _STORED_DIRS_VERSION)
+        except BaseException:
+            await conn.rollback()
+            raise
 
 
 _vacuum_scheduled = False
@@ -1461,33 +1600,30 @@ async def db_stats(top_n: int = 5) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _api_workspace_dir() -> str:
-    """Resolve the langgraph dev subprocess's workspace directory.
+def _api_session_dirs() -> SessionDirs:
+    """The workspace and run folder this langgraph dev server serves.
 
-    ``start_langgraph_dev`` injects ``EVOSCIENTIST_WORKSPACE_DIR`` and sets
-    the subprocess cwd to the workspace, so either source identifies the
-    workspace this server instance is serving.
+    ``start_langgraph_dev`` sets ``EVOSCIENTIST_WORKSPACE_DIR`` (and
+    ``EVOSCIENTIST_RUN_DIR`` for a ``--mode=run`` session) on the subprocess.
 
-    NOTE: ``Path.resolve()`` / ``Path.cwd()`` call ``os.getcwd()``, a blocking
-    syscall. Call this from a sync context or via ``asyncio.to_thread`` — never
-    directly from an async function on the dev runtime (blockbuster will flag it).
+    NOTE: the first call resolves paths, a blocking syscall. Call this from a
+    sync context or via :func:`_api_session_dirs_async` — never directly from
+    an async function on the dev runtime (blockbuster will flag it).
     """
-    import os
-
-    ws = os.environ.get("EVOSCIENTIST_WORKSPACE_DIR", "").strip()
-    if ws:
-        return str(Path(ws).expanduser().resolve())
-    return str(Path.cwd().resolve())
+    return process_session_dirs()
 
 
-async def _api_workspace_dir_async() -> str:
-    """Async wrapper for :func:`_api_workspace_dir`.
+async def _api_session_dirs_async() -> SessionDirs:
+    """Async wrapper for :func:`_api_session_dirs`, run off the event loop."""
+    return await asyncio.to_thread(_api_session_dirs)
 
-    Offloads the blocking ``os.getcwd()`` (via ``Path.cwd()/resolve()``) to a
-    thread so it never runs on the event loop — the dev runtime's blockbuster
-    guard flags it otherwise. Use this from any async call site.
-    """
-    return await asyncio.to_thread(_api_workspace_dir)
+
+# Graphs the server builds for the session's folder (``main_graph.py`` and
+# ``graphs.py``). Every other graph works in the workspace root, so its rows
+# carry no ``run_dir`` and its runs are checked against the workspace only.
+FOLDER_GRAPH_IDS = frozenset(
+    {AGENT_NAME, "writing-agent", "data-analysis-agent", "expert-container-async"}
+)
 
 
 class _ApiPruningCheckpointer(PruningCheckpointer):
@@ -1499,6 +1635,7 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
     rows with the current workspace keeps main and async-subagent threads
     restorable without exposing other workspaces. Memory-worker rows still get
     workspace metadata, but remain disposable until worker cloning lands.
+    Only graphs that work in the session's folder get its ``run_dir``.
 
     Only the main graph receives ``agent_name``. The local CLI session
     surface still uses that ownership key, so worker/subagent graph rows must
@@ -1514,13 +1651,14 @@ class _ApiPruningCheckpointer(PruningCheckpointer):
     ) -> Any:
         if isinstance(metadata, dict) and isinstance(metadata.get("graph_id"), str):
             metadata = dict(metadata)
-            # _api_workspace_dir() calls Path.resolve()/Path.cwd() -> os.getcwd(),
-            # a blocking syscall flagged by the dev runtime's blockbuster guard.
-            # Run it in a thread, and only when actually needed — ``setdefault``
-            # would evaluate the argument eagerly on every write even when the
-            # key is already present.
+            # Resolving the server's folders is a blocking syscall flagged by
+            # the dev runtime's blockbuster guard. Run it in a thread, and only
+            # when the run did not bring its own folders.
             if "workspace_dir" not in metadata:
-                metadata["workspace_dir"] = await _api_workspace_dir_async()
+                dirs = await _api_session_dirs_async()
+                if metadata["graph_id"] not in FOLDER_GRAPH_IDS:
+                    dirs = SessionDirs(dirs.workspace)
+                metadata.update(dirs.metadata())
             metadata["updated_at"] = datetime.now(UTC).isoformat()
             if metadata.get("graph_id") == AGENT_NAME:
                 metadata.setdefault("agent_name", AGENT_NAME)
@@ -1574,7 +1712,15 @@ class _RestoredThreadInfo:
     assistant_id: str | None
     graph_id: str
     workspace_dir: str
+    run_dir: str | None
     model: str | None
+
+
+def _stored_session_dirs(
+    pairs: list[tuple[str | None, str | None]],
+) -> dict[tuple[str | None, str | None], SessionDirs | None]:
+    """Read stored ``(workspace_dir, run_dir)`` pairs (resolves paths)."""
+    return {pair: SessionDirs.from_stored(*pair) for pair in set(pairs)}
 
 
 async def _restore_webui_threads_to_global_store() -> bool:
@@ -1589,7 +1735,10 @@ async def _restore_webui_threads_to_global_store() -> bool:
     dicts that satisfy ``POST /threads/search``.
 
     Restore scope — UUID-format graph threads owned by this server's
-    workspace (``metadata.workspace_dir`` matches). This includes the main
+    workspace (``metadata.workspace_dir`` names the same root, in any run
+    folder). The registry holds the root in ``workspace_dir`` and the run
+    folder in ``run_dir``; rows from before ``run_dir`` existed were upgraded
+    by :func:`_upgrade_stored_dirs` when the server opened the DB. This includes the main
     graph and async-subagent graphs. Memory-worker graphs are excluded for now:
     they are still treated as disposable residue until worker cloning lands.
     The workspace filter is required because sessions.db is machine-global,
@@ -1627,7 +1776,7 @@ async def _restore_webui_threads_to_global_store() -> bool:
         # Legacy WebUI/CLI interop rows without graph_id are restored as the
         # main graph only when they carry agent_name == AGENT_NAME. Rows
         # predating workspace stamping remain deliberately excluded.
-        current_workspace = await _api_workspace_dir_async()
+        current_workspace = (await _api_session_dirs_async()).workspace.key
         sqlite_data: dict[uuid.UUID, _RestoredThreadInfo] = {}
         titles: dict[uuid.UUID, str] = {}
         db_path = str(get_db_path())
@@ -1649,7 +1798,8 @@ async def _restore_webui_threads_to_global_store() -> bool:
                            MAX(json_extract(metadata, '$.graph_id')) as graph_id,
                            MAX(json_extract(metadata, '$.workspace_dir')) as workspace_dir,
                            MAX(json_extract(metadata, '$.model')) as model,
-                           MAX(json_extract(metadata, '$.agent_name')) as agent_name
+                           MAX(json_extract(metadata, '$.agent_name')) as agent_name,
+                           MAX(json_extract(metadata, '$.run_dir')) as run_dir
                     FROM checkpoints
                     WHERE thread_id LIKE '________-____-____-____-____________'
                       AND (
@@ -1661,6 +1811,9 @@ async def _restore_webui_threads_to_global_store() -> bool:
                 """
                 async with conn.execute(query) as cur:
                     rows = list(await cur.fetchall())
+            stored_dirs = await asyncio.to_thread(
+                _stored_session_dirs, [(row[4], row[7]) for row in rows]
+            )
 
             for row in rows:
                 (
@@ -1671,6 +1824,7 @@ async def _restore_webui_threads_to_global_store() -> bool:
                     workspace_dir,
                     model,
                     agent_name,
+                    run_dir,
                 ) = row
                 thread_uuid = _to_uuid_safe(thread_id_str)
                 if thread_uuid is None:
@@ -1680,13 +1834,16 @@ async def _restore_webui_threads_to_global_store() -> bool:
                     restored_graph_id = AGENT_NAME
                 if restored_graph_id is None:
                     continue
-                if not workspace_dir or workspace_dir != current_workspace:
+                dirs = stored_dirs[(workspace_dir, run_dir)]
+                if dirs is None or dirs.workspace.key != current_workspace:
                     continue
+                stored = dirs.metadata()
                 sqlite_data[thread_uuid] = _RestoredThreadInfo(
                     updated_at=updated_at,
                     assistant_id=assistant_id,
                     graph_id=restored_graph_id,
-                    workspace_dir=workspace_dir,
+                    workspace_dir=stored["workspace_dir"],
+                    run_dir=stored.get("run_dir"),
                     model=model,
                 )
 
@@ -1753,6 +1910,12 @@ async def _restore_webui_threads_to_global_store() -> bool:
                 if meta.get("workspace_dir") != info.workspace_dir:
                     meta["workspace_dir"] = info.workspace_dir
                     changed = True
+                if meta.get("run_dir") != info.run_dir:
+                    if info.run_dir is None:
+                        meta.pop("run_dir", None)
+                    else:
+                        meta["run_dir"] = info.run_dir
+                    changed = True
                 if info.model and meta.get("model") != info.model:
                     meta["model"] = info.model
                     changed = True
@@ -1780,6 +1943,8 @@ async def _restore_webui_threads_to_global_store() -> bool:
                 "graph_id": info.graph_id,
                 "workspace_dir": info.workspace_dir,
             }
+            if info.run_dir:
+                stub_metadata["run_dir"] = info.run_dir
             if info.assistant_id:
                 # str, not uuid.UUID — same convention as above.
                 stub_metadata["assistant_id"] = str(info.assistant_id)
@@ -1907,6 +2072,7 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
         str(get_db_path()), keep_per_ns=keep
     ) as saver:
         await saver.setup()
+        await _upgrade_stored_dirs_safely()
         await _purge_internal_worker_threads()
         if await _restore_webui_threads_to_global_store():
             await _sweep_orphaned_runs_in_global_store()

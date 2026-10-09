@@ -405,7 +405,7 @@ class TestConfig:
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_auto_approve_still_includes_ask_user_middleware(
-    mock_config, mock_model, mock_tool_selector
+    mock_config, mock_model, mock_tool_selector, workspace
 ):
     cfg = MagicMock()
     cfg.enable_ask_user = True
@@ -418,7 +418,9 @@ def test_auto_approve_still_includes_ask_user_middleware(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    type_names = [type(m).__name__ for m in _get_default_middleware()]
+    type_names = [
+        type(m).__name__ for m in _get_default_middleware(workspace=workspace)
+    ]
     assert "AskUserMiddleware" in type_names
 
 
@@ -426,7 +428,7 @@ def test_auto_approve_still_includes_ask_user_middleware(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_auto_mode_disables_ask_user_middleware(
-    mock_config, mock_model, mock_tool_selector
+    mock_config, mock_model, mock_tool_selector, workspace
 ):
     cfg = MagicMock()
     cfg.enable_ask_user = True
@@ -439,7 +441,9 @@ def test_auto_mode_disables_ask_user_middleware(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    type_names = [type(m).__name__ for m in _get_default_middleware()]
+    type_names = [
+        type(m).__name__ for m in _get_default_middleware(workspace=workspace)
+    ]
     assert "AskUserMiddleware" not in type_names
 
 
@@ -447,7 +451,7 @@ def test_auto_mode_disables_ask_user_middleware(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_for_async_subagent_omits_ask_user_middleware(
-    mock_config, mock_model, mock_tool_selector
+    mock_config, mock_model, mock_tool_selector, workspace
 ):
     """``AskUserMiddleware`` uses ``interrupt()`` to wait on user input.
 
@@ -470,11 +474,13 @@ def test_for_async_subagent_omits_ask_user_middleware(
     from EvoScientist.EvoScientist import _get_default_middleware
 
     # Sanity: with the default flag, ask_user IS present.
-    default_names = [type(m).__name__ for m in _get_default_middleware()]
+    default_names = [
+        type(m).__name__ for m in _get_default_middleware(workspace=workspace)
+    ]
     assert "AskUserMiddleware" in default_names
 
     # With for_async_subagent=True, ask_user is suppressed.
-    async_mw = _get_default_middleware(for_async_subagent=True)
+    async_mw = _get_default_middleware(workspace=workspace, for_async_subagent=True)
     async_names = [type(m).__name__ for m in async_mw]
     assert "AskUserMiddleware" not in async_names
     # Other middleware must remain — only ask_user is filtered.

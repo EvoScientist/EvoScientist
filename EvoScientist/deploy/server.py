@@ -8,13 +8,8 @@ Differs from ``EvoSci`` / ``EvoSci serve``: no in-process CLI agent,
 no session DB, no channel runtime, no TUI. The terminal only shows
 startup progress, the Ready banner, and then blocks until Ctrl+C.
 
-Mode dispatch happens via the ``EVOSCIENTIST_DEPLOY_MODE`` env var
-injected by ``start_langgraph_dev``: ``full`` for the deploy subprocess
-(this command), ``stripped`` for CLI/serve subprocesses, unset for the
-parent process. The subprocess reads this at module-load time
-(``langgraph_dev/manager.py``) to flip ``_ASYNC_SUBAGENTS_AVAILABLE``,
-and the agent build code (``EvoScientist.py:_get_default_agent``)
-loads or skips MCP based on the value.
+The server is the same one ``EvoSci`` / ``EvoSci serve`` start in the
+background.
 """
 
 from __future__ import annotations
@@ -67,7 +62,7 @@ def deploy(
 ):
     """Deploy EvoScientist main agent as a standalone LangGraph dev server.
 
-    Starts ``langgraph dev`` in deploy mode (full MCP + async sub-agents).
+    Starts ``langgraph dev`` (MCP tools and async sub-agents in the server).
     Connect any LangChain-compatible UI or SDK client to the printed
     endpoint. Press Ctrl+C to stop.
     """
@@ -102,12 +97,9 @@ def deploy(
     apply_config_to_env(config)
 
     # 2. Resolve workspace (CLI > config.default_workdir > cwd)
-    if workdir:
-        ws = os.path.abspath(os.path.expanduser(workdir))
-    elif config.default_workdir:
-        ws = os.path.abspath(os.path.expanduser(config.default_workdir))
-    else:
-        ws = os.getcwd()
+    from ..paths import start_workspace_path
+
+    ws = str(start_workspace_path(workdir, config.default_workdir))
     # Subprocess inherits this path via EVOSCIENTIST_WORKSPACE_DIR (set inside
     # start_langgraph_dev). Ensure the dir exists; do NOT mutate the parent
     # process's paths module state — the deploy parent has no in-process agent.
@@ -233,12 +225,12 @@ def deploy(
             console.print(f"[red]ccproxy startup failed:[/red] {exc}")
             raise typer.Exit(1) from exc
 
-    # 7. Start langgraph dev (deploy mode → full MCP + async)
+    # 7. Start langgraph dev
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     try:
         with console.status(
-            "[dim]Starting langgraph dev (deploy mode: MCP + async)...[/dim]",
+            "[dim]Starting langgraph dev...[/dim]",
             spinner="dots",
         ):
             proc = start_langgraph_dev(
@@ -247,7 +239,6 @@ def deploy(
                 host=effective_host,
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
-                deploy_mode=True,
                 tunnel=tunnel,
                 config_fingerprint=_server_config_fingerprint(config),
             )
@@ -263,9 +254,9 @@ def deploy(
     # server log; show it here.
     from rich.markup import escape
 
-    from ..setup.research_env import missing_python_hint
+    from ..agent_shell import setup_hint
 
-    hint = missing_python_hint()
+    hint = setup_hint()
     if hint is not None:
         console.print(f"[yellow]⚠ {escape(hint)}[/yellow]")
 

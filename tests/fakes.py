@@ -24,6 +24,10 @@ from EvoScientist.gateway import (
     ThreadResolution,
     ThreadStore,
 )
+from EvoScientist.paths import Workspace
+
+# A path value for tests whose code never touches the workspace folder.
+TEST_WORKSPACE = Workspace("/nonexistent/evosci-test-workspace")
 
 _DEFAULT_COPY_RESPONSE = object()
 

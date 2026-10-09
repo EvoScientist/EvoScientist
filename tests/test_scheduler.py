@@ -2,11 +2,13 @@
 
 from unittest.mock import MagicMock
 
+from tests.fakes import TEST_WORKSPACE
+
 
 def _mw():
     from EvoScientist.middleware.scheduler import SchedulerMiddleware
 
-    m = SchedulerMiddleware()
+    m = SchedulerMiddleware(TEST_WORKSPACE)
     m._cache = None
     m._cache_at = 0.0
     return m
@@ -19,7 +21,7 @@ def test_schedules_block_lists_active_crons(monkeypatch):
     monkeypatch.setattr(
         crons,
         "list_schedules",
-        lambda: [
+        lambda *, workspace: [
             {
                 "cron_id": "abc12345-xyz",
                 "schedule": "*/10 * * * *",
@@ -48,7 +50,7 @@ def test_schedules_block_empty_on_error(monkeypatch):
 
     monkeypatch.setattr(crons, "is_available", lambda: True)
 
-    def _boom():
+    def _boom(*, workspace):
         raise RuntimeError("backend died")
 
     monkeypatch.setattr(crons, "list_schedules", _boom)

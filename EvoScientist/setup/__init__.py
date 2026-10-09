@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from . import node, research_env
+from . import git, node, research_env, webui
 from .protocol import PROTOCOL, Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,9 @@ class Stage:
 
 STAGES: tuple[Stage, ...] = (
     Stage("node", "Node.js", None, node.run_stage),
+    Stage("git", "Git for Windows", frozenset({"win32"}), git.run_stage),
     Stage("research-env", "Python research environment", None, research_env.run_stage),
+    Stage("webui", "WebUI", None, webui.run_stage),
 )
 
 
@@ -56,15 +58,35 @@ def manifest() -> dict[str, Any]:
     }
 
 
-def run_stages(stages: Iterable[Stage], emit: Emitter, mirror: str) -> int:
+def run_stages(
+    stages: Iterable[Stage],
+    emit: Emitter,
+    mirror: str,
+    skip: Collection[str] = (),
+) -> int:
     """Run every stage in order; returns 1 if any failed, else 0.
 
-    The stages do not depend on each other, so a failed one (e.g. a blocked
-    Node download) does not stop the rest; each still ends with its own
-    terminal event.
+    A failed stage (e.g. a blocked Node download) does not stop the rest;
+    each still ends with its own terminal event. The one dependency, ``webui``
+    on ``node``, needs no ordering here: the webui stage asks ``ensure_node()``
+    itself, which raises the Node failure again within the same process.
+
+    A stage in ``skip`` (``EvoSci setup --skip``) ends with ``skipped`` and the
+    reason ``skip_option`` in its detail, e.g. the desktop app, which bundles
+    its own UI, skips ``webui``.
     """
     failed = False
     for stage in stages:
+        if stage.id in skip:
+            emit(
+                make_event(
+                    stage.id,
+                    "skipped",
+                    message="Skipped (--skip)",
+                    detail={"reason": "skip_option"},
+                )
+            )
+            continue
         if not stage.applies():
             emit(
                 make_event(stage.id, "skipped", message=f"Not needed on {sys.platform}")

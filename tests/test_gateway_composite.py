@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from EvoScientist.gateway import (
+    GraphGateway,
+    LangGraphServerGateway,
     LocalGraphGateway,
     LocalThreadStore,
     RunRequest,
@@ -114,8 +117,12 @@ class RecordingGateway:
         self.calls.append(("stream_events", request.thread_id))
         return _empty_async_iter()
 
-    async def update_state_values(self, target, tid, values):
-        self.calls.append(("update_state_values", tid))
+    async def get_state_snapshot(self, target, tid):
+        self.calls.append(("get_state_snapshot", tid))
+        return SimpleNamespace(next=(), tasks=(), interrupts=(), values=self._state)
+
+    async def update_state_values(self, target, tid, values, *, as_node=None):
+        self.calls.append(("update_state_values", tid, as_node))
 
     async def get_run_status(self, target, tid, run_id):
         self.calls.append(("get_run_status", tid))
@@ -227,6 +234,27 @@ async def test_stream_events_uuid_routes_to_server():
     assert execute.called("stream_events")
 
 
+async def test_stream_events_early_close_closes_the_inner_stream():
+    """Closing the composite stream early closes the server stream with it."""
+    closed: list[bool] = []
+
+    async def _inner():
+        try:
+            yield {"type": "interrupt"}
+            yield {"type": "text", "content": "never reached"}
+        finally:
+            closed.append(True)
+
+    execute = RecordingGateway("e")
+    execute.stream_events = lambda request: _inner()
+    stream = _composite(RecordingGateway("r"), execute).stream_events(
+        RunRequest(message="hi", thread_id=UUID)
+    )
+    assert await stream.__anext__() == {"type": "interrupt"}
+    await stream.aclose()
+    assert closed == [True]
+
+
 async def test_stream_events_legacy_yields_error_then_raises():
     read = RecordingGateway("r")
     execute = RecordingGateway("e")
@@ -275,6 +303,96 @@ async def test_update_state_values_legacy_refused():
     assert not execute.called("update_state_values")
     await comp.update_state_values(None, UUID, {})
     assert execute.called("update_state_values")
+
+
+async def test_update_state_values_forwards_as_node():
+    read = RecordingGateway("r")
+    execute = RecordingGateway("e")
+    await _composite(read, execute).update_state_values(
+        None, UUID, None, as_node="__end__"
+    )
+    assert ("update_state_values", UUID, "__end__") in execute.calls
+    assert not read.called("update_state_values")
+
+
+async def test_state_snapshot_uuid_server_legacy_local():
+    read = RecordingGateway("r", state={"src": "local"})
+    execute = RecordingGateway("e", state={"src": "server"})
+    comp = _composite(read, execute)
+    assert (await comp.get_state_snapshot(None, UUID)).values == {"src": "server"}
+    assert not read.called("get_state_snapshot")
+    assert (await comp.get_state_snapshot(None, LEGACY)).values == {"src": "local"}
+
+
+async def test_close_parked_checkpoint_through_composite():
+    """HITL close on the server backend completes via the composite (#600).
+
+    The recover sequence itself is covered in ``tests/test_hitl_loop.py``;
+    here only the routing matters: the close succeeds and never reads or
+    writes through the local reader.
+    """
+    from langchain_core.messages import AIMessage
+
+    from EvoScientist.backends import close_parked_checkpoint
+    from EvoScientist.gateway import GraphTarget
+    from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
+
+    agent = FakeCheckpointAgent(
+        values={
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "echo hi"},
+                            "id": "exec-1",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            ]
+        }
+    )
+    read = RecordingGateway("r")
+    execute = FakeGraphGateway(checkpoint=agent)
+    comp = CompositeGraphGateway(read=read, execute=execute)
+
+    await close_parked_checkpoint(comp, GraphTarget(local_graph=None), UUID)
+
+    assert not read.called("get_state_snapshot")
+    assert not read.called("update_state_values")
+
+
+def _protocol_methods() -> list[str]:
+    return [
+        name
+        for name, value in vars(GraphGateway).items()
+        if not name.startswith("_") and inspect.isfunction(value)
+    ]
+
+
+def _signature_shape(fn) -> list[tuple[str, Any, bool]]:
+    return [
+        (param.name, param.kind, param.default is not inspect.Parameter.empty)
+        for param in inspect.signature(fn).parameters.values()
+    ]
+
+
+@pytest.mark.parametrize(
+    "gateway_cls",
+    [CompositeGraphGateway, LocalGraphGateway, LangGraphServerGateway],
+)
+@pytest.mark.parametrize("method", _protocol_methods())
+def test_gateway_matches_protocol_signature(gateway_cls, method):
+    """Every gateway implements each GraphGateway method with the same shape.
+
+    Subclassing the protocol would not catch a missing override: its bodies
+    are docstring-only, so the inherited method would silently return None.
+    """
+    impl = getattr(gateway_cls, method, None)
+    assert impl is not None, f"{gateway_cls.__name__} is missing {method}"
+    assert _signature_shape(impl) == _signature_shape(getattr(GraphGateway, method))
 
 
 async def test_clone_thread_uuid_server_legacy_refused():

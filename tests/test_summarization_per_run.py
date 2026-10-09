@@ -440,7 +440,7 @@ async def test_summary_follows_the_run_model():
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_default_middleware_registers_subclass_exactly_once(
-    mock_config, mock_model, mock_ts
+    mock_config, mock_model, mock_ts, workspace
 ):
     mock_model.return_value = MagicMock(
         profile={"max_input_tokens": CONSTRUCTION_WINDOW}
@@ -454,7 +454,7 @@ def test_default_middleware_registers_subclass_exactly_once(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware(backend=MagicMock())
+    mw = _get_default_middleware(workspace=workspace, backend=MagicMock())
     summ = [m for m in mw if m.name == "SummarizationMiddleware"]
     assert len(summ) == 1, "expected exactly one summarization middleware"
     assert isinstance(summ[0], _PerRunLimitsSummarizationMiddleware)
@@ -462,7 +462,7 @@ def test_default_middleware_registers_subclass_exactly_once(
     # Without a backend (tests, async sub-agent factories) the stock frozen
     # built-in must be left untouched rather than replaced by a shim-backend
     # instance that would offload history to the wrong place.
-    mw_plain = _get_default_middleware()
+    mw_plain = _get_default_middleware(workspace=workspace)
     assert not [m for m in mw_plain if m.name == "SummarizationMiddleware"]
 
 
@@ -473,7 +473,7 @@ def test_default_middleware_registers_subclass_exactly_once(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_deepagents_name_merge_replaces_stock_instance(
-    mock_config, mock_model, mock_ts
+    mock_config, mock_model, mock_ts, workspace
 ):
     """deepagents' name-based merge swaps the frozen built-in for our
     subclass in the identical core-stack slot (the fix mechanism for #466).
@@ -499,7 +499,7 @@ def test_deepagents_name_merge_replaces_stock_instance(
         def __init__(self, name: str) -> None:
             self.name = name
 
-    user_mw = _get_default_middleware(backend=MagicMock())
+    user_mw = _get_default_middleware(workspace=workspace, backend=MagicMock())
 
     core = [
         _Named("FilesystemMiddleware"),
@@ -514,7 +514,7 @@ def test_deepagents_name_merge_replaces_stock_instance(
     assert summ[0] is not core[2]
 
 
-def test_explicit_general_purpose_spec_gets_per_run_summarization():
+def test_explicit_general_purpose_spec_gets_per_run_summarization(workspace):
     """general-purpose is an explicit spec, so it does not inherit the
     parent's middleware by name. Injection has to install the subclass
     itself (#466 review)."""
@@ -529,6 +529,7 @@ def test_explicit_general_purpose_spec_gets_per_run_summarization():
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs,
+        workspace=workspace,
         cfg=_factory_cfg_mock(),
         chat_model=model,
         backend=backend,
@@ -587,6 +588,7 @@ def test_async_subagent_factory_installs_per_run_summarization(
     mock_backend,
     mock_mcp,
     mock_create,
+    workspace,
 ):
     """``build_async_subagent_graph`` must pass its backend so the per-run
     subclass replaces the frozen-window built-in (scheduler / writing-agent /
@@ -602,7 +604,7 @@ def test_async_subagent_factory_installs_per_run_summarization(
 
     from EvoScientist.subagents._factory import build_async_subagent_graph
 
-    build_async_subagent_graph("writing-agent")
+    build_async_subagent_graph("writing-agent", workspace=workspace)
 
     kwargs = mock_create.call_args.kwargs
     _assert_per_run_summarization(kwargs["middleware"], mock_backend.return_value)
@@ -635,6 +637,7 @@ def test_scheduler_summarization_uses_auxiliary_model(
     mock_backend,
     mock_mcp,
     mock_create,
+    workspace,
 ):
     """The scheduler graph is built on the auxiliary model. Summaries must
     use that model too, not the main model the middleware factory would
@@ -656,7 +659,7 @@ def test_scheduler_summarization_uses_auxiliary_model(
 
     from EvoScientist.subagents._factory import build_async_subagent_graph
 
-    build_async_subagent_graph("scheduler")
+    build_async_subagent_graph("scheduler", workspace=workspace)
 
     kwargs = mock_create.call_args.kwargs
     assert kwargs["model"] is aux
@@ -695,6 +698,7 @@ def test_expert_container_factory_installs_per_run_summarization(
     mock_config,
     mock_backend,
     mock_create,
+    workspace,
 ):
     """``build_expert_container_async_graph`` must pass its backend too —
     the expert container graph is its own deployed graph with its own frozen
@@ -709,7 +713,7 @@ def test_expert_container_factory_installs_per_run_summarization(
         build_expert_container_async_graph,
     )
 
-    build_expert_container_async_graph()
+    build_expert_container_async_graph(workspace)
 
     kwargs = mock_create.call_args.kwargs
     _assert_per_run_summarization(kwargs["middleware"], mock_backend.return_value)

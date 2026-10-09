@@ -21,6 +21,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..message_meta import is_pinned_skill
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
@@ -67,6 +68,7 @@ def _build_thread_metadata(
     *,
     graph_id: str,
     workspace_dir: str | None,
+    run_dir: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     merged = dict(metadata or {})
@@ -77,13 +79,15 @@ def _build_thread_metadata(
         merged["agent_name"] = None
     if workspace_dir is not None:
         merged["workspace_dir"] = workspace_dir
+    if run_dir is not None:
+        merged["run_dir"] = run_dir
     merged.setdefault("updated_at", datetime.now(UTC).isoformat())
     return merged
 
 
 def _thread_preview(messages: list[BaseMessage]) -> str:
     for message in reversed(messages):
-        if getattr(message, "type", None) != "human":
+        if getattr(message, "type", None) != "human" or is_pinned_skill(message):
             continue
         content = message.content
         if isinstance(content, str):
@@ -229,6 +233,7 @@ class LangGraphServerThreadStore(ThreadStore):
         *,
         metadata: Mapping[str, Any] | None = None,
         workspace_dir: str | None = None,
+        run_dir: str | None = None,
     ) -> str:
         target_graph_id = self._target_graph_id(graph_id)
         thread = await self.client.threads.create(
@@ -236,6 +241,7 @@ class LangGraphServerThreadStore(ThreadStore):
             metadata=_build_thread_metadata(
                 graph_id=target_graph_id,
                 workspace_dir=workspace_dir,
+                run_dir=run_dir,
                 metadata=metadata,
             ),
         )
@@ -248,6 +254,7 @@ class LangGraphServerThreadStore(ThreadStore):
         *,
         metadata: Mapping[str, Any] | None = None,
         workspace_dir: str | None = None,
+        run_dir: str | None = None,
     ) -> None:
         target_graph_id = self._target_graph_id(graph_id)
         await self.client.threads.create(
@@ -256,6 +263,7 @@ class LangGraphServerThreadStore(ThreadStore):
             metadata=_build_thread_metadata(
                 graph_id=target_graph_id,
                 workspace_dir=workspace_dir,
+                run_dir=run_dir,
                 metadata=metadata,
             ),
             if_exists="do_nothing",
@@ -284,6 +292,7 @@ class LangGraphServerThreadStore(ThreadStore):
                 "created_at": thread.get("created_at"),
                 "updated_at": thread.get("updated_at"),
                 "workspace_dir": metadata.get("workspace_dir"),
+                "run_dir": metadata.get("run_dir"),
                 "model": metadata.get("model"),
                 "metadata": metadata,
             }
@@ -542,6 +551,7 @@ class LangGraphServerGateway:
             graph_id=self._target_graph_id(target),
             metadata=metadata,
             workspace_dir=target.workspace_dir if target is not None else None,
+            run_dir=target.run_dir if target is not None else None,
         )
 
     async def list_threads(
@@ -614,8 +624,14 @@ class LangGraphServerGateway:
         self,
         thread_id: str,
         configurable_extra: Mapping[str, Any] | None,
+        *,
+        target: GraphTarget | None = None,
     ) -> dict[str, Any]:
         """Assemble this run's config, reading the live session config here.
+
+        The target's folders go in last and replace any a caller put in
+        ``configurable_extra``, so the server checks the run against the
+        folders the session works in and can refuse it when it serves others.
 
         ``_ensure_config`` returns the cached, in-place-mutated session
         config — NOT a fresh disk read — so mid-session ``/model`` edits that
@@ -641,13 +657,27 @@ class LangGraphServerGateway:
             if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
             else None
         )
-        return resolve_per_run_config(
+        folders = (
+            {"workspace_dir": target.workspace_dir, "run_dir": target.run_dir}
+            if target is not None
+            else {}
+        )
+        extra = {
+            key: value
+            for key, value in (configurable_extra or {}).items()
+            if key not in folders
+        }
+        config = resolve_per_run_config(
             thread_id,
-            configurable_extra,
+            extra,
             per_run_overrides=overrides,
             recursion_limit=recursion_limit,
             hitl_suppressed=hitl_suppressed_for_run(cfg),
         )
+        for key, value in folders.items():
+            if value:
+                config["configurable"][key] = value
+        return config
 
     async def _ensure_thread(self, request: RunRequest) -> None:
         await self.thread_store.ensure_thread_exists(
@@ -657,6 +687,7 @@ class LangGraphServerGateway:
             workspace_dir=(
                 request.target.workspace_dir if request.target is not None else None
             ),
+            run_dir=request.target.run_dir if request.target is not None else None,
         )
 
     async def _start_or_resume(
@@ -666,7 +697,9 @@ class LangGraphServerGateway:
         *,
         thread_ready: bool = False,
     ) -> None:
-        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
+        config = self._resolve_run_config(
+            request.thread_id, request.configurable_extra, target=request.target
+        )
         # ``_stream_events`` already registered the thread before the pre-run
         # state read. Skip the second ``threads.create(if_exists="do_nothing")``
         # when that succeeded; retry only if it raised (the warn-and-continue
@@ -684,6 +717,7 @@ class LangGraphServerGateway:
             workspace_dir=(
                 request.target.workspace_dir if request.target is not None else None
             ),
+            run_dir=request.target.run_dir if request.target is not None else None,
             metadata=request.metadata,
         )
         try:

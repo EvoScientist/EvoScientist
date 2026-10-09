@@ -26,6 +26,7 @@ from EvoScientist.channels.bus.events import InboundMessage as BusInbound
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
+from EvoScientist.middleware import events as mw_events
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
 from tests.fakes import StubChannel as _StubChannel
@@ -454,9 +455,11 @@ def test_hitl_budget_stop_ignores_human_cap_for_auto_rounds():
 class TestConsumerHitlRoundBudget:
     """Channel consumer ``_stream_with_hitl`` resume-loop budgeting."""
 
-    def _consumer(self, stream) -> tuple[InboundConsumer, MessageBus, FakeGraphGateway]:
+    def _consumer(
+        self, stream, media_dir
+    ) -> tuple[InboundConsumer, MessageBus, FakeGraphGateway]:
         bus = MessageBus()
-        mgr = ChannelManager(bus)
+        mgr = ChannelManager(bus, media_dir=media_dir)
         mgr.register(_StubChannel())
         agent = FakeCheckpointAgent()
         gateway = FakeGraphGateway(stream=stream, checkpoint=agent)
@@ -476,7 +479,7 @@ class TestConsumerHitlRoundBudget:
             gateway,
         )
 
-    async def test_session_grant_resumes_past_50_rounds(self):
+    async def test_session_grant_resumes_past_50_rounds(self, tmp_path):
         """An auto-approving session grant drives 60 guarded calls to
         completion instead of falling out of the loop at 50 (issue #469)."""
         stream_calls = 0
@@ -490,7 +493,7 @@ class TestConsumerHitlRoundBudget:
             yield {"type": "text", "content": "final answer"}
             yield {"type": "done", "content": "final answer"}
 
-        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer, bus, _gateway = self._consumer(_fake_stream, tmp_path)
         consumer._approval_policy.grant_session("stub:c1")
 
         await bus.publish_inbound(
@@ -505,7 +508,9 @@ class TestConsumerHitlRoundBudget:
         await consumer.stop()
         await task
 
-    async def test_session_grant_runs_long_unattended_turns_past_200_rounds(self):
+    async def test_session_grant_runs_long_unattended_turns_past_200_rounds(
+        self, tmp_path
+    ):
         """The runaway guard is 1000 total rounds (CLI parity), not 200: an
         unattended session-grant turn with 205 guarded calls must run to
         completion — no stop, no truncation at the old cap (issue #469)."""
@@ -520,7 +525,7 @@ class TestConsumerHitlRoundBudget:
             yield {"type": "text", "content": "all done"}
             yield {"type": "done", "content": "all done"}
 
-        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer, bus, _gateway = self._consumer(_fake_stream, tmp_path)
         consumer._approval_policy.grant_session("stub:c1")
 
         await bus.publish_inbound(
@@ -535,8 +540,76 @@ class TestConsumerHitlRoundBudget:
         await consumer.stop()
         await task
 
+    @pytest.mark.parametrize("pause", ["interrupt", "ask_user"])
+    async def test_pause_closes_stream_in_consumer_context(
+        self, monkeypatch, tmp_path, pause
+    ):
+        """Leaving the stream at an approval or a question closes it right
+        away, in the consumer's own task and contextvars context (issue #568).
+
+        The fake stream binds and resets the run event sink like
+        ``stream_agent_events``: ``reset_run_event_sink`` raises
+        ``ValueError`` if it runs in another context, e.g. in the event
+        loop's generator finalizer, or when ``_timeout_aiter`` advances the
+        stream in a child task (``asyncio.wait_for`` before Python 3.12).
+        """
+        stream_calls = 0
+        started_in: list[asyncio.Task | None] = []
+        closed_in: list[asyncio.Task | None] = []
+        sink_at_start: list[object] = []
+        loop_errors: list[dict] = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda _loop, context: loop_errors.append(context)
+        )
+
+        async def _fake_stream(_request):
+            nonlocal stream_calls
+            stream_calls += 1
+            started_in.append(asyncio.current_task())
+            sink_at_start.append(mw_events._current_run_event_sink.get())
+            token = mw_events.bind_run_event_sink(MagicMock())
+            try:
+                if stream_calls == 1:
+                    if pause == "interrupt":
+                        yield _interrupt_event(stream_calls)
+                    else:
+                        yield {
+                            "type": "ask_user",
+                            "interrupt_id": "ask-1",
+                            "questions": [{"question": "Continue?"}],
+                        }
+                    return
+                yield {"type": "text", "content": "final answer"}
+                yield {"type": "done", "content": "final answer"}
+            finally:
+                closed_in.append(asyncio.current_task())
+                mw_events.reset_run_event_sink(token)
+
+        async def _fake_ask_user(_questions, _io, timeout=0):
+            return {"answers": ["yes"], "status": "answered"}
+
+        consumer, bus, _gateway = self._consumer(_fake_stream, tmp_path)
+        consumer._approval_policy.grant_session("stub:c1")
+        monkeypatch.setattr(consumer_mod, "resolve_ask_user", _fake_ask_user)
+
+        await bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
+        )
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+
+        assert outbound.content == "final answer"
+        assert stream_calls == 2
+        assert closed_in == started_in
+        # The first run's sink was unbound before the resumed run started.
+        assert sink_at_start == [None, None]
+        assert loop_errors == []
+
+        await consumer.stop()
+        await task
+
     async def test_human_round_budget_exhausted_notifies_channel(
-        self, monkeypatch, caplog
+        self, monkeypatch, caplog, tmp_path
     ):
         """50 human decisions are all resumed (the 50th approval IS sent);
         the 51st pending is refused BEFORE prompting, the parked checkpoint
@@ -569,7 +642,7 @@ class TestConsumerHitlRoundBudget:
             prompt_calls += 1
             return ApprovalOutcome(decisions=[{"type": "approve"}], prompted=True)
 
-        consumer, bus, gateway = self._consumer(_fake_stream)
+        consumer, bus, gateway = self._consumer(_fake_stream, tmp_path)
         monkeypatch.setattr(consumer_mod, "resolve_approval", _human_approves)
 
         await bus.publish_inbound(
@@ -594,7 +667,7 @@ class TestConsumerHitlRoundBudget:
         await task
 
     async def test_ask_user_rounds_share_budget_and_drain_cancelled(
-        self, monkeypatch, caplog
+        self, monkeypatch, caplog, tmp_path
     ):
         """ask_user rounds count toward the same human budget; the 51st
         question is never asked and its checkpoint is closed without a
@@ -621,7 +694,7 @@ class TestConsumerHitlRoundBudget:
             asked += 1
             return {"answers": ["yes"], "status": "answered"}
 
-        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer, bus, _gateway = self._consumer(_fake_stream, tmp_path)
         monkeypatch.setattr(consumer_mod, "resolve_ask_user", _fake_ask_user)
 
         await bus.publish_inbound(
@@ -641,7 +714,7 @@ class TestConsumerHitlRoundBudget:
         await task
 
     async def test_human_budget_does_not_block_a_following_session_grant(
-        self, monkeypatch
+        self, monkeypatch, tmp_path
     ):
         """Approving one-by-one and then granting the session must not stop
         the next auto-resolved pending (issue #469 review)."""
@@ -680,7 +753,7 @@ class TestConsumerHitlRoundBudget:
             policy.grant_session(session_key)
             return ApprovalOutcome(decisions=[{"type": "approve"}], prompted=True)
 
-        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer, bus, _gateway = self._consumer(_fake_stream, tmp_path)
         monkeypatch.setattr(consumer_mod, "resolve_approval", _human_then_grant)
 
         await bus.publish_inbound(
@@ -697,7 +770,7 @@ class TestConsumerHitlRoundBudget:
         await task
 
     async def test_close_failure_still_sends_partial_and_stop(
-        self, monkeypatch, caplog
+        self, monkeypatch, caplog, tmp_path
     ):
         import EvoScientist.channels.hitl_budget as budget_mod
 
@@ -707,7 +780,7 @@ class TestConsumerHitlRoundBudget:
             yield {"type": "text", "content": "partial answer"}
             yield _interrupt_event(1)
 
-        consumer, bus, _gateway = self._consumer(_fake_stream)
+        consumer, bus, _gateway = self._consumer(_fake_stream, tmp_path)
         consumer.agent.update_error = RuntimeError("checkpoint store down")
 
         await bus.publish_inbound(
@@ -727,7 +800,7 @@ class TestConsumerHitlRoundBudget:
         await consumer.stop()
         await task
 
-    async def test_total_cap_closes_without_another_resume(self, monkeypatch):
+    async def test_total_cap_closes_without_another_resume(self, monkeypatch, tmp_path):
         """The 1000-round runaway guard stops an auto-approved consumer turn
         and closes the checkpoint. No further resume is streamed."""
         from langgraph.types import Command
@@ -742,7 +815,7 @@ class TestConsumerHitlRoundBudget:
             stream_calls += 1
             yield _interrupt_event(stream_calls)
 
-        consumer, bus, gateway = self._consumer(_fake_stream)
+        consumer, bus, gateway = self._consumer(_fake_stream, tmp_path)
         consumer._approval_policy.grant_session("stub:c1")
 
         await bus.publish_inbound(
