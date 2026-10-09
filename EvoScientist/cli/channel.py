@@ -269,7 +269,8 @@ def _cancel_channel_session(channel_type: str, chat_id: str) -> tuple[int, int]:
 # TUI (``cli/tui_interactive.py``'s channel handler), and headless
 # serve (``cli/commands.py::_serve_process_message``).  They all route
 # ``/foo`` text through ``cmd_manager`` instead of feeding it to the
-# LLM as a plain prompt.
+# LLM as a plain prompt; a slash naming an installed skill streams to
+# the agent.
 
 
 async def dispatch_channel_slash_command(
@@ -291,10 +292,10 @@ async def dispatch_channel_slash_command(
     """Dispatch a slash command from a channel message.
 
     Returns True if the helper handled the message (successfully or with
-    an error) — the caller must then return without streaming anything
-    to the agent.  Returns False for non-slash content or unresolved
-    slash commands, so the caller can fall through to the agent
-    streaming path (matches TUI behavior).
+    an error, including an unknown command) — the caller must then return
+    without streaming anything to the agent.  Returns False for non-slash
+    content and for ``/skill-name`` input naming an installed skill, so the
+    caller streams it to the agent like any other message.
 
     Parameters
     ----------
@@ -403,11 +404,14 @@ async def _dispatch_channel_slash_impl(
     from ..commands.channel_ui import ChannelCommandUI
     from ..commands.manager import manager as cmd_manager
 
-    # The wrapper only forwards slash-prefixed content, so an unresolved
-    # parse is always an unknown command — answer instead of feeding a typo
-    # to the agent.
+    # An unresolved slash is a pinned skill when it names one; anything else
+    # is an unknown command, answered here instead of fed to the agent.
     parsed = cmd_manager.resolve(msg.content)
     if parsed is None:
+        from ..commands import skill_slash
+
+        if skill_slash.skill_slash_names(msg.content, dirs.workspace):
+            return False
         bad_cmd = msg.content.split(None, 1)[0]
         _set_channel_response(
             msg.msg_id,

@@ -600,6 +600,12 @@ def _proposal_dir_by_id(
     return matches[0] if len(matches) == 1 else None
 
 
+def _notify_approved_skill() -> None:
+    from ...tools.skills_manager import _notify_skills_changed
+
+    _notify_skills_changed()
+
+
 def approve_skill_proposal(
     memory_dir: str | Path,
     proposal_id: str,
@@ -697,6 +703,7 @@ def approve_skill_proposal(
     manifest["approved_skill_path"] = str(destination)
     _write_manifest(manifest_path, manifest)
     mark_cluster_processed(memory_dir, str(manifest["cluster_hash"]))
+    _notify_approved_skill()
     return {
         "approved": True,
         "proposal_id": manifest["proposal_id"],

@@ -5,6 +5,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from ..message_meta import is_pinned_skill, pinned_skill_name, skill_label
 from .base import CommandUI
 
 if TYPE_CHECKING:
@@ -236,6 +237,9 @@ class ChannelCommandUI(CommandUI):
             lines.append("Conversation history:")
 
         for message in display:
+            if is_pinned_skill(message):
+                lines.append(skill_label(pinned_skill_name(message) or "unknown"))
+                continue
             text = self._extract_message_text(message)
             if not text:
                 continue

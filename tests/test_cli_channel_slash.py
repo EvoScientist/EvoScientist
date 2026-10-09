@@ -670,3 +670,26 @@ async def test_cmd_execute_returning_false_falls_through():
         )
     assert handled is False
     mock_set_resp.assert_not_called()
+
+
+async def test_skill_slash_falls_through_to_the_agent():
+    """``/skill-name`` over a channel goes to the agent, not 'Unknown command'."""
+    msg = _make_msg(content="/paper-writing draft the intro")
+    append = MagicMock()
+    with (
+        patch("EvoScientist.commands.manager.manager.resolve", return_value=None),
+        patch(
+            "EvoScientist.commands.skill_slash.skill_slash_names",
+            return_value=["paper-writing"],
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_response,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            checkpointer=None,
+            append_system=append,
+        )
+    assert handled is False
+    mock_response.assert_not_called()

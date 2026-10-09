@@ -43,7 +43,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -90,12 +90,18 @@ def _reset_skills_changed_callbacks() -> None:
     _skills_changed_callbacks.clear()
 
 
+# (fingerprint, {name: description}) per workspace for slash completion; rebuilt
+# when the skills directories change on disk, and cleared on every notify.
+_skill_index_cache: dict[str, tuple[tuple, dict[str, str]]] = {}
+
+
 def _notify_skills_changed() -> None:
-    """Fire every registered callback.
+    """Drop the cached skill index and fire every registered callback.
 
     Exceptions are logged but swallowed so a misbehaving subscriber can't
     break the install/uninstall return path.
     """
+    _skill_index_cache.clear()
     for cb in _skills_changed_callbacks:
         try:
             cb()
@@ -1106,6 +1112,130 @@ def list_skills(
         _add_tier(Path(SKILLS_DIR), source="builtin")
 
     return skills
+
+
+def _skill_dirs_fingerprint(workspace: Workspace) -> tuple:
+    """Cheap stat-only signature of the skills roots the skill index reads.
+
+    Each SKILL.md adds its mtime and ctime, so a permission repair is a change.
+    A root that cannot be listed contributes a fresh marker on every call, so
+    the signature never matches and the index is rebuilt each time.
+    """
+    from ..EvoScientist import SKILLS_DIR
+
+    roots = (workspace.skills_dir, Path(paths.GLOBAL_SKILLS_DIR), Path(SKILLS_DIR))
+    parts: list[tuple] = []
+    for root in roots:
+        try:
+            if not root.is_dir():
+                parts.append((str(root), None))
+                continue
+            children = []
+            for entry in sorted(root.iterdir()):
+                if not entry.is_dir():
+                    continue
+                try:
+                    stat = (entry / "SKILL.md").stat()
+                    stamps = (stat.st_mtime_ns, stat.st_ctime_ns)
+                except FileNotFoundError:
+                    stamps = None
+                children.append((entry.name, stamps))
+            parts.append(tuple(children))
+        except OSError:
+            # A fresh object never compares equal, so a failing root forces a rescan.
+            parts.append((str(root), object()))
+    return tuple(parts)
+
+
+_MAX_SKILL_MD_BYTES = 10 * 1024 * 1024
+
+# The fence rule of the agent's skills middleware: a closing line must be exactly ``---``.
+_INDEX_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+
+def _skill_name_and_description(raw: bytes) -> tuple[str, str] | None:
+    """Return the frontmatter name and description, or None when the agent skips the file."""
+    if len(raw) > _MAX_SKILL_MD_BYTES:
+        return None
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    match = _INDEX_FRONTMATTER_RE.match(content)
+    if match is None:
+        return None
+    try:
+        frontmatter = yaml.safe_load(match.group(1))
+    except (yaml.YAMLError, ValueError, RecursionError):
+        # safe_load also raises these for a bad date or tag and for deep nesting.
+        return None
+    if not isinstance(frontmatter, dict):
+        return None
+    name = str(frontmatter.get("name", "")).strip()
+    description = str(frontmatter.get("description", "")).strip()
+    if not name or not description:
+        return None
+    return name, description
+
+
+def _build_skill_index(workspace: Workspace) -> dict[str, str]:
+    """Return ``{name: description}`` for the skills the agent can pin.
+
+    Runs deepagents' ``ls`` + ``download_files`` calls over the agent's own
+    merged skills backend.
+    """
+    from ..backends import MergedSkillsBackend
+    from ..EvoScientist import SKILLS_DIR
+
+    backend = MergedSkillsBackend(
+        primary_dir=str(workspace.skills_dir),
+        global_dir=str(paths.GLOBAL_SKILLS_DIR),
+        secondary_dir=SKILLS_DIR,
+    )
+    skill_md_paths = [
+        str(PurePosixPath(entry["path"]) / "SKILL.md")
+        for entry in backend.ls("/").entries or []
+        if entry.get("is_dir")
+    ]
+    index: dict[str, str] = {}
+    # In path order, so the later folder wins a repeated name, as in the middleware.
+    for response in backend.download_files(skill_md_paths):
+        if response.error is None and response.content is not None:
+            parsed = _skill_name_and_description(response.content)
+            if parsed is not None:
+                index[parsed[0]] = parsed[1]
+    return index
+
+
+def installed_skill_index(workspace: Workspace) -> dict[str, str]:
+    """Return ``{name: description}`` for every skill the agent can load.
+
+    Cached per workspace and rebuilt when the skills directories change.
+    """
+    fingerprint = _skill_dirs_fingerprint(workspace)
+    cached = _skill_index_cache.get(workspace.key)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    index = _build_skill_index(workspace)
+    _skill_index_cache[workspace.key] = (fingerprint, index)
+    return index
+
+
+def pinned_skill_names(text: str, workspace: Workspace) -> list[str]:
+    """Return the installed skills named by the leading ``/name`` words of *text*.
+
+    Empty unless the first word names one, so a typo stays an unknown command.
+    Scans fresh so a skill made a moment ago is never rejected.
+    """
+    from ..message_meta import parse_skill_slashes
+
+    names = parse_skill_slashes(text)
+    if not names:
+        return []
+    index = _build_skill_index(workspace)
+    if names[0] not in index:
+        return []
+    return [name for name in names if name in index]
 
 
 def list_expert_skills(

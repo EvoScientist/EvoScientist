@@ -1979,3 +1979,440 @@ class TestSkillsChangedCallback:
         )
         assert result["success"] is False
         assert good == [True]
+
+
+class TestPinnedSkillNames:
+    @pytest.fixture(autouse=True)
+    def global_skills(self, tmp_path, monkeypatch):
+        """Keep the developer's real global skills out of the index."""
+        from EvoScientist.tools import skills_manager
+
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        monkeypatch.setattr("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir)
+        skills_manager._skill_index_cache.clear()
+        yield global_dir
+        skills_manager._skill_index_cache.clear()
+
+    @staticmethod
+    def _skill(workspace, name, description="A skill."):
+        TestPinnedSkillNames._skill_in(workspace.skills_dir, name, description)
+
+    @staticmethod
+    def _skill_in(root, name, description="A skill."):
+        skill_dir = root / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        return skill_dir
+
+    @staticmethod
+    def _raw_skill(root, dirname, content):
+        skill_dir = root / dirname
+        skill_dir.mkdir(parents=True)
+        data = content if isinstance(content, bytes) else content.encode("utf-8")
+        (skill_dir / "SKILL.md").write_bytes(data)
+        return skill_dir
+
+    def test_first_word_must_be_installed(self, workspace):
+        from EvoScientist.tools.skills_manager import pinned_skill_names
+
+        self._skill(workspace, "alpha")
+        assert pinned_skill_names("/alpha go", workspace) == ["alpha"]
+        assert pinned_skill_names("/typo go", workspace) == []
+        assert pinned_skill_names("/alpha /typo go", workspace) == ["alpha"]
+        assert pinned_skill_names("go", workspace) == []
+
+    def test_sees_a_skill_made_or_removed_by_hand(self, workspace):
+        import shutil
+
+        from EvoScientist.tools.skills_manager import pinned_skill_names
+
+        self._skill(workspace, "alpha")
+        assert pinned_skill_names("/alpha go", workspace) == ["alpha"]
+        assert pinned_skill_names("/beta go", workspace) == []
+
+        self._skill(workspace, "beta")
+        assert pinned_skill_names("/beta go", workspace) == ["beta"]
+
+        shutil.rmtree(workspace.skills_dir / "alpha")
+        assert pinned_skill_names("/alpha go", workspace) == []
+
+    def test_text_without_a_leading_skill_word_scans_nothing(self, workspace):
+        from EvoScientist.tools import skills_manager
+
+        with patch.object(
+            skills_manager,
+            "_build_skill_index",
+            wraps=skills_manager._build_skill_index,
+        ) as spy:
+            assert skills_manager.pinned_skill_names("/", workspace) == []
+            assert skills_manager.pinned_skill_names("hello", workspace) == []
+        spy.assert_not_called()
+
+    def test_index_picks_up_a_hand_made_skill(self, workspace):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        self._skill(workspace, "alpha", "Alpha.")
+        assert installed_skill_index(workspace)["alpha"] == "Alpha."
+        assert "beta" not in installed_skill_index(workspace)
+
+        self._skill(workspace, "beta", "Beta.")
+        assert installed_skill_index(workspace)["beta"] == "Beta."
+
+    def test_index_picks_up_an_edited_description(self, workspace):
+        import os
+
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        self._skill(workspace, "alpha", "Old.")
+        assert installed_skill_index(workspace)["alpha"] == "Old."
+
+        skill_md = workspace.skills_dir / "alpha" / "SKILL.md"
+        skill_md.write_text(
+            "---\nname: alpha\ndescription: New.\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        later = skill_md.stat().st_mtime_ns + 60 * 10**9
+        os.utime(skill_md, ns=(later, later))
+        assert installed_skill_index(workspace)["alpha"] == "New."
+
+    def test_index_is_not_rescanned_when_nothing_changed(self, workspace):
+        from EvoScientist.tools import skills_manager
+
+        self._skill(workspace, "alpha")
+        with patch.object(
+            skills_manager,
+            "_build_skill_index",
+            wraps=skills_manager._build_skill_index,
+        ) as spy:
+            first = skills_manager.installed_skill_index(workspace)
+            second = skills_manager.installed_skill_index(workspace)
+        assert first == second
+        assert spy.call_count == 1
+
+    def test_notify_drops_the_cached_index(self, workspace):
+        from EvoScientist.tools import skills_manager
+
+        skills_manager.installed_skill_index(workspace)
+        assert workspace.key in skills_manager._skill_index_cache
+        skills_manager._notify_skills_changed()
+        assert workspace.key not in skills_manager._skill_index_cache
+
+    def test_fingerprint_marks_a_missing_root(self, workspace):
+        from EvoScientist.tools.skills_manager import _skill_dirs_fingerprint
+
+        assert _skill_dirs_fingerprint(workspace)[0] == (
+            str(workspace.skills_dir),
+            None,
+        )
+
+    def test_fingerprint_marks_an_unreadable_root(self, workspace):
+        from EvoScientist.tools.skills_manager import _skill_dirs_fingerprint
+
+        self._skill(workspace, "alpha")
+        healthy = _skill_dirs_fingerprint(workspace)
+        with patch("pathlib.Path.iterdir", side_effect=PermissionError):
+            broken = _skill_dirs_fingerprint(workspace)
+        assert broken[0][0] == str(workspace.skills_dir)
+        assert broken != healthy
+
+    def test_fingerprint_of_an_unreadable_root_never_repeats(self, workspace):
+        from EvoScientist.tools.skills_manager import _skill_dirs_fingerprint
+
+        self._skill(workspace, "alpha")
+        with patch("pathlib.Path.iterdir", side_effect=PermissionError):
+            first = _skill_dirs_fingerprint(workspace)
+            second = _skill_dirs_fingerprint(workspace)
+        assert first != second
+
+    def test_index_is_rescanned_while_a_root_cannot_be_listed(self, workspace):
+        from EvoScientist.tools import skills_manager
+
+        self._skill(workspace, "alpha")
+        with (
+            patch("pathlib.Path.iterdir", side_effect=PermissionError),
+            patch.object(skills_manager, "_build_skill_index", return_value={}) as spy,
+        ):
+            skills_manager.installed_skill_index(workspace)
+            skills_manager.installed_skill_index(workspace)
+        assert spy.call_count == 2
+
+    def test_approval_hook_clears_the_index(self, workspace):
+        from EvoScientist.memory.autoskills import proposals
+        from EvoScientist.tools import skills_manager
+
+        skills_manager._skill_index_cache[workspace.key] = ((), {})
+        proposals._notify_approved_skill()
+        assert workspace.key not in skills_manager._skill_index_cache
+
+    def test_index_values_are_strings_when_the_yaml_is_not(self, workspace):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        self._raw_skill(
+            workspace.skills_dir,
+            "numbers",
+            "---\nname: 2024\ndescription: 42\n---\n\nBody.\n",
+        )
+        assert installed_skill_index(workspace)["2024"] == "42"
+
+    def test_expert_is_keyed_by_its_frontmatter_name(self, workspace):
+        from EvoScientist.tools.skills_manager import pinned_skill_names
+
+        skill_dir = self._raw_skill(
+            workspace.skills_dir,
+            "real-dir",
+            "---\nname: mismatched-name\ndescription: An expert.\n---\n\nBody.\n",
+        )
+        (skill_dir / "EXPERT.md").write_text("Persona.\n", encoding="utf-8")
+        assert pinned_skill_names("/mismatched-name go", workspace) == [
+            "mismatched-name"
+        ]
+        assert pinned_skill_names("/real-dir go", workspace) == []
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "# Title only, no frontmatter\n",
+            "---\nname: [unclosed\ndescription: Bad yaml.\n---\n\nBody.\n",
+            "---\n- just\n- a list\n---\n\nBody.\n",
+            "---\nname: bad-skill\ndescription: '  '\n---\n\nBody.\n",
+            "---\nname: ''\ndescription: No name.\n---\n\nBody.\n",
+            "---\nname: bad-skill\n---\n\nBody.\n",
+            b"---\nname: bad-skill\ndescription: \xff\xfe\n---\n\nBody.\n",
+            "---\nname: bad-skill\ndescription: Hi.\ncreated: 2024-13-45\n---\n\nBody.\n",
+            "---\nname: bad-skill\ndescription: Hi.\ncount: !!int abc\n---\n\nBody.\n",
+            "---\nname: bad-skill\ndescription: Hi.\n----\n\nBody.\n",
+            "---\nname: bad-skill\ndescription: Hi.\n---junk\n\nBody.\n",
+            "---\nname: bad-skill\ndescription: Hi.\n---",
+        ],
+        ids=[
+            "no-frontmatter",
+            "invalid-yaml",
+            "not-a-mapping",
+            "empty-description",
+            "empty-name",
+            "missing-description",
+            "not-utf8",
+            "invalid-date",
+            "bad-int-tag",
+            "closing-fence-with-extra-dash",
+            "closing-fence-with-trailing-text",
+            "frontmatter-only-no-newline",
+        ],
+    )
+    def test_skills_the_agent_cannot_load_are_not_indexed(self, workspace, content):
+        from EvoScientist.tools.skills_manager import (
+            installed_skill_index,
+            pinned_skill_names,
+        )
+
+        before = set(installed_skill_index(workspace))
+        self._raw_skill(workspace.skills_dir, "bad-skill", content)
+        self._skill(workspace, "good-skill")
+        assert set(installed_skill_index(workspace)) == before | {"good-skill"}
+        assert pinned_skill_names("/bad-skill go", workspace) == []
+
+    def test_oversized_skill_md_is_not_indexed(self, workspace, monkeypatch):
+        from EvoScientist.tools import skills_manager
+
+        monkeypatch.setattr(skills_manager, "_MAX_SKILL_MD_BYTES", 64)
+        self._raw_skill(
+            workspace.skills_dir,
+            "huge-skill",
+            "---\nname: huge-skill\ndescription: " + "x" * 100 + "\n---\n\nBody.\n",
+        )
+        assert "huge-skill" not in skills_manager.installed_skill_index(workspace)
+
+    def test_workspace_folder_shadows_a_global_folder_of_the_same_name(
+        self, workspace, global_skills
+    ):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        self._raw_skill(
+            workspace.skills_dir,
+            "shared",
+            "---\nname: workspace-name\ndescription: From the workspace.\n---\n",
+        )
+        self._raw_skill(
+            global_skills,
+            "shared",
+            "---\nname: global-name\ndescription: From the global tier.\n---\n",
+        )
+        index = installed_skill_index(workspace)
+        assert index["workspace-name"] == "From the workspace."
+        assert "global-name" not in index
+
+    def test_folder_without_skill_md_does_not_shadow_a_lower_tier(
+        self, workspace, global_skills
+    ):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        (workspace.skills_dir / "shared").mkdir(parents=True)
+        self._raw_skill(
+            global_skills,
+            "shared",
+            "---\nname: global-name\ndescription: From the global tier.\n---\n",
+        )
+        assert installed_skill_index(workspace)["global-name"] == (
+            "From the global tier."
+        )
+
+    def test_same_frontmatter_name_in_two_folders_keeps_the_later_folder(
+        self, workspace
+    ):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        for dirname, description in (("a-dir", "First."), ("b-dir", "Second.")):
+            self._raw_skill(
+                workspace.skills_dir,
+                dirname,
+                f"---\nname: twin\ndescription: {description}\n---\n",
+            )
+        assert installed_skill_index(workspace)["twin"] == "Second."
+
+    def test_deeply_nested_frontmatter_is_not_indexed(self, workspace):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        nested = "[" * 5000 + "]" * 5000
+        self._raw_skill(
+            workspace.skills_dir,
+            "deep-skill",
+            f"---\nname: deep-skill\ndescription: Hi.\nk: {nested}\n---\n\nBody.\n",
+        )
+        assert "deep-skill" not in installed_skill_index(workspace)
+
+    def test_folder_sorting_follows_the_middleware_path_order(self, workspace):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        for dirname, description in (("foo", "Plain."), ("foo.bak", "Backup.")):
+            self._raw_skill(
+                workspace.skills_dir,
+                dirname,
+                f"---\nname: foo\ndescription: {description}\n---\n",
+            )
+        assert installed_skill_index(workspace)["foo"] == "Plain."
+
+    def test_builtin_skills_are_indexed(self, workspace):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        assert "skill-creator" in installed_skill_index(workspace)
+
+    def test_backend_failure_raises_so_callers_can_degrade(self, workspace):
+        from EvoScientist.tools.skills_manager import _build_skill_index
+
+        self._skill(workspace, "alpha")
+        with (
+            patch(
+                "EvoScientist.backends.MergedSkillsBackend.download_files",
+                side_effect=PermissionError,
+            ),
+            pytest.raises(PermissionError),
+        ):
+            _build_skill_index(workspace)
+
+    @pytest.fixture
+    def unreadable(self):
+        """Make a file unreadable for the test, restoring it afterwards."""
+        import os
+
+        if os.name != "posix" or os.geteuid() == 0:
+            pytest.skip("permission bits do not restrict this user")
+        locked: list[Path] = []
+
+        def lock(path):
+            path.chmod(0o000)
+            locked.append(path)
+
+        yield lock
+        for path in locked:
+            path.chmod(0o644)
+
+    def test_unreadable_workspace_file_falls_through_to_the_global_tier(
+        self, workspace, global_skills, unreadable
+    ):
+        from EvoScientist.tools.skills_manager import pinned_skill_names
+
+        self._skill(workspace, "alpha")
+        self._skill_in(global_skills, "alpha")
+        unreadable(workspace.skills_dir / "alpha" / "SKILL.md")
+        assert pinned_skill_names("/alpha go", workspace) == ["alpha"]
+
+    def test_skill_folder_symlinked_outside_the_skills_root_is_not_indexed(
+        self, workspace, tmp_path
+    ):
+        from EvoScientist.tools.skills_manager import pinned_skill_names
+
+        outside = self._skill_in(tmp_path / "outside", "alpha")
+        workspace.skills_dir.mkdir(parents=True)
+        try:
+            (workspace.skills_dir / "alpha").symlink_to(
+                outside, target_is_directory=True
+            )
+        except OSError:
+            pytest.skip("symlinks are not available")
+        assert pinned_skill_names("/alpha go", workspace) == []
+
+    @staticmethod
+    def _restore(path):
+        """Repair a file's permission without touching its content."""
+        import time
+
+        time.sleep(0.02)  # let ctime move past the kernel's timestamp tick
+        path.chmod(0o644)
+
+    def test_a_permission_repair_refreshes_the_cached_index(
+        self, workspace, unreadable
+    ):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        self._skill(workspace, "alpha")
+        skill_md = workspace.skills_dir / "alpha" / "SKILL.md"
+        unreadable(skill_md)
+        assert "alpha" not in installed_skill_index(workspace)
+
+        self._restore(skill_md)
+        assert "alpha" in installed_skill_index(workspace)
+
+    def test_a_permission_repair_brings_back_the_higher_tier_copy(
+        self, workspace, global_skills, unreadable
+    ):
+        from EvoScientist.tools.skills_manager import installed_skill_index
+
+        self._skill(workspace, "alpha", "Workspace copy.")
+        self._skill_in(global_skills, "alpha", "Global copy.")
+        skill_md = workspace.skills_dir / "alpha" / "SKILL.md"
+        unreadable(skill_md)
+        assert installed_skill_index(workspace)["alpha"] == "Global copy."
+
+        self._restore(skill_md)
+        assert installed_skill_index(workspace)["alpha"] == "Workspace copy."
+
+    def test_a_folder_without_skill_md_does_not_stop_the_scan_being_cached(
+        self, workspace, global_skills
+    ):
+        from EvoScientist.tools import skills_manager
+
+        self._skill(workspace, "alpha")
+        (workspace.skills_dir / "assets").mkdir()
+        (global_skills / "assets").mkdir()
+        with patch.object(
+            skills_manager,
+            "_build_skill_index",
+            wraps=skills_manager._build_skill_index,
+        ) as spy:
+            skills_manager.installed_skill_index(workspace)
+            skills_manager.installed_skill_index(workspace)
+        assert spy.call_count == 1
+
+    def test_indexing_does_not_create_the_workspace_skills_folder(self, workspace):
+        from EvoScientist.tools.skills_manager import (
+            installed_skill_index,
+            pinned_skill_names,
+        )
+
+        installed_skill_index(workspace)
+        pinned_skill_names("/alpha go", workspace)
+        assert not workspace.skills_dir.exists()

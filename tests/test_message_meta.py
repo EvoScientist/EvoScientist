@@ -12,6 +12,7 @@ from EvoScientist.message_meta import (
     message_text,
     parse_skill_slashes,
     pinned_skill_name,
+    skill_label,
 )
 
 
@@ -113,3 +114,7 @@ class TestPinnedSkill:
         msg = HumanMessage("x", additional_kwargs={"lc_source": "pinned_skill"})
         assert is_pinned_skill(msg)
         assert pinned_skill_name(msg) is None
+
+
+def test_skill_label():
+    assert skill_label("alpha") == "skill: alpha"

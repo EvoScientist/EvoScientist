@@ -1,8 +1,14 @@
 """Tests for multi-stage command completions, categories, and dynamic completions."""
 
+from typing import ClassVar
 from unittest.mock import patch
 
-from EvoScientist.commands._completion_engine import compute_completions
+import pytest
+
+from EvoScientist.commands._completion_engine import (
+    SKILL_CATEGORY,
+    compute_completions,
+)
 
 
 class TestTopLevelCompletions:
@@ -128,3 +134,149 @@ class TestDynamicCompletions:
         with patch("EvoScientist.mcp.load_mcp_config", return_value=fake_config):
             r = compute_completions("/mcp remove ", 12)
         assert [c.text for c in r.candidates] == ["srv1"]
+
+
+class TestSkillCompletions:
+    _INDEX: ClassVar[dict[str, str]] = {
+        "paper-writing": "Write a full paper. " + "x" * 200,
+        "paper-review": "Review a paper.",
+        "new": "A skill that clashes with /new.",
+    }
+
+    def _complete(self, text, workspace):
+        with patch(
+            "EvoScientist.tools.skills_manager.installed_skill_index",
+            return_value=self._INDEX,
+        ):
+            return compute_completions(text, len(text), workspace=workspace)
+
+    def test_prefix_lists_matching_skills(self, workspace):
+        r = self._complete("/paper", workspace)
+        skills = [c for c in r.candidates if c.category == SKILL_CATEGORY]
+        assert [c.text for c in skills] == ["/paper-review", "/paper-writing"]
+        assert all(c.description.startswith("(skill) ") for c in skills)
+        assert all(len(c.description) <= 80 for c in skills)
+
+    def test_skills_come_after_commands(self, workspace):
+        r = self._complete("/", workspace)
+        cats = [c.category for c in r.candidates]
+        assert SKILL_CATEGORY in cats
+        assert cats.index(SKILL_CATEGORY) > max(
+            i for i, c in enumerate(cats) if c != SKILL_CATEGORY
+        )
+
+    def test_command_name_clash_is_not_offered_as_a_skill(self, workspace):
+        r = self._complete("/ne", workspace)
+        assert [c.text for c in r.candidates].count("/new") == 1
+        assert not any(c.category == SKILL_CATEGORY for c in r.candidates)
+
+    def test_typing_the_message_after_a_skill_stops_completion(self, workspace):
+        assert self._complete("/paper-writing ", workspace).kind == "empty"
+
+    def test_no_workspace_no_skills(self):
+        r = compute_completions("/paper", 6)
+        assert not any(c.category == SKILL_CATEGORY for c in r.candidates)
+
+    def test_names_the_pin_parser_rejects_are_not_offered(self, workspace):
+        index = {
+            "My_Skill": "Mixed case with an underscore.",
+            "foo_bar": "Underscore.",
+            "paper-writing": "Write a paper.",
+        }
+        with patch(
+            "EvoScientist.tools.skills_manager.installed_skill_index",
+            return_value=index,
+        ):
+            r = compute_completions("/", 1, workspace=workspace)
+        skills = [c.text for c in r.candidates if c.category == SKILL_CATEGORY]
+        assert "/paper-writing" in skills
+        assert "/My_Skill" not in skills
+        assert "/foo_bar" not in skills
+
+    def test_unreadable_skills_directory_leaves_the_commands(self, workspace):
+        with patch(
+            "EvoScientist.tools.skills_manager.installed_skill_index",
+            side_effect=PermissionError("denied"),
+        ):
+            r = compute_completions("/mo", 3, workspace=workspace)
+            nothing = compute_completions("/pa", 3, workspace=workspace)
+        assert "/model" in [c.text for c in r.candidates]
+        assert not any(c.category == SKILL_CATEGORY for c in r.candidates)
+        assert nothing.kind == "empty"
+
+    _SKILL_INDEX: ClassVar[dict[str, str]] = {
+        "skill": "A skill.",
+        "skill-two": "Another skill.",
+    }
+
+    def _complete_skill_prefix(self, text, workspace):
+        with patch(
+            "EvoScientist.tools.skills_manager.installed_skill_index",
+            return_value=self._SKILL_INDEX,
+        ):
+            return compute_completions(text, len(text), workspace=workspace)
+
+    def test_exact_skill_name_leads_with_its_whole_group(self, workspace):
+        r = self._complete_skill_prefix("/skill", workspace)
+        texts = [c.text for c in r.candidates]
+        assert texts[:2] == ["/skill", "/skill-two"]
+        assert "/skills" in texts
+        assert "/autoskills" in texts
+        categories = [c.category for c in r.candidates]
+        skill_count = categories.count(SKILL_CATEGORY)
+        assert skill_count == 2
+        assert categories[:skill_count] == [SKILL_CATEGORY] * skill_count
+
+    def test_exact_skill_name_keeps_the_command_order(self, workspace):
+        exact = self._complete_skill_prefix("/skill", workspace).candidates
+        with patch(
+            "EvoScientist.tools.skills_manager.installed_skill_index",
+            return_value={"skill-two": "Another skill."},
+        ):
+            other = compute_completions("/skill", 6, workspace=workspace).candidates
+        assert exact[2:] == other[:-1]
+
+    def test_partial_skill_name_keeps_the_commands_first(self, workspace):
+        r = self._complete_skill_prefix("/ski", workspace)
+        texts = [c.text for c in r.candidates]
+        categories = [c.category for c in r.candidates]
+        assert "/skills" in texts
+        assert "/autoskills" in texts
+        assert categories[0] != SKILL_CATEGORY
+        assert texts[-2:] == ["/skill", "/skill-two"]
+        assert categories[-2:] == [SKILL_CATEGORY] * 2
+
+
+class TestSkillCompletionsFromDisk:
+    @pytest.fixture(autouse=True)
+    def _isolated_global_skills(self, tmp_path, monkeypatch):
+        from EvoScientist.tools import skills_manager
+
+        global_dir = tmp_path / "global_skills"
+        global_dir.mkdir()
+        monkeypatch.setattr("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir)
+        skills_manager._skill_index_cache.clear()
+        yield
+        skills_manager._skill_index_cache.clear()
+
+    def test_non_string_frontmatter_values_do_not_break_completion(self, workspace):
+        skill_dir = workspace.skills_dir / "numbers"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: 2024\ndescription: 42\n---\n\nBody.\n", encoding="utf-8"
+        )
+        r = compute_completions("/", 1, workspace=workspace)
+        skills = {
+            c.text: c.description for c in r.candidates if c.category == SKILL_CATEGORY
+        }
+        assert skills["/2024"] == "(skill) 42"
+
+    def test_frontmatter_yaml_cannot_raise_out_of_completion(self, workspace):
+        skill_dir = workspace.skills_dir / "dated"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: dated\ndescription: Hi.\ncreated: 2024-13-45\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        r = compute_completions("/", 1, workspace=workspace)
+        assert "/dated" not in [c.text for c in r.candidates]
