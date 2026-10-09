@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from EvoScientist.middleware.summarization import (
@@ -87,7 +88,7 @@ class _UnhashableModel:
     def __init__(self, window):
         self.profile = {"max_input_tokens": window}
 
-    def with_retry(self):
+    def with_retry(self, **kwargs):
         return self
 
     def __hash__(self):
@@ -333,7 +334,7 @@ async def test_unsynced_shim_reports_construction_profile_not_resolved_window():
             self.profile = profile
             self.context_window = context_window
 
-        def with_retry(self):
+        def with_retry(self, **kwargs):
             return self
 
     construction = _Model(profile=None, context_window=32_768)
@@ -426,6 +427,68 @@ async def test_summary_follows_the_run_model():
     await mw._acreate_summary([HumanMessage("old turn")])
     large.with_retry.return_value.ainvoke.assert_awaited_once()
     construction.with_retry.return_value.ainvoke.assert_not_called()
+
+
+def _failing_model_cls():
+    """A chat model whose every call raises a non-retryable ``ModelError``."""
+    from langchain_core.exceptions import ModelError
+    from langchain_core.language_models import FakeListChatModel
+
+    class _NonRetryable(ModelError):
+        is_retryable = False
+
+    class _Failing(FakeListChatModel):
+        calls: int = 0
+
+        async def _agenerate(self, *args, **kwargs):
+            self.calls += 1
+            raise _NonRetryable("bad request")
+
+    return _Failing, _NonRetryable
+
+
+def _sync_to(mw, run_model):
+    with (
+        _patched_config({"model": "small-model"}),
+        patch("EvoScientist.llm.get_chat_model", return_value=run_model),
+    ):
+        mw._sync_limits()
+
+
+async def test_summary_keeps_upstream_retry_policy():
+    """The run model summarizes under the retry policy upstream chose."""
+    failing, non_retryable = _failing_model_cls()
+    construction = failing(responses=["CONSTRUCTION"])
+    construction.profile = {"max_input_tokens": CONSTRUCTION_WINDOW}
+    mw = create_per_run_summarization_middleware(construction, MagicMock())
+    upstream = mw._lc_helper._summary_model
+    run_model = failing(responses=["SUMMARY"])
+    run_model.profile = {"max_input_tokens": 20_000}
+    _sync_to(mw, run_model)
+    target = mw._lc_helper._summary_model._target()
+    assert target.bound is run_model
+    for runnable in (upstream, target):
+        with pytest.raises(non_retryable):
+            await runnable.ainvoke([HumanMessage("old turn")])
+    assert run_model.calls == construction.calls
+
+
+def test_racing_shim_install_keeps_upstream_retry_policy():
+    """A second installer that passed the guard must not wrap the first shim."""
+    failing, _ = _failing_model_cls()
+    construction = failing(responses=["CONSTRUCTION"])
+    construction.profile = {"max_input_tokens": CONSTRUCTION_WINDOW}
+    mw = create_per_run_summarization_middleware(construction, MagicMock())
+    upstream = mw._lc_helper._summary_model
+    run_model = failing(responses=["SUMMARY"])
+    run_model.profile = {"max_input_tokens": 20_000}
+    _sync_to(mw, run_model)
+    mw._lc_helper.model = construction  # the state a racing thread saw
+    mw._synced_state.set(None)
+    _sync_to(mw, run_model)
+    target = mw._lc_helper._summary_model._target()
+    assert target.bound is run_model
+    assert target.retry_exception_types == upstream.retry_exception_types
 
 
 # ---------------------------------------------------------------------------

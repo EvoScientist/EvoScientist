@@ -39,6 +39,7 @@ from deepagents.middleware.summarization import (
     compute_summarization_defaults,
 )
 from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.runnables.retry import RunnableRetry
 
 from ..llm.context_window import get_context_window, resolve_context_window
 from .configurable_model import _read_model_override
@@ -58,7 +59,7 @@ class _ProfileWindowShim:
     ``self.model._get_ls_params()``. Re-pointing ``_lc_helper.model`` at this
     shim makes the first read see the per-run context window and the second
     fall through to the run's model. Summaries use the same pairing: a
-    second shim reads the synced run model (``with_retry()``) so the model
+    second shim reads the synced run model (with upstream's retry policy) so the model
     that sees the conversation also writes the summary. When no override is
     synced, that shim falls back to the construction summary model.
 
@@ -116,7 +117,12 @@ class _SummaryModelShim:
 
     def _target(self) -> Any:
         state = self._state_var.get()
-        return state[0].with_retry() if state is not None else self._fallback
+        if state is None:
+            return self._fallback
+        if isinstance(self._fallback, RunnableRetry):
+            # Same retry policy upstream gave the construction model.
+            return self._fallback.model_copy(update={"bound": state[0]})
+        return state[0].with_retry()
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         return self._target().invoke(*args, **kwargs)
@@ -212,6 +218,8 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             truncate_args_settings=defaults["truncate_args_settings"],
         )
         self._construction_model: Any = construction_model
+        # Captured before any shim wraps it, so racing installers never nest shims.
+        self._upstream_summary_model: Any = self._lc_helper._summary_model
         # Per-task synced state: ``(target_model, resolved_window)`` or None.
         # The default is None and __init__ never sets it — "no override synced
         # in this task" means stock delegation semantics (see
@@ -275,7 +283,7 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             )
             self._lc_helper._summary_model = _SummaryModelShim(
                 self._synced_state,
-                self._lc_helper._summary_model,
+                self._upstream_summary_model,
             )
         self._synced_state.set((target, resolved))
 
