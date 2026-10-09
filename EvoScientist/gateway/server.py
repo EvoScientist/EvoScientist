@@ -756,8 +756,7 @@ class LangGraphServerGateway:
             request.message,
             media=request.media,
         )
-        if on_run_attempt is not None:
-            on_run_attempt()
+        on_run_attempt()
         await stream.run.start(
             input=run_input,
             config=config,
@@ -1163,8 +1162,9 @@ class LangGraphServerGateway:
             # at the yield, so any repair after it never runs and the thread
             # keeps its non-empty ``next`` — the failed step would replay on
             # the next request.
+            #
             # Only repair once this request reached run.start / run.respond,
-            # even if that call raised. Earlier failures (thread metadata,
+            # even if that call raised. Earlier failures (thread registration,
             # input building, resume validation) have not touched the
             # checkpoint, and a non-empty ``next`` there may belong to another
             # in-flight request on the same thread.
