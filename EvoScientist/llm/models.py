@@ -638,10 +638,6 @@ def get_chat_model(
         if isinstance(reasoning, dict):
             reasoning = dict(reasoning)
             reasoning.setdefault("context", "all_turns")
-            # store=False tells langchain-openai to keep only blocks with
-            # encrypted_content on passback; the Codex backend returns those
-            # on every response, so cross-turn reasoning replay works (#507).
-            reasoning.setdefault("store", False)
             kwargs["reasoning"] = reasoning
 
     if _uses_native_deepseek:
