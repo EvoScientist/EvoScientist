@@ -6,7 +6,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from .. import sessions as session_store
+from ..langgraph_dev.manager import needs_langgraph_dev
 from .types import (
     GraphEvent,
     GraphStateValues,
@@ -211,6 +214,14 @@ class LocalGraphGateway:
             as_node=as_node,
         )
 
+    def _dev_server_client(self):
+        from ..langgraph_dev.sdk import (
+            cached_langgraph_async_client,
+            configured_langgraph_dev_url,
+        )
+
+        return cached_langgraph_async_client(configured_langgraph_dev_url())
+
     async def get_run_status(
         self,
         target: GraphTarget,
@@ -220,12 +231,7 @@ class LocalGraphGateway:
         # The main graph runs in-process, but async sub-agent tasks still run
         # on the langgraph dev server (launching them requires it up), so their
         # run status lives there — read it through the dev-server SDK client.
-        from ..langgraph_dev.sdk import (
-            cached_langgraph_async_client,
-            configured_langgraph_dev_url,
-        )
-
-        client = cached_langgraph_async_client(configured_langgraph_dev_url())
+        client = self._dev_server_client()
         run = await client.runs.get(thread_id, run_id)
         return run["status"]
 
@@ -235,11 +241,32 @@ class LocalGraphGateway:
         thread_id: str,
         process_id: str,
     ) -> str:
-        # Background processes launched by the in-process main graph live in this
-        # process's registry, so read it directly (no server round-trip).
+        # Processes launched by the in-process graph are in this registry;
+        # processes launched by the dev server (e.g. WebUI turns on a shared
+        # thread) are only in its registry.
         from .. import background
 
-        return background.poll_status(process_id)
+        status = background.poll_status(process_id)
+        if status != "unknown":
+            return status
+
+        # Only query the dev server when the config says one should exist.
+        # If it's down or was never started, return "unknown" (the notifier
+        # stops polling this id). Timeouts and 5xx propagate for retry.
+        from ..EvoScientist import _ensure_config
+
+        cfg = _ensure_config()
+        if not needs_langgraph_dev(cfg, backend="local"):
+            return "unknown"
+
+        try:
+            client = self._dev_server_client()
+            data = await client.http.get(
+                "/api/bg_process_status", params={"process_id": process_id}
+            )
+        except httpx.ConnectError:
+            return "unknown"
+        return data["status"]
 
     def _require_local_graph(self, target: GraphTarget | None) -> CompiledStateGraph:
         if target is None or target.local_graph is None:
