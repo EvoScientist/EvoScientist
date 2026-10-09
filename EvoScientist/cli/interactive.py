@@ -738,6 +738,8 @@ def cmd_interactive(
         if not messages:
             return
 
+        from ..message_meta import is_pinned_skill, pinned_skill_name, skill_label
+
         HISTORY_WINDOW = 50
 
         # Only human and ai messages; skip tool/system
@@ -755,6 +757,10 @@ def cmd_interactive(
             content = getattr(msg, "content", "") or ""
 
             if msg_type == "human":
+                if is_pinned_skill(msg):
+                    name = pinned_skill_name(msg) or "unknown"
+                    console.print(f"[dim]{escape(skill_label(name))}[/dim]")
+                    continue
                 # Extract text from multimodal list
                 if isinstance(content, list):
                     parts = [
@@ -1568,16 +1574,27 @@ def cmd_interactive(
                         # Unknown slash command (typo) — short-circuit so
                         # it doesn't get forwarded to the agent, which
                         # would waste tokens interpreting the nonsense.
+                        # ``/skill-name`` naming an installed skill goes on
+                        # to the agent, which pins that skill.
                         if user_input.lstrip().startswith("/"):
-                            bad_cmd = user_input.split(None, 1)[0]
-                            console.print(
-                                f"[red]Unknown command:[/red] {escape(bad_cmd)}"
+                            from ..commands.skill_slash import skill_slash_names
+                            from ..message_meta import skill_label
+
+                            pinned = skill_slash_names(
+                                user_input, state["dirs"].workspace
                             )
-                            console.print(
-                                "[dim]Type /help to see available commands.[/dim]"
-                            )
-                            console.print()
-                            continue
+                            if not pinned:
+                                bad_cmd = user_input.split(None, 1)[0]
+                                console.print(
+                                    f"[red]Unknown command:[/red] {escape(bad_cmd)}"
+                                )
+                                console.print(
+                                    "[dim]Type /help to see available commands.[/dim]"
+                                )
+                                console.print()
+                                continue
+                            for name in pinned:
+                                console.print(f"[dim]{escape(skill_label(name))}[/dim]")
 
                         # Resolve @file mentions — inject file contents inline
                         _, message_to_send, file_warnings = resolve_file_mentions(

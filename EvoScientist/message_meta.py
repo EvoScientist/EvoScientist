@@ -68,3 +68,7 @@ def parse_skill_slashes(text: str) -> list[str]:
         if match.group(1) not in names:
             names.append(match.group(1))
     return names
+
+
+def skill_label(name: str) -> str:
+    return f"skill: {name}"

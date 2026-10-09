@@ -1686,7 +1686,16 @@ def run_textual_interactive(
 
             # 1. Mount user message + loading spinner
             if not skip_user_message:
-                await container.mount(UserMessage(display_text or user_text))
+                shown = display_text or user_text
+                await container.mount(UserMessage(shown))
+                if shown.lstrip().startswith("/"):
+                    from ..commands.skill_slash import skill_slash_names
+                    from ..message_meta import skill_label
+
+                    for name in skill_slash_names(shown, self._dirs.workspace):
+                        await container.mount(
+                            SystemMessage(skill_label(name), msg_style="dim")
+                        )
             # Mount file warnings after user message so they appear in the
             # correct position (between user input and model response).
             for w in file_warnings or []:
@@ -3017,7 +3026,7 @@ def run_textual_interactive(
                 self._render_queue_indicator()
                 return
 
-            if text.startswith("/"):
+            if text.startswith("/") and not self._names_skill(text):
                 self._hide_completions()
                 # Launch as independent task to free the message pump.
                 # Commands like /resume mount interactive widgets that need
@@ -3452,6 +3461,12 @@ def run_textual_interactive(
 
         # ── Slash commands ─────────────────────────────────────
 
+        def _names_skill(self, text: str) -> bool:
+            """True for ``/skill-name`` input that should reach the agent."""
+            from ..commands.skill_slash import skill_slash_names
+
+            return bool(skill_slash_names(text, self._dirs.workspace))
+
         async def _handle_command(self, command: str) -> None:
             # Echo the command so the user sees what they ran
             self._append_system(command.strip(), style="cyan")
@@ -3524,6 +3539,8 @@ def run_textual_interactive(
             if not messages:
                 return
 
+            from ..message_meta import is_pinned_skill, pinned_skill_name, skill_label
+
             HISTORY_WINDOW = 50
             container = self.query_one("#chat", VerticalScroll)
 
@@ -3550,6 +3567,12 @@ def run_textual_interactive(
                 content = getattr(message, "content", "") or ""
 
                 if msg_type == "human":
+                    if is_pinned_skill(message):
+                        name = pinned_skill_name(message) or "unknown"
+                        await container.mount(
+                            SystemMessage(skill_label(name), msg_style="dim")
+                        )
+                        continue
                     if isinstance(content, list):
                         parts = [
                             block.get("text", "")

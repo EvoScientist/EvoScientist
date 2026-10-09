@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from EvoScientist import paths
 from EvoScientist.config import (
@@ -266,13 +267,17 @@ def test_skill_proposal_lifecycle_promotes_to_workspace_skill(tmp_path):
     assert pending[0].skill_name == "focused-validation"
     assert pending[0].proposal_id == "focused-validation"
 
-    approved = approve_skill_proposal(
-        memory_dir,
-        pending[0].proposal_id,
-        skills_dir=skills_dir,
-    )
+    with patch(
+        "EvoScientist.memory.autoskills.proposals._notify_approved_skill"
+    ) as notify:
+        approved = approve_skill_proposal(
+            memory_dir,
+            pending[0].proposal_id,
+            skills_dir=skills_dir,
+        )
 
     assert approved["approved"] is True
+    notify.assert_called_once_with()
     skill_md = skills_dir / "focused-validation" / "SKILL.md"
     assert skill_md.exists()
     assert "name: focused-validation" in skill_md.read_text(encoding="utf-8")
@@ -889,9 +894,13 @@ def test_reject_skill_proposal_marks_processed(tmp_path):
         skills_dir=tmp_path / "skills",
     )
 
-    rejected = reject_skill_proposal(memory_dir, proposal["proposal_id"])
+    with patch(
+        "EvoScientist.memory.autoskills.proposals._notify_approved_skill"
+    ) as notify:
+        rejected = reject_skill_proposal(memory_dir, proposal["proposal_id"])
 
     assert rejected["rejected"] is True
+    notify.assert_not_called()
     assert list_skill_proposals(memory_dir)[0].status == "rejected"
     assert (memory_dir / "autoskills" / "processed" / "cluster-rejected.json").exists()
 
