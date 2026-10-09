@@ -391,8 +391,10 @@ _PROCESS_RUN_DIR: Path | None = None
 _LOG_OFFSET_AT_START: int = 0
 
 # Cloudflare quick-tunnel public URL, as printed by cloudflared into the
-# langgraph dev log. Mirrors langgraph_api/tunneling/cloudflare.py.
-_TUNNEL_URL_RE = re.compile(r"https://[A-Za-z0-9.-]+\.trycloudflare\.com")
+# langgraph dev log. Exclude the API endpoint logged when tunnel creation fails.
+_TUNNEL_URL_RE = re.compile(
+    r"https://(?!api\.)[A-Za-z0-9.-]+\.trycloudflare\.com", re.IGNORECASE
+)
 
 # Whether async sub-agents are usable in this process.
 #
