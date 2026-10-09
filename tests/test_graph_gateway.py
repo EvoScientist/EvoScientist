@@ -2247,6 +2247,77 @@ async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     ]
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "registration",
+        "input",
+        "resume-validation",
+        "non-resume-command",
+        "unmatched-id-keyed",
+        "wrong-hitl-id",
+        "start",
+        "respond",
+        "multi-respond",
+    ],
+)
+async def test_state_repair_requires_this_request_to_attempt_a_run(
+    monkeypatch, failure
+):
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream("thread", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"thread": {"values": {}, "next": ("model",)}},
+        streams={"thread": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads)),
+        interrupt_wait_seconds=0,
+    )
+    message = "hi"
+    if failure == "registration":
+        threads.create = AsyncMock(side_effect=RuntimeError("before run"))
+    elif failure == "input":
+        monkeypatch.setattr(
+            "EvoScientist.gateway.server.build_agent_stream_input",
+            AsyncMock(side_effect=RuntimeError("before run")),
+        )
+    elif failure == "resume-validation":
+        message = Command(resume={"answer": "yes"})
+    elif failure == "non-resume-command":
+        message = Command(update={"configurable": {"model": "test"}})
+    elif failure == "unmatched-id-keyed":
+        stream.interrupts = [
+            {"interrupt_id": "first"},
+            {"interrupt_id": "second"},
+        ]
+        message = Command(resume={"unknown": {"decisions": [{"type": "approve"}]}})
+    elif failure == "wrong-hitl-id":
+        stream.interrupts = [{"interrupt_id": "first"}]
+        message = Command(resume={"wrong": {"decisions": [{"type": "approve"}]}})
+    elif failure == "start":
+        stream.run.start = AsyncMock(side_effect=RuntimeError("start attempted"))
+    else:
+        stream.interrupts = [{"interrupt_id": "first"}]
+        if failure == "multi-respond":
+            stream.interrupts.append({"interrupt_id": "second"})
+        message = Command(resume={"first": {"decisions": [{"type": "approve"}]}})
+        stream.run.respond = AsyncMock(side_effect=RuntimeError("respond attempted"))
+    with pytest.raises(RuntimeError):
+        async for _ in gateway.stream_events(
+            RunRequest(message=message, thread_id="thread")
+        ):
+            pass
+    expected = (
+        [("thread", None, "__end__")]
+        if failure in {"start", "respond", "multi-respond"}
+        else []
+    )
+    assert threads.state_updates == expected
+
+
 async def test_langgraph_server_gateway_repairs_state_when_consumer_closes_after_error_event():
     """A consumer that stops iterating once it has the error event triggers
     GeneratorExit at the yield - the repair must already have run."""
