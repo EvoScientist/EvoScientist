@@ -18,6 +18,7 @@ from EvoScientist.tools.skills_manager import (
     fetch_remote_skill_index,
     install_skill,
     installed_provenance,
+    is_expert_skill_dir,
     list_expert_skills,
     list_skills,
     register_skills_changed_callback,
@@ -386,6 +387,33 @@ class TestUninstallSkill:
 
         assert result["success"] is False
         assert "not found" in result["error"]
+
+    def test_uninstall_reports_whether_the_removed_skill_was_an_expert(
+        self, temp_skills_dir, skills_ws
+    ):
+        for name, expert in (("plain-skill", False), ("idea-expert", True)):
+            d = temp_skills_dir / name
+            d.mkdir()
+            (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+            if expert:
+                (d / "EXPERT.md").write_text("You are a demo expert.\n")
+
+        assert uninstall_skill("plain-skill", workspace=skills_ws)["expert"] is False
+        assert uninstall_skill("idea-expert", workspace=skills_ws)["expert"] is True
+
+
+class TestIsExpertSkillDir:
+    def test_classifies_only_the_given_directory(self, tmp_path):
+        plain = tmp_path / "plain"
+        expert = tmp_path / "expert"
+        for d in (plain, expert):
+            d.mkdir()
+            (d / "SKILL.md").write_text(f"---\nname: {d.name}\ndescription: d\n---\n")
+        (expert / "EXPERT.md").write_text("You are a demo expert.\n")
+
+        assert is_expert_skill_dir(plain) is False
+        assert is_expert_skill_dir(expert) is True
+        assert is_expert_skill_dir(tmp_path / "missing") is False
 
 
 # =============================================================================

@@ -941,6 +941,7 @@ def _get_default_middleware(
         ContextOverflowMapperMiddleware,
         ErrorNormalizationMiddleware,
         ModelFallbackMiddleware,
+        SkillsReloadMiddleware,
         ToolErrorHandlerMiddleware,
         ToolHistoryRepairMiddleware,
         create_active_team_middleware,
@@ -1101,6 +1102,11 @@ def _get_default_middleware(
                 media_dir=_run_media_dir(workspace, work_dir),
             )
         )
+
+    # Main agent only: sync sub-agents never inherit skills_metadata, so each
+    # task call rescans anyway.
+    if not for_async_subagent:
+        mw.append(SkillsReloadMiddleware())
 
     # SummarizationMiddleware with per-run context limits (#466): deepagents
     # installs its own (frozen on the construction model's window) inside the

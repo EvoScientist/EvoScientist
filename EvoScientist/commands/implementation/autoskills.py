@@ -235,9 +235,6 @@ class AutoSkillsCommand(Command):
                 f"{verb} autoskill: {result['skill_name']} ({result['path']})",
                 style="green",
             )
-            ctx.ui.append_system(
-                "Reload with /new to apply the new skill.", style="dim"
-            )
         else:
             ctx.ui.append_system(f"Approval failed: {result.get('error')}", style="red")
 

@@ -1142,6 +1142,11 @@ def list_expert_skills(
     ]
 
 
+def is_expert_skill_dir(skill_dir: Path) -> bool:
+    """Return True if the skill directory *skill_dir* declares an expert."""
+    return _parse_skill_md(skill_dir / "SKILL.md").type == "expert"
+
+
 def uninstall_skill(name: str, *, workspace: Workspace) -> dict:
     """Uninstall a skill from workspace or global tier.
 
@@ -1153,6 +1158,8 @@ def uninstall_skill(name: str, *, workspace: Workspace) -> dict:
     Returns:
         Dictionary with result:
         - success: bool
+        - name: the name that was passed in (if successful)
+        - expert: whether the removed directory declared an expert (if successful)
         - error: error message (if failed)
     """
     try:
@@ -1194,9 +1201,10 @@ def _uninstall_skill_impl(name: str, *, workspace: Workspace) -> dict:
         if not target_path.is_relative_to(search_dir):
             return {"success": False, "error": f"Invalid skill path: {name}"}
 
+        expert = is_expert_skill_dir(target_path)
         shutil.rmtree(target_path)
         _record_uninstall(search_dir, target_path.name)
-        return {"success": True, "name": name}
+        return {"success": True, "name": name, "expert": expert}
 
     # Check if it's a built-in skill (read-only, cannot be uninstalled)
     from ..EvoScientist import SKILLS_DIR
