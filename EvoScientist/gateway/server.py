@@ -21,6 +21,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..message_meta import is_pinned_skill
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
@@ -86,7 +87,7 @@ def _build_thread_metadata(
 
 def _thread_preview(messages: list[BaseMessage]) -> str:
     for message in reversed(messages):
-        if getattr(message, "type", None) != "human":
+        if getattr(message, "type", None) != "human" or is_pinned_skill(message):
             continue
         content = message.content
         if isinstance(content, str):

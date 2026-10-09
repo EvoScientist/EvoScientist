@@ -52,6 +52,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Overwrite
 
+from .message_meta import is_pinned_skill
 from .paths import SessionDirs, process_session_dirs
 
 _logger = logging.getLogger(__name__)
@@ -872,7 +873,7 @@ def _apply_summarization_event(messages: list, event: dict | None) -> list:
 def _extract_preview(messages: list, max_len: int = 50) -> str:
     """Extract the first human message as a preview string."""
     for msg in messages:
-        if getattr(msg, "type", None) != "human":
+        if getattr(msg, "type", None) != "human" or is_pinned_skill(msg):
             continue
         content = getattr(msg, "content", "") or ""
         if isinstance(content, list):

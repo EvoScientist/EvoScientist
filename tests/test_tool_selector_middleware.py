@@ -1199,3 +1199,69 @@ def test_auto_selector_model_survives_copy():
     for clone in (copy.copy(wrapped), copy.deepcopy(wrapped)):
         assert type(clone) is _AutoToolChoiceSelectorModel
         assert isinstance(clone._model, FakeListChatModel)
+
+
+def _pinned_skill_message():
+    from langchain_core.messages import HumanMessage
+
+    return HumanMessage(
+        "<skill name='alpha'>long body</skill>",
+        additional_kwargs={"lc_source": "pinned_skill", "skill": {"name": "alpha"}},
+    )
+
+
+def _selection_request():
+    from langchain_core.messages import HumanMessage
+
+    return ModelRequest(
+        model=MagicMock(),
+        messages=[HumanMessage("find papers on X"), _pinned_skill_message()],
+        tools=[_tool(f"t{i}") for i in range(15)],
+    )
+
+
+def test_selector_sees_the_user_message_and_model_sees_the_skill():
+    seen_by_selector = []
+    seen_by_model = []
+
+    class _Selector:
+        def wrap_model_call(self, request, handler):
+            seen_by_selector.append(list(request.messages))
+            return handler(request.override(tools=request.tools[:2]))
+
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=lambda _always: _Selector(), threshold=10
+    )
+    request = _selection_request()
+
+    cond.wrap_model_call(request, lambda req: seen_by_model.append(req) or "ok")
+
+    assert [m.content for m in seen_by_selector[0]] == ["find papers on X"]
+    assert seen_by_model[0].messages == request.messages
+    assert len(seen_by_model[0].tools) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_selector_sees_the_user_message_and_model_sees_the_skill():
+    seen_by_selector = []
+    seen_by_model = []
+
+    class _Selector:
+        async def awrap_model_call(self, request, handler):
+            seen_by_selector.append(list(request.messages))
+            return await handler(request.override(tools=request.tools[:2]))
+
+    async def _handler(req):
+        seen_by_model.append(req)
+        return "ok"
+
+    cond = _ConditionalToolSelectorMiddleware(
+        selector_factory=lambda _always: _Selector(), threshold=10
+    )
+    request = _selection_request()
+
+    await cond.awrap_model_call(request, _handler)
+
+    assert [m.content for m in seen_by_selector[0]] == ["find papers on X"]
+    assert seen_by_model[0].messages == request.messages
+    assert len(seen_by_model[0].tools) == 2

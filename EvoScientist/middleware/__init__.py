@@ -35,6 +35,7 @@ from .scheduler import (
     SchedulerMiddleware,
     create_scheduler_middleware,
 )
+from .skill_pin import SkillPinMiddleware
 from .skills_reload import SkillsReloadMiddleware
 from .summarization import create_per_run_summarization_middleware
 from .tool_error_handler import ToolErrorHandlerMiddleware
@@ -57,6 +58,7 @@ __all__ = [
     "Question",
     "RuntimeContextMiddleware",
     "SchedulerMiddleware",
+    "SkillPinMiddleware",
     "SkillsReloadMiddleware",
     "ToolErrorHandlerMiddleware",
     "ToolHistoryRepairMiddleware",
