@@ -517,7 +517,7 @@ def test_default_middleware_registers_subclass_exactly_once(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware(workspace=workspace, backend=MagicMock())
+    mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
     summ = [m for m in mw if m.name == "SummarizationMiddleware"]
     assert len(summ) == 1, "expected exactly one summarization middleware"
     assert isinstance(summ[0], _PerRunLimitsSummarizationMiddleware)
@@ -562,7 +562,7 @@ def test_deepagents_name_merge_replaces_stock_instance(
         def __init__(self, name: str) -> None:
             self.name = name
 
-    user_mw = _get_default_middleware(workspace=workspace, backend=MagicMock())
+    user_mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
 
     core = [
         _Named("FilesystemMiddleware"),

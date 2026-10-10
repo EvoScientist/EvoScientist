@@ -246,3 +246,31 @@ async def test_typing_slash_with_a_non_string_description_does_not_crash(
 
         assert app.is_running
         assert prompt.value == "/new"
+
+
+async def test_history_shows_grader_feedback_as_a_label(monkeypatch, workspace):
+    feedback = HumanMessage(
+        "A grader reviewed your work and asked for revisions.",
+        additional_kwargs={"lc_source": "rubric_grader"},
+    )
+    gateway = _gateway(
+        messages=[
+            HumanMessage("write the report"),
+            AIMessage("Draft."),
+            feedback,
+            AIMessage("Revised."),
+        ]
+    )
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        _prepare(app, workspace, gateway)
+
+        await app._render_history("tid")
+        await pilot.pause()
+
+        assert "rubric: revision requested" in _system_lines(app)
+        assert _user_lines(app) == ["> write the report"]
+        rendered = _system_lines(app) + _user_lines(app)
+        assert not any("A grader reviewed" in text for text in rendered)

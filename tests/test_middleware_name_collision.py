@@ -10,6 +10,7 @@ The per-run subclass is appended only when a backend is supplied, and that
 one deliberate overlap is asserted separately (#466).
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 DEEPAGENTS_BASE_STACK_NAMES = {
@@ -58,7 +59,7 @@ def test_backend_summarization_is_the_only_deliberate_collision(
     cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
-    mw = _get_default_middleware(workspace=workspace, backend=MagicMock())
+    mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
     overlap = [m for m in mw if m.name in DEEPAGENTS_BASE_STACK_NAMES]
     assert [m.name for m in overlap] == ["SummarizationMiddleware"]
     assert isinstance(overlap[0], _PerRunLimitsSummarizationMiddleware)

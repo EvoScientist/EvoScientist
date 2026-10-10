@@ -2560,6 +2560,40 @@ def _is_fresh_interactive_session(prompt: str | None, thread_id: str | None) -> 
     return not prompt and not thread_id
 
 
+# 2 is Click's usage-error code; 1 stays "the run failed".
+RUBRIC_UNMET_EXIT_CODE = 3
+
+
+def _resolve_rubric_option(value: str | None, *, prompt: str | None) -> str | None:
+    """Return the text given by ``--rubric``, reading ``@path`` from disk."""
+    if value is None:
+        return None
+    if not prompt:
+        raise typer.BadParameter("--rubric requires -p/--prompt (single-shot mode)")
+    text = value
+    if value.startswith("@"):
+        path = Path(value[1:])
+        try:
+            # expanduser raises RuntimeError for an unknown "~user".
+            text = path.expanduser().read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError, RuntimeError) as exc:
+            reason = getattr(exc, "strerror", None) or str(exc)
+            raise typer.BadParameter(
+                f"--rubric could not read {path}: {reason}"
+            ) from exc
+    text = text.strip()
+    if not text:
+        raise typer.BadParameter("--rubric is empty")
+    return text
+
+
+def _rubric_exit_code(rubric: str | None, result: str | None) -> int | None:
+    """Exit code for a single-shot run that finished; ``None`` keeps the default."""
+    if rubric is None or result == "satisfied":
+        return None
+    return RUBRIC_UNMET_EXIT_CODE
+
+
 def _resolve_stream_json_auto_mode(auto_mode: bool | None, output_format: str) -> bool:
     """Resolve the effective ``--auto-mode`` for a single-shot run.
 
@@ -2663,8 +2697,22 @@ def _main_callback(
             "'stream-json' (line-delimited JSON events to stdout)."
         ),
     ),
-    # Annotated, so a direct call without this argument gets a plain False
+    # Annotated, so a direct call without these arguments gets a plain default
     # rather than Typer's OptionInfo default, which is truthy.
+    rubric: Annotated[
+        str | None,
+        typer.Option(
+            "--rubric",
+            metavar="TEXT|@PATH",
+            help=(
+                "Acceptance criteria for a single-shot (-p) run. The work is "
+                "graded each time the agent stops and sent back with the gaps, "
+                "up to 3 passes. Literal text, or '@path' to read a file. "
+                "Sub-agents run in-turn for this run. Exit code 3 when the "
+                "criteria are not met."
+            ),
+        ),
+    ] = None,
     version_json: Annotated[
         bool,
         typer.Option(
@@ -2703,6 +2751,8 @@ def _main_callback(
         from ..stream.json_sink import redirect_console_to_stderr
 
         redirect_console_to_stderr()
+
+    rubric_text = _resolve_rubric_option(rubric, prompt=prompt)
 
     # stream-json is headless, so auto-mode defaults on (auto-handle approval and
     # ask_user gates) unless the caller explicitly passed --no-auto-mode. Without
@@ -2750,6 +2800,10 @@ def _main_callback(
             cli_overrides["enable_ask_user"] = True
     if dangerous:
         cli_overrides["dangerous_mode"] = True
+    if rubric_text is not None:
+        # The grader runs when the agent stops; a background sub-agent would
+        # still be working then, so this run keeps every sub-agent in-turn.
+        cli_overrides["enable_async_subagents"] = False
     if auth_mode:
         if auth_mode not in ("api_key", "oauth"):
             raise typer.BadParameter("--auth-mode must be 'api_key' or 'oauth'")
@@ -2762,6 +2816,19 @@ def _main_callback(
             if auth_mode == "api_key" or provider in in_use:
                 setattr(config, f"{provider}_auth_mode", auth_mode)
     apply_config_to_env(config)
+
+    if rubric_text is not None:
+        from ..config import GatewaySurface, resolve_gateway_backend
+
+        single_shot_backend = resolve_gateway_backend(
+            config, GatewaySurface.SINGLE_SHOT
+        )
+        if single_shot_backend == "langgraph_server":
+            raise typer.BadParameter(
+                "--rubric needs the local gateway for single-shot runs: on "
+                "langgraph_server the agent runs in the server process, which "
+                "still dispatches background sub-agents the grader cannot wait for"
+            )
 
     _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
 
@@ -2939,6 +3006,7 @@ def _main_callback(
                     config=config,
                     runtime=async_runtime,
                 )
+                rubric_result: str | None = None
                 try:
                     if effective_output_format == "stream-json":
                         # Headless JSONL path: drive the sink through the gateway
@@ -2952,9 +3020,21 @@ def _main_callback(
                             target=GraphTarget(
                                 local_graph=agent, **session_dirs.metadata()
                             ),
+                            rubric=rubric_text,
                         )
+
+                        def _track_verdict(event: dict) -> None:
+                            nonlocal rubric_result
+                            if event.get("type") == "rubric_evaluation":
+                                result = event.get("result")
+                                rubric_result = (
+                                    result if isinstance(result, str) else None
+                                )
+
                         try:
-                            await stream_json(graph_gateway, request)
+                            await stream_json(
+                                graph_gateway, request, on_event=_track_verdict
+                            )
                         except Exception as exc:
                             # stream_events already emitted a terminal `error`
                             # event onto the JSON stream before re-raising; exit
@@ -2978,10 +3058,11 @@ def _main_callback(
                                 ui_backend=config.ui_backend,
                                 runtime_gateways=runtime_gateways,
                                 async_runtime=async_runtime,
+                                rubric=rubric_text,
                             )
                         )
                         try:
-                            await asyncio.shield(stream_worker)
+                            rubric_result = await asyncio.shield(stream_worker)
                         except asyncio.CancelledError:
                             from ..stream.display import request_stream_cancel
                             from .tui_runtime import settle_cancelled_worker
@@ -2991,6 +3072,13 @@ def _main_callback(
                                 on_cancel=request_stream_cancel,
                             )
                             raise
+                    exit_code = _rubric_exit_code(rubric_text, rubric_result)
+                    if exit_code is not None:
+                        console.print(
+                            "[yellow]Acceptance criteria not met "
+                            f"(exit code {exit_code}).[/yellow]"
+                        )
+                        raise typer.Exit(exit_code)
                 finally:
                     # Model failures can bypass middleware ``after_agent``
                     # hooks. Close any remaining QuickJS workers while this

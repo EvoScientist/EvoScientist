@@ -366,3 +366,56 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
     # so they never drive the main-agent tool-selection widget.
     mock_tool_selector.assert_called_once()
     assert isinstance(mock_tool_selector.call_args.kwargs["events"], NoOpSink)
+
+
+@patch(
+    "EvoScientist.middleware.create_per_run_summarization_middleware",
+    return_value=MagicMock(name="summarization"),
+)
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_main_agent_mounts_the_grader_after_every_other_after_agent_hook(
+    mock_config, mock_chat, mock_tool_selector, mock_summarization, workspace, tmp_path
+):
+    from deepagents.backends import FilesystemBackend
+
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+    from EvoScientist.message_meta import this_run_messages
+    from EvoScientist.middleware.rubric import EvoRubricMiddleware
+
+    backend = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
+    main = _get_default_middleware(workspace=workspace, backend=backend)
+
+    assert isinstance(main[-1], EvoRubricMiddleware)
+    assert main[-1].max_iterations == 3
+    assert main[-1]._prepare_messages_for_grader is this_run_messages
+    assert main[-1]._require_run_marker is True
+    names = [type(m).__name__ for m in main]
+    for earlier in ("EvoMemoryLifecycleMiddleware", "EvoCodeInterpreterMiddleware"):
+        assert names.index(earlier) < len(main) - 1
+
+    sub = _get_default_middleware(
+        workspace=workspace, backend=backend, for_async_subagent=True
+    )
+    assert not any(isinstance(m, EvoRubricMiddleware) for m in sub)
+
+    no_backend = _get_default_middleware(workspace=workspace)
+    assert not any(isinstance(m, EvoRubricMiddleware) for m in no_backend)

@@ -21,7 +21,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
-from ..message_meta import is_pinned_skill
+from ..message_meta import is_pinned_skill, is_rubric_feedback
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
@@ -87,7 +87,11 @@ def _build_thread_metadata(
 
 def _thread_preview(messages: list[BaseMessage]) -> str:
     for message in reversed(messages):
-        if getattr(message, "type", None) != "human" or is_pinned_skill(message):
+        if (
+            getattr(message, "type", None) != "human"
+            or is_pinned_skill(message)
+            or is_rubric_feedback(message)
+        ):
             continue
         content = message.content
         if isinstance(content, str):
@@ -626,6 +630,7 @@ class LangGraphServerGateway:
         configurable_extra: Mapping[str, Any] | None,
         *,
         target: GraphTarget | None = None,
+        rubric_run: bool = False,
     ) -> dict[str, Any]:
         """Assemble this run's config, reading the live session config here.
 
@@ -673,6 +678,7 @@ class LangGraphServerGateway:
             per_run_overrides=overrides,
             recursion_limit=recursion_limit,
             hitl_suppressed=hitl_suppressed_for_run(cfg),
+            rubric_run=rubric_run,
         )
         for key, value in folders.items():
             if value:
@@ -699,7 +705,10 @@ class LangGraphServerGateway:
         on_run_attempt: Callable[[], None],
     ) -> None:
         config = self._resolve_run_config(
-            request.thread_id, request.configurable_extra, target=request.target
+            request.thread_id,
+            request.configurable_extra,
+            target=request.target,
+            rubric_run=request.rubric is not None,
         )
         # ``_stream_events`` already registered the thread before the pre-run
         # state read. Skip the second ``threads.create(if_exists="do_nothing")``
@@ -735,9 +744,10 @@ class LangGraphServerGateway:
             if request.message.resume is not None:
                 # Known divergence: the resume goes through run.respond,
                 # which takes no config, so the per-run overrides above
-                # (model / recursion_limit) are NOT applied to a resumed
-                # turn - it runs with the thread's construction-time
-                # binding until the next fresh run re-applies them. The
+                # (model / recursion_limit / the rubric marker) are NOT
+                # applied to a resumed turn - it runs with the thread's
+                # construction-time binding until the next fresh run
+                # re-applies them. The
                 # primitive that would carry config on a resume is
                 # run.start with Command(resume=...); switching to it needs
                 # live-server verification first.
@@ -755,6 +765,7 @@ class LangGraphServerGateway:
         run_input = await build_agent_stream_input(
             request.message,
             media=request.media,
+            rubric=request.rubric,
         )
         on_run_attempt()
         await stream.run.start(

@@ -1123,6 +1123,26 @@ def _get_default_middleware(
     if backend is not None:
         mw.append(create_per_run_summarization_middleware(model, backend))
 
+    # Last on purpose: after_agent hooks run in reverse order, so a revision
+    # jumps back to the model before the memory worker launches or the code
+    # interpreter slot is released. Same helper model as the tool selector.
+    if backend is not None and not for_async_subagent:
+        from .message_meta import this_run_messages
+        from .middleware.rubric import (
+            MAIN_RUBRIC_MAX_ITERATIONS,
+            create_rubric_middleware,
+        )
+
+        mw.append(
+            create_rubric_middleware(
+                model=tool_selector_model,
+                backend=backend,
+                max_iterations=MAIN_RUBRIC_MAX_ITERATIONS,
+                prepare_messages=this_run_messages,
+                require_run_marker=True,
+            )
+        )
+
     return mw
 
 

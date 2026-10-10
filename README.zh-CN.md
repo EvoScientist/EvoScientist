@@ -457,6 +457,7 @@ EvoSci --ui cli                   # 经典 CLI（轻量）
 EvoSci --ui webui                 # 浏览器工作区界面（需 Node.js）
 EvoSci serve                      # 无头模式——仅渠道，无交互提示符
 EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI / SDK 客户端使用
+EvoSci -p "query" --rubric @criteria.md --auto-mode  # 按验收清单评分；未达标时退出码为 3（docs/guides/rubric.md）
 ```
 
 </details>

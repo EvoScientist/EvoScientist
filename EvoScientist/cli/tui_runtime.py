@@ -127,6 +127,7 @@ def run_streaming(
     cancel_scope: str | None = None,
     gateway: GraphGateway,
     runtime: AsyncRuntime | None = None,
+    rubric: str | None = None,
 ) -> str:
     """Run streaming with the selected backend."""
     backend = get_backend(ui_backend, warn_fallback=True)
@@ -151,6 +152,7 @@ def run_streaming(
             cancel_scope=cancel_scope,
             gateway=gateway,
             runtime=runtime,
+            rubric=rubric,
         )
     except AsyncRuntimeError:
         raise
@@ -180,6 +182,7 @@ def run_streaming(
                 cancel_scope=cancel_scope,
                 gateway=gateway,
                 runtime=runtime,
+                rubric=rubric,
             )
         raise
 

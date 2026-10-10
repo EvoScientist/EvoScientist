@@ -738,7 +738,7 @@ def cmd_interactive(
         if not messages:
             return
 
-        from ..message_meta import is_pinned_skill, pinned_skill_name, skill_label
+        from ..message_meta import harness_label
 
         HISTORY_WINDOW = 50
 
@@ -757,9 +757,9 @@ def cmd_interactive(
             content = getattr(msg, "content", "") or ""
 
             if msg_type == "human":
-                if is_pinned_skill(msg):
-                    name = pinned_skill_name(msg) or "unknown"
-                    console.print(f"[dim]{escape(skill_label(name))}[/dim]")
+                label = harness_label(msg)
+                if label is not None:
+                    console.print(f"[dim]{escape(label)}[/dim]")
                     continue
                 # Extract text from multimodal list
                 if isinstance(content, list):
@@ -1745,7 +1745,8 @@ def cmd_run(
     dirs: SessionDirs,
     runtime_gateways: RuntimeGateways,
     async_runtime: "AsyncRuntime | None" = None,
-) -> None:
+    rubric: str | None = None,
+) -> str | None:
     """Single-shot execution with streaming display.
 
     Args:
@@ -1756,6 +1757,10 @@ def cmd_run(
         dirs: The session's workspace and run folder
         model: Model name for checkpoint metadata
         ui_backend: UI backend ('cli' or 'tui')
+        rubric: Acceptance criteria this run is graded against.
+
+    Returns:
+        The latest grading verdict, or None when nothing was graded.
     """
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
@@ -1765,6 +1770,11 @@ def cmd_run(
     console.print(f"[dim]Thread: {short_thread_id(thread_id)}[/dim]")
     console.print(f"[dim]Workspace: {_shorten_path(str(dirs.work_dir))}[/dim]")
     console.print()
+
+    verdict: dict[str, str | None] = {"result": None}
+
+    def _track_verdict(_event_type: str, state: Any) -> None:
+        verdict["result"] = state.rubric_result
 
     meta = build_metadata(dirs, model)
     try:
@@ -1778,10 +1788,13 @@ def cmd_run(
             metadata=meta,
             gateway=runtime_gateways.graph_gateway,
             runtime=async_runtime,
+            rubric=rubric,
+            on_stream_event=_track_verdict if rubric is not None else None,
         )
         from .commands import _wait_for_memory_workers
 
         _wait_for_memory_workers()
+        return verdict["result"]
     except Exception as e:
         error_msg = str(e)
         if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():

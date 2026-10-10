@@ -121,6 +121,7 @@ def test_scheduler_rubric_uses_scheduler_model_and_allows_one_retry(tmp_path):
     rubric = kwargs["middleware"][-1]
     assert rubric._model is aux
     assert rubric.max_iterations == 2
+    assert rubric._require_run_marker is False  # crons grade from their input
 
 
 def test_scheduler_graph_build_emits_no_beta_warning(tmp_path):
@@ -131,9 +132,9 @@ def test_scheduler_graph_build_emits_no_beta_warning(tmp_path):
 
 
 def test_rubric_evaluation_is_logged_at_info(caplog):
-    from EvoScientist.subagents._factory import _log_rubric_evaluation
+    from EvoScientist.middleware.rubric import _log_rubric_evaluation
 
-    with caplog.at_level(logging.INFO, logger="EvoScientist.subagents._factory"):
+    with caplog.at_level(logging.INFO, logger="EvoScientist.middleware.rubric"):
         _log_rubric_evaluation(
             {
                 "grading_run_id": "g-1",
@@ -171,7 +172,7 @@ def test_grader_strategy_is_json_mode_for_gemini_on_openrouter():
     """OpenRouter drops the criteria oneOf from Gemini tool schemas; JSON mode works."""
     from langchain.agents.structured_output import ProviderStrategy
 
-    from EvoScientist.subagents._factory import _grader_strategy
+    from EvoScientist.middleware.rubric import _grader_strategy
 
     strategy = _grader_strategy(_openrouter("google/gemini-3.8-flash"))
     assert isinstance(strategy, ProviderStrategy)
@@ -185,7 +186,7 @@ def test_grader_strategy_is_tool_calling_for_anthropic_on_openrouter():
     """
     from langchain.agents.structured_output import ToolStrategy
 
-    from EvoScientist.subagents._factory import _grader_strategy
+    from EvoScientist.middleware.rubric import _grader_strategy
 
     for model_id in ("anthropic/claude-fable-5", "anthropic/claude-sonnet-4.6"):
         assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
@@ -199,7 +200,7 @@ def test_grader_strategy_is_tool_calling_for_openai_on_openrouter():
     """
     from langchain.agents.structured_output import ToolStrategy
 
-    from EvoScientist.subagents._factory import _grader_strategy
+    from EvoScientist.middleware.rubric import _grader_strategy
 
     for model_id in ("openai/gpt-5.6-luna", "openai/gpt-6-luna"):
         assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
@@ -208,7 +209,7 @@ def test_grader_strategy_is_tool_calling_for_openai_on_openrouter():
 def test_grader_strategy_defers_to_langchain_elsewhere():
     from langchain_anthropic import ChatAnthropic
 
-    from EvoScientist.subagents._factory import _grader_strategy
+    from EvoScientist.middleware.rubric import _grader_strategy
 
     assert (
         _grader_strategy(ChatAnthropic(model="claude-haiku-4-5", api_key="k")) is None
@@ -227,7 +228,7 @@ def test_scheduler_grader_is_built_with_the_explicit_strategy(tmp_path):
     rubric = kwargs["middleware"][-1]
     assert rubric._model is aux  # no model copy; the strategy is passed explicitly
     with patch(
-        "EvoScientist.subagents._factory.create_agent", wraps=create_agent
+        "EvoScientist.middleware.rubric.create_agent", wraps=create_agent
     ) as spy:
         rubric._ensure_grader()
     response_format = spy.call_args.kwargs["response_format"]
@@ -393,7 +394,7 @@ def test_grader_call_budget_stops_a_parse_error_loop():
     from langchain.agents import create_agent
     from langchain.agents.structured_output import ToolStrategy
 
-    from EvoScientist.subagents._factory import _GraderCallBudget
+    from EvoScientist.middleware.rubric import _GraderCallBudget
 
     fake = _BrokenGrader()
     grader = create_agent(
@@ -410,7 +411,7 @@ def test_grader_call_budget_stops_a_parse_error_loop():
 
 
 def test_scheduler_grader_carries_a_call_budget(tmp_path):
-    from EvoScientist.subagents._factory import _GraderCallBudget
+    from EvoScientist.middleware.rubric import _GraderCallBudget
 
     kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path)
     grader_mw = kwargs["middleware"][-1]._grader_middleware
@@ -495,7 +496,7 @@ async def test_grader_call_budget_also_guards_the_async_path():
     from langchain.agents import create_agent
     from langchain.agents.structured_output import ToolStrategy
 
-    from EvoScientist.subagents._factory import _GraderCallBudget
+    from EvoScientist.middleware.rubric import _GraderCallBudget
 
     fake = _BrokenGrader()
     grader = create_agent(
@@ -511,23 +512,10 @@ async def test_grader_call_budget_also_guards_the_async_path():
     assert fake.calls == 2
 
 
-def test_factory_warns_when_openrouter_fable_cannot_grade(tmp_path, caplog):
-    """Fable/Mythos via OpenRouter rejects forced tool_choice and returns JSON
-    missing required fields, so no grader strategy works; say so at build."""
-    with caplog.at_level(logging.WARNING, logger="EvoScientist.subagents._factory"):
+def test_scheduler_build_is_quiet_for_an_unsupported_grader(tmp_path, caplog):
+    """The warning belongs to the first graded run, not to server start."""
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         _build(
             "scheduler", tmp_path, aux_model=_openrouter("anthropic/claude-fable-5.1")
         )
-    assert "claude-fable-5.1" in caplog.text
-    assert "auxiliary_model" in caplog.text
-
-
-def test_factory_stays_quiet_for_supported_openrouter_graders(tmp_path, caplog):
-    """Fable 5 (not 5.1) grades fine through OpenRouter, probed 2026-09-04."""
-    with caplog.at_level(logging.WARNING, logger="EvoScientist.subagents._factory"):
-        _build(
-            "scheduler", tmp_path, aux_model=_openrouter("anthropic/claude-sonnet-5")
-        )
-        _build("scheduler", tmp_path, aux_model=_openrouter("anthropic/claude-fable-5"))
-        _build("scheduler", tmp_path, aux_model=_openrouter("google/gemini-3.8-flash"))
-    assert "rubric" not in caplog.text.lower()
+    assert caplog.text == ""

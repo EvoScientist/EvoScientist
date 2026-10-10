@@ -10,6 +10,8 @@ from collections.abc import Mapping
 from typing import Any
 
 PINNED_SKILL_SOURCE = "pinned_skill"
+RUBRIC_GRADER_SOURCE = "rubric_grader"
+RUBRIC_FEEDBACK_LABEL = "rubric: revision requested"
 
 # Agent Skills spec: lowercase letters, digits and single hyphens, 1-64 chars.
 _SKILL_SLASH = re.compile(r"/([a-z0-9]+(?:-[a-z0-9]+)*)")
@@ -37,12 +39,25 @@ def is_pinned_skill(message: Any) -> bool:
     return message_source(message) == PINNED_SKILL_SOURCE
 
 
+def is_rubric_feedback(message: Any) -> bool:
+    return message_source(message) == RUBRIC_GRADER_SOURCE
+
+
 def pinned_skill_name(message: Any) -> str | None:
     if not is_pinned_skill(message):
         return None
     skill = _additional_kwargs(message).get("skill")
     name = skill.get("name") if isinstance(skill, Mapping) else None
     return name if isinstance(name, str) and name else None
+
+
+def this_run_messages(messages: list) -> list:
+    """Return the messages from the latest message the user typed onwards."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if _field(message, "type") == "human" and message_source(message) is None:
+            return messages[index:]
+    return messages
 
 
 def message_text(content: Any) -> str:
@@ -72,3 +87,12 @@ def parse_skill_slashes(text: str) -> list[str]:
 
 def skill_label(name: str) -> str:
     return f"skill: {name}"
+
+
+def harness_label(message: Any) -> str | None:
+    """One-line label history shows in place of a harness-added message."""
+    if is_pinned_skill(message):
+        return skill_label(pinned_skill_name(message) or "unknown")
+    if is_rubric_feedback(message):
+        return RUBRIC_FEEDBACK_LABEL
+    return None

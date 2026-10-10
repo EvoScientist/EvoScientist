@@ -3539,7 +3539,7 @@ def run_textual_interactive(
             if not messages:
                 return
 
-            from ..message_meta import is_pinned_skill, pinned_skill_name, skill_label
+            from ..message_meta import harness_label
 
             HISTORY_WINDOW = 50
             container = self.query_one("#chat", VerticalScroll)
@@ -3567,11 +3567,9 @@ def run_textual_interactive(
                 content = getattr(message, "content", "") or ""
 
                 if msg_type == "human":
-                    if is_pinned_skill(message):
-                        name = pinned_skill_name(message) or "unknown"
-                        await container.mount(
-                            SystemMessage(skill_label(name), msg_style="dim")
-                        )
+                    label = harness_label(message)
+                    if label is not None:
+                        await container.mount(SystemMessage(label, msg_style="dim"))
                         continue
                     if isinstance(content, list):
                         parts = [

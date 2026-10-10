@@ -381,6 +381,12 @@ class ActionVerdict:
 # disarm one run without disarming the armed graph.
 HITL_SUPPRESSED_KEY = "hitl_suppressed"
 
+# Per-run ``configurable`` key set by the gateways on every call of a run that
+# carries a rubric. The main agent grades only an invocation that has it, so a
+# rubric left in the thread by a run that never reached a verdict cannot grade
+# a later turn or a continuation started by another client.
+RUBRIC_RUN_KEY = "rubric_run"
+
 
 def is_hitl_suppressed(config=None) -> bool:
     """Whether the current run has HITL suppressed via ``configurable``.

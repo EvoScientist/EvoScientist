@@ -107,6 +107,9 @@ class StreamState:
         self.pending_interrupt: dict | None = None
         # ask_user interrupt tracking
         self.pending_ask_user: dict | None = None
+        # Acceptance grading: a pass in progress and the verdicts so far
+        self.rubric_checking = False
+        self.rubric_evaluations: list[dict] = []
         # Cached Markdown object for Rich CLI display (avoids O(n²) re-parsing)
         self._cached_md_text: str = ""
         self._cached_md: object | None = None
@@ -306,7 +309,32 @@ class StreamState:
             error_msg = event.get("message", "Unknown error")
             self.response_text += f"\n\n[Error] {error_msg}"
 
+        elif event_type == "rubric_evaluation_start":
+            self.rubric_checking = True
+
+        elif event_type == "rubric_evaluation":
+            self.rubric_checking = False
+            self.rubric_evaluations.append(event)
+            if (
+                event.get("result") == "needs_revision"
+                and self.response_text.strip()
+                and not self.response_text.endswith("\n\n")
+            ):
+                # A revision is often a short addendum: keep the draft and
+                # start what follows on its own paragraph.
+                self.response_text += "\n\n"
+                if self.latest_text:
+                    self.latest_text += "\n\n"
+
         return event_type
+
+    @property
+    def rubric_result(self) -> str | None:
+        """Verdict of the latest grading pass, or ``None`` when nothing was graded."""
+        if not self.rubric_evaluations:
+            return None
+        result = self.rubric_evaluations[-1].get("result")
+        return result if isinstance(result, str) else None
 
     def visible_tool_counts(self) -> tuple[int, int]:
         """Return (completed, total) counts for tool calls."""
@@ -358,6 +386,8 @@ class StreamState:
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "selected_tools": self.selected_tools,
+            "rubric_evaluations": self.rubric_evaluations,
+            "rubric_checking": self.rubric_checking,
         }
 
 

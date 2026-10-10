@@ -118,3 +118,69 @@ class TestPinnedSkill:
 
 def test_skill_label():
     assert skill_label("alpha") == "skill: alpha"
+
+
+def test_this_run_messages_starts_at_the_latest_typed_message():
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from EvoScientist.message_meta import this_run_messages
+
+    history = [
+        HumanMessage("old task"),
+        AIMessage("old answer"),
+        HumanMessage("new task"),
+        HumanMessage("skill body", additional_kwargs={"lc_source": "pinned_skill"}),
+        AIMessage("draft"),
+        HumanMessage("revise", additional_kwargs={"lc_source": "rubric_grader"}),
+        AIMessage("revised"),
+    ]
+    assert [m.content for m in this_run_messages(history)] == [
+        "new task",
+        "skill body",
+        "draft",
+        "revise",
+        "revised",
+    ]
+
+
+def test_this_run_messages_keeps_everything_without_a_typed_message():
+    from langchain_core.messages import AIMessage
+
+    from EvoScientist.message_meta import this_run_messages
+
+    history = [AIMessage("only an answer")]
+    assert this_run_messages(history) == history
+
+
+def test_rubric_feedback_is_recognised_by_its_source_tag():
+    from langchain_core.messages import HumanMessage
+
+    from EvoScientist.message_meta import RUBRIC_FEEDBACK_LABEL, is_rubric_feedback
+
+    feedback = HumanMessage("revise", additional_kwargs={"lc_source": "rubric_grader"})
+    summary = HumanMessage("summary", additional_kwargs={"lc_source": "summarization"})
+
+    assert is_rubric_feedback(feedback)
+    assert not is_rubric_feedback(summary)
+    assert not is_rubric_feedback(HumanMessage("hello"))
+    assert RUBRIC_FEEDBACK_LABEL == "rubric: revision requested"
+
+
+def test_harness_label_names_what_replaces_the_message():
+    from langchain_core.messages import HumanMessage
+
+    from EvoScientist.message_meta import harness_label
+
+    pinned = HumanMessage(
+        "body",
+        additional_kwargs={"lc_source": "pinned_skill", "skill": {"name": "alpha"}},
+    )
+    unnamed = HumanMessage("body", additional_kwargs={"lc_source": "pinned_skill"})
+    feedback = HumanMessage("revise", additional_kwargs={"lc_source": "rubric_grader"})
+    summary = HumanMessage("summary", additional_kwargs={"lc_source": "summarization"})
+
+    assert harness_label(pinned) == "skill: alpha"
+    assert harness_label(unnamed) == "skill: unknown"
+    assert harness_label(feedback) == "rubric: revision requested"
+    assert harness_label(summary) is None
+    assert harness_label(HumanMessage("hello")) is None

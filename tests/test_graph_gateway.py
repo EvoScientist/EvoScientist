@@ -2854,3 +2854,106 @@ async def test_divergence_server_enqueue_serializes_concurrent_runs():
         )
     ]
     assert events[-1]["type"] == "done"
+
+
+def test_run_streaming_puts_the_rubric_on_the_run_request():
+    agent = MagicMock()
+    gateway = FakeGraphGateway(
+        events=[
+            {"type": "text", "content": "ok"},
+            {"type": "done", "response": "ok"},
+        ]
+    )
+
+    with patch("EvoScientist.stream.display.Live"):
+        display_mod._run_streaming(
+            agent=agent,
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=gateway,
+            rubric="- a",
+        )
+
+    assert [request.rubric for request in gateway.requests] == ["- a"]
+
+
+def _cmd_run_with_fake_stream(monkeypatch, *, verdict, **cmd_kwargs):
+    from types import SimpleNamespace
+
+    from EvoScientist.cli import interactive
+
+    thread_store = FakeThreadStore(generated_thread_id="generated-thread")
+    runtime_gateways = RuntimeGateways(
+        thread_store=thread_store,
+        graph_gateway=LocalGraphGateway(thread_store=thread_store),
+    )
+    seen: dict[str, Any] = {}
+
+    def _run_streaming(**kwargs):
+        seen.update(kwargs)
+        callback = kwargs.get("on_stream_event")
+        if callback is not None:
+            callback("rubric_evaluation", SimpleNamespace(rubric_result=verdict))
+        return "ok"
+
+    monkeypatch.setattr(interactive, "run_streaming", _run_streaming)
+    result = interactive.cmd_run(
+        MagicMock(),
+        "hello",
+        thread_id="generated-thread",
+        show_thinking=False,
+        dirs=SessionDirs(Workspace("/tmp/ws")),
+        model="test-model",
+        runtime_gateways=runtime_gateways,
+        **cmd_kwargs,
+    )
+    return result, seen
+
+
+def test_cmd_run_forwards_the_rubric_and_returns_the_verdict(monkeypatch):
+    result, seen = _cmd_run_with_fake_stream(
+        monkeypatch, verdict="max_iterations_reached", rubric="- a"
+    )
+    assert seen["rubric"] == "- a"
+    assert result == "max_iterations_reached"
+
+
+def test_cmd_run_without_a_rubric_tracks_nothing(monkeypatch):
+    result, seen = _cmd_run_with_fake_stream(monkeypatch, verdict="satisfied")
+    assert seen["rubric"] is None
+    assert seen["on_stream_event"] is None
+    assert result is None
+
+
+def test_resolve_per_run_config_marks_only_a_graded_run():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    marked = resolve_per_run_config("t1", None, rubric_run=True)
+    assert marked["configurable"]["rubric_run"] is True
+    assert "rubric_run" not in resolve_per_run_config("t1", None)["configurable"]
+
+
+async def test_langgraph_server_gateway_marks_a_graded_run():
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    live_cfg = SimpleNamespace(
+        model="live-model", provider="live-provider", recursion_limit=4242
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345", rubric="- a")
+        ):
+            pass
+
+    start = stream.run.starts[0]
+    assert start["input"]["rubric"] == "- a"
+    assert start["config"]["configurable"]["rubric_run"] is True

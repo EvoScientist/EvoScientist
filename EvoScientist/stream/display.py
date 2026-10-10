@@ -653,6 +653,46 @@ def _render_todo_panel(todo_items: list[dict]) -> Panel:
 # ---------------------------------------------------------------------------
 
 
+_RUBRIC_RESULT_LINES = {
+    "satisfied": ("Acceptance criteria satisfied", "green"),
+    "needs_revision": ("Acceptance criteria not yet satisfied", "yellow"),
+    "max_iterations_reached": (
+        "Acceptance criteria not satisfied (pass limit reached)",
+        "yellow",
+    ),
+    "failed": ("Rubric cannot be evaluated", "red"),
+    "grader_error": ("Acceptance criteria check failed", "red"),
+}
+
+
+def _render_rubric_lines(evaluations: list, checking: bool) -> list:
+    """Lines for the grading passes so far, as plain ``Text`` (never markup)."""
+    lines: list = []
+    for evaluation in evaluations:
+        result = str(evaluation.get("result") or "")
+        label, style = _RUBRIC_RESULT_LINES.get(
+            result, ("Acceptance criteria check ended", "yellow")
+        )
+        explanation = str(evaluation.get("explanation") or "").strip()
+        if explanation and result != "satisfied":
+            label = f"{label}: {explanation}"
+        lines.append(Text(label, style=style))
+        if result in ("needs_revision", "max_iterations_reached"):
+            for criterion in evaluation.get("criteria") or []:
+                if not isinstance(criterion, dict) or criterion.get("passed", True):
+                    continue
+                name = str(criterion.get("name") or "criterion")
+                gap = str(criterion.get("gap") or "").strip()
+                lines.append(
+                    Text(f"  - {name}: {gap}" if gap else f"  - {name}", style=style)
+                )
+    if checking:
+        lines.append(
+            Spinner("dots", text=" Checking acceptance criteria...", style="cyan")
+        )
+    return lines
+
+
 def create_streaming_display(
     thinking_text: str = "",
     response_text: str = "",
@@ -678,6 +718,8 @@ def create_streaming_display(
     is_summarizing: bool = False,
     selected_tools: list | None = None,
     status_footer: Any | None = None,
+    rubric_evaluations: list | None = None,
+    rubric_checking: bool = False,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -946,6 +988,13 @@ def create_streaming_display(
                     elements.extend(result_elements)
 
             # Remaining sub-agent sections are rendered below.
+
+    rubric_lines = _render_rubric_lines(
+        rubric_evaluations or [], rubric_checking and not is_final
+    )
+    if rubric_lines:
+        elements.append(Text(""))  # blank separator
+        elements.extend(rubric_lines)
 
     if is_final:
         # Final frame: render todo panel + response (tools/subagents handled above).
@@ -1456,6 +1505,7 @@ def _run_streaming(
     hitl_outcome_fn: Callable[[list, bool], "ApprovalOutcome"] | None = None,
     gateway: GraphGateway,
     runtime: AsyncRuntime | None = None,
+    rubric: str | None = None,
     _state: StreamState | None = None,
     _media_sent: set[str] | None = None,
     _sent_thinking_text: str | None = None,
@@ -1510,6 +1560,7 @@ def _run_streaming(
                 hitl_outcome_fn=hitl_outcome_fn,
                 gateway=gateway,
                 runtime=owned_runtime,
+                rubric=rubric,
                 _state=_state,
                 _media_sent=_media_sent,
                 _sent_thinking_text=_sent_thinking_text,
@@ -1540,6 +1591,7 @@ def _run_streaming(
                 metadata=metadata,
                 configurable_extra=configurable_extra,
                 target=_graph_target_for_local_agent(agent, metadata),
+                rubric=rubric,
             )
         )
         try:

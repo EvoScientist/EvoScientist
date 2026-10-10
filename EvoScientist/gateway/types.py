@@ -26,6 +26,7 @@ def resolve_per_run_config(
     per_run_overrides: Mapping[str, Any] | None = None,
     recursion_limit: int | None = None,
     hitl_suppressed: bool = False,
+    rubric_run: bool = False,
 ) -> dict[str, Any]:
     """Assemble the per-run LangGraph config for a gateway stream call.
 
@@ -51,15 +52,18 @@ def resolve_per_run_config(
     Merges, in precedence order (lowest to highest):
 
     1. ``per_run_overrides`` (server backend session defaults),
-    2. the suppression key (always written, ``True`` or ``False``),
+    2. the suppression key (always written, ``True`` or ``False``) and, for a
+       run that carries a rubric, the ``rubric_run`` marker,
     3. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
        explicit per-run injection is more specific than the session default,
     4. ``thread_id`` - structural key, always set last.
     """
     configurable: dict[str, Any] = dict(per_run_overrides or {})
-    from ..backends import HITL_SUPPRESSED_KEY
+    from ..backends import HITL_SUPPRESSED_KEY, RUBRIC_RUN_KEY
 
     configurable[HITL_SUPPRESSED_KEY] = bool(hitl_suppressed)
+    if rubric_run:
+        configurable[RUBRIC_RUN_KEY] = True
     if configurable_extra:
         configurable.update(configurable_extra)
     configurable["thread_id"] = thread_id
@@ -102,6 +106,8 @@ class RunRequest:
     ``langgraph_sdk``'s ``config.configurable`` on their own; this field is
     the local-gateway equivalent so CLI / TUI / headless serve can bias
     the run identically."""
+    rubric: str | None = None
+    """Acceptance criteria this turn is graded against; ``None`` means ungraded."""
 
 
 @dataclass(frozen=True, slots=True)

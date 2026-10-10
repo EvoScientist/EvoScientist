@@ -908,3 +908,75 @@ class TestIsFinalResponseDelegation:
 # =============================================================================
 # ChannelState queue mechanism (removed — replaced by bus mode in channel.py)
 # =============================================================================
+
+
+class TestRubricState:
+    def test_tracks_checking_and_the_latest_result(self):
+        from EvoScientist.stream.state import StreamState
+
+        state = StreamState()
+        assert state.rubric_result is None
+
+        state.handle_event({"type": "rubric_evaluation_start", "iteration": 0})
+        assert state.rubric_checking is True
+
+        state.handle_event(
+            {"type": "rubric_evaluation", "iteration": 0, "result": "needs_revision"}
+        )
+        assert state.rubric_checking is False
+        assert state.rubric_result == "needs_revision"
+
+        state.handle_event(
+            {"type": "rubric_evaluation", "iteration": 1, "result": "satisfied"}
+        )
+        assert state.rubric_result == "satisfied"
+        assert len(state.rubric_evaluations) == 2
+        args = state.get_display_args()
+        assert args["rubric_checking"] is False
+        assert args["rubric_evaluations"] is state.rubric_evaluations
+
+    def test_a_failed_pass_keeps_the_draft_and_starts_a_new_paragraph(self):
+        """A revision is often a short addendum, so the draft must stay visible."""
+        import io
+
+        from rich.console import Console
+
+        from EvoScientist.stream.display import create_streaming_display
+        from EvoScientist.stream.state import StreamState
+
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "First draft."})
+        state.handle_event(
+            {"type": "rubric_evaluation", "iteration": 0, "result": "needs_revision"}
+        )
+        state.handle_event({"type": "text", "content": "Revised answer."})
+
+        assert state.response_text == "First draft.\n\nRevised answer."
+
+        out = io.StringIO()
+        Console(file=out, width=100, color_system=None).print(
+            create_streaming_display(**state.get_display_args(), is_final=True)
+        )
+        rendered = out.getvalue()
+        assert "First draft." in rendered
+        assert "Revised answer." in rendered
+        assert "First draft.Revised" not in rendered
+
+    def test_a_failed_pass_with_no_answer_yet_adds_nothing(self):
+        from EvoScientist.stream.state import StreamState
+
+        state = StreamState()
+        state.handle_event(
+            {"type": "rubric_evaluation", "iteration": 0, "result": "needs_revision"}
+        )
+        assert state.response_text == ""
+
+    def test_a_satisfied_pass_keeps_the_answer(self):
+        from EvoScientist.stream.state import StreamState
+
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "Final answer."})
+        state.handle_event(
+            {"type": "rubric_evaluation", "iteration": 0, "result": "satisfied"}
+        )
+        assert state.response_text == "Final answer."

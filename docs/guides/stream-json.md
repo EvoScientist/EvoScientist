@@ -57,8 +57,10 @@ fields beyond `type` are listed below.
 | `usage_stats`          | `input_tokens`, `output_tokens`                           | Token usage |
 | `interrupt`            | `interrupt_id`, `action_requests`, `review_configs`      | HITL approval interrupt |
 | `ask_user`             | `interrupt_id`, `questions`, `tool_call_id`              | Agent-initiated clarifying question |
+| `rubric_evaluation_start` | `iteration`                                            | A grading pass began (runs started with `--rubric`); the grader's own work follows as `subagent_*` events named `rubric_grader` |
+| `rubric_evaluation`    | `iteration`, `result`, `explanation`, `criteria`, `unverified` | Verdict of a grading pass; `result` is `satisfied`, `needs_revision`, `max_iterations_reached`, `failed` or `grader_error` |
 | `error`                | `message`                                                | Error during the run |
-| `done`                 | `content`, `response`                                     | Final response; end of stream |
+| `done`                 | `content`, `response`                                     | Final response; end of stream. For a `--rubric` run, `response` holds the answer of every pass, separated by a blank line |
 
 ## Example transcript
 

@@ -46,7 +46,7 @@ from .v3_payloads import (
 
 UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
-LangGraphStreamInput: TypeAlias = dict[str, list[dict[str, object]]] | Command
+LangGraphStreamInput: TypeAlias = dict[str, object] | Command
 _ValueMessageKey: TypeAlias = tuple[str, ...]
 
 
@@ -426,6 +426,33 @@ class _V3EventProcessor:
             return self._process_custom_event(_event_data(event))
         return []
 
+    def _process_rubric_event(self, kind: str, payload: Any) -> list[dict[str, Any]]:
+        raw_iteration = payload.get("iteration")
+        iteration = raw_iteration if isinstance(raw_iteration, int) else 0
+        if kind == "rubric_evaluation_start":
+            return [self.emitter.rubric_evaluation_start(iteration=iteration).data]
+        result = payload.get("result")
+        explanation = payload.get("explanation")
+        criteria = payload.get("criteria")
+        if (
+            result == "needs_revision"
+            and self.full_response.strip()
+            and not self.full_response.endswith("\n\n")
+        ):
+            # Keep the draft; the revision starts on its own paragraph.
+            self.full_response += "\n\n"
+        return [
+            self.emitter.rubric_evaluation(
+                iteration=iteration,
+                result=result if isinstance(result, str) else "",
+                explanation=explanation if isinstance(explanation, str) else "",
+                criteria=[dict(c) for c in criteria if isinstance(c, Mapping)]
+                if isinstance(criteria, list)
+                else [],
+                unverified=payload.get("unverified") is True,
+            ).data
+        ]
+
     def _process_custom_event(self, data: object) -> list[dict[str, Any]]:
         """Translate a ``custom`` stream payload into UI events.
 
@@ -433,11 +460,18 @@ class _V3EventProcessor:
         ``langchain_quickjs`` for in-eval ``task()`` fan-out: ``start`` /
         ``complete`` / ``error`` become ``panel_dispatch_start`` /
         ``panel_dispatch_complete`` / ``panel_dispatch_error`` UI events.
-        Unrecognised event types are ignored so future producers can extend
-        the custom channel without breaking existing consumers.
+        Also handles the acceptance grader's ``rubric_evaluation_start`` /
+        ``rubric_evaluation_end``. Unrecognised event types are ignored so
+        future producers can extend the custom channel without breaking
+        existing consumers.
         """
         payload = _as_raw_map(data)
-        if payload is None or payload.get("type") != "subagent":
+        if payload is None:
+            return []
+        kind = payload.get("type")
+        if kind in ("rubric_evaluation_start", "rubric_evaluation_end"):
+            return self._process_rubric_event(kind, payload)
+        if kind != "subagent":
             return []
         phase = payload.get("phase")
         eval_id = payload.get("eval_id")
@@ -972,6 +1006,7 @@ async def build_agent_stream_input(
     message: GraphRunInput,
     *,
     media: list[str] | None = None,
+    rubric: str | None = None,
 ) -> LangGraphStreamInput:
     """Build the LangGraph run input shared by local and server gateways."""
     if not isinstance(message, str):
@@ -1019,7 +1054,12 @@ async def build_agent_stream_input(
             content_blocks.append({"type": "text", "text": ref_text})
         if content_blocks:
             user_content = content_blocks
-    return {"messages": [{"role": "user", "content": user_content}]}
+    run_input: dict[str, object] = {
+        "messages": [{"role": "user", "content": user_content}]
+    }
+    if rubric is not None:
+        run_input["rubric"] = rubric
+    return run_input
 
 
 async def stream_agent_events(
@@ -1030,6 +1070,7 @@ async def stream_agent_events(
     media: list[str] | None = None,
     events: "ToolSelectionView | None" = None,
     configurable_extra: dict[str, Any] | None = None,
+    rubric: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -1072,6 +1113,7 @@ async def stream_agent_events(
         thread_id,
         configurable_extra,
         hitl_suppressed=hitl_suppressed_for_run(),
+        rubric_run=rubric is not None,
     )
     if metadata:
         config["metadata"] = metadata
@@ -1096,7 +1138,7 @@ async def stream_agent_events(
         await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
     clear_completed_memory_activity_counts()
-    astream_input = await build_agent_stream_input(message, media=media)
+    astream_input = await build_agent_stream_input(message, media=media, rubric=rubric)
 
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []

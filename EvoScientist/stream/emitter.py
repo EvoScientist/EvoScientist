@@ -207,6 +207,36 @@ class StreamEventEmitter:
         )
 
     @staticmethod
+    def rubric_evaluation_start(*, iteration: int) -> StreamEvent:
+        """The acceptance grader started a pass over the finished work."""
+        return StreamEvent(
+            "rubric_evaluation_start",
+            {"type": "rubric_evaluation_start", "iteration": iteration},
+        )
+
+    @staticmethod
+    def rubric_evaluation(
+        *,
+        iteration: int,
+        result: str,
+        explanation: str,
+        criteria: list[dict],
+        unverified: bool,
+    ) -> StreamEvent:
+        """The verdict of one grading pass."""
+        return StreamEvent(
+            "rubric_evaluation",
+            {
+                "type": "rubric_evaluation",
+                "iteration": iteration,
+                "result": result,
+                "explanation": explanation,
+                "criteria": criteria,
+                "unverified": unverified,
+            },
+        )
+
+    @staticmethod
     def done(response: str = "") -> StreamEvent:
         """Done event."""
         return StreamEvent(
