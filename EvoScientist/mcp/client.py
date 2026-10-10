@@ -408,6 +408,15 @@ _MAX_CONCURRENT_CONNECTIONS = 8
 # past 60s.
 _SERVER_GET_TOOLS_TIMEOUT_SECONDS = 40
 
+# Healthy remote servers usually list tools within a few seconds; 20s leaves
+# room for hosted cold starts without holding up CLI/TUI startup for 40s.
+# Unlike stdio servers, they need no first-launch package download.
+_NETWORK_GET_TOOLS_TIMEOUT_SECONDS = 20
+
+# Give a timed-out server a short window to close its session before cancelling
+# cleanup that may itself be waiting on a DELETE response.
+_GET_TOOLS_CLEANUP_GRACE_SECONDS = 5
+
 # Env vars forwarded to stdio MCP subprocesses on top of the MCP SDK's
 # minimal default set (HOME/PATH/USER/…). Without this, servers behind
 # a proxy or with a custom CA bundle silently fail with long timeouts.
@@ -1085,13 +1094,16 @@ ProgressCallback = Callable[[str, str, str], None]
 """
 
 
-def _get_tools_timeout() -> float | None:
-    """The per-server ``get_tools`` limit for this process.
+def _get_tools_timeout(transport: str) -> float | None:
+    """The default ``get_tools`` limit for this transport and process.
 
-    Only ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS`` set) has a deadline:
-    its health check gives up after 60s.  The CLI and TUI have none, so there a
-    slow server only makes startup slower and is left to finish.
+    URL transports always have a discovery deadline. Stdio servers have a
+    deadline only inside ``langgraph dev`` (``EVOSCIENTIST_SERVER_PROCESS=1``),
+    whose health check gives up after 60s. CLI/TUI stdio discovery may wait
+    as long as needed for first-launch package downloads.
     """
+    if transport in _URL_TRANSPORTS:
+        return _NETWORK_GET_TOOLS_TIMEOUT_SECONDS
     if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return _SERVER_GET_TOOLS_TIMEOUT_SECONDS
     return None
@@ -1109,7 +1121,9 @@ async def _load_tools(
 
     Args:
         timeout: Seconds each server gets to return its tools before it is
-            skipped like a failed one.  ``None`` waits as long as it takes.
+            skipped like a failed one. With ``None``, network servers use the
+            default discovery budget. Stdio servers wait as long as needed in
+            the CLI/TUI, or use the server health budget in ``langgraph dev``.
 
     Raises:
         ImportError: if ``langchain-mcp-adapters`` is not installed.
@@ -1150,9 +1164,19 @@ async def _load_tools(
     async def _fetch(name: str) -> tuple[str, list]:
         async with sem:
             _report("start", name)
-            deadline = asyncio.timeout(timeout)
+            server_timeout = (
+                timeout
+                if timeout is not None
+                else _get_tools_timeout(connections[name]["transport"])
+            )
+            deadline = asyncio.timeout(server_timeout)
+            backstop = asyncio.timeout(
+                None
+                if server_timeout is None
+                else server_timeout + _GET_TOOLS_CLEANUP_GRACE_SECONDS
+            )
             try:
-                async with deadline:
+                async with backstop, deadline:
                     tools = await client.get_tools(server_name=name)
                 logger.info("MCP server %r: loaded %d tool(s)", name, len(tools))
                 _report("success", name, str(len(tools)))
@@ -1162,7 +1186,7 @@ async def _load_tools(
                 # TimeoutError raised inside ``get_tools`` (a websocket
                 # handshake, ``socket.timeout``) keeps its real error.
                 if isinstance(exc, TimeoutError) and deadline.expired():
-                    detail = f"timed out after {timeout}s"
+                    detail = f"timed out after {server_timeout}s"
                 else:
                     detail = str(exc)
                 # When the caller wired up ``on_progress`` they own the
@@ -1205,9 +1229,7 @@ async def aload_mcp_tools(
     if not config:
         return {}
     try:
-        server_tools = await _load_tools(
-            config, on_progress=on_progress, timeout=_get_tools_timeout()
-        )
+        server_tools = await _load_tools(config, on_progress=on_progress)
     except Exception as exc:
         logger.warning("MCP tool loading failed: %s", exc)
         return {}
@@ -1260,9 +1282,7 @@ def load_mcp_tools(
 
     try:
         server_tools = runtime.run_sync(
-            lambda: _load_tools(
-                config, on_progress=on_progress, timeout=_get_tools_timeout()
-            )
+            lambda: _load_tools(config, on_progress=on_progress)
         )
     except AsyncRuntimeError as exc:
         # A bridge lifecycle/call-site error is not an MCP availability
