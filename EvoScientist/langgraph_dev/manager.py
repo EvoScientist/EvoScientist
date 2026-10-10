@@ -19,9 +19,11 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -1225,6 +1227,20 @@ def read_tunnel_url(timeout: float = 35.0, poll_interval: float = 0.5) -> str | 
     return None
 
 
+@contextmanager
+def _ignore_sigint_during_cleanup():
+    """Let exit cleanup finish even when Ctrl+C is pressed again."""
+    if threading.current_thread() is not threading.main_thread():
+        # Only the main thread can install signal handlers.
+        yield
+        return
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
     """Gracefully stop a langgraph dev process.
 
@@ -1236,9 +1252,10 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
     (which also hold ``_LOCK``) don't observe partially-cleared state.
     """
     global _PROCESS, _PROCESS_WORKSPACE, _PROCESS_RUN_DIR, SERVED_WORKSPACE
-    with _LOCK:
-        SERVED_WORKSPACE = None
+    with _ignore_sigint_during_cleanup(), _LOCK:
         proc = proc if proc is not None else _PROCESS
+        if proc is None or proc is _PROCESS:
+            SERVED_WORKSPACE = None
         if proc is None:
             # No live process to stop, but stale PID/sidecar files may still
             # be on disk from a previous run that died unexpectedly — fall
@@ -1280,18 +1297,28 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
                     try:
                         proc.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        pass
+                        # Keep the handle and records if shutdown hasn't finished.
+                        return
 
             if proc is _PROCESS:
                 _PROCESS = None
                 _PROCESS_WORKSPACE = None
                 _PROCESS_RUN_DIR = None
-    if RUNTIME.pid_file.exists():
-        try:
-            RUNTIME.pid_file.unlink()
-        except OSError:
-            pass
-    _unlink_workspace_sidecar()
+        if proc is not None:
+            # Older atexit callbacks may name a server replaced by /resume
+            # or /new. They must not erase the current server's records.
+            try:
+                recorded_pid = int(RUNTIME.pid_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return
+            if recorded_pid != proc.pid:
+                return
+        if RUNTIME.pid_file.exists():
+            try:
+                RUNTIME.pid_file.unlink()
+            except OSError:
+                pass
+        _unlink_workspace_sidecar()
 
     # Note: ``.langgraph_api/`` is intentionally NOT removed — it holds
     # langgraph dev's persisted async-task / scheduler / Store state that
