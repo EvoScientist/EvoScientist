@@ -2371,6 +2371,39 @@ class TestNetworkDiscoveryDeadline:
         assert ("error", "hung", "timed out after 0.02s") in events
         assert ("success", "healthy", "1") in events
 
+    async def test_server_that_hangs_while_closing_is_given_up_on(self, monkeypatch):
+        from EvoScientist.mcp import client as mcp_client
+
+        class Client:
+            def __init__(self, connections):
+                pass
+
+            async def get_tools(self, server_name):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    await asyncio.Event().wait()
+
+        monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02)
+        monkeypatch.setattr(
+            mcp_client, "_GET_TOOLS_CLEANUP_GRACE_SECONDS", 0.05, raising=False
+        )
+        monkeypatch.setattr(
+            "langchain_mcp_adapters.client.MultiServerMCPClient", Client
+        )
+        events = []
+
+        result = await asyncio.wait_for(
+            mcp_client._load_tools(
+                {"hung": {"transport": "streamable_http", "url": "http://x/mcp"}},
+                on_progress=lambda *event: events.append(event),
+            ),
+            timeout=1,
+        )
+
+        assert result == {"hung": []}
+        assert ("error", "hung", "timed out after 0.02s") in events
+
     async def test_cli_stdio_startup_is_not_cut_off_by_network_budget(
         self, monkeypatch
     ):

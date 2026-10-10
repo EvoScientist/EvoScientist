@@ -413,6 +413,10 @@ _SERVER_GET_TOOLS_TIMEOUT_SECONDS = 40
 # Unlike stdio servers, they need no first-launch package download.
 _NETWORK_GET_TOOLS_TIMEOUT_SECONDS = 20
 
+# Give a timed-out server a short window to close its session before cancelling
+# cleanup that may itself be waiting on a DELETE response.
+_GET_TOOLS_CLEANUP_GRACE_SECONDS = 5
+
 # Env vars forwarded to stdio MCP subprocesses on top of the MCP SDK's
 # minimal default set (HOME/PATH/USER/…). Without this, servers behind
 # a proxy or with a custom CA bundle silently fail with long timeouts.
@@ -1166,8 +1170,13 @@ async def _load_tools(
                 else _get_tools_timeout(connections[name]["transport"])
             )
             deadline = asyncio.timeout(server_timeout)
+            backstop = asyncio.timeout(
+                None
+                if server_timeout is None
+                else server_timeout + _GET_TOOLS_CLEANUP_GRACE_SECONDS
+            )
             try:
-                async with deadline:
+                async with backstop, deadline:
                     tools = await client.get_tools(server_name=name)
                 logger.info("MCP server %r: loaded %d tool(s)", name, len(tools))
                 _report("success", name, str(len(tools)))
