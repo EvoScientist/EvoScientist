@@ -8,6 +8,7 @@ to be available.
 from __future__ import annotations
 
 import dataclasses
+import signal
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -484,6 +485,61 @@ class TestKillOwnedStaleProcess:
         ):
             assert manager._kill_owned_stale_process(6174) is False
             assert not pid_file.exists()
+
+
+# =============================================================================
+# stop_langgraph_dev — interrupted exit cleanup
+# =============================================================================
+
+
+def test_stop_survives_sigint_and_preserves_other_server_records(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A second Ctrl+C and an old exit hook must not orphan the current server."""
+    proc = MagicMock(pid=42)
+    proc.poll.return_value = None
+    old_proc = MagicMock(pid=41)
+    old_proc.poll.return_value = 0
+    monkeypatch.setattr(manager, "_PROCESS", proc)
+    monkeypatch.setattr(manager, "SERVED_WORKSPACE", tmp_path)
+    runtime_paths.pid_dir.mkdir()
+    runtime_paths.pid_file.write_text("42", encoding="utf-8")
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=42)
+
+    manager.stop_langgraph_dev(old_proc)
+    records_preserved = (
+        runtime_paths.pid_file.exists() and runtime_paths.workspace_sidecar.exists()
+    )
+    workspace_preserved = manager.SERVED_WORKSPACE == tmp_path
+
+    parent = MagicMock()
+
+    def interrupted_walk(*, recursive):
+        signal.raise_signal(signal.SIGINT)
+        return []
+
+    parent.children.side_effect = interrupted_walk
+    monkeypatch.setattr(manager.psutil, "Process", lambda pid: parent)
+    previous_sigint = signal.signal(signal.SIGINT, signal.default_int_handler)
+    interrupted = False
+    try:
+        try:
+            manager.stop_langgraph_dev(proc)
+        except KeyboardInterrupt:
+            interrupted = True
+        restored_sigint = signal.getsignal(signal.SIGINT)
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+
+    assert not interrupted, "Ctrl+C abandoned the server's exit cleanup"
+    assert records_preserved, "an old exit hook deleted the current server's records"
+    assert workspace_preserved
+    parent.terminate.assert_called_once()
+    proc.wait.assert_called_once_with(timeout=5)
+    assert manager._PROCESS is None
+    assert not runtime_paths.pid_file.exists()
+    assert not runtime_paths.workspace_sidecar.exists()
+    assert restored_sigint is signal.default_int_handler
 
 
 # =============================================================================
