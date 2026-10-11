@@ -486,7 +486,11 @@ class InboundConsumer:
             # Total cap is checked after each stream, before the next
             # decision. The human budget is checked only when a prompt
             # would be shown (issue #469).
+            from ..backends import approve_all_configurable_extra
             from .hitl_budget import HITL_BUDGET_STOP_NOTICE, hitl_budget_stop
+
+            # Which calls carry this chat's grant: see ``_hitl_when``.
+            approve_all_carry = self._approval_policy.is_session_granted(session_key)
 
             while True:
                 _hitl_round += 1
@@ -529,6 +533,9 @@ class InboundConsumer:
                                 if isinstance(stream_input, str)
                                 else None,
                                 target=GraphTarget(local_graph=self.agent),
+                                configurable_extra=approve_all_configurable_extra(
+                                    approve_all_carry
+                                ),
                             )
                         ),
                         self._inference_timeout,
@@ -641,6 +648,9 @@ class InboundConsumer:
                     )
 
                     stream_input = Command(resume=result)
+                    approve_all_carry = self._approval_policy.is_session_granted(
+                        session_key
+                    )
                     continue
 
                 # HITL: resolve the interrupt through the shared engine.
@@ -688,6 +698,9 @@ class InboundConsumer:
 
                 stream_input = build_hitl_resume(
                     interrupt_data.get("interrupt_id"), outcome.decisions
+                )
+                approve_all_carry = outcome.session_granted and all(
+                    decision.get("type") == "approve" for decision in outcome.decisions
                 )
                 # continue to next HITL round
 

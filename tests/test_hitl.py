@@ -849,6 +849,38 @@ class TestInterruptOnWiring:
         assert _hitl_when(suppressed_req) is False
         assert _hitl_when(armed_req) is True
 
+    def test_hitl_when_disarms_under_a_session_grant(self):
+        """configurable.hitl_approve_all=True -> no interrupt, with or without suppression."""
+        from types import SimpleNamespace
+
+        from EvoScientist.EvoScientist import _hitl_when
+
+        def _req(**configurable):
+            return SimpleNamespace(
+                runtime=SimpleNamespace(config={"configurable": configurable})
+            )
+
+        assert _hitl_when(_req(hitl_suppressed=False, hitl_approve_all=True)) is False
+        assert _hitl_when(_req(hitl_suppressed=True, hitl_approve_all=True)) is False
+        assert _hitl_when(_req(hitl_suppressed=False, hitl_approve_all=False)) is True
+        assert _hitl_when(_req(hitl_suppressed=False)) is True
+        # Only a literal True is a grant.
+        assert _hitl_when(_req(hitl_suppressed=False, hitl_approve_all="true")) is True
+
+    def test_hitl_when_reads_the_grant_from_the_ambient_config(self, monkeypatch):
+        import langgraph.config as lg_config
+
+        from EvoScientist.EvoScientist import _hitl_when
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {
+                "configurable": {"hitl_suppressed": False, "hitl_approve_all": True}
+            },
+        )
+        assert _hitl_when(None) is False
+
     def test_hitl_interrupt_on_reaches_create_deep_agent(self, workspace):
         """The kwarg must actually reach ``create_deep_agent`` — not just the
         pure helper — so a future edit that drops it or re-adds a bare
@@ -1248,3 +1280,72 @@ class TestHitlResumeKeying:
                 build_hitl_resume(ints[0].id, [{"type": "approve"}]), config=cfg
             )
         assert not res.get("__interrupt__", [])  # drained, no crash
+
+    def test_a_keyed_resume_releases_the_other_parked_approval(self):
+        """Two sub-agents each park an approval. Under a session grant the
+        client answers one id; the call carries the grant, so the other is not
+        parked again - what the client's next auto-answer would have done."""
+        import uuid
+
+        from deepagents import create_deep_agent
+        from langchain_core.language_models.fake_chat_models import (
+            FakeMessagesListChatModel,
+        )
+        from langchain_core.messages import AIMessage, ToolCall
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from EvoScientist.backends import build_hitl_resume
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        class _SM(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        def _sub_model():
+            call = ToolCall(name="execute", args={"command": "echo hi"}, id="e1")
+            done = AIMessage(content="sub done")
+            return _SM(responses=[AIMessage(content="", tool_calls=[call]), done, done])
+
+        top = AIMessage(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    name="task",
+                    args={"description": "A", "subagent_type": "agent-a"},
+                    id="t1",
+                ),
+                ToolCall(
+                    name="task",
+                    args={"description": "B", "subagent_type": "agent-b"},
+                    id="t2",
+                ),
+            ],
+        )
+        agent = create_deep_agent(
+            model=_SM(responses=[top] + [AIMessage(content="done")] * 6),
+            subagents=[
+                {
+                    "name": name,
+                    "description": name,
+                    "system_prompt": name,
+                    "model": _sub_model(),
+                }
+                for name in ("agent-a", "agent-b")
+            ],
+            interrupt_on=_build_hitl_interrupt_on(),
+            checkpointer=InMemorySaver(),
+        )
+        thread = {"thread_id": str(uuid.uuid4()), "hitl_suppressed": False}
+        res = agent.invoke(
+            {"messages": [("user", "go")]}, config={"configurable": thread}
+        )
+        parked = res.get("__interrupt__", [])
+        assert len(parked) == 2
+
+        res = agent.invoke(
+            build_hitl_resume(parked[0].id, [{"type": "approve"}]),
+            config={"configurable": {**thread, "hitl_approve_all": True}},
+        )
+        assert not res.get("__interrupt__", [])
+        task_results = [m.content for m in res["messages"] if m.type == "tool"]
+        assert task_results == ["sub done", "sub done"]

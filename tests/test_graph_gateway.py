@@ -1490,6 +1490,49 @@ async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
     assert start["config"]["configurable"]["hitl_suppressed"] is True
 
 
+async def test_server_gateway_never_forwards_the_session_grant():
+    """A keyed fresh run on a thread parked at a declined approval would run the
+    declined batch on the server, so this gateway drops the key from every run."""
+    cfg = SimpleNamespace(model="m", provider="p", auto_mode=False, auto_approve=False)
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg):
+        async for _event in gateway.stream_events(
+            RunRequest(
+                message="hi",
+                thread_id="abc12345",
+                configurable_extra={
+                    "hitl_approve_all": True,
+                    "active_teams": ["reviewer"],
+                },
+            )
+        ):
+            pass
+
+    (start,) = stream.run.starts
+    configurable = start["config"]["configurable"]
+    assert "hitl_approve_all" not in configurable
+    assert configurable["active_teams"] == ["reviewer"]
+    assert configurable["hitl_suppressed"] is False
+
+
+def test_local_run_config_carries_the_session_grant():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    run_config = resolve_per_run_config(
+        "t1", {"hitl_approve_all": True}, hitl_suppressed=False
+    )
+    assert run_config["configurable"]["hitl_approve_all"] is True
+    assert run_config["configurable"]["hitl_suppressed"] is False
+
+
 async def test_langgraph_server_gateway_warns_on_pre_run_state_fetch_failure(
     caplog: pytest.LogCaptureFixture,
 ):

@@ -672,6 +672,14 @@ class ApprovalOutcome:
     ``prompted`` is False only when the policy auto-resolved the interrupt
     without asking a human. The consumer's HITL loop counts only prompted
     rounds against its round budget (issue #469).
+
+    ``session_granted`` is True only when ``decisions`` came from a session
+    "approve all" grant that was already in force (all approve by
+    construction). Config rules and human replies, the reply that grants
+    included, leave it False: a caller may send the grant to the graph only
+    with an answer that carries it. ``grant_in_force`` says whether the
+    session holds a grant once this outcome is returned, which the reply that
+    grants does too.
     """
 
     decisions: list[dict] | None = None
@@ -680,6 +688,8 @@ class ApprovalOutcome:
     # True only when a human prompt was skipped because the caller's human
     # budget was already spent. Auto fast paths leave this False.
     budget_exhausted: bool = False
+    session_granted: bool = False
+    grant_in_force: bool = False
 
 
 async def resolve_approval(
@@ -705,9 +715,16 @@ async def resolve_approval(
     ``unrecognized_reply`` (see
     :class:`ApprovalOutcome` for the per-driver policy).
     """
+    # Read before the snapshot: a grant given by this very reply must not be
+    # reported as the answer's source, and an empty batch never takes the
+    # grant branch.
+    in_force = policy.is_session_granted(session_key)
+    granted = bool(action_requests) and in_force
     auto, policy_rejections = policy.decision_snapshot(session_key, action_requests)
     if auto is not None:
-        return ApprovalOutcome(decisions=auto)
+        return ApprovalOutcome(
+            decisions=auto, session_granted=granted, grant_in_force=in_force
+        )
 
     # After the session/config fast path, before any prompt. A spent human
     # budget must not ask, and must not have blocked the auto return above.
@@ -737,6 +754,7 @@ async def resolve_approval(
                 action_requests, policy_rejections
             ),
             prompted=True,
+            grant_in_force=True,
         )
     if decision == "approve":
         await io.send(APPROVED_FEEDBACK)

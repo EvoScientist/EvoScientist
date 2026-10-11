@@ -381,6 +381,11 @@ class ActionVerdict:
 # disarm one run without disarming the armed graph.
 HITL_SUPPRESSED_KEY = "hitl_suppressed"
 
+# Per-run ``configurable`` key carrying a session's "approve all" grant. Read
+# only by the HITL ``when`` predicate: an explicit human grant approves
+# everything, so unlike ``hitl_suppressed`` it does not arm the backend guard.
+HITL_APPROVE_ALL_KEY = "hitl_approve_all"
+
 # Per-run ``configurable`` key set by the gateways on every call of a run that
 # carries a rubric. The main agent grades only an invocation that has it, so a
 # rubric left in the thread by a run that never reached a verdict cannot grade
@@ -421,6 +426,34 @@ def is_hitl_suppressed(config=None) -> bool:
 
         return bool(_ensure_config().auto_approve)
     return bool(configurable[HITL_SUPPRESSED_KEY])
+
+
+def is_hitl_approve_all(config=None) -> bool:
+    """Whether the current call carries a session's "approve all" grant.
+
+    Reads :data:`HITL_APPROVE_ALL_KEY` off an explicit *config* or the ambient
+    run config. Only a literal ``True`` grants, and an absent key never does:
+    the grant belongs to the client that sent it, so there is no fallback to
+    the serving process's own settings.
+    """
+    if config is None:
+        try:
+            from langgraph.config import get_config
+
+            config = get_config()
+        except Exception:
+            return False
+    if not isinstance(config, dict):
+        return False
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return False
+    return configurable.get(HITL_APPROVE_ALL_KEY) is True
+
+
+def approve_all_configurable_extra(active: bool) -> dict[str, Any] | None:
+    """The ``configurable_extra`` part for a call that carries the session grant."""
+    return {HITL_APPROVE_ALL_KEY: True} if active else None
 
 
 def hitl_suppressed_for_run(config=None) -> bool:

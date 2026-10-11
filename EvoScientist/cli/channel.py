@@ -791,6 +791,27 @@ def channel_ask_user_prompt(
     )
 
 
+def channel_session_granted(msg: ChannelMessage) -> bool:
+    """Whether this message's chat has an "approve all" grant in force."""
+    return _approval_policy.is_session_granted(_channel_message_session_key(msg))
+
+
+def channel_turn_configurable_extra(
+    msg: ChannelMessage, extra: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """*extra* for a turn this message starts, plus its chat's grant if it holds one.
+
+    The turn loop cannot see the chat, so the channel-origin call sites tell
+    it here whether the turn starts under an "approve all".
+    """
+    from ..backends import approve_all_configurable_extra
+    from ..rubric_session import merge_configurable_extra
+
+    return merge_configurable_extra(
+        extra, approve_all_configurable_extra(channel_session_granted(msg))
+    )
+
+
 def channel_hitl_prompt(
     action_requests: list,
     msg: ChannelMessage,
@@ -811,9 +832,14 @@ def channel_hitl_prompt(
     and whether the budget skipped the prompt.
     """
     session_key = _channel_message_session_key(msg)
+    in_force = _approval_policy.is_session_granted(session_key)
     decisions = _approval_policy.auto_decision(session_key, action_requests)
     if decisions is not None:
-        return ApprovalOutcome(decisions=decisions)
+        return ApprovalOutcome(
+            decisions=decisions,
+            session_granted=bool(action_requests) and in_force,
+            grant_in_force=in_force,
+        )
     if human_budget_exhausted:
         return ApprovalOutcome(budget_exhausted=True)
 

@@ -1203,21 +1203,30 @@ def _get_default_middleware(
 
 
 def _hitl_when(request) -> bool:
-    """HITL ``when`` predicate: interrupt unless the run is suppressed.
+    """HITL ``when`` predicate: interrupt unless the call says not to.
 
-    Reads ``configurable.hitl_suppressed`` off the run's own config, carried
-    on ``request.runtime.config`` — langchain builds the runtime for both its
+    A call skips the interrupt when its config carries
+    ``configurable.hitl_suppressed`` (an unattended run, backend-guarded) or
+    ``configurable.hitl_approve_all`` (the session's human "approve all").
+    Both are read off the run's own config, carried on
+    ``request.runtime.config`` — langchain builds the runtime for both its
     batch (``tool=None``) and per-call request shapes, so the request always
     carries it (batch mode falls back to an empty config when langgraph has
     none, which arms — same as before). Falls back to the ambient
     ``get_config()`` when there is no runtime, and arms (``True``) when there
-    is no config at all: outside a run there is nothing to suppress.
+    is no config at all: outside a run there is nothing to skip.
+
+    The predicate is evaluated again when a parked approval is resumed, and a
+    call that skips then drops that resume's decisions. Clients therefore send
+    the grant with an approval answer only when the grant itself produced it
+    (all approve; never the reply that grants), and otherwise with a
+    question's answer or a turn's first call while a grant is in force.
     """
-    from .backends import is_hitl_suppressed
+    from .backends import is_hitl_approve_all, is_hitl_suppressed
 
     runtime = getattr(request, "runtime", None)
     config = getattr(runtime, "config", None)
-    return not is_hitl_suppressed(config)
+    return not (is_hitl_suppressed(config) or is_hitl_approve_all(config))
 
 
 def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:

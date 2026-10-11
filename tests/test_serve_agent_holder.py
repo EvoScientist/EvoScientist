@@ -757,6 +757,59 @@ def test_serve_process_message_uses_runtime_workspace_from_state():
     assert captured["meta_dirs"] == restored
 
 
+@pytest.mark.parametrize("granted", [True, False])
+def test_serve_process_message_starts_a_granted_chat_with_the_grant(granted):
+    """The turn loop cannot see the chat, so the handler says whether its
+    "approve all" is in force; another chat's grant must not count."""
+    from EvoScientist.cli import channel as channel_mod
+
+    msg = ChannelMessage(
+        msg_id="msg-3",
+        content="hello",
+        sender="channel-user",
+        channel_type="imessage",
+        metadata={},
+        channel_ref=None,
+        bus_ref=None,
+        chat_id="chat-a",
+        message_id="ts-3",
+    )
+    thread_store = _thread_store()
+    state = _runtime_state(
+        agent=_agent(),
+        thread_id="tid",
+        dirs=SessionDirs(Workspace("/ws")),
+        thread_store=thread_store,
+        runtime_gateways=_runtime_gateways(thread_store),
+    )
+    channel_mod._approval_policy.clear_sessions()
+    channel_mod._approval_policy.grant_session(
+        "imessage:chat-a" if granted else "imessage:chat-b"
+    )
+    try:
+        with (
+            AsyncRuntime(thread_name="test-serve-runtime") as async_runtime,
+            patch(
+                "EvoScientist.cli.commands.dispatch_channel_slash_command",
+                new=AsyncMock(return_value=False),
+            ),
+            patch("EvoScientist.cli.commands.build_metadata", return_value={}),
+            patch(
+                "EvoScientist.cli.tui_runtime.run_streaming", return_value="ok"
+            ) as run_streaming,
+        ):
+            state.async_runtime = async_runtime
+            _register_channel_request(msg)
+            _serve_process_message(
+                msg, runtime_state=state, model="model", show_thinking=False
+            )
+    finally:
+        channel_mod._approval_policy.clear_sessions()
+
+    extra = run_streaming.call_args.kwargs["configurable_extra"] or {}
+    assert extra.get("hitl_approve_all", False) is granted
+
+
 def test_serve_channel_send_does_not_block_owned_runtime_loop():
     """Channel I/O is scheduled on the bus loop and settled before the reply."""
     from EvoScientist.cli import channel as channel_mod

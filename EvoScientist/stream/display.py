@@ -1265,12 +1265,16 @@ class _HitlResolution:
     human budget is spent). ``human_prompted`` says whether a human was
     asked this round. ``budget_exhausted`` is set only when a human prompt
     was skipped because the human-round budget was already spent; auto
-    fast paths never set it (issue #469).
+    fast paths never set it (issue #469). ``session_granted`` is True only
+    when the decisions came from a session "approve all" already in force;
+    ``grant_in_force`` also covers the channel reply that grants.
     """
 
     decisions: list[dict] | None
     human_prompted: bool
     budget_exhausted: bool = False
+    session_granted: bool = False
+    grant_in_force: bool = False
 
 
 def _resolve_hitl_approval(
@@ -1306,9 +1310,13 @@ def _resolve_hitl_approval(
 
     # Session "approve all" is an explicit human opt-in → blanket-approve
     # everything (dangerous set included), unlike unattended auto_approve below.
+    # Read here, before any prompt: the prompt is where the grant gets set.
     if _session_auto_approve:
         return _HitlResolution(
-            [{"type": "approve"} for _ in action_requests], human_prompted=False
+            [{"type": "approve"} for _ in action_requests],
+            human_prompted=False,
+            session_granted=True,
+            grant_in_force=True,
         )
 
     # Config-rule fast path (shared with the TUI). Returns full decisions when
@@ -1325,7 +1333,12 @@ def _resolve_hitl_approval(
         outcome = outcome_fn(action_requests, human_budget_exhausted)
         if outcome.budget_exhausted:
             return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
-        return _HitlResolution(outcome.decisions, human_prompted=outcome.prompted)
+        return _HitlResolution(
+            outcome.decisions,
+            human_prompted=outcome.prompted,
+            session_granted=outcome.session_granted,
+            grant_in_force=outcome.session_granted or outcome.grant_in_force,
+        )
 
     # After the auto fast paths: a spent human budget must not prompt, but
     # it also must not have blocked the session grant / allow-list above.
@@ -1635,6 +1648,20 @@ def _run_streaming(
         state.response_text = final_text
         return final_text
 
+    from ..backends import HITL_APPROVE_ALL_KEY, approve_all_configurable_extra
+    from ..rubric_session import merge_configurable_extra
+
+    # Which calls carry the session grant: see ``_hitl_when``. The caller's
+    # extras carry the key when the turn starts under a channel's grant; from
+    # there each call gets its own extras, built without it.
+    base_extra = {
+        key: value
+        for key, value in (configurable_extra or {}).items()
+        if key != HITL_APPROVE_ALL_KEY
+    }
+    turn_granted = (configurable_extra or {}).get(HITL_APPROVE_ALL_KEY) is True
+    approve_all_carry = turn_granted or _session_auto_approve
+
     async def _consume() -> None:
         nonlocal _sent_thinking_text, _todo_sent
         event_stream = gateway.stream_events(
@@ -1642,7 +1669,9 @@ def _run_streaming(
                 message=message,
                 thread_id=thread_id,
                 metadata=metadata,
-                configurable_extra=configurable_extra,
+                configurable_extra=merge_configurable_extra(
+                    base_extra, approve_all_configurable_extra(approve_all_carry)
+                ),
                 target=_graph_target_for_local_agent(agent, metadata),
                 rubric=rubric,
             )
@@ -1968,6 +1997,7 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
                 message = Command(resume=result)
+                approve_all_carry = turn_granted or _session_auto_approve
                 continue
 
             # HITL: check for pending interrupt and handle approval
@@ -2011,6 +2041,11 @@ def _run_streaming(
                     if is_stream_cancel_requested(cancel_scope):
                         return _stopped_response()
                     message = build_hitl_resume(interrupt_id, resolution.decisions)
+                    turn_granted = turn_granted or resolution.grant_in_force
+                    approve_all_carry = resolution.session_granted and all(
+                        decision.get("type") == "approve"
+                        for decision in resolution.decisions
+                    )
                     continue
 
             # Everything (tools, thinking, todos, response) is already on screen

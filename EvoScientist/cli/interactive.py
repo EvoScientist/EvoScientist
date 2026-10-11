@@ -1217,7 +1217,9 @@ def cmd_interactive(
                             show_thinking=show_thinking,
                             interactive=True,
                             metadata=meta,
-                            configurable_extra=_run_configurable_extra("thread"),
+                            configurable_extra=_ch_mod.channel_turn_configurable_extra(
+                                msg, _run_configurable_extra("thread")
+                            ),
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,

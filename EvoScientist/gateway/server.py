@@ -645,7 +645,11 @@ class LangGraphServerGateway:
         server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
         overrides the server's construction-time ``.with_config`` binding.
         """
-        from ..backends import hitl_suppressed_for_run, model_retry_for_run
+        from ..backends import (
+            HITL_APPROVE_ALL_KEY,
+            hitl_suppressed_for_run,
+            model_retry_for_run,
+        )
         from ..EvoScientist import _ensure_config
 
         cfg = _ensure_config()
@@ -667,10 +671,14 @@ class LangGraphServerGateway:
             if target is not None
             else {}
         )
+        # The session grant never reaches the server. The server turns a new
+        # message on a thread parked at an approval into a resume and keeps
+        # this run's config, so a keyed run would execute a batch nobody
+        # approved.
         extra = {
             key: value
             for key, value in (configurable_extra or {}).items()
-            if key not in folders
+            if key not in folders and key != HITL_APPROVE_ALL_KEY
         }
         config = resolve_per_run_config(
             thread_id,

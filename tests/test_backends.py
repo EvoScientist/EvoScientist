@@ -2221,6 +2221,67 @@ class TestIsHitlSuppressed:
         assert is_hitl_suppressed() is True
 
 
+class TestIsHitlApproveAll:
+    """The session's "approve all" grant read off configurable.hitl_approve_all."""
+
+    def test_explicit_true(self):
+        from EvoScientist.backends import HITL_APPROVE_ALL_KEY, is_hitl_approve_all
+
+        assert HITL_APPROVE_ALL_KEY == "hitl_approve_all"
+        assert is_hitl_approve_all({"configurable": {"hitl_approve_all": True}}) is True
+
+    def test_absent_key_is_not_a_grant(self, monkeypatch):
+        """No fallback to the serving process: only a client that sent the key grants."""
+        from types import SimpleNamespace
+
+        import EvoScientist.EvoScientist as evo_mod
+        from EvoScientist.backends import is_hitl_approve_all
+
+        monkeypatch.setattr(
+            evo_mod,
+            "_ensure_config",
+            lambda config=None: SimpleNamespace(auto_approve=True),
+        )
+        assert is_hitl_approve_all({"configurable": {}}) is False
+        assert is_hitl_approve_all({}) is False
+
+    def test_only_a_literal_true_grants(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        for value in ("true", 1, [True], {"on": True}, None, False):
+            config = {"configurable": {"hitl_approve_all": value}}
+            assert is_hitl_approve_all(config) is False, value
+
+    def test_malformed_configurable_is_false(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        assert is_hitl_approve_all({"configurable": "nope"}) is False
+        assert is_hitl_approve_all("not-a-dict") is False
+
+    def test_no_ambient_config_is_false(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        assert is_hitl_approve_all() is False
+
+    def test_reads_ambient_config_when_none_passed(self, monkeypatch):
+        import langgraph.config as lg_config
+
+        from EvoScientist.backends import is_hitl_approve_all
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {"configurable": {"hitl_approve_all": True}},
+        )
+        assert is_hitl_approve_all() is True
+
+    def test_configurable_extra_helper(self):
+        from EvoScientist.backends import approve_all_configurable_extra
+
+        assert approve_all_configurable_extra(True) == {"hitl_approve_all": True}
+        assert approve_all_configurable_extra(False) is None
+
+
 class TestHitlSuppressedForRun:
     """Pre-run derivation of the suppression flag from config.auto_mode."""
 
@@ -2296,6 +2357,20 @@ class TestEffectiveGuardDangerous:
         import EvoScientist.backends as backends_mod
 
         monkeypatch.setattr(backends_mod, "is_hitl_suppressed", lambda: False)
+        be = self._backend(tmp_path, guard_dangerous=False)
+        assert be._effective_guard_dangerous() is False
+
+    def test_session_grant_alone_does_not_guard(self, tmp_path, monkeypatch):
+        """A human "approve all" approves everything: the grant key must not arm the guard."""
+        import langgraph.config as lg_config
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {
+                "configurable": {"hitl_suppressed": False, "hitl_approve_all": True}
+            },
+        )
         be = self._backend(tmp_path, guard_dangerous=False)
         assert be._effective_guard_dangerous() is False
 

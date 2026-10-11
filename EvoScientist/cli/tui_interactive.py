@@ -1668,6 +1668,7 @@ def run_textual_interactive(
             cancel_scope: str | None = None,
             thread_id_override: str | None = None,
             rubric_mode: str | None = "thread",
+            approve_all_at_start: bool = False,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -1682,6 +1683,8 @@ def run_textual_interactive(
                     the agent.
                 skip_user_message: If True, don't mount UserMessage (caller
                     already mounted it — e.g. channel messages with labels).
+                approve_all_at_start: The channel this turn came from already
+                    has an "approve all" grant in force.
                 channel_hitl_fn: Optional channel-based HITL approval function.
                     When provided (channel messages), this is called instead
                     of mounting the ApprovalWidget. It receives
@@ -1936,6 +1939,12 @@ def run_textual_interactive(
             # A pause was stored but no resume was built. Close it without
             # the budget-stop notice (that notice is only for a spent cap).
             _hitl_unresolved = False
+            # Which calls carry the session grant: see ``_hitl_when``. Decided
+            # where each answer is built, never from the flag at a round's top.
+            from ..backends import approve_all_configurable_extra
+
+            _turn_granted = approve_all_at_start
+            _approve_all_carry = _turn_granted or self._hitl_auto_approve
             while True:
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
@@ -1967,6 +1976,7 @@ def run_textual_interactive(
                         self._rubric_configurable_extra(
                             thread_id_override or self._conversation_tid, rubric_mode
                         ),
+                        approve_all_configurable_extra(_approve_all_carry),
                     )
                     events = iter_with_stream_cancel(
                         graph_gateway.stream_events(
@@ -2452,12 +2462,17 @@ def run_textual_interactive(
                                 )
 
                                 _stream_input = Command(resume=result)
+                                _approve_all_carry = (
+                                    _turn_granted or self._hitl_auto_approve
+                                )
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop
 
                         elif event_type == "interrupt":
                             action_reqs = event.get("action_requests", [])
                             interrupt_id = event.get("interrupt_id")
+                            # Only an answer produced by the grant sets it below.
+                            _approve_all_carry = False
 
                             # HITL: session "approve all" blanket-approves.
                             # The human budget does not apply; the total cap
@@ -2477,6 +2492,7 @@ def run_textual_interactive(
                                 _stream_input = build_hitl_resume(
                                     interrupt_id, decisions
                                 )
+                                _approve_all_carry = True
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop
 
@@ -2513,6 +2529,18 @@ def run_textual_interactive(
 
                                     _stream_input = build_hitl_resume(
                                         interrupt_id, decisions
+                                    )
+                                    _turn_granted = (
+                                        _turn_granted
+                                        or outcome.session_granted
+                                        or outcome.grant_in_force
+                                    )
+                                    _approve_all_carry = (
+                                        outcome.session_granted
+                                        and all(
+                                            _d.get("type") == "approve"
+                                            for _d in decisions
+                                        )
                                     )
                                     _hitl_resuming = True
                                     break  # re-enter outer HITL loop
@@ -3101,6 +3129,7 @@ def run_textual_interactive(
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,
                         cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
+                        approve_all_at_start=_ch_mod.channel_session_granted(msg),
                     )
                 except Exception as exc:
                     response = f"Error: {exc}"
