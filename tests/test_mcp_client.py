@@ -2386,7 +2386,7 @@ class TestNetworkDiscoveryDeadline:
 
         monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02)
         monkeypatch.setattr(
-            mcp_client, "_GET_TOOLS_CLEANUP_GRACE_SECONDS", 0.05, raising=False
+            mcp_client, "_GET_TOOLS_CLEANUP_GRACE_SECONDS", 0.05
         )
         monkeypatch.setattr(
             "langchain_mcp_adapters.client.MultiServerMCPClient", Client
