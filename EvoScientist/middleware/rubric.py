@@ -754,6 +754,7 @@ def create_rubric_middleware(
     task_status: Callable[[str, str], Awaitable[str]] | None = None,
     process_status: Callable[[str], str] | None = None,
     server_available: Callable[[], Awaitable[bool]] | None = None,
+    model_retry: AgentMiddleware | None = None,
 ) -> EvoRubricMiddleware:
     """Acceptance grading for a run that carries ``rubric`` (no-op otherwise).
 
@@ -767,6 +768,8 @@ def create_rubric_middleware(
     from deepagents import FilesystemMiddleware
     from deepagents.middleware import UnsupportedContentMiddleware
     from langchain_core._api import LangChainBetaWarning
+
+    from .model_retry import ModelCallBoundaryMiddleware
 
     # Eviction thresholds off: both eviction paths write files through the
     # backend, which would let the grader touch the shared workspace.
@@ -783,10 +786,15 @@ def create_rubric_middleware(
             model=model,
             system_prompt=GRADER_SYSTEM_PROMPT + GRADER_FILE_CHECK_PROMPT,
             grader_middleware=[
+                *([model_retry] if model_retry is not None else []),
                 grader_fs,
                 _GraderCallBudget(max_calls=GRADER_MAX_CALLS),
-                # create_agent does not add it; last so it sees the final request.
+                # create_agent does not add it; after every middleware that
+                # edits the request, so it sees the final one.
                 UnsupportedContentMiddleware(),
+                # The call marks come with the retry layer: it is what rejects
+                # an error-finished grader response the marks flag.
+                *([ModelCallBoundaryMiddleware()] if model_retry is not None else []),
             ],
             prepare_messages=prepare_messages,
             max_iterations=max_iterations,

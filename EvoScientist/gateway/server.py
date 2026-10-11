@@ -645,7 +645,7 @@ class LangGraphServerGateway:
         server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
         overrides the server's construction-time ``.with_config`` binding.
         """
-        from ..backends import hitl_suppressed_for_run
+        from ..backends import hitl_suppressed_for_run, model_retry_for_run
         from ..EvoScientist import _ensure_config
 
         cfg = _ensure_config()
@@ -679,6 +679,7 @@ class LangGraphServerGateway:
             recursion_limit=recursion_limit,
             hitl_suppressed=hitl_suppressed_for_run(cfg),
             rubric_run=rubric_run,
+            model_retry=model_retry_for_run(cfg),
         )
         for key, value in folders.items():
             if value:
@@ -744,7 +745,8 @@ class LangGraphServerGateway:
             if request.message.resume is not None:
                 # Known divergence: the resume goes through run.respond,
                 # which takes no config, so the per-run overrides above
-                # (model / recursion_limit / the rubric marker) are NOT
+                # (model / recursion_limit / the rubric marker / the
+                # model_retry tier) are NOT
                 # applied to a resumed turn - it runs with the thread's
                 # construction-time binding until the next fresh run
                 # re-applies them. The

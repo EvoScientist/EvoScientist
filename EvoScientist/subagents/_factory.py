@@ -58,6 +58,7 @@ def build_async_subagent_graph(
         _get_default_backend,
         _get_default_middleware,
         _inject_subagent_middleware,
+        _model_retry_middleware,
     )
     from EvoScientist.tools import make_skill_manager_tool, tavily_search, think_tool
     from EvoScientist.utils import load_subagents, resolve_subagent_tools
@@ -135,6 +136,8 @@ def build_async_subagent_graph(
         workspace=workspace,
         chat_model=model,
         backend=backend,
+        unattended=name == "scheduler",
+        model_retry_honors_run_key=name != "scheduler",
     )
 
     # ``backend=`` matters: without it the per-run SummarizationMiddleware
@@ -148,6 +151,8 @@ def build_async_subagent_graph(
         memory_source_agent=name,
         backend=backend,
         chat_model=model,
+        unattended=name == "scheduler",
+        model_retry_honors_run_key=name != "scheduler",
     )
 
     if name == "scheduler":
@@ -162,6 +167,9 @@ def build_async_subagent_graph(
                 model=model,
                 backend=backend,
                 max_iterations=SCHEDULER_RUBRIC_MAX_ITERATIONS,
+                model_retry=_model_retry_middleware(
+                    unattended=True, honor_run_key=False
+                ),
             ),
         ]
     return create_deep_agent(

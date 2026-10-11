@@ -209,6 +209,10 @@ class EvoScientistConfig:
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
+    # Transient model-call failures (5xx, 429, connection drops): total wait
+    # budget per model call, in seconds; 0 switches the retry off.
+    model_retry_wait_seconds: int = 60
+    auto_mode_retry_wait_seconds: int = 1800  # unattended runs: auto_mode, scheduler
     # Optional auxiliary model for background/helper LLM calls (memory workers +
     # tool selector). Empty = fall back to the main model/provider.
     auxiliary_provider: str = ""  # empty = use main provider
@@ -990,6 +994,8 @@ _ENV_MAPPINGS = {
     "gateway_backend_tui": "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
     "gateway_backend_standalone": "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
+    "model_retry_wait_seconds": "EVOSCIENTIST_MODEL_RETRY_WAIT_SECONDS",
+    "auto_mode_retry_wait_seconds": "EVOSCIENTIST_AUTO_MODE_RETRY_WAIT_SECONDS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",

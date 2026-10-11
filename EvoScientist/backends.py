@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 from deepagents.backends.protocol import (
@@ -386,6 +386,7 @@ HITL_SUPPRESSED_KEY = "hitl_suppressed"
 # rubric left in the thread by a run that never reached a verdict cannot grade
 # a later turn or a continuation started by another client.
 RUBRIC_RUN_KEY = "rubric_run"
+MODEL_RETRY_RUN_KEY = "model_retry"
 
 
 def is_hitl_suppressed(config=None) -> bool:
@@ -442,6 +443,25 @@ def hitl_suppressed_for_run(config=None) -> bool:
     return bool(
         getattr(config, "auto_mode", False) or getattr(config, "auto_approve", False)
     )
+
+
+def model_retry_for_run(config=None) -> dict[str, Any]:
+    """The retry tier THIS run carries to whichever gateway runs the main agent."""
+    if config is None:
+        from .EvoScientist import _ensure_config
+
+        config = _ensure_config()
+    unattended = bool(getattr(config, "auto_mode", False))
+    budget = (
+        getattr(config, "auto_mode_retry_wait_seconds", 0)
+        if unattended
+        else getattr(config, "model_retry_wait_seconds", 0)
+    )
+    try:
+        budget = max(0, int(budget))
+    except (TypeError, ValueError):
+        budget = 0
+    return {"unattended": unattended, "wait_budget_seconds": budget}
 
 
 def resolve_action_decision(

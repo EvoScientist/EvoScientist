@@ -995,3 +995,166 @@ class TestRubricState:
             {"type": "rubric_evaluation", "iteration": 0, "result": "satisfied"}
         )
         assert state.response_text == "Final answer."
+
+
+# --- model retries: what a failed attempt left behind is rolled back -----
+
+
+def _discard(text_chars=0, thinking_chars=0, tool_call_ids=()):
+    return {
+        "text_chars": text_chars,
+        "thinking_chars": thinking_chars,
+        "tool_call_ids": list(tool_call_ids),
+    }
+
+
+def _retry(discarded, instance_id=""):
+    return {
+        "type": "model_retry",
+        "attempt": 2,
+        "wait_seconds": 1.0,
+        "reason": "503: starting up",
+        "budget_left_seconds": 50.0,
+        "cause": "exception",
+        "subagent": "",
+        "instance_id": instance_id,
+        "discarded": discarded,
+    }
+
+
+def test_model_retry_rolls_back_the_failed_attempt_in_main_state():
+    state = StreamState()
+    state.handle_event({"type": "thinking", "content": "plan "})
+    state.handle_event({"type": "text", "content": "First."})
+    state.handle_event({"type": "tool_call", "id": "t1", "name": "ls", "args": {}})
+    state.handle_event(
+        {"type": "tool_result", "id": "t1", "name": "ls", "content": "x"}
+    )
+    state.handle_event({"type": "thinking", "content": "again"})
+    state.handle_event({"type": "text", "content": "Half a sen"})
+    state.handle_event({"type": "tool_call", "id": "dead", "name": "ls", "args": {}})
+    state.handle_event(_retry(_discard(len("Half a sen"), len("again"), ["dead"])))
+    assert state.response_text == "First."
+    assert state.latest_text == ""
+    assert state.thinking_text == "plan "
+    assert [tc["id"] for tc in state.tool_calls] == ["t1"]
+    assert state.narration_segments == [(0, "First.")]
+    assert state.is_responding is False
+    assert state.is_thinking is False
+    assert state.model_retries[0]["attempt"] == 2
+    assert state.has_pending_work() is False
+
+
+def test_model_output_discarded_applies_without_a_notice():
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "partial "})
+    state.handle_event(
+        {
+            "type": "model_output_discarded",
+            "instance_id": "",
+            "discarded": _discard(len("partial ")),
+        }
+    )
+    state.handle_event({"type": "text", "content": "complete"})
+    assert state.response_text == "complete"
+    assert state.model_retries == []
+
+
+def test_subagent_discard_removes_its_tool_calls_only():
+    state = StreamState()
+    state.handle_event(
+        {
+            "type": "subagent_start",
+            "name": "research",
+            "description": "",
+            "instance_id": "i1",
+            "tool_call_id": "p1",
+        }
+    )
+    state.handle_event(
+        {
+            "type": "subagent_tool_call",
+            "subagent": "research",
+            "name": "ls",
+            "args": {},
+            "id": "s1",
+            "instance_id": "i1",
+        }
+    )
+    state.handle_event({"type": "text", "content": "main"})
+    state.handle_event(_retry(_discard(3, 0, ["s1"]), instance_id="i1"))
+    assert state.response_text == "main"
+    assert state._subagent_map["i1"].tool_calls == []
+    assert state.model_retries[0]["instance_id"] == "i1"
+
+
+def test_discard_keeps_the_clean_prefix_of_a_boundary_crossing_narration_segment():
+    """A rubric draft and the failed revision share one segment: the draft must survive."""
+    from EvoScientist.stream.state import StreamState
+
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "DRAFT"})
+    state.handle_event(
+        {
+            "type": "rubric_evaluation",
+            "iteration": 1,
+            "result": "needs_revision",
+            "explanation": "",
+            "criteria": [],
+        }
+    )
+    state.handle_event({"type": "text", "content": "partial"})
+    state.handle_event({"type": "tool_call", "id": "dead", "name": "ls", "args": {}})
+    state.handle_event(
+        {
+            "type": "model_retry",
+            "attempt": 2,
+            "wait_seconds": 1.0,
+            "reason": "x",
+            "budget_left_seconds": 1.0,
+            "cause": "exception",
+            "subagent": "",
+            "instance_id": "",
+            "discarded": {
+                "text_chars": len("partial"),
+                "thinking_chars": 0,
+                "tool_call_ids": ["dead"],
+            },
+        }
+    )
+    # Exactly the state before the failed attempt: the draft is the current
+    # segment again, so the final frame shows it ahead of the retry's answer.
+    assert state.response_text == "DRAFT\n\n"
+    assert state.latest_text == "DRAFT\n\n"
+    assert state.narration_segments == []
+    assert state.narrated_response_end == 0
+    assert state.tool_calls == []
+    state.handle_event({"type": "text", "content": "FINAL"})
+    assert state.response_text[state.narrated_response_end :] == "DRAFT\n\nFINAL"
+
+
+def test_discard_reindexes_segments_after_a_removed_tool_call():
+    from EvoScientist.stream.state import StreamState
+
+    state = StreamState()
+    state.handle_event({"type": "text", "content": "one"})
+    state.handle_event({"type": "tool_call", "id": "a", "name": "ls", "args": {}})
+    state.handle_event({"type": "text", "content": "two"})
+    state.handle_event({"type": "tool_call", "id": "b", "name": "ls", "args": {}})
+    state.handle_event({"type": "text", "content": "three"})
+    state.handle_event(
+        {
+            "type": "model_output_discarded",
+            "instance_id": "",
+            "discarded": {
+                "text_chars": len("twothree"),
+                "thinking_chars": 0,
+                "tool_call_ids": ["b"],
+            },
+        }
+    )
+    assert state.response_text == "one"
+    assert state.latest_text == ""
+    assert state.narration_segments == [(0, "one")]
+    assert state.narrated_response_end == len("one")
+    assert [tc["id"] for tc in state.tool_calls] == ["a"]

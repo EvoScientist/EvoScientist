@@ -91,6 +91,41 @@ def _format_todo_list(todos: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def trim_text(text: str, chars: int) -> str:
+    """Drop ``chars`` characters from the end of ``text`` (a failed model attempt's output)."""
+    return text[: max(0, len(text) - chars)] if chars > 0 else text
+
+
+def apply_model_discard(
+    event: dict,
+    final_content: str,
+    subagent_text_buffers: dict[str, tuple[str, list[str]]],
+    thinking_buffer: list[str],
+) -> str:
+    """Drop a failed model attempt's output from the reply buffers; the trimmed main text."""
+    discarded = event.get("discarded") or {}
+    chars = int(discarded.get("text_chars") or 0)
+    instance_id = event.get("instance_id") or ""
+    if instance_id:
+        if instance_id in subagent_text_buffers:
+            trim_buffer(subagent_text_buffers[instance_id][1], chars)
+        return final_content
+    trim_buffer(thinking_buffer, int(discarded.get("thinking_chars") or 0))
+    return trim_text(final_content, chars)
+
+
+def trim_buffer(chunks: list[str], chars: int) -> None:
+    """Drop ``chars`` characters from the end of a chunk list in place."""
+    remaining = chars
+    while remaining > 0 and chunks:
+        last = chunks[-1]
+        if len(last) <= remaining:
+            remaining -= len(chunks.pop())
+        else:
+            chunks[-1] = last[: len(last) - remaining]
+            remaining = 0
+
+
 def _join_subagent_text(buffers: dict[str, tuple[str, list[str]]]) -> str:
     """Join sub-agent text buffers into a single fallback string.
 
@@ -537,6 +572,14 @@ class InboundConsumer:
                                 subagent_text_buffers[instance_id] = (sa_name, [])
                             subagent_text_buffers[instance_id][1].append(
                                 event.get("content", "")
+                            )
+
+                        elif event_type in ("model_retry", "model_output_discarded"):
+                            final_content = apply_model_discard(
+                                event,
+                                final_content,
+                                subagent_text_buffers,
+                                thinking_buffer,
                             )
 
                         elif event_type == "done":

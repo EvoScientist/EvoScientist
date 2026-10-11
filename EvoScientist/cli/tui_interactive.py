@@ -13,7 +13,7 @@ import random
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -1736,6 +1736,11 @@ def run_textual_interactive(
                 narration: AssistantMessage | None = None
                 assistant_start: int = 0
                 narrated_end: int = 0
+                # Finished narration widgets with the response offset each
+                # ends at, so a discarded attempt's narration can be removed.
+                narration_log: list[tuple[int, AssistantMessage]] = field(
+                    default_factory=list
+                )
 
             response_display = _ResponseDisplayState()
 
@@ -1790,6 +1795,9 @@ def run_textual_interactive(
                         )
                     except Exception:
                         await container.mount(narration)
+                    response_display.narration_log.append(
+                        (response_display.assistant_start + len(content), narration)
+                    )
                     response_display.narrated_end = max(
                         response_display.narrated_end,
                         response_display.assistant_start + len(content),
@@ -1806,6 +1814,9 @@ def run_textual_interactive(
                 """Finalize inline narration without removing it from the transcript."""
                 if response_display.narration is not None:
                     await response_display.narration.stop_stream()
+                    response_display.narration_log.append(
+                        (response_display.narrated_end, response_display.narration)
+                    )
                     response_display.narration = None
 
             async def _mark_cancelled_response() -> str:
@@ -2291,6 +2302,61 @@ def run_textual_interactive(
                                     SystemMessage(line_text, msg_style=line_style)
                                 )
 
+                        elif event_type in ("model_retry", "model_output_discarded"):
+                            # state already rolled back; mirror it in the widgets.
+                            discarded = event.get("discarded") or {}
+                            instance_id = event.get("instance_id") or ""
+                            ids = [str(i) for i in discarded.get("tool_call_ids") or []]
+                            sa_w = None
+                            if instance_id:
+                                sa_w = _get_sa_widget(instance_id, "")
+                                if sa_w is not None and ids:
+                                    await sa_w.discard_tool_calls(ids)
+                            else:
+                                if int(discarded.get("text_chars") or 0):
+                                    if response_display.assistant is not None:
+                                        await _remove_w(response_display.assistant)
+                                        response_display.assistant = None
+                                    if response_display.narration is not None:
+                                        if state.latest_text.strip():
+                                            await _mount_or_update_narration(
+                                                state.latest_text
+                                            )
+                                        else:
+                                            await _remove_w(response_display.narration)
+                                            response_display.narration = None
+                                    kept_len = len(state.response_text)
+                                    for end, widget in list(
+                                        response_display.narration_log
+                                    ):
+                                        if end > kept_len:
+                                            await _remove_w(widget)
+                                            response_display.narration_log.remove(
+                                                (end, widget)
+                                            )
+                                    response_display.narrated_end = min(
+                                        response_display.narrated_end, kept_len
+                                    )
+                                    response_display.assistant_start = min(
+                                        response_display.assistant_start, kept_len
+                                    )
+                                    self._set_status_streaming_text(state.latest_text)
+                                if thinking_w is not None:
+                                    thinking_w.truncate(
+                                        int(discarded.get("thinking_chars") or 0)
+                                    )
+                                for tool_id in ids:
+                                    tw = tool_widgets.pop(tool_id, None)
+                                    if tw is not None:
+                                        await _remove_w(tw)
+                            if event_type == "model_retry":
+                                from ..stream.display import model_retry_text
+
+                                await container.mount(
+                                    SystemMessage(
+                                        model_retry_text(event), msg_style="yellow"
+                                    )
+                                )
                         elif event_type == "rubric_evaluation_deferred":
                             from ..stream.display import rubric_deferred_text
 

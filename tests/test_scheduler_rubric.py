@@ -109,7 +109,7 @@ def test_scheduler_grader_gets_read_only_tools_on_the_agent_backend(tmp_path):
 
     kwargs, backend, _aux, _stub = _build("scheduler", tmp_path)
     rubric = kwargs["middleware"][-1]
-    grader_fs = rubric._grader_middleware[0]
+    grader_fs = rubric._grader_middleware[1]
     assert isinstance(grader_fs, FilesystemMiddleware)
     assert [t.name for t in grader_fs.tools] == ["ls", "read_file"]
     assert grader_fs.backend is backend
@@ -152,7 +152,7 @@ def test_scheduler_grader_never_evicts_to_the_shared_workspace(tmp_path):
     """Both eviction paths write files through the backend; the grader must
     stay read-only even on an oversized rubric or transcript."""
     kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path)
-    grader_fs = kwargs["middleware"][-1]._grader_middleware[0]
+    grader_fs = kwargs["middleware"][-1]._grader_middleware[1]
     assert grader_fs._tool_token_limit_before_evict is None
     assert grader_fs._human_message_token_limit_before_evict is None
 
@@ -416,12 +416,14 @@ def test_scheduler_grader_carries_a_call_budget(tmp_path):
     kwargs, _backend, _aux, _stub = _build("scheduler", tmp_path)
     grader_mw = kwargs["middleware"][-1]._grader_middleware
     assert [type(m).__name__ for m in grader_mw] == [
+        "ModelRetryMiddleware",
         "FilesystemMiddleware",
         "_GraderCallBudget",
         "UnsupportedContentMiddleware",
+        "ModelCallBoundaryMiddleware",
     ]
-    assert isinstance(grader_mw[1], _GraderCallBudget)
-    assert grader_mw[1].max_calls == 12
+    assert isinstance(grader_mw[2], _GraderCallBudget)
+    assert grader_mw[2].max_calls == 12
 
 
 class _RecordingGrader(BaseChatModel):

@@ -27,6 +27,7 @@ def resolve_per_run_config(
     recursion_limit: int | None = None,
     hitl_suppressed: bool = False,
     rubric_run: bool = False,
+    model_retry: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the per-run LangGraph config for a gateway stream call.
 
@@ -55,16 +56,20 @@ def resolve_per_run_config(
     2. the suppression key (always written, ``True`` or ``False``),
     3. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
        explicit per-run injection is more specific than the session default,
+    3b. the retry tier this run carries (``model_retry``), when the caller
+       resolved one - the main agent follows the CLI's tier on either backend,
     4. for a run that carries a rubric, ``rubric_run["mode"] = "input"`` on
        top of whatever marker the caller supplied,
     5. ``thread_id`` - structural key, always set last.
     """
     configurable: dict[str, Any] = dict(per_run_overrides or {})
-    from ..backends import HITL_SUPPRESSED_KEY, RUBRIC_RUN_KEY
+    from ..backends import HITL_SUPPRESSED_KEY, MODEL_RETRY_RUN_KEY, RUBRIC_RUN_KEY
 
     configurable[HITL_SUPPRESSED_KEY] = bool(hitl_suppressed)
     if configurable_extra:
         configurable.update(configurable_extra)
+    if model_retry is not None:
+        configurable[MODEL_RETRY_RUN_KEY] = dict(model_retry)
     if rubric_run:
         # Input text is the most specific source; a client marker may still
         # carry checklist operations to apply.

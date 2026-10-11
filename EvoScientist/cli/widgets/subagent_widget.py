@@ -169,6 +169,17 @@ class SubAgentWidget(Vertical):
         self._update_visibility()
         return w
 
+    async def discard_tool_calls(self, tool_call_ids: list[str]) -> None:
+        """Remove the tool calls a failed model attempt emitted."""
+        for tool_call_id in tool_call_ids:
+            widget = self._tool_widgets.pop(tool_call_id, None)
+            if widget is not None:
+                try:
+                    await widget.remove()
+                except Exception:
+                    pass
+        self._update_visibility()
+
     def complete_tool(
         self,
         tool_name: str,

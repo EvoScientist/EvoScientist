@@ -944,6 +944,7 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
                     "model": "live-model",
                     "model_provider": "live-provider",
                     "hitl_suppressed": False,
+                    "model_retry": {"unattended": False, "wait_budget_seconds": 0},
                     "thread_id": "abc12345",
                 },
                 "recursion_limit": 4242,
@@ -1020,6 +1021,7 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
                     "model": "live-model",
                     "model_provider": "live-provider",
                     "hitl_suppressed": False,
+                    "model_retry": {"unattended": False, "wait_budget_seconds": 0},
                     "active_teams": ["code-agent"],
                     "custom_key": "custom_value",
                     "thread_id": "abc12345",
@@ -2971,3 +2973,110 @@ async def test_langgraph_server_gateway_marks_a_graded_run():
     start = stream.run.starts[0]
     assert start["input"]["rubric"] == "- a"
     assert start["config"]["configurable"]["rubric_run"] == {"mode": "input"}
+
+
+def test_server_gateway_run_carries_the_retry_key(monkeypatch):
+    """A -p --auto-mode run on the server gateway must bring its own tier."""
+    import EvoScientist.EvoScientist as evo_mod
+    from EvoScientist.backends import MODEL_RETRY_RUN_KEY
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.gateway import server as server_mod
+
+    cfg = EvoScientistConfig(auto_mode=True, auto_mode_retry_wait_seconds=1800)
+    monkeypatch.setattr(evo_mod, "_ensure_config", lambda: cfg)
+    gateway = server_mod.LangGraphServerGateway.__new__(
+        server_mod.LangGraphServerGateway
+    )
+    config = gateway._resolve_run_config("t1", None)
+    assert config["configurable"][MODEL_RETRY_RUN_KEY] == {
+        "unattended": True,
+        "wait_budget_seconds": 1800,
+    }
+
+
+def _model_call(phase: str, call: str, status: str | None = None) -> dict:
+    payload: dict[str, object] = {"type": "model_call", "phase": phase, "call": call}
+    if status is not None:
+        payload["status"] = status
+    return _custom_stream_event(payload)
+
+
+async def test_langgraph_server_gateway_recovers_a_whole_message_fallback_after_a_discard():
+    """The transport drops a non-streamed message, so the values snapshot must deliver it.
+
+    The failed primary's text had switched snapshot recovery off; once that
+    text is discarded the fallback's answer has no other way to arrive.
+    """
+    events = await _collect_server_gateway_stream(
+        [
+            _model_call("start", "1"),
+            _root_text_delta("WRO"),
+            _model_call("end", "1", "failed"),
+            _model_call("start", "2"),
+            _model_call("end", "2", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    assert [event["type"] for event in events] == [
+        "text",
+        "model_output_discarded",
+        "text",
+        "done",
+    ]
+    assert events[-1]["response"] == "new"
+
+
+async def test_langgraph_server_gateway_recovery_after_a_discard_skips_streamed_messages():
+    first = {"type": "ai", "content": "first", "id": "ai-1"}
+    events = await _collect_server_gateway_stream(
+        [
+            _model_call("start", "1"),
+            _root_text_delta("first"),
+            _root_message_finish(),
+            _model_call("end", "1", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, first]),
+            _model_call("start", "2"),
+            _root_text_delta("WRO"),
+            _model_call("end", "2", "failed"),
+            _model_call("start", "3"),
+            _model_call("end", "3", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, first, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    texts = [event["content"] for event in events if event["type"] == "text"]
+    assert texts == ["first", "WRO", "new"]
+    assert events[-1]["response"] == "firstnew"
+
+
+async def test_langgraph_server_gateway_streamed_retry_after_a_discard_is_not_duplicated():
+    events = await _collect_server_gateway_stream(
+        [
+            _model_call("start", "1"),
+            _root_text_delta("WRO"),
+            _model_call("end", "1", "failed"),
+            _custom_stream_event(
+                {
+                    "type": "model_retry",
+                    "attempt": 2,
+                    "wait_seconds": 1.0,
+                    "reason": "503: starting up",
+                    "budget_left_seconds": 9.0,
+                    "cause": "exception",
+                }
+            ),
+            _model_call("start", "2"),
+            _root_text_delta("new"),
+            _root_message_finish(),
+            _model_call("end", "2", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    texts = [event["content"] for event in events if event["type"] == "text"]
+    assert texts == ["WRO", "new"]
+    assert events[-1]["response"] == "new"

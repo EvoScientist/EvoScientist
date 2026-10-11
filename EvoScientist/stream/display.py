@@ -677,6 +677,23 @@ def rubric_deferred_text(tasks: int, processes: int) -> str:
     return f"Acceptance check deferred: {what} still running"
 
 
+def model_retry_text(event: dict) -> str:
+    """One line per retry; shared by the Rich CLI and the TUI."""
+    wait = float(event.get("wait_seconds") or 0.0)
+    wait_text = f"{wait:.0f}" if wait >= 1 else f"{wait:.1f}"
+    # A sub-agent's or the grader's retry is named; the main agent's is not.
+    who = str(event.get("subagent") or "")
+    return (
+        f"{who + ': ' if who else ''}"
+        f"Model request failed ({event.get('reason') or 'transient error'}); "
+        f"retrying in {wait_text} s (attempt {event.get('attempt') or '?'})"
+    )
+
+
+def _render_model_retry_lines(retries: list) -> list:
+    return [Text(model_retry_text(event), style="yellow") for event in retries]
+
+
 def rubric_result_lines(evaluation: dict) -> list[tuple[str, str]]:
     """``(text, style)`` lines for one grading pass; shared by the Rich CLI and the TUI."""
     result = str(evaluation.get("result") or "")
@@ -750,6 +767,7 @@ def create_streaming_display(
     rubric_evaluations: list | None = None,
     rubric_checking: bool = False,
     rubric_deferred: dict | None = None,
+    model_retries: list | None = None,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -1018,6 +1036,11 @@ def create_streaming_display(
                     elements.extend(result_elements)
 
             # Remaining sub-agent sections are rendered below.
+
+    retry_lines = _render_model_retry_lines(model_retries or [])
+    if retry_lines:
+        elements.append(Text(""))  # blank separator
+        elements.extend(retry_lines)
 
     rubric_lines = _render_rubric_lines(
         rubric_evaluations or [], rubric_checking and not is_final, rubric_deferred

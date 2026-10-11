@@ -102,6 +102,8 @@ def test_factory_requests_async_safe_middleware(
         work_dir=None,
         for_async_subagent=True,
         memory_source_agent="writing-agent",
+        unattended=False,
+        model_retry_honors_run_key=True,
         backend=mock_backend.return_value,
         chat_model=mock_chat.return_value,
     )

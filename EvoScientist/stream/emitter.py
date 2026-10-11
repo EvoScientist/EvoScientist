@@ -249,6 +249,46 @@ class StreamEventEmitter:
         )
 
     @staticmethod
+    def model_retry(
+        *,
+        attempt: int,
+        wait_seconds: float,
+        reason: str,
+        budget_left_seconds: float,
+        cause: str,
+        instance_id: str,
+        subagent: str,
+        discarded: dict[str, Any],
+    ) -> StreamEvent:
+        return StreamEvent(
+            "model_retry",
+            {
+                "type": "model_retry",
+                "attempt": attempt,
+                "wait_seconds": wait_seconds,
+                "reason": reason,
+                "budget_left_seconds": budget_left_seconds,
+                "cause": cause,
+                "instance_id": instance_id,
+                "subagent": subagent,
+                "discarded": discarded,
+            },
+        )
+
+    @staticmethod
+    def model_output_discarded(
+        *, instance_id: str, discarded: dict[str, Any]
+    ) -> StreamEvent:
+        return StreamEvent(
+            "model_output_discarded",
+            {
+                "type": "model_output_discarded",
+                "instance_id": instance_id,
+                "discarded": discarded,
+            },
+        )
+
+    @staticmethod
     def done(
         response: str = "", *, last_pass_response: str | None = None
     ) -> StreamEvent:

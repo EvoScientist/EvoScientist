@@ -9,7 +9,7 @@ import inspect
 import mimetypes
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
@@ -315,6 +315,38 @@ class _SubagentInfo:
         return ":".join(self.path)
 
 
+@dataclass
+class _CallRecord:
+    """One provider call of a namespace, between its ``model_call`` start and end events."""
+
+    call: str
+    state: str = "open"  # open | clean | error | failed
+    text_chars: int = 0
+    thinking_chars: int = 0
+    tool_call_ids: list[str] = field(default_factory=list)
+    full_response_len: int = 0
+    selector_snapshot: tuple[bool, str, bool] | None = None
+
+    def discard_payload(self) -> dict[str, Any]:
+        return {
+            "text_chars": self.text_chars,
+            "thinking_chars": self.thinking_chars,
+            "tool_call_ids": list(self.tool_call_ids),
+        }
+
+    @property
+    def discardable(self) -> bool:
+        return self.state != "clean"
+
+    @property
+    def ended_badly(self) -> bool:
+        return self.state in ("error", "failed")
+
+    @property
+    def empty(self) -> bool:
+        return not (self.text_chars or self.thinking_chars or self.tool_call_ids)
+
+
 class _SubagentRegistry:
     """Track v3 DeepAgents subagent handles by namespace path."""
 
@@ -382,6 +414,10 @@ class _V3EventProcessor:
             existing_summarization_event
         )
         self._seen_value_message_keys = self._message_keys(existing_messages)
+        # Snapshot recovery delivers messages the transport did not stream. It
+        # is suspended once root text streams and resumed when that text is
+        # discarded, since the answer that replaces it may not stream.
+        self._value_recovery = process_value_messages
         self._process_value_message_snapshots = process_value_messages
         self.full_response = ""
         # Where the pass a graded run's last verdict applies to starts in
@@ -394,6 +430,8 @@ class _V3EventProcessor:
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
         self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
+        self._records: dict[tuple[str, ...], _CallRecord] = {}
+        self._namespace: tuple[str, ...] = ()
 
     @staticmethod
     def _tool_scope(
@@ -401,9 +439,115 @@ class _V3EventProcessor:
     ) -> tuple[str, ...]:
         return subagent.path if subagent is not None else namespace
 
+    # -- provider calls: what a retry or a fallback may discard -------------
+    # The boundary is the ``model_call`` custom event pair, never message
+    # metadata: the server transport strips run_id and node before SSE.
+    # Output is attributed by timing, so a stream that bypasses the boundary
+    # yet overlaps an open call in the same namespace is counted with it.
+
+    def _current_record(self) -> _CallRecord | None:
+        record = self._records.get(self._namespace)
+        return record if record is not None and record.state == "open" else None
+
+    def _count_text(self, chars: int) -> None:
+        record = self._current_record()
+        if record is not None:
+            record.text_chars += chars
+
+    def _count_thinking(self, chars: int) -> None:
+        record = self._current_record()
+        if record is not None:
+            record.thinking_chars += chars
+
+    def _discard(
+        self, record: _CallRecord, subagent: _SubagentInfo | None
+    ) -> dict[str, Any] | None:
+        """Roll back to the call's start; the payload the clients apply, or None if nothing was emitted."""
+        if not self._namespace:
+            # The root answer loses everything it gained since the call began;
+            # report that amount so clients trim exactly what is cut here.
+            record.text_chars = max(
+                0, len(self.full_response) - record.full_response_len
+            )
+            self.full_response = self.full_response[: record.full_response_len]
+            if record.selector_snapshot is not None:
+                self._selector.restore(record.selector_snapshot)
+            self._process_value_message_snapshots = self._value_recovery
+        scope = self._tool_scope(self._namespace, subagent)
+        for tool_call_id in record.tool_call_ids:
+            self._emitted_tool_calls.discard((scope, tool_call_id))
+            self._tool_inputs.pop((scope, tool_call_id), None)
+        self._records.pop(self._namespace, None)
+        return None if record.empty else record.discard_payload()
+
+    def _process_model_call(
+        self, payload: RawMap, subagent: _SubagentInfo | None
+    ) -> list[dict[str, Any]]:
+        """Open or close this namespace's call; a new call discards a predecessor that ended badly.
+
+        A predecessor whose end mark never arrived is left alone: dropping it
+        would cost a good answer if only the mark was lost.
+        """
+        call = str(payload.get("call") or "")
+        phase = payload.get("phase")
+        record = self._records.get(self._namespace)
+        if phase == "end":
+            if record is not None and record.state == "open" and record.call == call:
+                status = payload.get("status")
+                record.state = status if status in ("clean", "error") else "failed"
+            return []
+        if phase != "start":
+            return []
+        events: list[dict[str, Any]] = []
+        if record is not None and record.ended_badly:
+            discarded = self._discard(record, subagent)
+            if discarded is not None:
+                events.append(
+                    self.emitter.model_output_discarded(
+                        instance_id=subagent.instance_id if subagent else "",
+                        discarded=discarded,
+                    ).data
+                )
+        self._records[self._namespace] = _CallRecord(
+            call=call,
+            full_response_len=len(self.full_response),
+            selector_snapshot=self._selector.snapshot()
+            if not self._namespace
+            else None,
+        )
+        return events
+
+    def _process_model_retry(
+        self, payload: RawMap, subagent: _SubagentInfo | None
+    ) -> list[dict[str, Any]]:
+        record = self._records.get(self._namespace)
+        discarded = None
+        if record is not None and record.discardable:
+            discarded = self._discard(record, subagent)
+        name = ""
+        if subagent is not None:
+            # The event names its own agent; a namespace registered by the
+            # server tracker is only named after its graph node.
+            agent = payload.get("agent")
+            name = agent if isinstance(agent, str) and agent else subagent.name
+        return [
+            self.emitter.model_retry(
+                attempt=_count(payload.get("attempt")) or 1,
+                wait_seconds=float(payload.get("wait_seconds") or 0.0),
+                reason=str(payload.get("reason") or ""),
+                budget_left_seconds=float(payload.get("budget_left_seconds") or 0.0),
+                cause=str(payload.get("cause") or "exception"),
+                instance_id=subagent.instance_id if subagent else "",
+                subagent=name,
+                discarded=discarded
+                or {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []},
+            ).data
+        ]
+
     async def process(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         method = event.get("method")
         namespace = _event_namespace(event)
+        self._namespace = namespace
         subagent = None
         if namespace and method in ("messages", "tools"):
             subagent = await self.subagents.wait_resolve(namespace)
@@ -427,13 +571,21 @@ class _V3EventProcessor:
             interrupts = params.get("interrupts") or ()
             if interrupts:
                 events.extend(self._process_update_event({"__interrupt__": interrupts}))
-            if self._process_value_message_snapshots and not namespace:
-                events.extend(self._process_value_messages(_event_data(event)))
+            if not namespace:
+                if self._process_value_message_snapshots:
+                    events.extend(self._process_value_messages(_event_data(event)))
+                elif self._value_recovery:
+                    # Streamed messages are already delivered: remember them
+                    # so a later resume does not deliver them again.
+                    self._mark_value_messages_seen(_event_data(event))
             return events
         if method == "input.requested":
             return self._process_input_requested(event.get("params"))
         if method == "custom":
-            return self._process_custom_event(_event_data(event))
+            subagent = (
+                await self.subagents.wait_resolve(namespace) if namespace else None
+            )
+            return self._process_custom_event(_event_data(event), subagent)
         return []
 
     def _process_rubric_event(self, kind: str, payload: Any) -> list[dict[str, Any]]:
@@ -477,7 +629,9 @@ class _V3EventProcessor:
             return None
         return self.full_response[self._last_pass_start :]
 
-    def _process_custom_event(self, data: object) -> list[dict[str, Any]]:
+    def _process_custom_event(
+        self, data: object, subagent: _SubagentInfo | None = None
+    ) -> list[dict[str, Any]]:
         """Translate a ``custom`` stream payload into UI events.
 
         Currently handles the ``subagent`` lifecycle emitted by
@@ -493,6 +647,10 @@ class _V3EventProcessor:
         if payload is None:
             return []
         kind = payload.get("type")
+        if kind == "model_call":
+            return self._process_model_call(payload, subagent)
+        if kind == "model_retry":
+            return self._process_model_retry(payload, subagent)
         if kind in (
             "rubric_evaluation_start",
             "rubric_evaluation_end",
@@ -575,6 +733,11 @@ class _V3EventProcessor:
         else:
             key = ("body", str(raw_role), repr(content))
         return _AssistantValueMessage(key=key, content=content)
+
+    def _mark_value_messages_seen(self, data: object) -> None:
+        data_map = _as_raw_map(data)
+        messages = data_map.get("messages") if data_map is not None else None
+        self._seen_value_message_keys |= self._message_keys(messages)
 
     def _process_value_messages(self, data: object) -> list[dict[str, Any]]:
         data_map = _as_raw_map(data)
@@ -670,6 +833,7 @@ class _V3EventProcessor:
                 else:
                     self.full_response += pending
                     events.append(self.emitter.text(pending).data)
+                self._count_text(len(pending))
             if subagent is None:
                 usage = _as_raw_map(payload.get("usage"))
                 inp, out = _usage_counts(usage) if usage is not None else (0, 0)
@@ -738,6 +902,9 @@ class _V3EventProcessor:
         if key in self._emitted_tool_calls:
             return []
         self._emitted_tool_calls.add(key)
+        record = self._current_record()
+        if record is not None:
+            record.tool_call_ids.append(tool_call_id)
         if subagent is not None:
             return [
                 self.emitter.subagent_tool_call(
@@ -987,6 +1154,7 @@ class _V3EventProcessor:
             return events
         if not emit_text or emit_text.isspace():
             return events
+        self._count_text(len(emit_text))
         if subagent is not None:
             events.append(
                 self.emitter.subagent_text(
@@ -1006,6 +1174,7 @@ class _V3EventProcessor:
         suppressed, events = self._selector.process_thinking(text)
         if suppressed:
             return events
+        self._count_thinking(len(text))
         events.append(self.emitter.thinking(text).data)
         return events
 
@@ -1134,7 +1303,7 @@ async def stream_agent_events(
     # rebuilt on model switches and binds recursion_limit at construction
     # from the same live config. The HITL suppression flag is the exception -
     # a per-run signal both backends need (the graph is always armed).
-    from ..backends import hitl_suppressed_for_run
+    from ..backends import hitl_suppressed_for_run, model_retry_for_run
     from ..gateway.types import resolve_per_run_config
 
     config = resolve_per_run_config(
@@ -1142,6 +1311,7 @@ async def stream_agent_events(
         configurable_extra,
         hitl_suppressed=hitl_suppressed_for_run(),
         rubric_run=rubric is not None,
+        model_retry=model_retry_for_run(),
     )
     if metadata:
         config["metadata"] = metadata
