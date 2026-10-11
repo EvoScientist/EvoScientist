@@ -3,9 +3,9 @@
 This module provides a unified interface for creating chat model instances
 with support for multiple providers (Anthropic, OpenAI, Google GenAI, Atlas
 Cloud, MiniMax (Anthropic-compatible), NVIDIA, SiliconFlow, OpenRouter, Requesty,
-Novita, ZhipuAI, Volcengine, DashScope, DashScope-Code, DeepSeek, Ollama, and
-custom OpenAI/Anthropic-compatible endpoints) and convenient short names for
-common models.
+Novita, Opper, Xiaomi MiMo (Anthropic-compatible), ZhipuAI, Volcengine,
+DashScope, DashScope-Code, DeepSeek, Ollama, and custom OpenAI/Anthropic-
+compatible endpoints) and convenient short names for common models.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import os
 import re
 import subprocess
 import warnings
-from functools import lru_cache
 from typing import Any
 from urllib.parse import urlparse
 
@@ -52,29 +51,49 @@ from .registry import (
     list_models_by_provider,  # noqa: F401 — re-exported for existing import sites
 )
 
+_ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
+    "minimax": "MINIMAX_BASE_URL",
+    "xiaomi-token-plan": "MIMO_TOKEN_PLAN_BASE_URL",
+}
+
 # Minimum Codex CLI version advertised when no explicit override is set. Newer
-# installed versions are advertised automatically.
-_CODEX_CLIENT_VERSION_FALLBACK = "0.144.1"
+# installed versions are advertised automatically. The backend gates models on
+# it (gpt-6-* is refused as "not supported" at 0.144.1).
+_CODEX_CLIENT_VERSION_FALLBACK = "0.156.1"
+_CODEX_VERSION_TIMEOUT_SECONDS = 10
+_installed_codex_version = ""
+_codex_probe_disabled = False
 
 
-@lru_cache(maxsize=1)
 def _installed_codex_client_version() -> str:
-    """Return the installed Codex CLI version, or an empty string."""
+    """Return the installed Codex CLI version, or an empty string.
+
+    A success and a missing binary are cached; a timeout or non-zero exit
+    (e.g. mid-upgrade) is retried on the next call.
+    """
+    global _installed_codex_version, _codex_probe_disabled
+    if _installed_codex_version or _codex_probe_disabled:
+        return _installed_codex_version
     try:
         result = subprocess.run(
             ["codex", "--version"],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_CODEX_VERSION_TIMEOUT_SECONDS,
             check=False,
         )
+    except FileNotFoundError:
+        _codex_probe_disabled = True
+        return ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
 
     if result.returncode != 0:
         return ""
     match = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout + result.stderr)
-    return match.group(1) if match else ""
+    if match:
+        _installed_codex_version = match.group(1)
+    return _installed_codex_version
 
 
 def _resolve_codex_client_version() -> str:
@@ -149,6 +168,14 @@ def _apply_openai_compat_reasoning_config(
             kwargs["reasoning_effort"] = effort
         return
 
+    if provider == "opper" and configured:
+        # Opper's compat ChatRequest accepts the standard OpenAI
+        # ``reasoning_effort`` field, but the pool spans reasoning and
+        # non-reasoning models, so forward an explicit setting only rather
+        # than defaulting one on the user's behalf.
+        kwargs.setdefault("reasoning_effort", configured)
+        return
+
     if provider == "custom-openai" and configured:
         kwargs.setdefault("reasoning_effort", configured)
 
@@ -189,11 +216,16 @@ def _supports_openrouter_anthropic_prompt_cache(
 ) -> bool:
     """Return whether EvoScientist should declare Claude caching for a router.
 
-    Both OpenRouter and Requesty are OpenAI-compatible routers that forward an
+    OpenRouter and Requesty are OpenAI-compatible routers that forward an
     Anthropic-style ``cache_control`` declaration through to Claude models
-    addressed as ``anthropic/...``. Implicit caching is handled upstream for
-    most providers, but Claude prompt caching needs the explicit declaration.
+    addressed as ``anthropic/...``. Opper takes the same top-level declaration,
+    but addresses Claude by bare pool id (``claude-sonnet-4-6``) or by a
+    route-pinned ``provider/claude-...`` id, so it matches on the short name.
+    Implicit caching is handled upstream for most providers, but Claude prompt
+    caching needs the explicit declaration.
     """
+    if provider == "opper":
+        return model_id.rsplit("/", 1)[-1].startswith("claude-")
     return provider in ("openrouter", "requesty") and model_id.startswith(
         ("anthropic/", "~anthropic/")
     )
@@ -225,17 +257,19 @@ def _apply_openrouter_anthropic_prompt_cache(
 ) -> None:
     """Declare router Claude prompt caching unless explicitly disabled.
 
-    OpenRouter and Requesty both handle implicit caching for most providers,
+    OpenRouter, Requesty and Opper handle implicit caching for most providers,
     but Claude prompt caching needs an Anthropic-style cache-control
     declaration. Each router honours its own opt-out env flag
     (``EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE`` /
-    ``EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE``).
+    ``EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE`` /
+    ``EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE``).
     """
     if provider is None:
         return
     disable_flag = {
         "openrouter": "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE",
         "requesty": "EVOSCIENTIST_REQUESTY_ANTHROPIC_PROMPT_CACHE",
+        "opper": "EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE",
     }.get(provider)
     if disable_flag is not None and _env_flag_disabled(disable_flag):
         return
@@ -262,6 +296,33 @@ def _enable_openrouter_429_retry(chat_model: Any) -> None:
     retry_config.status_codes_override = ["429", "5XX"]
 
 
+# Claude models from before adaptive thinking (4.6). A closed set, so any newer id,
+# including one langchain-anthropic has no profile for yet, counts as current.
+_PRE_ADAPTIVE_CLAUDE = re.compile(
+    r"claude-(3|(haiku|sonnet|opus)-4-[015](-|$)|(sonnet|opus)-4-\d{8})"
+)
+
+
+def _is_current_claude(model_id: str) -> bool:
+    return model_id.startswith("claude-") and not _PRE_ADAPTIVE_CLAUDE.match(model_id)
+
+
+def _fill_claude_structured_output(chat_model: Any, model_id: str) -> None:
+    """Declare native structured output for a current Claude id that
+    langchain-anthropic has no profile for yet; without it agents fall back to
+    forced tool calling, which newer Claude models reject."""
+    if not _is_current_claude(model_id):
+        return
+    profile = getattr(chat_model, "profile", None)
+    if isinstance(profile, dict) and "structured_output" in profile:
+        return
+    base = profile if isinstance(profile, dict) else {}
+    try:
+        chat_model.profile = {**base, "structured_output": True}
+    except Exception:
+        pass
+
+
 def _apply_auto_config(
     provider: str,
     model_id: str,
@@ -274,6 +335,11 @@ def _apply_auto_config(
     Mutates *kwargs* in place.  Only sets keys that the caller hasn't already
     provided, so explicit user settings are never overridden.
     """
+    # Current Claude models all output up to 128K (their profiles agree); without a
+    # profile langchain-anthropic falls back to 4096. Applies on every route.
+    if provider == "anthropic" and _is_current_claude(model_id):
+        kwargs.setdefault("max_tokens", 128000)
+
     # Anthropic: extended thinking
     if provider == "anthropic" and "thinking" not in kwargs:
         _supports_thinking = original_provider in _THINKING_CAPABLE_PROVIDERS
@@ -292,9 +358,7 @@ def _apply_auto_config(
             if is_third_party and _is_mandatory_thinking_kimi(model_id):
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
                 kwargs.setdefault("max_tokens", 16000)
-        elif "fable" in model_id or model_id.endswith(
-            ("opus-5", "sonnet-5", "4-6", "4-7", "4-8")
-        ):
+        elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")
         else:
@@ -551,8 +615,11 @@ def get_chat_model(
                     "Anthropic-compatible API endpoint URL (e.g. https://api.anthropic.com)."
                 )
             base_url = base_url.rstrip("/")
-        elif provider == "minimax":
-            base_url = os.environ.get("MINIMAX_BASE_URL", base_url_default).rstrip("/")
+        elif provider in _ANTHROPIC_BASE_URL_OVERRIDE_ENV:
+            # A blank override must fall back, or ChatAnthropic defaults to
+            # api.anthropic.com and sends this provider's key there.
+            override = os.environ.get(_ANTHROPIC_BASE_URL_OVERRIDE_ENV[provider], "")
+            base_url = (override.strip() or base_url_default).rstrip("/")
         else:
             base_url = base_url_default
         if base_url:
@@ -563,6 +630,10 @@ def get_chat_model(
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
+        # MiMo ids have no langchain profile, so ChatAnthropic would fall back to
+        # 4096; match the server's own default (131072) instead.
+        if provider in ("xiaomi", "xiaomi-token-plan"):
+            kwargs.setdefault("max_tokens", 131072)
         provider = "anthropic"
 
     elif provider == "ollama":
@@ -630,7 +701,11 @@ def get_chat_model(
     ):
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
-        _patch_openai_compat_content(chat_model)
+        # ccproxy Codex route must keep encrypted reasoning blocks so
+        # reasoning.context="all_turns" can replay them across turns (#507).
+        _patch_openai_compat_content(
+            chat_model, keep_encrypted_reasoning=_is_openai_proxy
+        )
 
     if _is_openai_proxy:
         _patch_ccproxy_system_to_developer(chat_model)
@@ -641,6 +716,7 @@ def get_chat_model(
     if provider == "anthropic":
         _patch_anthropic_strip_foreign_reasoning()
         _patch_anthropic_structured_output()
+        _fill_claude_structured_output(chat_model, model_id)
 
     apply_known_context_window(chat_model)
 
