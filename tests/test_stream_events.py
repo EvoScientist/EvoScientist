@@ -1549,6 +1549,22 @@ class TestRubricEvents:
             },
         ]
 
+    async def test_deferred_grading_becomes_a_ui_event(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {"type": "rubric_evaluation_deferred", "tasks": 1, "processes": 2}
+                ),
+                custom_subagent_event({"type": "rubric_evaluation_deferred"}),
+            ]
+        )
+        events = await collect_events(agent)
+        deferred = [e for e in events if e.get("type") == "rubric_evaluation_deferred"]
+        assert deferred == [
+            {"type": "rubric_evaluation_deferred", "tasks": 1, "processes": 2},
+            {"type": "rubric_evaluation_deferred", "tasks": 0, "processes": 0},
+        ]
+
     async def test_malformed_grader_payload_degrades_instead_of_raising(self):
         agent = FakeV3Agent(
             [

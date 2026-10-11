@@ -665,27 +665,56 @@ _RUBRIC_RESULT_LINES = {
 }
 
 
-def _render_rubric_lines(evaluations: list, checking: bool) -> list:
+def rubric_deferred_text(tasks: int, processes: int) -> str:
+    """One line saying what grading waits for; shared by the Rich CLI and the TUI."""
+    parts: list[str] = []
+    if tasks:
+        parts.append(f"{tasks} background task{'s' if tasks != 1 else ''}")
+    if processes:
+        noun = "process" if tasks else "background process"
+        parts.append(f"{processes} {noun}{'es' if processes != 1 else ''}")
+    what = " and ".join(parts) if parts else "background work"
+    return f"Acceptance check deferred: {what} still running"
+
+
+def rubric_result_lines(evaluation: dict) -> list[tuple[str, str]]:
+    """``(text, style)`` lines for one grading pass; shared by the Rich CLI and the TUI."""
+    result = str(evaluation.get("result") or "")
+    label, style = _RUBRIC_RESULT_LINES.get(
+        result, ("Acceptance criteria check ended", "yellow")
+    )
+    explanation = str(evaluation.get("explanation") or "").strip()
+    if explanation and result != "satisfied":
+        label = f"{label}: {explanation}"
+    lines = [(label, style)]
+    if result in ("needs_revision", "max_iterations_reached"):
+        for criterion in evaluation.get("criteria") or []:
+            if not isinstance(criterion, dict) or criterion.get("passed", True):
+                continue
+            name = str(criterion.get("name") or "criterion")
+            gap = str(criterion.get("gap") or "").strip()
+            lines.append((f"  - {name}: {gap}" if gap else f"  - {name}", style))
+    return lines
+
+
+def _render_rubric_lines(
+    evaluations: list, checking: bool, deferred: dict | None = None
+) -> list:
     """Lines for the grading passes so far, as plain ``Text`` (never markup)."""
     lines: list = []
     for evaluation in evaluations:
-        result = str(evaluation.get("result") or "")
-        label, style = _RUBRIC_RESULT_LINES.get(
-            result, ("Acceptance criteria check ended", "yellow")
+        for text, style in rubric_result_lines(evaluation):
+            lines.append(Text(text, style=style))
+    if deferred:
+        lines.append(
+            Text(
+                rubric_deferred_text(
+                    int(deferred.get("tasks") or 0),
+                    int(deferred.get("processes") or 0),
+                ),
+                style="yellow",
+            )
         )
-        explanation = str(evaluation.get("explanation") or "").strip()
-        if explanation and result != "satisfied":
-            label = f"{label}: {explanation}"
-        lines.append(Text(label, style=style))
-        if result in ("needs_revision", "max_iterations_reached"):
-            for criterion in evaluation.get("criteria") or []:
-                if not isinstance(criterion, dict) or criterion.get("passed", True):
-                    continue
-                name = str(criterion.get("name") or "criterion")
-                gap = str(criterion.get("gap") or "").strip()
-                lines.append(
-                    Text(f"  - {name}: {gap}" if gap else f"  - {name}", style=style)
-                )
     if checking:
         lines.append(
             Spinner("dots", text=" Checking acceptance criteria...", style="cyan")
@@ -720,6 +749,7 @@ def create_streaming_display(
     status_footer: Any | None = None,
     rubric_evaluations: list | None = None,
     rubric_checking: bool = False,
+    rubric_deferred: dict | None = None,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -990,7 +1020,7 @@ def create_streaming_display(
             # Remaining sub-agent sections are rendered below.
 
     rubric_lines = _render_rubric_lines(
-        rubric_evaluations or [], rubric_checking and not is_final
+        rubric_evaluations or [], rubric_checking and not is_final, rubric_deferred
     )
     if rubric_lines:
         elements.append(Text(""))  # blank separator

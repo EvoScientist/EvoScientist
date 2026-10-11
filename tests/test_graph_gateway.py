@@ -2931,8 +2931,22 @@ def test_resolve_per_run_config_marks_only_a_graded_run():
     from EvoScientist.gateway.types import resolve_per_run_config
 
     marked = resolve_per_run_config("t1", None, rubric_run=True)
-    assert marked["configurable"]["rubric_run"] is True
+    assert marked["configurable"]["rubric_run"] == {"mode": "input"}
     assert "rubric_run" not in resolve_per_run_config("t1", None)["configurable"]
+
+
+def test_input_mode_wins_over_a_client_marker_but_keeps_its_changes():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    change = {"session": "s", "seq": 1, "sticky": "- a"}
+    extra = {"rubric_run": {"mode": "thread", "changes": [change]}}
+    marked = resolve_per_run_config("t1", extra, rubric_run=True)
+    assert marked["configurable"]["rubric_run"] == {
+        "mode": "input",
+        "changes": [change],
+    }
+    unmarked = resolve_per_run_config("t1", extra)
+    assert unmarked["configurable"]["rubric_run"]["mode"] == "thread"
 
 
 async def test_langgraph_server_gateway_marks_a_graded_run():
@@ -2956,4 +2970,4 @@ async def test_langgraph_server_gateway_marks_a_graded_run():
 
     start = stream.run.starts[0]
     assert start["input"]["rubric"] == "- a"
-    assert start["config"]["configurable"]["rubric_run"] is True
+    assert start["config"]["configurable"]["rubric_run"] == {"mode": "input"}

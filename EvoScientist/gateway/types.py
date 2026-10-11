@@ -52,20 +52,27 @@ def resolve_per_run_config(
     Merges, in precedence order (lowest to highest):
 
     1. ``per_run_overrides`` (server backend session defaults),
-    2. the suppression key (always written, ``True`` or ``False``) and, for a
-       run that carries a rubric, the ``rubric_run`` marker,
+    2. the suppression key (always written, ``True`` or ``False``),
     3. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
        explicit per-run injection is more specific than the session default,
-    4. ``thread_id`` - structural key, always set last.
+    4. for a run that carries a rubric, ``rubric_run["mode"] = "input"`` on
+       top of whatever marker the caller supplied,
+    5. ``thread_id`` - structural key, always set last.
     """
     configurable: dict[str, Any] = dict(per_run_overrides or {})
     from ..backends import HITL_SUPPRESSED_KEY, RUBRIC_RUN_KEY
 
     configurable[HITL_SUPPRESSED_KEY] = bool(hitl_suppressed)
-    if rubric_run:
-        configurable[RUBRIC_RUN_KEY] = True
     if configurable_extra:
         configurable.update(configurable_extra)
+    if rubric_run:
+        # Input text is the most specific source; a client marker may still
+        # carry checklist operations to apply.
+        marker = configurable.get(RUBRIC_RUN_KEY)
+        configurable[RUBRIC_RUN_KEY] = {
+            **(marker if isinstance(marker, dict) else {}),
+            "mode": "input",
+        }
     configurable["thread_id"] = thread_id
 
     run_config: dict[str, Any] = {"configurable": configurable}

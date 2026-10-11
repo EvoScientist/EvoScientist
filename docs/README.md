@@ -16,7 +16,7 @@
 | Guide                                                      | Description                                                                     |
 |------------------------------------------------------------|---------------------------------------------------------------------------------|
 | [`stream-json` output protocol](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/stream-json.md#stream-json-output-protocol)   | Line-delimited JSON event stream (`--output-format stream-json`) for driving EvoScientist headlessly from SDK / programmatic clients |
-| [Grading a run against a rubric](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/rubric.md#grading-a-run-against-a-rubric)   | Acceptance criteria for single-shot runs (`--rubric`): what the grader checks, exit codes and limits |
+| [Grading a run against a rubric](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/rubric.md#grading-a-run-against-a-rubric)   | Acceptance criteria for single-shot runs (`--rubric`) and for threads in the TUI / interactive CLI (`/rubric`): what the grader checks, when grading is deferred, exit codes and limits |
 
 ## Contributing a Recipe
 

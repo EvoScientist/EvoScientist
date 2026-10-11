@@ -237,6 +237,18 @@ class StreamEventEmitter:
         )
 
     @staticmethod
+    def rubric_evaluation_deferred(*, tasks: int, processes: int) -> StreamEvent:
+        """Grading waits for this thread's background sub-agents or processes."""
+        return StreamEvent(
+            "rubric_evaluation_deferred",
+            {
+                "type": "rubric_evaluation_deferred",
+                "tasks": tasks,
+                "processes": processes,
+            },
+        )
+
+    @staticmethod
     def done(
         response: str = "", *, last_pass_response: str | None = None
     ) -> StreamEvent:

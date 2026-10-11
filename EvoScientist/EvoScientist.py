@@ -1127,10 +1127,13 @@ def _get_default_middleware(
     # jumps back to the model before the memory worker launches or the code
     # interpreter slot is released. Same helper model as the tool selector.
     if backend is not None and not for_async_subagent:
+        from .background import poll_status
         from .message_meta import this_run_messages
         from .middleware.rubric import (
             MAIN_RUBRIC_MAX_ITERATIONS,
             create_rubric_middleware,
+            dev_server_reachable,
+            live_task_status,
         )
 
         mw.append(
@@ -1140,6 +1143,9 @@ def _get_default_middleware(
                 max_iterations=MAIN_RUBRIC_MAX_ITERATIONS,
                 prepare_messages=this_run_messages,
                 require_run_marker=True,
+                task_status=live_task_status,
+                process_status=poll_status,
+                server_available=dev_server_reachable,
             )
         )
 

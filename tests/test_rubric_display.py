@@ -85,3 +85,25 @@ def test_final_frame_never_shows_the_checking_line():
     assert "Checking acceptance criteria" not in _render(
         is_final=True, rubric_checking=True
     )
+
+
+def test_deferred_line_names_what_is_still_running():
+    one = _render(rubric_deferred={"tasks": 0, "processes": 1})
+    assert "Acceptance check deferred: 1 background process still running" in one
+    both = _render(rubric_deferred={"tasks": 1, "processes": 2})
+    assert (
+        "Acceptance check deferred: 1 background task and 2 processes still running"
+        in both
+    )
+    assert "deferred" not in _render(rubric_deferred=None)
+
+
+def test_deferred_line_is_plain_text_and_follows_the_passes():
+    text = _render(
+        is_final=True,
+        rubric_evaluations=[{"result": "needs_revision", "explanation": "[red]x"}],
+        rubric_deferred={"tasks": 2, "processes": 0},
+    )
+    assert "[red]x" in text
+    assert text.index("not yet satisfied") < text.index("Acceptance check deferred")
+    assert "2 background tasks still running" in text

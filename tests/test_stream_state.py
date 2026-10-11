@@ -935,6 +935,21 @@ class TestRubricState:
         assert args["rubric_checking"] is False
         assert args["rubric_evaluations"] is state.rubric_evaluations
 
+    def test_deferred_grading_is_kept_until_the_next_pass_starts(self):
+        state = StreamState()
+        assert state.rubric_deferred is None
+        state.handle_event(
+            {"type": "rubric_evaluation_deferred", "tasks": 1, "processes": 2}
+        )
+        assert state.rubric_deferred == {"tasks": 1, "processes": 2}
+        assert state.rubric_checking is False
+        assert state.get_display_args()["rubric_deferred"] == {
+            "tasks": 1,
+            "processes": 2,
+        }
+        state.handle_event({"type": "rubric_evaluation_start", "iteration": 0})
+        assert state.rubric_deferred is None
+
     def test_a_failed_pass_keeps_the_draft_and_starts_a_new_paragraph(self):
         """A revision is often a short addendum, so the draft must stay visible."""
         import io

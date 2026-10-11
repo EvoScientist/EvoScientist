@@ -355,6 +355,13 @@ class _SubagentRegistry:
         return self.resolve(namespace)
 
 
+def _count(value: Any) -> int:
+    """A non-negative int from a model-facing payload field, else 0."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
+
+
 class _V3EventProcessor:
     """Translate v3 protocol channel events into EvoScientist UI events."""
 
@@ -430,6 +437,13 @@ class _V3EventProcessor:
         return []
 
     def _process_rubric_event(self, kind: str, payload: Any) -> list[dict[str, Any]]:
+        if kind == "rubric_evaluation_deferred":
+            return [
+                self.emitter.rubric_evaluation_deferred(
+                    tasks=_count(payload.get("tasks")),
+                    processes=_count(payload.get("processes")),
+                ).data
+            ]
         raw_iteration = payload.get("iteration")
         iteration = raw_iteration if isinstance(raw_iteration, int) else 0
         if kind == "rubric_evaluation_start":
@@ -471,7 +485,7 @@ class _V3EventProcessor:
         ``complete`` / ``error`` become ``panel_dispatch_start`` /
         ``panel_dispatch_complete`` / ``panel_dispatch_error`` UI events.
         Also handles the acceptance grader's ``rubric_evaluation_start`` /
-        ``rubric_evaluation_end``. Unrecognised event types are ignored so
+        ``rubric_evaluation_end`` / ``rubric_evaluation_deferred``. Unrecognised event types are ignored so
         future producers can extend the custom channel without breaking
         existing consumers.
         """
@@ -479,7 +493,11 @@ class _V3EventProcessor:
         if payload is None:
             return []
         kind = payload.get("type")
-        if kind in ("rubric_evaluation_start", "rubric_evaluation_end"):
+        if kind in (
+            "rubric_evaluation_start",
+            "rubric_evaluation_end",
+            "rubric_evaluation_deferred",
+        ):
             return self._process_rubric_event(kind, payload)
         if kind != "subagent":
             return []

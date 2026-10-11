@@ -2571,21 +2571,12 @@ def _resolve_rubric_option(value: str | None, *, prompt: str | None) -> str | No
         return None
     if not prompt:
         raise typer.BadParameter("--rubric requires -p/--prompt (single-shot mode)")
-    text = value
-    if value.startswith("@"):
-        path = Path(value[1:])
-        try:
-            # expanduser raises RuntimeError for an unknown "~user".
-            text = path.expanduser().read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeDecodeError, RuntimeError) as exc:
-            reason = getattr(exc, "strerror", None) or str(exc)
-            raise typer.BadParameter(
-                f"--rubric could not read {path}: {reason}"
-            ) from exc
-    text = text.strip()
-    if not text:
-        raise typer.BadParameter("--rubric is empty")
-    return text
+    from ..rubric_text import RubricTextError, read_rubric_text
+
+    try:
+        return read_rubric_text(value)
+    except RubricTextError as exc:
+        raise typer.BadParameter(f"--rubric {exc}") from exc
 
 
 def _rubric_exit_code(rubric: str | None, result: str | None) -> int | None:

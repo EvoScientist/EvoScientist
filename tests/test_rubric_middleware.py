@@ -42,6 +42,7 @@ class _ScriptedGrader(BaseChatModel):
 
     verdicts: list
     calls: int = 0
+    last_payload: str = ""
 
     @property
     def _llm_type(self) -> str:
@@ -53,6 +54,9 @@ class _ScriptedGrader(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         item = self.verdicts[min(self.calls, len(self.verdicts) - 1)]
         self.calls += 1
+        self.last_payload = next(
+            (str(m.content) for m in reversed(messages) if m.type == "human"), ""
+        )
         if isinstance(item, Exception):
             raise item
         msg = AIMessage(
@@ -103,7 +107,7 @@ def _agent(tmp_path, verdicts, replies, *, max_iterations=3, require_run_marker=
 def _run(agent, payload, thread_id="t", *, marked=False):
     cfg = {"configurable": {"thread_id": thread_id}}
     if marked:
-        cfg["configurable"]["rubric_run"] = True
+        cfg["configurable"]["rubric_run"] = {"mode": "input"}
     events = [
         data
         for _mode, data in agent.stream(payload, cfg, stream_mode=["custom"])
@@ -388,7 +392,7 @@ def _parked_before_grading(tmp_path):
         checkpointer=InMemorySaver(),
         interrupt_before=["EvoRubricMiddleware.after_agent"],
     )
-    marked = {"configurable": {"thread_id": "parked", "rubric_run": True}}
+    marked = {"configurable": {"thread_id": "parked", "rubric_run": {"mode": "input"}}}
     agent.invoke({"messages": [HumanMessage("do it")], "rubric": "- c1"}, marked)
     assert agent.get_state(marked).next == ("EvoRubricMiddleware.after_agent",)
     return agent, grader, marked

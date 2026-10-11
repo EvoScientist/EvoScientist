@@ -458,6 +458,7 @@ EvoSci --ui webui                 # 浏览器工作区界面（需 Node.js）
 EvoSci serve                      # 无头模式——仅渠道，无交互提示符
 EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI / SDK 客户端使用
 EvoSci -p "query" --rubric @criteria.md --auto-mode  # 按验收清单评分；没有得到 satisfied 判定时退出码为 3（docs/guides/rubric.md）
+# TUI / 交互式 CLI 里：/rubric set @criteria.md 对该线程的每一轮评分，/rubric next 只评下一个任务（docs/guides/rubric.md#interactive-sessions）
 ```
 
 </details>

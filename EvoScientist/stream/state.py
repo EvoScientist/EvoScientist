@@ -110,6 +110,8 @@ class StreamState:
         # Acceptance grading: a pass in progress and the verdicts so far
         self.rubric_checking = False
         self.rubric_evaluations: list[dict] = []
+        # {"tasks": n, "processes": n} while grading waits for background work.
+        self.rubric_deferred: dict | None = None
         # Cached Markdown object for Rich CLI display (avoids O(n²) re-parsing)
         self._cached_md_text: str = ""
         self._cached_md: object | None = None
@@ -311,6 +313,14 @@ class StreamState:
 
         elif event_type == "rubric_evaluation_start":
             self.rubric_checking = True
+            self.rubric_deferred = None
+
+        elif event_type == "rubric_evaluation_deferred":
+            self.rubric_checking = False
+            self.rubric_deferred = {
+                "tasks": event.get("tasks", 0),
+                "processes": event.get("processes", 0),
+            }
 
         elif event_type == "rubric_evaluation":
             self.rubric_checking = False
@@ -388,6 +398,7 @@ class StreamState:
             "selected_tools": self.selected_tools,
             "rubric_evaluations": self.rubric_evaluations,
             "rubric_checking": self.rubric_checking,
+            "rubric_deferred": self.rubric_deferred,
         }
 
 

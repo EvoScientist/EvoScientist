@@ -263,8 +263,14 @@ def build_status_fragments(
     snapshot: SessionStatusSnapshot,
     started_at: datetime,
     width: int,
+    *,
+    rubric_badge: str | None = None,
 ) -> list[tuple[str, str]]:
-    """Build prompt_toolkit formatted-text fragments for the status bar."""
+    """Build prompt_toolkit formatted-text fragments for the status bar.
+
+    ``rubric_badge`` (``on`` / ``next`` / ``on+next``) says which acceptance
+    checklists the thread holds; shown on wide bars only.
+    """
     now = datetime.now()
     duration_label = format_duration_compact(started_at, now=now)
     percent = snapshot.context_percent
@@ -304,6 +310,15 @@ def build_status_fragments(
             ("class:status-bar", " "),
         ]
 
+    if rubric_badge and width >= 76:
+        frags.extend(
+            [
+                ("class:status-bar-dim", "│ "),
+                ("class:status-bar-strong", f"rubric: {rubric_badge}"),
+                ("class:status-bar", " "),
+            ]
+        )
+
     _append_memory_indicator(
         frags,
         worker_status=get_memory_worker_status(),
@@ -322,6 +337,8 @@ def build_status_text(
     snapshot: SessionStatusSnapshot,
     started_at: datetime,
     width: int,
+    *,
+    rubric_badge: str | None = None,
 ):
     """Build a Rich Text object for the persistent TUI status bar."""
     from rich.text import Text
@@ -336,7 +353,9 @@ def build_status_text(
         "status-bar-critical": f"on {STATUS_BAR_BG} {STATUS_CRITICAL} bold",
     }
     text = Text(no_wrap=True, overflow="crop")
-    for style, content in build_status_fragments(snapshot, started_at, width):
+    for style, content in build_status_fragments(
+        snapshot, started_at, width, rubric_badge=rubric_badge
+    ):
         rich_style = rich_styles.get(
             style.removeprefix("class:"),
             f"on {STATUS_BAR_BG} {STATUS_TEXT}",

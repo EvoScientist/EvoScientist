@@ -406,7 +406,7 @@ def test_main_agent_mounts_the_grader_after_our_other_after_agent_hooks(
 
     assert isinstance(main[-1], EvoRubricMiddleware)
     assert main[-1].max_iterations == 3
-    assert main[-1]._prepare_messages_for_grader is this_run_messages
+    assert main[-1]._prepare_run_messages is this_run_messages
     assert main[-1]._require_run_marker is True
     names = [type(m).__name__ for m in main]
     assert {"EvoMemoryLifecycleMiddleware", "EvoCodeInterpreterMiddleware"} <= set(
