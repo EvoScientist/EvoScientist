@@ -138,7 +138,9 @@ class TestRichCliHitlRoundBudget:
                 }
             ],
         )
-        agent = FakeCheckpointAgent(values={"messages": [dangling]})
+        # A main-agent approval parks before any tool of the batch runs.
+        parked_at = "HumanInTheLoopMiddleware.after_model"
+        agent = FakeCheckpointAgent(values={"messages": [dangling]}, next=(parked_at,))
         gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         state = display_mod.StreamState()
 
@@ -166,10 +168,10 @@ class TestRichCliHitlRoundBudget:
         assert "i51" not in resumes[-1].message.resume
         assert [as_node for _values, as_node in agent.updates] == [
             "__end__",
-            "tools",
+            parked_at,
             "__end__",
         ]
-        tool_update = next(update for update in agent.updates if update[1] == "tools")
+        tool_update = next(update for update in agent.updates if update[1] == parked_at)
         content = tool_update[0]["messages"][0].content
         assert HITL_ROUND_LIMIT_REJECT_MESSAGE in content
         assert "Do not retry this tool call" in content
@@ -329,7 +331,7 @@ class TestRichCliHitlRoundBudget:
         gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
 
-        with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
+        with caplog.at_level(logging.WARNING, logger="EvoScientist"):
             result = display_mod._run_streaming(
                 agent=agent,
                 message="hello",
@@ -343,9 +345,13 @@ class TestRichCliHitlRoundBudget:
 
         assert result == "partial"
         assert len(gateway.requests) == 1
-        assert any(
-            "Failed to close parked HITL" in r.getMessage() for r in caplog.records
-        )
+        failures = [
+            r
+            for r in caplog.records
+            if "Could not close the parked checkpoint" in r.getMessage()
+        ]
+        assert len(failures) == 1
+        assert failures[0].exc_info is None
 
     def test_channel_session_grant_resumes_past_50_rounds(self, monkeypatch):
         from langgraph.types import Command  # type: ignore[import-untyped]
@@ -1557,16 +1563,20 @@ class TestConsumerHitlRoundBudget:
         await bus.publish_inbound(
             BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
         )
-        with caplog.at_level(logging.WARNING, logger="EvoScientist.channels.consumer"):
+        with caplog.at_level(logging.WARNING, logger="EvoScientist"):
             task = asyncio.create_task(consumer.run())
             first = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
             second = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
 
         assert first.content == "partial answer"
         assert second.content == "Approval round limit reached; stopping this turn."
-        assert any(
-            "Failed to close parked HITL" in r.getMessage() for r in caplog.records
-        )
+        failures = [
+            r
+            for r in caplog.records
+            if "Could not close the parked checkpoint" in r.getMessage()
+        ]
+        assert len(failures) == 1
+        assert failures[0].exc_info is None
 
         await consumer.stop()
         await task

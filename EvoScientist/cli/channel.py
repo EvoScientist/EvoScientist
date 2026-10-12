@@ -854,7 +854,7 @@ def channel_hitl_prompt(
             # explicit notice. Only the serve-mode consumer refeeds the
             # text as a new turn.
             await io.send(UNRECOGNIZED_FEEDBACK)
-            return ApprovalOutcome(prompted=True)
+            return ApprovalOutcome(prompted=True, rejected=True)
         return outcome
 
     return _run_engine_on_bus(

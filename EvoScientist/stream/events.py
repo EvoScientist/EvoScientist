@@ -31,6 +31,7 @@ from .tool_selection import _ToolSelectionSuppressor
 from .utils import DisplayLimits, is_success
 
 if TYPE_CHECKING:
+    from ..backends import ParkedCloseReason
     from ..middleware.events import ToolSelectionView
 from .v3_payloads import (
     RawMap,
@@ -124,6 +125,24 @@ class _GatewayCheckpointOps:
         )
 
 
+# Where the root graph parks while a gated call waits for approval: nothing of
+# that batch has run yet. Any other position means tools were running.
+_HITL_PARK_NODE = "HumanInTheLoopMiddleware.after_model"
+
+
+def _one_line(value: Any, limit: int = 200) -> str:
+    """*value* as one bounded log line (a server refusal embeds the run payload)."""
+    return " ".join(str(value).split())[:limit]
+
+
+def _every_call_answered(snapshot: Any) -> bool:
+    """Whether no call of the last AI message lacks a result (unreadable: no)."""
+    from ..backends import _unanswered_calls
+
+    values = getattr(snapshot, "values", None) or {}
+    return _unanswered_calls(list(values.get("messages") or [])) == []
+
+
 def _interrupted_dangling_patch(messages: list) -> list[ToolMessage]:
     """Synthetic error results for tool calls still unanswered in *messages*."""
     answered_ids = {
@@ -154,6 +173,7 @@ async def _recover_interrupted_graph_state(
     snapshot: Any | None = None,
     *,
     close_interrupts: bool = False,
+    close_reason: "ParkedCloseReason" = "round_limit",
 ) -> bool:
     """Close out a run that ended mid-step so the next turn starts fresh.
 
@@ -196,9 +216,12 @@ async def _recover_interrupted_graph_state(
     ``_snapshot_has_pending_interrupt`` distinguishes the two.
 
     Pass ``close_interrupts=True`` to close a genuine HITL/ask_user pause
-    anyway (spent round budget). Synthetic results then use the HITL reject
-    wording instead of the crash-recovery interrupted text. The checkpoint
-    is verified empty of both pending tasks and interrupts.
+    anyway (the turn ended there: declined, unanswered, or out of rounds).
+    Synthetic results are then worded for ``close_reason`` and for whether
+    the graph had stopped before any tool of the batch ran. The checkpoint
+    is verified empty of pending tasks and interrupts, and every call of the
+    last AI message must have a result: a close that stopped half-way is
+    reported, not repaired.
 
     ``agent`` is any object with ``aget_state`` / ``aupdate_state`` — the
     compiled graph on the crash-recovery path, or ``_GatewayCheckpointOps``
@@ -240,6 +263,13 @@ async def _recover_interrupted_graph_state(
         # tasks whose writes never made it into a checkpoint. A HITL close
         # also proceeds when the pause is parked even if ``next`` is empty.
         if not _snapshot_needs_recovery(snapshot) and not (close_interrupts and parked):
+            if close_interrupts and not _every_call_answered(snapshot):
+                _log.warning(
+                    "Thread %s has nothing pending but a tool call without a "
+                    "result; an earlier close did not finish",
+                    config.get("configurable", {}).get("thread_id", "?"),
+                )
+                return False
             return True
 
         stuck_at = snapshot.next or tuple(
@@ -254,7 +284,12 @@ async def _recover_interrupted_graph_state(
         if close_interrupts:
             from ..backends import abandoned_tool_messages
 
-            patch = abandoned_tool_messages(list(messages))
+            patch = abandoned_tool_messages(
+                list(messages),
+                reason=close_reason,
+                parked_before_tools=bool(stuck_at)
+                and all(node == _HITL_PARK_NODE for node in stuck_at),
+            )
         else:
             patch = _interrupted_dangling_patch(list(messages))
         if patch:
@@ -279,11 +314,19 @@ async def _recover_interrupted_graph_state(
             close_interrupts and _snapshot_has_pending_interrupt(verify)
         )
         if still_stuck:
+            stuck = getattr(verify, "next", None) or getattr(verify, "tasks", None)
             _log.warning(
                 "Interrupted graph state for thread %s is still stuck at %s "
                 "after recovery",
                 config.get("configurable", {}).get("thread_id", "?"),
-                getattr(verify, "next", None) or getattr(verify, "tasks", None),
+                _one_line(stuck) if close_interrupts else stuck,
+            )
+            return False
+        if close_interrupts and not _every_call_answered(verify):
+            _log.warning(
+                "Closed the parked checkpoint of thread %s but a tool call "
+                "still has no result",
+                config.get("configurable", {}).get("thread_id", "?"),
             )
             return False
         _log.debug(
@@ -294,13 +337,30 @@ async def _recover_interrupted_graph_state(
             len(patch),
         )
         return True
+    except asyncio.CancelledError:
+        if close_interrupts:
+            _log.warning(
+                "Closing the parked checkpoint of thread %s was cancelled "
+                "before it finished",
+                config.get("configurable", {}).get("thread_id", "?"),
+            )
+        raise
     except Exception as exc:
-        _log.warning(
-            "Could not recover interrupted graph state for thread %s: %s",
-            config.get("configurable", {}).get("thread_id", "?"),
-            exc,
-            exc_info=True,
-        )
+        thread_id = config.get("configurable", {}).get("thread_id", "?")
+        if close_interrupts:
+            _log.warning(
+                "Could not close the parked checkpoint of thread %s: %s",
+                thread_id,
+                _one_line(exc),
+            )
+            _log.debug("Parked checkpoint close failed", exc_info=True)
+        else:
+            _log.warning(
+                "Could not recover interrupted graph state for thread %s: %s",
+                thread_id,
+                exc,
+                exc_info=True,
+            )
         return False
 
 

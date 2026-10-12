@@ -552,7 +552,8 @@ class FakeCheckpointAgent:
                 self.next = ()
                 self.tasks = ()
                 self.interrupts = ()
-        elif as_node == "tools" and isinstance(values, dict):
+        elif isinstance(values, dict):
+            # Results are written as the node the graph was parked at.
             messages = list(self.values.get("messages") or [])
             messages.extend(values.get("messages") or [])
             self.values = {**self.values, "messages": messages}

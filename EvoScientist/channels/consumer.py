@@ -15,7 +15,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from .base import Channel
@@ -32,6 +32,9 @@ from .interaction import (
     resolve_approval,
     resolve_ask_user,
 )
+
+if TYPE_CHECKING:
+    from ..backends import ParkedCloseReason
 
 logger = logging.getLogger(__name__)
 
@@ -456,6 +459,25 @@ class InboundConsumer:
                     refeed, channel, thread_id, session_key
                 )
 
+    async def _close_parked(self, thread_id: str, reason: ParkedCloseReason) -> None:
+        """Close the pause this turn ends at; the turn ends the same if that fails."""
+        from ..backends import close_parked_checkpoint
+
+        try:
+            await close_parked_checkpoint(
+                self.graph_gateway,
+                GraphTarget(local_graph=self.agent),
+                thread_id,
+                reason=reason,
+            )
+        except Exception:
+            # The close has logged why.
+            logger.debug(
+                "Parked HITL checkpoint close failed on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+
     async def _stream_with_hitl(
         self,
         msg: InboundMessage,
@@ -682,6 +704,9 @@ class InboundConsumer:
                     # returned to ``_handle_message`` so chat-lock ordering
                     # stays serialized.
                     await io.send(REJECTED_FEEDBACK)
+                    # Closed before the reply is fed back, so the new turn
+                    # does not land on the parked approval.
+                    await self._close_parked(thread_id, "rejected")
                     # In this flow, the final wait_reply call is exactly the
                     # unrecognized approval reply. ask_user does not read this.
                     refeed_msg = io.take_reply_context()
@@ -692,7 +717,11 @@ class InboundConsumer:
                         )
                     return refeed_msg
                 if outcome.decisions is None:
-                    return None  # reject / timeout / stop — end the turn
+                    # reject / timeout / stop — end the turn
+                    await self._close_parked(
+                        thread_id, "rejected" if outcome.rejected else "unanswered"
+                    )
+                    return None
 
                 from ..backends import answer_keeps_grant, build_hitl_resume
 
@@ -708,21 +737,7 @@ class InboundConsumer:
             # resuming the agent (a rejecting resume runs another model
             # step), send any partial answer from the last real round, then
             # the stop notice (issue #469).
-            from ..backends import close_parked_checkpoint
-
-            try:
-                await close_parked_checkpoint(
-                    self.graph_gateway,
-                    GraphTarget(local_graph=self.agent),
-                    thread_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to close parked HITL checkpoint for %s in %s",
-                    msg.sender_id,
-                    session_key,
-                    exc_info=True,
-                )
+            await self._close_parked(thread_id, "round_limit")
             logger.warning(
                 "HITL round limit reached for %s in %s", msg.sender_id, session_key
             )

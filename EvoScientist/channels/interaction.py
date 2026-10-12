@@ -680,7 +680,9 @@ class ApprovalOutcome:
     mixed batch, so a caller sends the grant only with an answer the grant
     produced. ``grant_in_force`` says whether the
     session holds a grant once this outcome is returned, which the reply that
-    grants does too.
+    grants does too. ``rejected`` is True when a human replied and did not
+    approve; a decline without it (timeout, stop, a prompt that could not be
+    sent) was left unanswered.
     """
 
     decisions: list[dict] | None = None
@@ -691,6 +693,7 @@ class ApprovalOutcome:
     budget_exhausted: bool = False
     session_granted: bool = False
     grant_in_force: bool = False
+    rejected: bool = False
 
 
 async def resolve_approval(
@@ -767,8 +770,8 @@ async def resolve_approval(
         )
     if decision == "reject":
         await io.send(REJECTED_FEEDBACK)
-        return ApprovalOutcome(prompted=True)
+        return ApprovalOutcome(prompted=True, rejected=True)
 
     # Unrecognized — decline and report the raw text; the driver chooses
     # the feedback / refeed policy.
-    return ApprovalOutcome(unrecognized_reply=reply, prompted=True)
+    return ApprovalOutcome(unrecognized_reply=reply, prompted=True, rejected=True)

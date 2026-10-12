@@ -98,9 +98,14 @@ from .status_bar import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..backends import ParkedCloseReason
     from ..runtime import AsyncRuntime
 
 _channel_logger = logging.getLogger(__name__)
+
+# How long an approval widget waits for the user before the approval counts
+# as unanswered.
+_APPROVAL_WIDGET_TIMEOUT = 300.0
 
 
 def _shorten_path(path: str) -> str:
@@ -713,6 +718,7 @@ def run_textual_interactive(
             self._comp_base: str = ""
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
+            self._approval_timed_out = False
             self._ask_user_future: asyncio.Future | None = None
             self._picker_future: asyncio.Future | None = None
             self._browser_future: asyncio.Future | None = None
@@ -1497,12 +1503,19 @@ def run_textual_interactive(
             """Wait for user to interact with an ApprovalWidget.
 
             Returns the ``ApprovalWidget.Decided`` message, or ``None`` on
-            timeout / cancellation.
+            timeout / cancellation. ``_approval_timed_out`` tells the two
+            apart: Ctrl+C on the widget is a refusal, a timeout is not.
             """
             self._approval_future = asyncio.get_running_loop().create_future()
+            self._approval_timed_out = False
             try:
-                return await asyncio.wait_for(self._approval_future, timeout=300)
-            except (TimeoutError, asyncio.CancelledError):
+                return await asyncio.wait_for(
+                    self._approval_future, timeout=_APPROVAL_WIDGET_TIMEOUT
+                )
+            except TimeoutError:
+                self._approval_timed_out = True
+                return None
+            except asyncio.CancelledError:
                 return None
             finally:
                 self._approval_future = None
@@ -1930,6 +1943,36 @@ def run_textual_interactive(
             _stream_input: Any = user_text  # str or Command for HITL resume
             graph_gateway = self._graph_gateway()
 
+            async def _close_ended_pause(reason: ParkedCloseReason) -> None:
+                """Close the pause the turn ends at; mark what still runs rejected."""
+                from ..backends import close_parked_checkpoint
+
+                _tid = thread_id_override or self._conversation_tid
+                try:
+                    await close_parked_checkpoint(
+                        graph_gateway,
+                        GraphTarget(local_graph=agent, **self._dirs.metadata()),
+                        _tid,
+                        reason=reason,
+                    )
+                except Exception:
+                    # The close has logged why; the turn ends either way.
+                    _channel_logger.debug(
+                        "Parked HITL checkpoint close failed on thread %s",
+                        _tid,
+                        exc_info=True,
+                    )
+                finally:
+                    # Also when a second Ctrl+C cancels the close itself.
+                    state.pending_interrupt = None
+                    state.pending_ask_user = None
+                    for tw in tool_widgets.values():
+                        if tw._status == "running":
+                            tw.set_rejected()
+
+            # Set when Ctrl+C cancels the turn task itself.
+            _turn_cancelled = False
+
             _hitl_round = 0
             _human_rounds = 0
             # Set when the round budget is spent before the next prompt or
@@ -1939,6 +1982,11 @@ def run_textual_interactive(
             # A pause was stored but no resume was built. Close it without
             # the budget-stop notice (that notice is only for a spent cap).
             _hitl_unresolved = False
+            # Why the turn ends at a pause: "rejected" or "unanswered" once
+            # an approval was declined. From then on later pauses of the same
+            # stream are not handled; work that is still running finishes,
+            # then the parked checkpoint is closed with this reason.
+            _hitl_declined: ParkedCloseReason | None = None
             # Which calls carry the session grant: see ``_hitl_when``. Decided
             # where each answer is built, never from the flag at a round's top.
             from ..backends import approve_all_configurable_extra
@@ -2415,6 +2463,8 @@ def run_textual_interactive(
                                 )
 
                         elif event_type == "ask_user":
+                            if _hitl_declined is not None:
+                                continue
                             questions = event.get("questions", [])
                             if questions:
                                 # Budget refusal must precede the prompt:
@@ -2469,6 +2519,10 @@ def run_textual_interactive(
                                 break  # re-enter outer HITL loop
 
                         elif event_type == "interrupt":
+                            # First, before the budget checks and the automatic
+                            # answers: after a decline nothing restarts the turn.
+                            if _hitl_declined is not None:
+                                continue
                             action_reqs = event.get("action_requests", [])
                             interrupt_id = event.get("interrupt_id")
                             # Only an answer produced by the grant sets it below.
@@ -2542,10 +2596,12 @@ def run_textual_interactive(
                                     _hitl_resuming = True
                                     break  # re-enter outer HITL loop
                                 else:
+                                    # Tools still running may be siblings that
+                                    # finish; they are marked when the stream ends.
+                                    _hitl_declined = (
+                                        "rejected" if outcome.rejected else "unanswered"
+                                    )
                                     state.pending_interrupt = None
-                                    for tw in tool_widgets.values():
-                                        if tw._status == "running":
-                                            tw.set_rejected()
                                     self._append_system(
                                         "Tool execution rejected by channel user.",
                                         style="yellow",
@@ -2635,10 +2691,17 @@ def run_textual_interactive(
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop with resume
                             else:
+                                # Only a wait that ran out is "unanswered";
+                                # Ctrl+C on the widget is a refusal. Tools still
+                                # running may be siblings that finish; they are
+                                # marked when the stream ends.
+                                _hitl_declined = (
+                                    "unanswered"
+                                    if decided_event is None
+                                    and self._approval_timed_out
+                                    else "rejected"
+                                )
                                 state.pending_interrupt = None
-                                for tw in tool_widgets.values():
-                                    if tw._status == "running":
-                                        tw.set_rejected()
                                 self._append_system(
                                     "Tool execution rejected.",
                                     style="yellow",
@@ -2698,6 +2761,7 @@ def run_textual_interactive(
                 except asyncio.CancelledError:
                     # Ctrl+C cancellation: preserve streamed text before the outer
                     # turn handler appends its interruption notice.
+                    _turn_cancelled = True
                     await _mark_cancelled_response()
                     raise
                 except Exception as exc:
@@ -2756,6 +2820,7 @@ def run_textual_interactive(
                         not _hitl_resuming
                         and not _hitl_budget_exhausted
                         and not _hitl_unresolved
+                        and _hitl_declined is None
                     ):
                         _expand_completed_tools()
                         for tw in tool_widgets.values():
@@ -2800,14 +2865,19 @@ def run_textual_interactive(
                     if self._chat_following:
                         self._anchor_chat(container)
                     self._new_content_below = False
+                    # Ctrl+C after a decline: the cancellation leaves from
+                    # here, so the decline is closed now that the stream is
+                    # shut down.
+                    if _turn_cancelled and _hitl_declined is not None:
+                        await _close_ended_pause(_hitl_declined)
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
                     break
-                if _hitl_budget_exhausted:
+                if _hitl_budget_exhausted or _hitl_declined is not None:
                     # A pending was refused before a prompt or resume was
-                    # built. Leave it parked so the close below can end the
+                    # built, or the user declined. The close below ends the
                     # checkpoint without another model step.
                     break
                 if state.pending_interrupt is None and state.pending_ask_user is None:
@@ -2827,33 +2897,27 @@ def run_textual_interactive(
             _close_target = GraphTarget(local_graph=agent, **self._dirs.metadata())
             _close_tid = thread_id_override or self._conversation_tid
 
-            # Round budget exhausted. Close the parked checkpoint without
-            # resuming the agent. The finally above skipped the
-            # "interrupted" mark when ``_hitl_budget_exhausted`` so the
-            # widgets here can show rejected instead.
-            if not is_stream_cancel_requested(cancel_scope) and (
+            # The turn ends at a pause nobody will answer: the round budget
+            # is spent, the user declined, or the pause could not be resolved.
+            # Close the parked checkpoint without resuming the agent. The
+            # finally above left the widgets "running" so they show rejected
+            # here. A stopped turn keeps its pause, unless the user had
+            # already declined: the decline is what gets recorded.
+            _pause_left = (
                 state.pending_interrupt is not None
                 or state.pending_ask_user is not None
+            )
+            if _hitl_declined is not None or (
+                _pause_left and not is_stream_cancel_requested(cancel_scope)
             ):
-                from ..backends import close_parked_checkpoint
-
-                try:
-                    await close_parked_checkpoint(
-                        graph_gateway, _close_target, _close_tid
-                    )
-                except Exception:
-                    _channel_logger.warning(
-                        "Failed to close parked HITL checkpoint on thread %s",
-                        _close_tid,
-                        exc_info=True,
-                    )
-                state.pending_interrupt = None
-                state.pending_ask_user = None
-                for tw in tool_widgets.values():
-                    if tw._status == "running":
-                        tw.set_rejected()
-                # Unresolved pauses (empty ask_user, swallowed error) are
-                # closed the same way, but they are not a spent budget.
+                await _close_ended_pause(
+                    "round_limit"
+                    if _hitl_budget_exhausted
+                    else (_hitl_declined or "unanswered")
+                )
+                if _hitl_declined is not None:
+                    _expand_completed_tools()
+                # Only a spent budget gets the notice.
                 if _hitl_budget_exhausted:
                     self._append_system(
                         HITL_BUDGET_STOP_NOTICE,

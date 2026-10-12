@@ -259,7 +259,7 @@ class TestResolveApproval:
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
         io = FakeIO(["2"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome(prompted=True)
+        assert result == I.ApprovalOutcome(prompted=True, rejected=True)
         assert io.contents[-1] == I.REJECTED_FEEDBACK
 
     async def test_approve_all_grants_session(self, monkeypatch):
@@ -292,6 +292,8 @@ class TestResolveApproval:
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result.decisions is None
         assert result.unrecognized_reply == "huh?"
+        # A human replied and did not approve: a rejection, not silence.
+        assert result.rejected is True
         # No feedback sent by the engine itself on the unrecognized path.
         assert I.UNRECOGNIZED_FEEDBACK not in io.contents
         assert I.REJECTED_FEEDBACK not in io.contents
@@ -301,6 +303,7 @@ class TestResolveApproval:
         io = FakeIO([])  # times out
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome(prompted=True)
+        assert result.rejected is False  # nobody answered
         assert io.contents[-1] == I.APPROVAL_TIMEOUT_FEEDBACK
 
     async def test_stop_command_silent_cancel(self, monkeypatch):

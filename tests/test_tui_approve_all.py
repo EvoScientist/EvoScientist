@@ -114,22 +114,6 @@ async def test_the_granting_answer_is_sent_unkeyed(monkeypatch, workspace):
     assert _keyed(extras) == [False, False, True]
 
 
-async def test_a_grant_on_the_second_of_two_parked_approvals_is_sent_unkeyed(
-    monkeypatch, workspace
-):
-    """Two approvals arrive in one stream: the first is declined at the widget
-    (no resume), the grant comes with the second. The decision is taken in
-    the handler of each approval, not once per stream call."""
-    _no_config_rule(monkeypatch)
-    extras = await _turn(
-        monkeypatch,
-        workspace,
-        [[_interrupt(1), _interrupt(2)], [_interrupt(3)], DONE],
-        prepare=lambda app: _widget_answers(monkeypatch, app, REJECTING, GRANTING),
-    )
-    assert _keyed(extras) == [False, False, True]
-
-
 async def test_a_config_rule_answer_is_not_keyed(monkeypatch, workspace):
     import EvoScientist.channels.interaction as interaction_mod
 

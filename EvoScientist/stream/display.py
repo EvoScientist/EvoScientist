@@ -49,6 +49,7 @@ from .utils import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..backends import ParkedCloseReason
     from ..channels.interaction import ApprovalOutcome
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,10 @@ if TYPE_CHECKING:
 _MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".pdf"}
 _T = TypeVar("_T")
 _QuestionRunner = Callable[[Any], Any]
+
+
+class _ApprovalUnanswered(Exception):
+    """The approval prompt could not be read (no terminal), so nobody declined."""
 
 
 class _StreamPromptCancelled(Exception):
@@ -1267,7 +1272,8 @@ class _HitlResolution:
     was skipped because the human-round budget was already spent; auto
     fast paths never set it (issue #469). ``session_granted`` is True only
     when the decisions came from a session "approve all" already in force;
-    ``grant_in_force`` also covers the channel reply that grants.
+    ``grant_in_force`` also covers the channel reply that grants. ``rejected``
+    is True when a human declined; a decline without it was left unanswered.
     """
 
     decisions: list[dict] | None
@@ -1275,6 +1281,7 @@ class _HitlResolution:
     budget_exhausted: bool = False
     session_granted: bool = False
     grant_in_force: bool = False
+    rejected: bool = False
 
 
 def _resolve_hitl_approval(
@@ -1338,6 +1345,7 @@ def _resolve_hitl_approval(
             human_prompted=outcome.prompted,
             session_granted=outcome.session_granted,
             grant_in_force=outcome.grant_in_force,
+            rejected=outcome.rejected,
         )
 
     # After the auto fast paths: a spent human budget must not prompt, but
@@ -1345,13 +1353,16 @@ def _resolve_hitl_approval(
     if human_budget_exhausted:
         return _HitlResolution(None, human_prompted=False, budget_exhausted=True)
 
-    human = (
-        prompt_fn(action_requests)
-        if prompt_fn is not None
-        else _prompt_hitl_approval(action_requests, question_runner=question_runner)
-    )
+    try:
+        human = (
+            prompt_fn(action_requests)
+            if prompt_fn is not None
+            else _prompt_hitl_approval(action_requests, question_runner=question_runner)
+        )
+    except _ApprovalUnanswered:
+        return _HitlResolution(None, human_prompted=True)
     if human is None or any(d.get("type") != "approve" for d in human):
-        return _HitlResolution(human, human_prompted=True)
+        return _HitlResolution(human, human_prompted=True, rejected=human is None)
     return _HitlResolution(
         decisions_after_human_approval(action_requests, rejections),
         human_prompted=True,
@@ -1415,7 +1426,11 @@ def _prompt_hitl_approval(
         selected = (
             question_runner(question) if question_runner is not None else question.ask()
         )
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
+        # No terminal to read from: nobody declined.
+        console.print("[dim]  Rejected.[/dim]")
+        raise _ApprovalUnanswered from None
+    except KeyboardInterrupt:
         console.print("[dim]  Rejected.[/dim]")
         return None
 
@@ -1780,28 +1795,30 @@ def _run_streaming(
             if aclose is not None:
                 await aclose()
 
-    def _stop_on_hitl_round_limit() -> str:
-        """Stop an exhausted HITL resume loop visibly (issue #469).
+    def _close_parked_turn(reason: "ParkedCloseReason") -> str:
+        """End the turn at a pause that will not be answered.
 
-        Prints a notice, closes the parked interrupt without resuming the
-        agent (a rejecting resume would run another invisible model step),
-        and returns the partial response gathered so far. Channel callers
-        (``hitl_outcome_fn``) also get the notice in the returned text,
-        because the console line never reaches the channel user.
+        Closes the parked interrupt without resuming the agent (a rejecting
+        resume would run another invisible model step) and returns the
+        partial response gathered so far. At the round limit (issue #469) a
+        notice is printed, and channel callers (``hitl_outcome_fn``) also get
+        it in the returned text, because the console line never reaches them.
         """
-        from ..channels.hitl_budget import (
-            HITL_BUDGET_STOP_NOTICE,
-            MAX_HITL_TOTAL_ROUNDS,
-            MAX_HUMAN_HITL_ROUNDS,
-        )
+        at_limit = reason == "round_limit"
+        if at_limit:
+            from ..channels.hitl_budget import (
+                HITL_BUDGET_STOP_NOTICE,
+                MAX_HITL_TOTAL_ROUNDS,
+                MAX_HUMAN_HITL_ROUNDS,
+            )
 
-        limit = (
-            MAX_HITL_TOTAL_ROUNDS
-            if total_rounds >= MAX_HITL_TOTAL_ROUNDS
-            else MAX_HUMAN_HITL_ROUNDS
-        )
-        console.print(f"[yellow]{HITL_BUDGET_STOP_NOTICE}[/yellow]")
-        _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
+            limit = (
+                MAX_HITL_TOTAL_ROUNDS
+                if total_rounds >= MAX_HITL_TOTAL_ROUNDS
+                else MAX_HUMAN_HITL_ROUNDS
+            )
+            console.print(f"[yellow]{HITL_BUDGET_STOP_NOTICE}[/yellow]")
+            _logger.warning("HITL loop reached max rounds (%d), stopping", limit)
         state.pending_interrupt = None
         state.pending_ask_user = None
 
@@ -1812,6 +1829,7 @@ def _run_streaming(
                 gateway,
                 _graph_target_for_local_agent(agent, metadata),
                 thread_id,
+                reason=reason,
             )
 
         try:
@@ -1821,13 +1839,14 @@ def _run_streaming(
                 raise
             _stopped_response()
         except Exception:
-            _logger.warning(
-                "Failed to close parked HITL checkpoint on thread %s",
+            # The close has logged why; the turn ends either way.
+            _logger.debug(
+                "Parked HITL checkpoint close failed on thread %s",
                 thread_id,
                 exc_info=True,
             )
         text = (state.response_text or "").strip()
-        if hitl_outcome_fn is None:
+        if not at_limit or hitl_outcome_fn is None:
             return text
         from ..channels.hitl_budget import channel_response_with_budget_stop
 
@@ -1960,7 +1979,7 @@ def _run_streaming(
                 total_rounds=total_rounds,
                 needs_human=False,
             ):
-                return _stop_on_hitl_round_limit()
+                return _close_parked_turn("round_limit")
 
             # ask_user: check before HITL (ask_user uses the same resume loop)
             if state.pending_ask_user is not None:
@@ -1969,7 +1988,7 @@ def _run_streaming(
                     total_rounds=total_rounds,
                     needs_human=True,
                 ):
-                    return _stop_on_hitl_round_limit()
+                    return _close_parked_turn("round_limit")
                 human_rounds += 1  # ask_user always prompts a human
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
@@ -2026,7 +2045,7 @@ def _run_streaming(
                 except _StreamPromptCancelled:
                     return _stopped_response()
                 if resolution.budget_exhausted:
-                    return _stop_on_hitl_round_limit()
+                    return _close_parked_turn("round_limit")
                 if resolution.human_prompted:
                     human_rounds += 1
                 if is_stream_cancel_requested(cancel_scope):
@@ -2045,6 +2064,9 @@ def _run_streaming(
                         resolution.session_granted, resolution.decisions
                     )
                     continue
+                return _close_parked_turn(
+                    "rejected" if resolution.rejected else "unanswered"
+                )
 
             # Everything (tools, thinking, todos, response) is already on screen
             # from Live's final frame (transient=False). No need to re-print.

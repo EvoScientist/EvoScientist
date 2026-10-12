@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 from deepagents.backends.protocol import (
@@ -586,86 +586,155 @@ def resolve_action_decision(
     return ActionVerdict(ActionDecision.PROMPT)
 
 
-# Reason recorded on tool results written when a HITL round budget closes a
-# parked interrupt without resuming the agent (issue #469). A rejecting
-# ``Command(resume=...)`` does not close the checkpoint: HumanInTheLoop
-# middleware turns it into a ToolMessage and routes straight back to the
-# model. Surfaces call ``_recover_interrupted_graph_state(close_interrupts=
-# True)`` so the clear → patch → clear → verify sequence is shared with
-# crash recovery. The constant is part of the HITL result text, alongside
-# the stock "do not retry" sentence — passing it as a reject decision's
-# ``message`` would drop that sentence.
+# A parked approval or question is closed without resuming the agent when the
+# turn ends there: a rejecting ``Command(resume=...)`` does not close the
+# checkpoint, HumanInTheLoop middleware turns it into a ToolMessage and routes
+# straight back to the model. Surfaces call ``close_parked_checkpoint`` so the
+# clear → patch → clear → verify sequence is shared with crash recovery, and
+# say why the turn ended.
+ParkedCloseReason = Literal["round_limit", "rejected", "unanswered"]
+
 HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
 
+_NO_RETRY = "Do not retry this tool call unless the user explicitly requests it."
 
-def abandoned_tool_messages(messages: list) -> list:
-    """Tool results for unanswered calls on the last AI message.
+# The user was asked about the call and it did not run. The round-limit
+# sentence predates the others and is kept as it was.
+_ASKED_RESULT: dict[str, str] = {
+    "rejected": (
+        "User rejected the tool call for `{name}` with id {call_id}. The tool "
+        f"was not executed. {_NO_RETRY}"
+    ),
+    "unanswered": (
+        "The approval request for the tool call `{name}` with id {call_id} was "
+        f"left unanswered. The tool was not executed. {_NO_RETRY}"
+    ),
+    "round_limit": (
+        "User rejected the tool call for `{name}` with id {call_id} "
+        f"({HITL_ROUND_LIMIT_REJECT_MESSAGE}). The tool was not executed. "
+        f"{_NO_RETRY}"
+    ),
+}
+# The call did not run and nobody refused it: no retry ban.
+_TURN_ENDED: dict[str, str] = {
+    "rejected": "the turn ended when the user rejected an approval request",
+    "unanswered": (
+        "the turn ended with an approval request or question left unanswered"
+    ),
+    "round_limit": HITL_ROUND_LIMIT_REJECT_MESSAGE,
+}
+_NOT_FINISHED: dict[str, str] = {
+    "rejected": "the user rejected an approval request",
+    "unanswered": "an approval request or question was left unanswered",
+    "round_limit": HITL_ROUND_LIMIT_REJECT_MESSAGE,
+}
 
-    Closing a parked interrupt without these leaves dangling ``tool_calls``
-    or ``invalid_tool_calls``, and the next user turn is rejected by the
-    provider. The wording keeps the middleware's default "do not retry"
-    instruction. Crash recovery covers both lists; this does too.
+
+def _unanswered_calls(messages: list) -> list[tuple[dict, bool]] | None:
+    """``(call, is_invalid)`` for calls of the last AI message without a result.
+
+    ``None`` when the messages cannot be read, which is not the same as none
+    being unanswered. A call without an id cannot be answered and is skipped.
     """
-    from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
+    from langchain_core.messages import AIMessage, convert_to_messages
 
     try:
         converted = list(convert_to_messages(messages))
     except Exception:
-        return []
+        return None
 
-    def _calls(message: AIMessage) -> list:
+    def _calls(message: AIMessage) -> list[tuple[dict, bool]]:
         return [
-            *message.tool_calls,
-            *(getattr(message, "invalid_tool_calls", None) or ()),
+            *((call, False) for call in message.tool_calls),
+            *(
+                (call, True)
+                for call in (getattr(message, "invalid_tool_calls", None) or ())
+            ),
         ]
 
-    last_ai = None
+    last_calls: list[tuple[dict, bool]] = []
     last_index = -1
     for index, message in enumerate(converted):
         if isinstance(message, AIMessage) and _calls(message):
-            last_ai = message
+            last_calls = _calls(message)
             last_index = index
-    if last_ai is None:
-        return []
     answered = {
         message.tool_call_id
         for message in converted[last_index + 1 :]
         if getattr(message, "type", None) == "tool" and message.tool_call_id
     }
+    return [
+        (call, invalid)
+        for call, invalid in last_calls
+        if call.get("id") and call["id"] not in answered
+    ]
+
+
+def abandoned_tool_messages(
+    messages: list,
+    *,
+    reason: ParkedCloseReason = "round_limit",
+    parked_before_tools: bool = False,
+) -> list:
+    """Tool results for unanswered calls on the last AI message.
+
+    Closing a parked interrupt without these leaves dangling ``tool_calls``
+    or ``invalid_tool_calls``, and the next user turn is rejected by the
+    provider. Each result says what is known about its call:
+    ``parked_before_tools`` means the graph stopped before any tool of the
+    batch ran, so a gated call was the one the user was asked about and the
+    rest were simply not executed; anywhere else a valid call had started.
+    A malformed call never runs.
+    """
+    from langchain_core.messages import ToolMessage
+
+    from .EvoScientist import HITL_INTERRUPT_ON
+
     results = []
-    for call in _calls(last_ai):
-        call_id = call.get("id")
-        if not call_id or call_id in answered:
-            continue
+    for call, invalid in _unanswered_calls(messages) or ():
+        call_id = call["id"]
         name = call.get("name") or "tool"
+        if invalid or (parked_before_tools and name not in HITL_INTERRUPT_ON):
+            content = (
+                f"The tool call for `{name}` with id {call_id} was not executed: "
+                f"{_TURN_ENDED[reason]}."
+            )
+        elif parked_before_tools:
+            content = _ASKED_RESULT[reason].format(name=name, call_id=call_id)
+        else:
+            content = (
+                f"The tool call for `{name}` with id {call_id} did not finish "
+                f"({_NOT_FINISHED[reason]}). Anything it had already done may "
+                "have taken effect or may still be finishing; check the current "
+                "state instead of re-running it unless the user asks."
+            )
         results.append(
             ToolMessage(
-                content=(
-                    f"User rejected the tool call for `{name}` with id {call_id} "
-                    f"({HITL_ROUND_LIMIT_REJECT_MESSAGE}). The tool was not "
-                    "executed. Do not retry this tool call unless the user "
-                    "explicitly requests it."
-                ),
-                name=name,
-                tool_call_id=call_id,
-                status="error",
+                content=content, name=name, tool_call_id=call_id, status="error"
             )
         )
     return results
 
 
-async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
+async def close_parked_checkpoint(
+    gateway,
+    target,
+    thread_id: str,
+    *,
+    reason: ParkedCloseReason = "round_limit",
+) -> None:
     """End a parked HITL/ask_user turn without another model step.
 
     Reuses ``_recover_interrupted_graph_state(close_interrupts=True)`` through
-    ``gateway`` so HITL budget exhaustion and crash recovery share one
+    ``gateway`` so every such close and crash recovery share one
     clear → patch → clear → verify sequence. After #470,
     ``GraphTarget.local_graph`` may be None and execution is server-backed;
     the gateway is the authority for checkpoint reads and writes.
 
     Finished sibling writes (``ask_user`` beside another tool) stay in
-    history; unanswered calls get HITL reject results. A rejecting resume
-    is not used: that resumes the agent.
+    history; unanswered calls get results worded for ``reason``. A rejecting
+    resume is not used: that resumes the agent. Raises when the thread is not
+    left closed with every call answered.
     """
     from .stream.events import _GatewayCheckpointOps, _recover_interrupted_graph_state
 
@@ -673,6 +742,7 @@ async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
         _GatewayCheckpointOps(gateway, target, thread_id),
         {"configurable": {"thread_id": thread_id}},
         close_interrupts=True,
+        close_reason=reason,
     )
     if not ok:
         raise RuntimeError(
