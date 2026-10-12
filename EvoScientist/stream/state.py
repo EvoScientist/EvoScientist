@@ -431,6 +431,9 @@ class StreamState:
         Returns:
             A ``ResearchPhase`` enum member.
         """
+        if self.rubric_checking:
+            # The grader works unseen, after the agent's own thinking ended.
+            return ResearchPhase.RESEARCHING
         if self.is_thinking:
             return ResearchPhase.THINKING
         if self.has_pending_work():

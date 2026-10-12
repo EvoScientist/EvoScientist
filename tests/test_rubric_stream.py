@@ -44,15 +44,14 @@ _EXPERIMENTAL_STREAM = "ignore:The v3 streaming protocol on Pregel is experiment
 
 
 @pytest.mark.filterwarnings(_EXPERIMENTAL_STREAM)
-async def test_nested_grader_is_shown_under_its_own_name(tmp_path):
+async def test_nested_grader_is_not_shown_as_a_subagent(tmp_path):
     # One-word replies: the fake model streams word by word and the stream
     # pipeline drops whitespace-only chunks.
     agent, _grader = _deep(tmp_path, [FAIL, PASS], ["draft", "revised"])
 
     events = await _collect(agent, "do it", "t1", rubric="- c1")
 
-    started = {e["name"] for e in events if e["type"] == "subagent_start"}
-    assert started == {"rubric_grader"}
+    assert [e["type"] for e in events if e["type"].startswith("subagent")] == []
     assert [e["type"] for e in events if e["type"].startswith("rubric_")] == [
         "rubric_evaluation_start",
         "rubric_evaluation",
@@ -166,3 +165,32 @@ async def test_approval_from_another_client_is_not_graded(tmp_path):
     assert grader.calls == 0
     state = await agent.aget_state({"configurable": {"thread_id": "t"}})
     assert state.values["rubric"] is None
+
+
+async def test_a_subagent_that_only_shares_the_graders_name_is_shown():
+    from tests.stream_v3_fakes import (
+        FakeSubagent,
+        FakeV3Agent,
+        collect_events,
+        tool_finished,
+        tool_started,
+    )
+
+    # Started by the task tool, so it does not run below the grading hook.
+    namespace = ("tools:1",)
+    agent = FakeV3Agent(
+        [
+            tool_started("ls", tool_call_id="t1", namespace=namespace),
+            tool_finished("[]", tool_call_id="t1", namespace=namespace),
+        ],
+        subagents=[FakeSubagent(namespace, "rubric_grader")],
+    )
+
+    events = await collect_events(agent)
+
+    assert [e["type"] for e in events if e["type"].startswith("subagent")] == [
+        "subagent_start",
+        "subagent_tool_call",
+        "subagent_tool_result",
+        "subagent_end",
+    ]

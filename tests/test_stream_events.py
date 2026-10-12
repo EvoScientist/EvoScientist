@@ -2114,7 +2114,9 @@ class TestModelRetryRollback:
         retry = self._retries(out)[0]
         assert retry["instance_id"] != ""
         assert retry["subagent"] == "rubric_grader"
-        assert retry["discarded"]["text_chars"] == len("grading")
+        # The grader's output was never shown, so there is nothing to take back.
+        assert retry["discarded"]["text_chars"] == 0
+        assert [e["type"] for e in out if e["type"].startswith("subagent")] == []
         assert self._done(out)["response"] == "Main answer."
 
     async def test_subagent_retry_is_keyed_by_raw_namespace(self):

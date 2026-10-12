@@ -261,7 +261,7 @@ async def test_badge_appears_once_the_agent_has_loaded(monkeypatch, workspace):
         assert app._rubric_badges.get(app._conversation_tid) == "on"
 
 
-async def test_a_late_grader_end_event_does_not_repeat_the_draft(
+async def test_a_late_subagent_end_event_does_not_repeat_the_draft(
     monkeypatch, workspace
 ):
     app = await _capture_app(monkeypatch, workspace)
@@ -271,10 +271,10 @@ async def test_a_late_grader_end_event_does_not_repeat_the_draft(
                 {"type": "text", "content": "draft"},
                 {
                     "type": "subagent_start",
-                    "instance_id": "g1",
-                    "name": "rubric_grader",
+                    "instance_id": "h1",
+                    "name": "helper",
                     "description": "",
-                    "tool_call_id": "tc-g1",
+                    "tool_call_id": "tc-h1",
                 },
                 {"type": "rubric_evaluation_start", "iteration": 0},
                 {
@@ -286,7 +286,8 @@ async def test_a_late_grader_end_event_does_not_repeat_the_draft(
                     "unverified": False,
                 },
                 {"type": "text", "content": "fixed"},
-                {"type": "subagent_end", "instance_id": "g1", "name": "rubric_grader"},
+                # Sent by the sub-agent's own task, so it can trail later events.
+                {"type": "subagent_end", "instance_id": "h1", "name": "helper"},
                 {"type": "done", "response": "draft\n\nfixed"},
             ]
         )
@@ -302,6 +303,142 @@ async def test_a_late_grader_end_event_does_not_repeat_the_draft(
         after = [t for k, t in seq[verdict:] if k == "assistant"]
         assert after, seq
         assert all("draft" not in t for t in after), after
+
+
+class _Gated:
+    """A scripted stream that stops at each named gate until the test lets it go on."""
+
+    def __init__(self, *script):
+        import asyncio
+
+        self._script = script
+        self._reached = {s: asyncio.Event() for s in script if isinstance(s, str)}
+        self._go_on = {s: asyncio.Event() for s in self._reached}
+
+    async def stream(self, _request):
+        for step in self._script:
+            if isinstance(step, str):
+                self._reached[step].set()
+                await self._go_on[step].wait()
+            else:
+                yield step
+
+    async def chat_at(self, app, pilot, gate) -> list:
+        """The chat's widgets once the stream stands at *gate*."""
+        import asyncio
+
+        await asyncio.wait_for(self._reached[gate].wait(), 10)
+        await pilot.pause()
+        return list(app.query_one("#chat").children)
+
+    def go_on(self, gate) -> None:
+        self._go_on[gate].set()
+
+
+_CHECK = {"type": "rubric_evaluation_start", "iteration": 0}
+_CHECKING_LINE = "rubric: checking acceptance criteria (pass 1)"
+_SATISFIED = {
+    "type": "rubric_evaluation",
+    "iteration": 0,
+    "result": "satisfied",
+    "explanation": "ok",
+    "criteria": [],
+    "unverified": False,
+}
+
+
+async def _run_gated(app, workspace, gated) -> None:
+    gateway = _gateway()
+    gateway.stream = gated.stream
+    _prepare(app, workspace, gateway)
+    await _submit(app, "task")
+
+
+async def test_a_spinner_runs_under_the_checking_line_until_the_verdict(
+    monkeypatch, workspace
+):
+    from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+    from EvoScientist.cli.widgets.system_message import SystemMessage
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        gated = _Gated(
+            {"type": "text", "content": "draft"},
+            _CHECK,
+            "grading",
+            _SATISFIED,
+            "verdict",
+            {"type": "done", "response": "draft"},
+        )
+        await _run_gated(app, workspace, gated)
+
+        # The grader's own work is not shown: the spinner says it is running.
+        *_, line, last = await gated.chat_at(app, pilot, "grading")
+        assert isinstance(line, SystemMessage)
+        assert str(line.render()) == _CHECKING_LINE
+        assert isinstance(last, LoadingWidget)
+        gated.go_on("grading")
+
+        # The verdict takes the spinner's place while the run still goes on.
+        *_, line, last = await gated.chat_at(app, pilot, "verdict")
+        assert str(line.render()) == _CHECKING_LINE
+        assert isinstance(last, SystemMessage)
+        assert str(last.render()) == "Acceptance criteria satisfied"
+        assert not list(app.query(LoadingWidget))
+        gated.go_on("verdict")
+        await _finish_turns(app, pilot)
+
+
+async def test_a_check_that_opens_the_turn_keeps_one_spinner(monkeypatch, workspace):
+    from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        # The answer had no text, so the turn's first spinner is still up.
+        gated = _Gated(_CHECK, "grading", _SATISFIED, {"type": "done", "response": ""})
+        await _run_gated(app, workspace, gated)
+
+        chat = await gated.chat_at(app, pilot, "grading")
+        assert [isinstance(w, LoadingWidget) for w in chat].count(True) == 1
+        assert isinstance(chat[-1], LoadingWidget)
+        gated.go_on("grading")
+        await _finish_turns(app, pilot)
+        assert not list(app.query(LoadingWidget))
+
+
+async def test_a_grader_retry_notice_goes_above_the_spinner(monkeypatch, workspace):
+    from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        retry = {
+            "type": "model_retry",
+            "attempt": 2,
+            "wait_seconds": 8.0,
+            "reason": "503: starting up",
+            "budget_left_seconds": 50.0,
+            "cause": "exception",
+            "subagent": "rubric_grader",
+            "instance_id": "EvoRubricMiddleware.after_agent:1",
+            "discarded": {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []},
+        }
+        gated = _Gated(
+            {"type": "text", "content": "draft"},
+            _CHECK,
+            retry,
+            "waiting",
+            _SATISFIED,
+            {"type": "done", "response": "draft"},
+        )
+        await _run_gated(app, workspace, gated)
+
+        *_, line, notice, last = await gated.chat_at(app, pilot, "waiting")
+        assert str(line.render()) == _CHECKING_LINE
+        assert str(notice.render()).startswith("rubric_grader: Model request failed")
+        assert isinstance(last, LoadingWidget)
+        gated.go_on("waiting")
+        await _finish_turns(app, pilot)
+        assert not list(app.query(LoadingWidget))
 
 
 async def test_checklist_text_is_shown_literally_in_the_tui(monkeypatch, workspace):

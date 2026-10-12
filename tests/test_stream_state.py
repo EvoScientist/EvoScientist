@@ -696,6 +696,24 @@ class TestComputePhase:
         state.handle_event({"type": "text", "content": "Hello"})
         assert state.compute_phase() == "writing"
 
+    def test_researching_while_the_acceptance_check_runs(self):
+        state = StreamState()
+        state.handle_event({"type": "text", "content": "Final report"})
+        state.handle_event({"type": "rubric_evaluation_start", "iteration": 0})
+        assert state.compute_phase() == "researching"
+        state.handle_event(
+            {"type": "rubric_evaluation", "iteration": 0, "result": "satisfied"}
+        )
+        assert state.compute_phase() == "writing"
+
+    def test_researching_when_the_check_follows_reasoning_only(self):
+        # No text ended the reasoning, so it still counts as going on.
+        state = StreamState()
+        state.handle_event({"type": "thinking", "content": "hm"})
+        assert state.compute_phase() == "thinking"
+        state.handle_event({"type": "rubric_evaluation_start", "iteration": 0})
+        assert state.compute_phase() == "researching"
+
     def test_researching_with_active_subagent(self):
         state = StreamState()
         state.handle_event(

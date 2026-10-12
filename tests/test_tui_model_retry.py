@@ -7,7 +7,13 @@ import pytest
 pytest.importorskip("textual")
 
 from tests.test_tui_banner_position import _capture_app
-from tests.test_tui_rubric import _assistant_texts, _chat_sequence, _gateway
+from tests.test_tui_rubric import (
+    _assistant_texts,
+    _chat_sequence,
+    _Gated,
+    _gateway,
+    _run_gated,
+)
 from tests.test_tui_skill_pin import (
     _finish_turns,
     _isolated_skills,  # noqa: F401  (autouse fixture)
@@ -157,3 +163,100 @@ async def test_discard_without_retry_mounts_no_line(monkeypatch, workspace):
         assert not [
             s for s in _chat_sequence(app) if s[0] == "system" and "retrying" in s[1]
         ]
+
+
+async def test_a_retry_before_any_content_keeps_the_spinner_last(
+    monkeypatch, workspace
+):
+    from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        nothing = {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []}
+        gated = _Gated(
+            _retry(nothing),
+            "waiting",
+            {"type": "text", "content": "Answer."},
+            {"type": "done", "response": "Answer."},
+        )
+        await _run_gated(app, workspace, gated)
+
+        *_, notice, last = await gated.chat_at(app, pilot, "waiting")
+        assert str(notice.render()).startswith("Model request failed")
+        assert isinstance(last, LoadingWidget)
+        gated.go_on("waiting")
+        await _finish_turns(app, pilot)
+        assert not list(app.query(LoadingWidget))
+
+
+async def test_a_subagent_retry_notice_follows_its_box(monkeypatch, workspace):
+    from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+    from EvoScientist.cli.widgets.subagent_widget import SubAgentWidget
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        nothing = {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []}
+        gated = _Gated(
+            # No root content yet, so the turn's first spinner is still up.
+            {
+                "type": "subagent_start",
+                "instance_id": "h1",
+                "name": "helper",
+                "description": "",
+                "tool_call_id": "tc-h1",
+            },
+            {**_retry(nothing, "h1"), "subagent": "helper"},
+            "waiting",
+            {"type": "subagent_end", "instance_id": "h1", "name": "helper"},
+            {"type": "text", "content": "Answer."},
+            {"type": "done", "response": "Answer."},
+        )
+        await _run_gated(app, workspace, gated)
+
+        *_, box, notice, last = await gated.chat_at(app, pilot, "waiting")
+        assert isinstance(box, SubAgentWidget)
+        assert str(notice.render()).startswith("helper: Model request failed")
+        assert isinstance(last, LoadingWidget)
+        gated.go_on("waiting")
+        await _finish_turns(app, pilot)
+        assert not list(app.query(LoadingWidget))
+
+
+async def test_a_retry_notice_follows_the_tool_selection_line(monkeypatch, workspace):
+    from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+    from EvoScientist.cli.widgets.tool_selection_widget import ToolSelectionWidget
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        nothing = {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []}
+        gated = _Gated(
+            # The selection line leaves the turn's first spinner up, above it.
+            {"type": "tool_selection", "tools": ["ls", "read_file"]},
+            _retry(nothing),
+            "waiting",
+            {"type": "text", "content": "Answer."},
+            {"type": "done", "response": "Answer."},
+        )
+        await _run_gated(app, workspace, gated)
+
+        *_, selection, notice, last = await gated.chat_at(app, pilot, "waiting")
+        assert isinstance(selection, ToolSelectionWidget)
+        assert str(notice.render()).startswith("Model request failed")
+        assert isinstance(last, LoadingWidget)
+        gated.go_on("waiting")
+        await _finish_turns(app, pilot)
+        assert not list(app.query(LoadingWidget))
+
+
+async def test_a_retry_after_a_pause_that_found_the_spinner_up(monkeypatch, workspace):
+    from tests.test_tui_approve_all import DONE, _interrupt, _turn
+
+    # The paused round's cleanup removed the spinner; the resumed round has
+    # none to keep last. ``_turn`` asserts that the answer still arrives.
+    nothing = {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []}
+    await _turn(
+        monkeypatch,
+        workspace,
+        [[_interrupt(1)], [_retry(nothing), *DONE]],
+        prepare=lambda app: setattr(app, "_hitl_auto_approve", True),
+    )

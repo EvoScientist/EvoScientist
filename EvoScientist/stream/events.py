@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ..middleware.events import ToolSelectionView
 from .v3_payloads import (
     GOAL_DRAFT_LINEAGE,
+    RUBRIC_GRADER_LINEAGE,
     RawMap,
     _as_raw_map,
     _event_data,
@@ -615,7 +616,8 @@ class _V3EventProcessor:
         # later event back until the stream ends; its own output is not shown.
         drafting = _under(namespace, GOAL_DRAFT_LINEAGE)
         if namespace and method in ("messages", "tools"):
-            if drafting:
+            # The grader's own output is not shown either.
+            if drafting or _under(namespace, RUBRIC_GRADER_LINEAGE):
                 return []
             subagent = await self.subagents.wait_resolve(namespace)
             if subagent is None:
@@ -1545,6 +1547,11 @@ async def stream_agent_events(
                     if cause and cause["type"] == "toolCall":
                         trigger_call_id = cause["tool_call_id"]
                     instance_id = ":".join(path)
+                    if _under(path, RUBRIC_GRADER_LINEAGE):
+                        # Registered so its custom events (call marks, retry
+                        # notice) resolve at once and carry its name.
+                        subagents.register(path, name, description)
+                        continue
                     await queue.put(
                         emitter.subagent_start(
                             name,

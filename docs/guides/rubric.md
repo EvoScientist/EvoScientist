@@ -18,7 +18,7 @@ EvoSci -p "Reproduce table 2" --auto-mode --rubric @criteria.md
 - The rubric applies to this run only. Later turns on the same thread are not graded unless the thread holds a `/rubric` checklist, and a run that is parked at an approval and then continued from another client (for example the WebUI) finishes without grading.
 - Sub-agents run in-turn during a `--rubric` run instead of in the background.
 - Only runs the CLI marks are graded (`configurable.rubric_run` in the run's config): a single-shot run started with `--rubric`, and in an interactive session the turns of a thread that holds a `/rubric` checklist. A `rubric` that another client sends in a run's input is dropped and the run is not graded, unless that client also sets the marker.
-- The grader's own file checks are shown as a sub-agent named `rubric_grader`.
+- The grader's own work is not shown: a line says a check is running, then the verdict follows.
 - The grader uses the auxiliary model when one is configured, otherwise the main model.
 
 ## Exit codes

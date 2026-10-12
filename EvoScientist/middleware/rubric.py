@@ -784,7 +784,7 @@ class EvoRubricMiddleware(RubricMiddleware):
     @staticmethod
     def _grader_invocation_config(metadata):
         # Upstream hands the grader the parent's metadata, agent name included,
-        # so its work would be shown as a sub-agent called like the main agent.
+        # so its retry notice would be labelled like the main agent's.
         config = RubricMiddleware._grader_invocation_config(metadata)
         return {
             "metadata": {

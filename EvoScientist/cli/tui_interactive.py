@@ -2400,16 +2400,25 @@ def run_textual_interactive(
 
                         elif event_type == "rubric_evaluation_start":
                             passes = int(event.get("iteration") or 0) + 1
+                            if not loading_removed:
+                                await loading.cleanup()
+                                loading_removed = True
                             await container.mount(
                                 SystemMessage(
                                     f"rubric: checking acceptance criteria (pass {passes})",
                                     msg_style="dim",
                                 )
                             )
+                            # The grader's own work is not shown; the verdict
+                            # or the end of the stream takes the spinner away.
+                            await _restart_loading()
 
                         elif event_type == "rubric_evaluation":
                             from ..stream.display import rubric_result_lines
 
+                            if not loading_removed:
+                                await loading.cleanup()
+                                loading_removed = True
                             if event.get("result") == "needs_revision":
                                 # The revision must land below its verdict, and
                                 # the draft must not come back as narration.
@@ -2470,11 +2479,14 @@ def run_textual_interactive(
                             if event_type == "model_retry":
                                 from ..stream.display import model_retry_text
 
-                                await container.mount(
-                                    SystemMessage(
-                                        model_retry_text(event), msg_style="yellow"
-                                    )
+                                notice = SystemMessage(
+                                    model_retry_text(event), msg_style="yellow"
                                 )
+                                await container.mount(notice)
+                                # A spinner that is up stays the last line. Asked
+                                # of the widget: a paused round removes it unflagged.
+                                if loading.parent is container:
+                                    container.move_child(loading, after=notice)
                         elif event_type == "rubric_evaluation_deferred":
                             from ..stream.display import rubric_deferred_text
 

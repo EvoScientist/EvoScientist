@@ -15,6 +15,7 @@ pytest.importorskip("textual")
 from EvoScientist.cli.widgets.ask_user_widget import AskUserWidget
 from EvoScientist.cli.widgets.assistant_message import AssistantMessage
 from EvoScientist.cli.widgets.loading_widget import LoadingWidget
+from EvoScientist.cli.widgets.subagent_widget import SubAgentWidget
 from EvoScientist.cli.widgets.system_message import SystemMessage
 from EvoScientist.cli.widgets.user_message import UserMessage
 from EvoScientist.gateway import RuntimeGateways
@@ -132,6 +133,9 @@ async def test_accepting_a_goal_shows_one_user_message_and_runs_to_completion(
         )
         assert not list(app.query(AskUserWidget))
         assert not list(app.query(LoadingWidget))
+        # The grader ran, and none of its own work was drawn.
+        assert model.calls["grade"] == 1
+        assert not list(app.query(SubAgentWidget))
 
         assert (await _values(agent, app))["_goal"]["status"] == "complete"
         assert model.calls == {"main": 1, "draft": 1, "grade": 1}
