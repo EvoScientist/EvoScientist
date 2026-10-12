@@ -136,6 +136,9 @@ class CommandContext:
     # The input after the command name, as typed (newlines and quotes kept);
     # ``args`` is the shell-split view of the same text.
     raw_args: str = ""
+    # Set by ``/goal``: once the command returned, the surface starts a run
+    # that carries this request and no message.
+    goal_request: dict[str, Any] | None = None
 
     @property
     def workspace(self) -> Workspace:

@@ -268,8 +268,8 @@ def build_status_fragments(
 ) -> list[tuple[str, str]]:
     """Build prompt_toolkit formatted-text fragments for the status bar.
 
-    ``rubric_badge`` (``on`` / ``next`` / ``on+next``) says which acceptance
-    checklists the thread holds; shown on wide bars only.
+    ``rubric_badge`` (``on`` / ``next`` / ``on+next``, or ``goal: <status>``)
+    says which acceptance checklists the thread holds; shown on wide bars only.
     """
     now = datetime.now()
     duration_label = format_duration_compact(started_at, now=now)
@@ -314,7 +314,12 @@ def build_status_fragments(
         frags.extend(
             [
                 ("class:status-bar-dim", "│ "),
-                ("class:status-bar-strong", f"rubric: {rubric_badge}"),
+                (
+                    "class:status-bar-strong",
+                    rubric_badge
+                    if rubric_badge.startswith("goal: ")
+                    else f"rubric: {rubric_badge}",
+                ),
                 ("class:status-bar", " "),
             ]
         )

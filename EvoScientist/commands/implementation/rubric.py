@@ -29,6 +29,30 @@ _USAGE = (
 )
 
 
+async def read_thread_values(ctx: CommandContext, who: str) -> dict | None:
+    """The thread's state values, or ``None`` when they cannot be read now."""
+    if ctx.agent is None or ctx.graph_gateway is None:
+        return None
+    from ...gateway import GraphTarget
+
+    target = GraphTarget(local_graph=ctx.agent, **ctx.dirs.metadata())
+    try:
+        return await ctx.graph_gateway.get_state_values(target, ctx.thread_id) or {}
+    except Exception:
+        logger.debug("%s: thread state unavailable", who, exc_info=True)
+        return None
+
+
+async def _note_goal(ctx: CommandContext) -> None:
+    """Say that replacing the sticky checklist also ends the thread's goal."""
+    from ...rubric_session import thread_goal
+
+    if thread_goal(await read_thread_values(ctx, "/rubric")) is not None:
+        ctx.ui.append_system(
+            "This also cancels the thread's goal (see /goal).", style="yellow"
+        )
+
+
 def _text_after_subcommand(raw_args: str) -> str:
     parts = raw_args.split(None, 1)
     text = parts[1].strip() if len(parts) > 1 else ""
@@ -76,6 +100,7 @@ class RubricCommand(Command):
                 "Acceptance criteria cleared; applies from your next message.",
                 style="dim",
             )
+            await _note_goal(ctx)
             return
         text = _text_after_subcommand(ctx.raw_args)
         if sub not in ("set", "next") or not text:
@@ -97,6 +122,7 @@ class RubricCommand(Command):
                 "Acceptance criteria set for every turn from your next message on.",
                 style="dim",
             )
+            await _note_goal(ctx)
         else:
             runtime.rubric.record(ctx.thread_id, next=criteria)
             ctx.ui.append_system(
@@ -107,22 +133,13 @@ class RubricCommand(Command):
 
     async def _show(self, ctx: CommandContext, runtime: ChannelRuntime) -> None:
         pending = runtime.rubric.changes_for(ctx.thread_id)
-        values = None
-        unreadable = "Agent not loaded yet"
-        if ctx.agent is not None and ctx.graph_gateway is not None:
-            from ...gateway import GraphTarget
-
-            target = GraphTarget(local_graph=ctx.agent, **ctx.dirs.metadata())
-            try:
-                # A thread with no state yet reads as empty, not as unreadable.
-                values = (
-                    await ctx.graph_gateway.get_state_values(target, ctx.thread_id)
-                    or {}
-                )
-            except Exception:
-                unreadable = "Thread state could not be read"
-                logger.debug("/rubric show: thread state unavailable", exc_info=True)
+        values = await read_thread_values(ctx, "/rubric show")
         if values is None:
+            unreadable = (
+                "Agent not loaded yet"
+                if ctx.agent is None
+                else "Thread state could not be read"
+            )
             ctx.ui.append_system(
                 f"{unreadable}; showing only the changes waiting for your next "
                 "message.",

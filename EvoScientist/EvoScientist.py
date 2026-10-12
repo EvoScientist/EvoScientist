@@ -1198,6 +1198,26 @@ def _get_default_middleware(
                 ),
             )
         )
+        from .middleware.goal import GoalContextMiddleware, GoalMiddleware
+
+        # After the grader in the list, which is safe only because it has no
+        # end hook; its block then closes our part of the system prompt.
+        mw.append(GoalContextMiddleware())
+        # First: its start hook answers a /goal request before any other
+        # start hook runs, and the message it adds at acceptance is then an
+        # ordinary user turn for skill pinning and checklist selection.
+        mw.insert(
+            0,
+            GoalMiddleware(
+                model=model,
+                backend=backend,
+                model_retry=_model_retry_middleware(
+                    cfg, unattended=unattended, honor_run_key=model_retry_honors_run_key
+                ),
+                # The condition that leaves ask_user out: nobody can answer.
+                unattended=bool(getattr(cfg, "auto_mode", False)),
+            ),
+        )
 
     return mw
 

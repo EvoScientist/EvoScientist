@@ -30,6 +30,21 @@ def _event_namespace(event: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(str(part) for part in namespace)
 
 
+# The functional task the goal middleware drafts criteria in, and where its
+# run sits: below that middleware's start hook. It is no sub-agent, so nothing
+# ever registers its namespace.
+GOAL_DRAFT_TASK = "draft_goal"
+GOAL_DRAFT_LINEAGE = ("GoalMiddleware.before_agent", GOAL_DRAFT_TASK)
+
+
+def _under(namespace: tuple[str, ...], lineage: tuple[str, ...]) -> bool:
+    """Whether *namespace* starts with the nodes named in *lineage*."""
+    return len(namespace) >= len(lineage) and all(
+        part.split(":", 1)[0] == name
+        for part, name in zip(namespace, lineage, strict=False)
+    )
+
+
 def _event_data(event: Mapping[str, object]) -> object:
     params = _as_raw_map(event.get("params")) or {}
     return params.get("data")

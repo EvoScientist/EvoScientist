@@ -120,6 +120,8 @@ class RunRequest:
     the run identically."""
     rubric: str | None = None
     """Acceptance criteria this turn is graded against; ``None`` means ungraded."""
+    goal_request: dict[str, Any] | None = None
+    """A ``/goal`` request; the run then carries no message (``message`` is ``""``)."""
 
 
 @dataclass(frozen=True, slots=True)

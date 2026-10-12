@@ -129,6 +129,7 @@ def run_streaming(
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
+    goal_request: dict[str, Any] | None = None,
 ) -> str:
     """Run streaming with the selected backend."""
     backend = get_backend(ui_backend, warn_fallback=True)
@@ -155,6 +156,7 @@ def run_streaming(
             runtime=runtime,
             rubric=rubric,
             approve_all_at_start=approve_all_at_start,
+            goal_request=goal_request,
         )
     except AsyncRuntimeError:
         raise
@@ -186,6 +188,7 @@ def run_streaming(
                 runtime=runtime,
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
+                goal_request=goal_request,
             )
         raise
 

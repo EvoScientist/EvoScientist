@@ -57,7 +57,8 @@ _live_interpreters: weakref.WeakSet[EvoCodeInterpreterMiddleware]
 class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
     """Code interpreter middleware with EvoScientist's memory preflight hint.
 
-    ``after_agent`` / ``aafter_agent`` are intentionally NOT overridden. An
+    ``after_agent`` / ``aafter_agent`` only skip a run that ended before
+    ``before_agent`` ran. They are otherwise NOT gated. An
     earlier "conditional snapshot" gate that skipped ``after_agent`` on turns
     where ``code_interpreter`` wasn't called saved ~50 ms/turn of
     ``create_snapshot()`` work, but also skipped the slot eviction upstream
@@ -73,6 +74,18 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
 
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
+
+    # A run can end in the very first start hook (a ``/goal`` request that is
+    # cancelled); no slot was assigned, so there is nothing to snapshot or evict.
+    def after_agent(self, state, runtime):
+        if not state.get("_quickjs_slot_id"):
+            return None
+        return super().after_agent(state, runtime)
+
+    async def aafter_agent(self, state, runtime):
+        if not state.get("_quickjs_slot_id"):
+            return None
+        return await super().aafter_agent(state, runtime)
 
     async def aclose(self) -> None:
         """Evict active REPLs on their worker loops before event-loop shutdown."""

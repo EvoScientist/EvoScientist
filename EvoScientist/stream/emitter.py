@@ -239,6 +239,30 @@ class StreamEventEmitter:
         )
 
     @staticmethod
+    def goal_state(
+        *,
+        change: str,
+        status: str = "",
+        note: str = "",
+        objective: str = "",
+        criteria: str = "",
+        message: str = "",
+    ) -> StreamEvent:
+        """Something happened to the thread's goal (drafted, accepted, paused, ...)."""
+        return StreamEvent(
+            "goal_state",
+            {
+                "type": "goal_state",
+                "change": change,
+                "status": status,
+                "note": note,
+                "objective": objective,
+                "criteria": criteria,
+                "message": message,
+            },
+        )
+
+    @staticmethod
     def rubric_evaluation_deferred(*, tasks: int, processes: int) -> StreamEvent:
         """Grading waits for this thread's background sub-agents or processes."""
         return StreamEvent(

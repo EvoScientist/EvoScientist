@@ -122,7 +122,7 @@ async def test_skill_slash_runs_a_turn_with_one_label(monkeypatch, workspace):
         _prepare(app, workspace, gateway)
         commands: list[str] = []
 
-        async def _record(text):
+        async def _record(text, _token):
             commands.append(text)
 
         app._handle_command = _record
@@ -150,16 +150,18 @@ async def test_commands_typos_and_case_go_to_the_command_handler(
         _prepare(app, workspace, gateway)
         commands: list[str] = []
 
-        async def _record(text):
+        async def _record(text, _token):
             commands.append(text)
+            # The real handler owns the app while it runs and releases it.
+            app._busy = False
 
         app._handle_command = _record
 
         sent = ["/model", "/model gpt", "/typo hi", "/new", "/Alpha go"]
         for text in sent:
             await _submit(app, text)
-        if app._background_tasks:
-            await asyncio.gather(*list(app._background_tasks))
+            if app._background_tasks:
+                await asyncio.gather(*list(app._background_tasks))
         await pilot.pause()
 
         assert sorted(commands) == sorted(sent)

@@ -670,6 +670,85 @@ _RUBRIC_RESULT_LINES = {
 }
 
 
+_GOAL_LINES: dict[str, tuple[str, str]] = {
+    "drafting": ("Drafting acceptance criteria...", "dim"),
+    "accepted": ("Goal accepted.", "green"),
+    "amended": ("Goal amended.", "green"),
+    "cancelled": ("Goal proposal cancelled.", "yellow"),
+    "failed": ("Goal drafting failed", "red"),
+    "paused": ("Goal paused.", "yellow"),
+    "resumed": ("Goal resumed.", "green"),
+    "cleared": ("Goal cleared.", "yellow"),
+    "ignored": ("Nothing was changed", "yellow"),
+    "blocked": ("Goal blocked", "yellow"),
+    "unblocked": ("Goal unblocked.", "dim"),
+    "unmet": (
+        "The goal stays active: send a message to continue, "
+        "/goal amend to change it, /goal clear to drop it.",
+        "dim",
+    ),
+    "complete": ("Goal complete.", "green"),
+}
+# Changes whose note is the point of the line.
+_GOAL_NOTE_AFTER_COLON = frozenset({"failed", "ignored", "blocked"})
+# A note can be 4,000 characters; a status line shows its start.
+_GOAL_NOTE_SHOWN = 240
+
+
+def goal_event_lines(event: dict) -> list[tuple[str, str]]:
+    """``(text, style)`` lines for one goal event; shared by the Rich CLI and the TUI."""
+    change = str(event.get("change") or "")
+    label, style = _GOAL_LINES.get(change, (f"Goal: {change}", "dim"))
+    note = " ".join(str(event.get("note") or "").split())
+    if len(note) > _GOAL_NOTE_SHOWN:
+        # ``/goal`` shows the whole note.
+        note = note[: _GOAL_NOTE_SHOWN - 3].rstrip() + "..."
+    if note and change in _GOAL_NOTE_AFTER_COLON:
+        label = f"{label}: {note}"
+    elif note and change in ("complete", "cleared"):
+        label = f"{label} {note}"
+    elif change in _GOAL_NOTE_AFTER_COLON:
+        label = f"{label}."
+    lines = [(label, style)]
+    if change in ("accepted", "amended"):
+        if change == "amended" and event.get("objective"):
+            lines.append((f"  {event['objective']}", "dim"))
+        lines.extend(
+            (f"  {line}", "dim")
+            for line in str(event.get("criteria") or "").splitlines()
+            if line.strip()
+        )
+    return lines
+
+
+# Changes that follow the grader's verdict; the others open the turn.
+_GOAL_CLOSING_CHANGES = frozenset({"unmet", "complete"})
+
+
+def visible_goal_events(goal_events: list, *, closing: bool) -> list:
+    """This turn's goal events for one side of the verdict lines.
+
+    ``drafting`` is shown only while it is the latest event: the next one
+    says how the draft ended.
+    """
+    last = len(goal_events) - 1
+    return [
+        event
+        for index, event in enumerate(goal_events)
+        if (event.get("change") in _GOAL_CLOSING_CHANGES) is closing
+        and (event.get("change") != "drafting" or index == last)
+    ]
+
+
+def _render_goal_lines(goal_events: list, *, closing: bool) -> list:
+    """Lines for this turn's goal events, as plain ``Text`` (never markup)."""
+    return [
+        Text(text, style=style)
+        for event in visible_goal_events(goal_events, closing=closing)
+        for text, style in goal_event_lines(event)
+    ]
+
+
 def rubric_deferred_text(tasks: int, processes: int) -> str:
     """One line saying what grading waits for; shared by the Rich CLI and the TUI."""
     parts: list[str] = []
@@ -773,6 +852,7 @@ def create_streaming_display(
     rubric_checking: bool = False,
     rubric_deferred: dict | None = None,
     model_retries: list | None = None,
+    goal_events: list | None = None,
 ) -> Any:
     """Create Rich display layout for streaming output.
 
@@ -1047,12 +1127,21 @@ def create_streaming_display(
         elements.append(Text(""))  # blank separator
         elements.extend(retry_lines)
 
+    goal_lines = _render_goal_lines(goal_events or [], closing=False)
+    if goal_lines:
+        if elements:
+            elements.append(Text(""))  # blank separator
+        elements.extend(goal_lines)
+
     rubric_lines = _render_rubric_lines(
         rubric_evaluations or [], rubric_checking and not is_final, rubric_deferred
     )
     if rubric_lines:
         elements.append(Text(""))  # blank separator
         elements.extend(rubric_lines)
+
+    # What the verdict did to the goal reads after the verdict.
+    elements.extend(_render_goal_lines(goal_events or [], closing=True))
 
     if is_final:
         # Final frame: render todo panel + response (tools/subagents handled above).
@@ -1116,7 +1205,9 @@ def create_streaming_display(
                 elements.append(Text(""))  # blank separator
                 elements.append(answer_markdown)
 
-    if not elements:
+    # A turn can end with nothing to show (a /goal request that changed
+    # nothing visible); the final frame stays on screen, so no spinner there.
+    if not elements and not is_final:
         elements.append(Spinner("dots", text=" Processing...", style="cyan"))
     if status_footer is not None:
         elements.append(status_footer)
@@ -1485,7 +1576,13 @@ def _resolve_ask_user_prompt(
             q_type = q.get("type", "text")
             required = q.get("required", True)
             optional_suffix = " (optional)" if not required else ""
-            prompt_text = f"({i + 1}/{total}) {q_text}{optional_suffix}"
+            # The prompt is redrawn in place and silently cut when it is
+            # taller than the terminal, so a long question is printed above
+            # it and only its last line stays in the prompt.
+            body, _, last_line = str(q_text).rstrip().rpartition("\n")
+            if body:
+                console.print(Text(body))
+            prompt_text = f"({i + 1}/{total}) {last_line}{optional_suffix}"
 
             def _make_validator(is_required: bool):
                 def _validate(v: str) -> bool | str:
@@ -1588,6 +1685,7 @@ def _run_streaming(
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
     approve_all_at_start: bool = False,
+    goal_request: dict[str, Any] | None = None,
     _state: StreamState | None = None,
     _media_sent: set[str] | None = None,
     _sent_thinking_text: str | None = None,
@@ -1646,6 +1744,7 @@ def _run_streaming(
                 runtime=owned_runtime,
                 rubric=rubric,
                 approve_all_at_start=approve_all_at_start,
+                goal_request=goal_request,
                 _state=_state,
                 _media_sent=_media_sent,
                 _sent_thinking_text=_sent_thinking_text,
@@ -1688,6 +1787,8 @@ def _run_streaming(
                 ),
                 target=_graph_target_for_local_agent(agent, metadata),
                 rubric=rubric,
+                # Read only with the turn's first input; a resume ignores it.
+                goal_request=goal_request,
             )
         )
         try:

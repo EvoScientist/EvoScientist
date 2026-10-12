@@ -451,6 +451,7 @@ EvoSci deploy                     # standalone LangGraph server for external UIs
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
 EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a checklist; exit code 3 without a satisfied verdict (docs/guides/rubric.md)
 # In the TUI / interactive CLI: /rubric set @criteria.md grades every turn of the thread, /rubric next only the next task (docs/guides/rubric.md#interactive-sessions)
+# /goal <objective> drafts acceptance criteria for you to review and works until they are met (docs/guides/goal.md)
 ```
 
 `--output-format stream-json` makes a single-shot (`-p`) run emit its native events as line-delimited JSON on stdout (one object per line), with all human output on stderr — the integration surface for headless clients (e.g. an agent runtime). See [docs/guides/stream-json.md](docs/guides/stream-json.md) for the event schema.

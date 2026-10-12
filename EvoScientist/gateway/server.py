@@ -788,6 +788,7 @@ class LangGraphServerGateway:
             request.message,
             media=request.media,
             rubric=request.rubric,
+            goal_request=request.goal_request,
         )
         on_run_attempt()
         await stream.run.start(

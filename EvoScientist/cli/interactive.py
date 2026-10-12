@@ -1528,6 +1528,68 @@ def cmd_interactive(
 
             _update_executor.submit(_show_update_hint)
 
+            async def _run_prompt_turn(
+                message_to_send: str, *, goal_request: dict[str, Any] | None = None
+            ) -> None:
+                """Run one turn typed at the prompt, or one a ``/goal`` command asked for."""
+                console.print()
+                ready_agent = await _await_agent_ready()
+                meta = build_metadata(state["dirs"], model)
+                await _refresh_status_snapshot(
+                    message_to_send, reset_streaming_text=True
+                )
+                # Captured before waiting for the lock: a channel /resume
+                # that lands meanwhile must not move this turn, nor lend
+                # it the new thread's checklist operations.
+                turn_thread_id = state["thread_id"]
+                turn_extra = _run_configurable_extra("thread", turn_thread_id)
+                try:
+                    await _run_serialized_turn(
+                        turn_lock,
+                        lambda _agent=ready_agent, _message=message_to_send, _thread_id=turn_thread_id, _meta=meta, _extra=turn_extra, _goal=goal_request: (
+                            _run_rich_cli_streaming_turn(
+                                ui_backend=state["ui_backend"],
+                                agent=_agent,
+                                message=_message,
+                                thread_id=_thread_id,
+                                show_thinking=show_thinking,
+                                interactive=True,
+                                metadata=_meta,
+                                configurable_extra=_extra,
+                                goal_request=_goal,
+                                on_stream_event=_handle_stream_status_event,
+                                status_footer_builder=_stream_status_footer,
+                                gateway=runtime_gateways.graph_gateway,
+                                runtime=async_runtime,
+                            )
+                        ),
+                    )
+                finally:
+                    # On stream close — or a raised turn — read async_tasks
+                    # + bg_processes off thread state and enqueue any
+                    # completions not yet surfaced, so a task launched
+                    # mid-turn still surfaces and keeps idle polling armed.
+                    # Best-effort — never blocks the prompt on a read
+                    # failure.
+                    _close_target = GraphTarget(
+                        local_graph=ready_agent,
+                        **state["dirs"].metadata(),
+                    )
+                    await async_notifier.enqueue_completions_from_state(
+                        runtime_gateways.graph_gateway,
+                        _close_target,
+                        turn_thread_id,
+                    )
+                    await async_notifier.enqueue_bg_process_completions_from_state(
+                        runtime_gateways.graph_gateway,
+                        _close_target,
+                        turn_thread_id,
+                    )
+                    await _acknowledge_rubric(ready_agent, turn_thread_id)
+                await _refresh_status_snapshot(reset_streaming_text=True)
+                console.print()
+                _print_separator()
+
             # Slogan — after channels, right before user input
             console.print(
                 Text(f"  {random.choice(WELCOME_SLOGANS)}", style="dim italic")
@@ -1633,6 +1695,11 @@ def cmd_interactive(
                                 await _refresh_status_snapshot(
                                     reset_streaming_text=True,
                                 )
+                            if ctx.goal_request is not None:
+                                # The run carries the request and no message.
+                                await _run_prompt_turn(
+                                    "", goal_request=ctx.goal_request
+                                )
                             continue
 
                         # Unknown slash command (typo) — short-circuit so
@@ -1670,62 +1737,7 @@ def cmd_interactive(
                         # model response, not before the user input echo.
                         for w in file_warnings:
                             console.print(f"[yellow]⚠ {escape(w)}[/yellow]")
-                        console.print()
-                        ready_agent = await _await_agent_ready()
-                        meta = build_metadata(state["dirs"], model)
-                        await _refresh_status_snapshot(
-                            message_to_send, reset_streaming_text=True
-                        )
-                        # Captured before waiting for the lock: a channel /resume
-                        # that lands meanwhile must not move this turn, nor lend
-                        # it the new thread's checklist operations.
-                        turn_thread_id = state["thread_id"]
-                        turn_extra = _run_configurable_extra("thread", turn_thread_id)
-                        try:
-                            await _run_serialized_turn(
-                                turn_lock,
-                                lambda _agent=ready_agent, _message=message_to_send, _thread_id=turn_thread_id, _meta=meta, _extra=turn_extra: (
-                                    _run_rich_cli_streaming_turn(
-                                        ui_backend=state["ui_backend"],
-                                        agent=_agent,
-                                        message=_message,
-                                        thread_id=_thread_id,
-                                        show_thinking=show_thinking,
-                                        interactive=True,
-                                        metadata=_meta,
-                                        configurable_extra=_extra,
-                                        on_stream_event=_handle_stream_status_event,
-                                        status_footer_builder=_stream_status_footer,
-                                        gateway=runtime_gateways.graph_gateway,
-                                        runtime=async_runtime,
-                                    )
-                                ),
-                            )
-                        finally:
-                            # On stream close — or a raised turn — read async_tasks
-                            # + bg_processes off thread state and enqueue any
-                            # completions not yet surfaced, so a task launched
-                            # mid-turn still surfaces and keeps idle polling armed.
-                            # Best-effort — never blocks the prompt on a read
-                            # failure.
-                            _close_target = GraphTarget(
-                                local_graph=ready_agent,
-                                **state["dirs"].metadata(),
-                            )
-                            await async_notifier.enqueue_completions_from_state(
-                                runtime_gateways.graph_gateway,
-                                _close_target,
-                                turn_thread_id,
-                            )
-                            await async_notifier.enqueue_bg_process_completions_from_state(
-                                runtime_gateways.graph_gateway,
-                                _close_target,
-                                turn_thread_id,
-                            )
-                            await _acknowledge_rubric(ready_agent, turn_thread_id)
-                        await _refresh_status_snapshot(reset_streaming_text=True)
-                        console.print()
-                        _print_separator()
+                        await _run_prompt_turn(message_to_send)
 
                     except KeyboardInterrupt:
                         console.print()

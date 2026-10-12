@@ -729,6 +729,9 @@ def run_textual_interactive(
             self._history_index: int = -1  # -1 = not browsing history
             self._history_saved_input: str = ""  # saved current input before browsing
             self._background_tasks: set[asyncio.Task] = set()
+            # Token of the slash command that owns the app; Ctrl+C clears
+            # it, and a command that lost it starts nothing when it ends.
+            self._active_command: object | None = None
             from ..commands.base import ChannelRuntime
 
             self._channel_runtime = ChannelRuntime()
@@ -1682,6 +1685,7 @@ def run_textual_interactive(
             thread_id_override: str | None = None,
             rubric_mode: str | None = "thread",
             approve_all_at_start: bool = False,
+            goal_request: dict[str, Any] | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -1762,6 +1766,7 @@ def run_textual_interactive(
 
             # Transient indicator widgets (auto-removed on state transitions)
             processing_w: Static | None = None  # "Analyzing results..."
+            drafting_w: SystemMessage | None = None  # goal criteria being drafted
 
             # Tool collapsing (matches CLI MAX_VISIBLE_TOOLS)
             _MAX_VISIBLE_TOOLS = 4
@@ -1784,6 +1789,14 @@ def run_textual_interactive(
                         await w.remove()
                     except Exception:
                         pass
+
+            async def _restart_loading() -> None:
+                """A fresh spinner at the end of the chat: work goes on.
+                The caller has removed the previous one."""
+                nonlocal loading, loading_removed
+                loading = LoadingWidget()
+                loading_removed = False
+                await container.mount(loading)
 
             async def _mount_or_update_narration(text: str) -> None:
                 """Show the current between-tool text segment inline."""
@@ -2043,6 +2056,9 @@ def run_textual_interactive(
                                     **self._dirs.metadata(),
                                 ),
                                 configurable_extra=_configurable_extra,
+                                # Read only with the turn's first input; a
+                                # resume ignores it.
+                                goal_request=goal_request,
                             )
                         ),
                         cancel_scope,
@@ -2352,6 +2368,36 @@ def run_textual_interactive(
                                 # a pause the stream could not mark as one.
                                 sa_w.finalize(rejected=_hitl_declined is not None)
 
+                        elif event_type == "goal_state":
+                            from ..stream.display import goal_event_lines
+
+                            change = event.get("change")
+                            await _remove_w(drafting_w)
+                            drafting_w = None
+                            if not loading_removed:
+                                await loading.cleanup()
+                                loading_removed = True
+                            lines = goal_event_lines(event)
+                            if change == "drafting":
+                                # Replaced by whatever ends the draft.
+                                drafting_w = SystemMessage(
+                                    lines[0][0], msg_style=lines[0][1]
+                                )
+                                await container.mount(drafting_w)
+                            else:
+                                for line_text, line_style in lines:
+                                    await container.mount(
+                                        SystemMessage(line_text, msg_style=line_style)
+                                    )
+                            # The graph added this message to the thread; show
+                            # it once, as the user's, above the work it starts.
+                            added = str(event.get("message") or "")
+                            if added:
+                                await container.mount(UserMessage(added))
+                            # Below the lines; the next content or the end of
+                            # the stream takes it away.
+                            await _restart_loading()
+
                         elif event_type == "rubric_evaluation_start":
                             passes = int(event.get("iteration") or 0) + 1
                             await container.mount(
@@ -2512,9 +2558,19 @@ def run_textual_interactive(
 
                                     _prompt = self.query_one("#prompt", ChatTextArea)
                                     _prompt.disabled = True
+                                    await _remove_w(drafting_w)
+                                    drafting_w = None
+                                    if not loading_removed:
+                                        await loading.cleanup()
+                                        loading_removed = True
                                     ask_w = AskUserWidget(questions)
                                     await container.mount(ask_w)
                                     self.call_after_refresh(ask_w.focus_active)
+                                    # The question can be a turn's first
+                                    # content, when nothing follows the chat yet.
+                                    self.call_after_refresh(
+                                        container.scroll_end, animate=False
+                                    )
                                     result = await self._wait_for_ask_user(ask_w)
                                     try:
                                         await ask_w.remove()
@@ -2855,6 +2911,8 @@ def run_textual_interactive(
                             # the widget.
                             await _preserve_active_narration()
                             await _remove_w(processing_w)
+                            await _remove_w(drafting_w)
+                            drafting_w = None
                         except asyncio.CancelledError:
                             _turn_cancelled = True
                             raise
@@ -3055,6 +3113,7 @@ def run_textual_interactive(
             resolve_mentions: bool = True,
             thread_id_override: str | None = None,
             rubric_mode: str | None = "thread",
+            goal_request: dict[str, Any] | None = None,
         ) -> str:
             """Handle a user turn: stream agent response with widgets.
 
@@ -3077,9 +3136,11 @@ def run_textual_interactive(
                     notifier path so a mid-consume ``/new`` cannot redirect a
                     notification meant for thread A into thread B. Falls back
                     to the live tid when ``None``.
+                goal_request: A ``/goal`` request; the run then carries it
+                    and no message (*user_text* is empty).
             """
-            cancelled = False
             response = ""
+            load_failed = False
             try:
                 # Foreground turns share the legacy default scope. Reset it at
                 # the turn boundary; scoped channel stop requests remain armed.
@@ -3109,6 +3170,7 @@ def run_textual_interactive(
                 try:
                     await self._await_agent_ready()
                 except Exception:
+                    load_failed = True
                     return ""
 
                 response = await self._stream_with_widgets(
@@ -3118,9 +3180,9 @@ def run_textual_interactive(
                     skip_user_message=skip_user_message,
                     thread_id_override=thread_id_override,
                     rubric_mode=rubric_mode,
+                    goal_request=goal_request,
                 )
             except asyncio.CancelledError:
-                cancelled = True
                 try:
                     from ..middleware.code_interpreter import (
                         aclose_code_interpreters,
@@ -3134,18 +3196,20 @@ def run_textual_interactive(
                     )
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
-                self._busy = False
                 self._status_phase = ResearchPhase.IDLE
-                self._run_task = None
-                await self._refresh_status_snapshot(reset_streaming_text=True)
+                try:
+                    await self._refresh_status_snapshot(reset_streaming_text=True)
+                finally:
+                    # Kept until here: Ctrl+C must still find this turn, and
+                    # nothing else may take the app before its queue is sent.
+                    self._run_task = None
+                    self._busy = False
+                    # Ctrl+C empties the queue, so after a stop this sends what
+                    # was entered since; a failed load would be retried per entry.
+                    if not load_failed:
+                        self._drain_queue()
                 self._render_status()
                 self.query_one("#prompt", ChatTextArea).focus()
-
-            # Process next queued message (FIFO) — skip if interrupted
-            if not cancelled and self._queued_messages:
-                next_msg = self._queued_messages.pop(0)
-                self._render_queue_indicator()
-                self._run_task = asyncio.ensure_future(self._run_turn(next_msg))
 
             return response
 
@@ -3344,18 +3408,51 @@ def run_textual_interactive(
                 self._render_queue_indicator()
                 return
 
+            self._dispatch_input(text)
+
+        def _dispatch_input(self, text: str) -> None:
+            """Start the command or the turn for *text*: what Enter does, and
+            what queued input goes through once the app is free again."""
             if text.startswith("/") and not self._names_skill(text):
                 self._hide_completions()
+                # Taken in this step, before the task runs: the queue poll
+                # starts a turn whenever the app is free, and Ctrl+C looks here.
+                self._busy = True
+                token = object()
+                self._active_command = token
                 # Launch as independent task to free the message pump.
                 # Commands like /resume mount interactive widgets that need
                 # the pump to process key events and message bubbling.
-                _task = asyncio.create_task(self._handle_command(text))
+                _task = asyncio.create_task(self._handle_command(text, token))
                 self._background_tasks.add(_task)
                 _task.add_done_callback(self._background_tasks.discard)
                 return
 
             self._history_suggester.append_entry(text)
-            self._run_task = asyncio.ensure_future(self._run_turn(text))
+            self._start_turn(text)
+
+        def _start_turn(self, text: str, **kwargs: Any) -> None:
+            """Schedule a turn that owns the app from this step on."""
+            self._busy = True
+            task = asyncio.ensure_future(self._run_turn(text, **kwargs))
+            self._run_task = task
+            task.add_done_callback(self._release_unstarted_turn)
+
+        def _release_unstarted_turn(self, task: asyncio.Future) -> None:
+            # A turn cancelled before its first step never reaches its own
+            # cleanup; one that ran has already let go of the handle.
+            if self._run_task is task:
+                self._run_task = None
+                self._busy = False
+                self._drain_queue()
+
+        def _drain_queue(self) -> None:
+            """Send the next queued input (FIFO) through the submit path."""
+            if not self._queued_messages or self._exiting:
+                return
+            next_msg = self._queued_messages.pop(0)
+            self._render_queue_indicator()
+            self._dispatch_input(next_msg)
 
         def _build_file_candidates(self, text: str) -> list:
             """Build CompletionCandidate list for @file mentions."""
@@ -3785,7 +3882,11 @@ def run_textual_interactive(
 
             return bool(skill_slash_names(text, self._dirs.workspace))
 
-        async def _handle_command(self, command: str) -> None:
+        async def _handle_command(self, command: str, token: object) -> None:
+            """Run one slash command; *token* is the ownership its dispatcher took."""
+            if self._active_command is not token:
+                # Ctrl+C released the app before this command took a step.
+                return
             # Echo the command so the user sees what they ran
             self._append_system(command.strip(), style="cyan")
 
@@ -3795,6 +3896,7 @@ def run_textual_interactive(
             self._busy = True
             prompt_widget.disabled = True
             self._render_status()
+            goal_request: dict[str, Any] | None = None
 
             try:
                 # Only gate on agent readiness for commands that need it —
@@ -3832,15 +3934,38 @@ def run_textual_interactive(
                     # Compared with the agent the command was handed: /new and
                     # /resume restart the load, which empties the loader.
                     await _sync_tui_command_completion(self, ctx, agent, cmd)
+                    goal_request = ctx.goal_request
                     return
 
                 self._append_system(f"Unknown command: {command}", style="yellow")
                 self._render_status()
             finally:
-                self._busy = False
-                if not self._exiting:
+                owner = self._active_command is token
+                turn = self._run_task is not None and not self._run_task.done()
+                asking = (
+                    self._ask_user_future is not None
+                    or self._approval_future is not None
+                )
+                # A command that lost its token gives the input back unless a
+                # channel turn, a command or an open question holds it off.
+                if not self._exiting and (
+                    owner or ((not self._busy or turn) and not asking)
+                ):
                     prompt_widget.disabled = False
                     prompt_widget.focus()
+                if owner:
+                    self._active_command = None
+                    if goal_request is not None and not self._exiting:
+                        # Scheduled in this same step: the app stays taken.
+                        self._start_turn(
+                            "",
+                            skip_user_message=True,
+                            resolve_mentions=False,
+                            goal_request=goal_request,
+                        )
+                    else:
+                        self._busy = False
+                        self._drain_queue()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
@@ -3985,7 +4110,10 @@ def run_textual_interactive(
                         # so does one that finds the approval answered.
                         approval.set_result(None)
                 else:
-                    # Edge case: busy but no task — force reset
+                    # Busy without a live turn: a slash command loses the
+                    # app (it starts no run), and so does a finished handle.
+                    self._run_task = None
+                    self._active_command = None
                     self._busy = False
                     self.query_one("#prompt", ChatTextArea).focus()
                     self._render_status()

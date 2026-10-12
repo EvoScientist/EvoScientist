@@ -1500,12 +1500,32 @@ class TestRunInputRubric:
         from EvoScientist.stream.events import build_agent_stream_input
 
         without = await build_agent_stream_input("hi")
-        assert without == {"messages": [{"role": "user", "content": "hi"}]}
+        assert without == {
+            "messages": [{"role": "user", "content": "hi"}],
+            "goal_request": None,
+        }
         with_rubric = await build_agent_stream_input("hi", rubric="- a")
         assert with_rubric == {
             "messages": [{"role": "user", "content": "hi"}],
+            "goal_request": None,
             "rubric": "- a",
         }
+
+    async def test_every_message_clears_a_goal_request_left_on_the_thread(self):
+        """A request whose run never finished must not take over this message."""
+        from EvoScientist.stream.events import build_agent_stream_input
+
+        run_input = await build_agent_stream_input("hi")
+        assert "goal_request" in run_input
+        assert run_input["goal_request"] is None
+
+    async def test_a_goal_request_travels_without_a_message(self):
+        from EvoScientist.stream.events import build_agent_stream_input
+
+        request = {"kind": "create", "id": "r1", "objective": "ship it"}
+        run_input = await build_agent_stream_input("", goal_request=request)
+        assert run_input == {"messages": [], "goal_request": request}
+        assert run_input["goal_request"] is not request
 
     async def test_resume_command_is_passed_through_untouched(self):
         from EvoScientist.stream.events import build_agent_stream_input

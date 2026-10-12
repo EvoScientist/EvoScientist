@@ -36,6 +36,9 @@ from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph_sdk.errors import NotFoundError
 
+from ..message_meta import message_source
+from ..rubric_session import thread_goal
+
 if TYPE_CHECKING:
     from deepagents.backends.protocol import BackendProtocol
     from deepagents.middleware.rubric import RubricEvaluation
@@ -360,6 +363,10 @@ class EvoRubricMiddleware(RubricMiddleware):
             return self._ungraded_run_update(state)[1]
         update = _apply_operations(state, list(config.get("changes") or []))
         view = {**state, **update}
+        if state.get("_goal") and thread_goal(view) is None:
+            # A checklist command replaced the criteria the goal stood on.
+            update["_goal"] = None
+            self._goal_event("cleared", note="The checklist was replaced.")
         mode = config.get("mode")
         if mode == "input":
             if state.get("_rubric_grading"):
@@ -376,6 +383,7 @@ class EvoRubricMiddleware(RubricMiddleware):
         return update or None
 
     def _select_for_thread(self, state: Any, view: Any) -> dict[str, Any]:
+        view = self._without_idle_goal_checklist(view)
         source = next(
             (slot for slot in ("next", "sticky") if view.get(f"_{slot}_rubric")),
             None,
@@ -447,6 +455,90 @@ class EvoRubricMiddleware(RubricMiddleware):
             for task in (state.get("async_tasks") or {}).values()
             if task.get("status") in ACTIVE_STATUSES and task.get("run_id")
         ]
+
+    # -- the thread's goal ----------------------------------------------------
+
+    @staticmethod
+    def _goal_of_grading(state: Any) -> dict[str, Any] | None:
+        """The thread's goal, when the grading record is of its criteria."""
+        goal = thread_goal(state)
+        if goal is None:
+            return None
+        grading = state.get("_rubric_grading") or {}
+        if grading.get("source") != "sticky" or grading.get("id") != goal["rubric_id"]:
+            return None
+        return goal
+
+    def _graded_goal(self, state: Any) -> dict[str, Any] | None:
+        """The thread's goal, when this run grades its criteria.
+
+        The run's own marker decides: a turn parked mid-way can be continued
+        by a run marked otherwise, and the start hook that would drop the
+        grading record does not run again.
+        """
+        from .goal import goal_in_force
+
+        return self._goal_of_grading(state) if goal_in_force() else None
+
+    @staticmethod
+    def _without_idle_goal_checklist(view: Any) -> Any:
+        """A paused or completed goal's criteria are not graded."""
+        goal = thread_goal(view)
+        if goal is not None and goal.get("status") in ("paused", "complete"):
+            return {**view, "_sticky_rubric": None}
+        return view
+
+    @staticmethod
+    def _goal_event(change: str, **fields: Any) -> None:
+        from langgraph.config import get_stream_writer
+
+        from .goal import emit_goal_event
+
+        try:
+            writer = get_stream_writer()
+        except RuntimeError:
+            return
+        emit_goal_event(writer, change, **fields)
+
+    def _goal_ungraded_update(self, state: Any) -> dict[str, Any] | None:
+        """The update that ends this run ungraded because of the thread's goal.
+
+        The grading on the thread is of the goal's criteria, and either the
+        agent said it needs the user (grading would only push it back), or
+        goals do not apply on this run (it continues a turn that was parked).
+        """
+        from .goal import goal_in_force
+
+        goal = self._goal_of_grading(state)
+        if goal is None:
+            return None
+        if goal_in_force() and goal.get("status") != "blocked":
+            return None
+        return {"rubric": None, "_rubric_grading": None}
+
+    def _goal_verdict_update(self, state: Any, result: str) -> dict[str, Any]:
+        """What a final verdict does to the thread's goal."""
+        from .goal import goal_in_force
+
+        goal = self._graded_goal(state)
+        if goal is None:
+            # Another checklist's verdict: evidence the agent staged in this
+            # turn was about this turn, so it does not wait for a later one.
+            other = thread_goal(state) if goal_in_force() else None
+            if other and other.get("status") == "active" and other.get("evidence"):
+                return {"_goal": {"evidence": None}}
+            return {}
+        if goal.get("status") != "active":
+            return {}
+        if result == "satisfied":
+            evidence = goal.get("evidence") or ""
+            # The verdict line already says the criteria passed; the event
+            # adds only what the agent itself reported.
+            self._goal_event("complete", status="complete", note=evidence)
+            note = evidence or "Acceptance criteria satisfied."
+            return {"_goal": {"status": "complete", "note": note, "evidence": None}}
+        self._goal_event("unmet", status="active")
+        return {"_goal": {"evidence": None}}
 
     def _running_own_processes(self, state: Any) -> list[str]:
         """Ids of this thread's background processes that are still running."""
@@ -568,6 +660,9 @@ class EvoRubricMiddleware(RubricMiddleware):
         ungraded, update = self._ungraded_run_update(state)
         if ungraded:
             return update
+        ungraded_goal = self._goal_ungraded_update(state)
+        if ungraded_goal is not None:
+            return ungraded_goal
         return super().after_agent(state, runtime)
 
     @hook_config(can_jump_to=["model"])
@@ -575,6 +670,9 @@ class EvoRubricMiddleware(RubricMiddleware):
         ungraded, update = self._ungraded_run_update(state)
         if ungraded:
             return update
+        ungraded_goal = self._goal_ungraded_update(state)
+        if ungraded_goal is not None:
+            return ungraded_goal
         early = await self._defer_or_fail(state, runtime)
         if early is not None:
             return early
@@ -586,7 +684,22 @@ class EvoRubricMiddleware(RubricMiddleware):
         messages = list(state.get("messages") or [])
         grading = state.get("_rubric_grading") or {}
         index = _message_index(messages, grading.get("start"))
-        if index is not None:
+        goal = self._graded_goal(state)
+        first = _message_index(messages, goal.get("start")) if goal else None
+        if first is not None:
+            # A goal spans turns: read from its first message, without the
+            # feedback of gradings that came before this one.
+            messages = [
+                message
+                for position, message in enumerate(messages)
+                if position >= first
+                and not (
+                    index is not None
+                    and position < index
+                    and message_source(message) == RUBRIC_GRADER_MESSAGE_SOURCE
+                )
+            ]
+        elif index is not None:
             messages = messages[index:]
         elif self._prepare_run_messages is not None:
             messages = self._prepare_run_messages(messages)
@@ -621,7 +734,11 @@ class EvoRubricMiddleware(RubricMiddleware):
             if grading and grading.get("deferred"):
                 update["_rubric_grading"] = {**grading, "deferred": False}
             return update
-        return {**update, **self._final_cleanup(state)}
+        return {
+            **update,
+            **self._final_cleanup(state),
+            **self._goal_verdict_update(state, evaluation["result"]),
+        }
 
     def _handle_grader_exception(self, runtime, state, grading_run_id, iteration, exc):
         update = dict(
@@ -715,14 +832,23 @@ class _GraderCallBudget(AgentMiddleware):
 
     name = "rubric_grader_budget"
 
-    def __init__(self, *, max_calls: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_calls: int,
+        who: str = "rubric grader",
+        missing: str = "a verdict",
+    ) -> None:
         self.max_calls = max_calls
+        self._who = who
+        self._missing = missing
 
     def _check(self, request: Any) -> None:
         spent = sum(isinstance(m, AIMessage) for m in request.messages)
         if spent >= self.max_calls:
             msg = (
-                f"rubric grader exceeded {self.max_calls} model calls without a verdict"
+                f"{self._who} exceeded {self.max_calls} model calls "
+                f"without {self._missing}"
             )
             raise RuntimeError(msg)
 

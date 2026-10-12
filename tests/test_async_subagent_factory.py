@@ -406,14 +406,34 @@ def test_main_agent_mounts_the_grader_after_our_other_after_agent_hooks(
     backend = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
     main = _get_default_middleware(workspace=workspace, backend=backend)
 
-    assert isinstance(main[-1], EvoRubricMiddleware)
-    assert main[-1].max_iterations == 3
-    assert main[-1]._prepare_run_messages is this_run_messages
-    assert main[-1]._require_run_marker is True
+    from langchain.agents.middleware.types import AgentMiddleware
+
+    def _has(m, *hooks):
+        # The tool selector and summarization are mocked in this test.
+        return isinstance(m, AgentMiddleware) and any(
+            getattr(type(m), hook) is not getattr(AgentMiddleware, hook)
+            for hook in hooks
+        )
+
+    # End hooks run in reverse list order, so the grader must be the last
+    # middleware that has one; what follows it may only shape model calls.
+    with_end_hook = [m for m in main if _has(m, "after_agent", "aafter_agent")]
+    grader = with_end_hook[-1]
+    assert isinstance(grader, EvoRubricMiddleware)
+    assert grader.max_iterations == 3
+    assert grader._prepare_run_messages is this_run_messages
+    assert grader._require_run_marker is True
+    after_grader = main[main.index(grader) + 1 :]
+    assert [type(m).__name__ for m in after_grader] == ["GoalContextMiddleware"]
+    assert not _has(
+        after_grader[0], "before_agent", "abefore_agent", "after_agent", "aafter_agent"
+    )
     names = [type(m).__name__ for m in main]
     assert {"EvoMemoryLifecycleMiddleware", "EvoCodeInterpreterMiddleware"} <= set(
-        names[:-1]
+        names[: main.index(grader)]
     )
+    # The goal's start hook answers a request before any other start hook.
+    assert names[0] == "GoalMiddleware"
 
     sub = _get_default_middleware(
         workspace=workspace, backend=backend, for_async_subagent=True

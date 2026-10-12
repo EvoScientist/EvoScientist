@@ -938,7 +938,10 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert threads.stream_calls == [("abc12345", "writing-agent")]
     assert stream.run.starts == [
         {
-            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "input": {
+                "messages": [{"role": "user", "content": "hi"}],
+                "goal_request": None,
+            },
             "config": {
                 "configurable": {
                     "model": "live-model",
@@ -1015,7 +1018,10 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
 
     assert stream.run.starts == [
         {
-            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "input": {
+                "messages": [{"role": "user", "content": "hi"}],
+                "goal_request": None,
+            },
             "config": {
                 "configurable": {
                     "model": "live-model",
@@ -1443,7 +1449,8 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
         assert stream.run.starts == []
     else:
         assert stream.run.starts[0]["input"] == {
-            "messages": [{"role": "user", "content": "hi"}]
+            "messages": [{"role": "user", "content": "hi"}],
+            "goal_request": None,
         }
 
 

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from ..backends import ParkedCloseReason
     from ..middleware.events import ToolSelectionView
 from .v3_payloads import (
+    GOAL_DRAFT_LINEAGE,
     RawMap,
     _as_raw_map,
     _event_data,
@@ -42,6 +43,7 @@ from .v3_payloads import (
     _split_message_event_data,
     _strip_legacy_thinking_tags,
     _text_from_content,
+    _under,
     _usage_counts,
 )
 
@@ -609,7 +611,12 @@ class _V3EventProcessor:
         namespace = _event_namespace(event)
         self._namespace = namespace
         subagent = None
+        # Waiting for the drafter's namespace to resolve would hold every
+        # later event back until the stream ends; its own output is not shown.
+        drafting = _under(namespace, GOAL_DRAFT_LINEAGE)
         if namespace and method in ("messages", "tools"):
+            if drafting:
+                return []
             subagent = await self.subagents.wait_resolve(namespace)
             if subagent is None:
                 return []
@@ -642,6 +649,14 @@ class _V3EventProcessor:
         if method == "input.requested":
             return self._process_input_requested(event.get("params"))
         if method == "custom":
+            payload = _as_raw_map(_event_data(event))
+            # A goal event is about the thread, whichever run wrote it (the
+            # drafting line comes from a task below a hook): no sub-agent to
+            # wait for.
+            if payload is not None and payload.get("type") == "goal_state":
+                return self._process_goal_event(payload)
+            if drafting:
+                return []
             subagent = (
                 await self.subagents.wait_resolve(namespace) if namespace else None
             )
@@ -688,6 +703,26 @@ class _V3EventProcessor:
         if self._last_pass_start is None:
             return None
         return self.full_response[self._last_pass_start :]
+
+    def _process_goal_event(self, payload: Any) -> list[dict[str, Any]]:
+        change = payload.get("change")
+        if not isinstance(change, str) or not change:
+            return []
+
+        def _text(key: str) -> str:
+            value = payload.get(key)
+            return value if isinstance(value, str) else ""
+
+        return [
+            self.emitter.goal_state(
+                change=change,
+                status=_text("status"),
+                note=_text("note"),
+                objective=_text("objective"),
+                criteria=_text("criteria"),
+                message=_text("message"),
+            ).data
+        ]
 
     def _process_custom_event(
         self, data: object, subagent: _SubagentInfo | None = None
@@ -1264,10 +1299,18 @@ async def build_agent_stream_input(
     *,
     media: list[str] | None = None,
     rubric: str | None = None,
+    goal_request: dict[str, Any] | None = None,
 ) -> LangGraphStreamInput:
-    """Build the LangGraph run input shared by local and server gateways."""
+    """Build the LangGraph run input shared by local and server gateways.
+
+    Every new input writes ``goal_request``: a ``/goal`` request travels
+    without a message, and a message clears a request whose own run never
+    finished, so it cannot take over this turn.
+    """
     if not isinstance(message, str):
         return message
+    if goal_request is not None:
+        return {"messages": [], "goal_request": dict(goal_request)}
 
     user_content: UserMessageContent = message
     if media:
@@ -1312,7 +1355,8 @@ async def build_agent_stream_input(
         if content_blocks:
             user_content = content_blocks
     run_input: dict[str, object] = {
-        "messages": [{"role": "user", "content": user_content}]
+        "messages": [{"role": "user", "content": user_content}],
+        "goal_request": None,
     }
     if rubric is not None:
         run_input["rubric"] = rubric
@@ -1328,6 +1372,7 @@ async def stream_agent_events(
     events: "ToolSelectionView | None" = None,
     configurable_extra: dict[str, Any] | None = None,
     rubric: str | None = None,
+    goal_request: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -1412,7 +1457,9 @@ async def stream_agent_events(
         await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
     clear_completed_memory_activity_counts()
-    astream_input = await build_agent_stream_input(message, media=media, rubric=rubric)
+    astream_input = await build_agent_stream_input(
+        message, media=media, rubric=rubric, goal_request=goal_request
+    )
 
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []

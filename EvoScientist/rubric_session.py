@@ -1,4 +1,4 @@
-"""Session side of ``/rubric``: operations waiting for the next run, and the badge.
+"""Session side of ``/rubric`` and ``/goal``: operations waiting for the next run, and the badge.
 
 A command never writes thread state. It records an immutable operation here;
 the run of the next message on that thread carries every unacknowledged operation in
@@ -75,28 +75,70 @@ def merge_configurable_extra(*parts: Mapping[str, Any] | None) -> dict[str, Any]
     return merged or None
 
 
+def thread_goal(values: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The thread's goal, or ``None`` when its criteria are not the sticky checklist."""
+    values = values or {}
+    goal = values.get("_goal")
+    sticky = values.get("_sticky_rubric")
+    if not isinstance(goal, Mapping) or not isinstance(sticky, Mapping):
+        return None
+    rubric_id = goal.get("rubric_id")
+    if not rubric_id or rubric_id != sticky.get("id"):
+        return None
+    return dict(goal)
+
+
+_GOAL_BADGE_PREFIX = "goal: "
+# Status as stored -> as shown; ``ending`` is a goal a pending /rubric
+# command cancels with the next message.
+_GOAL_BADGE_WORDS = {"complete": "done"}
+_GOAL_BADGE_STATUSES = {"done": "complete", "ending": "active"}
+
+
 def values_for_badge(badge: str | None) -> dict[str, Any]:
     """Thread values that would show *badge*; used when the state cannot be read."""
-    on = badge in ("on", "on+next")
-    next_ = badge in ("next", "on+next")
-    return {
+    badge = badge or ""
+    is_goal = badge.startswith(_GOAL_BADGE_PREFIX)
+    on = is_goal or badge in ("on", "on+next")
+    next_ = badge == "next" or badge.endswith("+next")
+    values: dict[str, Any] = {
         "_sticky_rubric": {"text": "", "id": ""} if on else None,
         "_next_rubric": {"text": "", "id": ""} if next_ else None,
     }
+    if is_goal:
+        word = badge.removeprefix(_GOAL_BADGE_PREFIX).removesuffix("+next")
+        values["_sticky_rubric"]["id"] = "goal:badge"
+        values["_goal"] = {
+            "status": _GOAL_BADGE_STATUSES.get(word, word),
+            "rubric_id": "goal:badge",
+        }
+    return values
 
 
 def rubric_badge(
     values: Mapping[str, Any] | None, pending: list[Mapping[str, Any]]
 ) -> str | None:
-    """``on`` / ``next`` / ``on+next`` for the status bar, pending operations applied on top."""
+    """The status-bar badge, pending operations applied on top.
+
+    ``on`` / ``next`` / ``on+next`` for checklists; ``goal: active`` (or
+    ``paused`` / ``blocked`` / ``done`` / ``ending``, each ``+next``) when the
+    sticky checklist is a goal's criteria.
+    """
     values = values or {}
+    goal = thread_goal(values)
     sticky = bool(values.get("_sticky_rubric"))
     next_ = bool(values.get("_next_rubric"))
+    replaced = False
     for operation in pending:
         if "sticky" in operation:
             sticky = bool(operation["sticky"])
+            replaced = True
         if "next" in operation:
             next_ = bool(operation["next"])
+    if goal is not None:
+        status = str(goal.get("status") or "")
+        word = "ending" if replaced else _GOAL_BADGE_WORDS.get(status, status)
+        return f"{_GOAL_BADGE_PREFIX}{word}{'+next' if next_ else ''}"
     if sticky and next_:
         return "on+next"
     if sticky:
