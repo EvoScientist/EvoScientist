@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import typer
 
@@ -10,6 +12,11 @@ from EvoScientist.cli.commands import (
     _resolve_rubric_option,
     _rubric_exit_code,
 )
+
+
+def _plain(output: str) -> str:
+    """CLI output without colour codes, which a CI terminal gets."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", output)
 
 
 def test_literal_text_is_stripped():
@@ -34,6 +41,7 @@ def test_at_path_reads_the_file_relative_to_cwd(tmp_path, monkeypatch):
 def test_at_path_expands_the_home_directory(tmp_path, monkeypatch):
     (tmp_path / "c.md").write_text("- home", encoding="utf-8")
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # where Windows takes ~ from
     assert _resolve_rubric_option("@~/c.md", prompt="go") == "- home"
 
 
@@ -134,7 +142,7 @@ def test_rubric_without_prompt_is_a_usage_error(monkeypatch):
     overrides, result = _invoke(monkeypatch, ["--rubric", "- a"])
     assert overrides is None  # refused before the config is even loaded
     assert result.exit_code == 2
-    assert "requires -p" in result.output
+    assert "requires -p" in _plain(result.output)
 
 
 def test_rubric_is_refused_on_the_server_gateway(monkeypatch):
@@ -148,7 +156,7 @@ def test_rubric_is_refused_on_the_server_gateway(monkeypatch):
         monkeypatch, ["-p", "go", "--rubric", "- a"], config=config
     )
     assert result.exit_code == 2
-    assert "local gateway" in result.output
+    assert "local gateway" in _plain(result.output)
 
 
 def test_runtime_fallback_keeps_the_rubric(monkeypatch):
