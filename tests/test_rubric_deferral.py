@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import sys
 
 import httpcore
 import httpx
@@ -581,7 +582,11 @@ async def test_probe_dev_server_tells_refusal_from_other_failures():
     from EvoScientist.middleware.rubric import _probe_dev_server
 
     # Nothing listens on port 1: a refused connection, no reason to report.
-    assert await _probe_dev_server("http://127.0.0.1:1") == (False, None)
+    # Windows does not refuse a closed loopback port within the probe's second
+    # and reports the timeout instead.
+    answers, reason = await _probe_dev_server("http://127.0.0.1:1")
+    assert answers is False
+    assert reason is None or (sys.platform == "win32" and reason == "ConnectTimeout")
 
     def _answer(status):
         return httpx.MockTransport(lambda request: httpx.Response(status))
@@ -643,10 +648,18 @@ async def test_availability_runs_only_with_candidate_tasks_and_inside_the_budget
     from EvoScientist.middleware import rubric as rubric_mod
 
     calls = []
+    answered = []
+    cut_after = []
 
     async def _slow_check():
         calls.append("check")
-        await asyncio.sleep(0.2)
+        began = asyncio.get_running_loop().time()
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            cut_after.append(asyncio.get_running_loop().time() - began)
+            raise
+        answered.append(True)
         return True
 
     monkeypatch.setattr(rubric_mod, "DEFER_QUERY_TIMEOUT_SECONDS", 0.05)
@@ -680,7 +693,12 @@ async def test_availability_runs_only_with_candidate_tasks_and_inside_the_budget
     elapsed = asyncio.get_running_loop().time() - started
     assert _results(events) == ["satisfied"]
     assert calls == ["check"]
-    assert elapsed < 0.15, elapsed
+    # The check was cut at its 50 ms budget, not waited for. Its own time is
+    # measured apart from the turn's, with room for a slow runner in both.
+    assert answered == []
+    (cut,) = cut_after
+    assert cut < 0.5, cut
+    assert elapsed < 2.5, elapsed
     assert any("exceeded" in r.getMessage() for r in caplog.records)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock
 
 import EvoScientist.commands.implementation  # noqa: F401  (registers the commands)
@@ -190,7 +191,9 @@ async def test_checklist_and_error_text_reach_the_ui_as_plain_renderables(tmp_pa
         line.startswith("/rubric set could not read") and "[x]missing.md" in line
         for line in plain
     )
-    assert not any("\\[" in line for line in plain)
+    assert not any("\\[/" in line or "\\[x] " in line for line in plain)
+    if os.sep != "\\":  # a Windows path has its own backslash before the name
+        assert not any("\\[" in line for line in plain)
     # Lines built by the command itself stay markup-safe system lines.
     for line in (str(c.args[0]) for c in ui.append_system.call_args_list):
         render(line)
