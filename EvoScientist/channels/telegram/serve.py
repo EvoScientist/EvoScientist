@@ -28,6 +28,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+# The Telegram Bot API puts the bot token in the request URL path, and httpx
+# logs every request URL at INFO — which would leak the token into the logs.
+# Quiet the httpx logger like the main CLI does.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 

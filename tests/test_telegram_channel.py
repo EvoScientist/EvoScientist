@@ -365,3 +365,22 @@ class TestTelegramRetryDelay:
             response=httpx.Response(429, headers={"Retry-After": "3"}),
         )
         assert ch._extract_retry_delay(exc) == 3.0
+
+
+class TestTelegramServeLogging:
+    def test_httpx_logger_quieted_on_serve_import(self):
+        """The bot token is in the Telegram API URL path; httpx must not log it."""
+        import importlib
+        import logging
+        import sys
+
+        httpx_logger = logging.getLogger("httpx")
+        previous_level = httpx_logger.level
+        try:
+            # Re-execute the module so the test holds even if another test
+            # already imported it.
+            sys.modules.pop("EvoScientist.channels.telegram.serve", None)
+            importlib.import_module("EvoScientist.channels.telegram.serve")
+            assert httpx_logger.level == logging.WARNING
+        finally:
+            httpx_logger.setLevel(previous_level)
