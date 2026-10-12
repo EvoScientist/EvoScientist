@@ -161,6 +161,8 @@ class TestRichResolverSaysWhoDeclined:
         monkeypatch.setattr(
             interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
         )
+        # The runner answers; building the real prompt needs a console.
+        monkeypatch.setattr("questionary.select", lambda *_a, **_k: object())
 
     def _resolve(self, **kwargs):
         return display_mod._resolve_hitl_approval(_REQUESTS, **kwargs)

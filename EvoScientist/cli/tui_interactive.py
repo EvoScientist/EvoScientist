@@ -562,6 +562,7 @@ def run_textual_interactive(
         from textual.app import App, ComposeResult
         from textual.binding import Binding
         from textual.containers import Container, Horizontal, VerticalScroll
+        from textual.css.query import NoMatches
         from textual.events import MouseUp
         from textual.widget import Widget
         from textual.widgets import Static
@@ -4072,7 +4073,11 @@ def run_textual_interactive(
                 self._append_system(message, style="yellow")
 
         def _render_status(self) -> None:
-            status = self.query_one("#status", Static)
+            try:
+                status = self.query_one("#status", Static)
+            except NoMatches:
+                # The 1 s refresh can fire while the app is being torn down.
+                return
             width = (
                 getattr(status.size, "width", 0)
                 or getattr(status.content_region, "width", 0)

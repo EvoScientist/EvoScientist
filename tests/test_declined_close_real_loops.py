@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -268,13 +269,18 @@ async def test_the_tui_marks_both_sub_agent_commands_when_the_first_is_declined(
     assert rows == {"a1": "rejected", "b1": "rejected"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the command is a POSIX loop")
 @pytest.mark.parametrize("lag", [0.0, 0.05])
 async def test_the_tui_shows_an_approved_sub_agent_command_as_running(
     monkeypatch, workspace, tmp_path, lag
 ):
-    """The command waits for a file, so the row can be read while it runs."""
+    """The command says when it has started and then waits for a file, so the
+    row can be read while it runs."""
     _slow_protocol_events(monkeypatch, lag)
-    waiting = "while [ ! -f go.txt ]; do sleep 0.05; done; echo a > a.txt"
+    waiting = (
+        "echo started > started.txt; "
+        "while [ ! -f go.txt ]; do sleep 0.05; done; echo a > a.txt"
+    )
     scripts = {
         "go": [AIMessage("", tool_calls=[_task("t1", "SUBA")]), AIMessage("all done")],
         "SUBA": [
@@ -300,22 +306,33 @@ async def test_the_tui_shows_an_approved_sub_agent_command_as_running(
         )
         turn = asyncio.ensure_future(app._stream_with_widgets("go"))
         try:
-            await _until(lambda: bool(shown))
-            # Long enough for the round that asked to have been cleaned up.
-            await asyncio.sleep(0.3)
+            # The approved command is running: the round that asked has been
+            # cleaned up and the resumed one is under way.
+            started = tmp_path / "started.txt"
+            await _until(lambda: started.exists() or turn.done(), seconds=10)
             assert not turn.done()
             box = app.query_one(SubAgentWidget)
-            assert _rows(app) == {"a1": "running"}
-            assert box._is_active
+
+            def _running() -> bool:
+                return _rows(app) == {"a1": "running"} and box._is_active
+
+            await _until(_running, seconds=5)
+            # And it stays so while the command runs, which waits for the file.
+            await asyncio.sleep(0.6)
+            assert _running()
+            assert not turn.done()
             (tmp_path / "go.txt").write_text("")
             await asyncio.wait_for(turn, timeout=20)
             rows = _rows(app)
         finally:
+            # Let the command end by itself before the turn is given up: a turn
+            # cancelled under a running command can keep the process alive.
             (tmp_path / "go.txt").write_text("")
+            await asyncio.wait({turn}, timeout=5)
             await _settle(turn)
 
     assert len(shown) == 1
-    assert _files(tmp_path) == ["a.txt", "go.txt"]
+    assert _files(tmp_path) == ["a.txt", "go.txt", "started.txt"]
     assert rows == {"a1": "success"}
     assert not box._is_active
 
