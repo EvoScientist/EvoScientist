@@ -218,6 +218,37 @@ def _ensure_standalone_dev_server(
         raise
 
 
+def _ensure_ccproxy(config: Any) -> None:
+    """Start ccproxy (or reuse a running one) when Anthropic uses OAuth.
+
+    Mirrors ``evosci serve`` / ``deploy``: :func:`maybe_start_ccproxy`
+    force-sets ``ANTHROPIC_BASE_URL``/``ANTHROPIC_API_KEY`` so the standalone
+    agent's model calls route through the proxy instead of failing when the
+    env is unset. OpenAI's OAuth mode signs in to ChatGPT directly and needs
+    no proxy. Runs before the asyncio loop starts (like serve) so the
+    cold-start never blocks the channel loop. Unlike serve there is no
+    console to render the red mismatch banner: a startup failure is logged
+    as a single error line and re-raised to abort startup.
+    ``maybe_start_ccproxy`` reuses an already running ccproxy, so this is
+    safe when another surface started it.
+    """
+    if getattr(config, "anthropic_auth_mode", "api_key") != "oauth":
+        return
+
+    import atexit
+
+    from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+
+    try:
+        proc = maybe_start_ccproxy(config)
+    except RuntimeError as exc:
+        logger.error("ccproxy startup failed: %s", exc)
+        raise
+    if proc:
+        atexit.register(stop_ccproxy, proc)
+        logger.info("ccproxy started for standalone channel")
+
+
 def run_standalone(
     channel: Channel,
     bus: MessageBus,
@@ -263,6 +294,8 @@ def run_standalone(
                     logger.error("ChatGPT: %s", state.problem)
                 logger.error("%s", chatgpt_oauth.SIGN_IN_HINT)
                 raise SystemExit(1)
+        # ccproxy starts after the sign-in check, like the other entry points.
+        _ensure_ccproxy(config)
         reload_env_dirs()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
         # The agent serves ``default_workdir``, else the current directory.
