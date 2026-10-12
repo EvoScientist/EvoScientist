@@ -84,6 +84,11 @@ class TestStreamEventEmitter:
         assert ev.type == "subagent_end"
         assert ev.data["name"] == "research-agent"
         assert ev.data["instance_id"] == "task:abc"
+        assert "paused" not in ev.data
+
+    def test_subagent_end_at_a_pause(self):
+        ev = StreamEventEmitter.subagent_end("research-agent", "task:abc", paused=True)
+        assert ev.data["paused"] is True
 
     def test_done(self):
         ev = StreamEventEmitter.done("final answer")

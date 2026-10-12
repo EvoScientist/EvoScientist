@@ -17,6 +17,8 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
+from EvoScientist.cli.widgets.subagent_widget import SubAgentWidget
+from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.gateway import RuntimeGateways
@@ -139,6 +141,11 @@ def _files(tmp_path) -> list[str]:
     return sorted(path.name for path in tmp_path.glob("*.txt"))
 
 
+def _rows(app) -> dict[str, str]:
+    """What the row of each tool call says, sub-agents' calls included."""
+    return {widget._tool_id: widget._status for widget in app.query(ToolCallWidget)}
+
+
 async def test_the_tui_lets_a_working_sibling_finish_then_closes_the_decline(
     monkeypatch, workspace, tmp_path
 ):
@@ -168,6 +175,7 @@ async def test_the_tui_lets_a_working_sibling_finish_then_closes_the_decline(
             held.release.set()
             await asyncio.wait_for(turn, timeout=20)
             position, results = await _results(agent, app._conversation_tid)
+            rows = _rows(app)
         finally:
             held.release.set()
             await _settle(turn)
@@ -177,6 +185,139 @@ async def test_the_tui_lets_a_working_sibling_finish_then_closes_the_decline(
     assert position == ()
     assert results["t2"] == "subb done"
     assert NOT_FINISHED in results["t1"]
+    # The declined command says so; the sibling's finished calls keep theirs.
+    assert (rows["a1"], rows["b1"], rows["b2"]) == ("rejected", "success", "success")
+
+
+def _slow_protocol_events(monkeypatch, seconds: float) -> None:
+    """Hold back the decoder's protocol events (tool calls, approvals), so the
+    sub-agent ends, which another producer announces, overtake them."""
+    from EvoScientist.stream import events as events_mod
+
+    process = events_mod._V3EventProcessor.process
+
+    async def _late(self, event):
+        await asyncio.sleep(seconds)
+        return await process(self, event)
+
+    if seconds:
+        monkeypatch.setattr(events_mod._V3EventProcessor, "process", _late)
+
+
+async def _thread_shows_the_pause(agent, thread_id: str) -> None:
+    """Wait until the thread records the approval. An answer that leaves
+    before that meets another, existing race: the resume finds nothing parked."""
+    config = {"configurable": {"thread_id": thread_id}}
+    for _ in range(500):
+        state = await agent.aget_state(config)
+        if any(task.interrupts for task in state.tasks):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the thread never showed the approval")
+
+
+async def _tui(monkeypatch, workspace, agent, answer):
+    """The app on the real local gateway, its approval widget answered by ``answer``."""
+    app = await _capture_app(monkeypatch, workspace)
+    gateway = LocalGraphGateway()
+    monkeypatch.setattr(app, "_await_agent_ready", AsyncMock(return_value=agent))
+    monkeypatch.setattr(app, "_wait_for_approval", answer)
+    return app, gateway
+
+
+@pytest.mark.parametrize("lag", [0.0, 0.05])
+async def test_the_tui_marks_both_sub_agent_commands_when_the_first_is_declined(
+    monkeypatch, workspace, tmp_path, lag
+):
+    """Two sub-agents each ask to run a command and the first approval is
+    declined: the second is not asked, nothing runs, both rows read rejected."""
+    _slow_protocol_events(monkeypatch, lag)
+    scripts = {
+        "go": [AIMessage("", tool_calls=[_task("t1", "SUBA"), _task("t2", "SUBB")])],
+        "SUBA": [
+            AIMessage("", tool_calls=[_call("a1", "execute", command="echo a > a.txt")])
+        ],
+        "SUBB": [
+            AIMessage("", tool_calls=[_call("b1", "execute", command="echo b > b.txt")])
+        ],
+    }
+    agent = _agent(tmp_path, scripts)
+    shown: list[int] = []
+
+    async def _reject(_widget):
+        shown.append(1)
+        return SimpleNamespace(decisions=None, auto_approve_session=False)
+
+    app, gateway = await _tui(monkeypatch, workspace, agent, _reject)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._runtime_gateways = RuntimeGateways(
+            thread_store=gateway.thread_store, graph_gateway=gateway
+        )
+        turn = asyncio.ensure_future(app._stream_with_widgets("go"))
+        try:
+            await asyncio.wait_for(turn, timeout=20)
+            position, _ = await _results(agent, app._conversation_tid)
+            rows = _rows(app)
+        finally:
+            await _settle(turn)
+
+    assert len(shown) == 1
+    assert _files(tmp_path) == []
+    assert position == ()
+    assert rows == {"a1": "rejected", "b1": "rejected"}
+
+
+@pytest.mark.parametrize("lag", [0.0, 0.05])
+async def test_the_tui_shows_an_approved_sub_agent_command_as_running(
+    monkeypatch, workspace, tmp_path, lag
+):
+    """The command waits for a file, so the row can be read while it runs."""
+    _slow_protocol_events(monkeypatch, lag)
+    waiting = "while [ ! -f go.txt ]; do sleep 0.05; done; echo a > a.txt"
+    scripts = {
+        "go": [AIMessage("", tool_calls=[_task("t1", "SUBA")]), AIMessage("all done")],
+        "SUBA": [
+            AIMessage("", tool_calls=[_call("a1", "execute", command=waiting)]),
+            AIMessage("suba done"),
+        ],
+    }
+    agent = _agent(tmp_path, scripts)
+    shown: list[int] = []
+
+    async def _approve(_widget):
+        await _thread_shows_the_pause(agent, app._conversation_tid)
+        shown.append(1)
+        return SimpleNamespace(
+            decisions=[{"type": "approve"}], auto_approve_session=False
+        )
+
+    app, gateway = await _tui(monkeypatch, workspace, agent, _approve)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._runtime_gateways = RuntimeGateways(
+            thread_store=gateway.thread_store, graph_gateway=gateway
+        )
+        turn = asyncio.ensure_future(app._stream_with_widgets("go"))
+        try:
+            await _until(lambda: bool(shown))
+            # Long enough for the round that asked to have been cleaned up.
+            await asyncio.sleep(0.3)
+            assert not turn.done()
+            box = app.query_one(SubAgentWidget)
+            assert _rows(app) == {"a1": "running"}
+            assert box._is_active
+            (tmp_path / "go.txt").write_text("")
+            await asyncio.wait_for(turn, timeout=20)
+            rows = _rows(app)
+        finally:
+            (tmp_path / "go.txt").write_text("")
+            await _settle(turn)
+
+    assert len(shown) == 1
+    assert _files(tmp_path) == ["a.txt", "go.txt"]
+    assert rows == {"a1": "success"}
+    assert not box._is_active
 
 
 async def test_the_consumer_closes_a_declined_sub_agent_command(tmp_path, monkeypatch):

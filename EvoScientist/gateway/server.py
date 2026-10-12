@@ -460,7 +460,14 @@ class _ServerSubagentTracker:
                 events.extend(self._end(namespace))
         elif method == "tasks":
             if "result" in data:
-                events.extend(self._end_triggered_child(namespace, data.get("id")))
+                # A result that carries interrupts is a child that only paused.
+                events.extend(
+                    self._end_triggered_child(
+                        namespace,
+                        data.get("id"),
+                        paused=bool(data.get("interrupts")),
+                    )
+                )
             elif namespace:
                 events.extend(self._ensure_registered(namespace, tool_call_id=None))
         return events
@@ -496,24 +503,29 @@ class _ServerSubagentTracker:
             ).data
         ]
 
-    def _end(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
+    def _end(
+        self, path: tuple[str, ...], *, paused: bool = False
+    ) -> list[dict[str, Any]]:
         active = self._active.pop(path, None)
         if active is None:
             return []
         name, _tool_call_id = active
-        return [self.emitter.subagent_end(name, instance_id=":".join(path)).data]
+        end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
+        return [end.data]
 
     def _end_triggered_child(
         self,
         namespace: tuple[str, ...],
         result_id: object,
+        *,
+        paused: bool = False,
     ) -> list[dict[str, Any]]:
         if not result_id:
             return []
         events: list[dict[str, Any]] = []
         for path, (_name, tool_call_id) in list(self._active.items()):
             if path[:-1] == namespace and tool_call_id == result_id:
-                events.extend(self._end(path))
+                events.extend(self._end(path, paused=paused))
         return events
 
     @staticmethod

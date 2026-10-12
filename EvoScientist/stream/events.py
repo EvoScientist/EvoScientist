@@ -1473,8 +1473,12 @@ async def stream_agent_events(
                 if inspect.isawaitable(result):
                     await result
             finally:
+                # A nested run that stopped at a pause goes on with the turn.
+                paused = getattr(subagent, "status", None) == "interrupted"
                 await queue.put(
-                    emitter.subagent_end(name, instance_id=instance_id).data
+                    emitter.subagent_end(
+                        name, instance_id=instance_id, paused=paused
+                    ).data
                 )
 
         subagent_iter: AsyncIterator[Any] = aiter(stream.subagents)

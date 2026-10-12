@@ -2305,6 +2305,10 @@ def run_textual_interactive(
                                 sa_w = SubAgentWidget(sa_name, sa_desc)
                                 await container.mount(sa_w)
                                 subagent_widgets[instance_id] = sa_w
+                            else:
+                                # A resumed round announces the sub-agents
+                                # that go on after the pause.
+                                existing.reopen()
 
                         elif event_type == "subagent_tool_call":
                             instance_id = event["instance_id"]
@@ -2335,8 +2339,12 @@ def run_textual_interactive(
                         elif event_type == "subagent_end":
                             instance_id = event["instance_id"]
                             sa_w = _get_sa_widget(instance_id, event.get("name", ""))
-                            if sa_w is not None:
-                                sa_w.finalize()
+                            # A sub-agent that stopped at a pause has not
+                            # ended; the end of the round settles its box.
+                            if sa_w is not None and not event.get("paused"):
+                                # After a decline an end with open calls is
+                                # a pause the stream could not mark as one.
+                                sa_w.finalize(rejected=_hitl_declined is not None)
 
                         elif event_type == "rubric_evaluation_start":
                             passes = int(event.get("iteration") or 0) + 1
@@ -2829,11 +2837,18 @@ def run_textual_interactive(
                                     tw.set_interrupted()
                                 except Exception:
                                     pass
-                    # Finalize any still-active sub-agents
+                    # Finalize any still-active sub-agents; a resumed round
+                    # re-opens the ones that go on. Calls left without a
+                    # result read as the main agent's: rejected at a pause.
+                    _ends_at_pause = (
+                        _hitl_budget_exhausted
+                        or _hitl_unresolved
+                        or _hitl_declined is not None
+                    )
                     for sa_w in subagent_widgets.values():
                         if sa_w._is_active:
                             try:
-                                sa_w.finalize()
+                                sa_w.finalize(rejected=_ends_at_pause)
                             except Exception:
                                 pass
                     # Finalize any still-running panel dispatches so their

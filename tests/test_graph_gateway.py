@@ -1841,6 +1841,61 @@ async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
     ]
 
 
+@pytest.mark.parametrize(
+    ("interrupts", "paused"), [([{"id": "i1"}], True), ([], False)]
+)
+def test_the_server_tracker_says_when_a_child_only_paused(interrupts, paused):
+    """The result of the task a child run belongs to tells whether the child
+    stopped at an interrupt or finished."""
+    from EvoScientist.gateway.server import _ServerSubagentTracker
+    from EvoScientist.stream.emitter import StreamEventEmitter
+    from EvoScientist.stream.events import _SubagentRegistry
+
+    tracker = _ServerSubagentTracker(
+        emitter=StreamEventEmitter(), registry=_SubagentRegistry()
+    )
+    started = {
+        "method": "lifecycle",
+        "params": {"namespace": ["tools:task-1"], "data": {"event": "started"}},
+    }
+    result = {
+        "method": "tasks",
+        "params": {
+            "namespace": [],
+            "data": {
+                "id": "task-1",
+                "name": "tools",
+                "error": None,
+                "interrupts": interrupts,
+                "result": {},
+            },
+        },
+    }
+    events = [*tracker.process(started), *tracker.process(result)]
+    (end,) = [event for event in events if event["type"] == "subagent_end"]
+    assert bool(end.get("paused")) is paused
+    assert ("paused" in end) is paused
+
+
+def test_the_server_tracker_does_not_call_a_child_paused_when_the_stream_stops():
+    """A child that is still open when the stream ends gets an end event, and
+    nothing says that it paused."""
+    from EvoScientist.gateway.server import _ServerSubagentTracker
+    from EvoScientist.stream.emitter import StreamEventEmitter
+    from EvoScientist.stream.events import _SubagentRegistry
+
+    tracker = _ServerSubagentTracker(
+        emitter=StreamEventEmitter(), registry=_SubagentRegistry()
+    )
+    started = {
+        "method": "lifecycle",
+        "params": {"namespace": ["tools:task-1"], "data": {"event": "started"}},
+    }
+    events = [*tracker.process(started), *tracker.finish()]
+    (end,) = [event for event in events if event["type"] == "subagent_end"]
+    assert "paused" not in end
+
+
 async def test_langgraph_server_gateway_streams_subagent_protocol_events():
     stream = FakeLangGraphThreadStream(
         "abc12345",

@@ -50,7 +50,7 @@ fields beyond `type` are listed below.
 | `subagent_tool_call`   | `subagent`, `name`, `args`, `id`                          | Tool call inside a sub-agent |
 | `subagent_tool_result` | `subagent`, `name`, `content`, `success`, `id`            | Tool result inside a sub-agent |
 | `subagent_text`        | `subagent`, `content`, `instance_id`                      | Text from a sub-agent |
-| `subagent_end`         | `name`                                                    | Sub-agent delegation completes |
+| `subagent_end`         | `name`, `paused` (only when true)                         | Sub-agent delegation completes; with `paused` it stopped at an approval or a question and goes on when that is answered |
 | `tool_selection`       | `tools`                                                   | Tool-selector middleware picked tools |
 | `summarization_start`  | —                                                         | Context summarization begins |
 | `summarization`        | `content`                                                 | Context summarization output |

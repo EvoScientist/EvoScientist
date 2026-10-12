@@ -132,12 +132,14 @@ class StreamEventEmitter:
         )
 
     @staticmethod
-    def subagent_end(name: str, instance_id: str) -> StreamEvent:
-        """Sub-agent delegation completed."""
-        return StreamEvent(
-            "subagent_end",
-            {"type": "subagent_end", "name": name, "instance_id": instance_id},
-        )
+    def subagent_end(
+        name: str, instance_id: str, *, paused: bool = False
+    ) -> StreamEvent:
+        """Sub-agent delegation completed, or stopped at a pause (``paused``)."""
+        data = {"type": "subagent_end", "name": name, "instance_id": instance_id}
+        if paused:
+            data["paused"] = True
+        return StreamEvent("subagent_end", data)
 
     @staticmethod
     def panel_dispatch_start(

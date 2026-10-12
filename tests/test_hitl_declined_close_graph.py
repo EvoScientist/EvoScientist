@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
-from EvoScientist.backends import close_parked_checkpoint
+from EvoScientist.backends import build_hitl_resume, close_parked_checkpoint
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.gateway.local import LocalGraphGateway
@@ -316,3 +316,41 @@ async def test_a_sibling_sub_agent_that_finished_keeps_its_result(tmp_path):
     # Nothing is written after the close.
     assert (await _state(agent)).values["messages"] == state.values["messages"]
     assert _files(tmp_path) == ["sibling.txt"]
+
+
+async def test_the_stream_says_which_sub_agent_ends_are_pauses(tmp_path):
+    """A sub-agent that stops at an approval has not ended: it goes on once
+    the approval is granted, and only then ends."""
+    agent, _ = _agent(
+        tmp_path,
+        [
+            AIMessage(
+                "",
+                tool_calls=[
+                    _call(
+                        "t1",
+                        "task",
+                        subagent_type="general-purpose",
+                        description="run one command",
+                    )
+                ],
+            ),
+            AIMessage(
+                "", tool_calls=[_call("s1", "execute", command="echo 1 > one.txt")]
+            ),
+            AIMessage("sub done"),
+            AIMessage("all done"),
+        ],
+    )
+
+    def _ends(events: list[dict]) -> list[bool]:
+        return [bool(e.get("paused")) for e in events if e["type"] == "subagent_end"]
+
+    asked = await _turn(agent, "go")
+    assert _ends(asked) == [True]
+
+    (approval,) = [e for e in asked if e["type"] == "interrupt"]
+    granted = build_hitl_resume(approval["interrupt_id"], [{"type": "approve"}])
+    resumed = await _turn(agent, granted)
+    assert _ends(resumed) == [False]
+    assert _files(tmp_path) == ["one.txt"]

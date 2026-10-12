@@ -76,6 +76,8 @@ class SubAgentWidget(Vertical):
         # Ordered lists to track completed / running tools for collapsing
         self._completed_ids: list[str] = []
         self._running_ids: list[str] = []
+        # Calls a finalize marked interrupted, for a box that is re-opened.
+        self._cut: list[ToolCallWidget] = []
 
     @property
     def sa_name(self) -> str:
@@ -178,6 +180,9 @@ class SubAgentWidget(Vertical):
             if tool_call_id in self._completed_ids:
                 self._completed_ids.remove(tool_call_id)
             if widget is not None:
+                # A call a finalize had cut is not put back by a re-open.
+                if widget in self._cut:
+                    self._cut.remove(widget)
                 try:
                     await widget.remove()
                 except Exception:
@@ -304,17 +309,40 @@ class SubAgentWidget(Vertical):
         else:
             summary_w.remove_class("--visible")
 
-    def finalize(self) -> None:
-        """Mark sub-agent as completed and stop all nested timers."""
+    def reopen(self) -> None:
+        """Show the sub-agent as working again: the turn went on after a pause
+        and the calls a finalize cut short are still open."""
+        if self._is_active:
+            return
+        self._is_active = True
+        self.remove_class("--completed")
+        if self._timer_handle is None:
+            self._timer_handle = self.set_interval(0.1, self._tick)
+        for tw in self._cut:
+            if tw._status == "interrupted":
+                tw.set_running()
+        self._cut = []
+        self._render_header()
+        self._render_footer()
+
+    def finalize(self, *, rejected: bool = False) -> None:
+        """Mark sub-agent as completed and stop all nested timers.
+
+        Calls without a result read interrupted, or rejected when the turn
+        ended at an approval nobody granted.
+        """
         self._is_active = False
         if self._timer_handle is not None:
             self._timer_handle.stop()
             self._timer_handle = None
-        # Mark any nested ToolCallWidgets still running as interrupted
         for tw in self._tool_widgets.values():
             if tw._status == "running":
                 try:
-                    tw.set_interrupted()
+                    if rejected:
+                        tw.set_rejected()
+                    else:
+                        tw.set_interrupted()
+                        self._cut.append(tw)
                 except Exception:
                     pass
         self.add_class("--completed")
