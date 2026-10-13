@@ -850,3 +850,74 @@ def test_truncated_constraints_download_is_download_failed(tmp_path, monkeypatch
     with pytest.raises(updater.UpdateError) as exc:
         updater.download_constraints("0.3.7", "default", tmp_path / "c.txt")
     assert exc.value.code == "download_failed"
+
+
+@pytest.mark.skipif(
+    shutil.which("pwsh") is None
+    or sys.platform == "win32"
+    or not shutil.which("sleep"),
+    reason="runs the helper under pwsh with POSIX stand-ins",
+)
+def test_helper_cancel_before_retry_is_install_failed(tmp_path):
+    """A failed uv run may have changed the environment: a wait cancelled
+    before the retry must not claim that nothing was changed."""
+    from EvoScientist import update_helper
+
+    env = tmp_path / "env"
+    (env / "bin").mkdir(parents=True)
+    blocker = env / "bin" / "blocker"
+    shutil.copy(shutil.which("sleep"), blocker)
+    uv = tmp_path / "uv"
+    # Starts a process from the environment, then fails, as a uv run that
+    # met a locked file would leave things.
+    uv.write_text(f"#!/bin/sh\n'{blocker}' 30 >/dev/null 2>&1 &\nexit 1\n")
+    uv.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    config = {
+        "env_dir": str(env),
+        "uv": str(uv),
+        "uv_args": ["tool", "install"],
+        "uv_env": {},
+        "evosci": str(tmp_path / "EvoSci"),
+        "skip": [],
+        "installed": "0.3.6",
+        "target": "0.3.7",
+        "install_command": "install-script",
+        "temp_dir": str(work),
+        "json": True,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    script = tmp_path / "helper.ps1"
+    script.write_text(update_helper.HELPER, encoding="utf-8")
+    proc = subprocess.Popen(
+        [
+            "pwsh",
+            "-NoProfile",
+            "-File",
+            str(script),
+            "-ConfigPath",
+            str(tmp_path / "config.json"),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    events = []
+    try:
+        for line in proc.stdout:
+            event = json.loads(line)
+            events.append(event)
+            detail = event.get("detail") or {}
+            if "cancel_file" in detail:
+                Path(detail["cancel_file"]).write_text("")
+        proc.wait(timeout=60)
+    finally:
+        proc.kill()
+        subprocess.run(["pkill", "-f", str(blocker)], check=False)
+    end = events[-1]
+    assert end["status"] == "error"
+    assert end["code"] == "install_failed"
+    assert "install-script" in end["message"]
+    assert any("trying once more" in e.get("message", "") for e in events)

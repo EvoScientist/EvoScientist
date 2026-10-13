@@ -23,8 +23,12 @@ Cancelling the wait changes nothing and ends the update with
 - Under ``--json`` the waiting lines carry ``detail.cancel_file``: the caller
   creates that file to cancel. Closing stdin cannot be the signal: Node
   destroys a child's stdin when the child (``EvoSci``) exits, which is right
-  after the handover. A stdin that is not a pipe (``NUL``) marks an
-  unattended run, which fails at once instead of waiting.
+  after the handover. A stdin that is not a pipe (``NUL``, or a console:
+  ``--json`` is for programs) marks an unattended run, which fails at once
+  instead of waiting.
+- A wait cancelled after a failed uv run (before the retry) ends with
+  ``install_failed``, not ``environment_busy``: that uv run may have left the
+  environment broken.
 """
 
 from __future__ import annotations
@@ -110,8 +114,8 @@ function Get-Blockers {
 }
 
 $CancelFile = Join-Path $cfg.temp_dir 'cancel'
-# Under --json a stdin that is not a pipe (NUL: nobody is attached) marks an
-# unattended run, which fails at once when something blocks.
+# Under --json a stdin that is not a pipe (NUL: nobody is attached; or a
+# console) marks an unattended run, which fails at once when something blocks.
 $Unattended = $false
 if ($Json) {
     try {
@@ -182,7 +186,8 @@ try {
     $rc = Invoke-Uv
     if ($rc -ne 0) {
         Emit 'running' "uv failed (exit $rc); trying once more when nothing runs from the environment" $null $null 0.5
-        $phase = 'waiting'
+        # Not 'waiting': the failed run may have changed the environment.
+        $phase = 'retry-waiting'
         if (-not (Wait-Free 0.5)) { return }
         $phase = 'installing'
         $rc = Invoke-Uv
@@ -226,7 +231,7 @@ try {
     $reason = $_.Exception.Message
     if ($phase -eq 'setup') {
         Emit 'error' "EvoScientist $($cfg.target) is installed, but EvoSci setup could not run ($reason). Run it again: $($cfg.evosci) setup" @{ stage = $null; code = $null } 'setup_failed'
-    } elseif ($phase -eq 'installing') {
+    } elseif ($phase -eq 'installing' -or $phase -eq 'retry-waiting') {
         Emit 'error' "The install failed ($reason). If EvoSci no longer starts, run the install script again once nothing runs from it: $($cfg.install_command)" $null 'install_failed'
     } else {
         Emit 'error' "The update helper failed before installing ($reason). Nothing was changed." $null 'install_failed'
@@ -238,6 +243,11 @@ try {
             # The wait was cancelled: Ctrl+C, the cancel file, or nobody attached.
             $names = ($blockers | ForEach-Object { "$($_.name).exe ($($_.pid))" }) -join ', '
             Emit 'error' "Update cancelled while these still ran: $names. Nothing was changed." @{ waiting_for = $blockers } 'environment_busy'
+        } elseif ($phase -eq 'retry-waiting') {
+            # Cancelled before the retry: the failed uv run may have left the
+            # environment broken, so this is not "nothing was changed".
+            $names = ($blockers | ForEach-Object { "$($_.name).exe ($($_.pid))" }) -join ', '
+            Emit 'error' "Update cancelled after a failed install, while these still ran: $names. If EvoSci no longer starts, run the install script again once nothing runs from it: $($cfg.install_command)" @{ waiting_for = $blockers } 'install_failed'
         } elseif ($phase -eq 'setup') {
             # Ctrl+C while EvoSci setup ran.
             Emit 'error' "EvoScientist $($cfg.target) is installed, but EvoSci setup was interrupted. Run it again: $($cfg.evosci) setup" @{ stage = $null; code = $null } 'setup_failed'
