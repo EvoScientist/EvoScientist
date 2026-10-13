@@ -1019,9 +1019,10 @@ async def build_agent_stream_input(
             for path in file_refs:
                 tool_path = file_tool_path(path)
                 if tool_path != path:
+                    shell_path = path.replace("\\", "/")
                     references.append(
                         f"[attached file: {ntpath.basename(path)}] "
-                        f"file tools path: {tool_path}; shell path: {path}"
+                        f"file tools path: {tool_path}; shell path: {shell_path}"
                     )
                 else:
                     references.append(

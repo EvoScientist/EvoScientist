@@ -21,7 +21,7 @@ async def test_attachment_reference_passes_file_tool_validation(path):
     assert validate_path(file_path) == "/C:/project/media/paper.pdf"
     assert reference == (
         "[attached file: paper.pdf] file tools path: /C:/project/media/paper.pdf; "
-        f"shell path: {path}"
+        "shell path: C:/project/media/paper.pdf"
     )
 
 
