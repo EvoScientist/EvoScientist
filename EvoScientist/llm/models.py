@@ -55,9 +55,23 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 }
 
 
-def _resolve_reasoning_effort(default: str) -> str:
-    """Return the configured reasoning effort or a provider-specific default."""
-    return os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
+# Reasoning levels on one scale. One level is stored for every model (main,
+# auxiliary, fallbacks); a provider listed here accepts only a slice of the
+# scale, so a level outside it is sent as the nearest one it accepts.
+_REASONING_SCALE = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_PROVIDER_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
+    "openai": ("low", "medium", "high", "xhigh", "max"),
+}
+
+
+def _resolve_reasoning_effort(default: str, provider: str) -> str:
+    """Return the configured reasoning effort (or ``default``) as ``provider`` takes it."""
+    effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
+    levels = _PROVIDER_REASONING_LEVELS.get(provider)
+    if not levels or effort in levels or effort not in _REASONING_SCALE:
+        return effort
+    rank = _REASONING_SCALE.index(effort)
+    return min(levels, key=lambda level: abs(_REASONING_SCALE.index(level) - rank))
 
 
 # Qwen 3.8 Max canonical levels and documented OpenAI alias mappings:
@@ -321,7 +335,7 @@ def _apply_auto_config(
             )
             else "high"
         )
-        _eff = _resolve_reasoning_effort(_default_effort)
+        _eff = _resolve_reasoning_effort(_default_effort, "openai")
         kwargs["reasoning"] = {"effort": _eff, "summary": "auto"}
 
     # Google GenAI: surface thinking traces
@@ -471,7 +485,7 @@ def get_chat_model(
         # Note: mandatory-reasoning endpoints (kimi-k3, grok-4.5, …) reject
         # effort "none" with HTTP 400 — that error is surfaced to the user
         # as-is; pick a real effort (low+) for those models.
-        effort = _resolve_reasoning_effort("high")
+        effort = _resolve_reasoning_effort("high", "openrouter")
         kwargs.setdefault("reasoning", {"effort": effort, "summary": "auto"})
         # App attribution (issue #339): identify EvoScientist to OpenRouter so
         # usage is credited to the project (app rankings, model app tabs,

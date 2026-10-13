@@ -943,28 +943,50 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
     return choice == "assemble"
 
 
-def _step_reasoning_effort(config: EvoScientistConfig) -> str:
-    """Step 3.5: Configure OpenRouter reasoning effort level.
+# Levels offered per provider; each one is sent to that provider unchanged
+# (see ``llm.models._PROVIDER_REASONING_LEVELS``).
+_REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
+    # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+    "openrouter": [
+        ("xhigh", "xhigh  — ~95% of max_tokens for reasoning"),
+        ("high", "high   — ~80% of max_tokens (recommended)"),
+        ("medium", "medium — ~50% of max_tokens"),
+        ("low", "low    — ~20% of max_tokens"),
+        ("minimal", "minimal — ~10% of max_tokens"),
+        ("none", "none   — disable reasoning entirely"),
+    ],
+    "openai": [
+        ("low", "low    — fast responses with lighter reasoning"),
+        ("medium", "medium — balances speed and reasoning depth"),
+        ("high", "high   — greater reasoning depth (recommended)"),
+        ("xhigh", "xhigh  — extra high reasoning depth"),
+        ("max", "max    — deepest reasoning; uses your quota fastest"),
+    ],
+}
 
-    Only shown when the selected provider is OpenRouter. See:
-    https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+
+def _asks_reasoning_effort(provider: str) -> bool:
+    """Whether onboarding offers a reasoning level for ``provider``."""
+    return provider in _REASONING_EFFORT_CHOICES
+
+
+def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
+    """Step 3.5: Pick the reasoning effort level for OpenRouter or OpenAI.
 
     Args:
         config: Current configuration.
+        provider: The selected provider; it decides which levels are offered.
 
     Returns:
-        Selected reasoning effort level, or empty string to use default.
+        Selected reasoning effort level.
     """
-    effort_choices = [
-        Choice(title="xhigh  — ~95% of max_tokens for reasoning", value="xhigh"),
-        Choice(title="high   — ~80% of max_tokens (recommended)", value="high"),
-        Choice(title="medium — ~50% of max_tokens", value="medium"),
-        Choice(title="low    — ~20% of max_tokens", value="low"),
-        Choice(title="minimal — ~10% of max_tokens", value="minimal"),
-        Choice(title="none   — disable reasoning entirely", value="none"),
-    ]
+    levels = _REASONING_EFFORT_CHOICES[provider]
+    effort_choices = [Choice(title=title, value=value) for value, title in levels]
 
-    current = config.reasoning_effort or "high"
+    # A level kept from another provider may not be offered here.
+    current = config.reasoning_effort
+    if current not in {value for value, _ in levels}:
+        current = "high"
     effort = questionary.select(
         "Select reasoning effort level:",
         choices=effort_choices,

@@ -466,7 +466,7 @@ def configure_provider(
 
 @configure_app.command("model")
 def configure_model():
-    """Re-run model selection (and reasoning effort for OpenRouter)."""
+    """Re-run model selection (and reasoning effort for OpenRouter and OpenAI)."""
     _configure_section("model")
 
 

@@ -19,6 +19,7 @@ from ..settings import (
 )
 from .channels import _step_channels
 from .steps import (
+    _asks_reasoning_effort,
     _step_anthropic_auth_mode,
     _step_auxiliary_enable,
     _step_base_url,
@@ -770,8 +771,8 @@ def run_onboard(
                     config.model = _step_model(
                         config, provider, ollama_detected_models=ollama_detected_models
                     )
-                if provider == "openrouter" and _preset("model") is None:
-                    config.reasoning_effort = _step_reasoning_effort(config)
+                if _asks_reasoning_effort(provider) and _preset("model") is None:
+                    config.reasoning_effort = _step_reasoning_effort(config, provider)
                 _autosave(config)
 
             if "auxiliary_model" in sections_to_run:

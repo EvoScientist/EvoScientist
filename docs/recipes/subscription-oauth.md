@@ -127,7 +127,7 @@ The '<model>' model is not supported when using Codex with a ChatGPT account.
 
 Community measurements also indicate this route enforces a smaller context window than the public API for the same model IDs (~272K for gpt-5.5 vs 1.05M on the API).
 
-> **`reasoning_effort`:** an explicitly configured effort (`low`/`medium`/`high`/`xhigh`) is passed through; when unset, EvoScientist applies its own per-model default. Higher effort costs more latency and more of your subscription quota per request.
+> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model); a configured `none` or `minimal` is sent as `low`. When unset, EvoScientist applies its own per-model default. Higher effort costs more latency and more of your subscription quota per request.
 
 ### 4. Machines without a browser
 

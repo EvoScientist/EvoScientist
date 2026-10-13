@@ -1,5 +1,6 @@
 """Tests for EvoScientist onboarding wizard."""
 
+import os
 import subprocess
 from contextlib import contextmanager
 from unittest.mock import MagicMock, Mock, patch
@@ -827,6 +828,98 @@ class TestStepOpenAIAuthMode:
 
         with pytest.raises(GoBack):
             self._run(picked=BACK_SENTINEL, signed_in=False)
+
+
+class TestStepReasoningEffort:
+    def _run(self, provider, stored, picked="high"):
+        from EvoScientist.config.onboard import steps as onboard_steps
+
+        question = MagicMock()
+        question.ask.return_value = picked
+        with patch(
+            "EvoScientist.config.onboard.steps.questionary.select",
+            return_value=question,
+        ) as mock_select:
+            result = onboard_steps._step_reasoning_effort(
+                EvoScientistConfig(reasoning_effort=stored), provider
+            )
+        call = mock_select.call_args
+        return result, [c.value for c in call.kwargs["choices"]], call.kwargs["default"]
+
+    def test_openai_offers_the_levels_its_current_models_accept(self):
+        result, values, default = self._run("openai", "", picked="max")
+
+        assert result == "max"
+        assert values == ["low", "medium", "high", "xhigh", "max"]
+        assert default == "high"
+
+    def test_openrouter_list_is_unchanged(self):
+        _, values, default = self._run("openrouter", "")
+
+        assert values == ["xhigh", "high", "medium", "low", "minimal", "none"]
+        assert default == "high"
+
+    @pytest.mark.parametrize(
+        ("provider", "stored", "default"),
+        [
+            ("openai", "max", "max"),
+            ("openai", "minimal", "high"),  # carried over from another provider
+            ("openrouter", "minimal", "minimal"),
+            ("openrouter", "max", "high"),
+        ],
+    )
+    def test_highlights_the_stored_level_only_when_it_is_offered(
+        self, provider, stored, default
+    ):
+        assert self._run(provider, stored)[2] == default
+
+    @pytest.mark.parametrize("provider", ["openai", "openrouter"])
+    def test_every_offered_level_is_one_the_provider_is_sent_unchanged(self, provider):
+        from EvoScientist.llm.models import _resolve_reasoning_effort
+
+        _, values, _ = self._run(provider, "")
+
+        with patch.dict("os.environ"):
+            for value in values:
+                os.environ["EVOSCIENTIST_REASONING_EFFORT"] = value
+                assert _resolve_reasoning_effort("high", provider) == value
+
+    @pytest.mark.parametrize(
+        ("provider", "asked"),
+        [("openai", True), ("openrouter", True), ("anthropic", False), ("", False)],
+    )
+    def test_only_providers_with_a_level_list_are_asked(self, provider, asked):
+        from EvoScientist.config.onboard import steps as onboard_steps
+
+        assert onboard_steps._asks_reasoning_effort(provider) is asked
+
+    def test_model_section_asks_openai_users_for_a_level(self):
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="openai", model="gpt-6-sol", openai_api_key="sk-test"
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "gpt-6-luna",  # Model
+                "max",  # Reasoning effort
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(skip_validation=True, only_sections={"model"})
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.model == "gpt-6-luna"
+        assert final_config.reasoning_effort == "max"
 
 
 class TestRunChatGPTLogin:

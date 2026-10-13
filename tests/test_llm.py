@@ -4150,3 +4150,68 @@ class TestChatGPTSignIn:
 
         assert str(exc_info.value) == SIGN_IN_HINT
         assert list(tmp_path.iterdir()) == []
+
+
+class TestReasoningEffortAcrossProviders:
+    """One stored level; each provider gets the nearest level it accepts."""
+
+    @pytest.fixture(autouse=True)
+    def _keys(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_USE_RESPONSES_API", raising=False)
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "stored", "sent"),
+        [
+            ("openai", "gpt-6-sol", "none", "low"),
+            ("openai", "gpt-6-sol", "minimal", "low"),
+            ("openai", "gpt-6-sol", "low", "low"),
+            ("openai", "gpt-6-sol", "xhigh", "xhigh"),
+            ("openai", "gpt-6-sol", "max", "max"),
+            ("openrouter", "gpt-6-sol", "max", "max"),
+            ("openrouter", "gpt-6-sol", "minimal", "minimal"),
+            ("openrouter", "gpt-6-sol", "none", "none"),
+            # Not a level on the scale: the provider answers for itself.
+            ("openai", "gpt-6-sol", "turbo", "turbo"),
+            ("openrouter", "gpt-6-sol", "turbo", "turbo"),
+        ],
+    )
+    def test_stored_level_is_sent_as_the_nearest_supported_one(
+        self, monkeypatch, provider, model, stored, sent
+    ):
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", stored)
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model(model, provider=provider)
+
+        assert mock_init.call_args[1]["reasoning"]["effort"] == sent
+
+    def test_sign_in_route_gets_the_adapted_level_too(self, monkeypatch):
+        built = []
+        monkeypatch.setattr(
+            "EvoScientist.llm.chatgpt_oauth.build_model",
+            lambda model_id, **kwargs: built.append(kwargs) or MagicMock(),
+        )
+        monkeypatch.setattr(
+            "EvoScientist.llm.models.apply_known_context_window", lambda model: None
+        )
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "minimal")
+
+        get_chat_model("gpt-6.1-sol", provider="openai")
+
+        assert built[0]["reasoning"]["effort"] == "low"
+
+    def test_caller_supplied_reasoning_is_left_alone(self, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "max")
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model(
+                "gpt-6-sol", provider="openai", reasoning={"effort": "minimal"}
+            )
+
+        assert mock_init.call_args[1]["reasoning"] == {"effort": "minimal"}
