@@ -236,9 +236,9 @@ uv tool install EvoScientist
 ```
 
 > [!NOTE]
-> 更新已安装的版本到最新，请使用 `uv tool upgrade`：
+> 更新已安装的版本到最新（并使用该版本测试过的依赖版本），请使用 `EvoSci update`：
 > ```bash
-> uv tool upgrade EvoScientist
+> EvoSci update
 > ```
 
 或安装到当前环境：

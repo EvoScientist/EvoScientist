@@ -1181,7 +1181,7 @@ def run_textual_interactive(
                     current = _installed_version()
                     self.notify(
                         f"Update available: v{latest} (current: v{current}).\n"
-                        "Run: uv tool upgrade EvoScientist",
+                        "Run: EvoSci update",
                         severity="information",
                         timeout=15,
                     )
