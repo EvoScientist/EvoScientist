@@ -1,11 +1,13 @@
-"""The retry loop: budget as a deadline, backoff, Retry-After, events, per-run key."""
+"""The retry loop: the budget, backoff, Retry-After, a fallback chain, events, per-run key."""
 
 from __future__ import annotations
 
+import itertools
 import logging
 from types import SimpleNamespace
 
 import httpx
+import openai
 import pytest
 from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage
@@ -146,14 +148,32 @@ async def test_unattended_tier_caps_at_two_minutes():
     assert h.sleeps[0] == 1.0
 
 
-async def test_deadline_counts_failed_attempt_time_and_gives_up():
+async def test_a_first_attempt_longer_than_the_budget_is_still_retried():
     h = _Harness(budget=60.0)
-    outcomes = [_transient(), _transient(), _transient(), OK]
+    calls = 0
+
+    async def _handler(_request):
+        nonlocal calls
+        calls += 1
+        h.clock.now += 90.0 if calls == 1 else 5.0
+        if calls == 1:
+            raise _transient()
+        return OK
+
+    assert await h.mw.awrap_model_call(h.request, _handler) is OK
+    assert h.sleeps == [1.0]
+    # The budget started when the 90 s attempt failed, not when it began.
+    assert h.events[0]["budget_left_seconds"] == 59.0
+
+
+async def test_the_budget_counts_the_retried_attempts_and_gives_up():
+    h = _Harness(budget=60.0)
     with pytest.raises(ProviderStreamError):
-        await h.mw.awrap_model_call(h.request, h.handler(outcomes, cost=25.0))
-    # attempts end at t=25, 51, 78: waits of 1 s and 2 s fit, the 4 s wait at t=78 does not
-    assert h.sleeps == [1.0, 2.0]
-    assert h.clock.now == 78.0
+        await h.mw.awrap_model_call(h.request, h.handler([_transient()] * 5, cost=25.0))
+    # first failure at t=25, so the budget ends at t=85; attempts end at 51, 78
+    # and 107: waits of 1, 2 and 4 s fit, the 8 s wait at t=107 does not
+    assert h.sleeps == [1.0, 2.0, 4.0]
+    assert h.clock.now == 107.0
 
 
 async def test_retry_after_is_honoured_up_to_the_budget_not_the_cap():
@@ -264,6 +284,23 @@ async def test_run_key_zero_switches_off_and_is_ignored_when_not_honoured(monkey
     assert result is OK
 
 
+@pytest.mark.parametrize(
+    "budget", [float("inf"), "nan", "1e9", 1e9, 10**400, "60s", "61", True, 2.5]
+)
+def test_a_run_key_budget_that_is_not_an_int_falls_back(monkeypatch, budget):
+    from EvoScientist.middleware import model_retry as mod
+
+    monkeypatch.setattr(
+        mod,
+        "get_config",
+        lambda: {
+            "configurable": {MODEL_RETRY_RUN_KEY: {"wait_budget_seconds": budget}}
+        },
+    )
+    h = _Harness(budget=60.0)
+    assert h.mw._effective_tier().wait_budget_seconds == 60.0
+
+
 def test_sync_path_mirrors_the_async_loop():
     sleeps: list[float] = []
     clock = _Clock()
@@ -292,6 +329,56 @@ def test_sync_path_mirrors_the_async_loop():
     )
     assert mw.wrap_model_call(request, handler) is OK
     assert sleeps == [1.0]
+
+
+def _sync_harness(budget=60.0):
+    """The sync twin of ``_Harness``: the layer, its clock and its recorded waits."""
+    sleeps: list[float] = []
+    clock = _Clock()
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    mw = ModelRetryMiddleware(
+        wait_budget_seconds=budget,
+        unattended=False,
+        clock=clock,
+        sync_sleep=_sleep,
+        rng=lambda: 0.5,
+    )
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(stream_writer=lambda payload: None), model=None
+    )
+    return mw, clock, sleeps, request
+
+
+def test_sync_path_starts_the_budget_at_the_first_failure():
+    mw, clock, sleeps, request = _sync_harness()
+    outcomes = [_transient(), OK]
+
+    def handler(_request):
+        clock.now += 90.0
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    assert mw.wrap_model_call(request, handler) is OK
+    assert sleeps == [1.0]
+
+
+def test_sync_path_counts_the_retried_attempts_against_the_budget():
+    mw, clock, sleeps, request = _sync_harness()
+
+    def handler(_request):
+        clock.now += 25.0
+        raise _transient()
+
+    with pytest.raises(ProviderStreamError):
+        mw.wrap_model_call(request, handler)
+    assert sleeps == [1.0, 2.0, 4.0]
+    assert clock.now == 107.0
 
 
 async def test_warning_lines(caplog):
@@ -329,6 +416,412 @@ async def test_wait_that_overruns_the_deadline_gives_up_without_another_attempt(
     assert calls == 1
     assert [e["attempt"] for e in h.events] == [2]
     assert "giving up" in caplog.text
+
+
+# --- a fallback chain inside one attempt --------------------------------------
+
+
+def _sdk_error(status, headers=None):
+    cls = {
+        400: openai.BadRequestError,
+        401: openai.AuthenticationError,
+        404: openai.NotFoundError,
+        429: openai.RateLimitError,
+        503: openai.InternalServerError,
+    }[status]
+    request = httpx.Request("POST", "https://provider.test/v1/chat/completions")
+    response = httpx.Response(status, headers=headers, request=request)
+    return cls(f"Error code: {status}", response=response, body=None)
+
+
+def _rate_limited(_request=None):
+    raise _sdk_error(429, httpx.Headers({"retry-after": "1"}))
+
+
+async def test_a_long_run_of_short_waits_does_not_overflow_the_backoff():
+    """More than 1024 attempts fit in the unattended budget when the provider
+    asks for one second each time; the unused backoff must stay computable."""
+    h = _Harness(budget=1800.0, unattended=True)
+
+    async def handler(request):
+        _rate_limited(request)
+
+    with pytest.raises(openai.RateLimitError):
+        await h.mw.awrap_model_call(h.request, handler)
+    assert len(h.sleeps) > 1024
+    assert set(h.sleeps) == {1.0}
+
+
+def test_sync_path_does_not_overflow_the_backoff_on_a_long_run():
+    mw, _clock, sleeps, request = _sync_harness(budget=1800.0)
+    with pytest.raises(openai.RateLimitError):
+        mw.wrap_model_call(request, _rate_limited)
+    assert len(sleeps) > 1024
+
+
+async def test_the_backoff_still_reaches_its_cap_after_many_attempts():
+    h = _Harness(budget=1800.0, unattended=True, rng=lambda: 1.0)
+    with pytest.raises(ProviderStreamError):
+        await h.mw.awrap_model_call(h.request, h.handler([_transient()] * 40))
+    assert h.sleeps[-1] == 120.0
+    assert h.sleeps[6] == 70.4  # 64 s + 10 % jitter, still under the cap
+
+
+async def test_a_low_jitter_draw_keeps_the_minimum_wait_and_the_cap():
+    h = _Harness(budget=1800.0, unattended=True, rng=lambda: 0.0)
+    with pytest.raises(ProviderStreamError):
+        await h.mw.awrap_model_call(h.request, h.handler([_transient()] * 40))
+    assert h.sleeps[0] == MIN_WAIT_SECONDS  # 0.9 s was drawn
+    assert h.sleeps[-1] == 120.0
+
+
+class _ChainRequest:
+    """What the fallback and retry layers read off a request."""
+
+    def __init__(self, model, events):
+        self.model = model
+        self.runtime = SimpleNamespace(stream_writer=events.append)
+        self._events = events
+
+    def override(self, model):
+        return _ChainRequest(model, self._events)
+
+
+class _Chain:
+    """The real fallback layer inside the real retry layer, one fallback model."""
+
+    def __init__(
+        self,
+        monkeypatch,
+        primary,
+        fallback,
+        *,
+        budget=5.0,
+        models=None,
+        normalized=False,
+    ):
+        from EvoScientist.middleware import model_fallback
+        from EvoScientist.middleware.error_normalization import (
+            ErrorNormalizationMiddleware,
+        )
+
+        # In the real lists a normalization layer sits between the two.
+        self._normalization = ErrorNormalizationMiddleware() if normalized else None
+
+        self.h = _Harness(budget=budget)
+        self.failures = {"primary": primary, "fallback": fallback}
+        self.calls: list[str] = []
+        primary_model, self._fallback_model = models or (object(), object())
+        monkeypatch.setattr(
+            "EvoScientist.llm.models.get_chat_model",
+            lambda model, provider=None, **kwargs: self._fallback_model,
+        )
+        model_fallback.set_fallback_chain([("fb", "openai")])
+        self.chain = model_fallback.ModelFallbackMiddleware()
+        self.request = _ChainRequest(primary_model, self.h.events)
+
+    def _who(self, request):
+        return "fallback" if request.model is self._fallback_model else "primary"
+
+    def _fail(self, request):
+        who = self._who(request)
+        self.calls.append(who)
+        raise self.failures[who]()
+
+    async def run(self):
+        async def model(request):
+            self._fail(request)
+
+        async def through_the_chain(request):
+            return await self.chain.awrap_model_call(request, model)
+
+        async def attempt(request):
+            if self._normalization is None:
+                return await through_the_chain(request)
+            return await self._normalization.awrap_model_call(
+                request, through_the_chain
+            )
+
+        return await self.h.mw.awrap_model_call(self.request, attempt)
+
+
+@pytest.fixture
+def clean_chain():
+    from EvoScientist.middleware import model_fallback
+
+    yield
+    model_fallback._reset_chain_initialization()
+
+
+@pytest.mark.parametrize("broken", [401, 404])
+async def test_a_broken_fallback_does_not_switch_off_the_retry(
+    monkeypatch, clean_chain, broken
+):
+    chain = _Chain(monkeypatch, lambda: _sdk_error(503), lambda: _sdk_error(broken))
+    with pytest.raises(openai.APIStatusError) as raised:
+        await chain.run()
+    # The run ends with the last model's error, after the budget was spent on retries.
+    assert raised.value.status_code == broken
+    assert chain.calls.count("primary") > 1
+    assert chain.h.events[0]["reason"].endswith("Error code: 503")
+
+
+def _rejected_request():
+    error = _sdk_error(400)
+    error.args = ("Error code: 400 - invalid_request_error: unsupported parameter",)
+    return error
+
+
+def _context_overflow():
+    from langchain_core.exceptions import ContextOverflowError
+
+    return ContextOverflowError("too long")
+
+
+async def test_a_fallback_that_stops_the_chain_does_not_switch_off_the_retry(
+    monkeypatch, clean_chain
+):
+    """The fallback rejects the request (an unsupported parameter on another
+    model family); the primary's 503 still makes the attempt worth repeating."""
+    chain = _Chain(monkeypatch, lambda: _sdk_error(503), _rejected_request)
+    with pytest.raises(openai.BadRequestError):
+        await chain.run()
+    assert chain.calls.count("primary") > 1
+    assert chain.h.events[0]["reason"].endswith("Error code: 503")
+
+
+async def test_a_fallback_that_cannot_be_built_does_not_switch_off_the_retry(
+    monkeypatch, clean_chain
+):
+    chain = _Chain(monkeypatch, lambda: _sdk_error(503), lambda: _sdk_error(401))
+
+    def _cannot_build(model, provider=None, **kwargs):
+        raise ValueError("custom-openai needs a base URL")
+
+    monkeypatch.setattr("EvoScientist.llm.models.get_chat_model", _cannot_build)
+    with pytest.raises(ValueError, match="base URL"):
+        await chain.run()
+    assert chain.calls.count("primary") > 1
+    assert chain.h.events[0]["reason"].endswith("Error code: 503")
+
+
+async def test_a_recognized_providers_chain_is_judged_the_same(
+    monkeypatch, clean_chain
+):
+    """Failures normalized against their own model still show the retry layer what the SDK raised."""
+    from langchain_openai import ChatOpenAI
+
+    from EvoScientist.middleware.model_fallback import chain_failures
+
+    models = [ChatOpenAI(model="m", api_key="k") for _ in range(2)]
+    limited = httpx.Headers({"retry-after": "7"})
+    chain = _Chain(
+        monkeypatch,
+        lambda: _sdk_error(429, limited),
+        lambda: _sdk_error(401),
+        budget=10.0,
+        models=models,
+    )
+    with pytest.raises(ProviderStreamError) as raised:
+        await chain.run()
+    assert raised.value.status_code == 401
+    failures = chain_failures(raised.value)
+    assert [type(f) for f in failures] == [ProviderStreamError, ProviderStreamError]
+    assert [f.status_code for f in failures] == [429, 401]
+    assert chain.h.sleeps == [7.0]
+    assert chain.h.events[0]["reason"].startswith("429:")
+
+
+async def test_the_cause_follows_the_transient_model(monkeypatch, clean_chain):
+    errored = AIMessage("", response_metadata={"finish_reason": "error"})
+    chain = _Chain(
+        monkeypatch, lambda: ModelErrorFinishError(errored), lambda: _sdk_error(401)
+    )
+    with pytest.raises(openai.AuthenticationError):
+        await chain.run()
+    assert chain.h.events[0]["cause"] == "finish_reason"
+
+
+async def test_the_list_survives_the_normalization_layer_between_the_two(
+    monkeypatch, clean_chain
+):
+    """The last fallback has no provider of its own (Ollama, NVIDIA), so its
+    error is wrapped against the primary's on the way out; the chain's list
+    must still reach the retry layer."""
+    from langchain_openai import ChatOpenAI
+
+    chain = _Chain(
+        monkeypatch,
+        lambda: _sdk_error(503),
+        lambda: _sdk_error(401),
+        models=(ChatOpenAI(model="m", api_key="k"), object()),
+        normalized=True,
+    )
+    with pytest.raises(ProviderStreamError):
+        await chain.run()
+    assert chain.calls.count("primary") > 1
+    assert chain.h.events[0]["reason"].startswith("503:")
+
+
+@pytest.mark.parametrize(
+    ("primary_wait", "fallback_wait", "first_wait"),
+    [("120", None, 1.0), ("20", None, 1.0), (None, "120", 1.0), ("5", "3", 3.0)],
+    ids=[
+        "a rate-limited primary beyond the budget",
+        "a rate-limited primary",
+        "a rate-limited fallback",
+        "two rate limits",
+    ],
+)
+async def test_with_two_transient_models_the_shorter_wait_is_taken(
+    monkeypatch, clean_chain, primary_wait, fallback_wait, first_wait
+):
+    """Any model that may answer makes the attempt worth making."""
+
+    def _failure(wait):
+        if wait is None:
+            return lambda: _sdk_error(503)
+        return lambda: _sdk_error(429, httpx.Headers({"retry-after": wait}))
+
+    chain = _Chain(
+        monkeypatch, _failure(primary_wait), _failure(fallback_wait), budget=60.0
+    )
+    with pytest.raises(openai.APIStatusError):
+        await chain.run()
+    assert chain.h.sleeps[0] == first_wait
+    assert len(chain.h.sleeps) > 1
+    waited_for = "503" if first_wait == 1.0 else "429"
+    assert chain.h.events[0]["reason"].endswith(f"Error code: {waited_for}")
+
+
+async def test_on_equal_waits_the_earlier_model_is_named(monkeypatch, clean_chain):
+    """One jitter draw per attempt: two models that both back off wait the
+    same, so the line names the primary on every attempt."""
+    chain = _Chain(
+        monkeypatch, lambda: _sdk_error(503), lambda: _sdk_error(429), budget=20.0
+    )
+    draws = itertools.cycle([0.9, 0.1])
+    chain.h.mw._rng = lambda: next(draws)
+    with pytest.raises(openai.APIStatusError):
+        await chain.run()
+    assert len(chain.h.events) > 2
+    assert all(e["reason"].endswith("Error code: 503") for e in chain.h.events)
+
+
+async def test_the_log_names_the_model_that_was_waited_for(
+    monkeypatch, clean_chain, caplog
+):
+    chain = _Chain(
+        monkeypatch, lambda: _sdk_error(503), lambda: _sdk_error(401), budget=1.5
+    )
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.model_retry"):
+        with pytest.raises(openai.AuthenticationError):
+            await chain.run()
+    lines = [r.getMessage() for r in caplog.records]
+    (gave_up,) = [line for line in lines if "giving up" in line]
+    assert "Error code: 503" in gave_up
+    assert "Error code: 401" not in gave_up
+
+
+async def test_an_overrun_wait_names_the_model_that_was_waited_for(
+    monkeypatch, clean_chain, caplog
+):
+    chain = _Chain(
+        monkeypatch, lambda: _sdk_error(503), lambda: _sdk_error(401), budget=5.0
+    )
+
+    async def _suspended_sleep(seconds):
+        chain.h.clock.now += seconds + 30.0  # the process was suspended mid-wait
+
+    chain.h.mw._sleep = _suspended_sleep
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.model_retry"):
+        with pytest.raises(openai.AuthenticationError):
+            await chain.run()
+    (overran,) = [r.getMessage() for r in caplog.records if "ran" in r.getMessage()]
+    assert "Error code: 503" in overran
+    assert "Error code: 401" not in overran
+
+
+async def test_a_transient_fallback_is_retried_from_the_primary(
+    monkeypatch, clean_chain
+):
+    chain = _Chain(monkeypatch, lambda: _sdk_error(401), lambda: _sdk_error(503))
+    with pytest.raises(openai.InternalServerError):
+        await chain.run()
+    assert chain.calls.count("primary") == chain.calls.count("fallback") > 1
+
+
+async def test_a_chain_without_a_transient_failure_is_raised_at_once(
+    monkeypatch, clean_chain
+):
+    chain = _Chain(monkeypatch, lambda: _sdk_error(401), lambda: _sdk_error(404))
+    with pytest.raises(openai.NotFoundError):
+        await chain.run()
+    assert chain.calls == ["primary", "fallback"]
+    assert chain.h.events == []
+
+
+async def test_a_context_overflow_on_the_fallback_goes_out_at_once(
+    monkeypatch, clean_chain
+):
+    """The summarization outside compacts the conversation and tries again;
+    waiting out the budget for the primary would only hold that back."""
+    from langchain_core.exceptions import ContextOverflowError
+
+    chain = _Chain(monkeypatch, lambda: _sdk_error(503), _context_overflow)
+    with pytest.raises(ContextOverflowError):
+        await chain.run()
+    assert chain.calls == ["primary", "fallback"]
+    assert chain.h.events == []
+
+
+async def test_an_error_that_stops_the_chain_on_the_primary_is_not_retried(
+    monkeypatch, clean_chain
+):
+    from langchain_core.exceptions import ContextOverflowError
+
+    chain = _Chain(
+        monkeypatch, lambda: ContextOverflowError("too long"), lambda: _sdk_error(503)
+    )
+    with pytest.raises(ContextOverflowError):
+        await chain.run()
+    assert chain.calls == ["primary"]
+    assert chain.h.events == []
+
+
+async def test_the_wait_follows_the_transient_models_retry_after(
+    monkeypatch, clean_chain
+):
+    limited = httpx.Headers({"retry-after": "7"})
+    chain = _Chain(
+        monkeypatch,
+        lambda: _sdk_error(429, limited),
+        lambda: _sdk_error(401),
+        budget=10.0,
+    )
+    with pytest.raises(openai.AuthenticationError):
+        await chain.run()
+    assert chain.h.sleeps == [7.0]
+    assert chain.h.events[0]["reason"].endswith("Error code: 429")
+
+
+def test_sync_chain_with_a_broken_fallback_is_retried(monkeypatch, clean_chain):
+    chain = _Chain(monkeypatch, lambda: _sdk_error(503), lambda: _sdk_error(401))
+    sleeps: list[float] = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        chain.h.clock.now += seconds
+
+    chain.h.mw._sync_sleep = _sleep
+
+    def attempt(request):
+        return chain.chain.wrap_model_call(request, chain._fail)
+
+    with pytest.raises(openai.AuthenticationError):
+        chain.h.mw.wrap_model_call(chain.request, attempt)
+    assert sleeps
+    assert chain.calls.count("primary") == len(sleeps) + 1
 
 
 # --- the boundary middleware -------------------------------------------------

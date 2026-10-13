@@ -457,6 +457,7 @@ def model_retry_for_run(config=None) -> dict[str, Any]:
         if unattended
         else getattr(config, "model_retry_wait_seconds", 0)
     )
+    # Same rule as the mounted layer (``_model_retry_middleware``).
     try:
         budget = max(0, int(budget))
     except (TypeError, ValueError, OverflowError):

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from types import SimpleNamespace
 
+import aiohttp
 import httpx
 import httpx2
 import pytest
+import requests
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
@@ -394,10 +397,56 @@ def test_classification_on_real_sdk_exceptions(label, expected, make, how):
     assert is_transient(exc) is expected, f"{label}: {type(exc).__name__}: {exc}"
 
 
-def test_fallback_context_is_not_followed():
-    # The fallback chain raises the last model's error inside the except block
-    # of the primary's: the primary's transient ConnectError is reachable only
-    # through __context__, and must not make the final failure transient.
+def _ssl_key():
+    from aiohttp.client_reqrep import ConnectionKey
+
+    return ConnectionKey("h", 443, True, True, None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("make", "expected"),
+    [
+        (lambda: requests.exceptions.ReadTimeout("read timed out"), True),
+        (lambda: requests.exceptions.ConnectionError("connection reset"), True),
+        (lambda: requests.exceptions.SSLError("certificate verify failed"), False),
+        (lambda: aiohttp.ServerDisconnectedError(), True),
+        (lambda: aiohttp.ServerTimeoutError("timeout"), True),
+        (lambda: aiohttp.ClientSSLError(_ssl_key(), ssl.SSLError(1, "bad")), False),
+        (
+            lambda: aiohttp.ClientConnectorCertificateError(
+                _ssl_key(), ssl.SSLCertVerificationError(1, "self-signed")
+            ),
+            False,
+        ),
+        (lambda: aiohttp.InvalidURL("not a url"), False),
+        (lambda: requests.exceptions.InvalidURL("not a url"), False),
+    ],
+    ids=[
+        "requests-timeout",
+        "requests-reset",
+        "requests-ssl",
+        "aiohttp-disconnect",
+        "aiohttp-timeout",
+        "aiohttp-ssl",
+        "aiohttp-certificate",
+        "aiohttp-invalid-url",
+        "requests-invalid-url",
+    ],
+)
+def test_the_nvidia_clients_transport_errors(make, expected):
+    """The NVIDIA client raises these raw, past the normalization layer."""
+    exc = make()
+
+    async def _how(_model):
+        raise exc
+
+    normalized = asyncio.run(_through_normalization(SimpleNamespace(), _how))
+    assert is_transient(normalized) is expected
+
+
+def test_an_implicit_context_is_not_followed():
+    # An implicit __context__ is not evidence: a chain's earlier failures
+    # count only when the chain lists them itself.
     try:
         try:
             raise httpx.ConnectError("refused")

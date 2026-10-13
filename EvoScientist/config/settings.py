@@ -209,8 +209,8 @@ class EvoScientistConfig:
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
-    # Transient model-call failures (5xx, 429, connection drops): total wait
-    # budget per model call, in seconds; 0 switches the retry off.
+    # Transient model-call failures (5xx, 429, connection drops): how long one
+    # model call keeps retrying after it first fails, in seconds; 0 = no retry.
     model_retry_wait_seconds: int = 60
     auto_mode_retry_wait_seconds: int = 1800  # unattended runs: auto_mode, scheduler
     # Optional auxiliary model for background/helper LLM calls (memory workers +

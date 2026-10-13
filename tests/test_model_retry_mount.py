@@ -135,6 +135,19 @@ def _mw_names(middleware):
     return [getattr(m, "name", type(m).__name__) for m in middleware]
 
 
+@pytest.fixture(autouse=True)
+def no_configured_model(monkeypatch):
+    """The lists are built with the user's configured model, which needs its key."""
+    from langchain_core.language_models.fake_chat_models import (
+        FakeMessagesListChatModel,
+    )
+
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_chat_model",
+        lambda: FakeMessagesListChatModel(responses=[]),
+    )
+
+
 def _retry_of(middleware) -> ModelRetryMiddleware:
     return next(m for m in middleware if isinstance(m, ModelRetryMiddleware))
 

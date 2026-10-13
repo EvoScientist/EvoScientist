@@ -409,8 +409,8 @@ def _inject_subagent_middleware(
             ToolErrorHandlerMiddleware(),
             TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
-            # Innermost of the layers that can fail a call: marks each
-            # provider call for the stream decoder.
+            # Inside the retry layer: marks each provider call for the
+            # stream decoder.
             ModelCallBoundaryMiddleware(),
         ]
         if memory_controls.memory_enabled:
@@ -683,7 +683,6 @@ def _build_base_kwargs(
         cfg=cfg,
         chat_model=chat_model,
         backend=base_backend,
-        unattended=bool(getattr(cfg, "auto_mode", False)),
     )
     subs = _maybe_swap_async_subagents(
         subs,
@@ -776,7 +775,6 @@ def load_mcp_and_build_kwargs(
         cfg=cfg,
         chat_model=chat_model,
         backend=base_backend,
-        unattended=bool(getattr(cfg, "auto_mode", False)),
     )
 
     # Inject MCP tools into subagents by name
@@ -915,6 +913,8 @@ def _model_retry_middleware(
         if tier_unattended
         else cfg.model_retry_wait_seconds
     )
+    # The config puts a malformed value back to its default itself; this only
+    # meets an object built some other way, where both readers agree on no retry.
     try:
         budget = max(0, int(budget))
     except (TypeError, ValueError, OverflowError):

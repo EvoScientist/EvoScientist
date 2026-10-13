@@ -1,9 +1,9 @@
 """Retry transient model-call failures inside a wait budget.
 
-Classification walks only ``__cause__`` and exception-group members: the
-fallback chain raises the last model's error inside the ``except`` block of
-the previous one, so ``__context__`` would make a 401 look like the 503
-before it.
+Classification walks only ``__cause__`` and exception-group members, never
+``__context__``: an error raised while another was being handled says nothing
+about that other one. A fallback chain that ran out lists each model's failure
+on the error it raises, and one transient model is enough to try again.
 
 ``ModelCallBoundaryMiddleware`` marks each provider call on the custom stream
 so the stream decoder can drop what a failed call had already emitted.
@@ -38,6 +38,8 @@ INTERACTIVE_CAP_SECONDS = 10.0
 UNATTENDED_CAP_SECONDS = 120.0
 MIN_WAIT_SECONDS = 1.0
 JITTER_FRACTION = 0.1
+# Past every cap; a long run of short waits must not overflow the float.
+MAX_BACKOFF_DOUBLINGS = 32
 # A wait may end this late (timer granularity) before it counts as overrun.
 DEADLINE_SLACK_SECONDS = 1.0
 RETRYABLE_STATUSES = frozenset({408, 409, 425, 429})
@@ -53,6 +55,10 @@ _TRANSIENT_CLASSES = frozenset(
         ("httpcore", "TimeoutException"),
         ("httpcore2", "NetworkError"),
         ("httpcore2", "TimeoutException"),
+        # The NVIDIA client: requests for sync calls, aiohttp for async ones.
+        ("requests", "ConnectionError"),
+        ("requests", "Timeout"),
+        ("aiohttp", "ClientConnectionError"),
     }
 )
 _EXCLUDED_CLASSES = frozenset(
@@ -61,6 +67,9 @@ _EXCLUDED_CLASSES = frozenset(
         ("httpx", "LocalProtocolError"),
         ("httpx2", "UnsupportedProtocol"),
         ("httpx2", "LocalProtocolError"),
+        # A certificate or TLS setup failure repeats on every attempt.
+        ("requests", "SSLError"),
+        ("aiohttp", "ClientSSLError"),
     }
 )
 _ANTHROPIC_TRANSIENT_TYPES = frozenset(
@@ -209,8 +218,8 @@ def _signal(exc: BaseException) -> bool | None:
     return None
 
 
-def is_transient(exc: BaseException) -> bool:
-    """Whether a failed attempt is worth retrying: exclusions anywhere in the tree win."""
+def _transient_alone(exc: BaseException) -> bool:
+    """One failure judged by its own tree: exclusions anywhere in it win."""
     tree = list(_iter_tree(exc))
     if any(_hard_exclusion(item) for item in tree):
         return False
@@ -219,6 +228,22 @@ def is_transient(exc: BaseException) -> bool:
         if signal is not None:
             return signal
     return False
+
+
+def retryable_failures(exc: BaseException) -> list[BaseException]:
+    """The failures that make another attempt worth it; empty when none does.
+
+    After an exhausted fallback chain these are the models that failed
+    transiently: the next attempt starts from the primary again.
+    """
+    from .model_fallback import chain_failures
+
+    return [f for f in chain_failures(exc) or (exc,) if _transient_alone(f)]
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Whether a failed attempt is worth retrying."""
+    return bool(retryable_failures(exc))
 
 
 def has_error_finish(exc: BaseException) -> bool:
@@ -311,7 +336,9 @@ def _emit(request: ModelRequest, event: dict[str, Any]) -> None:
     try:
         writer(event)
     except Exception:
-        logger.debug("%s: stream_writer raised; ignoring", event.get("type"))
+        logger.debug(
+            "%s: stream_writer raised; ignoring", event.get("type"), exc_info=True
+        )
 
 
 @dataclass(frozen=True)
@@ -324,11 +351,18 @@ class RetryTier:
         return UNATTENDED_CAP_SECONDS if self.unattended else INTERACTIVE_CAP_SECONDS
 
 
+def _wait_after(exc: BaseException, backoff: float) -> float:
+    """The provider's ``Retry-After`` for *exc* when it sent one, else *backoff*."""
+    wait = retry_after_seconds(exc)
+    return max(round(backoff if wait is None else wait, 3), MIN_WAIT_SECONDS)
+
+
 class ModelRetryMiddleware(AgentMiddleware):
     """Retry a transient model-call failure inside a per-call wait budget.
 
     Sits outside the fallback chain: one attempt is primary plus fallbacks.
-    The budget is a deadline, so a slow failing attempt counts against it.
+    The budget starts at the first failure: the waits and the retried attempts
+    count against it, the first attempt's own time does not.
     """
 
     name = "model_retry"
@@ -363,10 +397,13 @@ class ModelRetryMiddleware(AgentMiddleware):
             return self._tier
         if not isinstance(marker, dict):
             return self._tier
-        budget = marker.get("wait_budget_seconds", self._tier.wait_budget_seconds)
+        budget = marker.get("wait_budget_seconds")
+        # The config's rule: whole seconds as an int, anything else is the default.
         try:
-            budget = max(0.0, float(budget))
-        except (TypeError, ValueError):
+            if isinstance(budget, bool) or not isinstance(budget, int):
+                raise TypeError
+            budget = float(max(0, budget))
+        except (TypeError, OverflowError):
             budget = self._tier.wait_budget_seconds
         return RetryTier(budget, bool(marker.get("unattended", self._tier.unattended)))
 
@@ -380,29 +417,33 @@ class ModelRetryMiddleware(AgentMiddleware):
             raise ModelErrorFinishError(errored)
         return response
 
-    def _next_wait(self, exc: BaseException, attempt: int, tier: RetryTier) -> float:
-        wait = retry_after_seconds(exc)
-        if wait is None:
-            base = float(2 ** (attempt - 1))
-            jittered = base * (1.0 + JITTER_FRACTION * (2.0 * self._rng() - 1.0))
-            wait = min(jittered, tier.cap_seconds)
-        return max(round(wait, 3), MIN_WAIT_SECONDS)
+    def _backoff(self, attempt: int, tier: RetryTier) -> float:
+        base = float(2 ** min(attempt - 1, MAX_BACKOFF_DOUBLINGS))
+        jittered = base * (1.0 + JITTER_FRACTION * (2.0 * self._rng() - 1.0))
+        return min(jittered, tier.cap_seconds)
 
     def _plan_retry(
         self, exc: BaseException, attempt: int, tier: RetryTier, deadline: float
     ) -> tuple[float, dict[str, Any]] | None:
         """The wait and event for the next attempt, or ``None`` to give up now."""
-        if isinstance(exc, GraphBubbleUp) or not is_transient(exc):
+        failures = [] if isinstance(exc, GraphBubbleUp) else retryable_failures(exc)
+        if not failures:
             return None
-        wait = self._next_wait(exc, attempt, tier)
+        # Any model that may answer makes the attempt worth making, so the
+        # shortest wait is sat out; one backoff draw, so a tie names the earlier model.
+        backoff = self._backoff(attempt, tier)
+        wait, failure = min(
+            ((_wait_after(item, backoff), item) for item in failures),
+            key=lambda planned: planned[0],
+        )
         now = self._clock()
         if now + wait > deadline:
             logger.warning(
-                "model call still failing after %d attempt%s and %.0f s; giving up (%s)",
+                "model call still failing after %d attempt%s, %.0f s after it first failed; giving up (%s)",
                 attempt,
                 "" if attempt == 1 else "s",
                 now - (deadline - tier.wait_budget_seconds),
-                describe_failure(exc),
+                describe_failure(failure),
             )
             return None
         left = deadline - now - wait
@@ -410,9 +451,9 @@ class ModelRetryMiddleware(AgentMiddleware):
             "type": "model_retry",
             "attempt": attempt + 1,
             "wait_seconds": round(wait, 1),
-            "reason": describe_failure(exc),
+            "reason": describe_failure(failure),
             "budget_left_seconds": round(left, 1),
-            "cause": "finish_reason" if has_error_finish(exc) else "exception",
+            "cause": "finish_reason" if has_error_finish(failure) else "exception",
             # A namespace is not always named after its agent downstream.
             "agent": _agent_name(),
         }
@@ -426,7 +467,7 @@ class ModelRetryMiddleware(AgentMiddleware):
         )
         return wait, event
 
-    def _overran(self, exc: BaseException, tier: RetryTier, deadline: float) -> bool:
+    def _overran(self, reason: str, tier: RetryTier, deadline: float) -> bool:
         """Whether the wait itself ran past the deadline (suspended process, stalled loop)."""
         late = self._clock() - deadline
         if late <= DEADLINE_SLACK_SECONDS:
@@ -435,7 +476,7 @@ class ModelRetryMiddleware(AgentMiddleware):
             "model call retry wait ran %.0f s past the %.0f s budget; giving up (%s)",
             late,
             tier.wait_budget_seconds,
-            describe_failure(exc),
+            reason,
         )
         return True
 
@@ -447,19 +488,21 @@ class ModelRetryMiddleware(AgentMiddleware):
         tier = self._effective_tier()
         if tier.wait_budget_seconds <= 0:
             return self._check_response(await handler(request))
-        deadline = self._clock() + tier.wait_budget_seconds
+        deadline: float | None = None
         attempt = 1
         while True:
             try:
                 return self._check_response(await handler(request))
             except Exception as exc:
+                if deadline is None:
+                    deadline = self._clock() + tier.wait_budget_seconds
                 plan = self._plan_retry(exc, attempt, tier, deadline)
                 if plan is None:
                     raise
                 wait, event = plan
                 _emit(request, event)
                 await self._sleep(wait)
-                if self._overran(exc, tier, deadline):
+                if self._overran(event["reason"], tier, deadline):
                     raise
                 attempt += 1
 
@@ -471,19 +514,21 @@ class ModelRetryMiddleware(AgentMiddleware):
         tier = self._effective_tier()
         if tier.wait_budget_seconds <= 0:
             return self._check_response(handler(request))
-        deadline = self._clock() + tier.wait_budget_seconds
+        deadline: float | None = None
         attempt = 1
         while True:
             try:
                 return self._check_response(handler(request))
             except Exception as exc:
+                if deadline is None:
+                    deadline = self._clock() + tier.wait_budget_seconds
                 plan = self._plan_retry(exc, attempt, tier, deadline)
                 if plan is None:
                     raise
                 wait, event = plan
                 _emit(request, event)
                 self._sync_sleep(wait)
-                if self._overran(exc, tier, deadline):
+                if self._overran(event["reason"], tier, deadline):
                     raise
                 attempt += 1
 
@@ -493,7 +538,7 @@ class ModelCallBoundaryMiddleware(AgentMiddleware):
 
     The stream decoder drops a failed call's output by these marks. They travel
     as custom events because the server transport strips message metadata.
-    Mounted innermost, so every model of a fallback chain gets its own pair.
+    Mounted inside the fallback chain, so every model of a chain gets its own pair.
     """
 
     name = "model_call_boundary"

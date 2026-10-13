@@ -240,7 +240,9 @@ def _is_provider_error(exc: BaseException) -> bool:
     return any(module.startswith(p) for p in _PROVIDER_EXC_MODULE_PREFIXES)
 
 
-def _normalize(request: ModelRequest, exc: BaseException) -> ProviderStreamError | None:
+def _normalize(
+    request: ModelRequest | None, exc: BaseException
+) -> ProviderStreamError | None:
     """Return a :class:`ProviderStreamError` wrapping *exc* if the model
     on *request* comes from a recognized provider SDK, or ``None`` if
     the caller should re-raise *exc* unchanged.

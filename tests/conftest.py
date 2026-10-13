@@ -98,6 +98,15 @@ def _fresh_process_workspace():
 
 
 @pytest.fixture
+def no_mcp(monkeypatch):
+    """For tests that build the real agent: it would load the user's MCP servers,
+    which cannot start inside a running loop. Opt in with ``usefixtures``."""
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._load_mcp_tools_cached", lambda *a, **k: {}
+    )
+
+
+@pytest.fixture
 def workspace(tmp_path):
     """A ``Workspace`` rooted at a fresh temporary folder."""
     from EvoScientist.paths import Workspace
