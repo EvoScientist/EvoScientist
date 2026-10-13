@@ -559,7 +559,14 @@ def server(monkeypatch):
     """A server answering on 6174; *owned* when its sidecar pid serves it."""
     import EvoScientist.langgraph_dev.manager as manager
 
-    state = {"owned": True, "running": True, "stopped": 0}
+    state = {
+        "owned": True,
+        "running": True,
+        "stopped": 0,
+        "stop_fails": False,
+        "jobs": ["train.py"],
+        "busy": True,
+    }
     monkeypatch.setattr(
         manager, "is_langgraph_dev_running", lambda **kw: state["running"]
     )
@@ -567,16 +574,18 @@ def server(monkeypatch):
     monkeypatch.setattr(manager, "_pid_serves_port", lambda pid, port: state["owned"])
 
     def stop():
+        if state["stop_fails"] or not state["owned"]:
+            return None
         state["stopped"] += 1
         state["running"] = False
-        return 42 if state["owned"] else None
+        return 42
 
     monkeypatch.setattr(manager, "stop_recorded_server", stop)
     monkeypatch.setattr(
-        "EvoScientist.deploy.busy.running_bg_process_names", lambda url: ["train.py"]
+        "EvoScientist.deploy.busy.running_bg_process_names", lambda url: state["jobs"]
     )
     monkeypatch.setattr(
-        "EvoScientist.deploy.busy.backend_has_active_runs", lambda url: True
+        "EvoScientist.deploy.busy.has_busy_thread", lambda url: state["busy"]
     )
 
     class Config:
@@ -619,6 +628,59 @@ def test_terminal_asks_and_names_busy_work(server):
     assert server["stopped"] == 1
     assert "train.py" in asked[0]
     assert "a task is running" in asked[0]
+
+
+def test_background_job_alone_is_not_called_a_task(server):
+    server["busy"] = False
+    asked: list[str] = []
+    updater.check_server(
+        updater.UpdateOptions(), _emits(), lambda q: asked.append(q) or True
+    )
+    assert "train.py" in asked[0]
+    assert "a task is running" not in asked[0]
+
+
+def test_owned_server_that_does_not_stop(server):
+    server["stop_fails"] = True
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.check_server(updater.UpdateOptions(yes=True), _emits(), None)
+    assert exc.value.code == "server_running"
+    assert "Could not stop" in exc.value.message
+    assert "ownership record" not in exc.value.message
+
+
+def test_has_busy_thread_asks_for_busy_threads_only(monkeypatch):
+    from EvoScientist.deploy import busy
+
+    payloads: list[dict] = []
+    monkeypatch.setattr(
+        busy,
+        "_search_threads",
+        lambda url, payload, timeout: payloads.append(payload) or [],
+    )
+    assert busy.has_busy_thread("http://x") is False
+    assert payloads == [{"status": "busy", "limit": 1}]
+
+    def broken(url, payload, timeout):
+        raise OSError("down")
+
+    monkeypatch.setattr(busy, "_search_threads", broken)
+    assert busy.has_busy_thread("http://x") is False
+
+
+def test_ctrl_c_at_the_question_cancels(uv_install, monkeypatch):
+    import click
+
+    def abort(opts, emit, confirm):
+        raise click.exceptions.Abort()
+
+    monkeypatch.setattr(updater, "check_server", abort)
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8"))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "server_running"
+    assert end["message"] == "Update cancelled."
 
 
 def test_answering_no_cancels(server):
@@ -766,3 +828,25 @@ def test_tool_bin_dir_reads_utf8(monkeypatch):
     monkeypatch.setattr(updater.subprocess, "run", fake_run)
     assert updater.tool_bin_dir("uv") == Path(path)
     assert seen[0]["encoding"] == "utf-8"
+
+
+def test_check_works_for_installs_it_does_not_update(
+    tmp_path, monkeypatch, no_subprocess
+):
+    """--check only prints the versions, also for an editable install."""
+    _plain_env(tmp_path, monkeypatch, editable=True)
+    code, lines, _ = _run(updater.UpdateOptions(check=True, json=True))
+    assert code == 0
+    assert _terminal(lines)["detail"] == {"version": "0.3.7", "latest": "0.3.10"}
+
+
+def test_truncated_constraints_download_is_download_failed(tmp_path, monkeypatch):
+    import http.client
+
+    def truncated(url, timeout):
+        raise http.client.IncompleteRead(b"six==", 10)
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", truncated)
+    with pytest.raises(updater.UpdateError) as exc:
+        updater.download_constraints("0.3.7", "default", tmp_path / "c.txt")
+    assert exc.value.code == "download_failed"

@@ -31,7 +31,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import click
+
 from . import uv_tool
+from .setup.download import _NETWORK_ERRORS
 from .setup.protocol import Emitter, StageError, make_event
 
 logger = logging.getLogger(__name__)
@@ -113,9 +116,10 @@ def _manual(message: str) -> UpdateError:
 
 def read_tool_receipt() -> uv_tool.Receipt | None:
     """The receipt of the uv tool environment EvoScientist runs from; None for
-    any other install. Raises :class:`UpdateError` (``manual_update``) for an
-    install this command must not reinstall: an unreadable receipt, an
-    editable or source install, or the Docker image."""
+    any other install (pip, conda, the Docker image: their messages need the
+    target version). Raises :class:`UpdateError` (``manual_update``) for an
+    install this command must not reinstall and that needs no version: an
+    unreadable receipt, an editable or source install."""
     from .ccproxy_manager import _is_editable_install
 
     env = uv_tool.tool_env()
@@ -223,7 +227,7 @@ def download_constraints(target: str, mirror: str, dest: Path) -> None:
         raise UpdateError(
             "download_failed", f"Download of {url} failed: {exc}"
         ) from exc
-    except OSError as exc:
+    except _NETWORK_ERRORS as exc:
         raise UpdateError(
             "download_failed", f"Download of {url} failed: {exc}"
         ) from exc
@@ -238,7 +242,7 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
     ``server_running`` when the update must not go on."""
     from .cli.server_cmd import manual_stop_command
     from .config import get_effective_config
-    from .deploy.busy import backend_has_active_runs, running_bg_process_names
+    from .deploy.busy import has_busy_thread, running_bg_process_names
     from .langgraph_dev.manager import (
         _DEFAULT_HOST,
         _DEFAULT_PORT,
@@ -264,7 +268,7 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
         jobs = running_bg_process_names(url)
         if jobs:
             busy.append(f"background jobs still running: {', '.join(jobs)}")
-        if backend_has_active_runs(url):
+        if has_busy_thread(url):
             busy.append("a task is running")
         question = (
             f"The EvoScientist server on port {port} runs the old version"
@@ -283,11 +287,15 @@ def check_server(opts: UpdateOptions, emit: Emitter, confirm: Confirm) -> None:
                     "server_running", "Update cancelled; the server keeps running."
                 )
         pid = stop_recorded_server()
-        if pid is not None:
-            emit(
-                make_event(STAGE, "running", message=f"Stopped the server (pid {pid})")
+        if pid is None:
+            raise UpdateError(
+                "server_running",
+                f"Could not stop the EvoScientist server on port {port}; nothing "
+                f"was changed. Stop it with EvoSci server stop, then run EvoSci "
+                f"update again.",
             )
-            return
+        emit(make_event(STAGE, "running", message=f"Stopped the server (pid {pid})"))
+        return
     manual = manual_stop_command(port)
     message = (
         f"A langgraph dev server that EvoSci has no ownership record for answers "
@@ -495,6 +503,13 @@ def run_update(
         message, detail = _update(opts, emit, confirm, write_line)
     except HandedOver:
         return 0
+    except click.exceptions.Abort:  # Ctrl+C at the terminal question
+        emit(
+            make_event(
+                STAGE, "error", message="Update cancelled.", code="server_running"
+            )
+        )
+        return 1
     except UpdateError as exc:
         emit(
             make_event(
@@ -519,7 +534,6 @@ def _update(
     from .config import load_config
 
     installed = installed_version()
-    receipt = read_tool_receipt()
     mirror = load_config().mirror
     emit(make_event(STAGE, "running", progress=0.0, message="Checking for releases"))
     versions = lookup_versions(mirror)
@@ -533,6 +547,7 @@ def _update(
             {"version": installed, "latest": latest},
         )
 
+    receipt = read_tool_receipt()
     target = choose_target(opts.version, versions)
     if not opts.version and _version(target) <= _version(installed):
         return (
