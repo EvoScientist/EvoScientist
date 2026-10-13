@@ -153,12 +153,46 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
         return [string]::Equals((Get-LongPath $A), (Get-LongPath $B), [StringComparison]::OrdinalIgnoreCase)
     }
 
-    # Runs a native command with its output on the console and returns its
-    # exit code. Native stderr must not become a terminating error.
-    function Invoke-Native([string]$Exe, [string[]]$Arguments) {
+    # Runs a native command and returns its output lines (stdout, and stderr
+    # with -WithStderr) and exit code. Windows PowerShell decodes captured
+    # native output with the console's code page, while uv and Python with
+    # -X utf8 write UTF-8: a path with non-ASCII characters would come back
+    # garbled, so the console encoding is UTF-8 during the call.
+    function Invoke-Captured([string]$Exe, [string[]]$Arguments, [switch]$WithStderr) {
         $ErrorActionPreference = 'Continue'
-        & $Exe @Arguments | Out-Host
-        return $LASTEXITCODE
+        $saved = [Console]::OutputEncoding
+        try {
+            try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
+            if ($WithStderr) {
+                $lines = @(& $Exe @Arguments 2>&1 | ForEach-Object { "$_" })
+            } else {
+                $lines = @(& $Exe @Arguments | ForEach-Object { "$_" })
+            }
+            return @{ Lines = $lines; ExitCode = $LASTEXITCODE }
+        } finally {
+            try { [Console]::OutputEncoding = $saved } catch { }
+        }
+    }
+
+    # Runs a native command on this console (its output is not read by
+    # PowerShell, so EvoSci's progress output keeps the console's encoding)
+    # and returns its exit code.
+    function Invoke-OnConsole([string]$Exe, [string[]]$Arguments) {
+        $quoted = foreach ($arg in $Arguments) {
+            if ($arg -and $arg -notmatch '[\s"]') {
+                $arg
+            } else {
+                # The quoting rules of CommandLineToArgvW.
+                $escaped = [regex]::Replace($arg, '(\\*)"', '$1$1\"')
+                '"' + [regex]::Replace($escaped, '(\\+)$', '$1$1') + '"'
+            }
+        }
+        $info = New-Object Diagnostics.ProcessStartInfo $Exe
+        $info.Arguments = $quoted -join ' '
+        $info.UseShellExecute = $false
+        $process = [Diagnostics.Process]::Start($info)
+        $process.WaitForExit()
+        return $process.ExitCode
     }
 
     function Get-Download([string]$Url, [string]$OutFile) {
@@ -366,8 +400,8 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
 
         $uv = Install-Uv $dataDir $tempDir
         $constraints = Get-Constraints $installVersion $tempDir
-        $toolDir = (& $uv tool dir | Out-String).Trim()
-        $binDir = (& $uv tool dir --bin | Out-String).Trim()
+        $toolDir = ((Invoke-Captured $uv @('tool', 'dir')).Lines -join '').Trim()
+        $binDir = ((Invoke-Captured $uv @('tool', 'dir', '--bin')).Lines -join '').Trim()
         $envDir = Join-Path $toolDir 'evoscientist'
 
         $extras = ''
@@ -385,14 +419,11 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
             if ((Test-Path $receipt) -and (Test-Path $python)) {
                 $reader = Join-Path $tempDir 'read_receipt.py'
                 [IO.File]::WriteAllText($reader, $ReceiptReader, (New-Object Text.UTF8Encoding $false))
-                $ErrorActionPreference = 'Continue'
-                $lines = & $python -I $reader $receipt 2>&1
-                $readRc = $LASTEXITCODE
-                $ErrorActionPreference = 'Stop'
-                if ($readRc -ne 0) {
+                $read = Invoke-Captured $python @('-X', 'utf8', '-I', $reader, $receipt) -WithStderr
+                if ($read.ExitCode -ne 0) {
                     Write-Warn "Cannot read $receipt with $python. $lost"
                 } else {
-                    foreach ($line in $lines) {
+                    foreach ($line in $read.Lines) {
                         $kind, $value = "$line".Split("`t", 2)
                         switch ($kind) {
                             'extras' { $extras = "[$value]" }
@@ -417,7 +448,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
         $uvArgs += $withArgs
         $uvArgs += $spec
         Write-Info "Installing EvoScientist $installVersion..."
-        if ((Invoke-Native $uv $uvArgs) -ne 0) {
+        if ((Invoke-OnConsole $uv $uvArgs) -ne 0) {
             Write-ExcludeNewerHint
             throw "uv could not install EvoScientist $installVersion (see uv's output above). If EvoScientist was started meanwhile, close it and run this script again."
         }
@@ -428,10 +459,9 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
             if ($NoModifyPath) {
                 Write-Info "Not changing PATH (-NoModifyPath). Add $binDir to PATH to run EvoSci."
             } else {
-                $ErrorActionPreference = 'Continue'
-                $out = & $uv tool update-shell 2>&1 | ForEach-Object { "$_" }
-                $rc = $LASTEXITCODE
-                $ErrorActionPreference = 'Stop'
+                $shell = Invoke-Captured $uv @('tool', 'update-shell') -WithStderr
+                $out = $shell.Lines
+                $rc = $shell.ExitCode
                 if ($rc -eq 0) {
                     $out | Out-Host
                     $pathChanged = $true
@@ -452,7 +482,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
             if ($Cn) { $setupArgs += '--cn' }
             # By absolute path: this window does not see the PATH change yet.
             $evosci = Join-Path $binDir 'EvoSci.exe'
-            if ((Invoke-Native $evosci $setupArgs) -ne 0) {
+            if ((Invoke-OnConsole $evosci $setupArgs) -ne 0) {
                 throw "EvoScientist $installVersion is installed, but EvoSci setup failed (see above). Run it again with: & '$evosci' setup"
             }
         }
