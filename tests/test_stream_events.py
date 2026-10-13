@@ -1729,6 +1729,51 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Full answer."
         assert [e["type"] for e in out if e["type"] == "model_call"] == []
 
+    async def test_a_rolled_back_call_never_reaches_into_an_earlier_pass(self):
+        """A graded run's last pass starts after the verdict; a failed call of
+        the revision pass is cut back to its own start, not past that point."""
+        from tests.stream_v3_fakes import (
+            custom_subagent_event,
+            local_text_delta,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+        )
+
+        def verdict(result, iteration):
+            return custom_subagent_event(
+                {
+                    "type": "rubric_evaluation_end",
+                    "iteration": iteration,
+                    "result": result,
+                    "explanation": "",
+                    "criteria": [],
+                }
+            )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                local_text_delta("Draft."),
+                message_finish(),
+                model_call_end("1"),
+                verdict("needs_revision", 0),
+                model_call_start("2"),
+                local_text_delta("Half a rev"),
+                model_call_end("2", "failed"),
+                retry_event(),
+                model_call_start("3"),
+                local_text_delta("Revised."),
+                message_finish(),
+                model_call_end("3"),
+                verdict("satisfied", 1),
+            ]
+        )
+        done = self._done(out)
+        assert done["response"] == "Draft.\n\nRevised."
+        assert done["last_pass_response"] == "Revised."
+
     async def test_server_transport_shape_without_message_metadata(self):
         """langgraph-api strips run metadata before SSE: the boundary events alone must do."""
         from tests.stream_v3_fakes import (
