@@ -713,17 +713,29 @@ def test_start_helper_json_keeps_the_callers_pipes(tmp_path, monkeypatch):
     assert config == {"env_dir": "C:\\env", "temp_dir": str(tmp_path), "json": True}
 
 
-def test_start_helper_terminal_shares_the_console(tmp_path, monkeypatch):
+def test_start_helper_terminal_opens_its_own_window(tmp_path, monkeypatch):
+    """A prompt reads Ctrl+C as a key, so the helper gets a console of its own,
+    where Ctrl+C reaches it."""
     from EvoScientist import update_helper
 
     calls: list[dict] = []
+    monkeypatch.setattr(subprocess, "CREATE_NEW_CONSOLE", 0x10, raising=False)
     monkeypatch.setattr(
         update_helper.subprocess,
         "Popen",
         lambda cmd, **kwargs: calls.append(kwargs),
     )
     update_helper.start_helper(tmp_path, {}, json_mode=False)
-    assert calls == [{}]  # same console and process group: Ctrl+C reaches it
+    assert calls == [{"creationflags": 0x10}]
+
+
+def test_terminal_handover_says_new_window(uv_install, monkeypatch):
+    from EvoScientist import update_helper
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(update_helper, "start_helper", lambda *a, **kw: None)
+    _code, lines, _ = _run(updater.UpdateOptions())
+    assert "new window" in lines[-1]["message"]
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="needs pwsh")

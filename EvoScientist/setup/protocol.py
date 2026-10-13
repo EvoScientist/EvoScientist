@@ -18,7 +18,8 @@ Event fields:
   (``setup_failed``: the failed stage and its code; ``environment_busy``: the
   processes still running); on ``running`` events of ``EvoSci update``'s
   Windows helper while it waits (``{"waiting_for": [{"pid", "name",
-  "path"}]}``).
+  "path"}], "cancel_file": "<path>"}``: creating that file cancels the
+  wait).
 - ``code``: a stable error code on ``error`` events (see :data:`ERROR_CODES`).
 """
 

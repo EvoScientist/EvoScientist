@@ -13,9 +13,18 @@ writes the update's terminal line.
 
 While it waits it prints ``running`` lines ("Update pending until you
 close: ...", ``detail.waiting_for``), a new one whenever that set changes.
-Ctrl+C in a terminal, or the end of its stdin under ``--json`` (the caller
-closed it, or it was already closed), cancels the wait: nothing is changed
-and the update ends with ``environment_busy``.
+Cancelling the wait changes nothing and ends the update with
+``environment_busy``:
+
+- In a terminal the helper runs in a window of its own: Ctrl+C there cancels.
+  The window the update was started from has its prompt back by then, and a
+  prompt (PSReadLine) reads Ctrl+C as a key, so no Ctrl+C event would reach
+  a helper sharing it.
+- Under ``--json`` the waiting lines carry ``detail.cancel_file``: the caller
+  creates that file to cancel. Closing stdin cannot be the signal: Node
+  destroys a child's stdin when the child (``EvoSci``) exits, which is right
+  after the handover. A stdin that is not a pipe (``NUL``) marks an
+  unattended run, which fails at once instead of waiting.
 """
 
 from __future__ import annotations
@@ -65,6 +74,10 @@ if (-not ('EvoSciUpdate.Win32' -as [type])) {
     Add-Type -Namespace EvoSciUpdate -Name Win32 -MemberDefinition @'
 [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
 public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferSize);
+[DllImport("kernel32.dll")]
+public static extern IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll")]
+public static extern uint GetFileType(IntPtr hFile);
 '@
 }
 function Get-LongPath([string]$Path) {
@@ -92,16 +105,19 @@ function Get-Blockers {
         })
 }
 
-$stdin = $null
-$pending = $null
+$CancelFile = Join-Path $cfg.temp_dir 'cancel'
+# Under --json a stdin that is not a pipe (NUL: nobody is attached) marks an
+# unattended run, which fails at once when something blocks.
+$Unattended = $false
 if ($Json) {
-    $stdin = [Console]::OpenStandardInput()
-    $buf = New-Object byte[] 1
-    $pending = $stdin.BeginRead($buf, 0, 1, $null, $null)
+    try {
+        # STD_INPUT_HANDLE; FILE_TYPE_PIPE = 3
+        $Unattended = [EvoSciUpdate.Win32]::GetFileType([EvoSciUpdate.Win32]::GetStdHandle(-10)) -ne 3
+    } catch { }
 }
 
-# Waits until nothing runs from the environment. False when the caller
-# cancelled: under --json its stdin ended (also one that had already ended).
+# Waits until nothing runs from the environment. False when the wait was
+# cancelled: the cancel file exists, or the run is unattended.
 function Wait-Free([double]$Progress) {
     $last = $null
     while ($true) {
@@ -110,13 +126,14 @@ function Wait-Free([double]$Progress) {
         $key = ($script:blockers | ForEach-Object { $_.pid }) -join ','
         if ($key -ne $last) {
             $names = ($script:blockers | ForEach-Object { "$($_.name).exe ($($_.pid))" }) -join ', '
-            Emit 'running' "Update pending until you close: $names" @{ waiting_for = $script:blockers } $null $Progress
+            if ($Json) {
+                Emit 'running' "Update pending until you close: $names" @{ waiting_for = $script:blockers; cancel_file = $CancelFile } $null $Progress
+            } else {
+                Emit 'running' "Update pending until you close: $names (Ctrl+C here cancels)" $null $null $Progress
+            }
             $last = $key
         }
-        if ($Json -and $script:pending.IsCompleted) {
-            if ($script:stdin.EndRead($script:pending) -eq 0) { return $false }
-            $script:pending = $script:stdin.BeginRead($buf, 0, 1, $null, $null)
-        }
+        if ($Unattended -or (Test-Path -LiteralPath $CancelFile)) { return $false }
         Start-Sleep -Milliseconds 500
     }
 }
@@ -214,7 +231,7 @@ try {
 } finally {
     if (-not $finished) {
         if ($phase -eq 'waiting') {
-            # The wait was cancelled: Ctrl+C, or the end of stdin under --json.
+            # The wait was cancelled: Ctrl+C, the cancel file, or nobody attached.
             $names = ($blockers | ForEach-Object { "$($_.name).exe ($($_.pid))" }) -join ', '
             Emit 'error' "Update cancelled while these still ran: $names. Nothing was changed." @{ waiting_for = $blockers } 'environment_busy'
         } elseif ($phase -eq 'setup') {
@@ -226,6 +243,10 @@ try {
         }
     }
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $cfg.temp_dir
+    if (-not $Json) {
+        # The helper's own window closes when it exits.
+        try { Read-Host 'Press Enter to close this window' | Out-Null } catch { }
+    }
 }
 """
 
@@ -239,8 +260,8 @@ def start_helper(temp_dir: Path, config: dict[str, Any], *, json_mode: bool) -> 
     """Write the helper and its config into *temp_dir* (the helper deletes it
     when it ends) and start it. Under ``--json`` it gets this process's stdin
     and stdout in a new process group without a console window, so a caller
-    reading the pipe gets its lines after EvoSci exits; in a terminal it
-    shares the console, so Ctrl+C reaches it."""
+    reading the pipe gets its lines after EvoSci exits; in a terminal it opens
+    a console window of its own, where Ctrl+C reaches it."""
     script = temp_dir / HELPER_NAME
     script.write_text(HELPER, encoding="utf-8-sig")
     config_path = temp_dir / "config.json"
@@ -265,4 +286,6 @@ def start_helper(temp_dir: Path, config: dict[str, Any], *, json_mode: bool) -> 
         )
         subprocess.Popen(cmd, creationflags=flags, stdin=sys.stdin, stdout=sys.stdout)
     else:
-        subprocess.Popen(cmd)
+        subprocess.Popen(
+            cmd, creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        )

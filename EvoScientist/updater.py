@@ -653,6 +653,9 @@ def _hand_over(
             message=(
                 "The install continues in a helper once EvoScientist has "
                 "exited; wait for its last line"
+                if opts.json
+                else "The install continues in a new window once EvoScientist "
+                "has exited"
             ),
         )
     )
