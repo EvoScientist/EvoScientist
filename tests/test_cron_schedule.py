@@ -195,8 +195,9 @@ requirements = [
 """.lstrip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-    assert registry._uv_tool_existing_requirements()["mcp-écho"] == "mcp-écho>=1.0"
+    from EvoScientist import uv_tool
+
+    assert uv_tool.read_receipt(venv).with_args() == ["--with", "mcp-écho>=1.0"]
 
     runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
     monkeypatch.setattr(manager, "RUNTIME", runtime)

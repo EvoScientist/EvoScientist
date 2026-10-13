@@ -1424,137 +1424,35 @@ class TestParseMcpEditArgs:
 # ---- uv tool compatibility ----
 
 
+def _use_tool_env(monkeypatch, env):
+    """Run as if from the uv tool environment *env* (its receipt in
+    ``sys.prefix``, as under the ``EvoSci`` entry point) on uv's own Python,
+    on Linux, with ``uv`` as the uv to run."""
+    import EvoScientist.mcp.registry as reg
+
+    monkeypatch.setattr(reg.sys, "prefix", str(env))
+    monkeypatch.setattr(reg.sys, "platform", "linux")
+    monkeypatch.setattr(reg.uv_tool, "find_uv", lambda: "uv")
+    monkeypatch.setattr(reg.uv_tool, "runs_on_managed_python", lambda uv: True)
+
+
 class TestUvToolCompat:
-    """Tests for uv tool environment detection and compatible install helpers."""
-
-    # -- _is_uv_tool_env --
-
-    def test_is_uv_tool_env_false_when_no_virtual_env(self, monkeypatch):
-        from EvoScientist.mcp.registry import _is_uv_tool_env
-
-        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-        assert _is_uv_tool_env() is False
-
-    def test_is_uv_tool_env_false_for_regular_venv(self, monkeypatch):
-        from EvoScientist.mcp.registry import _is_uv_tool_env
-
-        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/projects/myapp/.venv")
-        assert _is_uv_tool_env() is False
-
-    def test_is_uv_tool_env_true_unix(self, monkeypatch):
-        from EvoScientist.mcp.registry import _is_uv_tool_env
-
-        monkeypatch.setenv(
-            "VIRTUAL_ENV", "/home/user/.local/share/uv/tools/evoscientist"
-        )
-        assert _is_uv_tool_env() is True
-
-    def test_is_uv_tool_env_true_windows_backslashes(self, monkeypatch):
-        from EvoScientist.mcp.registry import _is_uv_tool_env
-
-        monkeypatch.setenv(
-            "VIRTUAL_ENV", r"C:\Users\user\AppData\Local\uv\tools\evoscientist"
-        )
-        assert _is_uv_tool_env() is True
-
-    # -- _uv_tool_name --
-
-    def test_uv_tool_name_returns_name(self, monkeypatch):
-        import EvoScientist.mcp.registry as reg
-
-        monkeypatch.setenv(
-            "VIRTUAL_ENV", "/home/user/.local/share/uv/tools/evoscientist"
-        )
-        assert reg._uv_tool_name() == "evoscientist"
-
-    def test_uv_tool_name_returns_none_when_not_uv(self, monkeypatch):
-        import EvoScientist.mcp.registry as reg
-
-        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/projects/myapp/.venv")
-        assert reg._uv_tool_name() is None
-
-    def test_uv_tool_name_returns_none_when_no_virtual_env(self, monkeypatch):
-        import EvoScientist.mcp.registry as reg
-
-        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-        assert reg._uv_tool_name() is None
-
-    # -- _uv_tool_existing_requirements --
-
-    def test_existing_requirements_from_receipt(self, monkeypatch, tmp_path):
-        import EvoScientist.mcp.registry as reg
-
-        venv = tmp_path / "uv" / "tools" / "evoscientist"
-        venv.mkdir(parents=True)
-        receipt = venv / "uv-receipt.toml"
-        receipt.write_text(
-            "[tool]\nrequirements = [\n"
-            '  { name = "evoscientist" },\n'
-            '  { name = "arxiv-mcp-server" },\n'
-            '  { name = "rich" },\n'
-            "]\n"
-        )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-        result = reg._uv_tool_existing_requirements()
-        assert result == {"arxiv-mcp-server": "arxiv-mcp-server", "rich": "rich"}
-
-    def test_existing_requirements_preserves_specifiers_and_extras(
-        self, monkeypatch, tmp_path
-    ):
-        import EvoScientist.mcp.registry as reg
-
-        venv = tmp_path / "uv" / "tools" / "evoscientist"
-        venv.mkdir(parents=True)
-        receipt = venv / "uv-receipt.toml"
-        receipt.write_text(
-            "[tool]\nrequirements = [\n"
-            '  { name = "evoscientist" },\n'
-            '  { name = "rich", specifier = ">=13.0" },\n'
-            '  { name = "requests", extras = ["socks"] },\n'
-            '  { name = "lark-oapi", specifier = ">=1.4.0", extras = ["oauth"] },\n'
-            "]\n"
-        )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-        result = reg._uv_tool_existing_requirements()
-        assert result == {
-            "rich": "rich>=13.0",
-            "requests": "requests[socks]",
-            "lark-oapi": "lark-oapi[oauth]>=1.4.0",
-        }
-
-    def test_existing_requirements_excludes_tool_name(self, monkeypatch, tmp_path):
-        import EvoScientist.mcp.registry as reg
-
-        venv = tmp_path / "uv" / "tools" / "evoscientist"
-        venv.mkdir(parents=True)
-        receipt = venv / "uv-receipt.toml"
-        receipt.write_text(
-            '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
-        )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-        assert reg._uv_tool_existing_requirements() == {}
-
-    def test_existing_requirements_no_receipt(self, monkeypatch, tmp_path):
-        import EvoScientist.mcp.registry as reg
-
-        venv = tmp_path / "uv" / "tools" / "evoscientist"
-        venv.mkdir(parents=True)
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-        assert reg._uv_tool_existing_requirements() == {}
+    """Tests for the install helpers in and outside the uv tool environment."""
 
     # -- pip_install_hint --
 
-    def test_pip_install_hint_uv_tool(self, monkeypatch):
+    def test_pip_install_hint_uv_tool(self, monkeypatch, tmp_path):
         import EvoScientist.mcp.registry as reg
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: True)
+        (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
+        _use_tool_env(monkeypatch, tmp_path)
         hint = reg.pip_install_hint()
-        assert "uv tool install --reinstall evoscientist --with" in hint
+        assert hint == f'"uv" pip install --python "{sys.executable}"'
 
     def test_pip_install_hint_uv_no_tool(self, monkeypatch):
         import EvoScientist.mcp.registry as reg
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.uv_tool, "tool_env", lambda: None)
         monkeypatch.setattr(
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
@@ -1563,7 +1461,7 @@ class TestUvToolCompat:
     def test_pip_install_hint_plain_pip(self, monkeypatch):
         import EvoScientist.mcp.registry as reg
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.uv_tool, "tool_env", lambda: None)
         monkeypatch.setattr(reg.shutil, "which", lambda x: None)
         assert reg.pip_install_hint() == "pip install"
 
@@ -1585,7 +1483,7 @@ class TestUvToolCompat:
             '  { name = "existing-pkg" },\n'
             "]\n"
         )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        _use_tool_env(monkeypatch, venv)
 
         captured: list[list[str]] = []
 
@@ -1602,12 +1500,137 @@ class TestUvToolCompat:
         assert len(captured) == 1
         cmd = captured[0]
         assert cmd[:3] == ["uv", "tool", "install"]
-        assert "evoscientist" in cmd
+        # EvoScientist stays on the installed version, on uv's Python of the
+        # running X.Y.
+        from importlib.metadata import version
+
+        assert cmd[-1] == f"EvoScientist=={version('EvoScientist')}"
+        py = f"{sys.version_info.major}.{sys.version_info.minor}"
+        assert cmd[cmd.index("--python") + 1] == py
+        assert "--managed-python" in cmd
+        assert "-c" not in cmd  # no constraints recorded
         # Must preserve existing --with requirement
         assert "--with" in cmd
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         assert "existing-pkg" in with_args
         assert "new-mcp-server" in with_args
+
+    def test_install_library_uv_tool_keeps_receipt(self, monkeypatch, tmp_path):
+        """The reinstall keeps the extras, the Python, the constraints, and a
+        --with entry's marker and source."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        (venv / "uv-receipt.toml").write_text(
+            "[tool]\nrequirements = [\n"
+            '  { name = "evoscientist", extras = ["oauth"], specifier = "==0.3.6" },\n'
+            '  { name = "idna", marker = "python_full_version >= \'3.8\'", specifier = ">=3" },\n'
+            '  { name = "pyjokes", git = "https://github.com/pyjokes/pyjokes?rev=v0.6.0" },\n'
+            "]\n"
+            'constraints = [{ name = "six", specifier = "==1.17.0" }]\n'
+            'python = "3.12"\n'
+        )
+        _use_tool_env(monkeypatch, venv)
+        monkeypatch.setattr(reg.uv_tool, "runs_on_managed_python", lambda uv: False)
+        captured: list[list[str]] = []
+        constraint_texts: list[str] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(list(cmd))
+            constraint_texts.append(Path(cmd[cmd.index("-c") + 1]).read_text())
+            return type("R", (), {"returncode": 0})()
+
+        monkeypatch.setattr(reg.subprocess, "run", fake_run)
+        assert reg.install_library("new-pkg") is True
+        cmd = captured[0]
+        from importlib.metadata import version
+
+        assert cmd[-1] == f"EvoScientist[oauth]=={version('EvoScientist')}"
+        assert cmd[cmd.index("--python") + 1] == "3.12"
+        assert "--no-managed-python" in cmd
+        assert constraint_texts == ["six==1.17.0\n"]
+        assert not Path(cmd[cmd.index("-c") + 1]).exists()  # temp file removed
+        with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
+        assert with_args == [
+            "idna>=3 ; python_full_version >= '3.8'",
+            "pyjokes @ git+https://github.com/pyjokes/pyjokes@v0.6.0",
+            "new-pkg",
+        ]
+
+    def test_install_library_uv_tool_keeps_source_install(self, monkeypatch, tmp_path):
+        """EvoScientist installed from a directory stays on that directory."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        src = tmp_path / "checkout"
+        (venv / "uv-receipt.toml").write_text(
+            "[tool]\nrequirements = [\n"
+            f'  {{ name = "evoscientist", directory = "{src.as_posix()}" }},\n'
+            "]\n"
+        )
+        _use_tool_env(monkeypatch, venv)
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("new-pkg") is True
+        assert captured[0][-1] == f"evoscientist @ {src.as_uri()}"
+
+    def test_install_library_uv_tool_env_skipped_on_windows(
+        self, monkeypatch, tmp_path
+    ):
+        """On Windows the reinstall is not tried: uv pip install instead."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        (venv / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
+        )
+        _use_tool_env(monkeypatch, venv)
+        monkeypatch.setattr(reg.sys, "platform", "win32")
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("new-pkg") is True
+        assert [c[:3] for c in captured] == [["uv", "pip", "install"]]
+
+    def test_install_library_uv_tool_unreadable_receipt_falls_back(
+        self, monkeypatch, tmp_path
+    ):
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        (venv / "uv-receipt.toml").write_text("not [ toml")
+        _use_tool_env(monkeypatch, venv)
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("new-pkg") is True
+        assert [c[:3] for c in captured] == [["uv", "pip", "install"]]
 
     def test_install_library_uv_tool_env_no_duplicate_with(self, monkeypatch, tmp_path):
         """If the package is already in the receipt, don't add it twice."""
@@ -1622,7 +1645,7 @@ class TestUvToolCompat:
             '  { name = "arxiv-mcp-server" },\n'
             "]\n"
         )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        _use_tool_env(monkeypatch, venv)
 
         captured: list[list[str]] = []
 
@@ -1653,7 +1676,7 @@ class TestUvToolCompat:
             '  { name = "requests", extras = ["socks"] },\n'
             "]\n"
         )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        _use_tool_env(monkeypatch, venv)
 
         captured: list[list[str]] = []
 
@@ -1687,7 +1710,7 @@ class TestUvToolCompat:
             '  { name = "rich", specifier = ">=13.0" },\n'
             "]\n"
         )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        _use_tool_env(monkeypatch, venv)
 
         captured: list[list[str]] = []
 
@@ -1718,14 +1741,14 @@ class TestUvToolCompat:
         receipt.write_text(
             '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
         )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        _use_tool_env(monkeypatch, venv)
 
         commands: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
             commands.append(cmd)
             if cmd[:3] == ["uv", "tool", "install"]:
-                return type("R", (), {"returncode": 1})()
+                return type("R", (), {"returncode": 1, "stderr": "error"})()
             return type("R", (), {"returncode": 0})()
 
         monkeypatch.setattr(
@@ -1753,14 +1776,14 @@ class TestUvToolCompat:
         receipt.write_text(
             '[tool]\nrequirements = [\n  { name = "evoscientist" },\n]\n'
         )
-        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        _use_tool_env(monkeypatch, venv)
 
         commands: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
             commands.append(cmd)
             if cmd[:3] == ["uv", "tool", "install"]:
-                return type("R", (), {"returncode": 1})()
+                return type("R", (), {"returncode": 1, "stderr": "error"})()
             return type("R", (), {"returncode": 0})()
 
         monkeypatch.setattr(
@@ -1788,7 +1811,7 @@ class TestUvToolCompat:
             captured.append(cmd)
             return type("R", (), {"returncode": 0})()
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.uv_tool, "tool_env", lambda: None)
         monkeypatch.setattr(
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
@@ -1816,7 +1839,7 @@ class TestUvToolCompat:
         fake_bin.write_text("#!/bin/sh\n")
         fake_bin.chmod(0o755)
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.uv_tool, "tool_env", lambda: None)
         monkeypatch.setattr(
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
@@ -1843,7 +1866,7 @@ class TestUvToolCompat:
             captured.append(cmd)
             return type("R", (), {"returncode": 0})()
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.uv_tool, "tool_env", lambda: None)
         monkeypatch.setattr(
             reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
         )
@@ -1881,7 +1904,7 @@ class TestUvToolCompat:
                 return "/venv/bin/arxiv-mcp-server"  # stale, should NOT be trusted
             return None
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.uv_tool, "tool_env", lambda: None)
         monkeypatch.setattr(reg.shutil, "which", fake_which)
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
         monkeypatch.setattr(
@@ -1907,7 +1930,7 @@ class TestUvToolCompat:
             ns = type("R", (), {"returncode": 0})()
             return ns
 
-        monkeypatch.setattr(reg, "_is_uv_tool_env", lambda: False)
+        monkeypatch.setattr(reg.uv_tool, "tool_env", lambda: None)
         monkeypatch.setattr(reg.shutil, "which", lambda x: None)
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
         reg.install_library("some-package")
