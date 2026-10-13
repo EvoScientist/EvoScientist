@@ -197,15 +197,29 @@ def resolve_virtual_path(work_dir: str | Path, virtual_path: str) -> Path:
     return (Path(work_dir) / vpath.lstrip("/")).resolve()
 
 
-def _expand(path: str) -> Path:
-    return Path(path).expanduser()
-
-
 def _env_path(key: str) -> Path | None:
-    value = os.getenv(key)
-    if not value:
+    value = os.environ.get(key)
+    if value is None or not value.strip():
         return None
-    return _expand(value)
+    return Path(value).expanduser()
+
+
+def _shared_dir_from_env(key: str) -> Path | None:
+    """Read a folder that other programs locate too from *key*, as an absolute path.
+
+    The data and config folders are also found by the WebUI and the desktop
+    app, so they follow one path rule: an unset, empty or whitespace-only
+    value counts as unset; a leading ``~``, alone or followed by a path
+    separator, is the home folder, and nothing else is expanded (no ``~user``,
+    no environment variables); a relative path is resolved against the
+    current folder.
+    """
+    value = os.environ.get(key)
+    if value is None or not value.strip():
+        return None
+    if value == "~" or value.startswith(("~/", "~" + os.sep)):
+        value = str(Path.home()) + value[1:]
+    return Path(os.path.abspath(value))
 
 
 def _global_data_dir() -> Path:
@@ -213,13 +227,44 @@ def _global_data_dir() -> Path:
 
     This is the base for sessions.db, skills/, memories/, history — things
     that are NOT configuration but application state. Config files (config.yaml,
-    mcp.yaml) continue to live in XDG_CONFIG_HOME.
+    mcp.yaml) live in CONFIG_DIR.
     """
     return Path.home() / ".evoscientist"
 
 
-# Global data dir: ~/.evoscientist/ by default, overridable via env var.
-DATA_DIR: Path = _env_path("EVOSCIENTIST_DATA_DIR") or _global_data_dir()
+def _config_dir() -> Path:
+    """Configuration folder: ``$XDG_CONFIG_HOME/evoscientist``, by default
+    ``~/.config/evoscientist`` (config.yaml, mcp.yaml)."""
+    return (
+        _shared_dir_from_env("XDG_CONFIG_HOME") or Path.home() / ".config"
+    ) / "evoscientist"
+
+
+# Both folders are read once, when this module is imported: a workspace ``.env``
+# loaded later does not move them, and processes this one starts get them as
+# absolute paths (see ``dir_env``).
+DATA_DIR: Path = _shared_dir_from_env("EVOSCIENTIST_DATA_DIR") or _global_data_dir()
+CONFIG_DIR: Path = _config_dir()
+# Whether XDG_CONFIG_HOME was set when this process started (see ``dir_env``).
+_XDG_CONFIG_HOME_SET: bool = _shared_dir_from_env("XDG_CONFIG_HOME") is not None
+
+
+def dir_env(env: dict[str, str]) -> dict[str, str]:
+    """Return *env* with this process's data and config folders, as absolute paths.
+
+    For processes this one starts (the langgraph dev server, the WebUI): they
+    run in other folders and load their own ``.env``, so they get the folders
+    this process uses rather than resolving the variables again.
+    ``XDG_CONFIG_HOME`` is passed only if this process started with it: unset
+    gives the same folder, and other programs the child runs (the agent's
+    shell, MCP servers) may treat a set value differently from an unset one.
+    """
+    env = {**env, "EVOSCIENTIST_DATA_DIR": str(DATA_DIR)}
+    if _XDG_CONFIG_HOME_SET:
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
+    else:
+        env.pop("XDG_CONFIG_HOME", None)
+    return env
 
 
 def _global_skills_dir() -> Path:
@@ -283,14 +328,7 @@ def migrate_legacy_sessions_db() -> None:
         logger.debug("Could not create %s; skipping legacy migration.", DATA_DIR)
         return
 
-    # Resolve legacy source via XDG_CONFIG_HOME (matches config.settings.get_config_dir).
-    # Inlined here to avoid importing config.settings at paths load time.
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    legacy = (
-        (Path(xdg) / "evoscientist")
-        if xdg
-        else (Path.home() / ".config" / "evoscientist")
-    )
+    legacy = CONFIG_DIR
     if not legacy.exists():
         marker.touch()
         return

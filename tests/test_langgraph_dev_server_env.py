@@ -86,6 +86,19 @@ def test_start_sets_workspace_dir_env(monkeypatch, tmp_path, runtime_paths):
     assert captured["env"].get("EVOSCIENTIST_WORKSPACE_DIR") == str(tmp_path)
 
 
+def test_start_passes_this_process_data_folder(monkeypatch, tmp_path, runtime_paths):
+    """The server runs in the workspace and loads its ``.env``; a relative or
+    later-changed variable must not give it another folder."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "rel-data")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+    assert captured["env"]["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
+
+
 # =============================================================================
 # Bind host — argv flag + env propagation
 # =============================================================================

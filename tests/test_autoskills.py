@@ -792,7 +792,6 @@ def test_submit_tool_reads_live_autoskill_mode_without_rebuild(
     tmp_path,
     monkeypatch,
 ):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config-home"))
     monkeypatch.setattr(
         "EvoScientist.config.settings.find_dotenv",
         lambda *a, **k: str(tmp_path / ".env"),

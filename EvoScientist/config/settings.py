@@ -19,6 +19,8 @@ from typing import Any, Literal, get_args, get_origin, get_type_hints
 import yaml
 from dotenv import dotenv_values, find_dotenv
 
+from .. import paths
+
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
 # (stream/display.py, channels/interaction.py) — keep aligned with the agent's
@@ -111,12 +113,10 @@ def _normalize_hhmm(value: Any) -> str | None:
 def get_config_dir() -> Path:
     """Get the configuration directory path.
 
-    Uses XDG_CONFIG_HOME if set, otherwise ~/.config/evoscientist/
+    ``$XDG_CONFIG_HOME/evoscientist`` when that is set, otherwise
+    ``~/.config/evoscientist``, read once at startup (``paths.CONFIG_DIR``).
     """
-    xdg_config = os.environ.get("XDG_CONFIG_HOME")
-    if xdg_config:
-        return Path(xdg_config) / "evoscientist"
-    return Path.home() / ".config" / "evoscientist"
+    return paths.CONFIG_DIR
 
 
 def get_config_path() -> Path:

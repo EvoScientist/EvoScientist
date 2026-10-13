@@ -31,6 +31,7 @@ import psutil
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
+from EvoScientist import paths
 from EvoScientist.config import (
     EvoScientistConfig,
     MemoryControls,
@@ -1047,7 +1048,9 @@ def start_langgraph_dev(
     # purposes mean "this is the user's workspace", so they don't conflict;
     # the explicit write below always wins for the subprocess regardless of
     # what the parent had inherited from its own environment.
-    sub_env = os.environ.copy()
+    # The server runs in the workspace and loads its ``.env``; it gets this
+    # process's data and config folders so both use the same files.
+    sub_env = paths.dir_env(os.environ)
     sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
     if run_dir is not None:
         sub_env["EVOSCIENTIST_RUN_DIR"] = str(run_dir)

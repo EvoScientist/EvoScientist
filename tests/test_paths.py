@@ -334,20 +334,12 @@ class TestLegacySessionsDbMigration:
     """
 
     def _setup(self, tmp_path, monkeypatch):
-        """Redirect data dir to tmp_path/new_data and Path.home() to
-        tmp_path/fake_home so legacy resolves to tmp_path/fake_home/.config/evoscientist.
-
-        Clears XDG_CONFIG_HOME so the legacy resolver deterministically uses
-        the Path.home() fallback. Tests that want the XDG branch set the
-        env var explicitly.
-        """
-        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        """Redirect the data folder to tmp_path/new_data and the config folder,
+        the legacy source, to tmp_path/config/evoscientist."""
         data_dir = tmp_path / "new_data"
-        fake_home = tmp_path / "fake_home"
-        fake_home.mkdir()
-        legacy_dir = fake_home / ".config" / "evoscientist"
+        legacy_dir = tmp_path / "config" / "evoscientist"
         monkeypatch.setattr(paths, "DATA_DIR", data_dir)
-        monkeypatch.setattr(paths.Path, "home", classmethod(lambda cls: fake_home))
+        monkeypatch.setattr(paths, "CONFIG_DIR", legacy_dir)
         return data_dir, legacy_dir
 
     def test_copies_sqlite_trio_when_legacy_exists(self, tmp_path, monkeypatch):
@@ -399,22 +391,6 @@ class TestLegacySessionsDbMigration:
 
         assert (data_dir / "sessions.db").read_bytes() == b"new-content-keep"
 
-    def test_respects_xdg_config_home(self, tmp_path, monkeypatch):
-        """Legacy source must honor XDG_CONFIG_HOME so users who customize it
-        don't silently get skipped by the migration."""
-        data_dir = tmp_path / "new_data"
-        xdg = tmp_path / "xdg"
-        legacy_dir = xdg / "evoscientist"
-        legacy_dir.mkdir(parents=True)
-        (legacy_dir / "sessions.db").write_bytes(b"xdg-db")
-
-        monkeypatch.setattr(paths, "DATA_DIR", data_dir)
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
-
-        paths.migrate_legacy_sessions_db()
-
-        assert (data_dir / "sessions.db").read_bytes() == b"xdg-db"
-
     def test_marker_not_written_on_partial_failure(self, tmp_path, monkeypatch):
         """If any copy fails, the .migrated marker must not be written."""
         data_dir, legacy_dir = self._setup(tmp_path, monkeypatch)
@@ -434,3 +410,63 @@ class TestLegacySessionsDbMigration:
 
         assert (data_dir / "sessions.db").exists()  # main db copied
         assert not (data_dir / ".migrated").exists()  # retry allowed
+
+
+class TestSharedDirFromEnv:
+    """The data and config folders, which other programs locate too, follow one
+    path rule."""
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_shared_dir_from_env_blank_is_unset(self, value, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", value)
+        assert paths._shared_dir_from_env("EVOSCIENTIST_DATA_DIR") is None
+
+    @pytest.mark.parametrize(("value", "suffix"), [("~", ""), ("~/evo", "evo")])
+    def test_shared_dir_from_env_expands_a_leading_tilde(
+        self, value, suffix, tmp_path, monkeypatch
+    ):
+        _fake_home(monkeypatch, tmp_path)
+        monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", value)
+        assert paths._shared_dir_from_env("EVOSCIENTIST_DATA_DIR") == tmp_path / suffix
+
+    @pytest.mark.parametrize("value", ["~nobody/evo", "$HOME/evo"])
+    def test_shared_dir_from_env_expands_nothing_else(
+        self, value, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", value)
+        assert paths._shared_dir_from_env("EVOSCIENTIST_DATA_DIR") == tmp_path / value
+
+    def test_shared_dir_from_env_resolves_a_relative_path(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "data")
+        assert paths._shared_dir_from_env("EVOSCIENTIST_DATA_DIR") == tmp_path / "data"
+
+    @pytest.mark.parametrize("xdg", [None, "cfg"])
+    def test_config_dir_follows_xdg_config_home(self, xdg, tmp_path, monkeypatch):
+        _fake_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        if xdg is None:
+            monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+            expected = tmp_path / ".config" / "evoscientist"
+        else:
+            monkeypatch.setenv("XDG_CONFIG_HOME", xdg)
+            expected = tmp_path / xdg / "evoscientist"
+        assert paths._config_dir() == expected
+
+    @pytest.mark.parametrize("xdg_set", [True, False])
+    def test_dir_env_gives_children_this_process_folders(
+        self, xdg_set, tmp_path, monkeypatch
+    ):
+        """Children run in other folders and load their own ``.env``;
+        ``XDG_CONFIG_HOME`` is passed only when this process started with it."""
+        monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+        monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path / "cfg" / "evoscientist")
+        monkeypatch.setattr(paths, "_XDG_CONFIG_HOME_SET", xdg_set)
+        env = paths.dir_env(
+            {"EVOSCIENTIST_DATA_DIR": "rel", "XDG_CONFIG_HOME": "rel", "OTHER": "x"}
+        )
+        expected = {"EVOSCIENTIST_DATA_DIR": str(tmp_path / "data"), "OTHER": "x"}
+        if xdg_set:
+            expected["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+        assert env == expected

@@ -140,6 +140,33 @@ def _isolate_dotenv(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_user_dirs(tmp_path_factory, monkeypatch):
+    """Keep the developer's real data and config folders out of every test.
+
+    Both are read once at import (``paths.DATA_DIR``, ``paths.CONFIG_DIR``), so
+    setting ``EVOSCIENTIST_DATA_DIR`` or ``XDG_CONFIG_HOME`` in a test does not
+    move them; point them, and the copies taken at import, at fresh folders.
+    """
+    from EvoScientist import paths, update_check
+    from EvoScientist.cli import tui_interactive
+    from EvoScientist.mcp import client as mcp_client
+
+    root = tmp_path_factory.mktemp("user")
+    data_dir = root / ".evoscientist"
+    config_dir = root / "config" / "evoscientist"
+    monkeypatch.setattr(paths, "DATA_DIR", data_dir)
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", data_dir / "skills")
+    monkeypatch.setattr(paths, "GLOBAL_MEMORIES_DIR", data_dir / "memories")
+    monkeypatch.setattr(paths, "MEMORIES_DIR", data_dir / "memories")
+    monkeypatch.setattr(tui_interactive, "DATA_DIR", data_dir)
+    monkeypatch.setattr(paths, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(mcp_client, "USER_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(mcp_client, "USER_MCP_CONFIG", config_dir / "mcp.yaml")
+    monkeypatch.setattr(update_check, "CACHE_DIR", config_dir)
+    monkeypatch.setattr(update_check, "CACHE_FILE", config_dir / "latest_version.json")
+
+
+@pytest.fixture(autouse=True)
 def _no_agent_python_probe(monkeypatch):
     """Keep the agent-shell python decision away from the real machine.
 

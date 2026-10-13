@@ -473,6 +473,27 @@ def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
     assert env["PORT"] == "4716"
 
 
+def test_frontend_env_drops_a_config_folder_set_after_startup(monkeypatch):
+    """A workspace ``.env`` merged into os.environ must not give the WebUI
+    another config folder than this process uses."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "_XDG_CONFIG_HOME_SET", False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/from/a/dotenv")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert "XDG_CONFIG_HOME" not in env
+
+
+def test_frontend_env_has_this_process_data_folder(monkeypatch, tmp_path):
+    """The WebUI reads the same local files as this process."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "rel-data")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert env["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
+
+
 # --------------------------------------------------------------------------- #
 # Runner preflight
 # --------------------------------------------------------------------------- #
