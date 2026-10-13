@@ -1534,11 +1534,16 @@ class TestUvToolCompat:
         _use_tool_env(monkeypatch, venv)
         monkeypatch.setattr(reg.uv_tool, "runs_on_managed_python", lambda uv: False)
         captured: list[list[str]] = []
+        constraint_files: list[Path] = []
         constraint_texts: list[str] = []
 
         def fake_run(cmd, **kwargs):
             captured.append(list(cmd))
-            constraint_texts.append(Path(cmd[cmd.index("-c") + 1]).read_text())
+            # By name, from its folder: uv splits a -c path at spaces.
+            name = cmd[cmd.index("-c") + 1]
+            assert Path(name).name == name
+            constraint_files.append(Path(kwargs["cwd"]) / name)
+            constraint_texts.append(constraint_files[-1].read_text())
             return type("R", (), {"returncode": 0})()
 
         monkeypatch.setattr(reg.subprocess, "run", fake_run)
@@ -1550,7 +1555,7 @@ class TestUvToolCompat:
         assert cmd[cmd.index("--python") + 1] == "3.12"
         assert "--no-managed-python" in cmd
         assert constraint_texts == ["six==1.17.0\n"]
-        assert not Path(cmd[cmd.index("-c") + 1]).exists()  # temp file removed
+        assert not constraint_files[0].exists()  # temp file removed
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         assert with_args == [
             "idna>=3 ; python_full_version >= '3.8'",

@@ -222,7 +222,8 @@ def test_uv_command_keeps_python_extras_and_with(tmp_path):
     assert cmd[:4] == ["/opt/uv", "tool", "install", "--force"]
     assert cmd[cmd.index("--python") + 1] == "3.12"
     assert "--managed-python" in cmd
-    assert cmd[cmd.index("-c") + 1] == str(tmp_path / "c.txt")
+    # By name: uv splits a -c path at spaces, so it runs from the file's dir.
+    assert cmd[cmd.index("-c") + 1] == "c.txt"
     assert "EvoScientist[oauth]==0.3.10" in cmd
     with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
     assert with_args == ["six>=1.10,<2", "idna>=3 ; python_full_version >= '3.8'"]
@@ -308,6 +309,10 @@ def test_json_update_forwards_setup_lines(uv_install, monkeypatch):
     assert done["detail"] == {"version": "0.3.10"}
     # uv output goes to stderr, never stdout.
     uv_call = runs.calls[0]
+    # The constraints file by name, from its temp dir (removed afterwards).
+    assert uv_call["cmd"][uv_call["cmd"].index("-c") + 1] == "constraints.txt"
+    assert Path(uv_call["cwd"]).name.startswith("evosci-update-")
+    assert not Path(uv_call["cwd"]).exists()
     assert uv_call["cmd"][0] == "/opt/uv"
     assert uv_call["stdout"] is sys.stderr
     # --skip reaches the new setup, by absolute path in uv's bin dir.

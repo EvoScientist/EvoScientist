@@ -124,8 +124,15 @@ function Wait-Free([double]$Progress) {
 function Invoke-Uv {
     $ErrorActionPreference = 'Continue'
     # stdout is for event lines: uv's output goes to stderr.
-    & $cfg.uv @($cfg.uv_args) 2>&1 | ForEach-Object { [Console]::Error.WriteLine("$_") }
-    return $LASTEXITCODE
+    # From the temp dir: the constraints file is passed by name (uv splits a
+    # -c path at spaces).
+    Push-Location -LiteralPath $cfg.temp_dir
+    try {
+        & $cfg.uv @($cfg.uv_args) 2>&1 | ForEach-Object { [Console]::Error.WriteLine("$_") }
+        return $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
 }
 
 function Invoke-OnConsole([string]$Exe, [string[]]$Arguments) {

@@ -342,7 +342,12 @@ def uv_install_command(
     uv: str, receipt: uv_tool.Receipt, target: str, constraints: Path
 ) -> list[str]:
     """``uv tool install --force`` of *target*, keeping the receipt's extras,
-    Python version and ``--with`` requirements, on uv's own Python."""
+    Python version and ``--with`` requirements, on uv's own Python.
+
+    Run it from ``constraints.parent``: the file is passed by name, as uv
+    splits a ``-c`` path at spaces (astral-sh/uv#12639), such as a temp dir
+    under a Windows user name with a space.
+    """
     extras = f"[{','.join(receipt.extras)}]" if receipt.extras else ""
     return [
         uv,
@@ -353,7 +358,7 @@ def uv_install_command(
         uv_tool.python_request(receipt),
         "--managed-python",
         "-c",
-        str(constraints),
+        constraints.name,
         f"EvoScientist{extras}=={target}",
         *receipt.with_args(),
     ]
@@ -597,6 +602,7 @@ def _update(
         # uv's own output goes to stderr under --json: stdout is for events.
         result = subprocess.run(
             cmd,
+            cwd=tmp,
             env=uv_environment(mirror),
             stdout=sys.stderr if opts.json else None,
         )

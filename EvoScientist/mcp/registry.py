@@ -164,7 +164,9 @@ def _uv_tool_reinstall_cmd(
         else "--no-managed-python"
     )
     if constraints is not None:
-        cmd += ["-c", str(constraints)]
+        # By name, run from its folder: uv splits a -c path at spaces
+        # (astral-sh/uv#12639).
+        cmd += ["-c", constraints.name]
     cmd += receipt.with_args()
     bare = uv_tool.normalize(_bare_package_name(package))
     if all(uv_tool.normalize(e["name"]) != bare for e in receipt.others):
@@ -201,7 +203,13 @@ def _install_with_uv_tool_env(package: str) -> bool:
         logger.info(f"Not adding {package} with uv tool install --with: {exc}")
         return False
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=constraints.parent if constraints is not None else None,
+        )
         if result.returncode == 0:
             import importlib
 
