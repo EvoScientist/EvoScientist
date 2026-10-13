@@ -381,7 +381,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
     New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
     # Environment, TLS and proxy changes are undone at the end, so the caller's
     # session keeps its own values under irm | iex.
-    $envNames = @('UV_SYSTEM_CERTS', 'UV_HTTP_TIMEOUT', 'UV_DEFAULT_INDEX', 'UV_PYTHON_INSTALL_MIRROR')
+    $envNames = @('UV_SYSTEM_CERTS', 'UV_HTTP_TIMEOUT', 'UV_DEFAULT_INDEX', 'UV_PYTHON_INSTALL_MIRROR', 'PYTHONIOENCODING')
     $savedEnv = @{}
     foreach ($name in $envNames) { $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
     $savedProtocol = [Net.ServicePointManager]::SecurityProtocol
@@ -399,6 +399,10 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
         # a network that inspects TLS works; longer timeout for slow mirrors.
         if (-not $env:UV_SYSTEM_CERTS) { $env:UV_SYSTEM_CERTS = '1' }
         if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = '300' }
+        # EvoSci setup writes its progress with symbols such as a check mark: to a pipe (CI,
+        # the desktop app) Python would encode them in the ANSI code page and
+        # fail. Its console output is unaffected.
+        if (-not $env:PYTHONIOENCODING) { $env:PYTHONIOENCODING = 'utf-8' }
         if ($Cn) {
             $env:UV_DEFAULT_INDEX = $CnSimple
             $env:UV_PYTHON_INSTALL_MIRROR = $CnPythonMirror
