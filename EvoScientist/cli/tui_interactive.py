@@ -42,10 +42,9 @@ from ..gateway import (
 )
 from ..paths import DATA_DIR, SessionDirs, Workspace
 from ..rubric_session import (
+    acknowledge_applied,
     merge_configurable_extra,
-    rubric_badge,
-    rubric_configurable_extra,
-    values_for_badge,
+    thread_run_extra,
 )
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
@@ -3569,12 +3568,9 @@ def run_textual_interactive(
                 if await cmd_manager.execute(command, ctx):
                     if cmd is None:
                         return
-                    await _sync_tui_command_completion(
-                        self,
-                        ctx,
-                        self._agent_loader.agent,
-                        cmd,
-                    )
+                    # Compared with the agent the command was handed: /new and
+                    # /resume restart the load, which empties the loader.
+                    await _sync_tui_command_completion(self, ctx, agent, cmd)
                     return
 
                 self._append_system(f"Unknown command: {command}", style="yellow")
@@ -3777,31 +3773,16 @@ def run_textual_interactive(
             self._rebuild_status_snapshot()
             await self._acknowledge_rubric(self._conversation_tid)
 
-        def _local_execution(self) -> bool:
-            """Whether this session's runs execute in-process (the local gateway)."""
-            from ..gateway.server import LangGraphServerGateway
-
-            gateway = self._runtime_gateways.graph_gateway
-            execute_gateway = getattr(gateway, "execute_gateway", gateway)
-            return not isinstance(execute_gateway, LangGraphServerGateway)
-
         def _rubric_configurable_extra(
             self, thread_id: str | None, mode: str | None
         ) -> dict[str, Any] | None:
-            """The run marker and pending ``/rubric`` operations for *thread_id*.
-
-            Only the session's own thread on the local gateway is marked: a
-            notifier turn for another thread runs with this thread's workspace.
-            """
-            if (
-                mode is None
-                or thread_id is None
-                or thread_id != self._conversation_tid
-                or not self._local_execution()
-            ):
-                return None
-            return rubric_configurable_extra(
-                self._channel_runtime.rubric, thread_id, mode
+            """The run marker and pending ``/rubric`` operations for *thread_id*."""
+            return thread_run_extra(
+                self._channel_runtime.rubric,
+                self._runtime_gateways.graph_gateway,
+                thread_id=thread_id,
+                current_thread_id=self._conversation_tid,
+                mode=mode,
             )
 
         async def _refresh_rubric_badge(self) -> None:
@@ -3810,30 +3791,13 @@ def run_textual_interactive(
 
         async def _acknowledge_rubric(self, thread_id: str | None) -> None:
             """Drop operations the thread applied; refresh its status-bar badge."""
-            if not thread_id:
-                return
-            session = self._channel_runtime.rubric
-            # Without a readable state keep what the badge last showed.
-            values: dict[str, Any] = values_for_badge(
-                self._rubric_badges.get(thread_id)
-            )
-            agent = self._agent_loader.agent
-            if agent is not None:
-                try:
-                    values = (
-                        await self._runtime_gateways.graph_gateway.get_state_values(
-                            GraphTarget(local_graph=agent, **self._dirs.metadata()),
-                            thread_id,
-                        )
-                        or {}
-                    )
-                except Exception:
-                    _channel_logger.debug(
-                        "rubric: thread state unavailable", exc_info=True
-                    )
-            session.acknowledge(thread_id, values.get("_rubric_applied"))
-            self._rubric_badges[thread_id] = rubric_badge(
-                values, session.changes_for(thread_id)
+            await acknowledge_applied(
+                self._channel_runtime.rubric,
+                self._rubric_badges,
+                self._runtime_gateways.graph_gateway,
+                agent=self._agent_loader.agent,
+                dirs=self._dirs,
+                thread_id=thread_id,
             )
 
         def _set_status_usage_baseline(self, input_tokens: int) -> None:

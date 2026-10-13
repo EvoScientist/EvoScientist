@@ -59,7 +59,7 @@ fields beyond `type` are listed below.
 | `ask_user`             | `interrupt_id`, `questions`, `tool_call_id`              | Agent-initiated clarifying question |
 | `rubric_evaluation_start` | `iteration`                                            | A grading pass began (runs started with `--rubric`); the grader's own work follows as `subagent_*` events named `rubric_grader` |
 | `rubric_evaluation`    | `iteration`, `result`, `explanation`, `criteria`, `unverified` | Verdict of a grading pass; `result` is `satisfied`, `needs_revision`, `max_iterations_reached`, `failed` or `grader_error` |
-| `rubric_evaluation_deferred` | `tasks`, `processes`                                  | Grading waits for this thread's background sub-agents (`tasks`) or `run_in_background` processes (`processes`); the pass runs in the turn their completion starts |
+| `rubric_evaluation_deferred` | `tasks`, `processes`                                  | Not emitted by a `-p` run (a `--rubric` single-shot run never defers); in an interactive `/rubric` session grading waits for this thread's background sub-agents (`tasks`) or `run_in_background` processes (`processes`), and the pass runs in the turn their completion starts |
 | `error`                | `message`                                                | Error during the run |
 | `done`                 | `content`, `response`, `last_pass_response`               | Final response; end of stream. For a `--rubric` run, `response` holds the answer of every pass, separated by a blank line, and `last_pass_response` (present once the run was graded) holds only the text written after the last revision request; it is empty when that pass wrote none |
 

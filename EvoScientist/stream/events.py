@@ -356,7 +356,7 @@ class _SubagentRegistry:
 
 
 def _count(value: Any) -> int:
-    """A non-negative int from a model-facing payload field, else 0."""
+    """A non-negative int from a custom stream payload field, else 0."""
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return max(value, 0)

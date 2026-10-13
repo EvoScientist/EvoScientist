@@ -320,3 +320,71 @@ async def test_checklist_text_is_shown_literally_in_the_tui(monkeypatch, workspa
                 break
         assert text in shown, shown
         assert not any("\\[" in line for line in shown), shown
+
+
+@pytest.mark.parametrize("command", ["/new", "/resume other"])
+async def test_a_session_change_keeps_its_own_agent_load(
+    monkeypatch, workspace, command
+):
+    """``/new`` and ``/resume`` restart the load; the agent the command was
+    handed must not be put back in its place."""
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        gateway = _gateway()
+        gateway.thread_store.resolved_thread_id = "other"
+        gateway.thread_store.metadata = {"workspace_dir": str(workspace.root)}
+        _prepare(app, workspace, gateway)
+        previous = object()
+        app._agent_loader.agent = previous
+        adopted: list[object] = []
+        monkeypatch.setattr(app._agent_loader, "adopt", adopted.append)
+        restarts: list[object] = []
+        start = app._start_background_agent_load
+
+        def _restart(dirs):
+            restarts.append(dirs)
+            start(dirs)
+
+        monkeypatch.setattr(app, "_start_background_agent_load", _restart)
+        await _submit(app, command)
+        for _ in range(40):
+            await pilot.pause()
+            if restarts and not app._busy:
+                break
+        assert restarts, _system_lines(app)
+        assert adopted == []
+        assert app._agent_loader.agent is not previous
+
+
+async def test_a_command_that_builds_a_new_agent_still_has_it_adopted(
+    monkeypatch, workspace
+):
+    """The other side of the rule above: ``/model`` hands a new agent back."""
+    import EvoScientist.cli.tui_interactive as tui_mod
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test() as pilot:
+        _prepare(app, workspace, _gateway())
+        previous, built = object(), object()
+        app._agent_loader.agent = previous
+        adopted: list[object] = []
+        monkeypatch.setattr(app._agent_loader, "adopt", adopted.append)
+
+        class _Swap:
+            name = "/swap"
+
+            def needs_agent(self, _args):
+                return False
+
+        async def _execute(_command, ctx):
+            ctx.agent = built
+            return True
+
+        monkeypatch.setattr(tui_mod.cmd_manager, "resolve", lambda _c: (_Swap(), []))
+        monkeypatch.setattr(tui_mod.cmd_manager, "execute", _execute)
+        await _submit(app, "/swap")
+        for _ in range(40):
+            await pilot.pause()
+            if adopted:
+                break
+        assert adopted == [built]

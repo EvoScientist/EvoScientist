@@ -31,8 +31,18 @@ class _WorkState(AsyncSubAgentState, BackgroundState):
 
 
 class _WorkChannels(AgentMiddleware):
+    """The work channels, plus sub-agent tasks a turn starts (see ``_launch``)."""
+
     name = "work_channels"
     state_schema = _WorkState
+
+    def __init__(self):
+        super().__init__()
+        self.launching: dict | None = None
+
+    def after_model(self, state, runtime):
+        tasks, self.launching = self.launching, None
+        return {"async_tasks": tasks} if tasks else None
 
 
 class _Live:
@@ -77,13 +87,20 @@ def _agent(tmp_path, verdicts, replies, live, *, max_iterations=3):
         task_status=live.task_status,
         process_status=live.process_status,
     )
+    work = _WorkChannels()
     agent = create_agent(
         model=_Main(messages=iter([AIMessage(r) for r in replies])),
         tools=[],
-        middleware=[_WorkChannels(), rubric],
+        middleware=[work, rubric],
         checkpointer=InMemorySaver(),
     )
+    agent.work = work
     return agent, grader
+
+
+def _launch(agent, tasks):
+    """The next turn starts these sub-agent tasks (after its first model call)."""
+    agent.work.launching = tasks
 
 
 def _op(seq, session="s1", **fields):
@@ -148,7 +165,7 @@ def _seed(agent, update, thread="t"):
 async def test_running_task_defers_and_emits_the_event(tmp_path):
     live = _Live(task_answers=["running"])
     agent, grader = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     events, values = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == []
     assert _deferred(events) == [(1, 0)]
@@ -163,7 +180,7 @@ async def test_running_task_defers_and_emits_the_event(tmp_path):
 async def test_stored_running_but_live_finished_grades(tmp_path):
     live = _Live(task_answers=["success"])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     events, values = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
     assert _deferred(events) == []
@@ -173,7 +190,7 @@ async def test_stored_running_but_live_finished_grades(tmp_path):
 async def test_unreadable_status_grades_and_warns(tmp_path, caplog):
     live = _Live(task_answers=[RuntimeError("boom")])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
@@ -188,7 +205,7 @@ async def test_not_found_grades_without_a_warning(tmp_path, caplog):
     )
     live = _Live(task_answers=[gone])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
@@ -198,7 +215,8 @@ async def test_not_found_grades_without_a_warning(tmp_path, caplog):
 async def test_input_mode_ignores_background_work(tmp_path):
     live = _Live(task_answers=["running"], processes={"p1": "running"})
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task(), "bg_processes": _process()})
+    _launch(agent, _task())
+    _seed(agent, {"bg_processes": _process()})
     events, _ = await _run(agent, "task", mode="input", rubric="- s")
     assert _results(events) == ["satisfied"]
     assert live.calls == []
@@ -207,7 +225,7 @@ async def test_input_mode_ignores_background_work(tmp_path):
 async def test_no_checklist_emits_no_deferred_event(tmp_path):
     live = _Live(task_answers=["running"])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     events, _ = await _run(agent, "chat")
     assert events == []
     assert live.calls == []
@@ -216,7 +234,7 @@ async def test_no_checklist_emits_no_deferred_event(tmp_path):
 async def test_followup_finishes_a_deferred_grading_from_the_task_message(tmp_path):
     live = _Live(task_answers=["running", "success"])
     agent, grader = _agent(tmp_path, [PASS], ["draft", "noted", "x"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     await _run(agent, "the task", changes=[_op(1, next="- n")])
     events, values = await _run(
         agent, "[Async tasks update] t1 finished", mode="followup"
@@ -245,7 +263,7 @@ async def test_followup_keeps_the_pass_count(tmp_path):
     agent, grader = _agent(
         tmp_path, [FAIL, FAIL, FAIL], ["a", "b", "c", "d", "e", "f", "g"], live
     )
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     first, _ = await _run(agent, "task", changes=[_op(1, next="- n")])
     assert _results(first) == ["needs_revision"]
     assert _deferred(first) == [(1, 0)]
@@ -260,7 +278,7 @@ async def test_followup_keeps_the_pass_count(tmp_path):
     assert len({e["grading_run_id"] for e in values["_rubric_evaluations"]}) == 1
 
 
-async def test_followup_with_a_missing_start_returns_grader_error(tmp_path):
+async def test_followup_with_a_missing_start_returns_grader_error(tmp_path, caplog):
     live = _Live()
     agent, grader = _agent(tmp_path, [PASS], ["noted", "x"], live)
     _seed(
@@ -278,18 +296,71 @@ async def test_followup_with_a_missing_start_returns_grader_error(tmp_path):
             },
         },
     )
-    events, values = await _run(agent, "[Async tasks update]", mode="followup")
+    with caplog.at_level(logging.WARNING):
+        events, values = await _run(agent, "[Async tasks update]", mode="followup")
     assert _results(events) == ["grader_error"]
     assert grader.calls == 0
     assert values["rubric"] is None
     assert values["_rubric_grading"] is None
     assert values["_next_rubric"] is None
+    # Nothing was graded, so nothing may read as a failure of the grader.
+    (verdict,) = [e for e in events if e["type"] == "rubric_evaluation_end"]
+    assert verdict["explanation"] == (
+        "Not graded: the message that started this task is no longer in the thread."
+    )
+    assert [e["explanation"] for e in values["_rubric_evaluations"]] == [
+        verdict["explanation"]
+    ]
+    assert [(r.name, r.levelname) for r in caplog.records] == [
+        ("EvoScientist.middleware.rubric", "WARNING")
+    ]
+    assert "no longer in the thread" in caplog.records[0].getMessage()
+    assert caplog.records[0].exc_info is None
+
+
+async def test_a_callback_that_raises_does_not_stop_the_ungraded_ending(
+    tmp_path, caplog, monkeypatch
+):
+    """As upstream does for a verdict: the callback's error is logged and the
+    grading still ends."""
+
+    def _broken(_evaluation):
+        raise RuntimeError("callback broke")
+
+    monkeypatch.setattr(
+        "EvoScientist.middleware.rubric._log_rubric_evaluation", _broken
+    )
+    live = _Live()
+    agent, _grader = _agent(tmp_path, [PASS], ["noted", "x"], live)
+    _seed(
+        agent,
+        {
+            "_next_rubric": {"text": "- n", "id": "s1:1"},
+            "_rubric_applied": {"s1": 1},
+            "rubric": "- n",
+            "_rubric_grading": {
+                "source": "next",
+                "id": "s1:1",
+                "start": "m-gone",
+                "deferred": True,
+                "skip": [],
+            },
+        },
+    )
+    with caplog.at_level(logging.WARNING):
+        events, values = await _run(agent, "[Async tasks update]", mode="followup")
+    assert _results(events) == ["grader_error"]
+    assert values["_rubric_grading"] is None
+    assert any(
+        "on_evaluation callback raised" in r.getMessage() and r.exc_info
+        for r in caplog.records
+    )
 
 
 async def test_deferred_sticky_grading_leaves_a_later_next_with_equal_text(tmp_path):
     live = _Live(task_answers=["running", "running", "success"])
     agent, _ = _agent(tmp_path, [PASS, PASS], ["a", "b", "c", "d", "e"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     await _run(agent, "task", changes=[_op(1, sticky="- s")])
     stored, values = await _run(
         agent, "[Async tasks update]", mode="followup", changes=[_op(2, next="- s")]
@@ -307,7 +378,7 @@ async def test_deferred_sticky_grading_leaves_a_later_next_with_equal_text(tmp_p
 async def test_typed_turn_while_deferred_keeps_the_start(tmp_path):
     live = _Live(task_answers=["running", "running", "success"])
     agent, grader = _agent(tmp_path, [PASS], ["a", "b", "c", "d"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     await _run(agent, "the task", changes=[_op(1, sticky="- s")])
     more, values = await _run(agent, "and also this")
     assert _deferred(more) == [(1, 0)]
@@ -321,7 +392,7 @@ async def test_typed_turn_while_deferred_keeps_the_start(tmp_path):
 async def test_replaced_checklist_voids_the_deferred_grading(tmp_path):
     live = _Live(task_answers=["running", "success"])
     agent, grader = _agent(tmp_path, [PASS], ["a", "b", "c"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     await _run(agent, "task", changes=[_op(1, sticky="- s")])
     events, values = await _run(
         agent,
@@ -389,7 +460,8 @@ async def test_unknown_process_does_not_defer(tmp_path):
 async def test_task_and_process_report_both_counts(tmp_path):
     live = _Live(task_answers=["running"], process_answers={"p1": STARTED_THIS_TURN})
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task(), "bg_processes": _process()})
+    _launch(agent, _task())
+    _seed(agent, {"bg_processes": _process()})
     events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _deferred(events) == [(1, 1)]
 
@@ -467,7 +539,7 @@ async def test_connect_error_grades_without_a_warning(tmp_path, caplog):
     )
     live = _Live(task_answers=[refused])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
@@ -489,7 +561,7 @@ async def test_refusal_on_one_address_among_other_failures_is_quiet(tmp_path, ca
     )
     live = _Live(task_answers=[mixed])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
@@ -500,7 +572,7 @@ async def test_connect_error_other_than_refusal_grades_with_a_warning(tmp_path, 
     unresolved = _connect_error(socket.gaierror(8, "nodename nor servname provided"))
     live = _Live(task_answers=[unresolved])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
@@ -510,7 +582,7 @@ async def test_connect_error_other_than_refusal_grades_with_a_warning(tmp_path, 
 async def test_read_timeout_grades_with_a_warning(tmp_path, caplog):
     live = _Live(task_answers=[httpx.ReadTimeout("slow")])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
@@ -537,10 +609,11 @@ async def test_status_reads_are_skipped_when_the_server_is_unavailable(tmp_path)
     agent = create_agent(
         model=_Main(messages=iter([AIMessage("a"), AIMessage("b")])),
         tools=[],
-        middleware=[_WorkChannels(), rubric],
+        middleware=[work := _WorkChannels(), rubric],
         checkpointer=InMemorySaver(),
     )
-    _seed(agent, {"async_tasks": _task()})
+    agent.work = work
+    _launch(agent, _task())
     events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
     assert live.calls == []
@@ -678,15 +751,16 @@ async def test_availability_runs_only_with_candidate_tasks_and_inside_the_budget
     agent = create_agent(
         model=_Main(messages=iter([AIMessage(str(i)) for i in range(4)])),
         tools=[],
-        middleware=[_WorkChannels(), rubric],
+        middleware=[work := _WorkChannels(), rubric],
         checkpointer=InMemorySaver(),
     )
+    agent.work = work
     # No task records: the availability check is not even made.
     events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
     assert calls == []
     # A stored running task: the check runs, but inside the budget.
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     started = asyncio.get_running_loop().time()
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "again")
@@ -705,7 +779,7 @@ async def test_availability_runs_only_with_candidate_tasks_and_inside_the_budget
 async def test_connect_timeout_grades_with_a_warning(tmp_path, caplog):
     live = _Live(task_answers=[httpx.ConnectTimeout("slow connect")])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.rubric"):
         events, _ = await _run(agent, "task", changes=[_op(1, sticky="- s")])
     assert _results(events) == ["satisfied"]
@@ -715,8 +789,9 @@ async def test_connect_timeout_grades_with_a_warning(tmp_path, caplog):
 async def test_a_new_grading_starts_with_no_evaluations_even_when_deferred(tmp_path):
     live = _Live(task_answers=["success", "success", "running"])
     agent, _ = _agent(tmp_path, [FAIL, PASS, PASS], ["a", "b", "c", "d"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     await _run(agent, "task one", changes=[_op(1, sticky="- s")])
+    _launch(agent, _task("t2", run_id="r2"))
     events, values = await _run(agent, "task two")
     assert _deferred(events) == [(1, 0)]
     assert values["_rubric_evaluations"] == []
@@ -727,7 +802,7 @@ async def test_sync_hook_path_is_not_used_by_these_tests(tmp_path, mode):
     """Documented limit: the sync ``after_agent`` grades without deferring."""
     live = _Live(task_answers=["running"])
     agent, _ = _agent(tmp_path, [PASS], ["a", "b"], live)
-    _seed(agent, {"async_tasks": _task()})
+    _launch(agent, _task())
     cfg = {
         "configurable": {
             "thread_id": "t",
@@ -747,3 +822,156 @@ async def test_sync_hook_path_is_not_used_by_these_tests(tmp_path, mode):
     if mode == "thread":
         assert _results(events) == ["satisfied"]
     assert _deferred(events) == []
+
+
+# -- sub-agent tasks that were running before the grading started --------------
+
+
+async def test_a_task_running_before_the_grading_started_does_not_hold_it(tmp_path):
+    """A long task from before the checklist was set belongs to earlier work."""
+    live = _Live(task_answers=["running"])
+    agent, grader = _agent(tmp_path, [PASS], ["a", "b"], live)
+    _seed(agent, {"async_tasks": _task()})
+    events, values = await _run(agent, "one task", changes=[_op(1, next="- n")])
+    assert _deferred(events) == []
+    assert _results(events) == ["satisfied"]
+    assert "one task" in grader.last_payload
+    assert live.calls == []
+    assert values["_next_rubric"] is None
+    assert values["_rubric_grading"] is None
+
+
+async def test_an_earlier_task_does_not_hold_a_grading_it_did_not_start_either(
+    tmp_path,
+):
+    """The turn's own task holds the grading; the older one is not even read."""
+    live = _Live(task_answers=["running"])
+    agent, _grader = _agent(tmp_path, [PASS], ["a", "b"], live)
+    earlier = {
+        **_task("old", run_id="r-old"),
+        **_task("done", run_id="r-done", status="success"),
+    }
+    _seed(agent, {"async_tasks": earlier})
+    _launch(agent, _task("new", run_id="r-new"))
+    events, values = await _run(agent, "the task", changes=[_op(1, sticky="- s")])
+    assert _deferred(events) == [(1, 0)]
+    assert live.calls == [("new", "r-new")]
+    # Only what was still going is remembered; finished runs need no entry.
+    assert values["_rubric_grading"]["skip_runs"] == ["r-old"]
+
+
+async def test_a_new_run_of_an_earlier_task_holds_the_grading(tmp_path):
+    """An earlier task sent on again by this turn is this turn's work."""
+    live = _Live(task_answers=["running"])
+    agent, _grader = _agent(tmp_path, [PASS], ["a", "b"], live)
+    _seed(agent, {"async_tasks": _task("t1", run_id="r1")})
+    _launch(agent, _task("t1", run_id="r2"))
+    events, _values = await _run(agent, "the task", changes=[_op(1, sticky="- s")])
+    assert _deferred(events) == [(1, 0)]
+    assert live.calls == [("t1", "r2")]
+
+
+async def test_a_deferred_grading_keeps_what_it_skipped_at_its_start(tmp_path):
+    """The next message goes on with the same grading: its own task still holds."""
+    live = _Live(task_answers=["running", "running", "success"])
+    agent, grader = _agent(tmp_path, [PASS], ["a", "b", "c", "d"], live)
+    _seed(agent, {"async_tasks": _task("old", run_id="r-old")})
+    _launch(agent, _task("new", run_id="r-new"))
+    await _run(agent, "the task", changes=[_op(1, sticky="- s")])
+    more, values = await _run(agent, "and also this")
+    assert _deferred(more) == [(1, 0)]
+    assert values["_rubric_grading"]["skip_runs"] == ["r-old"]
+    done, _ = await _run(agent, "[Async tasks update]", mode="followup")
+    assert _results(done) == ["satisfied"]
+    assert "the task" in grader.last_payload
+
+
+# -- runs without the marker while a grading is deferred -----------------------
+
+
+async def test_an_unmarked_run_keeps_a_deferred_grading(tmp_path):
+    """Another client's turn on the thread must not lose the grading that waits."""
+    live = _Live(task_answers=["running", "success"])
+    agent, grader = _agent(tmp_path, [PASS], ["draft", "other", "noted", "x"], live)
+    _launch(agent, _task())
+    await _run(agent, "the task", changes=[_op(1, next="- n")])
+    _events, values = await _run(agent, "from another client", mode=None)
+    assert values["rubric"] is None
+    assert values["_rubric_grading"]["deferred"] is True
+    assert grader.calls == 0
+    events, values = await _run(
+        agent, "[Async tasks update] t1 finished", mode="followup"
+    )
+    assert _results(events) == ["satisfied"]
+    assert "the task" in grader.last_payload
+    assert values["_next_rubric"] is None
+    assert values["_rubric_grading"] is None
+
+
+async def test_the_next_message_after_an_unmarked_run_grades_the_original_task(
+    tmp_path,
+):
+    """Without a notification the grading runs at the next message, from its start."""
+    live = _Live(task_answers=["running", "success"])
+    agent, grader = _agent(tmp_path, [PASS], ["draft", "other", "noted", "x"], live)
+    _launch(agent, _task())
+    await _run(agent, "the task", changes=[_op(1, next="- n")])
+    await _run(agent, "from another client", mode=None)
+    events, values = await _run(agent, "thx")
+    assert _results(events) == ["satisfied"]
+    assert "the task" in grader.last_payload
+    assert values["_next_rubric"] is None
+
+
+async def test_an_unmarked_run_still_drops_a_grading_that_was_not_deferred(tmp_path):
+    """A marked run parked mid-way and continued elsewhere leaves nothing behind."""
+    live = _Live()
+    agent, grader = _agent(tmp_path, [PASS], ["a", "b"], live)
+    _seed(
+        agent,
+        {
+            "_sticky_rubric": {"text": "- s", "id": "s1:1"},
+            "rubric": "- s",
+            "_rubric_grading": {
+                "source": "sticky",
+                "id": "s1:1",
+                "start": "m1",
+                "deferred": False,
+                "skip": [],
+            },
+        },
+    )
+    _events, values = await _run(agent, "from another client", mode=None)
+    assert values["rubric"] is None
+    assert values["_rubric_grading"] is None
+    assert grader.calls == 0
+
+
+async def test_a_rubric_change_made_during_a_deferred_grading_waits_for_the_next_message(
+    tmp_path,
+):
+    from EvoScientist.rubric_session import RubricSession, rubric_configurable_extra
+
+    def changes(mode):
+        return rubric_configurable_extra(session, "t", mode)["rubric_run"]["changes"]
+
+    session = RubricSession()
+    live = _Live(task_answers=["running", "success"])
+    agent, _ = _agent(tmp_path, [PASS] * 3, ["draft", "noted", "next"], live)
+    _launch(agent, _task())
+    session.record("t", sticky="- A")
+    _, v1 = await _run(agent, "the task", changes=changes("thread"))
+    assert v1["_rubric_grading"]["deferred"]
+
+    session.record("t", sticky="- B")
+    ev, v2 = await _run(
+        agent,
+        "[Async tasks update] t1 finished",
+        mode="followup",
+        changes=changes("followup"),
+    )
+    assert _results(ev) == ["satisfied"]
+    assert v2["_sticky_rubric"]["text"] == "- A"
+
+    _, v3 = await _run(agent, "go on", changes=changes("thread"))
+    assert v3["_sticky_rubric"]["text"] == "- B"

@@ -109,6 +109,16 @@ class TestConfigurableExtra:
             "rubric_run": {"mode": "followup", "changes": []}
         }
 
+    def test_a_notifier_turn_carries_no_changes_and_leaves_them_pending(self):
+        from EvoScientist.rubric_session import RubricSession, rubric_configurable_extra
+
+        session = RubricSession()
+        session.record("t", sticky="- b")
+        assert rubric_configurable_extra(session, "t", "followup") == {
+            "rubric_run": {"mode": "followup", "changes": []}
+        }
+        assert [op["sticky"] for op in session.changes_for("t")] == ["- b"]
+
     def test_merge_skips_empty_parts_and_returns_none_when_nothing_is_left(self):
         from EvoScientist.rubric_session import merge_configurable_extra
 
@@ -167,3 +177,92 @@ class TestValuesForBadge:
             assert rubric_badge(values_for_badge(badge), []) == badge
         pending = [{"session": "x", "seq": 1, "next": "- n"}]
         assert rubric_badge(values_for_badge("on"), pending) == "on+next"
+
+
+# -- helpers shared by the interactive CLI and the TUI -------------------------
+
+
+def _server_gateway():
+    from EvoScientist.gateway.server import LangGraphServerGateway
+
+    return object.__new__(LangGraphServerGateway)
+
+
+def test_runs_in_process_goes_by_the_gateway_that_executes():
+    from types import SimpleNamespace
+
+    from EvoScientist.rubric_session import runs_in_process
+
+    assert runs_in_process(object()) is True
+    assert runs_in_process(_server_gateway()) is False
+    # A routing gateway is judged by the one it executes on.
+    assert runs_in_process(SimpleNamespace(execute_gateway=_server_gateway())) is False
+    assert runs_in_process(SimpleNamespace(execute_gateway=object())) is True
+
+
+def test_only_the_sessions_own_thread_on_the_local_gateway_is_marked():
+    from EvoScientist.rubric_session import RubricSession, thread_run_extra
+
+    session = RubricSession()
+    session.record("mine", sticky="- a")
+
+    def extra(gateway=None, *, thread_id="mine", current="mine", mode="thread"):
+        return thread_run_extra(
+            session,
+            gateway if gateway is not None else object(),
+            thread_id=thread_id,
+            current_thread_id=current,
+            mode=mode,
+        )
+
+    marked = extra()
+    assert marked["rubric_run"]["mode"] == "thread"
+    assert marked["rubric_run"]["changes"] == session.changes_for("mine")
+    assert extra(mode="followup")["rubric_run"]["mode"] == "followup"
+    assert extra(thread_id="other") is None
+    assert extra(thread_id=None) is None
+    assert extra(mode=None) is None
+    assert extra(mode="") is None
+    assert extra(_server_gateway()) is None
+
+
+async def test_acknowledge_applied_drops_operations_and_sets_the_badge(tmp_path):
+    from EvoScientist.paths import SessionDirs, Workspace
+    from EvoScientist.rubric_session import RubricSession, acknowledge_applied
+    from tests.fakes import FakeGraphGateway
+
+    session = RubricSession()
+    session.record("t", sticky="- a")
+    (operation,) = session.changes_for("t")
+    gateway = FakeGraphGateway(
+        state_values={
+            "_sticky_rubric": {"text": "- a", "id": "x"},
+            "_rubric_applied": {operation["session"]: operation["seq"]},
+        }
+    )
+    badges: dict[str, str | None] = {}
+    dirs = SessionDirs(Workspace(tmp_path))
+
+    loaded = object()
+
+    async def ack(agent=loaded, thread_id="t"):
+        await acknowledge_applied(
+            session, badges, gateway, agent=agent, dirs=dirs, thread_id=thread_id
+        )
+
+    await ack()
+    assert session.changes_for("t") == []
+    assert badges == {"t": "on"}
+
+    # An unreadable state, or no agent to read it with, keeps the last badge.
+    gateway.state_error = RuntimeError("database is locked")
+    await ack()
+    assert badges == {"t": "on"}
+    gateway.state_error = None
+    gateway.state_values = {}
+    await ack(agent=None)
+    assert badges == {"t": "on"}
+    await ack()
+    assert badges == {"t": None}
+    await ack(thread_id=None)
+    assert badges == {"t": None}

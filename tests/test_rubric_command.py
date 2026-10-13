@@ -116,6 +116,30 @@ async def test_show_without_a_loaded_agent_prints_only_pending(tmp_path):
     assert "not loaded" in text
 
 
+async def test_show_says_when_the_thread_state_cannot_be_read(tmp_path):
+    gateway = FakeGraphGateway(state_values={})
+    gateway.state_error = RuntimeError("database is locked")
+    ctx, ui, runtime = _ctx(tmp_path, gateway=gateway)
+    runtime.rubric.record("t", sticky="- soon")
+    assert await manager.execute("/rubric show", ctx)
+    text = "\n".join(_lines(ui))
+    assert "Thread state could not be read; showing only the changes" in text
+    assert "not loaded" not in text
+    assert "- soon" in text
+
+
+async def test_show_on_a_thread_without_state_blames_nothing(tmp_path):
+    gateway = FakeGraphGateway(state_values={})
+    gateway.get_state_values = AsyncMock(return_value=None)
+    ctx, ui, runtime = _ctx(tmp_path, gateway=gateway)
+    runtime.rubric.record("t", sticky="- soon")
+    assert await manager.execute("/rubric show", ctx)
+    text = "\n".join(_lines(ui))
+    assert "not loaded" not in text
+    assert "could not be read" not in text
+    assert "- soon" in text
+
+
 async def test_refused_on_a_channel_ui(tmp_path):
     ui = MagicMock()
     ui.supports_interactive = False

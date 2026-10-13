@@ -521,10 +521,9 @@ def cmd_interactive(
 
     from ..commands.base import ChannelRuntime, active_teams_configurable_extra
     from ..rubric_session import (
+        acknowledge_applied,
         merge_configurable_extra,
-        rubric_badge,
-        rubric_configurable_extra,
-        values_for_badge,
+        thread_run_extra,
     )
 
     channel_runtime = ChannelRuntime()
@@ -652,46 +651,30 @@ def cmd_interactive(
             state["status_streaming_text"],
         )
 
-    def _local_execution() -> bool:
-        """Whether this session's runs execute in-process (the local gateway)."""
-        from ..gateway.server import LangGraphServerGateway
-
-        gateway = runtime_gateways.graph_gateway
-        execute_gateway = getattr(gateway, "execute_gateway", gateway)
-        return not isinstance(execute_gateway, LangGraphServerGateway)
-
     def _run_configurable_extra(
         mode: str | None, thread_id: str | None = None
     ) -> dict[str, Any] | None:
         """Invited experts plus, on the session's own thread, the rubric marker."""
-        tid = thread_id or state["thread_id"]
-        rubric_extra = None
-        if mode and tid == state["thread_id"] and _local_execution():
-            rubric_extra = rubric_configurable_extra(channel_runtime.rubric, tid, mode)
         return merge_configurable_extra(
-            active_teams_configurable_extra(channel_runtime), rubric_extra
+            active_teams_configurable_extra(channel_runtime),
+            thread_run_extra(
+                channel_runtime.rubric,
+                runtime_gateways.graph_gateway,
+                thread_id=thread_id or state["thread_id"],
+                current_thread_id=state["thread_id"],
+                mode=mode,
+            ),
         )
 
     async def _acknowledge_rubric(agent: Any, thread_id: str | None) -> None:
         """Drop operations the thread applied; refresh the status-bar badge."""
-        if not thread_id:
-            return
-        # Without a readable state keep what this thread's badge last showed.
-        values: dict[str, Any] = values_for_badge(state["rubric_badges"].get(thread_id))
-        if agent is not None:
-            try:
-                values = (
-                    await runtime_gateways.graph_gateway.get_state_values(
-                        GraphTarget(local_graph=agent, **state["dirs"].metadata()),
-                        thread_id,
-                    )
-                    or {}
-                )
-            except Exception:
-                pass
-        channel_runtime.rubric.acknowledge(thread_id, values.get("_rubric_applied"))
-        state["rubric_badges"][thread_id] = rubric_badge(
-            values, channel_runtime.rubric.changes_for(thread_id)
+        await acknowledge_applied(
+            channel_runtime.rubric,
+            state["rubric_badges"],
+            runtime_gateways.graph_gateway,
+            agent=agent,
+            dirs=state["dirs"],
+            thread_id=thread_id,
         )
 
     def _set_status_streaming_text(text: str | None) -> None:

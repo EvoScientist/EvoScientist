@@ -33,6 +33,7 @@ from langchain.agents.middleware.types import (
 )
 from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
 from langchain_core.messages import AIMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph_sdk.errors import NotFoundError
 
 if TYPE_CHECKING:
@@ -121,11 +122,10 @@ async def _probe_dev_server(
     error, so a refusal on an earlier address would hide behind a later failure.
     """
     try:
-        # trust_env=False: a loopback probe must not go through a proxy.
+        # An explicit transport keeps env proxies off this loopback probe.
         async with httpx.AsyncClient(
             transport=transport or httpx.AsyncHTTPTransport(retries=0),
             timeout=1.0,
-            trust_env=False,
         ) as client:
             status = (await client.get(f"{url}/ok")).status_code
     except (httpx.TransportError, OSError) as exc:
@@ -236,7 +236,7 @@ class EvoRubricState(RubricState):
     _next_rubric: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
     # Highest applied operation sequence number per client session.
     _rubric_applied: NotRequired[Annotated[dict[str, int], PrivateStateAttr]]
-    # {"source", "id", "start", "deferred", "skip"} while a grading is open.
+    # {"source", "id", "start", "deferred", "skip", "skip_runs"} while a grading is open.
     _rubric_grading: NotRequired[Annotated[dict[str, Any] | None, PrivateStateAttr]]
 
 
@@ -295,7 +295,8 @@ class EvoRubricMiddleware(RubricMiddleware):
     ``"followup"`` run only finishes a grading the thread deferred, keeping
     its pass count. A final verdict clears the run's checklist, and the
     ``next`` checklist only when that grading used it. With
-    ``require_run_marker`` an unmarked invocation drops any open grading.
+    ``require_run_marker`` an unmarked invocation drops an open grading,
+    unless it is deferred and still waits for its own turn.
     ``_ensure_grader`` mirrors upstream except for the model and
     ``response_format``: a bare ``GraderResponse`` there lets langchain choose
     the strategy, which is wrong on OpenRouter (see
@@ -342,7 +343,9 @@ class EvoRubricMiddleware(RubricMiddleware):
                 "marker; the run is not graded"
             )
             update["rubric"] = None
-        if state.get("_rubric_grading"):
+        grading = state.get("_rubric_grading")
+        # A deferred grading waits for its own turn; this run only passes by.
+        if grading and not grading.get("deferred"):
             update["_rubric_grading"] = None
         return True, (update or None)
 
@@ -414,6 +417,8 @@ class EvoRubricMiddleware(RubricMiddleware):
                 "id": picked["id"],
                 "start": current,
                 "deferred": False,
+                # Sub-agent runs already going belong to earlier work.
+                "skip_runs": self._active_task_runs(state),
             }
         grading["skip"] = self._running_own_processes(state)
         update["_rubric_grading"] = grading
@@ -433,6 +438,15 @@ class EvoRubricMiddleware(RubricMiddleware):
         if view.get("rubric"):
             update["rubric"] = None
         return update
+
+    @staticmethod
+    def _active_task_runs(state: Any) -> list[str]:
+        """Run ids of the sub-agent tasks the thread records as unfinished."""
+        return [
+            task["run_id"]
+            for task in (state.get("async_tasks") or {}).values()
+            if task.get("status") in ACTIVE_STATUSES and task.get("run_id")
+        ]
 
     def _running_own_processes(self, state: Any) -> list[str]:
         """Ids of this thread's background processes that are still running."""
@@ -454,10 +468,13 @@ class EvoRubricMiddleware(RubricMiddleware):
         skip = set(grading.get("skip") or [])
         processes = [p for p in self._running_own_processes(state) if p not in skip]
         tasks = 0
+        skip_runs = set(grading.get("skip_runs") or [])
         candidates = [
             task
             for task in (state.get("async_tasks") or {}).values()
-            if task.get("status") in ACTIVE_STATUSES and task.get("run_id")
+            if task.get("status") in ACTIVE_STATUSES
+            and task.get("run_id")
+            and task["run_id"] not in skip_runs
         ]
         if self._task_status is None or not candidates:
             return tasks, len(processes)
@@ -507,7 +524,7 @@ class EvoRubricMiddleware(RubricMiddleware):
                 }
             )
         except Exception:
-            logger.debug("rubric: stream_writer raised; ignoring")
+            logger.debug("rubric: stream_writer raised; ignoring", exc_info=True)
 
     async def _defer_or_fail(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         """The update that ends this hook early, or ``None`` to grade now."""
@@ -526,8 +543,12 @@ class EvoRubricMiddleware(RubricMiddleware):
             prep = self._prepare_evaluation(state, runtime)
             if prep is None:
                 return None
-            exc = RuntimeError("the task's first message is no longer in the thread")
-            return self._handle_grader_exception(runtime, state, *prep, exc)
+            return self._end_ungraded(
+                runtime,
+                state,
+                *prep,
+                "the message that started this task is no longer in the thread",
+            )
         tasks, processes = await self._pending_work(state)
         if not tasks and not processes:
             return None
@@ -608,6 +629,38 @@ class EvoRubricMiddleware(RubricMiddleware):
                 runtime, state, grading_run_id, iteration, exc
             )
         )
+        self._current_grading_only(update, grading_run_id)
+        return {**update, **self._final_cleanup(state)}
+
+    def _end_ungraded(self, runtime, state, grading_run_id, iteration, reason):
+        """End a grading the grader was never called for, as a ``grader_error``."""
+        logger.warning("rubric: grading ended without a verdict: %s", reason)
+        evaluation: RubricEvaluation = {
+            "grading_run_id": grading_run_id,
+            "iteration": iteration,
+            "result": "grader_error",
+            "explanation": f"Not graded: {reason}.",
+            "criteria": [],
+            "unverified": False,
+        }
+        self._emit(
+            runtime, "rubric_evaluation_end", grading_run_id, iteration, evaluation
+        )
+        if self._on_evaluation is not None:
+            try:
+                self._on_evaluation(evaluation)
+            except GraphBubbleUp:
+                raise
+            except Exception:
+                logger.exception("rubric: on_evaluation callback raised")
+        update: dict[str, Any] = {
+            "_rubric_evaluations": [
+                *state.get("_rubric_evaluations", []),
+                evaluation,
+            ],
+            "_rubric_iterations": iteration + 1,
+            "_rubric_status": "grader_error",
+        }
         self._current_grading_only(update, grading_run_id)
         return {**update, **self._final_cleanup(state)}
 
