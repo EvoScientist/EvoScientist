@@ -178,7 +178,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
     # Runs a native command on this console (its output is not read by
     # PowerShell, so EvoSci's progress output keeps the console's encoding)
     # and returns its exit code.
-    function Invoke-OnConsole([string]$Exe, [string[]]$Arguments) {
+    function Invoke-OnConsole([string]$Exe, [string[]]$Arguments, [string]$WorkingDirectory) {
         $quoted = foreach ($arg in $Arguments) {
             if ($arg -and $arg -notmatch '[\s"]') {
                 $arg
@@ -191,6 +191,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
         $info = New-Object Diagnostics.ProcessStartInfo $Exe
         $info.Arguments = $quoted -join ' '
         $info.UseShellExecute = $false
+        if ($WorkingDirectory) { $info.WorkingDirectory = $WorkingDirectory }
         $process = [Diagnostics.Process]::Start($info)
         $process.WaitForExit()
         return $process.ExitCode
@@ -463,12 +464,15 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
             $wheel = (Resolve-Path -LiteralPath $env:EVOSCI_INSTALL_SOURCE).ProviderPath
             $spec = "EvoScientist$extras @ " + ([Uri]$wheel).AbsoluteUri
         }
-        $uvArgs = @('tool', 'install', '--python', $PythonVersion, '--managed-python', '-c', $constraints)
+        # uv splits a -c path at spaces (astral-sh/uv#12639), such as a %TEMP%
+        # under a user name with a space: uv runs from the file's folder and
+        # gets its bare name.
+        $uvArgs = @('tool', 'install', '--python', $PythonVersion, '--managed-python', '-c', (Split-Path -Leaf $constraints))
         if ($force) { $uvArgs += '--force' }
         $uvArgs += $withArgs
         $uvArgs += $spec
         Write-Info "Installing EvoScientist $installVersion..."
-        if ((Invoke-OnConsole $uv $uvArgs) -ne 0) {
+        if ((Invoke-OnConsole $uv $uvArgs (Split-Path -Parent $constraints)) -ne 0) {
             Write-ExcludeNewerHint
             throw "uv could not install EvoScientist $installVersion (see uv's output above). If EvoScientist was started meanwhile, close it and run this script again."
         }

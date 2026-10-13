@@ -388,12 +388,14 @@ install_package() {
     wheel=$(cd "$(dirname "$EVOSCI_INSTALL_SOURCE")" && pwd -P)/$(basename "$EVOSCI_INSTALL_SOURCE")
     spec="EvoScientist$EXTRAS @ file://$wheel"
   fi
-  local args=(tool install --python "$PYTHON_VERSION" --managed-python -c "$CONSTRAINTS")
+  # uv splits a -c path at spaces (astral-sh/uv#12639), so uv runs from the
+  # file's directory and gets its bare name.
+  local args=(tool install --python "$PYTHON_VERSION" --managed-python -c "$(basename "$CONSTRAINTS")")
   if [ "$FORCE" = 1 ]; then
     args+=(--force)
   fi
   info "Installing EvoScientist $VERSION..."
-  if ! "$UV" "${args[@]}" ${WITH_ARGS[@]+"${WITH_ARGS[@]}"} "$spec" </dev/null; then
+  if ! (cd "$(dirname "$CONSTRAINTS")" && "$UV" "${args[@]}" ${WITH_ARGS[@]+"${WITH_ARGS[@]}"} "$spec" </dev/null); then
     exclude_newer_hint
     die "uv could not install EvoScientist $VERSION (see uv's output above)."
   fi
