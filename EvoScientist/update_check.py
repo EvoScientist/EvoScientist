@@ -16,6 +16,11 @@ from .config.settings import get_config_dir
 logger = logging.getLogger(__name__)
 
 PYPI_URL = "https://pypi.org/pypi/EvoScientist/json"
+PYPI_SIMPLE = "https://pypi.org/simple"
+# The Tsinghua PyPI mirror, used with ``mirror: cn`` (the index the install
+# scripts and ``EvoSci update`` install from there).
+CN_SIMPLE = "https://pypi.tuna.tsinghua.edu.cn/simple"
+_SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 CACHE_DIR = get_config_dir()
 CACHE_FILE = CACHE_DIR / "latest_version.json"
 CACHE_TTL = 86_400  # 24 hours
@@ -28,34 +33,82 @@ def _installed_version() -> str:
     return _pkg_version("EvoScientist")
 
 
-def _parse_version(v: str) -> tuple[int, ...]:
-    """Parse a dotted version string into a comparable integer tuple."""
-    return tuple(int(x) for x in v.strip().split("."))
+def index_url(mirror: str) -> str:
+    """The package index for a ``mirror`` setting."""
+    return CN_SIMPLE if mirror == "cn" else PYPI_SIMPLE
 
 
-def get_latest_version() -> str | None:
-    """Fetch the latest EvoScientist version from PyPI, with 24h caching."""
-    # Try cache first
+def fetch_versions(index: str, timeout: float) -> list[str]:
+    """Every EvoScientist version *index* lists, from its JSON simple API
+    (PEP 691). The list is not sorted (the Tsinghua mirror sorts it as
+    strings). Raises ``OSError`` / ``ValueError`` / ``KeyError`` on failure."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{index.rstrip('/')}/evoscientist/",
+        headers={"Accept": _SIMPLE_JSON, "User-Agent": "EvoScientist update-check"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        versions = json.loads(resp.read())["versions"]
+    return [v for v in versions if isinstance(v, str)]
+
+
+def newest_release(versions: list[str]) -> str | None:
+    """The newest final release among *versions* (PEP 440); pre-releases and
+    versions that do not parse are skipped."""
+    from packaging.version import InvalidVersion, Version
+
+    releases = []
+    for v in versions:
+        try:
+            parsed = Version(v)
+        except InvalidVersion:
+            continue
+        if not (parsed.is_prerelease or parsed.is_devrelease):
+            releases.append((parsed, v))
+    return max(releases)[1] if releases else None
+
+
+def _fetch_latest(mirror: str, timeout: float) -> str | None:
+    if mirror == "cn":
+        return newest_release(fetch_versions(CN_SIMPLE, timeout))
+    import urllib.request
+
+    req = urllib.request.Request(
+        PYPI_URL, headers={"User-Agent": "EvoScientist update-check"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())["info"]["version"]
+
+
+def get_latest_version(
+    *, refresh: bool = False, mirror: str | None = None, timeout: float = 3
+) -> str | None:
+    """Fetch the latest EvoScientist version, with 24h caching.
+
+    *refresh* skips the cache (``EvoSci update --check``). With ``mirror:
+    cn`` (the config's, unless *mirror* is given) the Tsinghua mirror is
+    asked instead of PyPI.
+    """
+    if not refresh:
+        try:
+            if CACHE_FILE.exists():
+                data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+                if time.time() - data.get("checked_at", 0) < CACHE_TTL:
+                    return data["version"]
+        except Exception:
+            logger.debug("Failed to read update-check cache", exc_info=True)
+
     try:
-        if CACHE_FILE.exists():
-            data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-            if time.time() - data.get("checked_at", 0) < CACHE_TTL:
-                return data["version"]
-    except Exception:
-        logger.debug("Failed to read update-check cache", exc_info=True)
+        if mirror is None:
+            from .config import load_config
 
-    # Fetch from PyPI (use urllib to avoid extra deps)
-    try:
-        import urllib.request
-
-        req = urllib.request.Request(
-            PYPI_URL,
-            headers={"User-Agent": "EvoScientist update-check"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            latest: str = json.loads(resp.read())["info"]["version"]
+            mirror = load_config().mirror
+        latest = _fetch_latest(mirror, timeout)
     except Exception:
-        logger.debug("Failed to fetch latest version from PyPI", exc_info=True)
+        logger.debug("Failed to fetch the latest version", exc_info=True)
+        return None
+    if latest is None:
         return None
 
     # Cache result
@@ -83,11 +136,13 @@ def is_update_available() -> tuple[bool, str | None]:
     if latest is None:
         return False, None
 
+    from packaging.version import InvalidVersion, Version
+
     try:
         current = _installed_version()
-        if _parse_version(latest) > _parse_version(current):
+        if Version(latest) > Version(current):
             return True, latest
-    except (ValueError, TypeError):
+    except (InvalidVersion, TypeError):
         logger.debug("Failed to compare versions", exc_info=True)
 
     return False, None

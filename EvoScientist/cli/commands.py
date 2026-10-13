@@ -305,6 +305,73 @@ def onboard(
 
 
 # =============================================================================
+# Update command
+# =============================================================================
+
+
+@app.command()
+def update(
+    version: str | None = typer.Option(
+        None,
+        "--version",
+        help=(
+            "Install this release instead of the newest one; an older one rolls "
+            "back. An older release keeps only the config keys and values it "
+            "knows: its next config save drops the rest (all settings, if it "
+            "cannot read the file), so config.yaml is copied to "
+            "config.yaml.bak-<current version> first. sessions.db is used as it is."
+        ),
+    ),
+    check: bool = typer.Option(
+        False, "--check", help="Only print the installed and the newest version"
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Stop a running server without asking"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON event per line; never asks"
+    ),
+    skip: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skip", help="Pass --skip <id> to the new EvoSci setup (repeatable)"
+        ),
+    ] = None,
+):
+    """Update EvoScientist to the newest release, with its tested dependencies.
+
+    A uv tool install (the install scripts, or uv tool install) is reinstalled
+    with the release's constraints.txt, keeping its extras, Python version and
+    packages added with --with, on uv's own Python (an install made without
+    --python moves to uv's Python of the same version on its first update).
+    The new version's EvoSci setup runs afterwards. For pip, conda, an
+    editable install or the Docker image, it prints what to run instead.
+    """
+    from ..setup.protocol import ConsoleEmitter, JsonEmitter
+    from ..updater import UpdateOptions, run_update
+
+    if json_output:
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+        emit = JsonEmitter()
+        confirm = None
+    else:
+        emit = ConsoleEmitter(console)
+        confirm = (
+            (lambda question: typer.confirm(question, default=False))
+            if sys.stdin.isatty()
+            else None
+        )
+    opts = UpdateOptions(
+        version=version, check=check, yes=yes, json=json_output, skip=list(skip or ())
+    )
+    code = run_update(opts, emit, confirm=confirm)
+    if code:
+        raise typer.Exit(code)
+
+
+# =============================================================================
 # Setup command
 # =============================================================================
 
