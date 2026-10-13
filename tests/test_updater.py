@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -142,7 +143,9 @@ def test_version_help_describes_rollback():
 
     result = CliRunner().invoke(app, ["update", "--help"], terminal_width=200)
     assert result.exit_code == 0
-    text = " ".join(result.output.split())
+    # CI forces colour: drop the styling codes Rich puts between the words.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    text = " ".join(plain.split())
     assert "config.yaml.bak-<current version>" in text
     assert "rolls back" in text
 
