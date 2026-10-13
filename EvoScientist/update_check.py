@@ -81,30 +81,24 @@ def _fetch_latest(mirror: str, timeout: float) -> str | None:
         return json.loads(resp.read())["info"]["version"]
 
 
-def get_latest_version(
-    *, refresh: bool = False, mirror: str | None = None, timeout: float = 3
-) -> str | None:
+def get_latest_version() -> str | None:
     """Fetch the latest EvoScientist version, with 24h caching.
 
-    *refresh* skips the cache (``EvoSci update --check``). With ``mirror:
-    cn`` (the config's, unless *mirror* is given) the Tsinghua mirror is
-    asked instead of PyPI.
+    With ``mirror: cn`` in the config the Tsinghua mirror is asked instead of
+    PyPI. (``EvoSci update`` reads the index itself, without the cache.)
     """
-    if not refresh:
-        try:
-            if CACHE_FILE.exists():
-                data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-                if time.time() - data.get("checked_at", 0) < CACHE_TTL:
-                    return data["version"]
-        except Exception:
-            logger.debug("Failed to read update-check cache", exc_info=True)
+    try:
+        if CACHE_FILE.exists():
+            data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+            if time.time() - data.get("checked_at", 0) < CACHE_TTL:
+                return data["version"]
+    except Exception:
+        logger.debug("Failed to read update-check cache", exc_info=True)
 
     try:
-        if mirror is None:
-            from .config import load_config
+        from .config import load_config
 
-            mirror = load_config().mirror
-        latest = _fetch_latest(mirror, timeout)
+        latest = _fetch_latest(load_config().mirror, timeout=3)
     except Exception:
         logger.debug("Failed to fetch the latest version", exc_info=True)
         return None

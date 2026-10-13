@@ -1449,6 +1449,15 @@ class TestUvToolCompat:
         hint = reg.pip_install_hint()
         assert hint == f'"uv" pip install --python "{sys.executable}"'
 
+    def test_pip_install_hint_uv_tool_windows(self, monkeypatch, tmp_path):
+        """Pasted into PowerShell, a quoted path runs only after ``&``."""
+        import EvoScientist.mcp.registry as reg
+
+        (tmp_path / "uv-receipt.toml").write_text("[tool]\n")
+        _use_tool_env(monkeypatch, tmp_path)
+        monkeypatch.setattr(reg.sys, "platform", "win32")
+        assert reg.pip_install_hint().startswith('& "uv" pip install --python ')
+
     def test_pip_install_hint_uv_no_tool(self, monkeypatch):
         import EvoScientist.mcp.registry as reg
 

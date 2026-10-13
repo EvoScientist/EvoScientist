@@ -55,22 +55,11 @@ class TestGetLatestVersion:
 
         monkeypatch.setattr("EvoScientist.config.load_config", lambda: Config())
 
-    def test_refresh_skips_fresh_cache(self, tmp_path):
-        cache_file = tmp_path / "latest_version.json"
-        cache_file.write_text(
-            json.dumps({"version": "1.0.0", "checked_at": time.time()})
-        )
-        with (
-            patch("EvoScientist.update_check.CACHE_FILE", cache_file),
-            patch("EvoScientist.update_check.CACHE_DIR", tmp_path),
-            patch(
-                "urllib.request.urlopen",
-                return_value=_response({"info": {"version": "2.0.0"}}),
-            ),
-        ):
-            assert get_latest_version(refresh=True) == "2.0.0"
+    def test_cn_mirror_reads_tsinghua(self, tmp_path, monkeypatch):
+        class Config:
+            mirror = "cn"
 
-    def test_cn_mirror_reads_tsinghua(self, tmp_path):
+        monkeypatch.setattr("EvoScientist.config.load_config", lambda: Config())
         cache_file = tmp_path / "latest_version.json"
         resp = _response({"versions": ["0.3.10", "0.3.9", "0.4.0rc1"]})
         with (
@@ -78,7 +67,7 @@ class TestGetLatestVersion:
             patch("EvoScientist.update_check.CACHE_DIR", tmp_path),
             patch("urllib.request.urlopen", return_value=resp) as urlopen,
         ):
-            assert get_latest_version(mirror="cn") == "0.3.10"
+            assert get_latest_version() == "0.3.10"
         assert urlopen.call_args.args[0].full_url.startswith(CN_SIMPLE)
 
     def test_fresh_cache_hit(self, tmp_path):

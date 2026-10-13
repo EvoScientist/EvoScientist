@@ -88,7 +88,9 @@ def pip_install_hint() -> str:
     """
     uv = uv_tool.find_uv()
     if uv_tool.tool_env() is not None and uv:
-        return f'"{uv}" pip install --python "{sys.executable}"'
+        # PowerShell runs a quoted path only after the call operator.
+        call = "& " if sys.platform == "win32" else ""
+        return f'{call}"{uv}" pip install --python "{sys.executable}"'
     if shutil.which("uv"):
         return "uv pip install"
     return "pip install"
@@ -257,8 +259,10 @@ def install_library(package: str) -> bool:
 
     Strategy:
 
-    1. **uv tool env**: ``uv tool install evoscientist --with <pkg>`` —
-       package lands in evosci's isolated env and is importable from it.
+    1. **uv tool env** (macOS and Linux): ``uv tool install`` again with the
+       receipt's version, extras, Python, constraints and ``--with``
+       packages plus ``--with <pkg>`` — the package lands in evosci's
+       isolated env, is importable from it and recorded in the receipt.
     2. **Fallback**: ``uv pip install`` / ``pip install`` into the active
        venv. Not durable under ``uv sync``, but there's no better option
        for libraries outside a uv tool env.
@@ -276,7 +280,8 @@ def install_cli_tool(package: str, *, verify_command: str) -> bool:
 
     Strategy:
 
-    1. **uv tool env**: ``uv tool install evoscientist --with <pkg>`` —
+    1. **uv tool env** (macOS and Linux): the same receipt-keeping
+       ``uv tool install ... --with <pkg>`` as :func:`install_library` —
        durable via uv's receipt, binary resolvable via the tool's bin dir.
     2. **Standalone ``uv tool install <pkg>``**: binary symlinked under
        ``~/.local/bin`` (``uv tool dir --bin``); survives ``uv sync``.
