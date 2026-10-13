@@ -128,6 +128,7 @@ def run_streaming(
     gateway: GraphGateway,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
+    approve_all_at_start: bool = False,
 ) -> str:
     """Run streaming with the selected backend."""
     backend = get_backend(ui_backend, warn_fallback=True)
@@ -153,6 +154,7 @@ def run_streaming(
             gateway=gateway,
             runtime=runtime,
             rubric=rubric,
+            approve_all_at_start=approve_all_at_start,
         )
     except AsyncRuntimeError:
         raise
@@ -183,6 +185,7 @@ def run_streaming(
                 gateway=gateway,
                 runtime=runtime,
                 rubric=rubric,
+                approve_all_at_start=approve_all_at_start,
             )
         raise
 

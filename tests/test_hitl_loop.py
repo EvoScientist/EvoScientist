@@ -542,30 +542,37 @@ class TestRichCliSessionGrantReachesTheGraph:
         )
         assert self._extras(gateway) == [None, GRANT if granted else None]
 
-    def test_caller_extras_with_the_key_start_the_turn_keyed(self, monkeypatch):
+    def test_a_turn_that_starts_granted_is_keyed_from_its_first_call(self, monkeypatch):
         """A channel-origin turn: the caller knows the chat's grant and says so
-        in the extras; the loop leaves the caller's dict alone."""
+        with a flag; the loop leaves the caller's extras alone."""
         monkeypatch.setattr(display_mod, "_session_auto_approve", False)
-        extras = {"active_teams": ["reviewer"], "hitl_approve_all": True}
+        extras = {"active_teams": ["reviewer"]}
         gateway = FakeGraphGateway(stream=_interrupts_then_done(0))
-        self._run(gateway, configurable_extra=extras)
+        self._run(gateway, configurable_extra=extras, approve_all_at_start=True)
         assert self._extras(gateway) == [
             {"active_teams": ["reviewer"], "hitl_approve_all": True}
         ]
-        assert extras == {"active_teams": ["reviewer"], "hitl_approve_all": True}
+        assert extras == {"active_teams": ["reviewer"]}
 
-    def test_an_initial_key_is_dropped_from_a_call_that_must_not_carry_it(
+    def test_a_turn_that_starts_ungranted_is_not_keyed(self, monkeypatch):
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(0))
+        self._run(gateway, configurable_extra={"active_teams": ["reviewer"]})
+        assert self._extras(gateway) == [{"active_teams": ["reviewer"]}]
+
+    def test_a_starting_grant_is_dropped_from_a_call_that_must_not_carry_it(
         self, monkeypatch
     ):
         from EvoScientist.channels.interaction import ApprovalOutcome
 
         monkeypatch.setattr(display_mod, "_session_auto_approve", False)
         _attended_config(monkeypatch)
-        extras = {"active_teams": ["reviewer"], "hitl_approve_all": True}
+        extras = {"active_teams": ["reviewer"]}
         gateway = FakeGraphGateway(stream=_interrupts_then_done(1))
         self._run(
             gateway,
             configurable_extra=extras,
+            approve_all_at_start=True,
             hitl_outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
                 decisions=[{"type": "approve"} for _ in reqs], prompted=True
             ),
@@ -574,7 +581,7 @@ class TestRichCliSessionGrantReachesTheGraph:
             {"active_teams": ["reviewer"], "hitl_approve_all": True},
             {"active_teams": ["reviewer"]},
         ]
-        assert extras == {"active_teams": ["reviewer"], "hitl_approve_all": True}
+        assert extras == {"active_teams": ["reviewer"]}
 
     @pytest.mark.parametrize("granted", [True, False])
     def test_an_ask_user_answer_is_keyed_only_under_a_grant(self, monkeypatch, granted):
@@ -665,7 +672,9 @@ class TestRichCliSessionGrantReachesTheGraph:
         self._run(
             gateway,
             hitl_outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
-                decisions=[{"type": "approve"} for _ in reqs], session_granted=True
+                decisions=[{"type": "approve"} for _ in reqs],
+                session_granted=True,
+                grant_in_force=True,
             ),
             ask_user_prompt_fn=lambda _p: ANSWER,
         )
@@ -760,7 +769,7 @@ class TestRichCliSessionGrantReachesTheGraph:
         gateway = FakeGraphGateway(stream=_interrupts_then_done(1))
         self._run(
             gateway,
-            configurable_extra=dict(GRANT),
+            approve_all_at_start=True,
             hitl_outcome_fn=_bridge_must_not_be_asked,
         )
         assert self._extras(gateway) == [GRANT, None]

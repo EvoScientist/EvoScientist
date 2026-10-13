@@ -1303,7 +1303,12 @@ async def stream_agent_events(
     # rebuilt on model switches and binds recursion_limit at construction
     # from the same live config. The HITL suppression flag is the exception -
     # a per-run signal both backends need (the graph is always armed).
-    from ..backends import hitl_suppressed_for_run, model_retry_for_run
+    from ..backends import (
+        HITL_APPROVE_ALL_KEY,
+        hitl_suppressed_for_run,
+        model_retry_for_run,
+        resume_declines,
+    )
     from ..gateway.types import resolve_per_run_config
 
     config = resolve_per_run_config(
@@ -1313,6 +1318,17 @@ async def stream_agent_events(
         rubric_run=rubric is not None,
         model_retry=model_retry_for_run(),
     )
+    # The callers already keep the grant off a declining answer. Every local
+    # run passes here, so one that slips still cannot run a declined call.
+    if resume_declines(message) and config["configurable"].pop(
+        HITL_APPROVE_ALL_KEY, None
+    ):
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "dropped %s from a resume that does not keep the grant",
+            HITL_APPROVE_ALL_KEY,
+        )
     if metadata:
         config["metadata"] = metadata
     emitter = StreamEventEmitter()

@@ -265,7 +265,7 @@ async def test_a_question_after_a_bridge_grant_answer_is_answered_keyed(
         workspace,
         [[_interrupt(1)], [ASK], DONE],
         channel_hitl_fn=lambda _reqs, human_budget_exhausted=False: ApprovalOutcome(
-            decisions=list(APPROVE), session_granted=True
+            decisions=list(APPROVE), session_granted=True, grant_in_force=True
         ),
         channel_ask_user_fn=lambda _event: dict(ANSWER),
     )

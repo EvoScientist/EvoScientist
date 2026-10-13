@@ -1337,7 +1337,7 @@ def _resolve_hitl_approval(
             outcome.decisions,
             human_prompted=outcome.prompted,
             session_granted=outcome.session_granted,
-            grant_in_force=outcome.session_granted or outcome.grant_in_force,
+            grant_in_force=outcome.grant_in_force,
         )
 
     # After the auto fast paths: a spent human budget must not prompt, but
@@ -1572,6 +1572,7 @@ def _run_streaming(
     gateway: GraphGateway,
     runtime: AsyncRuntime | None = None,
     rubric: str | None = None,
+    approve_all_at_start: bool = False,
     _state: StreamState | None = None,
     _media_sent: set[str] | None = None,
     _sent_thinking_text: str | None = None,
@@ -1600,6 +1601,8 @@ def _run_streaming(
         metadata: Optional metadata dict forwarded to ``stream_agent_events``
             for LangGraph checkpoint persistence.
         gateway: Graph/thread gateway supplied by the active runtime.
+        approve_all_at_start: The channel this turn came from already holds an
+            "approve all" grant, so the turn's first call carries it.
 
     Returns:
         The final response text.
@@ -1627,6 +1630,7 @@ def _run_streaming(
                 gateway=gateway,
                 runtime=owned_runtime,
                 rubric=rubric,
+                approve_all_at_start=approve_all_at_start,
                 _state=_state,
                 _media_sent=_media_sent,
                 _sent_thinking_text=_sent_thinking_text,
@@ -1648,18 +1652,12 @@ def _run_streaming(
         state.response_text = final_text
         return final_text
 
-    from ..backends import HITL_APPROVE_ALL_KEY, approve_all_configurable_extra
+    from ..backends import approve_all_configurable_extra
     from ..rubric_session import merge_configurable_extra
 
-    # Which calls carry the session grant: see ``_hitl_when``. The caller's
-    # extras carry the key when the turn starts under a channel's grant; from
-    # there each call gets its own extras, built without it.
-    base_extra = {
-        key: value
-        for key, value in (configurable_extra or {}).items()
-        if key != HITL_APPROVE_ALL_KEY
-    }
-    turn_granted = (configurable_extra or {}).get(HITL_APPROVE_ALL_KEY) is True
+    # Which calls carry the session grant: see ``_hitl_when``. Decided where
+    # each answer is built, never from the flag at a round's top.
+    turn_granted = approve_all_at_start
     approve_all_carry = turn_granted or _session_auto_approve
 
     async def _consume() -> None:
@@ -1670,7 +1668,8 @@ def _run_streaming(
                 thread_id=thread_id,
                 metadata=metadata,
                 configurable_extra=merge_configurable_extra(
-                    base_extra, approve_all_configurable_extra(approve_all_carry)
+                    configurable_extra,
+                    approve_all_configurable_extra(approve_all_carry),
                 ),
                 target=_graph_target_for_local_agent(agent, metadata),
                 rubric=rubric,
@@ -2033,7 +2032,7 @@ def _run_streaming(
                 if is_stream_cancel_requested(cancel_scope):
                     return _stopped_response()
                 if resolution.decisions is not None:
-                    from ..backends import build_hitl_resume
+                    from ..backends import answer_keeps_grant, build_hitl_resume
 
                     interrupt_id = state.pending_interrupt.get("interrupt_id")
                     state.pending_interrupt = None
@@ -2042,9 +2041,8 @@ def _run_streaming(
                         return _stopped_response()
                     message = build_hitl_resume(interrupt_id, resolution.decisions)
                     turn_granted = turn_granted or resolution.grant_in_force
-                    approve_all_carry = resolution.session_granted and all(
-                        decision.get("type") == "approve"
-                        for decision in resolution.decisions
+                    approve_all_carry = answer_keeps_grant(
+                        resolution.session_granted, resolution.decisions
                     )
                     continue
 

@@ -806,8 +806,9 @@ def test_serve_process_message_starts_a_granted_chat_with_the_grant(granted):
     finally:
         channel_mod._approval_policy.clear_sessions()
 
-    extra = run_streaming.call_args.kwargs["configurable_extra"] or {}
-    assert extra.get("hitl_approve_all", False) is granted
+    kwargs = run_streaming.call_args.kwargs
+    assert kwargs["approve_all_at_start"] is granted
+    assert "hitl_approve_all" not in (kwargs["configurable_extra"] or {})
 
 
 def test_serve_channel_send_does_not_block_owned_runtime_loop():

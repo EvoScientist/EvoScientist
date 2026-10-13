@@ -63,7 +63,7 @@ from .channel import (
     _start_channels_bus_mode,
     channel_ask_user_prompt,
     channel_hitl_prompt,
-    channel_turn_configurable_extra,
+    channel_session_granted,
     dispatch_channel_slash_command,
     forget_channel_origin,
     get_channel_origin,
@@ -1723,9 +1723,8 @@ def _serve_process_message(
                 show_thinking=show_thinking,
                 interactive=True,
                 metadata=meta,
-                configurable_extra=channel_turn_configurable_extra(
-                    msg, active_teams_configurable_extra(channel_runtime)
-                ),
+                configurable_extra=active_teams_configurable_extra(channel_runtime),
+                approve_all_at_start=channel_session_granted(msg),
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,

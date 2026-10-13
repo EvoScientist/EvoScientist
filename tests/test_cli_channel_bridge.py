@@ -280,34 +280,6 @@ class TestHitlPromptBridge:
         assert outcome.session_granted is False
         assert outcome.grant_in_force is False
 
-    def test_channel_turn_extra_adds_the_grant_for_a_granted_chat_only(self):
-        """What a channel-origin call site hands the turn loop."""
-
-        def _msg(chat_id):
-            return ChannelMessage(
-                msg_id="m1",
-                content="",
-                sender="u1",
-                channel_type="fake",
-                chat_id=chat_id,
-                bus_ref=object(),
-            )
-
-        teams = {"active_teams": ["reviewer"]}
-        channel_mod._approval_policy.grant_session("fake:chat1")
-        assert channel_mod.channel_turn_configurable_extra(_msg("chat1"), teams) == {
-            "active_teams": ["reviewer"],
-            "hitl_approve_all": True,
-        }
-        assert channel_mod.channel_turn_configurable_extra(_msg("chat1"), None) == {
-            "hitl_approve_all": True
-        }
-        assert (
-            channel_mod.channel_turn_configurable_extra(_msg("chat2"), teams) == teams
-        )
-        assert channel_mod.channel_turn_configurable_extra(_msg("chat2"), None) is None
-        assert teams == {"active_teams": ["reviewer"]}
-
     def test_channel_session_granted_is_per_chat(self):
         def _msg(chat_id):
             return ChannelMessage(

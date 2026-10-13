@@ -2525,22 +2525,19 @@ def run_textual_interactive(
                                     response = await _mark_cancelled_response()
                                     break
                                 if decisions is not None:
-                                    from ..backends import build_hitl_resume
+                                    from ..backends import (
+                                        answer_keeps_grant,
+                                        build_hitl_resume,
+                                    )
 
                                     _stream_input = build_hitl_resume(
                                         interrupt_id, decisions
                                     )
                                     _turn_granted = (
-                                        _turn_granted
-                                        or outcome.session_granted
-                                        or outcome.grant_in_force
+                                        _turn_granted or outcome.grant_in_force
                                     )
-                                    _approve_all_carry = (
-                                        outcome.session_granted
-                                        and all(
-                                            _d.get("type") == "approve"
-                                            for _d in decisions
-                                        )
+                                    _approve_all_carry = answer_keeps_grant(
+                                        outcome.session_granted, decisions
                                     )
                                     _hitl_resuming = True
                                     break  # re-enter outer HITL loop

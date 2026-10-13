@@ -676,8 +676,9 @@ class ApprovalOutcome:
     ``session_granted`` is True only when ``decisions`` came from a session
     "approve all" grant that was already in force (all approve by
     construction). Config rules and human replies, the reply that grants
-    included, leave it False: a caller may send the grant to the graph only
-    with an answer that carries it. ``grant_in_force`` says whether the
+    included, leave it False: that reply can carry config rejections from a
+    mixed batch, so a caller sends the grant only with an answer the grant
+    produced. ``grant_in_force`` says whether the
     session holds a grant once this outcome is returned, which the reply that
     grants does too.
     """

@@ -42,6 +42,7 @@ class StreamingTUIBackend(Protocol):
         gateway: GraphGateway,
         runtime: AsyncRuntime | None = None,
         rubric: str | None = None,
+        approve_all_at_start: bool = False,
     ) -> str:
         """Run streaming and return final response text."""
 
@@ -75,6 +76,7 @@ class RichStreamingBackend:
         gateway: GraphGateway,
         runtime: AsyncRuntime | None = None,
         rubric: str | None = None,
+        approve_all_at_start: bool = False,
     ) -> str:
         return _run_streaming(
             agent=agent,
@@ -97,4 +99,5 @@ class RichStreamingBackend:
             gateway=gateway,
             runtime=runtime,
             rubric=rubric,
+            approve_all_at_start=approve_all_at_start,
         )

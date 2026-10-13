@@ -1222,21 +1222,36 @@ def _hitl_when(request) -> bool:
     (all approve; never the reply that grants), and otherwise with a
     question's answer or a turn's first call while a grant is in force.
     """
-    from .backends import is_hitl_approve_all, is_hitl_suppressed
+    from .backends import is_hitl_approve_all
 
-    runtime = getattr(request, "runtime", None)
-    config = getattr(runtime, "config", None)
-    return not (is_hitl_suppressed(config) or is_hitl_approve_all(config))
+    config = getattr(getattr(request, "runtime", None), "config", None)
+    return _hitl_when_served(request) and not is_hitl_approve_all(config)
 
 
-def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
+def _hitl_when_served(request) -> bool:
+    """``_hitl_when`` for the graph a server serves: only ``hitl_suppressed`` skips.
+
+    No server run has a use for the session grant (the server gateway drops
+    it), so a client that sends the key anyway is still asked.
+    """
+    from .backends import is_hitl_suppressed
+
+    config = getattr(getattr(request, "runtime", None), "config", None)
+    return not is_hitl_suppressed(config)
+
+
+def _build_hitl_interrupt_on(
+    *, honor_approve_all: bool
+) -> dict[str, "InterruptOnConfig"]:
     """Return the always-armed HITL config for ``create_deep_agent``.
 
-    The main graph is *always* armed; per-run suppression is delegated to the
-    :func:`_hitl_when` predicate rather than keyed on ``auto_approve`` at
-    construction — otherwise a graph built once for an unattended session would
-    silently disable HITL for a later attended session on the same keepalive
-    server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
+    The main graph is *always* armed; per-run suppression is left to the
+    ``when`` predicate rather than keyed on ``auto_approve`` at construction:
+    :func:`_hitl_when` (``honor_approve_all``, the CLI agent) also skips under
+    the session grant, :func:`_hitl_when_served` (a served graph) only under
+    ``hitl_suppressed``. Otherwise a graph built once for an unattended session
+    would silently disable HITL for a later attended session on the same
+    keepalive server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
     lets declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not —
     so async agents can't hang on an approval nobody can deliver.
     """
@@ -1245,7 +1260,7 @@ def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
     return {
         tool: InterruptOnConfig(
             allowed_decisions=["approve", "edit", "reject", "respond"],
-            when=_hitl_when,
+            when=_hitl_when if honor_approve_all else _hitl_when_served,
         )
         for tool in HITL_INTERRUPT_ON
     }
@@ -1276,7 +1291,7 @@ def _get_default_agent():
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
-            interrupt_on=_build_hitl_interrupt_on(),
+            interrupt_on=_build_hitl_interrupt_on(honor_approve_all=False),
         ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
@@ -1430,5 +1445,5 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
-        interrupt_on=_build_hitl_interrupt_on(),
+        interrupt_on=_build_hitl_interrupt_on(honor_approve_all=True),
     ).with_config({"recursion_limit": cfg.recursion_limit})

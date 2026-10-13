@@ -694,13 +694,13 @@ class InboundConsumer:
                 if outcome.decisions is None:
                     return None  # reject / timeout / stop — end the turn
 
-                from ..backends import build_hitl_resume
+                from ..backends import answer_keeps_grant, build_hitl_resume
 
                 stream_input = build_hitl_resume(
                     interrupt_data.get("interrupt_id"), outcome.decisions
                 )
-                approve_all_carry = outcome.session_granted and all(
-                    decision.get("type") == "approve" for decision in outcome.decisions
+                approve_all_carry = answer_keeps_grant(
+                    outcome.session_granted, outcome.decisions
                 )
                 # continue to next HITL round
 

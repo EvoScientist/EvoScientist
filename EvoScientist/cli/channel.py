@@ -796,22 +796,6 @@ def channel_session_granted(msg: ChannelMessage) -> bool:
     return _approval_policy.is_session_granted(_channel_message_session_key(msg))
 
 
-def channel_turn_configurable_extra(
-    msg: ChannelMessage, extra: dict[str, Any] | None
-) -> dict[str, Any] | None:
-    """*extra* for a turn this message starts, plus its chat's grant if it holds one.
-
-    The turn loop cannot see the chat, so the channel-origin call sites tell
-    it here whether the turn starts under an "approve all".
-    """
-    from ..backends import approve_all_configurable_extra
-    from ..rubric_session import merge_configurable_extra
-
-    return merge_configurable_extra(
-        extra, approve_all_configurable_extra(channel_session_granted(msg))
-    )
-
-
 def channel_hitl_prompt(
     action_requests: list,
     msg: ChannelMessage,

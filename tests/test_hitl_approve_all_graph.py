@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+
+import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -11,6 +14,8 @@ from EvoScientist.config import EvoScientistConfig
 from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.paths import Workspace
 from EvoScientist.stream.events import stream_agent_events
+
+pytestmark = pytest.mark.usefixtures("no_mcp")
 
 
 class _Scripted(GenericFakeChatModel):
@@ -234,3 +239,113 @@ async def test_the_grant_does_not_arm_the_dangerous_guard_but_suppression_does(
     )
     assert not both.get("__interrupt__")
     assert "Command blocked" in _tool_text(both, "c1")
+
+
+# --- a declining answer never travels with the grant --------------------------
+
+
+def _flat(_interrupt, *decisions) -> Command:
+    return Command(resume={"decisions": list(decisions)})
+
+
+@pytest.mark.parametrize("shape", [_resume, _flat], ids=["by interrupt id", "flat"])
+async def test_a_declining_answer_sent_with_the_grant_still_declines(
+    tmp_path, caplog, shape
+):
+    """A caller that keys a rejecting answer by mistake: the grant is dropped
+    from that run, so the answer is applied instead of the whole batch."""
+    agent = _agent(
+        tmp_path, [_execute("c1", "echo 1 > declined.txt"), AIMessage("Understood.")]
+    )
+    parked = await agent.ainvoke({"messages": [("user", "go")]}, config=_config())
+    (interrupt,) = parked["__interrupt__"]
+
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.events"):
+        events = [
+            event
+            async for event in stream_agent_events(
+                agent,
+                shape(interrupt, REJECT),
+                "t",
+                configurable_extra={"hitl_approve_all": True},
+            )
+        ]
+    assert _written(tmp_path) == []
+    assert next(e for e in events if e["type"] == "done")["response"] == "Understood."
+    assert "hitl_approve_all" in caplog.text
+
+
+async def test_an_edited_answer_sent_with_the_grant_runs_the_edit(tmp_path):
+    agent = _agent(
+        tmp_path, [_execute("c1", "echo 1 > original.txt"), AIMessage("Done.")]
+    )
+    parked = await agent.ainvoke({"messages": [("user", "go")]}, config=_config())
+    (interrupt,) = parked["__interrupt__"]
+    async for _ in stream_agent_events(
+        agent,
+        _resume(interrupt, _edit("echo 1 > edited.txt")),
+        "t",
+        configurable_extra={"hitl_approve_all": True},
+    ):
+        pass
+    assert _written(tmp_path) == ["edited.txt"]
+
+
+async def test_an_approving_answer_keeps_the_grant(tmp_path, caplog, monkeypatch):
+    """The grant's own answer approves everything, so the key stays on the run."""
+    agent = _agent(tmp_path, [_execute("c1", "echo 1 > one.txt"), AIMessage("Done.")])
+    parked = await agent.ainvoke({"messages": [("user", "go")]}, config=_config())
+    (interrupt,) = parked["__interrupt__"]
+    configs = []
+    stream = agent.astream_events
+
+    def _spy(*args, **kwargs):
+        configs.append(kwargs["config"])
+        return stream(*args, **kwargs)
+
+    monkeypatch.setattr(agent, "astream_events", _spy)
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.events"):
+        async for _ in stream_agent_events(
+            agent,
+            _resume(interrupt, APPROVE),
+            "t",
+            configurable_extra={"hitl_approve_all": True},
+        ):
+            pass
+    assert _written(tmp_path) == ["one.txt"]
+    assert configs[-1]["configurable"]["hitl_approve_all"] is True
+    assert "hitl_approve_all" not in caplog.text
+
+
+# --- the graph a server serves does not take the grant -------------------------
+
+
+async def test_a_served_graph_still_asks_when_a_client_sends_the_grant(
+    tmp_path, monkeypatch
+):
+    """The served main graph is built without the grant: a client that sends
+    the key anyway gets the approval pause, and nothing runs."""
+    import EvoScientist.EvoScientist as es_mod
+
+    build = es_mod._build_hitl_interrupt_on
+    monkeypatch.setattr(
+        es_mod,
+        "_build_hitl_interrupt_on",
+        lambda **_kwargs: build(honor_approve_all=False),
+    )
+    agent = _agent(tmp_path, [_execute("c1", "echo 1 > one.txt"), AIMessage("Done.")])
+    result = await agent.ainvoke(
+        {"messages": [("user", "go")]}, config=_config(granted=True)
+    )
+    assert len(result["__interrupt__"]) == 1
+    assert _written(tmp_path) == []
+
+    (tmp_path / "unattended").mkdir()
+    unattended = _agent(
+        tmp_path / "unattended", [_execute("c1", "echo 1 > one.txt"), AIMessage("Ok.")]
+    )
+    result = await unattended.ainvoke(
+        {"messages": [("user", "go")]}, config=_config(suppressed=True)
+    )
+    assert not result.get("__interrupt__")
+    assert _written(tmp_path / "unattended") == ["one.txt"]

@@ -451,6 +451,43 @@ def is_hitl_approve_all(config=None) -> bool:
     return configurable.get(HITL_APPROVE_ALL_KEY) is True
 
 
+def _keeps_grant(answer: Any) -> bool:
+    """An answer that approves every call, or a question's answer."""
+    if not isinstance(answer, dict):
+        return False
+    if "decisions" in answer:
+        decisions = answer["decisions"]
+        return (
+            isinstance(decisions, list)
+            and bool(decisions)
+            and all(
+                isinstance(decision, dict) and decision.get("type") == "approve"
+                for decision in decisions
+            )
+        )
+    return "answers" in answer or answer.get("status") in ("answered", "cancelled")
+
+
+def resume_declines(message: Any) -> bool:
+    """Whether *message* is a resume the session grant must not travel with.
+
+    With the grant a resume skips its pause and drops its decisions, so any other shape loses it.
+    """
+    resume = getattr(message, "resume", None)
+    if resume is None:
+        return False
+    if not isinstance(resume, dict):
+        return True
+    if any(key in resume for key in ("decisions", "answers", "status")):
+        return not _keeps_grant(resume)
+    return not resume or not all(_keeps_grant(answer) for answer in resume.values())
+
+
+def answer_keeps_grant(session_granted: bool, decisions: Any) -> bool:
+    """Whether an approval answer may carry the grant: the grant itself produced it."""
+    return session_granted and _keeps_grant({"decisions": decisions})
+
+
 def approve_all_configurable_extra(active: bool) -> dict[str, Any] | None:
     """The ``configurable_extra`` part for a call that carries the session grant."""
     return {HITL_APPROVE_ALL_KEY: True} if active else None
