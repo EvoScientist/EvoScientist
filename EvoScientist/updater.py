@@ -482,6 +482,8 @@ def run_update(
 
     try:
         message, detail = _update(opts, emit, confirm, write_line)
+    except HandedOver:
+        return 0
     except UpdateError as exc:
         emit(
             make_event(
@@ -551,8 +553,10 @@ def _update(
             f"{install_command()}"
         )
 
-    with tempfile.TemporaryDirectory(prefix="evosci-update-") as tmp:
-        constraints = Path(tmp) / "constraints.txt"
+    tmp = Path(tempfile.mkdtemp(prefix="evosci-update-"))
+    handed_over = False
+    try:
+        constraints = tmp / "constraints.txt"
         emit(
             make_event(
                 STAGE,
@@ -575,6 +579,13 @@ def _update(
                     )
                 )
         cmd = uv_install_command(uv, receipt, target, constraints)
+        evosci = tool_bin_dir(uv) / (
+            "EvoSci.exe" if sys.platform == "win32" else "EvoSci"
+        )
+        if sys.platform == "win32":
+            _hand_over(opts, emit, tmp, cmd, mirror, evosci, installed, target)
+            handed_over = True
+            raise HandedOver
         emit(
             make_event(
                 STAGE,
@@ -595,8 +606,57 @@ def _update(
                 f"uv could not install EvoScientist {target} (see uv's output); "
                 f"the installed version is unchanged.{exclude_newer_hint()}",
             )
+    finally:
+        if not handed_over:  # the helper deletes it when it ends
+            shutil.rmtree(tmp, ignore_errors=True)
 
-    evosci = tool_bin_dir(uv) / ("EvoSci.exe" if sys.platform == "win32" else "EvoSci")
     emit(make_event(STAGE, "running", progress=0.8, message="Running EvoSci setup"))
     run_new_setup(evosci, opts, write_line)
     return f"Updated EvoScientist {installed} -> {target}", {"version": target}
+
+
+class HandedOver(Exception):
+    """The Windows helper took over and writes the terminal line itself."""
+
+
+def _hand_over(
+    opts: UpdateOptions,
+    emit: Emitter,
+    tmp: Path,
+    cmd: list[str],
+    mirror: str,
+    evosci: Path,
+    installed: str,
+    target: str,
+) -> None:
+    from .update_helper import start_helper
+
+    base = os.environ
+    env = uv_environment(mirror)
+    emit(
+        make_event(
+            STAGE,
+            "running",
+            progress=0.3,
+            message=(
+                "The install continues in a helper once EvoScientist has "
+                "exited; wait for its last line"
+            ),
+        )
+    )
+    start_helper(
+        tmp,
+        {
+            # Expanded, as the helper compares it with process paths.
+            "env_dir": os.path.realpath(sys.prefix),
+            "uv": cmd[0],
+            "uv_args": cmd[1:],
+            "uv_env": {k: v for k, v in env.items() if base.get(k) != v},
+            "evosci": str(evosci),
+            "skip": opts.skip,
+            "installed": installed,
+            "target": target,
+            "install_command": install_command(),
+        },
+        json_mode=opts.json,
+    )

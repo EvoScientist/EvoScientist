@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -645,3 +646,92 @@ def test_stale_record_without_server_is_ignored(server):
     emit = _emits()
     updater.check_server(updater.UpdateOptions(json=True), emit, None)
     assert server["stopped"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Windows: the helper takes over
+# --------------------------------------------------------------------------- #
+def test_windows_hands_over_to_the_helper(uv_install, monkeypatch):
+    from EvoScientist import update_helper
+
+    started: list[dict] = []
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(
+        update_helper,
+        "start_helper",
+        lambda tmp, config, json_mode: started.append(
+            {"tmp": tmp, "config": config, "json": json_mode}
+        ),
+    )
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    code, lines, _ = _run(updater.UpdateOptions(json=True, skip=["webui"]))
+    assert code == 0
+    assert runs.calls == []  # uv runs in the helper, after EvoSci has exited
+    # The helper writes the terminal line.
+    assert all(e["status"] == "running" for e in lines)
+    (call,) = started
+    config = call["config"]
+    assert call["json"] is True
+    assert call["tmp"].is_dir()  # the helper deletes it
+    assert (call["tmp"] / "constraints.txt").read_text() == "six==1.17.0\n"
+    assert config["env_dir"] == str(Path(sys.prefix).resolve())
+    assert config["uv"] == "/opt/uv"
+    assert config["uv_args"][:3] == ["tool", "install", "--force"]
+    assert config["evosci"] == str(uv_install["tmp"] / "bin" / "EvoSci.exe")
+    assert config["skip"] == ["webui"]
+    assert (config["installed"], config["target"]) == ("0.3.7", "0.3.10")
+
+
+def test_start_helper_json_keeps_the_callers_pipes(tmp_path, monkeypatch):
+    from EvoScientist import update_helper
+
+    calls: list[dict] = []
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x8000000, raising=False)
+    monkeypatch.setattr(
+        update_helper.subprocess,
+        "Popen",
+        lambda cmd, **kwargs: calls.append({"cmd": cmd, **kwargs}),
+    )
+    update_helper.start_helper(tmp_path, {"env_dir": "C:\\env"}, json_mode=True)
+    (call,) = calls
+    assert call["creationflags"] == 0x200 | 0x8000000
+    assert call["stdin"] is sys.stdin
+    assert call["stdout"] is sys.stdout
+    assert call["cmd"][-3:] == [
+        str(tmp_path / update_helper.HELPER_NAME),
+        "-ConfigPath",
+        str(tmp_path / "config.json"),
+    ]
+    config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert config == {"env_dir": "C:\\env", "temp_dir": str(tmp_path), "json": True}
+
+
+def test_start_helper_terminal_shares_the_console(tmp_path, monkeypatch):
+    from EvoScientist import update_helper
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        update_helper.subprocess,
+        "Popen",
+        lambda cmd, **kwargs: calls.append(kwargs),
+    )
+    update_helper.start_helper(tmp_path, {}, json_mode=False)
+    assert calls == [{}]  # same console and process group: Ctrl+C reaches it
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="needs pwsh")
+def test_helper_script_parses(tmp_path):
+    from EvoScientist import update_helper
+
+    script = tmp_path / "helper.ps1"
+    script.write_text(update_helper.HELPER, encoding="utf-8")
+    check = (
+        "$e = $null; [System.Management.Automation.Language.Parser]::ParseFile("
+        f"'{script}', [ref]$null, [ref]$e) | Out-Null; $e.Count"
+    )
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", check], capture_output=True, text=True
+    )
+    assert result.stdout.strip() == "0", result.stdout + result.stderr
