@@ -326,14 +326,23 @@ fetch_constraints() {
 }
 
 # When EvoScientist is already a uv tool, fills WITH_ARGS and EXTRAS from its
-# receipt so that the reinstall keeps them, and sets FORCE.
+# receipt so that the reinstall keeps them, and sets FORCE. Stops when the bin
+# dir already holds an EvoScientist command that is not a uv tool's (pipx and
+# pip --user use ~/.local/bin too): uv would refuse to overwrite it.
 read_existing_install() {
-  local tool_dir env receipt python kind value
+  local tool_dir env receipt python kind value name
   tool_dir=$("$UV" tool dir </dev/null)
   env="$tool_dir/evoscientist"
   receipt="$env/uv-receipt.toml"
   python="$env/bin/python"
-  [ -d "$env" ] || return 0
+  if [ ! -d "$env" ]; then
+    for name in EvoSci EvoScientist evosci evoscientist; do
+      if [ -e "$BIN_DIR/$name" ]; then
+        die "$BIN_DIR/$name exists but was not installed by uv; pipx or pip --user may have put it there. Remove that install (for example pipx uninstall EvoScientist or pip uninstall EvoScientist), then run this script again."
+      fi
+    done
+    return 0
+  fi
   FORCE=1
   local lost="Extras and packages added with --with (such as MCP servers) may be dropped by the reinstall."
   if [ ! -f "$receipt" ] || [ ! -x "$python" ]; then
@@ -407,9 +416,18 @@ update_path() {
       info "$out"
       PATH_CHANGED=1
       ;;
-    # uv exits 2 when the profiles already add the directory but this shell
-    # has not read them yet, e.g. on a second run of this script.
-    2) PATH_CHANGED=1 ;;
+    # Exit 2 is uv's code for any error; only this message means the profiles
+    # already add the directory and this shell has not read them yet, e.g. on
+    # a second run of this script.
+    2)
+      case "$out" in
+        *"already up-to-date"*) PATH_CHANGED=1 ;;
+        *)
+          printf '%s\n' "$out" >&2
+          warn "uv tool update-shell failed; add $BIN_DIR to PATH yourself."
+          ;;
+      esac
+      ;;
     *)
       printf '%s\n' "$out" >&2
       warn "uv tool update-shell failed; add $BIN_DIR to PATH yourself."
@@ -479,10 +497,10 @@ main() {
   FORCE=0
   EXTRAS=""
   WITH_ARGS=()
+  BIN_DIR=$("$UV" tool dir --bin </dev/null)
   read_existing_install
   install_package
 
-  BIN_DIR=$("$UV" tool dir --bin </dev/null)
   PATH_CHANGED=0
   update_path
 

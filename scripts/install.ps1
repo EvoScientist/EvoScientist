@@ -22,7 +22,8 @@
 # one at the release tag.
 #
 # Under irm | iex this code runs in the caller's session: everything lives in
-# one function, so no variable or setting leaks into it, and errors are thrown,
+# one function, environment, TLS and proxy settings are restored at the end, so
+# only the small type behind Get-LongPath stays loaded; errors are thrown,
 # never `exit`, which would close the window.
 
 param(
@@ -374,20 +375,24 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
     }
 
     Assert-Platform
-    Enable-Tls12
-    $installVersion = Get-InstallVersion
-    if ((Get-ReleaseVersion $installVersion) -le (Get-ReleaseVersion $LastUnsupported)) {
-        throw "EvoScientist $installVersion cannot be installed with this script: $LastUnsupported is the last release without constraints.txt, and every older release lacks it too. Choose a newer version."
-    }
 
     $tempDir = Join-Path ([IO.Path]::GetTempPath()) ("evosci-install-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-    # Environment changes are undone at the end, so the caller's session keeps
-    # its own values under irm | iex.
+    # Environment, TLS and proxy changes are undone at the end, so the caller's
+    # session keeps its own values under irm | iex.
     $envNames = @('UV_SYSTEM_CERTS', 'UV_HTTP_TIMEOUT', 'UV_DEFAULT_INDEX', 'UV_PYTHON_INSTALL_MIRROR')
     $savedEnv = @{}
     foreach ($name in $envNames) { $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    $savedProtocol = [Net.ServicePointManager]::SecurityProtocol
+    $savedCredentials = $null
+    try { $savedCredentials = [Net.WebRequest]::DefaultWebProxy.Credentials } catch { }
     try {
+        Enable-Tls12
+        $installVersion = Get-InstallVersion
+        if ((Get-ReleaseVersion $installVersion) -le (Get-ReleaseVersion $LastUnsupported)) {
+            throw "EvoScientist $installVersion cannot be installed with this script: $LastUnsupported is the last release without constraints.txt, and every older release lacks it too. Choose a newer version."
+        }
+
         $dataDir = Get-DataDir
         # uv trusts the Windows certificate store, as Invoke-WebRequest did, so
         # a network that inspects TLS works; longer timeout for slow mirrors.
@@ -400,13 +405,28 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
 
         $uv = Install-Uv $dataDir $tempDir
         $constraints = Get-Constraints $installVersion $tempDir
-        $toolDir = ((Invoke-Captured $uv @('tool', 'dir')).Lines -join '').Trim()
-        $binDir = ((Invoke-Captured $uv @('tool', 'dir', '--bin')).Lines -join '').Trim()
+        $toolDir = Invoke-Captured $uv @('tool', 'dir')
+        $binDir = Invoke-Captured $uv @('tool', 'dir', '--bin')
+        if ($toolDir.ExitCode -ne 0 -or $binDir.ExitCode -ne 0) {
+            throw "uv tool dir failed (exit codes $($toolDir.ExitCode), $($binDir.ExitCode)); see uv's output above."
+        }
+        $toolDir = ($toolDir.Lines -join '').Trim()
+        $binDir = ($binDir.Lines -join '').Trim()
         $envDir = Join-Path $toolDir 'evoscientist'
 
         $extras = ''
         $withArgs = @()
-        $force = Test-Path $envDir
+        $force = Test-Path -LiteralPath $envDir
+        if (-not $force) {
+            # pipx and pip --user use the same bin dir; uv would refuse to
+            # overwrite their command.
+            foreach ($name in $EntryPoints) {
+                $existing = Join-Path $binDir $name
+                if (Test-Path -LiteralPath $existing) {
+                    throw "$existing exists but was not installed by uv; pipx or pip --user may have put it there. Remove that install (for example pipx uninstall EvoScientist or pip uninstall EvoScientist), then run this script again."
+                }
+            }
+        }
         if ($force) {
             $blocking = Get-BlockingProcesses $envDir $binDir
             if ($blocking.Count -gt 0) {
@@ -459,17 +479,13 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
             if ($NoModifyPath) {
                 Write-Info "Not changing PATH (-NoModifyPath). Add $binDir to PATH to run EvoSci."
             } else {
+                # On Windows uv exits 0 also when the user PATH already has the
+                # directory ("already in PATH"); any other exit is an error.
                 $shell = Invoke-Captured $uv @('tool', 'update-shell') -WithStderr
-                $out = $shell.Lines
-                $rc = $shell.ExitCode
-                if ($rc -eq 0) {
-                    $out | Out-Host
-                    $pathChanged = $true
-                } elseif ($rc -eq 2) {
-                    # The user PATH already has it; this window has not read it.
+                $shell.Lines | Out-Host
+                if ($shell.ExitCode -eq 0) {
                     $pathChanged = $true
                 } else {
-                    $out | Out-Host
                     Write-Warn "uv tool update-shell failed; add $binDir to PATH yourself."
                 }
             }
@@ -505,6 +521,8 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
         Write-Info '  EvoSci --ui webui       start the WebUI'
     } finally {
         foreach ($name in $envNames) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process') }
+        [Net.ServicePointManager]::SecurityProtocol = $savedProtocol
+        try { [Net.WebRequest]::DefaultWebProxy.Credentials = $savedCredentials } catch { }
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tempDir
     }
 }
