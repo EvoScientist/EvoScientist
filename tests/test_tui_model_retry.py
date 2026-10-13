@@ -30,6 +30,46 @@ def _retry(discarded, instance_id=""):
     }
 
 
+async def test_discarded_calls_leave_the_box_bookkeeping():
+    """A dropped call must not keep a slot among the rows shown, be counted
+    in the summary of the hidden ones or in the closed box's header."""
+    from textual.app import App
+    from textual.widgets import Static
+
+    from EvoScientist.cli.widgets.subagent_widget import SubAgentWidget
+    from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
+
+    class _Host(App):
+        def compose(self):
+            yield SubAgentWidget("code-agent")
+
+    app = _Host()
+    async with app.run_test() as pilot:
+        box = app.query_one(SubAgentWidget)
+        for call in ("done-1", "done-2"):
+            await box.add_tool_call("read_file", {"file_path": f"/{call}"}, call)
+            box.complete_tool("read_file", "ok", True, call)
+        for call in ("a", "b", "c"):
+            await box.add_tool_call("execute", {"command": call}, call)
+        await pilot.pause()
+
+        await box.discard_tool_calls(["b", "done-1"])
+        await pilot.pause()
+
+        assert sorted(box._tool_widgets) == ["a", "c", "done-2"]
+        assert (box._running_ids, box._completed_ids) == (["a", "c"], ["done-2"])
+        shown = {w._tool_id: bool(w.display) for w in app.query(ToolCallWidget)}
+        assert shown == {"a": True, "c": True, "done-2": True}
+        assert not box.query_one(".sa-collapse-summary", Static).has_class("--visible")
+
+        # The same id emitted again is a new call, listed once.
+        await box.add_tool_call("execute", {"command": "b"}, "b")
+        assert box._running_ids == ["a", "c", "b"]
+
+        box.finalize()
+        assert "(4 tools)" in str(box.query_one(".sa-header", Static).render())
+
+
 async def test_retry_removes_the_failed_attempt_and_mounts_the_notice(
     monkeypatch, workspace
 ):

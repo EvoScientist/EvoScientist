@@ -126,7 +126,7 @@ class SubAgentWidget(Vertical):
             )
         else:
             line.append(f"\u2713 {self._display_name()}", style="bold green")
-            line.append(f"  ({self._tool_count} tools)", style="dim")
+            line.append(f"  ({len(self._tool_widgets)} tools)", style="dim")
         header.update(line)
 
     def _render_footer(self) -> None:
@@ -173,6 +173,10 @@ class SubAgentWidget(Vertical):
         """Remove the tool calls a failed model attempt emitted."""
         for tool_call_id in tool_call_ids:
             widget = self._tool_widgets.pop(tool_call_id, None)
+            if tool_call_id in self._running_ids:
+                self._running_ids.remove(tool_call_id)
+            if tool_call_id in self._completed_ids:
+                self._completed_ids.remove(tool_call_id)
             if widget is not None:
                 try:
                     await widget.remove()

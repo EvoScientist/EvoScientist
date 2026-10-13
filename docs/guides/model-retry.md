@@ -13,7 +13,7 @@ HTTP 408, 409, 425, 429 and 5xx; connection and timeout errors from the provider
 | `model_retry_wait_seconds` | 60 | interactive sessions (TUI, CLI, `serve`) |
 | `auto_mode_retry_wait_seconds` | 1800 | unattended runs (`--auto-mode`, `auto_mode: true`, scheduled tasks) |
 
-The budget is a deadline per model call: waits start at 1 s and double up to a cap of 10 s (interactive) or 2 minutes (unattended), a `Retry-After` header is honoured, and the time a failing attempt itself takes counts too. `0` switches the retry off. When the budget runs out the last error is raised and the run ends with it (`-p` exits with code 1 and prints the resume hint).
+The budget is a deadline per model call: waits start at 1 s and double up to a cap of 10 s (interactive) or 2 minutes (unattended), a `Retry-After` header is honoured, and the time a failing attempt itself takes counts too. `0` switches the retry off; a value that is not a whole number of seconds (`60s`) falls back to the default, with a warning in the log. When the budget runs out the last error is raised and the run ends with it (`-p` exits with code 1 and prints the resume hint).
 
 ```bash
 EvoSci config set auto_mode_retry_wait_seconds 600

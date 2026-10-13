@@ -459,7 +459,7 @@ def model_retry_for_run(config=None) -> dict[str, Any]:
     )
     try:
         budget = max(0, int(budget))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         budget = 0
     return {"unattended": unattended, "wait_budget_seconds": budget}
 

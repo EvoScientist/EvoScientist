@@ -915,8 +915,12 @@ def _model_retry_middleware(
         if tier_unattended
         else cfg.model_retry_wait_seconds
     )
+    try:
+        budget = max(0, int(budget))
+    except (TypeError, ValueError, OverflowError):
+        budget = 0
     return ModelRetryMiddleware(
-        wait_budget_seconds=max(0, int(budget)),
+        wait_budget_seconds=budget,
         unattended=tier_unattended,
         honor_run_key=honor_run_key,
     )

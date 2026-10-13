@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
+import pytest
+
 from EvoScientist.backends import MODEL_RETRY_RUN_KEY, model_retry_for_run
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.middleware.model_retry import (
@@ -34,6 +38,81 @@ def test_model_retry_for_run_follows_auto_mode():
     cfg.auto_mode = True
     assert model_retry_for_run(cfg) == {"unattended": True, "wait_budget_seconds": 345}
     cfg.auto_mode_retry_wait_seconds = -5
+    assert model_retry_for_run(cfg)["wait_budget_seconds"] == 0
+
+
+@pytest.mark.parametrize("bad", ["60s", "30m", "90", 1.5, float("inf"), True, [60]])
+def test_a_malformed_budget_goes_back_to_its_default_with_a_warning(bad, caplog):
+    """A value that is not a whole number of seconds must not switch the
+    retry off without a word; only 0 does that."""
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.config.settings"):
+        cfg = EvoScientistConfig(
+            model_retry_wait_seconds=bad, auto_mode_retry_wait_seconds=bad
+        )
+    assert (cfg.model_retry_wait_seconds, cfg.auto_mode_retry_wait_seconds) == (
+        60,
+        1800,
+    )
+    assert "Invalid model_retry_wait_seconds" in caplog.text
+    assert "Invalid auto_mode_retry_wait_seconds" in caplog.text
+
+
+def test_zero_and_whole_seconds_are_kept_as_written(caplog):
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.config.settings"):
+        cfg = EvoScientistConfig(
+            model_retry_wait_seconds=0, auto_mode_retry_wait_seconds=45
+        )
+    assert (cfg.model_retry_wait_seconds, cfg.auto_mode_retry_wait_seconds) == (0, 45)
+    assert "Invalid" not in caplog.text
+
+
+def test_a_negative_budget_is_kept_and_switches_the_retry_off(caplog):
+    from EvoScientist.EvoScientist import _model_retry_middleware
+
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.config.settings"):
+        cfg = EvoScientistConfig(model_retry_wait_seconds=-5)
+    assert cfg.model_retry_wait_seconds == -5
+    assert "Invalid" not in caplog.text
+    assert _model_retry_middleware(cfg)._tier.wait_budget_seconds == 0.0
+    assert model_retry_for_run(cfg)["wait_budget_seconds"] == 0
+
+
+def test_a_malformed_budget_in_the_config_file_keeps_the_default(tmp_path, monkeypatch):
+    """From the file, through the loader, to the retry layer and the run's key."""
+    from EvoScientist.config.settings import load_config
+    from EvoScientist.EvoScientist import _model_retry_middleware
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "evoscientist").mkdir()
+    (tmp_path / "evoscientist" / "config.yaml").write_text(
+        "model_retry_wait_seconds: 60s\nauto_mode_retry_wait_seconds: .inf\n",
+        encoding="utf-8",
+    )
+    cfg = load_config()
+    assert (cfg.model_retry_wait_seconds, cfg.auto_mode_retry_wait_seconds) == (
+        60,
+        1800,
+    )
+    assert _model_retry_middleware(cfg)._tier.wait_budget_seconds == 60.0
+    assert model_retry_for_run(cfg)["wait_budget_seconds"] == 60
+
+
+@pytest.mark.parametrize("value", ["60s", None, float("inf")])
+@pytest.mark.parametrize("auto_mode", [False, True])
+def test_the_readers_survive_a_value_the_config_did_not_normalise(value, auto_mode):
+    """A config object built some other way: the agent still starts and the
+    run's key agrees with the mounted layer, both without retries."""
+    from types import SimpleNamespace
+
+    from EvoScientist.EvoScientist import _model_retry_middleware
+
+    cfg = SimpleNamespace(
+        auto_mode=auto_mode,
+        model_retry_wait_seconds=value,
+        auto_mode_retry_wait_seconds=value,
+    )
+    retry = _model_retry_middleware(cfg)
+    assert (retry._tier.wait_budget_seconds, retry._tier.unattended) == (0.0, auto_mode)
     assert model_retry_for_run(cfg)["wait_budget_seconds"] == 0
 
 

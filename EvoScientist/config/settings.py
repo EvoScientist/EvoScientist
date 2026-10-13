@@ -571,6 +571,17 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
+        # A retry budget that is not a whole number of seconds (a hand-edited
+        # ``60s``) goes back to its default; ``0`` or less switches the retry off.
+        for name in ("model_retry_wait_seconds", "auto_mode_retry_wait_seconds"):
+            budget = getattr(self, name)
+            if not isinstance(budget, int) or isinstance(budget, bool):
+                default = type(self).__dataclass_fields__[name].default
+                logging.getLogger(__name__).warning(
+                    "Invalid %s %r; falling back to %d.", name, budget, default
+                )
+                setattr(self, name, default)
+
         # A non-positive cache cap would evict every file entry immediately,
         # defeating the cache entirely.
         cap = self.memory_observation_cache_max_files
