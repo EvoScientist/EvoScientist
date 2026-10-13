@@ -740,3 +740,17 @@ def test_helper_script_parses(tmp_path):
         ["pwsh", "-NoProfile", "-Command", check], capture_output=True, text=True
     )
     assert result.stdout.strip() == "0", result.stdout + result.stderr
+
+
+def test_tool_bin_dir_reads_utf8(monkeypatch):
+    """uv prints UTF-8; the Windows locale code page would garble the path."""
+    seen: list[dict] = []
+    path = "C:\\Users\\Public\\Evo Upd \u0105\u0119\\bin"
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, path + "\n", "")
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+    assert updater.tool_bin_dir("uv") == Path(path)
+    assert seen[0]["encoding"] == "utf-8"

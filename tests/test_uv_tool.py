@@ -182,6 +182,7 @@ def test_runs_on_managed_python(tmp_path, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         assert cmd == ["uv", "python", "dir"]
+        assert kwargs["encoding"] == "utf-8"  # uv prints UTF-8 on Windows too
         return subprocess.CompletedProcess(cmd, 0, f"{managed}\n", "")
 
     monkeypatch.setattr(uv_tool.subprocess, "run", fake_run)

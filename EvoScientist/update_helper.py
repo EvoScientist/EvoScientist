@@ -150,15 +150,20 @@ function Invoke-OnConsole([string]$Exe, [string[]]$Arguments) {
     return $process.ExitCode
 }
 
+# What the helper is doing, for the terminal line of an interruption.
+$phase = 'waiting'
 try {
     foreach ($p in $cfg.uv_env.PSObject.Properties) { Set-Item -Path "Env:\$($p.Name)" -Value $p.Value }
 
     if (-not (Wait-Free 0.35)) { return }
+    $phase = 'installing'
     Emit 'running' "Installing EvoScientist $($cfg.target)" $null $null 0.4
     $rc = Invoke-Uv
     if ($rc -ne 0) {
         Emit 'running' "uv failed (exit $rc); trying once more when nothing runs from the environment" $null $null 0.5
+        $phase = 'waiting'
         if (-not (Wait-Free 0.5)) { return }
+        $phase = 'installing'
         $rc = Invoke-Uv
     }
     if ($rc -ne 0) {
@@ -167,6 +172,7 @@ try {
         return
     }
 
+    $phase = 'setup'
     Emit 'running' 'Running EvoSci setup' $null $null 0.8
     $setupArgs = @('setup')
     foreach ($s in @($cfg.skip)) { if ($s) { $setupArgs += @('--skip', $s) } }
@@ -195,11 +201,29 @@ try {
     }
     Emit 'done' "Updated EvoScientist $($cfg.installed) -> $($cfg.target)" @{ version = $cfg.target }
     $finished = $true
+} catch {
+    $reason = $_.Exception.Message
+    if ($phase -eq 'setup') {
+        Emit 'error' "EvoScientist $($cfg.target) is installed, but EvoSci setup could not run ($reason). Run it again: $($cfg.evosci) setup" @{ stage = $null; code = $null } 'setup_failed'
+    } elseif ($phase -eq 'installing') {
+        Emit 'error' "The install failed ($reason). If EvoSci no longer starts, run the install script again once nothing runs from it: $($cfg.install_command)" $null 'install_failed'
+    } else {
+        Emit 'error' "The update helper failed before installing ($reason). Nothing was changed." $null 'install_failed'
+    }
+    $finished = $true
 } finally {
     if (-not $finished) {
-        # The wait was cancelled: Ctrl+C, or the end of stdin under --json.
-        $names = ($blockers | ForEach-Object { "$($_.name).exe ($($_.pid))" }) -join ', '
-        Emit 'error' "Update cancelled while these still ran: $names. Nothing was changed." @{ waiting_for = $blockers } 'environment_busy'
+        if ($phase -eq 'waiting') {
+            # The wait was cancelled: Ctrl+C, or the end of stdin under --json.
+            $names = ($blockers | ForEach-Object { "$($_.name).exe ($($_.pid))" }) -join ', '
+            Emit 'error' "Update cancelled while these still ran: $names. Nothing was changed." @{ waiting_for = $blockers } 'environment_busy'
+        } elseif ($phase -eq 'setup') {
+            # Ctrl+C while EvoSci setup ran.
+            Emit 'error' "EvoScientist $($cfg.target) is installed, but EvoSci setup was interrupted. Run it again: $($cfg.evosci) setup" @{ stage = $null; code = $null } 'setup_failed'
+        } else {
+            # Ctrl+C while uv ran.
+            Emit 'error' "The install was interrupted. If EvoSci no longer starts, run the install script again once nothing runs from it: $($cfg.install_command)" $null 'install_failed'
+        }
     }
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $cfg.temp_dir
 }

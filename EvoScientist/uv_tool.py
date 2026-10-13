@@ -196,8 +196,13 @@ def runs_on_managed_python(uv: str) -> bool:
     from .setup._install import is_under
 
     try:
+        # uv writes UTF-8, not the locale's code page (Windows).
         result = subprocess.run(
-            [uv, "python", "dir"], capture_output=True, text=True, timeout=30
+            [uv, "python", "dir"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return False

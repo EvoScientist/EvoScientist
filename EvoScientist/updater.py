@@ -399,8 +399,14 @@ def exclude_newer_hint() -> str:
 
 def tool_bin_dir(uv: str) -> Path:
     try:
+        # uv writes UTF-8; the locale's code page (Windows) would garble a
+        # path with non-ASCII characters.
         result = subprocess.run(
-            [uv, "tool", "dir", "--bin"], capture_output=True, text=True, timeout=30
+            [uv, "tool", "dir", "--bin"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError("install_failed", f"uv tool dir --bin failed: {exc}") from exc
