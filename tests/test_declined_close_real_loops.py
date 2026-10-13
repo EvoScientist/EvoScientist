@@ -25,9 +25,14 @@ from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.paths import Workspace
-from tests.test_tui_banner_position import _capture_app
+from tests.fakes import close_result
+from tests.tui_fakes import capture_app
 
-NOT_FINISHED = "did not finish (the user rejected an approval request)"
+pytestmark = pytest.mark.usefixtures("no_mcp")
+
+
+# A call that had started when the user rejected an approval elsewhere.
+NOT_FINISHED = ("did not finish", "rejected", False)
 
 
 class _Held:
@@ -152,7 +157,7 @@ async def test_the_tui_lets_a_working_sibling_finish_then_closes_the_decline(
 ):
     scripts, held = _two_sub_agents()
     agent = _agent(tmp_path, scripts)
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     gateway = LocalGraphGateway()
     shown: list[int] = []
 
@@ -185,7 +190,7 @@ async def test_the_tui_lets_a_working_sibling_finish_then_closes_the_decline(
     assert _files(tmp_path) == ["b1.txt", "b2.txt"]
     assert position == ()
     assert results["t2"] == "subb done"
-    assert NOT_FINISHED in results["t1"]
+    assert close_result(results["t1"]) == NOT_FINISHED
     # The declined command says so; the sibling's finished calls keep theirs.
     assert (rows["a1"], rows["b1"], rows["b2"]) == ("rejected", "success", "success")
 
@@ -219,7 +224,7 @@ async def _thread_shows_the_pause(agent, thread_id: str) -> None:
 
 async def _tui(monkeypatch, workspace, agent, answer):
     """The app on the real local gateway, its approval widget answered by ``answer``."""
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     gateway = LocalGraphGateway()
     monkeypatch.setattr(app, "_await_agent_ready", AsyncMock(return_value=agent))
     monkeypatch.setattr(app, "_wait_for_approval", answer)
@@ -394,7 +399,7 @@ async def test_the_consumer_closes_a_declined_sub_agent_command(tmp_path, monkey
 
     position, results = await _results(agent, await consumer._get_thread_id("u1"))
     assert position == ()
-    assert NOT_FINISHED in results["t1"]
+    assert close_result(results["t1"]) == NOT_FINISHED
     assert _files(work) == ["a0.txt"]
 
 
@@ -407,7 +412,7 @@ async def test_the_tui_closes_a_decline_when_ctrl_c_stops_the_sibling(
 
     scripts, held = _two_sub_agents()
     agent = _agent(tmp_path, scripts)
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     gateway = LocalGraphGateway()
     shown: list[int] = []
 
@@ -443,6 +448,6 @@ async def test_the_tui_closes_a_decline_when_ctrl_c_stops_the_sibling(
             discard_stream_cancel()
 
     assert position == ()
-    assert NOT_FINISHED in results["t1"]
-    assert NOT_FINISHED in results["t2"]
+    assert close_result(results["t1"]) == NOT_FINISHED
+    assert close_result(results["t2"]) == NOT_FINISHED
     assert _files(tmp_path) == ["b1.txt"]

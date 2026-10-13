@@ -597,10 +597,15 @@ ParkedCloseReason = Literal["round_limit", "rejected", "unanswered"]
 HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
 
 _NO_RETRY = "Do not retry this tool call unless the user explicitly requests it."
+_MAY_HAVE_RUN = (
+    "Anything it had already done may have taken effect or may still be "
+    "finishing; check the current state instead of re-running it unless the "
+    "user asks."
+)
 
 # The user was asked about the call and it did not run. The round-limit
 # sentence predates the others and is kept as it was.
-_ASKED_RESULT: dict[str, str] = {
+_ASKED_RESULT: dict[ParkedCloseReason, str] = {
     "rejected": (
         "User rejected the tool call for `{name}` with id {call_id}. The tool "
         f"was not executed. {_NO_RETRY}"
@@ -615,17 +620,12 @@ _ASKED_RESULT: dict[str, str] = {
         f"{_NO_RETRY}"
     ),
 }
-# The call did not run and nobody refused it: no retry ban.
-_TURN_ENDED: dict[str, str] = {
+# How the turn ended, for a call that did not run or did not finish: no retry ban.
+_TURN_ENDED: dict[ParkedCloseReason, str] = {
     "rejected": "the turn ended when the user rejected an approval request",
     "unanswered": (
         "the turn ended with an approval request or question left unanswered"
     ),
-    "round_limit": HITL_ROUND_LIMIT_REJECT_MESSAGE,
-}
-_NOT_FINISHED: dict[str, str] = {
-    "rejected": "the user rejected an approval request",
-    "unanswered": "an approval request or question was left unanswered",
     "round_limit": HITL_ROUND_LIMIT_REJECT_MESSAGE,
 }
 
@@ -673,7 +673,7 @@ def _unanswered_calls(messages: list) -> list[tuple[dict, bool]] | None:
 def abandoned_tool_messages(
     messages: list,
     *,
-    reason: ParkedCloseReason = "round_limit",
+    reason: ParkedCloseReason,
     parked_before_tools: bool = False,
 ) -> list:
     """Tool results for unanswered calls on the last AI message.
@@ -704,9 +704,7 @@ def abandoned_tool_messages(
         else:
             content = (
                 f"The tool call for `{name}` with id {call_id} did not finish "
-                f"({_NOT_FINISHED[reason]}). Anything it had already done may "
-                "have taken effect or may still be finishing; check the current "
-                "state instead of re-running it unless the user asks."
+                f"({_TURN_ENDED[reason]}). {_MAY_HAVE_RUN}"
             )
         results.append(
             ToolMessage(
@@ -721,7 +719,7 @@ async def close_parked_checkpoint(
     target,
     thread_id: str,
     *,
-    reason: ParkedCloseReason = "round_limit",
+    reason: ParkedCloseReason,
 ) -> None:
     """End a parked HITL/ask_user turn without another model step.
 

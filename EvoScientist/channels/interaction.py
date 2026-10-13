@@ -681,8 +681,8 @@ class ApprovalOutcome:
     produced. ``grant_in_force`` says whether the
     session holds a grant once this outcome is returned, which the reply that
     grants does too. ``rejected`` is True when a human replied and did not
-    approve; a decline without it (timeout, stop, a prompt that could not be
-    sent) was left unanswered.
+    approve, a stop included; a decline without it (timeout, a prompt that
+    could not be sent) was left unanswered.
     """
 
     decisions: list[dict] | None = None
@@ -713,8 +713,8 @@ async def resolve_approval(
     exactly once, at prompt time (:meth:`ApprovalPolicy.decision_snapshot`);
     the reply branches consume that snapshot's REJECTs, so config changes
     while the human is deciding cannot alter what the approval operation
-    does with the reply.  ``/stop`` cancels silently (it already got its own
-    ack from the transport's stop fast-path).  An unrecognized reply declines
+    does with the reply.  ``/stop`` is a refusal without feedback (it already
+    got its own ack from the transport's stop fast-path).  An unrecognized reply declines
     *without feedback* and hands the raw text back to the driver via
     ``unrecognized_reply`` (see
     :class:`ApprovalOutcome` for the per-driver policy).
@@ -747,7 +747,7 @@ async def resolve_approval(
         return ApprovalOutcome(prompted=True)
 
     if is_stop_command(reply):
-        return ApprovalOutcome(prompted=True)
+        return ApprovalOutcome(prompted=True, rejected=True)
 
     decision = parse_approval_reply(reply)
     if decision == "auto":

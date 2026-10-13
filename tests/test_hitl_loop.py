@@ -30,14 +30,8 @@ from EvoScientist.middleware import events as mw_events
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
 from tests.fakes import StubChannel as _StubChannel
-
-
-def _interrupt_event(n: int) -> dict:
-    return {
-        "type": "interrupt",
-        "interrupt_id": f"i{n}",
-        "action_requests": [{"name": "execute", "args": {"command": f"echo step-{n}"}}],
-    }
+from tests.fakes import attended_config as _attended_config
+from tests.fakes import interrupt_event as _interrupt_event
 
 
 class TestRichCliHitlRoundBudget:
@@ -462,15 +456,6 @@ def _interrupts_then_done(interrupts: int):
         yield {"type": "done", "content": "finished"}
 
     return _fake_stream
-
-
-def _attended_config(monkeypatch):
-    monkeypatch.setattr(
-        "EvoScientist.EvoScientist._ensure_config",
-        lambda: SimpleNamespace(
-            auto_approve=False, dangerous_mode=False, shell_allow_list=""
-        ),
-    )
 
 
 class TestRichCliSessionGrantReachesTheGraph:
@@ -1730,7 +1715,8 @@ def test_abandoned_tool_messages_closes_invalid_tool_calls():
                 ],
             ),
             ToolMessage(content="done", name="execute", tool_call_id="ok-1"),
-        ]
+        ],
+        reason="round_limit",
     )
     assert [message.tool_call_id for message in patch] == ["bad-1"]
     assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patch[0].content
@@ -1832,7 +1818,9 @@ async def test_close_parked_checkpoint_keeps_finished_sibling_results():
     )
 
     gateway = FakeGraphGateway(checkpoint=agent)
-    await close_parked_checkpoint(gateway, GraphTarget(), "t-sibling")
+    await close_parked_checkpoint(
+        gateway, GraphTarget(), "t-sibling", reason="round_limit"
+    )
 
     assert [as_node for _values, as_node in agent.updates] == [
         "__end__",
@@ -1864,7 +1852,9 @@ async def test_close_parked_checkpoint_trailing_end_even_without_dangling_calls(
 
     agent = FakeCheckpointAgent()
     gateway = FakeGraphGateway(checkpoint=agent)
-    await close_parked_checkpoint(gateway, GraphTarget(), "t-empty")
+    await close_parked_checkpoint(
+        gateway, GraphTarget(), "t-empty", reason="round_limit"
+    )
     assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
     assert all(values is None for values, _node in agent.updates)
     verify = await agent.aget_state({})
@@ -1882,6 +1872,7 @@ async def test_close_parked_checkpoint_raises_when_verify_still_stuck():
             FakeGraphGateway(checkpoint=_StickyCheckpointAgent()),
             GraphTarget(),
             "t-sticky",
+            reason="round_limit",
         )
 
 
@@ -1897,7 +1888,7 @@ async def test_close_parked_checkpoint_ignores_local_graph():
     )
     gateway = FakeGraphGateway(checkpoint=agent)
     await close_parked_checkpoint(
-        gateway, GraphTarget(local_graph=sentinel), "t-gateway"
+        gateway, GraphTarget(local_graph=sentinel), "t-gateway", reason="round_limit"
     )
     assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
     assert sentinel.aget_state.await_count == 0
@@ -1914,6 +1905,9 @@ async def test_close_parked_checkpoint_via_local_gateway():
 
     agent = FakeCheckpointAgent()
     await close_parked_checkpoint(
-        LocalGraphGateway(), GraphTarget(local_graph=agent), "t-local"
+        LocalGraphGateway(),
+        GraphTarget(local_graph=agent),
+        "t-local",
+        reason="round_limit",
     )
     assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]

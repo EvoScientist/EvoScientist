@@ -10,12 +10,19 @@ from langchain_core.messages import AIMessage
 
 from EvoScientist.channels.interaction import ApprovalOutcome
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
-from tests.test_hitl_loop import _attended_config, _interrupt_event
+from tests.fakes import (
+    FakeCheckpointAgent,
+    FakeGraphGateway,
+    attended_config,
+    close_result,
+    interrupt_event,
+)
 
 BEFORE_TOOLS = ("HumanInTheLoopMiddleware.after_model",)
-REJECTED = "User rejected the tool call for `execute` with id call-1. The tool was not executed."
-UNANSWERED = "The approval request for the tool call `execute` with id call-1 was left unanswered."
+# What the close wrote for the one call the user was asked about.
+REJECTED = ("asked", "rejected", True)
+UNANSWERED = ("asked", "unanswered", True)
+ROUND_LIMIT = ("asked", "round_limit", True)
 
 
 _REQUESTS = {"action_requests": [{"name": "execute", "args": {"command": "ls"}}]}
@@ -43,7 +50,7 @@ def _one_approval_then_done():
         calls += 1
         if calls == 1:
             yield {"type": "text", "content": "partial"}
-            yield _interrupt_event(1)
+            yield interrupt_event(1)
             return
         yield {"type": "text", "content": "must not run"}
         yield {"type": "done", "content": "must not run"}
@@ -58,6 +65,11 @@ def _written(agent: FakeCheckpointAgent) -> list[str]:
         if isinstance(values, dict)
         for message in values["messages"]
     ]
+
+
+def _closed(agent: FakeCheckpointAgent) -> list[tuple[str, str, bool]]:
+    """What the close wrote, per call, as facts (``close_result``)."""
+    return [close_result(text) for text in _written(agent)]
 
 
 class TestRichLoopClosesAtADecline:
@@ -78,7 +90,7 @@ class TestRichLoopClosesAtADecline:
     def _attended(self, monkeypatch):
         monkeypatch.setattr(display_mod, "_session_auto_approve", False)
         monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
-        _attended_config(monkeypatch)
+        attended_config(monkeypatch)
 
     def test_a_reject_at_the_prompt_closes_as_rejected(self):
         agent = _parked_agent()
@@ -86,7 +98,7 @@ class TestRichLoopClosesAtADecline:
         result = self._run(gateway, hitl_prompt_fn=lambda _requests: None)
         assert result == "partial"
         assert len(gateway.requests) == 1
-        assert [text.startswith(REJECTED) for text in _written(agent)] == [True]
+        assert _closed(agent) == [REJECTED]
         assert agent.next == ()
 
     def test_a_reject_on_the_channel_closes_as_rejected_without_a_limit_notice(self):
@@ -102,10 +114,10 @@ class TestRichLoopClosesAtADecline:
         )
         assert result == "partial"
         assert HITL_BUDGET_STOP_NOTICE not in result
-        assert [text.startswith(REJECTED) for text in _written(agent)] == [True]
+        assert _closed(agent) == [REJECTED]
 
     def test_an_approval_nobody_answered_closes_as_unanswered(self):
-        """A channel timeout, a stop reply or a prompt that could not be sent."""
+        """A channel timeout or a prompt that could not be sent."""
         agent = _parked_agent()
         gateway = FakeGraphGateway(stream=_one_approval_then_done(), checkpoint=agent)
         result = self._run(
@@ -114,24 +126,94 @@ class TestRichLoopClosesAtADecline:
         )
         assert result == "partial"
         assert len(gateway.requests) == 1
-        assert [text.startswith(UNANSWERED) for text in _written(agent)] == [True]
+        assert _closed(agent) == [UNANSWERED]
 
-    def test_a_stop_requested_at_the_prompt_closes_nothing(self):
+    def _stopped_run(self, agent, stream=None, **kwargs):
+        """A turn on its own cancel scope; the callbacks may request the stop."""
+        gateway = FakeGraphGateway(
+            stream=stream or _one_approval_then_done(), checkpoint=agent
+        )
+        try:
+            self._run(gateway, cancel_scope="scope-stop", **kwargs)
+        finally:
+            display_mod.discard_stream_cancel("scope-stop")
+        return gateway
+
+    def _assert_closed_as_rejected(self, agent, gateway):
+        assert len(gateway.requests) == 1
+        assert _closed(agent) == [REJECTED]
+        assert agent.next == ()
+
+    def test_a_stop_requested_at_the_prompt_closes_as_rejected(self):
+        """A stop while an approval is open is a refusal, as Ctrl+C on it is."""
         agent = _parked_agent()
-        gateway = FakeGraphGateway(stream=_one_approval_then_done(), checkpoint=agent)
 
         def _stop_then_decline(_requests):
             display_mod.request_stream_cancel("scope-stop")
             return None
 
-        try:
-            self._run(
-                gateway, hitl_prompt_fn=_stop_then_decline, cancel_scope="scope-stop"
-            )
-        finally:
-            display_mod.discard_stream_cancel("scope-stop")
+        gateway = self._stopped_run(agent, hitl_prompt_fn=_stop_then_decline)
+        self._assert_closed_as_rejected(agent, gateway)
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            ApprovalOutcome(prompted=True, rejected=True),
+            ApprovalOutcome(prompted=True),
+            ApprovalOutcome(decisions=[{"type": "approve"}], prompted=True),
+        ],
+        ids=["a stop reply", "an unanswered prompt", "an approval that came too late"],
+    )
+    def test_a_stop_while_the_channel_is_asked_closes_as_rejected(self, outcome):
+        """Whatever the bridge brings back, a stopped turn does not resume: the
+        approval it leaves is closed, not parked."""
+        agent = _parked_agent()
+
+        def _stopped(_requests, _exhausted):
+            display_mod.request_stream_cancel("scope-stop")
+            return outcome
+
+        gateway = self._stopped_run(agent, hitl_outcome_fn=_stopped)
+        self._assert_closed_as_rejected(agent, gateway)
+
+    def test_a_stop_that_cuts_the_terminal_prompt_closes_as_rejected(self, monkeypatch):
+        agent = _parked_agent()
+
+        def _cut(*_args, **_kwargs):
+            display_mod.request_stream_cancel("scope-stop")
+            raise display_mod._StreamPromptCancelled
+
+        monkeypatch.setattr(display_mod, "_resolve_hitl_approval", _cut)
+        gateway = self._stopped_run(agent)
+        self._assert_closed_as_rejected(agent, gateway)
+
+    def test_a_stop_before_the_approval_is_shown_closes_as_rejected(self):
+        agent = _parked_agent()
+
+        async def _stream(_request):
+            yield interrupt_event(1)
+            display_mod.request_stream_cancel("scope-stop")
+
+        def _never_asked(_requests):
+            raise AssertionError("a stopped turn must not prompt")
+
+        gateway = self._stopped_run(agent, _stream, hitl_prompt_fn=_never_asked)
+        self._assert_closed_as_rejected(agent, gateway)
+
+    def test_a_stop_at_an_open_question_closes_nothing(self):
+        """Only an approval is refused by a stop; a question keeps its pause."""
+        question = {"name": "ask_user", "args": {}, "id": "q-1", "type": "tool_call"}
+        agent = FakeCheckpointAgent(
+            next=("tools",),
+            values={"messages": [AIMessage(content="", tool_calls=[question])]},
+        )
+
+        async def _stream(_request):
+            yield {"type": "ask_user", "interrupt_id": "q-1", "questions": ["?"]}
+            display_mod.request_stream_cancel("scope-stop")
+
+        self._stopped_run(agent, _stream)
         assert agent.updates == []
-        assert agent.next == BEFORE_TOOLS
 
     def test_a_close_that_fails_ends_the_turn_with_one_short_log_line(self, caplog):
         agent = _parked_agent(
@@ -182,13 +264,19 @@ class TestRichResolverSaysWhoDeclined:
         resolution = self._resolve(question_runner=_interrupted)
         assert (resolution.decisions, resolution.rejected) == (None, True)
 
-    def test_no_terminal_to_read_from_is_not_a_rejection(self):
+    def test_no_terminal_to_read_from_is_not_a_rejection(self, monkeypatch):
         def _eof(_question):
             raise EOFError
 
+        printed: list[str] = []
+        monkeypatch.setattr(
+            display_mod.console, "print", lambda *a, **_k: printed.extend(map(str, a))
+        )
         resolution = self._resolve(question_runner=_eof)
         assert (resolution.decisions, resolution.rejected) == (None, False)
         assert resolution.human_prompted is True
+        assert any("Left unanswered." in line for line in printed)
+        assert not any("Rejected." in line for line in printed)
 
     def test_a_custom_prompt_that_returns_nothing_is_a_rejection(self):
         resolution = self._resolve(prompt_fn=lambda _requests: None)
@@ -286,7 +374,7 @@ class TestConsumerClosesAtADecline:
         sent, gateway = await self._decline(tmp_path, agent, "2")
         assert sent[-1] == "❌ Rejected"
         assert len(gateway.requests) == 1
-        assert [text.startswith(REJECTED) for text in _written(agent)] == [True]
+        assert _closed(agent) == [REJECTED]
         assert agent.next == ()
 
     async def test_the_round_limit_exit_records_the_limit(self, tmp_path, monkeypatch):
@@ -312,8 +400,7 @@ class TestConsumerClosesAtADecline:
         await task
         assert sent == ["partial", "Approval round limit reached; stopping this turn."]
         assert len(gateway.requests) == 1
-        (text,) = _written(agent)
-        assert "(approval round limit reached)" in text
+        assert _closed(agent) == [ROUND_LIMIT]
 
     async def test_a_timeout_closes_as_unanswered(self, tmp_path, monkeypatch):
         import EvoScientist.channels.consumer as consumer_mod
@@ -322,13 +409,13 @@ class TestConsumerClosesAtADecline:
         agent = _parked_agent()
         _sent, gateway = await self._decline(tmp_path, agent, None)
         assert len(gateway.requests) == 1
-        assert [text.startswith(UNANSWERED) for text in _written(agent)] == [True]
+        assert _closed(agent) == [UNANSWERED]
 
-    async def test_a_stop_reply_closes_as_unanswered(self, tmp_path):
+    async def test_a_stop_reply_closes_as_rejected(self, tmp_path):
         agent = _parked_agent()
         _sent, gateway = await self._decline(tmp_path, agent, "/stop")
         assert len(gateway.requests) == 1
-        assert [text.startswith(UNANSWERED) for text in _written(agent)] == [True]
+        assert _closed(agent) == [REJECTED]
 
     async def test_an_unrecognized_reply_closes_before_it_starts_the_next_turn(
         self, tmp_path
@@ -339,7 +426,7 @@ class TestConsumerClosesAtADecline:
         async def _fake_stream(_request):
             closed_at_call.append(bool(_written(agent)))
             if len(closed_at_call) == 1:
-                yield _interrupt_event(1)
+                yield interrupt_event(1)
                 return
             yield {"type": "text", "content": "finished"}
             yield {"type": "done", "content": "finished"}
@@ -350,7 +437,7 @@ class TestConsumerClosesAtADecline:
         assert sent[-1] == "finished"
         assert len(gateway.requests) == 2
         assert closed_at_call == [False, True]
-        assert [text.startswith(REJECTED) for text in _written(agent)] == [True]
+        assert _closed(agent) == [REJECTED]
 
     async def test_a_close_that_fails_ends_the_turn_with_one_short_log_line(
         self, tmp_path, caplog

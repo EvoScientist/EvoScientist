@@ -309,6 +309,18 @@ class SubAgentWidget(Vertical):
         else:
             summary_w.remove_class("--visible")
 
+    def asks(self, action_requests: list[dict]) -> bool:
+        """Whether an approval's *action_requests* name a call of this box that has no result."""
+        asked = [
+            (request.get("name"), request.get("args") or {})
+            for request in action_requests
+            if isinstance(request, dict)
+        ]
+        return any(
+            tw._status == "running" and (tw._tool_name, tw._tool_args) in asked
+            for tw in self._tool_widgets.values()
+        )
+
     def reopen(self) -> None:
         """Show the sub-agent as working again: the turn went on after a pause
         and the calls a finalize cut short are still open."""

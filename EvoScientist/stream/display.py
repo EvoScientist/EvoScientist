@@ -1428,7 +1428,7 @@ def _prompt_hitl_approval(
         )
     except EOFError:
         # No terminal to read from: nobody declined.
-        console.print("[dim]  Rejected.[/dim]")
+        console.print("[dim]  Left unanswered.[/dim]")
         raise _ApprovalUnanswered from None
     except KeyboardInterrupt:
         console.print("[dim]  Rejected.[/dim]")
@@ -1795,6 +1795,14 @@ def _run_streaming(
             if aclose is not None:
                 await aclose()
 
+    def _stopped_at_approval() -> str:
+        """End a stopped turn that leaves an approval open.
+
+        Such a stop is a refusal, as Ctrl+C on the prompt is: the next message must not land on it.
+        """
+        _close_parked_turn("rejected")
+        return _stopped_response()
+
     def _close_parked_turn(reason: "ParkedCloseReason") -> str:
         """End the turn at a pause that will not be answered.
 
@@ -2021,7 +2029,7 @@ def _run_streaming(
             # HITL: check for pending interrupt and handle approval
             if state.pending_interrupt is not None:
                 if is_stream_cancel_requested(cancel_scope):
-                    return _stopped_response()
+                    return _stopped_at_approval()
                 try:
                     resolution = _resolve_hitl_approval(
                         state.pending_interrupt,
@@ -2043,21 +2051,20 @@ def _run_streaming(
                         ),
                     )
                 except _StreamPromptCancelled:
-                    return _stopped_response()
+                    return _stopped_at_approval()
                 if resolution.budget_exhausted:
                     return _close_parked_turn("round_limit")
                 if resolution.human_prompted:
                     human_rounds += 1
+                # Whatever the answer was, a stopped turn does not resume.
                 if is_stream_cancel_requested(cancel_scope):
-                    return _stopped_response()
+                    return _stopped_at_approval()
                 if resolution.decisions is not None:
                     from ..backends import answer_keeps_grant, build_hitl_resume
 
                     interrupt_id = state.pending_interrupt.get("interrupt_id")
                     state.pending_interrupt = None
                     state.thinking_text = ""  # reset accumulation for fresh round
-                    if is_stream_cancel_requested(cancel_scope):
-                        return _stopped_response()
                     message = build_hitl_resume(interrupt_id, resolution.decisions)
                     turn_granted = turn_granted or resolution.grant_in_force
                     approve_all_carry = answer_keeps_grant(

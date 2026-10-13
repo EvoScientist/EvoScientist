@@ -19,23 +19,20 @@ from EvoScientist.cli.widgets.subagent_widget import SubAgentWidget
 from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeGraphGateway
-from tests.test_tui_approve_all import (
+from tests.fakes import FakeGraphGateway, no_config_rule
+from tests.tui_fakes import (
     APPROVE,
     APPROVING_ONCE,
-    REJECTING,
-    _interrupt,
-    _no_config_rule,
-    _widget_answers,
-)
-from tests.test_tui_banner_position import _capture_app
-from tests.test_tui_declined_close import (
     DONE,
     FINISHED,
+    REJECTING,
     TAIL,
-    _ctrl_c_turn,
-    _parked_agent,
-    _stream,
+    approval_interrupt,
+    capture_app,
+    ctrl_c_turn,
+    parked_agent,
+    scripted_stream,
+    widget_answers,
 )
 
 REJECTED = ("rejected", "■ rejected", False)
@@ -90,7 +87,7 @@ def _two_parked(order: str) -> list[dict]:
     paused when the run pauses: after the approvals, or before them when the
     decoder's two producers are out of step."""
     asked = [*_sub_agent(1), _call(1, "sub-1b"), *_sub_agent(2)]
-    approvals = [_interrupt(1), _interrupt(2)]
+    approvals = [approval_interrupt(1), approval_interrupt(2)]
     ends = [_end(1, paused=True), _end(2, paused=True)]
     if order == "ends first":
         return [*asked, *ends, *approvals, DONE]
@@ -109,7 +106,7 @@ def _rows(app) -> dict[str, tuple[str, str, bool]]:
 
 async def _started(monkeypatch, workspace, stream, agent):
     """The app with a scripted gateway; the caller runs the turn inside it."""
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     gateway = FakeGraphGateway(stream=stream, checkpoint=agent)
     return app, gateway
 
@@ -117,7 +114,9 @@ async def _started(monkeypatch, workspace, stream, agent):
 async def _turn(monkeypatch, workspace, script, agent, *, prepare=None, **kwargs):
     """One turn through the real TUI loop: the rows, the boxes still open and
     the number of stream calls."""
-    app, gateway = await _started(monkeypatch, workspace, _stream(script), agent)
+    app, gateway = await _started(
+        monkeypatch, workspace, scripted_stream(script), agent
+    )
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app._runtime_gateways = RuntimeGateways(
@@ -141,12 +140,12 @@ async def test_a_declined_turn_leaves_sub_agent_calls_rejected(
 ):
     """Two sub-agents each ask and the first approval is declined: neither
     command ran, and both rows say so, as the main agent's own row does."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     prepare = None
     if how == "refused":
 
         def prepare(app):
-            _widget_answers(monkeypatch, app, REJECTING)
+            widget_answers(monkeypatch, app, REJECTING)
 
     else:
         monkeypatch.setattr(tui_mod, "_APPROVAL_WIDGET_TIMEOUT", 0.05)
@@ -154,7 +153,7 @@ async def test_a_declined_turn_leaves_sub_agent_calls_rejected(
         monkeypatch,
         workspace,
         [_two_parked(order), FINISHED],
-        _parked_agent(name="task"),
+        parked_agent(name="task"),
         prepare=prepare,
     )
     assert calls == 1
@@ -167,14 +166,21 @@ async def test_ends_that_are_not_marked_as_paused_read_rejected_after_a_decline(
 ):
     """The server gateway announces every open sub-agent as ended when its
     stream stops, without saying which ones only paused."""
-    _no_config_rule(monkeypatch)
-    script = [*_sub_agent(1), *_sub_agent(2), _interrupt(1), _end(1), _end(2), DONE]
+    no_config_rule(monkeypatch)
+    script = [
+        *_sub_agent(1),
+        *_sub_agent(2),
+        approval_interrupt(1),
+        _end(1),
+        _end(2),
+        DONE,
+    ]
     rows, still_open, _calls = await _turn(
         monkeypatch,
         workspace,
         [script, FINISHED],
-        _parked_agent(name="task"),
-        prepare=lambda app: _widget_answers(monkeypatch, app, REJECTING),
+        parked_agent(name="task"),
+        prepare=lambda app: widget_answers(monkeypatch, app, REJECTING),
     )
     assert rows == {"sub-1": REJECTED, "sub-2": REJECTED}
     assert still_open == []
@@ -184,12 +190,12 @@ async def test_a_turn_stopped_at_the_round_limit_leaves_them_rejected(
     monkeypatch, workspace
 ):
     """The limit ends the turn at the approval itself, before any end event."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     rows, still_open, calls = await _turn(
         monkeypatch,
         workspace,
         [_two_parked("ends last"), FINISHED],
-        _parked_agent(name="task"),
+        parked_agent(name="task"),
         channel_hitl_fn=lambda _reqs, human_budget_exhausted=False: ApprovalOutcome(
             budget_exhausted=True
         ),
@@ -204,13 +210,13 @@ async def test_the_round_cap_after_an_automatic_answer_settles_the_box(
 ):
     """A channel's grant answers by itself and the cap on rounds then ends
     the turn without another stream call: nothing may be left spinning."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     monkeypatch.setattr(budget_mod, "MAX_HITL_TOTAL_ROUNDS", 1)
     rows, still_open, calls = await _turn(
         monkeypatch,
         workspace,
-        [[*_sub_agent(1), _interrupt(1)], FINISHED],
-        _parked_agent(name="task"),
+        [[*_sub_agent(1), approval_interrupt(1)], FINISHED],
+        parked_agent(name="task"),
         channel_hitl_fn=lambda _reqs, human_budget_exhausted=False: ApprovalOutcome(
             decisions=list(APPROVE), session_granted=True, grant_in_force=True
         ),
@@ -222,7 +228,7 @@ async def test_the_round_cap_after_an_automatic_answer_settles_the_box(
 
 async def test_a_stop_after_the_decline_still_reads_rejected(monkeypatch, workspace):
     """The decline is what ended the turn; the stop came later."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
 
     def _prepare(app):
         async def _reject_then_stop(_widget):
@@ -235,8 +241,8 @@ async def test_a_stop_after_the_decline_still_reads_rejected(monkeypatch, worksp
         rows, still_open, _calls = await _turn(
             monkeypatch,
             workspace,
-            [[*_sub_agent(1), _interrupt(1), DONE], FINISHED],
-            _parked_agent(name="task"),
+            [[*_sub_agent(1), approval_interrupt(1), DONE], FINISHED],
+            parked_agent(name="task"),
             prepare=_prepare,
             cancel_scope="tui-stop-declined",
         )
@@ -252,20 +258,20 @@ async def test_a_decline_without_end_events_is_settled_when_the_turn_ends(
 ):
     """One approval and nothing after it: only the decline says the turn
     ended at a pause."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     prepare = None
     if how == "refused":
 
         def prepare(app):
-            _widget_answers(monkeypatch, app, REJECTING)
+            widget_answers(monkeypatch, app, REJECTING)
 
     else:
         monkeypatch.setattr(tui_mod, "_APPROVAL_WIDGET_TIMEOUT", 0.05)
     rows, still_open, _calls = await _turn(
         monkeypatch,
         workspace,
-        [[*_sub_agent(1), _interrupt(1), DONE], FINISHED],
-        _parked_agent(name="task"),
+        [[*_sub_agent(1), approval_interrupt(1), DONE], FINISHED],
+        parked_agent(name="task"),
         prepare=prepare,
     )
     assert rows == {"sub-1": REJECTED}
@@ -281,7 +287,7 @@ async def test_a_pause_that_cannot_be_answered_leaves_them_rejected(
         monkeypatch,
         workspace,
         [[*_sub_agent(1), question, DONE], FINISHED],
-        _parked_agent(name="ask_user", next=("tools",)),
+        parked_agent(name="ask_user", next=("tools",)),
     )
     assert calls == 1
     assert rows == {"sub-1": REJECTED}
@@ -291,11 +297,11 @@ async def test_a_pause_that_cannot_be_answered_leaves_them_rejected(
 async def test_a_sibling_that_finishes_after_the_decline_keeps_its_result(
     monkeypatch, workspace
 ):
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     script = [
         *_sub_agent(1),
         *_sub_agent(2),
-        _interrupt(1),
+        approval_interrupt(1),
         _result(2),
         _end(2),
         _end(1, paused=True),
@@ -305,8 +311,8 @@ async def test_a_sibling_that_finishes_after_the_decline_keeps_its_result(
         monkeypatch,
         workspace,
         [script, FINISHED],
-        _parked_agent(name="task"),
-        prepare=lambda app: _widget_answers(monkeypatch, app, REJECTING),
+        parked_agent(name="task"),
+        prepare=lambda app: widget_answers(monkeypatch, app, REJECTING),
     )
     assert rows["sub-1"] == REJECTED
     assert rows["sub-2"][0] == "success"
@@ -317,12 +323,12 @@ async def test_a_sub_agent_that_ends_with_an_open_call_reads_interrupted(
     monkeypatch, workspace
 ):
     """Nothing was declined: a call left without a result was cut, not refused."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     rows, still_open, _calls = await _turn(
         monkeypatch,
         workspace,
         [[*_sub_agent(1), _end(1), *TAIL]],
-        _parked_agent(name="task"),
+        parked_agent(name="task"),
     )
     assert rows == {"sub-1": INTERRUPTED}
     assert still_open == []
@@ -333,23 +339,345 @@ async def test_a_box_with_nothing_open_is_closed_when_the_round_ends(
 ):
     """No end event came for it (the stream was left at an approval): its
     calls all have their results and the box must not keep spinning."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     rows, still_open, _calls = await _turn(
         monkeypatch,
         workspace,
         [[*_sub_agent(1), _result(1), *TAIL]],
-        _parked_agent(name="task"),
+        parked_agent(name="task"),
     )
     assert rows["sub-1"][0] == "success"
     assert still_open == []
 
 
+async def test_ctrl_c_after_a_decline_marks_only_the_declined_work_rejected(
+    monkeypatch, workspace
+):
+    """One sub-agent's command is declined while another still works and the
+    main agent has a call of its own running; then Ctrl+C. What the decline
+    stopped reads rejected, what Ctrl+C cut reads interrupted."""
+    no_config_rule(monkeypatch)
+    agent = parked_agent(name="task")
+    declined: list[int] = []
+
+    def _prepare(app):
+        async def _reject(_widget):
+            declined.append(1)
+            return REJECTING
+
+        monkeypatch.setattr(app, "_wait_for_approval", _reject)
+
+    own_call = {"type": "tool_call", "id": "own-1", "name": "read_file", "args": {}}
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [
+            [
+                *_sub_agent(1),
+                *_sub_agent(2),
+                own_call,
+                _end(1, paused=True),
+                approval_interrupt(1),
+            ],
+            FINISHED,
+        ],
+        agent,
+        hold=asyncio.Event(),  # never set: the second sub-agent is still working
+        when=lambda _app: bool(declined),
+        prepare=_prepare,
+    )
+    assert {call: status for call, (status, _shown) in turn.tools.items()} == {
+        "sub-1": "rejected",
+        "sub-2": "interrupted",
+        "own-1": "interrupted",
+    }
+    assert agent.next == ()
+
+
+@pytest.mark.parametrize("order", ["end before approval", "approval before end"])
+async def test_ctrl_c_on_the_widget_marks_only_the_asking_box_rejected(
+    monkeypatch, workspace, order
+):
+    """Ctrl+C on the open widget refuses and stops in one step. The asking
+    sub-agent's paused end usually comes after its approval and is then never
+    read: the box is known by the call the approval asks about."""
+    no_config_rule(monkeypatch)
+    agent = parked_agent(name="task")
+    asked = [approval_interrupt(1), _end(1, paused=True)]
+    if order == "end before approval":
+        asked.reverse()
+    own_call = {"type": "tool_call", "id": "own-1", "name": "read_file", "args": {}}
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [[*_sub_agent(1), *_sub_agent(2), own_call, *asked], FINISHED],
+        agent,
+        hold=asyncio.Event(),  # never set: the second sub-agent is still working
+        when=lambda app: app._approval_future is not None,
+    )
+    assert {call: status for call, (status, _shown) in turn.tools.items()} == {
+        "sub-1": "rejected",
+        "sub-2": "interrupted",
+        "own-1": "interrupted",
+    }
+    assert agent.next == ()
+
+
+@pytest.mark.parametrize(
+    ("other", "reads"),
+    [
+        ([_result(2, "sub-2a")], "success"),
+        ([], "interrupted"),
+    ],
+    ids=["finished with the same command", "another tool with the same arguments"],
+)
+async def test_only_an_open_call_of_the_asked_tool_marks_its_box(
+    monkeypatch, workspace, other, reads
+):
+    """The second sub-agent works on. A call of its own that already has its
+    result, or that is another tool's, is not the one the approval names."""
+    no_config_rule(monkeypatch)
+    look_alike = {**_call(2, "sub-2a"), "args": {"command": "echo 1"}}
+    if not other:
+        look_alike["name"] = "run_in_background"
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [
+            [
+                *_sub_agent(1),
+                _sub_agent(2)[0],
+                look_alike,
+                *other,
+                _call(2),
+                approval_interrupt(1),
+            ],
+            FINISHED,
+        ],
+        parked_agent(name="task"),
+        hold=asyncio.Event(),  # never set: the second sub-agent is still working
+        when=lambda app: app._approval_future is not None,
+    )
+    assert {call: status for call, (status, _shown) in turn.tools.items()} == {
+        "sub-1": "rejected",
+        "sub-2a": reads,
+        "sub-2": "interrupted",
+    }
+
+
+async def test_two_boxes_asking_for_the_same_command_are_both_at_a_pause(
+    monkeypatch, workspace
+):
+    no_config_rule(monkeypatch)
+    same = {**_call(2), "args": {"command": "echo 1"}}
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [[*_sub_agent(1), _sub_agent(2)[0], same, approval_interrupt(1)], FINISHED],
+        parked_agent(name="task"),
+        hold=asyncio.Event(),
+        when=lambda app: app._approval_future is not None,
+    )
+    assert {call: status for call, (status, _shown) in turn.tools.items()} == {
+        "sub-1": "rejected",
+        "sub-2": "rejected",
+    }
+
+
+async def test_an_asker_nobody_was_shown_is_known_by_its_paused_end(
+    monkeypatch, workspace
+):
+    """Two sub-agents ask; both paused ends are read before the first
+    approval, and Ctrl+C lands on it. The second asker's approval was never
+    read, so only its paused end says it is at a pause."""
+    no_config_rule(monkeypatch)
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [
+            [
+                *_sub_agent(1),
+                *_sub_agent(2),
+                _end(1, paused=True),
+                _end(2, paused=True),
+                approval_interrupt(1),
+            ],
+            FINISHED,
+        ],
+        parked_agent(name="task"),
+        hold=asyncio.Event(),
+        when=lambda app: app._approval_future is not None,
+    )
+    assert {call: status for call, (status, _shown) in turn.tools.items()} == {
+        "sub-1": "rejected",
+        "sub-2": "rejected",
+    }
+
+
+async def test_an_asker_after_the_decline_is_at_a_pause_too(monkeypatch, workspace):
+    """The first approval is declined; the second sub-agent's approval comes
+    after it and is not shown, and no paused end follows. Ctrl+C then cuts
+    the main agent's own call, not the second asker."""
+    no_config_rule(monkeypatch)
+    own_call = {"type": "tool_call", "id": "own-1", "name": "read_file", "args": {}}
+
+    def _own_call_is_up(app):
+        return any(w._tool_id == "own-1" for w in app.query(ToolCallWidget))
+
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [
+            [
+                *_sub_agent(1),
+                *_sub_agent(2),
+                approval_interrupt(1),
+                approval_interrupt(2),
+                own_call,
+            ],
+            FINISHED,
+        ],
+        parked_agent(name="task"),
+        hold=asyncio.Event(),
+        when=_own_call_is_up,
+        prepare=lambda app: widget_answers(monkeypatch, app, REJECTING),
+    )
+    assert {call: status for call, (status, _shown) in turn.tools.items()} == {
+        "sub-1": "rejected",
+        "sub-2": "rejected",
+        "own-1": "interrupted",
+    }
+
+
+@pytest.mark.parametrize("marked_by", ["the approval", "a paused end"])
+async def test_an_asker_of_an_earlier_round_does_not_count_in_a_later_one(
+    monkeypatch, workspace, marked_by
+):
+    """A sub-agent's command was approved; in the next round the main agent
+    asks about a command of its own and Ctrl+C lands on that approval. Nothing
+    ran beside it, so the main agent's call reads rejected."""
+    no_config_rule(monkeypatch)
+    own_call = {
+        "type": "tool_call",
+        "id": "own-1",
+        "name": "execute",
+        "args": {"command": "echo root"},
+    }
+    own_approval = {
+        "type": "interrupt",
+        "interrupt_id": "approval-root",
+        "action_requests": [{"name": "execute", "args": {"command": "echo root"}}],
+    }
+    first = [*_sub_agent(1), approval_interrupt(1)]
+    if marked_by == "a paused end":
+        first.insert(2, _end(1, paused=True))
+
+    def _prepare(app):
+        wait, answered = app._wait_for_approval, []
+
+        async def _approve_the_first(widget):
+            if not answered:
+                answered.append(1)
+                return APPROVING_ONCE
+            return await wait(widget)
+
+        monkeypatch.setattr(app, "_wait_for_approval", _approve_the_first)
+
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [first, [own_call, own_approval], FINISHED],
+        parked_agent(),
+        hold=None,
+        when=lambda app: app._approval_future is not None,
+        prepare=_prepare,
+    )
+    assert turn.tools["own-1"][0] == "rejected"
+
+
+async def test_a_plain_decline_beside_a_paused_box_rejects_both(monkeypatch, workspace):
+    """No stop: the stream ended with the second box still open, and the
+    decline is what ended the turn for both."""
+    no_config_rule(monkeypatch)
+    rows, still_open, _calls = await _turn(
+        monkeypatch,
+        workspace,
+        [
+            [
+                *_sub_agent(1),
+                *_sub_agent(2),
+                _end(1, paused=True),
+                approval_interrupt(1),
+                DONE,
+            ],
+            FINISHED,
+        ],
+        parked_agent(name="task"),
+        prepare=lambda app: widget_answers(monkeypatch, app, REJECTING),
+    )
+    assert rows == {"sub-1": REJECTED, "sub-2": REJECTED}
+    assert still_open == []
+
+
+async def test_a_sub_agent_that_went_on_after_its_approval_is_cut_not_declined(
+    monkeypatch, workspace
+):
+    """The first sub-agent's command was approved and it works on; the second
+    one's is declined, then Ctrl+C. Only the second was stopped by the decline."""
+    no_config_rule(monkeypatch)
+    agent = parked_agent(name="task")
+    declined: list[int] = []
+    calls = 0
+
+    async def _two_rounds(_request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            for event in (*_sub_agent(1), _end(1, paused=True), approval_interrupt(1)):
+                yield event
+            return
+        for event in (
+            *_sub_agent(1),
+            *_sub_agent(2),
+            _end(2, paused=True),
+            approval_interrupt(2),
+        ):
+            yield event
+        await asyncio.Event().wait()  # the first sub-agent is still working
+
+    def _prepare(app):
+        answers = iter([APPROVING_ONCE, REJECTING])
+
+        async def _answer(_widget):
+            answer = next(answers)
+            if answer is REJECTING:
+                declined.append(1)
+            return answer
+
+        monkeypatch.setattr(app, "_wait_for_approval", _answer)
+
+    turn = await ctrl_c_turn(
+        monkeypatch,
+        workspace,
+        [],
+        agent,
+        hold=None,
+        when=lambda _app: bool(declined),
+        prepare=_prepare,
+        stream=_two_rounds,
+    )
+    assert {call: status for call, (status, _shown) in turn.tools.items()} == {
+        "sub-1": "interrupted",
+        "sub-2": "rejected",
+    }
+
+
 async def test_a_stopped_turn_leaves_sub_agent_calls_interrupted(
     monkeypatch, workspace
 ):
-    _no_config_rule(monkeypatch)
-    agent = _parked_agent(name="task")
-    turn = await _ctrl_c_turn(
+    no_config_rule(monkeypatch)
+    agent = parked_agent(name="task")
+    turn = await ctrl_c_turn(
         monkeypatch,
         workspace,
         [[*_sub_agent(1)], FINISHED],
@@ -406,7 +734,7 @@ class _Running:
             self.monkeypatch,
             self.workspace,
             _stream_with_waits(self.script, self.gates),
-            _parked_agent(name="task"),
+            parked_agent(name="task"),
         )
         self._test = self.app.run_test(size=(80, 24))
         self.pilot = await self._test.__aenter__()
@@ -417,7 +745,7 @@ class _Running:
         self.monkeypatch.setattr(
             self.app, "_await_agent_ready", AsyncMock(return_value=MagicMock())
         )
-        _widget_answers(self.monkeypatch, self.app, *self.answers)
+        widget_answers(self.monkeypatch, self.app, *self.answers)
         self.turn = asyncio.create_task(self.app._stream_with_widgets("hello"))
         return self
 
@@ -454,10 +782,10 @@ async def test_an_approved_sub_agent_command_reads_running_until_its_result(
 ):
     """The turn goes on after the approval: the resumed round announces the
     sub-agent again, and its row runs while the command does."""
-    _no_config_rule(monkeypatch)
-    asked = [*_sub_agent(1), _interrupt(1)]
+    no_config_rule(monkeypatch)
+    asked = [*_sub_agent(1), approval_interrupt(1)]
     if order == "end first":
-        asked = [*_sub_agent(1), _end(1, paused=True), _interrupt(1)]
+        asked = [*_sub_agent(1), _end(1, paused=True), approval_interrupt(1)]
     script = [asked, [*_sub_agent(1), RUNNING, _result(1), _end(1), *TAIL]]
     gate = asyncio.Event()
     async with _Running(
@@ -475,8 +803,8 @@ async def test_an_approved_sub_agent_command_reads_running_until_its_result(
 
 
 async def test_re_opening_a_box_leaves_its_finished_calls_alone(monkeypatch, workspace):
-    _no_config_rule(monkeypatch)
-    asked = [*_sub_agent(1), _result(1), _call(1, "second"), _interrupt(1)]
+    no_config_rule(monkeypatch)
+    asked = [*_sub_agent(1), _result(1), _call(1, "second"), approval_interrupt(1)]
     script = [asked, [*_sub_agent(1), _call(1, "second"), RUNNING, *TAIL]]
     gate = asyncio.Event()
     async with _Running(
@@ -579,10 +907,10 @@ async def test_a_sub_agent_that_is_not_announced_again_does_not_keep_spinning(
     """Both sub-agents ask and both are approved. The first command's last
     events arrive while the second approval is open and are dropped with the
     rest of that stream call, and the next call says nothing about it."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     script = [
-        [*_sub_agent(1), *_sub_agent(2), _interrupt(1)],
-        [*_sub_agent(1), *_sub_agent(2), _interrupt(2), _result(1), _end(1)],
+        [*_sub_agent(1), *_sub_agent(2), approval_interrupt(1)],
+        [*_sub_agent(1), *_sub_agent(2), approval_interrupt(2), _result(1), _end(1)],
         [*_sub_agent(2), RUNNING, _result(2), _end(2), *TAIL],
     ]
     gate = asyncio.Event()
@@ -604,12 +932,12 @@ async def test_a_stop_right_after_the_approval_still_settles_the_box(
 ):
     """A stop requested through the flag ends the turn before the next stream
     call, so nothing would re-open or close the box afterwards."""
-    _no_config_rule(monkeypatch)
+    no_config_rule(monkeypatch)
     app, gateway = await _started(
         monkeypatch,
         workspace,
-        _stream([[*_sub_agent(1), _interrupt(1)], FINISHED]),
-        _parked_agent(name="task"),
+        scripted_stream([[*_sub_agent(1), approval_interrupt(1)], FINISHED]),
+        parked_agent(name="task"),
     )
 
     async def _approve_then_stop(_widget):
@@ -631,7 +959,8 @@ async def test_a_stop_right_after_the_approval_still_settles_the_box(
                 timeout=10,
             )
             assert len(gateway.requests) == 1
-            assert _rows(app) == {"sub-1": INTERRUPTED}
+            # The stop refused the approval it left open: nothing ran.
+            assert _rows(app) == {"sub-1": REJECTED}
             assert not app.query_one(SubAgentWidget)._is_active
     finally:
         display_mod.discard_stream_cancel("tui-stop-box")

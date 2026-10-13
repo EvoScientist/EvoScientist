@@ -358,7 +358,9 @@ async def test_close_parked_checkpoint_through_composite():
     execute = FakeGraphGateway(checkpoint=agent)
     comp = CompositeGraphGateway(read=read, execute=execute)
 
-    await close_parked_checkpoint(comp, GraphTarget(local_graph=None), UUID)
+    await close_parked_checkpoint(
+        comp, GraphTarget(local_graph=None), UUID, reason="round_limit"
+    )
 
     assert not read.called("get_state_snapshot")
     assert not read.called("update_state_values")

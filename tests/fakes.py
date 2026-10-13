@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -822,3 +823,67 @@ def deepseek_tool_call_response(name: str, args: dict[str, Any]) -> dict[str, An
         ],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
     }
+
+
+# -- a closed approval or question ----------------------------------------------
+
+
+def close_result(text: str) -> tuple[str, str, bool]:
+    """What a closed call's result says: what happened, why, and the retry ban.
+
+    ``asked``: the user was asked and the call did not run. ``not executed``:
+    nobody was asked. ``did not finish``: the call had started. The reason is
+    a ``ParkedCloseReason``. Read off the sentences in ``backends``, so a test
+    states the facts without repeating the wording.
+    """
+    from EvoScientist import backends
+
+    banned = backends._NO_RETRY in text
+    for reason, template in backends._ASKED_RESULT.items():
+        # A name has no backtick and an id no blank, so one reason's sentence
+        # cannot swallow the extra clause of another.
+        pattern = re.escape(template)
+        pattern = pattern.replace(re.escape("{name}"), "[^`]+")
+        pattern = pattern.replace(re.escape("{call_id}"), r"\S+")
+        if re.fullmatch(pattern, text):
+            return "asked", reason, banned
+    if "did not finish" in text:
+        what = "did not finish"
+    elif "was not executed" in text:
+        what = "not executed"
+    else:
+        return "", "", banned
+    clauses = backends._TURN_ENDED
+    reason = next((r for r, clause in clauses.items() if clause in text), "")
+    return what, reason, banned
+
+
+# -- an approval in the Rich loop ------------------------------------------------
+
+
+def interrupt_event(n: int) -> dict:
+    """The stream event for the *n*-th parked approval of a turn."""
+    return {
+        "type": "interrupt",
+        "interrupt_id": f"i{n}",
+        "action_requests": [{"name": "execute", "args": {"command": f"echo step-{n}"}}],
+    }
+
+
+def attended_config(monkeypatch) -> None:
+    """A session in which no config rule answers an approval."""
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config",
+        lambda: SimpleNamespace(
+            auto_approve=False, dangerous_mode=False, shell_allow_list=""
+        ),
+    )
+
+
+def no_config_rule(monkeypatch) -> None:
+    """The config policy leaves every approval to a human."""
+    import EvoScientist.channels.interaction as interaction_mod
+
+    monkeypatch.setattr(
+        interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
+    )

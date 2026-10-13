@@ -11,6 +11,10 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from EvoScientist.backends import (
+    _ASKED_RESULT,
+    _MAY_HAVE_RUN,
+    _NO_RETRY,
+    _TURN_ENDED,
     HITL_ROUND_LIMIT_REJECT_MESSAGE,
     abandoned_tool_messages,
     close_parked_checkpoint,
@@ -25,15 +29,11 @@ from tests.fakes import (
     FakeGraphGateway,
     FakeLangGraphClient,
     FakeLangGraphThreadsClient,
+    close_result,
 )
 
 BEFORE_TOOLS = ("HumanInTheLoopMiddleware.after_model",)
-NO_RETRY = "Do not retry this tool call unless the user explicitly requests it."
-CAUTION = (
-    "Anything it had already done may have taken effect or may still be "
-    "finishing; check the current state instead of re-running it unless the "
-    "user asks."
-)
+REASONS = ["rejected", "unanswered", "round_limit"]
 
 
 def _call(call_id: str, name: str, **args) -> dict:
@@ -60,52 +60,87 @@ def _texts(patch: list) -> dict[str, str]:
     return {message.tool_call_id: message.content for message in patch}
 
 
+def _results(texts: dict[str, str]) -> dict[str, tuple[str, str, bool]]:
+    """Per call: what its result says, as facts (``close_result``)."""
+    return {call_id: close_result(text) for call_id, text in texts.items()}
+
+
+# -- what the sentences tell the model -----------------------------------------
+#
+# ``close_result`` reads a result against the constants in ``backends``, so it
+# would follow them wherever they went. These pin what the constants say.
+
+
+def test_the_retry_ban_forbids_a_retry():
+    assert "do not retry" in _NO_RETRY.lower()
+    assert "unless the user" in _NO_RETRY
+
+
+@pytest.mark.parametrize("reason", REASONS)
+def test_a_call_the_user_was_asked_about_is_reported_as_not_executed(reason):
+    text = _ASKED_RESULT[reason].format(name="execute", call_id="c1")
+    assert "The tool was not executed." in text
+    assert text.endswith(_NO_RETRY)
+
+
+def test_each_reason_is_named_in_its_own_words():
+    for sentences in (_ASKED_RESULT, _TURN_ENDED):
+        assert "rejected" in sentences["rejected"]
+        assert "unanswered" in sentences["unanswered"]
+        assert "rejected" not in sentences["unanswered"]
+        assert HITL_ROUND_LIMIT_REJECT_MESSAGE in sentences["round_limit"]
+    assert "limit" in HITL_ROUND_LIMIT_REJECT_MESSAGE
+
+
+@pytest.mark.parametrize("reason", REASONS)
+def test_a_call_that_had_started_is_told_how_the_turn_ended(reason):
+    """A sibling that Ctrl+C cut did not stop because of the rejection; what
+    is true for every started call is how the turn ended."""
+    started = AIMessage(
+        content="", tool_calls=[{"name": "task", "args": {}, "id": "t1"}]
+    )
+    (result,) = abandoned_tool_messages([started], reason=reason)
+    assert f"did not finish ({_TURN_ENDED[reason]})." in result.content
+    assert result.content.endswith(_MAY_HAVE_RUN)
+
+
+def test_a_call_that_had_started_comes_with_a_caution():
+    assert "may have taken effect" in _MAY_HAVE_RUN
+    assert "check the current state" in _MAY_HAVE_RUN
+    assert "instead of re-running it" in _MAY_HAVE_RUN
+
+
 # -- the sentence per call ---------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("reason", "expected"),
-    [
-        (
-            "rejected",
-            "User rejected the tool call for `execute` with id c1. The tool was "
-            f"not executed. {NO_RETRY}",
-        ),
-        (
-            "unanswered",
-            "The approval request for the tool call `execute` with id c1 was "
-            f"left unanswered. The tool was not executed. {NO_RETRY}",
-        ),
-        (
-            "round_limit",
-            "User rejected the tool call for `execute` with id c1 (approval "
-            f"round limit reached). The tool was not executed. {NO_RETRY}",
-        ),
-    ],
-)
-def test_a_gated_call_parked_before_tools_was_asked_and_not_executed(reason, expected):
+@pytest.mark.parametrize("reason", REASONS)
+def test_a_gated_call_parked_before_tools_was_asked_and_not_executed(reason):
     patch = abandoned_tool_messages(
         [_ai(_call("c1", "execute", command="ls"))],
         reason=reason,
         parked_before_tools=True,
     )
-    assert [message.content for message in patch] == [expected]
-    assert patch[0].status == "error"
-    assert patch[0].name == "execute"
+    (message,) = patch
+    assert close_result(message.content) == ("asked", reason, True)
+    assert "`execute` with id c1" in message.content
+    assert message.status == "error"
+    assert message.name == "execute"
 
 
-@pytest.mark.parametrize(
-    ("reason", "clause"),
-    [
-        ("rejected", "the turn ended when the user rejected an approval request"),
-        (
-            "unanswered",
-            "the turn ended with an approval request or question left unanswered",
-        ),
-        ("round_limit", HITL_ROUND_LIMIT_REJECT_MESSAGE),
-    ],
-)
-def test_calls_the_user_was_not_asked_about_get_no_retry_ban(reason, clause):
+def test_each_reason_has_its_own_sentence_for_a_call_the_user_was_asked_about():
+    texts = {
+        reason: abandoned_tool_messages(
+            [_ai(_call("c1", "execute", command="ls"))],
+            reason=reason,
+            parked_before_tools=True,
+        )[0].content
+        for reason in REASONS
+    }
+    assert len(set(texts.values())) == len(REASONS)
+
+
+@pytest.mark.parametrize("reason", REASONS)
+def test_calls_the_user_was_not_asked_about_get_no_retry_ban(reason):
     """An ungated sibling, a question that was never shown and a malformed call."""
     patch = abandoned_tool_messages(
         [
@@ -120,32 +155,30 @@ def test_calls_the_user_was_not_asked_about_get_no_retry_ban(reason, clause):
         parked_before_tools=True,
     )
     texts = _texts(patch)
+    assert _results(texts) == {
+        "c1": ("asked", reason, True),
+        "w1": ("not executed", reason, False),
+        "q1": ("not executed", reason, False),
+        "bad-1": ("not executed", reason, False),
+    }
     for call_id, name in (
         ("w1", "write_file"),
         ("q1", "ask_user"),
         ("bad-1", "execute"),
     ):
-        assert texts[call_id] == (
-            f"The tool call for `{name}` with id {call_id} was not executed: {clause}."
-        )
-    assert NO_RETRY in texts["c1"]
+        assert f"`{name}` with id {call_id}" in texts[call_id]
 
 
-@pytest.mark.parametrize(
-    ("reason", "clause"),
-    [
-        ("rejected", "the user rejected an approval request"),
-        ("unanswered", "an approval request or question was left unanswered"),
-        ("round_limit", HITL_ROUND_LIMIT_REJECT_MESSAGE),
-    ],
-)
-def test_a_call_that_had_started_did_not_finish(reason, clause):
+@pytest.mark.parametrize("reason", REASONS)
+def test_a_call_that_had_started_did_not_finish(reason):
     patch = abandoned_tool_messages(
         [_ai(_call("t1", "task", description="work"))], reason=reason
     )
-    assert _texts(patch) == {
-        "t1": f"The tool call for `task` with id t1 did not finish ({clause}). {CAUTION}"
-    }
+    (message,) = patch
+    assert close_result(message.content) == ("did not finish", reason, False)
+    assert "`task` with id t1" in message.content
+    # It may have run in part, and the model is told to look before redoing it.
+    assert _MAY_HAVE_RUN in message.content
 
 
 def test_an_invalid_call_beside_a_running_question_was_not_executed():
@@ -154,12 +187,10 @@ def test_an_invalid_call_beside_a_running_question_was_not_executed():
         [_ai(_call("q1", "ask_user", questions=[]), invalid=(_invalid("bad-1"),))],
         reason="unanswered",
     )
-    texts = _texts(patch)
-    assert "did not finish" in texts["q1"]
-    assert texts["bad-1"] == (
-        "The tool call for `execute` with id bad-1 was not executed: the turn "
-        "ended with an approval request or question left unanswered."
-    )
+    assert _results(_texts(patch)) == {
+        "q1": ("did not finish", "unanswered", False),
+        "bad-1": ("not executed", "unanswered", False),
+    }
 
 
 def test_a_call_id_answered_in_an_earlier_turn_is_still_closed():
@@ -182,8 +213,7 @@ def test_a_gated_name_parked_in_tools_is_not_called_unexecuted():
     patch = abandoned_tool_messages(
         [_ai(_call("c1", "execute", command="ls"))], reason="rejected"
     )
-    assert "did not finish" in patch[0].content
-    assert "was not executed" not in patch[0].content
+    assert close_result(patch[0].content) == ("did not finish", "rejected", False)
 
 
 # -- through the close ---------------------------------------------------------
@@ -215,12 +245,10 @@ async def test_parked_before_tools_separates_asked_from_not_asked():
         },
     )
     await _close(agent)
-    written = _written(agent)
-    assert written["c1"].startswith("User rejected the tool call for `execute`")
-    assert written["w1"] == (
-        "The tool call for `write_file` with id w1 was not executed: the turn "
-        "ended when the user rejected an approval request."
-    )
+    assert _results(_written(agent)) == {
+        "c1": ("asked", "rejected", True),
+        "w1": ("not executed", "rejected", False),
+    }
 
 
 @pytest.mark.parametrize(
@@ -239,10 +267,7 @@ async def test_any_other_position_gets_the_cautious_sentence(position):
         values={"messages": [_ai(_call("t1", "task", description="work"))]},
     )
     await _close(agent, "unanswered")
-    assert _written(agent) == {
-        "t1": "The tool call for `task` with id t1 did not finish (an approval "
-        f"request or question was left unanswered). {CAUTION}"
-    }
+    assert _results(_written(agent)) == {"t1": ("did not finish", "unanswered", False)}
 
 
 async def test_a_pause_without_a_position_gets_the_cautious_sentence():
@@ -251,24 +276,17 @@ async def test_a_pause_without_a_position_gets_the_cautious_sentence():
     )
     agent.interrupts = (object(),)
     await _close(agent, "rejected")
-    assert _written(agent) == {
-        "c1": "The tool call for `execute` with id c1 did not finish (the user "
-        f"rejected an approval request). {CAUTION}"
-    }
+    assert _results(_written(agent)) == {"c1": ("did not finish", "rejected", False)}
 
 
-async def test_the_default_reason_is_the_round_limit():
-    agent = FakeCheckpointAgent(
-        next=BEFORE_TOOLS,
-        values={"messages": [_ai(_call("c1", "execute", command="ls"))]},
-    )
-    await close_parked_checkpoint(
-        FakeGraphGateway(checkpoint=agent), GraphTarget(), "t-limit"
-    )
-    assert _written(agent) == {
-        "c1": "User rejected the tool call for `execute` with id c1 (approval "
-        f"round limit reached). The tool was not executed. {NO_RETRY}"
-    }
+def test_every_reason_has_its_sentences():
+    from typing import get_args
+
+    from EvoScientist.backends import _ASKED_RESULT, _TURN_ENDED, ParkedCloseReason
+
+    reasons = set(get_args(ParkedCloseReason))
+    assert set(_ASKED_RESULT) == reasons
+    assert set(_TURN_ENDED) == reasons
 
 
 class _ParkedServerThreads(FakeLangGraphThreadsClient):
@@ -343,12 +361,10 @@ async def test_the_close_through_the_server_gateway_classifies_like_the_local_on
         BEFORE_TOOLS[0],
         "__end__",
     ]
-    written = _texts(threads.state_updates[1][1]["messages"])
-    assert written["c1"].startswith("User rejected the tool call for `execute`")
-    assert written["w1"] == (
-        "The tool call for `write_file` with id w1 was not executed: the turn "
-        "ended when the user rejected an approval request."
-    )
+    assert _results(_texts(threads.state_updates[1][1]["messages"])) == {
+        "c1": ("asked", "rejected", True),
+        "w1": ("not executed", "rejected", False),
+    }
     assert threads.states["t-srv"]["next"] == []
 
 

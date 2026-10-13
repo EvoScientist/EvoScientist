@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -13,17 +12,11 @@ pytest.importorskip("textual")
 from EvoScientist.channels.interaction import ApprovalOutcome
 from EvoScientist.gateway import RuntimeGateways
 from tests.fakes import FakeGraphGateway
-from tests.test_tui_banner_position import _capture_app
-
-APPROVE = [{"type": "approve"}]
-
-
-def _interrupt(n: int) -> dict:
-    return {
-        "type": "interrupt",
-        "interrupt_id": f"approval-{n}",
-        "action_requests": [{"name": "execute", "args": {"command": f"echo {n}"}}],
-    }
+from tests.fakes import no_config_rule as _no_config_rule
+from tests.tui_fakes import APPROVE, APPROVING_ONCE, ASK, GRANTING
+from tests.tui_fakes import approval_interrupt as _interrupt
+from tests.tui_fakes import capture_app as _capture_app
+from tests.tui_fakes import widget_answers as _widget_answers
 
 
 def _stream(script: list[list[dict]]):
@@ -70,23 +63,6 @@ async def _turn(monkeypatch, workspace, script, *, prepare=None, **kwargs):
 def _keyed(extras: list[dict]) -> list[bool]:
     """Per call: does it carry the session grant? (Other extras ride along.)"""
     return [extra.get("hitl_approve_all") is True for extra in extras]
-
-
-def _no_config_rule(monkeypatch):
-    import EvoScientist.channels.interaction as interaction_mod
-
-    monkeypatch.setattr(
-        interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
-    )
-
-
-def _widget_answers(monkeypatch, app, *answers):
-    monkeypatch.setattr(app, "_wait_for_approval", AsyncMock(side_effect=list(answers)))
-
-
-GRANTING = SimpleNamespace(decisions=APPROVE, auto_approve_session=True)
-APPROVING_ONCE = SimpleNamespace(decisions=APPROVE, auto_approve_session=False)
-REJECTING = SimpleNamespace(decisions=None, auto_approve_session=False)
 
 
 async def test_a_turn_under_the_grant_is_keyed_from_its_first_call(
@@ -185,11 +161,6 @@ async def test_other_extras_ride_on_every_call(monkeypatch, workspace):
     assert all("rubric_run" in extra for extra in extras)
 
 
-ASK = {
-    "type": "ask_user",
-    "interrupt_id": "question-1",
-    "questions": [{"question": "Continue?"}],
-}
 ANSWER = {"answers": ["yes"], "status": "answered"}
 
 
