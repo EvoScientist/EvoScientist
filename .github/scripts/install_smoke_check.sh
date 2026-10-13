@@ -135,8 +135,8 @@ online() {
   echo "installed versions match constraints.txt"
 
   out=$("$EVOSCI" setup --json </dev/null) || fail "The second EvoSci setup failed: $out"
-  if echo "$out" | grep -q '"Downloading '; then
-    fail "The second EvoSci setup downloaded something: $out"
+  if echo "$out" | grep -Eq '"(Downloading |Installing |Creating the virtual)'; then
+    fail "The second EvoSci setup downloaded or installed something: $out"
   fi
   echo "second setup downloaded nothing"
 

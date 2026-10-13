@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: install-smoke-${{ github.event.pull_request.number || github.ref }}
+  group: install-smoke-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -67,6 +67,7 @@ jobs:
         id: wheel
         run: |
           uv build --wheel -o dist
+          # Same arguments as EXPORT_ARGS in .github/scripts/release_guard.sh.
           uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate --quiet -o dist/constraints.txt
           wheel=$(ls dist/*.whl)
           version=$(basename "$wheel" | sed -E 's/^evoscientist-([^-]+)-.*/\1/')
@@ -209,6 +210,7 @@ jobs:
           if ($env:MODE -eq 'pr') { $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt" }
           Set-Location $env:RUNNER_TEMP
           & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode online
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       # Outbound firewall rules for the installed Python and Node executables;
       # Windows Firewall does not filter loopback traffic.
@@ -219,8 +221,12 @@ jobs:
           $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
           Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
           Set-Location $env:RUNNER_TEMP
+          # `exit` in a script called with & only sets $LASTEXITCODE: stop on
+          # a failed block check before the offline run overwrites it.
           & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode block
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode offline
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Upload the EvoScientist logs
         if: failure()

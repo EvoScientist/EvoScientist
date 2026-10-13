@@ -135,7 +135,7 @@ function Test-Online {
 
     $out = Invoke-Native $EvoSci @('setup', '--json')
     if ($NativeExitCode -ne 0) { Fail "The second EvoSci setup failed: $out" }
-    if ($out -match '"Downloading ') { Fail "The second EvoSci setup downloaded something: $out" }
+    if ($out -match '"(Downloading |Installing |Creating the virtual)') { Fail "The second EvoSci setup downloaded or installed something: $out" }
     Write-Host 'second setup downloaded nothing'
 
     # The oldest and the newest WebUI release in the core's range, through the
