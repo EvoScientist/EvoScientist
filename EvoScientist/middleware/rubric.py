@@ -32,34 +32,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Upstream's two records for a grader attempt that raised.
-_GRADER_FAILURE_RECORDS = ("grader failed", "coverage retry raised")
-
-
-class _GraderFailureOnOneLine(logging.Filter):
-    """Replace the traceback of upstream's grader-failure records with the reason.
-
-    A grader that runs out of calls or hits a provider error is an expected
-    outcome and the verdict already carries the reason to the user. The
-    traceback is kept when the logger is at DEBUG.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not record.exc_info or _UPSTREAM_LOGGER.isEnabledFor(logging.DEBUG):
-            return True
-        message = record.getMessage()
-        if any(marker in message for marker in _GRADER_FAILURE_RECORDS):
-            exc = record.exc_info[1]
-            record.msg = f"{message}: {type(exc).__name__}: {exc}"
-            record.args = None
-            record.exc_info = None
-            record.exc_text = None
-        return True
-
-
-_UPSTREAM_LOGGER = logging.getLogger("deepagents.middleware.rubric")
-_UPSTREAM_LOGGER.addFilter(_GraderFailureOnOneLine())
-
 # Read-only slice of the filesystem tools handed to the grader. A rubric names
 # its deliverables, so reading them is enough; ``grep``/``glob`` invited
 # whole-workspace scans (15s timeouts per call on large workspaces).
@@ -188,7 +160,13 @@ class EvoRubricMiddleware(RubricMiddleware):
         """Whether this run must not be graded, and the update that drops its rubric."""
         if not self._require_run_marker or _run_carries_rubric_marker():
             return False, None
-        return True, ({"rubric": None} if state.get("rubric") else None)
+        if not state.get("rubric"):
+            return True, None
+        logger.debug(
+            "rubric: dropped from a run whose config carries no rubric_run "
+            "marker; the run is not graded"
+        )
+        return True, {"rubric": None}
 
     def before_agent(self, state, runtime):
         ungraded, update = self._ungraded_run_update(state)
@@ -331,7 +309,8 @@ def create_rubric_middleware(
 
     Must be mounted LAST: ``after_agent`` hooks run in reverse list order, so
     the grader sees the finished run first and a ``needs_revision`` verdict
-    jumps back to the model before any other ``after_agent`` hook fires. The
+    jumps back to the model before EvoScientist's other ``after_agent`` hooks
+    fire (a harness profile's tail hooks still run first). The
     grader reads the same backend because the deliverables are files the
     transcript alone cannot prove exist.
     """

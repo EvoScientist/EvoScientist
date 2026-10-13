@@ -94,6 +94,18 @@ class TestStreamEventEmitter:
         ev = StreamEventEmitter.done()
         assert ev.data["response"] == ""
 
+    def test_done_carries_the_last_pass_only_for_a_graded_run(self):
+        assert "last_pass_response" not in StreamEventEmitter.done("a").data
+        graded = StreamEventEmitter.done("a\n\nb", last_pass_response="b").data
+        assert graded["last_pass_response"] == "b"
+        assert graded["response"] == "a\n\nb"
+        assert (
+            StreamEventEmitter.done("a", last_pass_response="").data[
+                "last_pass_response"
+            ]
+            == ""
+        )
+
     def test_error(self):
         ev = StreamEventEmitter.error("something broke")
         assert ev.type == "error"

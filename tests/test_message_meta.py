@@ -184,3 +184,11 @@ def test_harness_label_names_what_replaces_the_message():
     assert harness_label(feedback) == "rubric: revision requested"
     assert harness_label(summary) is None
     assert harness_label(HumanMessage("hello")) is None
+
+
+def test_the_grader_source_is_upstreams():
+    from deepagents.middleware.rubric import RUBRIC_GRADER_MESSAGE_SOURCE
+
+    from EvoScientist.message_meta import RUBRIC_GRADER_SOURCE
+
+    assert RUBRIC_GRADER_SOURCE == RUBRIC_GRADER_MESSAGE_SOURCE

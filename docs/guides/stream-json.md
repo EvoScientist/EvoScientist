@@ -60,7 +60,7 @@ fields beyond `type` are listed below.
 | `rubric_evaluation_start` | `iteration`                                            | A grading pass began (runs started with `--rubric`); the grader's own work follows as `subagent_*` events named `rubric_grader` |
 | `rubric_evaluation`    | `iteration`, `result`, `explanation`, `criteria`, `unverified` | Verdict of a grading pass; `result` is `satisfied`, `needs_revision`, `max_iterations_reached`, `failed` or `grader_error` |
 | `error`                | `message`                                                | Error during the run |
-| `done`                 | `content`, `response`                                     | Final response; end of stream. For a `--rubric` run, `response` holds the answer of every pass, separated by a blank line |
+| `done`                 | `content`, `response`, `last_pass_response`               | Final response; end of stream. For a `--rubric` run, `response` holds the answer of every pass, separated by a blank line, and `last_pass_response` (present once the run was graded) holds only the text written after the last revision request; it is empty when that pass wrote none |
 
 ## Example transcript
 

@@ -322,19 +322,27 @@ def test_rerun_after_a_cut_short_run_gets_all_its_passes(tmp_path):
     assert results == ["needs_revision", "needs_revision", "max_iterations_reached"]
 
 
-def test_grader_failure_is_logged_on_one_line(tmp_path, caplog):
-    """Upstream logs the failure with a traceback; the reason is enough."""
+def test_grader_failure_keeps_its_traceback_in_the_log(tmp_path, caplog):
+    """The server's log is the only diagnostic of a scheduled run's grader."""
+    from EvoScientist.cli.commands import _grader_failure_on_one_line
+
     agent, _grader, _other, _rubric = _agent(tmp_path, [RuntimeError("boom")], ["a"])
     with caplog.at_level(logging.ERROR, logger="deepagents.middleware.rubric"):
         _run(agent, {"messages": [HumanMessage("do it")], "rubric": "- c1"})
     failures = [r for r in caplog.records if "grader failed" in r.getMessage()]
     assert len(failures) == 1
-    assert failures[0].exc_info is None
-    assert "RuntimeError: boom" in failures[0].getMessage()
+    assert failures[0].exc_info is not None
+    assert not logging.getLogger("deepagents.middleware.rubric").filters
+    # Upstream's wording is what the console's one-line form goes by.
+    short = _grader_failure_on_one_line(failures[0])
+    assert short.exc_info is None
+    assert short.getMessage().endswith("RuntimeError: boom")
 
 
-def test_failed_second_attempt_is_logged_on_one_line_too(tmp_path, caplog):
+def test_failed_second_attempt_keeps_its_traceback_too(tmp_path, caplog):
     """An incomplete verdict is retried once; that retry failing is expected as well."""
+    from EvoScientist.cli.commands import _grader_failure_on_one_line
+
     incomplete = {"result": "satisfied", "explanation": "x", "criteria": []}
     agent, _grader, _other, _rubric = _agent(
         tmp_path, [incomplete, RuntimeError("boom")], ["a", "b", "c", "d"]
@@ -343,16 +351,25 @@ def test_failed_second_attempt_is_logged_on_one_line_too(tmp_path, caplog):
         _run(agent, {"messages": [HumanMessage("do it")], "rubric": "- c1"})
     retries = [r for r in caplog.records if "coverage retry raised" in r.getMessage()]
     assert retries
-    assert all(r.exc_info is None for r in retries)
-    assert "RuntimeError: boom" in retries[0].getMessage()
+    assert all(r.exc_info is not None for r in retries)
+    assert (
+        _grader_failure_on_one_line(retries[0])
+        .getMessage()
+        .endswith("RuntimeError: boom")
+    )
 
 
-def test_debug_logging_keeps_the_grader_traceback(tmp_path, caplog):
-    agent, _grader, _other, _rubric = _agent(tmp_path, [RuntimeError("boom")], ["a"])
-    with caplog.at_level(logging.DEBUG, logger="deepagents.middleware.rubric"):
+def test_a_dropped_rubric_is_noted_in_the_debug_log(tmp_path, caplog):
+    agent, grader, _other, _rubric = _agent(
+        tmp_path, [PASS], ["a", "b"], require_run_marker=True
+    )
+    with caplog.at_level(logging.DEBUG, logger="EvoScientist.middleware.rubric"):
         _run(agent, {"messages": [HumanMessage("do it")], "rubric": "- c1"})
-    failures = [r for r in caplog.records if "grader failed" in r.getMessage()]
-    assert failures[0].exc_info is not None
+        _run(agent, {"messages": [HumanMessage("again")]}, thread_id="other")
+    dropped = [r for r in caplog.records if "dropped" in r.getMessage()]
+    assert len(dropped) == 1
+    assert "rubric_run" in dropped[0].getMessage()
+    assert grader.calls == 0
 
 
 def _parked_before_grading(tmp_path):

@@ -237,11 +237,14 @@ class StreamEventEmitter:
         )
 
     @staticmethod
-    def done(response: str = "") -> StreamEvent:
-        """Done event."""
-        return StreamEvent(
-            "done", {"type": "done", "content": response, "response": response}
-        )
+    def done(
+        response: str = "", *, last_pass_response: str | None = None
+    ) -> StreamEvent:
+        """Done event; ``last_pass_response`` only for a run that was graded."""
+        data = {"type": "done", "content": response, "response": response}
+        if last_pass_response is not None:
+            data["last_pass_response"] = last_pass_response
+        return StreamEvent("done", data)
 
     @staticmethod
     def usage_stats(input_tokens: int, output_tokens: int) -> StreamEvent:

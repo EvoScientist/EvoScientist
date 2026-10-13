@@ -378,7 +378,7 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
 )
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
-def test_main_agent_mounts_the_grader_after_every_other_after_agent_hook(
+def test_main_agent_mounts_the_grader_after_our_other_after_agent_hooks(
     mock_config, mock_chat, mock_tool_selector, mock_summarization, workspace, tmp_path
 ):
     from deepagents.backends import FilesystemBackend
@@ -409,8 +409,9 @@ def test_main_agent_mounts_the_grader_after_every_other_after_agent_hook(
     assert main[-1]._prepare_messages_for_grader is this_run_messages
     assert main[-1]._require_run_marker is True
     names = [type(m).__name__ for m in main]
-    for earlier in ("EvoMemoryLifecycleMiddleware", "EvoCodeInterpreterMiddleware"):
-        assert names.index(earlier) < len(main) - 1
+    assert {"EvoMemoryLifecycleMiddleware", "EvoCodeInterpreterMiddleware"} <= set(
+        names[:-1]
+    )
 
     sub = _get_default_middleware(
         workspace=workspace, backend=backend, for_async_subagent=True

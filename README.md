@@ -449,7 +449,7 @@ EvoSci --ui webui                 # browser workspace UI (needs Node.js)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
-EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a checklist; exit code 3 if it is not met (docs/guides/rubric.md)
+EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a checklist; exit code 3 without a satisfied verdict (docs/guides/rubric.md)
 ```
 
 `--output-format stream-json` makes a single-shot (`-p`) run emit its native events as line-delimited JSON on stdout (one object per line), with all human output on stderr — the integration surface for headless clients (e.g. an agent runtime). See [docs/guides/stream-json.md](docs/guides/stream-json.md) for the event schema.

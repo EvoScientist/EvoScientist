@@ -1,5 +1,6 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import copy
 import json
 import logging
 import os
@@ -2594,6 +2595,39 @@ def _rubric_exit_code(rubric: str | None, result: str | None) -> int | None:
     return RUBRIC_UNMET_EXIT_CODE
 
 
+def _rubric_exit_notice(result: str | None, exit_code: int) -> str:
+    """The line a graded single-shot run prints before it exits with *exit_code*."""
+    if result is None:
+        # No verdict at all: a cancelled approval or question, the round limit.
+        return (
+            "The run stopped before the acceptance criteria were checked "
+            f"(exit code {exit_code})."
+        )
+    if result == "failed":
+        return (
+            f"The acceptance criteria could not be evaluated (exit code {exit_code})."
+        )
+    if result == "grader_error":
+        return (
+            "The acceptance criteria could not be checked: the grader failed "
+            f"(exit code {exit_code})."
+        )
+    return f"Acceptance criteria not met (exit code {exit_code})."
+
+
+def _single_shot_agent_config(config: Any, rubric: str | None) -> Any:
+    """The config a single-shot run builds its agent from.
+
+    The grader runs when the agent stops, so a graded run keeps sub-agents in-turn. The
+    agent is built from a copy; the background server is compared with the user's config.
+    """
+    if rubric is None:
+        return config
+    agent_config = copy.copy(config)
+    agent_config.enable_async_subagents = False
+    return agent_config
+
+
 def _resolve_stream_json_auto_mode(auto_mode: bool | None, output_format: str) -> bool:
     """Resolve the effective ``--auto-mode`` for a single-shot run.
 
@@ -2708,8 +2742,8 @@ def _main_callback(
                 "Acceptance criteria for a single-shot (-p) run. The work is "
                 "graded each time the agent stops and sent back with the gaps, "
                 "up to 3 passes. Literal text, or '@path' to read a file. "
-                "Sub-agents run in-turn for this run. Exit code 3 when the "
-                "criteria are not met."
+                "Sub-agents run in-turn for this run. Exit code 3 when the run "
+                "ends without a satisfied verdict."
             ),
         ),
     ] = None,
@@ -2800,10 +2834,6 @@ def _main_callback(
             cli_overrides["enable_ask_user"] = True
     if dangerous:
         cli_overrides["dangerous_mode"] = True
-    if rubric_text is not None:
-        # The grader runs when the agent stops; a background sub-agent would
-        # still be working then, so this run keeps every sub-agent in-turn.
-        cli_overrides["enable_async_subagents"] = False
     if auth_mode:
         if auth_mode not in ("api_key", "oauth"):
             raise typer.BadParameter("--auth-mode must be 'api_key' or 'oauth'")
@@ -3003,7 +3033,7 @@ def _main_callback(
                     work_dir=str(session_dirs.work_dir),
                     workspace=session_dirs.workspace,
                     checkpointer=checkpointer,
-                    config=config,
+                    config=_single_shot_agent_config(config, rubric_text),
                     runtime=async_runtime,
                 )
                 rubric_result: str | None = None
@@ -3074,10 +3104,8 @@ def _main_callback(
                             raise
                     exit_code = _rubric_exit_code(rubric_text, rubric_result)
                     if exit_code is not None:
-                        console.print(
-                            "[yellow]Acceptance criteria not met "
-                            f"(exit code {exit_code}).[/yellow]"
-                        )
+                        notice = _rubric_exit_notice(rubric_result, exit_code)
+                        console.print(f"[yellow]{notice}[/yellow]")
                         raise typer.Exit(exit_code)
                 finally:
                     # Model failures can bypass middleware ``after_agent``
@@ -3114,6 +3142,30 @@ def _main_callback(
         )
 
 
+# Upstream's logger and its two records for a grader attempt that raised.
+_GRADER_LOGGER = "deepagents.middleware.rubric"
+_GRADER_FAILURE_RECORDS = ("grader failed", "coverage retry raised")
+
+
+def _grader_failure_on_one_line(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy of upstream's grader-failure record with the reason instead of the traceback.
+
+    The verdict already says why; the record itself keeps its traceback for other handlers.
+    """
+    if record.name != _GRADER_LOGGER or not record.exc_info:
+        return record
+    message = record.getMessage()
+    if not any(marker in message for marker in _GRADER_FAILURE_RECORDS):
+        return record
+    exc = record.exc_info[1]
+    short = copy.copy(record)
+    short.msg = f"{message}: {type(exc).__name__}: {exc}"
+    short.args = None
+    short.exc_info = None
+    short.exc_text = None
+    return short
+
+
 def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
@@ -3137,6 +3189,8 @@ def _configure_logging():
         """Custom handler that renders warnings in dim style."""
 
         def emit(self, record: logging.LogRecord) -> None:
+            if not verbose_logging:
+                record = _grader_failure_on_one_line(record)
             if record.levelno == logging.WARNING:
                 # Use Rich console to print dim warning
                 msg = record.getMessage()

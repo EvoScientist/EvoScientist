@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -51,6 +52,11 @@ async def _capture_app(monkeypatch, workspace) -> object:
         captured["app"] = self
 
     monkeypatch.setattr(App, "run_async", _no_run)
+    # The status bar would build the user's configured model, which needs its key.
+    monkeypatch.setattr(
+        "EvoScientist.cli.status_bar._get_default_chat_model",
+        lambda: SimpleNamespace(model_name="test-model"),
+    )
 
     fake_load_agent = AsyncMock(return_value=None)
 

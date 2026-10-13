@@ -377,6 +377,9 @@ class _V3EventProcessor:
         self._seen_value_message_keys = self._message_keys(existing_messages)
         self._process_value_message_snapshots = process_value_messages
         self.full_response = ""
+        # Where the pass a graded run's last verdict applies to starts in
+        # ``full_response``; ``None`` until a verdict arrives.
+        self._last_pass_start: int | None = None
         self._summarization_in_progress = False
         self._tool_inputs: dict[
             tuple[tuple[str, ...], str], tuple[str, dict[str, Any]]
@@ -434,13 +437,13 @@ class _V3EventProcessor:
         result = payload.get("result")
         explanation = payload.get("explanation")
         criteria = payload.get("criteria")
-        if (
-            result == "needs_revision"
-            and self.full_response.strip()
-            and not self.full_response.endswith("\n\n")
-        ):
-            # Keep the draft; the revision starts on its own paragraph.
-            self.full_response += "\n\n"
+        if self._last_pass_start is None:
+            self._last_pass_start = 0
+        if result == "needs_revision":
+            if self.full_response.strip() and not self.full_response.endswith("\n\n"):
+                # Keep the draft; the revision starts on its own paragraph.
+                self.full_response += "\n\n"
+            self._last_pass_start = len(self.full_response)
         return [
             self.emitter.rubric_evaluation(
                 iteration=iteration,
@@ -452,6 +455,13 @@ class _V3EventProcessor:
                 unverified=payload.get("unverified") is True,
             ).data
         ]
+
+    @property
+    def last_pass_response(self) -> str | None:
+        """The text after the last revision request; ``None`` for an ungraded run."""
+        if self._last_pass_start is None:
+            return None
+        return self.full_response[self._last_pass_start :]
 
     def _process_custom_event(self, data: object) -> list[dict[str, Any]]:
         """Translate a ``custom`` stream payload into UI events.
@@ -1290,4 +1300,6 @@ async def stream_agent_events(
         if _run_raised:
             await _recover_interrupted_graph_state(agent, config)
 
-    yield emitter.done(processor.full_response).data
+    yield emitter.done(
+        processor.full_response, last_pass_response=processor.last_pass_response
+    ).data

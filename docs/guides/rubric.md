@@ -17,6 +17,7 @@ EvoSci -p "Reproduce table 2" --auto-mode --rubric @criteria.md
 - It sees this run's conversation and can list and read files in the workspace. It cannot run commands, so a criterion such as "the tests pass" is judged from what the conversation shows.
 - The rubric applies to this run only. Later turns on the same thread are not graded, and a run that is parked at an approval and then continued from another client (for example the WebUI) finishes without grading.
 - Sub-agents run in-turn during a `--rubric` run instead of in the background.
+- Only runs the CLI starts with `--rubric` are graded: it marks them in the run's config (`configurable.rubric_run`). A `rubric` that another client sends in a run's input is dropped and the run is not graded, unless that client also sets the marker.
 - The grader's own file checks are shown as a sub-agent named `rubric_grader`.
 - The grader uses the auxiliary model when one is configured, otherwise the main model.
 
@@ -25,7 +26,7 @@ EvoSci -p "Reproduce table 2" --auto-mode --rubric @criteria.md
 | Code | Meaning |
 |------|---------|
 | `0`  | The last grading pass was satisfied |
-| `3`  | The run finished without a satisfied verdict: the pass limit was reached, the grader failed, or the rubric could not be evaluated |
+| `3`  | The run finished without a satisfied verdict: the pass limit was reached, the grader failed, the rubric could not be evaluated, or the run stopped before it was graded (a cancelled approval or question, the approval round limit) |
 | `1`  | The run itself failed |
 
 With `--output-format stream-json` each pass also emits `rubric_evaluation_start` and `rubric_evaluation` events; see [stream-json](stream-json.md).

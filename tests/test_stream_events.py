@@ -1597,3 +1597,55 @@ class TestRubricEvents:
         events = await collect_events(agent)
         done = [e for e in events if e.get("type") == "done"]
         assert done[-1]["response"] == "First draft.\n\nRevised answer."
+        assert done[-1]["last_pass_response"] == "Revised answer."
+
+    @staticmethod
+    def _verdict(result: str, iteration: int = 0):
+        return custom_subagent_event(
+            {
+                "type": "rubric_evaluation_end",
+                "iteration": iteration,
+                "result": result,
+                "explanation": "",
+                "criteria": [],
+            }
+        )
+
+    async def _done(self, *events):
+        collected = await collect_events(FakeV3Agent(list(events)))
+        return [e for e in collected if e.get("type") == "done"][-1]
+
+    async def test_an_ungraded_run_has_no_last_pass_field(self):
+        done = await self._done(message_delta("Answer."), message_finish())
+        assert "last_pass_response" not in done
+
+    async def test_a_run_satisfied_at_once_has_the_whole_answer_as_its_last_pass(self):
+        done = await self._done(
+            message_delta("Answer."), message_finish(), self._verdict("satisfied")
+        )
+        assert done["last_pass_response"] == done["response"] == "Answer."
+
+    async def test_the_last_pass_is_the_text_after_the_last_revision_request(self):
+        done = await self._done(
+            message_delta("One."),
+            message_finish(),
+            self._verdict("needs_revision"),
+            message_delta("Two."),
+            message_finish(),
+            self._verdict("needs_revision", 1),
+            message_delta("Three."),
+            message_finish(),
+            self._verdict("max_iterations_reached", 2),
+        )
+        assert done["response"] == "One.\n\nTwo.\n\nThree."
+        assert done["last_pass_response"] == "Three."
+
+    async def test_a_revision_pass_without_text_has_an_empty_last_pass(self):
+        done = await self._done(
+            message_delta("Draft."),
+            message_finish(),
+            self._verdict("needs_revision"),
+            self._verdict("satisfied", 1),
+        )
+        assert done["response"].startswith("Draft.")
+        assert done["last_pass_response"] == ""
