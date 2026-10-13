@@ -1,0 +1,233 @@
+name: Installer smoke test
+
+# Runs scripts/install.sh and scripts/install.ps1 on clean runners, then checks
+# that EvoScientist works online and with the network blocked
+# (.github/scripts/install_smoke_check.{sh,ps1}).
+#
+# Pull requests: the scripts from the pull request install a wheel built from
+# it, with a constraints.txt exported from its uv.lock (the committed file is
+# refreshed only at release), through the test-only EVOSCI_INSTALL_SOURCE and
+# EVOSCI_INSTALL_CONSTRAINTS.
+# After a release, weekly and on demand: the public one-line commands,
+# unchanged, so a changed download URL or mirror shows up early.
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "EvoScientist/setup/**"
+      - "constraints.txt"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/install-smoke.yml"
+      - ".github/scripts/install_smoke_check.*"
+  workflow_run:
+    workflows: ["Publish to PyPI"]
+    types: [completed]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck scripts/install.sh .github/scripts/install_smoke_check.sh
+      - name: PowerShell parse check
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in 'scripts/install.ps1', '.github/scripts/install_smoke_check.ps1') {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors) | Out-Null
+            foreach ($e in $errors) { Write-Host "::error file=$file::$e"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.wheel.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v9.0.0
+      - name: Build the wheel and export the constraints
+        id: wheel
+        run: |
+          uv build --wheel -o dist
+          uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate --quiet -o dist/constraints.txt
+          wheel=$(ls dist/*.whl)
+          version=$(basename "$wheel" | sed -E 's/^evoscientist-([^-]+)-.*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  smoke:
+    needs: [lint, build]
+    if: >-
+      always() && needs.lint.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-latest
+            cn: true
+          - os: macos-latest
+          # Intel Macs are best-effort.
+          - os: macos-15-intel
+            best-effort: true
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.best-effort == true }}
+    timeout-minutes: 60
+    env:
+      MODE: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+      INDEX_URL: ${{ matrix.cn && 'https://pypi.tuna.tsinghua.edu.cn/simple' || 'https://pypi.org/simple' }}
+      CN_FLAG: ${{ matrix.cn && '--cn' || '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        if: env.MODE == 'pr'
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+
+      # macOS and Linux: every command runs through $RUNNER_TEMP/clean, which
+      # starts it with an empty environment (no UV_*, PIP_*, PYTHONPATH), a
+      # fresh HOME and a PATH without the runner's Node, uv and tool caches,
+      # from a directory outside the checkout.
+      - name: Prepare a clean environment
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/work"
+          lang=C.UTF-8
+          if [ "$RUNNER_OS" = macOS ]; then lang=en_US.UTF-8; fi
+          cat > "$RUNNER_TEMP/clean" <<EOF
+          #!/bin/bash
+          cd "$RUNNER_TEMP/work"
+          exec env -i HOME="$RUNNER_TEMP/home" PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$RUNNER_TEMP/tmp" LANG=$lang SHELL=/bin/bash USER="$USER" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/clean"
+          cat "$RUNNER_TEMP/clean"
+          if "$RUNNER_TEMP/clean" sh -c 'command -v node || command -v npx || command -v uv'; then
+            echo "::error::The clean environment still finds Node or uv"
+            exit 1
+          fi
+          if [ "$MODE" = pr ]; then
+            echo "EVOSCI_INSTALL_SOURCE=$(ls "$RUNNER_TEMP"/dist/*.whl)" >> "$GITHUB_ENV"
+            echo "EVOSCI_INSTALL_CONSTRAINTS=$RUNNER_TEMP/dist/constraints.txt" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install (pull request scripts and wheel)
+        if: runner.os != 'Windows' && env.MODE == 'pr'
+        run: |
+          "$RUNNER_TEMP/clean" EVOSCI_INSTALL_SOURCE="$EVOSCI_INSTALL_SOURCE" EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS" \
+            bash "$GITHUB_WORKSPACE/scripts/install.sh" $CN_FLAG
+
+      - name: Install (public command)
+        if: runner.os != 'Windows' && env.MODE == 'release'
+        run: |
+          if [ -n "$CN_FLAG" ]; then
+            "$RUNNER_TEMP/clean" bash -c 'curl -fsSL https://cdn.jsdelivr.net/gh/EvoScientist/EvoScientist@main/scripts/install.sh | bash -s -- --cn'
+          else
+            "$RUNNER_TEMP/clean" bash -c 'curl -fsSL https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/scripts/install.sh | bash'
+          fi
+
+      - name: Online checks
+        if: runner.os != 'Windows'
+        run: |
+          "$RUNNER_TEMP/clean" EXPECTED_VERSION="$EXPECTED_VERSION" INDEX_URL="$INDEX_URL" \
+            ${EVOSCI_INSTALL_CONSTRAINTS:+EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS"} \
+            bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" online
+
+      # A network namespace with only loopback. Creating it needs root;
+      # setpriv hands the command back to the runner user, and sudo's reset
+      # environment is replaced by the clean one.
+      - name: Offline checks (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          offline() {
+            sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- "$3" bash "$4" "$5"' \
+              sh "$(id -u)" "$(id -g)" "$RUNNER_TEMP/clean" "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$1"
+          }
+          offline blocked
+          offline offline
+
+      - name: Offline checks (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          profile='(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))'
+          for mode in blocked offline; do
+            sandbox-exec -p "$profile" "$RUNNER_TEMP/clean" bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$mode"
+          done
+
+      # Windows (Windows PowerShell 5.1): each step starts from a PATH with
+      # only the Windows directories, so the runner's Node, Python, Git and uv
+      # are hidden, and without UV_* or PIP_* settings.
+      - name: Install (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          foreach ($tool in 'node', 'npx', 'git', 'python', 'uv') {
+            if (Get-Command $tool -ErrorAction SilentlyContinue) { Write-Host "::error::The clean PATH still finds $tool"; exit 1 }
+          }
+          Set-Location $env:RUNNER_TEMP
+          if ($env:MODE -eq 'pr') {
+            $env:EVOSCI_INSTALL_SOURCE = (Get-ChildItem "$env:RUNNER_TEMP\dist\*.whl").FullName
+            $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt"
+            & ([scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\scripts\install.ps1")))
+          } else {
+            irm https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/scripts/install.ps1 | iex
+          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Online checks (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          if ($env:MODE -eq 'pr') { $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt" }
+          Set-Location $env:RUNNER_TEMP
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode online
+
+      # Outbound firewall rules for the installed Python and Node executables;
+      # Windows Firewall does not filter loopback traffic.
+      - name: Offline checks (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          Set-Location $env:RUNNER_TEMP
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode block
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode offline
+
+      - name: Upload the EvoScientist logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.os }}${{ matrix.cn && '-cn' || '' }}
+          path: |
+            ${{ runner.temp }}/home/.config/evoscientist/*.log
+            ~/.config/evoscientist/*.log
+          if-no-files-found: ignore
