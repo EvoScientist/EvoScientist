@@ -46,6 +46,30 @@ def _refusal(kind: str, status: str) -> str:
     return f"The goal is {status}; only {wanted} goal can be {kind}d."
 
 
+def _note_replaced(
+    ctx: CommandContext, runtime: ChannelRuntime, kind: str, values: dict | None
+) -> None:
+    """Say which ``/rubric`` checklist the goal is about to take the place of."""
+    if kind not in ("create", "amend", "resume"):
+        return
+    when = (
+        "resuming the goal drops it"
+        if kind == "resume"
+        else "it is dropped once the goal is accepted"
+    )
+    # Operations the thread already applied are not "waiting".
+    if values is not None:
+        runtime.rubric.acknowledge(ctx.thread_id, values.get("_rubric_applied"))
+    if runtime.rubric.changes_for(ctx.thread_id):
+        ctx.ui.append_system(f"A /rubric change is waiting: {when}.", style="yellow")
+    # Only a newly accepted goal clears a checklist already set for one task.
+    if kind != "resume" and (values or {}).get("_next_rubric"):
+        ctx.ui.append_system(
+            f"A checklist is set for the next task (/rubric next): {when}.",
+            style="yellow",
+        )
+
+
 class GoalCommand(Command):
     """Set, show, amend, pause, resume or clear the goal of the current thread."""
 
@@ -99,7 +123,6 @@ class GoalCommand(Command):
             new_goal_request,
         )
 
-        review = not bool(getattr(ctx.config, "auto_mode", False))
         head, *tail = raw.split(None, 1)
         kind = word if word in _STATUS_WORDS else None
         feedback = None
@@ -115,7 +138,10 @@ class GoalCommand(Command):
             except GoalTextError as exc:
                 ctx.ui.append_system(str(exc), style="red")
                 return
-            ctx.goal_request = new_goal_request("create", objective=raw, review=review)
+            _note_replaced(
+                ctx, runtime, "create", await read_thread_values(ctx, "/goal")
+            )
+            ctx.goal_request = new_goal_request("create", objective=raw)
             return
 
         values = await read_thread_values(ctx, "/goal")
@@ -134,8 +160,9 @@ class GoalCommand(Command):
         if status not in GOAL_REQUEST_STATUSES[kind]:
             ctx.ui.append_system(_refusal(kind, status), style="yellow")
             return
+        _note_replaced(ctx, runtime, kind, values)
         ctx.goal_request = new_goal_request(
-            kind, feedback=feedback, target=goal["rubric_id"], review=review
+            kind, feedback=feedback, target=goal["rubric_id"]
         )
 
     async def _show(self, ctx: CommandContext, runtime: ChannelRuntime) -> None:

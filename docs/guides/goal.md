@@ -13,7 +13,7 @@
 | `/goal <objective>` | Draft acceptance criteria and ask you to review them. Once you accept, the objective enters the conversation as your message and the agent starts working. A thread that already has a goal keeps it until you accept the new one. |
 | `/goal` (also `/goal show`, `/goal status`) | Show the goal, its status, its note and its criteria. |
 | `/goal amend <feedback>` | Revise the goal and its criteria from your feedback, with the same review. Your feedback enters the conversation and the agent goes on. For a goal that is active or blocked. |
-| `/goal pause` | Stop grading against the goal and tell the agent not to pursue it. The goal and its criteria are kept. |
+| `/goal pause` | Stop grading against the goal and tell the agent not to pursue it. The goal and its criteria are kept. For an active goal. |
 | `/goal resume` | Continue a paused goal; the agent starts a turn at once. |
 | `/goal clear` | Drop the goal and its criteria. |
 
@@ -23,7 +23,7 @@
 
 The review shows the objective and the drafted criteria. Accept them, cancel, or type what to change; with feedback the criteria are drafted again and shown again. Nothing enters the conversation until you accept. To use criteria you wrote yourself, use [`/rubric set`](rubric.md#interactive-sessions) instead.
 
-In the TUI an unanswered review is cancelled after 5 minutes. With `--auto-mode` there is nobody to ask, so the draft is adopted as it is.
+In the TUI an unanswered review is cancelled after 5 minutes. With `--auto-mode` there is nobody to ask, so the draft is adopted as it is; the adopted criteria are then shown as a warning (`Goal accepted without review (auto mode).`), so you can see what was accepted for you.
 
 ## While a goal is active
 
@@ -35,13 +35,13 @@ In the TUI an unanswered review is cancelled after 5 minutes. With `--auto-mode`
 
 ## Together with `/rubric`
 
-A goal's criteria take the place of the `/rubric set` checklist. `/rubric set` and `/rubric clear` therefore cancel the goal, with your next message; until then `/goal` and the status bar (`goal: ending`) say so. `/rubric next` still grades one task on its own and does not complete the goal. Accepting or resuming a goal drops `/rubric` changes that were still waiting for your next message, and accepting also drops a `/rubric next` checklist that was not used yet.
+A goal's criteria take the place of the `/rubric set` checklist. `/rubric set` and `/rubric clear` therefore cancel the goal, with your next message; until then `/goal` and the status bar (`goal: ending`) say so. `/rubric next` still grades one task on its own and does not complete the goal. Accepting or resuming a goal drops `/rubric` changes that were still waiting for your next message, and accepting also drops a `/rubric next` checklist that was not used yet; `/goal <objective>`, `/goal amend` and `/goal resume` say so before they start.
 
 ## Limits
 
 - `/goal` is refused in channel sessions and when the session executes its runs on the `langgraph_server` gateway.
 - On other surfaces (the WebUI, `EvoSci serve`, single-shot runs) a thread's goal is ignored: turns are not graded against it and the agent is not told about it. The goal is still there when you come back to the thread in the TUI or the interactive CLI.
-- The criteria are drafted by the main model, which may list and read files in the workspace. A draft may make at most 12 model calls.
+- The criteria are drafted by the main model, which may list and read files in the workspace; when that model fails, drafting follows the `model_fallbacks` chain as a turn does. A draft may make at most 12 model calls.
 - An objective is limited to 8,000 characters; the objective and its criteria together to 12,000.
 - A review that was left open (the app was closed, or the turn was stopped with Ctrl+C) is discarded by your next message; run `/goal` again. The same happens, without a message, when the review is answered from a surface that does not support goals.
-- Model retries during drafting are not announced; a draft that fails is reported with its reason.
+- Model retries and a switch to a fallback model during drafting are not announced; a draft that fails is reported with its reason.

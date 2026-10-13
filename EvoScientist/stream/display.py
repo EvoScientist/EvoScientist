@@ -675,7 +675,7 @@ _GOAL_LINES: dict[str, tuple[str, str]] = {
     "accepted": ("Goal accepted.", "green"),
     "amended": ("Goal amended.", "green"),
     "cancelled": ("Goal proposal cancelled.", "yellow"),
-    "failed": ("Goal drafting failed", "red"),
+    "failed": ("Goal request failed", "red"),
     "paused": ("Goal paused.", "yellow"),
     "resumed": ("Goal resumed.", "green"),
     "cleared": ("Goal cleared.", "yellow"),
@@ -688,6 +688,12 @@ _GOAL_LINES: dict[str, tuple[str, str]] = {
         "dim",
     ),
     "complete": ("Goal complete.", "green"),
+}
+# A draft adopted with nobody to review it: the user reads what was accepted
+# for them as a warning.
+_GOAL_UNREVIEWED_LINES: dict[str, str] = {
+    "accepted": "Goal accepted without review (auto mode).",
+    "amended": "Goal amended without review (auto mode).",
 }
 # Changes whose note is the point of the line.
 _GOAL_NOTE_AFTER_COLON = frozenset({"failed", "ignored", "blocked"})
@@ -709,12 +715,15 @@ def goal_event_lines(event: dict) -> list[tuple[str, str]]:
         label = f"{label} {note}"
     elif change in _GOAL_NOTE_AFTER_COLON:
         label = f"{label}."
+    detail = "dim"
+    if event.get("unreviewed") and change in _GOAL_UNREVIEWED_LINES:
+        label, style, detail = _GOAL_UNREVIEWED_LINES[change], "yellow", "yellow"
     lines = [(label, style)]
     if change in ("accepted", "amended"):
         if change == "amended" and event.get("objective"):
-            lines.append((f"  {event['objective']}", "dim"))
+            lines.append((f"  {event['objective']}", detail))
         lines.extend(
-            (f"  {line}", "dim")
+            (f"  {line}", detail)
             for line in str(event.get("criteria") or "").splitlines()
             if line.strip()
         )

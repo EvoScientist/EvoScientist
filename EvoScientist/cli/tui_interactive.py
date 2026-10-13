@@ -12,7 +12,7 @@ import queue
 import random
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -732,6 +732,8 @@ def run_textual_interactive(
             # Token of the slash command that owns the app; Ctrl+C clears
             # it, and a command that lost it starts nothing when it ends.
             self._active_command: object | None = None
+            # The token of a command that is waiting for the agent to load.
+            self._command_awaiting_agent: object | None = None
             from ..commands.base import ChannelRuntime
 
             self._channel_runtime = ChannelRuntime()
@@ -1370,8 +1372,6 @@ def run_textual_interactive(
             # keyboard input path (line ~2113). Queue-triggered turns that
             # `await _run_turn` from inside a nested call_later chain don't
             # get viewport-follow during streaming (only after completion).
-            # Mark busy synchronously so the next poll tick doesn't re-enter.
-            self._busy = True
             effective_tid = target_thread_id or self._conversation_tid
 
             async def _run_and_publish() -> None:
@@ -1394,7 +1394,8 @@ def run_textual_interactive(
                             style="dim",
                         )
 
-            self._run_task = asyncio.ensure_future(_run_and_publish())
+            # Taken in this step, so the next poll tick does not re-enter.
+            self._own_app(_run_and_publish())
 
         async def _read_async_tasks_tui(self, target_thread_id: str) -> AsyncTasksState:
             """Read async_tasks from agent state for dedup, against a frozen tid.
@@ -3445,8 +3446,12 @@ def run_textual_interactive(
 
         def _start_turn(self, text: str, **kwargs: Any) -> None:
             """Schedule a turn that owns the app from this step on."""
+            self._own_app(self._run_turn(text, **kwargs))
+
+        def _own_app(self, turn: Coroutine[Any, Any, Any]) -> None:
+            """Hand the app to *turn*, a coroutine that runs ``_run_turn``."""
             self._busy = True
-            task = asyncio.ensure_future(self._run_turn(text, **kwargs))
+            task = asyncio.ensure_future(turn)
             self._run_task = task
             task.add_done_callback(self._release_unstarted_turn)
 
@@ -3909,6 +3914,7 @@ def run_textual_interactive(
             prompt_widget.disabled = True
             self._render_status()
             goal_request: dict[str, Any] | None = None
+            load_failed = False
 
             try:
                 # Only gate on agent readiness for commands that need it —
@@ -3923,10 +3929,18 @@ def run_textual_interactive(
                 if parsed is not None:
                     cmd, cmd_args = parsed
                 if cmd is not None and cmd.needs_agent(cmd_args):
+                    self._command_awaiting_agent = token
                     try:
                         agent = await self._await_agent_ready()
                     except Exception:
                         # ``_on_agent_load_failure`` already surfaced the error.
+                        load_failed = True
+                        return
+                    finally:
+                        if self._command_awaiting_agent is token:
+                            self._command_awaiting_agent = None
+                    if self._active_command is not token:
+                        # Ctrl+C released the app while the agent loaded.
                         return
                 ctx = CommandContext(
                     agent=agent,
@@ -3977,7 +3991,9 @@ def run_textual_interactive(
                         )
                     else:
                         self._busy = False
-                        self._drain_queue()
+                        # A failed load would be retried per entry, as in _run_turn.
+                        if not load_failed:
+                            self._drain_queue()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
@@ -4124,10 +4140,19 @@ def run_textual_interactive(
                 else:
                     # Busy without a live turn: a slash command loses the
                     # app (it starts no run), and so does a finished handle.
+                    loading = (
+                        self._active_command is not None
+                        and self._command_awaiting_agent is self._active_command
+                    )
                     self._run_task = None
                     self._active_command = None
                     self._busy = False
-                    self.query_one("#prompt", ChatTextArea).focus()
+                    prompt = self.query_one("#prompt", ChatTextArea)
+                    if loading:
+                        # A command's agent load may never end; past it, the
+                        # command's own widget may still need the input off.
+                        prompt.disabled = False
+                    prompt.focus()
                     self._render_status()
                     self._append_system(
                         "\nInterrupted by user", style="dim italic #ffe082"

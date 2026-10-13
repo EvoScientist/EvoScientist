@@ -86,6 +86,7 @@ class TestCreate:
         assert accepted["criteria"] == DRAFT_1
         assert accepted["message"] == OBJECTIVE
         assert accepted["status"] == "active"
+        assert "unreviewed" not in accepted
 
     @pytest.mark.parametrize(
         "answer", [CANCEL, ESCAPED, {"status": "error"}, "garbage"]
@@ -155,8 +156,10 @@ class TestCreate:
         assert models.drafter.seen == []
 
     async def test_without_review_the_draft_is_applied_at_once(self, tmp_path):
-        agent, _ = goal_agent(tmp_path, drafts=[DRAFT_1], replies=["on it"])
-        result = await run(agent, request_input(_create(review=False)))
+        agent, _ = goal_agent(
+            tmp_path, drafts=[DRAFT_1], replies=["on it"], unattended=True
+        )
+        result = await run(agent, request_input(_create()))
         assert result.question is None
         assert result.changes[:2] == ["drafting", "accepted"]
         assert result.values["_sticky_rubric"]["text"] == DRAFT_1
@@ -535,6 +538,9 @@ class TestUnattendedAgent:
         assert result.changes[:2] == ["drafting", "accepted"]
         assert result.values["_goal"]["objective"] == "ship it"
         assert len(models.main.seen) == 1
+        # Nobody saw the draft: the event says so, for the surface to warn.
+        accepted = next(e for e in result.events if e.get("change") == "accepted")
+        assert accepted["unreviewed"] is True
 
     async def test_an_amendment_is_adopted_without_a_question(self, tmp_path):
         agent, _ = goal_agent(
@@ -550,6 +556,8 @@ class TestUnattendedAgent:
         assert result.question is None
         assert "amended" in result.changes
         assert result.values["_sticky_rubric"]["text"] == "- a\n- b"
+        amended = next(e for e in result.events if e.get("change") == "amended")
+        assert amended["unreviewed"] is True
 
 
 class TestEdges:

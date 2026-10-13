@@ -249,7 +249,8 @@ async def test_a_retry_notice_follows_the_tool_selection_line(monkeypatch, works
 
 
 async def test_a_retry_after_a_pause_that_found_the_spinner_up(monkeypatch, workspace):
-    from tests.test_tui_approve_all import DONE, _interrupt, _turn
+    from tests.test_tui_approve_all import DONE, _turn
+    from tests.tui_fakes import approval_interrupt as _interrupt
 
     # The paused round's cleanup removed the spinner; the resumed round has
     # none to keep last. ``_turn`` asserts that the answer still arrives.

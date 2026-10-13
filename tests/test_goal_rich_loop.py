@@ -14,6 +14,8 @@ from EvoScientist.stream import display as display_mod
 from tests.goal_fakes import ACCEPT, CANCEL, feedback
 from tests.test_goal_real_graph import OBJECTIVE, _agent
 
+pytestmark = pytest.mark.usefixtures("no_mcp")
+
 MARKED = {"rubric_run": {"mode": "thread", "changes": []}}
 
 

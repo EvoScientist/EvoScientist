@@ -884,12 +884,12 @@ def create_rubric_middleware(
 ) -> EvoRubricMiddleware:
     """Acceptance grading for a run that carries ``rubric`` (no-op otherwise).
 
-    Must be mounted LAST: ``after_agent`` hooks run in reverse list order, so
-    the grader sees the finished run first and a ``needs_revision`` verdict
-    jumps back to the model before EvoScientist's other ``after_agent`` hooks
-    fire (a harness profile's tail hooks still run first). The
-    grader reads the same backend because the deliverables are files the
-    transcript alone cannot prove exist.
+    Must be the last of our middleware with an end hook: those run in reverse
+    list order, so the grader sees the finished run first and a
+    ``needs_revision`` verdict jumps back to the model before EvoScientist's
+    other ``after_agent`` hooks fire (a harness profile's tail hooks still run
+    first). The grader reads the same backend because the deliverables are
+    files the transcript alone cannot prove exist.
     """
     from deepagents import FilesystemMiddleware
     from deepagents.middleware import UnsupportedContentMiddleware

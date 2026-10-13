@@ -39,16 +39,24 @@ class Scripted(BaseChatModel):
 
     replies: list = Field(default_factory=list)
     seen: list = Field(default_factory=list)
+    # Per call: the names of the tools the model was offered.
+    offered: list = Field(default_factory=list)
+    bound: list = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
         return "scripted"
 
     def bind_tools(self, tools, **kwargs):
+        self.bound = [
+            tool["name"] if isinstance(tool, dict) else tool.name for tool in tools
+        ]
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.seen.append(list(messages))
+        self.offered.append(self.bound)
+        self.bound = []
         reply = self.replies.pop(0) if self.replies else "done"
         if isinstance(reply, threading.Event):
             reply.wait(timeout=10)

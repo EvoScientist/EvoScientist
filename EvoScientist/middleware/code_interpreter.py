@@ -75,8 +75,8 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
     def _prepare_for_call(self, request: ModelRequest) -> str:
         return super()._prepare_for_call(request) + _MEMORY_FIRST_INTERPRETER_PROMPT
 
-    # A run can end in the very first start hook (a ``/goal`` request that is
-    # cancelled); no slot was assigned, so there is nothing to snapshot or evict.
+    # A run that ends in the first start hook skips before_agent; on a thread's
+    # first run there is no slot yet and upstream would raise.
     def after_agent(self, state, runtime):
         if not state.get("_quickjs_slot_id"):
             return None

@@ -12,6 +12,7 @@ import pytest
 
 pytest.importorskip("textual")
 
+import EvoScientist.cli.tui_interactive as tui_mod
 from EvoScientist.cli.widgets.ask_user_widget import AskUserWidget
 from EvoScientist.cli.widgets.assistant_message import AssistantMessage
 from EvoScientist.cli.widgets.loading_widget import LoadingWidget
@@ -22,12 +23,14 @@ from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.paths import SessionDirs
 from tests.test_goal_real_graph import OBJECTIVE, _agent
-from tests.test_tui_banner_position import _capture_app
 from tests.test_tui_skill_pin import (
     _isolated_skills,  # noqa: F401  (autouse fixture)
     _NoHistory,
     _submit,
 )
+from tests.tui_fakes import capture_app as _capture_app
+
+pytestmark = pytest.mark.usefixtures("no_mcp")
 
 
 def _wire(app, workspace, agent) -> None:
@@ -631,6 +634,14 @@ async def test_ctrl_c_during_the_command_starts_no_goal_run(
             return agent
 
         app._await_agent_ready = _held_ready
+        executed: list[str] = []
+        execute = tui_mod.cmd_manager.execute
+
+        async def _watched(command, ctx):
+            executed.append(command)
+            return await execute(command, ctx)
+
+        monkeypatch.setattr(tui_mod.cmd_manager, "execute", _watched)
         await _submit(app, f"/goal {OBJECTIVE}")
         await pilot.pause(0.2)
         assert app._busy is True
@@ -638,8 +649,9 @@ async def test_ctrl_c_during_the_command_starts_no_goal_run(
             app.action_request_quit()
             await pilot.pause(0.1)
             assert app._busy is False
-            # Input stays off while the command is still running, as before.
-            assert app.query_one("#prompt").disabled
+            # The load may never end (a broken MCP load); the input comes back
+            # now, so a command such as /mcp can still be typed.
+            assert not app.query_one("#prompt").disabled
             assert any("Interrupted by user" in line for line in _texts(app, "system"))
         finally:
             ready.set()
@@ -647,8 +659,43 @@ async def test_ctrl_c_during_the_command_starts_no_goal_run(
         await pilot.pause(0.3)
         assert app._run_task is None
         assert app._busy is False
+        # The load finished after the interrupt: the command's body never ran.
+        assert executed == []
         assert model.calls == {"main": 0, "draft": 0, "grade": 0}
         assert not list(app.query(AskUserWidget))
+        assert not app.query_one("#prompt").disabled
+
+
+async def test_ctrl_c_on_a_command_past_its_agent_load_leaves_the_input_off(
+    monkeypatch, workspace, tmp_path
+):
+    """Past the load a command may hold its own widget (a picker), so the
+    input stays off for it; it comes back when the command ends."""
+    agent, _model = _agent(tmp_path)
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        _wire(app, workspace, agent)
+        release = asyncio.Event()
+
+        async def _held(_command, _ctx):
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(tui_mod.cmd_manager, "execute", _held)
+        # A command that waits for the agent first: the load is over at once.
+        await _submit(app, "/goal pause")
+        await pilot.pause(0.2)
+        assert app._busy is True
+        try:
+            app.action_request_quit()
+            await pilot.pause(0.1)
+            assert app._busy is False
+            assert app.query_one("#prompt").disabled
+        finally:
+            release.set()
+        await _until(pilot, lambda: not app._background_tasks)
+        await pilot.pause(0.3)
         assert not app.query_one("#prompt").disabled
 
 
@@ -679,7 +726,8 @@ async def test_a_command_cut_by_ctrl_c_leaves_a_later_turn_alone(
         await pilot.pause(0.2)
         app.action_request_quit()
         await pilot.pause(0.1)
-        assert app.query_one("#prompt").disabled  # the command is still running
+        # The command is still running, and the input is back already.
+        assert not app.query_one("#prompt").disabled
         try:
             app._start_turn("hello")  # as the notifier does: a turn with a handle
             await _until(pilot, lambda: model.calls["main"] == 0 and app._run_task)
@@ -903,6 +951,33 @@ async def test_ctrl_c_before_a_dispatched_turn_starts_frees_the_app(
         display_mod.discard_stream_cancel()
 
 
+async def test_ctrl_c_before_a_notifier_turn_starts_frees_the_app(
+    monkeypatch, workspace
+):
+    """A background-task notification starts its turn the way typed input does."""
+    from EvoScientist.stream import display as display_mod
+
+    steps = _StepGateway()
+    steps.gate("again").set()
+    app = await _capture_app(monkeypatch, workspace)
+    try:
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            _fake_wire(app, workspace, steps.gateway)
+            await app._inject_notification_tui("a background task finished", [])
+            assert app._busy is True
+            app.action_request_quit()  # before the turn's task has run a step
+            await pilot.pause(0.3)
+            assert app._busy is False
+            assert app._run_task is None
+            assert steps.gateway.requests == []
+            await _submit(app, "again")
+            await _idle(app, pilot)
+            assert [request.message for request in steps.gateway.requests] == ["again"]
+    finally:
+        display_mod.discard_stream_cancel()
+
+
 async def test_ctrl_c_before_a_dispatched_command_starts_stops_it(
     monkeypatch, workspace, tmp_path
 ):
@@ -1091,6 +1166,42 @@ async def test_a_failed_agent_load_keeps_what_was_queued(monkeypatch, workspace)
         assert steps.gateway.requests == []
 
 
+async def test_a_command_whose_agent_load_fails_keeps_what_was_queued(
+    monkeypatch, workspace
+):
+    """The same for a command that waits for the agent."""
+    steps = _StepGateway()
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        _fake_wire(app, workspace, steps.gateway)
+        failing = asyncio.Event()
+        loads = 0
+
+        async def _load():
+            nonlocal loads
+            loads += 1
+            await failing.wait()
+            raise RuntimeError("MCP server did not start")
+
+        app._await_agent_ready = _load
+        await _submit(app, "/goal pause")
+        await _until(pilot, lambda: loads == 1)
+        await _submit(app, "second")
+        await _submit(app, "third")
+        failing.set()
+        await _until(
+            pilot,
+            lambda: (
+                not app._busy and app._run_task is None and app._active_command is None
+            ),
+        )
+        await pilot.pause(0.2)
+        assert app._queued_messages == ["second", "third"]
+        assert loads == 1
+        assert steps.gateway.requests == []
+
+
 async def test_a_turn_started_from_the_queue_can_be_stopped(monkeypatch, workspace):
     """It gets its handle like a typed turn: Ctrl+C must find it."""
     from EvoScientist.stream import display as display_mod
@@ -1214,7 +1325,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_an_open_approval_alone(
     from EvoScientist.channels import interaction as interaction_mod
     from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
     from tests.fakes import FakeGraphGateway, FakeThreadStore
-    from tests.test_hitl_loop import _interrupt_event
+    from tests.fakes import interrupt_event as _interrupt_event
 
     # No config rule answers the approval: the widget is shown.
     monkeypatch.setattr(

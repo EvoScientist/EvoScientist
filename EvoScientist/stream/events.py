@@ -723,6 +723,7 @@ class _V3EventProcessor:
                 objective=_text("objective"),
                 criteria=_text("criteria"),
                 message=_text("message"),
+                unreviewed=payload.get("unreviewed") is True,
             ).data
         ]
 

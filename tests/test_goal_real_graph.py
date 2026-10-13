@@ -27,6 +27,8 @@ from tests.goal_fakes import (
 )
 from tests.test_rubric_middleware import PASS
 
+pytestmark = pytest.mark.usefixtures("no_mcp")
+
 OBJECTIVE = "ship the report"
 
 
@@ -152,10 +154,17 @@ class TestAcceptedGoal:
         assert model.calls == {"main": 1, "draft": 1, "grade": 1}
         assert result.next == ()
 
-    async def test_the_agent_is_offered_the_goal_tool(self, tmp_path):
+    async def test_the_agent_is_offered_the_goal_tool_only_with_a_goal(self, tmp_path):
+        """On the real main graph, with every other middleware in the list."""
         agent, model = _agent(tmp_path)
         await run(agent, message_input("hi"))
-        assert any("update_goal" in names for names in model.tools_seen)
+        assert model.tools_seen  # the other tools were offered
+        assert not any("update_goal" in names for names in model.tools_seen)
+
+        await run(agent, request_input(_create()))
+        before = len(model.tools_seen)
+        await run(agent, resume_input(ACCEPT))
+        assert any("update_goal" in names for names in model.tools_seen[before:])
 
 
 class TestMemoryWorker:

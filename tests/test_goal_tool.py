@@ -114,6 +114,95 @@ class TestRefusals:
         assert "no goal" in _tool_replies(result)[0]
 
 
+class TestWhenTheModelIsOfferedTheTool:
+    """The tool is on the list only while there is a goal to report on."""
+
+    @staticmethod
+    async def _offered(tmp_path, *, mode="thread", **goal) -> list[str]:
+        agent, models = goal_agent(tmp_path, replies=["ok"])
+        if goal:
+            await seed_goal(agent, **goal)
+        await run(agent, message_input("hi"), mode=mode)
+        return models.main.offered[-1]
+
+    async def test_with_an_active_goal(self, tmp_path):
+        assert await self._offered(tmp_path, status="active") == ["update_goal"]
+
+    async def test_with_a_blocked_goal_the_run_does_not_unblock(self, tmp_path):
+        """A call left in the conversation still has its tool beside it."""
+        offered = await self._offered(tmp_path, mode="followup", status="blocked")
+        assert offered == ["update_goal"]
+
+    @pytest.mark.parametrize("status", ["paused", "complete"])
+    async def test_not_with_a_goal_that_is_not_worked_on(self, tmp_path, status):
+        assert await self._offered(tmp_path, status=status) == []
+
+    async def test_not_without_a_goal(self, tmp_path):
+        assert await self._offered(tmp_path) == []
+
+    @pytest.mark.parametrize("mode", [None, "input"])
+    async def test_not_on_a_run_where_goals_do_not_apply(self, tmp_path, mode):
+        assert await self._offered(tmp_path, mode=mode, status="active") == []
+
+    async def test_other_tools_stay(self, tmp_path):
+        from langchain_core.tools import tool
+
+        @tool
+        def lookup(query: str) -> str:
+            """Look something up."""
+            return query
+
+        agent, models = goal_agent(tmp_path, replies=["ok"], tools=[lookup])
+        await run(agent, message_input("hi"))
+        assert models.main.offered[-1] == ["lookup"]
+        await seed_goal(agent)
+        await run(agent, message_input("again"))
+        assert sorted(models.main.offered[-1]) == ["lookup", "update_goal"]
+
+    def test_a_provider_tool_given_as_a_dict_is_left_alone(self):
+        from types import SimpleNamespace
+
+        from EvoScientist.middleware.goal import _without_update_goal, update_goal
+
+        server_tool = {"type": "web_search_20250305", "name": "web_search"}
+        request = SimpleNamespace(tools=[server_tool, update_goal])
+        request.override = lambda **changes: SimpleNamespace(**changes)
+        assert _without_update_goal(request).tools == [server_tool]
+
+    @pytest.mark.parametrize(
+        "as_dict",
+        [
+            {"name": "update_goal", "description": "", "input_schema": {}},
+            {"type": "function", "function": {"name": "update_goal"}},
+        ],
+        ids=["flat", "function schema"],
+    )
+    def test_the_tool_given_as_a_dict_is_taken_off_as_well(self, as_dict):
+        from types import SimpleNamespace
+
+        from EvoScientist.middleware.goal import _without_update_goal
+
+        other = {"type": "function", "function": {"name": "lookup"}}
+        request = SimpleNamespace(tools=[other, as_dict])
+        request.override = lambda **changes: SimpleNamespace(**changes)
+        assert _without_update_goal(request).tools == [other]
+
+    def test_a_request_without_the_tool_is_passed_on_as_it_is(self):
+        from types import SimpleNamespace
+
+        from EvoScientist.middleware.goal import _without_update_goal
+
+        request = SimpleNamespace(tools=[{"name": "web_search"}])
+        assert _without_update_goal(request) is request
+
+    async def test_a_call_made_without_the_tool_on_offer_is_still_answered(
+        self, tmp_path
+    ):
+        agent, _ = goal_agent(tmp_path, replies=[_calls(BLOCKED), "ok"])
+        result = await run(agent, message_input("hi"))
+        assert "no goal" in _tool_replies(result)[0]
+
+
 def test_the_tool_selector_never_drops_the_tool():
     """With many MCP tools the selector trims the list; the goal tool must stay."""
     from EvoScientist.middleware.tool_selector import DEFAULT_ALWAYS_INCLUDE_TOOLS

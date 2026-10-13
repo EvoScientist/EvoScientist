@@ -1214,7 +1214,7 @@ def _get_default_middleware(
                 model_retry=_model_retry_middleware(
                     cfg, unattended=unattended, honor_run_key=model_retry_honors_run_key
                 ),
-                # The condition that leaves ask_user out: nobody can answer.
+                # Nobody answers a review in auto mode.
                 unattended=bool(getattr(cfg, "auto_mode", False)),
             ),
         )

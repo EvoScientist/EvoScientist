@@ -5,7 +5,7 @@ from __future__ import annotations
 from EvoScientist.gateway import GraphTarget, RunRequest
 from EvoScientist.gateway.local import LocalGraphGateway
 
-REQUEST = {"kind": "pause", "id": "r1", "target": "goal:g1", "review": True}
+REQUEST = {"kind": "pause", "id": "r1", "target": "goal:g1"}
 
 
 async def test_the_local_gateway_forwards_the_request(monkeypatch):

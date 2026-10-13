@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -13,6 +14,8 @@ from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.paths import Workspace
 from EvoScientist.stream.events import stream_agent_events
 from tests.test_rubric_middleware import PASS
+
+pytestmark = pytest.mark.usefixtures("no_mcp")
 
 
 class _Roles(BaseChatModel):
