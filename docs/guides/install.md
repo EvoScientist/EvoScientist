@@ -92,6 +92,12 @@ There is no `--uninstall` option. On macOS and Linux:
    ```bash
    ~/.evoscientist/tools/uv-0.12.23/uv tool uninstall EvoScientist
    ```
+   For a full removal, and only if no other uv on the machine uses them, also
+   remove the Python 3.12 that uv downloaded and uv's download cache:
+   ```bash
+   ~/.evoscientist/tools/uv-0.12.23/uv python uninstall 3.12
+   ~/.evoscientist/tools/uv-0.12.23/uv cache clean
+   ```
 2. Delete the downloaded tools and the agent's Python environment:
    ```bash
    rm -rf ~/.evoscientist/tools ~/.evoscientist/envs
@@ -109,6 +115,9 @@ On Windows (PowerShell):
 1. ```powershell
    & "$HOME\.evoscientist\tools\uv-0.12.23\uv.exe" tool uninstall EvoScientist
    ```
+   For a full removal, as on macOS and Linux:
+   `& "$HOME\.evoscientist\tools\uv-0.12.23\uv.exe" python uninstall 3.12` and
+   `... cache clean`.
 2. ```powershell
    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$HOME\.evoscientist\tools", "$HOME\.evoscientist\envs"
    ```
