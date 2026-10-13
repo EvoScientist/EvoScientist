@@ -43,6 +43,10 @@ param([Parameter(Mandatory = $true)][string]$ConfigPath)
 
 $ErrorActionPreference = 'Stop'
 $cfg = Get-Content -Raw -Encoding UTF8 -LiteralPath $ConfigPath | ConvertFrom-Json
+# uv and EvoSci write UTF-8: decode their output, and write this window's
+# lines, as UTF-8 rather than the console's code page (paths with non-ASCII
+# characters). Fails harmlessly without a console (--json).
+try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
 $Json = [bool]$cfg.json
 $finished = $false
 $blockers = @()
@@ -211,8 +215,8 @@ try {
         $setupRc = Invoke-OnConsole $cfg.evosci $setupArgs
     }
     if ($null -ne $failed -or $setupRc -ne 0) {
-        $stage = if ($failed) { $failed.stage } else { 'setup' }
-        Emit 'error' "EvoScientist is updated, but the $stage stage of EvoSci setup failed. Run it again: $($cfg.evosci) setup" $failed 'setup_failed'
+        $what = if ($failed) { "the $($failed.stage) stage of EvoSci setup" } else { 'EvoSci setup' }
+        Emit 'error' "EvoScientist is updated, but $what failed (see above). Run it again: $($cfg.evosci) setup" $failed 'setup_failed'
         $finished = $true
         return
     }
