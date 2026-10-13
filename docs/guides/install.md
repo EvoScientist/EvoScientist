@@ -110,7 +110,7 @@ On Windows (PowerShell):
    & "$HOME\.evoscientist\tools\uv-0.12.23\uv.exe" tool uninstall EvoScientist
    ```
 2. ```powershell
-   Remove-Item -Recurse -Force "$HOME\.evoscientist\tools", "$HOME\.evoscientist\envs"
+   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$HOME\.evoscientist\tools", "$HOME\.evoscientist\envs"
    ```
 3. As on macOS and Linux: `$HOME\.config\evoscientist` and `$HOME\.evoscientist`
    hold your settings and data.
