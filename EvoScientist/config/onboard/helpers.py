@@ -297,6 +297,42 @@ def _run_ccproxy_login(provider: str, label: str) -> None:
         console.print(f"  [red]Login error: {exc}[/red]")
 
 
+def _chatgpt_status_text(state) -> str:
+    """One-line sign-in status, with the plan when the token names it."""
+    return f"ChatGPT: signed in ({state.plan})" if state.plan else "ChatGPT: signed in"
+
+
+def _open_browser_here() -> bool:
+    """Whether a browser on this machine would be in front of the user."""
+    from ...deploy.launcher import no_display
+
+    return not (
+        no_display() or os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY")
+    )
+
+
+def _run_chatgpt_login() -> bool:
+    """Run the ChatGPT browser sign-in and print the outcome."""
+    import httpx
+    from rich.markup import escape
+
+    from ...llm import chatgpt_oauth
+
+    try:
+        state = chatgpt_oauth.login(open_browser=_open_browser_here())
+    except KeyboardInterrupt:
+        console.print("  [red]Login cancelled.[/red]")
+        return False
+    except (RuntimeError, OSError, ValueError, httpx.HTTPError) as exc:
+        console.print(f"  [red]Login failed: {escape(str(exc))}[/red]")
+        return False
+    if not state.signed_in:
+        console.print("  [red]Login failed: no token was stored.[/red]")
+        return False
+    console.print(f"  [green]✓ {_chatgpt_status_text(state)}[/green]")
+    return True
+
+
 def _check_npx() -> bool:
     """Check if npx is available on the system.
 

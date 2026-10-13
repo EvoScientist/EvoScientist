@@ -362,7 +362,7 @@ docker build -t evoscientist:dev .
 
 > [!NOTE]
 > 镜像中**未捆绑**以下内容，需要时基于镜像派生安装：
-> - **`stt`**（基于 `faster-whisper` 的语音转文字）和 **`oauth`**（`ccproxy-api`）
+> - **`stt`**（基于 `faster-whisper` 的语音转文字）和 **`oauth`**（`ccproxy-api`，用于 Claude 订阅 OAuth）
 > - **TinyTeX / LaTeX**（`pdflatex`、`latexmk`），供论文写作类技能使用
 >
 > ```dockerfile

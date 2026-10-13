@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import warnings
 from typing import Any
 from urllib.parse import urlparse
@@ -27,11 +26,10 @@ from ..config.settings import (
 from .context_window import apply_known_context_window
 from .deepseek import EvoChatDeepSeek
 from .patches import (
-    _is_ccproxy_codex,
     _patch_anthropic_strip_foreign_reasoning,
     _patch_anthropic_structured_output,
-    _patch_ccproxy_system_to_developer,
     _patch_openai_compat_content,
+    _patch_openai_responses_whole_tool_args,
     _patch_openrouter_strip_responses_reasoning,
     _patch_openrouter_structured_output,
 )
@@ -55,59 +53,6 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
     "minimax": "MINIMAX_BASE_URL",
     "xiaomi-token-plan": "MIMO_TOKEN_PLAN_BASE_URL",
 }
-
-# Minimum Codex CLI version advertised when no explicit override is set. Newer
-# installed versions are advertised automatically. The backend gates models on
-# it (gpt-6-* is refused as "not supported" at 0.144.1).
-_CODEX_CLIENT_VERSION_FALLBACK = "0.156.1"
-_CODEX_VERSION_TIMEOUT_SECONDS = 10
-_installed_codex_version = ""
-_codex_probe_disabled = False
-
-
-def _installed_codex_client_version() -> str:
-    """Return the installed Codex CLI version, or an empty string.
-
-    A success and a missing binary are cached; a timeout or non-zero exit
-    (e.g. mid-upgrade) is retried on the next call.
-    """
-    global _installed_codex_version, _codex_probe_disabled
-    if _installed_codex_version or _codex_probe_disabled:
-        return _installed_codex_version
-    try:
-        result = subprocess.run(
-            ["codex", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=_CODEX_VERSION_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except FileNotFoundError:
-        _codex_probe_disabled = True
-        return ""
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-
-    if result.returncode != 0:
-        return ""
-    match = re.search(r"\b(\d+\.\d+\.\d+)\b", result.stdout + result.stderr)
-    if match:
-        _installed_codex_version = match.group(1)
-    return _installed_codex_version
-
-
-def _resolve_codex_client_version() -> str:
-    """Resolve an explicit override or the newer of installed and minimum versions."""
-    override = os.environ.get("EVOSCIENTIST_CODEX_CLIENT_VERSION", "").strip()
-    if override:
-        return override
-
-    installed = _installed_codex_client_version()
-    if installed and tuple(map(int, installed.split("."))) >= tuple(
-        map(int, _CODEX_CLIENT_VERSION_FALLBACK.split("."))
-    ):
-        return installed
-    return _CODEX_CLIENT_VERSION_FALLBACK
 
 
 def _resolve_reasoning_effort(default: str) -> str:
@@ -446,7 +391,7 @@ def get_chat_model(
     _is_third_party = (
         provider in _OPENAI_ROUTED_PROVIDERS or provider in _ANTHROPIC_ROUTED_PROVIDERS
     )
-    _is_openai_proxy = False
+    _chatgpt_signin = False
     _original_provider: str | None = None
     if provider == "anthropic":
         base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
@@ -456,38 +401,18 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
 
-    # Native OpenAI base_url override (e.g. ccproxy Codex at localhost:8000/codex/v1)
+    # ChatGPT sign-in: the plan's own endpoint and token, so no key or base_url.
+    elif (
+        provider == "openai"
+        and os.environ.get("EVOSCIENTIST_OPENAI_AUTH_MODE") == "oauth"
+    ):
+        _chatgpt_signin = True
+
+    # Native OpenAI base_url override (e.g. a local OpenAI-compatible server)
     elif provider == "openai":
         base_url = os.environ.get("OPENAI_BASE_URL", "")
         if base_url:
             kwargs["base_url"] = base_url
-            _is_openai_proxy = _is_ccproxy_codex()
-            if _is_openai_proxy:
-                # Use Responses API for ccproxy: bypasses the format chain
-                # converter (Chat→Responses→Chat) which returns 502 on
-                # complex responses.  System messages are converted to
-                # developer role by _patch_ccproxy_system_to_developer().
-                kwargs.setdefault("use_responses_api", True)
-                # Streaming must stay ON for Responses API: ccproxy's
-                # StreamingBufferService loses output when assembling
-                # non-streaming responses.  (The old streaming=False was
-                # for Chat Completions tool_call duplication — not an issue
-                # with the Responses API SSE format.)
-                kwargs.pop("streaming", None)  # remove if set elsewhere
-                # ccproxy forwards client headers upstream and only
-                # gap-fills its own, so the Codex backend sees this
-                # client's identity. Without Codex-CLI-shaped headers it
-                # rejects current models ("The '<model>' model requires
-                # a newer version of Codex").
-                _codex_ver = _resolve_codex_client_version()
-                _headers = kwargs.get("default_headers") or {}
-                kwargs["default_headers"] = _headers
-                _headers.setdefault("originator", "codex_cli_rs")
-                _headers.setdefault("version", _codex_ver)
-                _headers.setdefault(
-                    "User-Agent",
-                    f"codex_cli_rs/{_headers['version']} (EvoScientist)",
-                )
         api_key = os.environ.get("OPENAI_API_KEY", "")
         if api_key:
             kwargs["api_key"] = api_key
@@ -663,7 +588,7 @@ def get_chat_model(
                 "Remove use_responses_api=True."
             )
         kwargs.pop("use_responses_api", None)
-    elif provider == "openai":
+    elif provider == "openai" and not _chatgpt_signin:
         _responses_api_setting = (
             os.environ.get("EVOSCIENTIST_USE_RESPONSES_API", "").strip().lower()
         )
@@ -673,7 +598,8 @@ def get_chat_model(
         elif _responses_api_setting == "true":
             kwargs["use_responses_api"] = True
 
-    if _is_openai_proxy and kwargs.get("use_responses_api") is True:
+    # The Codex backend carries reasoning across turns only when asked to.
+    if _chatgpt_signin:
         reasoning = kwargs.setdefault("reasoning", {})
         if isinstance(reasoning, dict):
             reasoning = dict(reasoning)
@@ -682,18 +608,23 @@ def get_chat_model(
 
     if _uses_native_deepseek:
         chat_model = EvoChatDeepSeek(model=model_id, **kwargs)
+    elif _chatgpt_signin:
+        from .chatgpt_oauth import build_model
+
+        _patch_openai_responses_whole_tool_args()
+        chat_model = build_model(model_id, **kwargs)
     else:
         chat_model = init_chat_model(model=model_id, model_provider=provider, **kwargs)
 
     # Flatten list content to strings for strict OpenAI-compatible providers
-    # (SiliconFlow, OpenRouter, custom-openai, etc.) and
-    # native OpenAI through a proxy, to avoid "sequence expected string" errors.
+    # (SiliconFlow, OpenRouter, custom-openai, etc.), to avoid "sequence expected
+    # string" errors.
     # Moonshot and Kimi Coding support standard format, no patch needed.
     # Mandatory-thinking Kimi models on Anthropic-routed endpoints are exempt:
     # flatten drops thinking blocks, which Kimi requires on tool-call turns.
     _no_patch_providers = {"moonshot", "kimi-coding"}
     if (
-        (_is_third_party or _is_openai_proxy)
+        _is_third_party
         and _original_provider not in _no_patch_providers
         and not _uses_native_deepseek
         and not (provider == "anthropic" and _is_mandatory_thinking_kimi(model_id))
@@ -702,9 +633,6 @@ def get_chat_model(
         # Anthropic-routed providers accept media in tool results natively;
         # only OpenAI-compatible providers need tool-media hoisting.
         _patch_openai_compat_content(chat_model)
-
-    if _is_openai_proxy:
-        _patch_ccproxy_system_to_developer(chat_model)
 
     if provider == "openrouter":
         _enable_openrouter_429_retry(chat_model)

@@ -1314,7 +1314,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = ">=0.3.2" },
     { name = "langchain-nvidia-ai-endpoints", specifier = ">=1.2" },
     { name = "langchain-ollama", specifier = ">=1.1" },
-    { name = "langchain-openai", specifier = ">=1.2" },
+    { name = "langchain-openai", specifier = ">=1.7.0" },
     { name = "langchain-openrouter", specifier = ">=0.2.5" },
     { name = "langchain-quickjs", specifier = ">=0.3.7" },
     { name = "langgraph-api", specifier = ">=0.7.30" },

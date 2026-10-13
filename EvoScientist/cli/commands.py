@@ -112,6 +112,39 @@ def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
     return runtime
 
 
+def _interactive_start(prompt: str | None) -> bool:
+    """True when a person is at the terminal: no ``-p`` and both streams are ttys."""
+    streams = (sys.stdin, sys.stdout)
+    return not prompt and all(s is not None and s.isatty() for s in streams)
+
+
+def _require_chatgpt_sign_in(config: Any, *, interactive: bool) -> None:
+    """Stop startup when OpenAI uses ChatGPT sign-in and nobody is signed in.
+
+    An interactive start offers the browser sign-in first.
+    """
+    if getattr(config, "openai_auth_mode", "api_key") != "oauth":
+        return
+
+    from ..llm import chatgpt_oauth
+
+    state = chatgpt_oauth.status()
+    if state.signed_in:
+        return
+    if state.problem:
+        console.print(f"[yellow]ChatGPT: {state.problem}[/yellow]")
+    if interactive:
+        import questionary
+
+        from ..config.onboard.helpers import _run_chatgpt_login
+
+        if questionary.confirm("Sign in with ChatGPT now?", default=True).ask():
+            if _run_chatgpt_login():
+                return
+    console.print(f"[red]{chatgpt_oauth.SIGN_IN_HINT}[/red]")
+    raise typer.Exit(1)
+
+
 # =============================================================================
 # Onboard command
 # =============================================================================
@@ -1859,9 +1892,11 @@ def serve(
     if debug:
         _configure_logging()
 
-    # Auto-start ccproxy if any provider uses OAuth mode
+    _require_chatgpt_sign_in(config, interactive=False)
+
+    # Auto-start ccproxy when Anthropic uses OAuth mode
     _ccproxy_proc_serve = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    if config.anthropic_auth_mode == "oauth":
         try:
             from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 
@@ -2588,7 +2623,8 @@ def _main_callback(
     auth_mode: str | None = typer.Option(
         None,
         "--auth-mode",
-        help="Auth mode for Anthropic/OpenAI: api_key (default) or oauth (ccproxy).",
+        help="Auth mode for Anthropic/OpenAI: api_key (default) or oauth "
+        "(Claude subscription via ccproxy, ChatGPT sign-in).",
     ),
     ui: str | None = typer.Option(
         None,
@@ -2708,9 +2744,11 @@ def _main_callback(
     config = get_effective_config(cli_overrides)
     apply_config_to_env(config)
 
-    # Auto-start ccproxy if any provider uses OAuth mode
+    _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
+
+    # Auto-start ccproxy when Anthropic uses OAuth mode
     _ccproxy_proc = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    if config.anthropic_auth_mode == "oauth":
         try:
             from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 

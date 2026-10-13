@@ -661,16 +661,6 @@ class TestStepOAuthAuthMode:
                 "Authentication mode",
                 "Log in to Claude now?",
             ),
-            (
-                "_step_openai_auth_mode",
-                "openai_auth_mode",
-                "OpenAI",
-                "Codex OAuth",
-                "codex",
-                "Codex OAuth",
-                "OpenAI authentication mode",
-                "Log in to Codex now?",
-            ),
         ],
     )
     def test_oauth_wrappers_use_provider_specific_ccproxy_flow(
@@ -684,7 +674,7 @@ class TestStepOAuthAuthMode:
         question_label,
         login_prompt,
     ):
-        """Anthropic/OpenAI wrappers share flow but keep provider-specific IDs."""
+        """The Anthropic wrapper passes its provider-specific IDs to the ccproxy flow."""
         from EvoScientist.config.onboard import steps as onboard_steps
 
         config = EvoScientistConfig(**{config_attr: "oauth"})
@@ -739,6 +729,211 @@ class TestStepOAuthAuthMode:
         ]
         mock_confirm.assert_called_once()
         assert mock_confirm.call_args.args[0] == login_prompt
+
+
+class TestStepOpenAIAuthMode:
+    def _run(self, *, picked, signed_in, confirm=True, plan="plus"):
+        from EvoScientist.config.onboard import steps as onboard_steps
+        from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
+
+        select_question = MagicMock()
+        select_question.ask.return_value = picked
+        confirm_question = MagicMock()
+        confirm_question.ask.return_value = confirm
+        state = ChatGPTLogin(signed_in=signed_in, plan=plan if signed_in else None)
+        with (
+            patch("EvoScientist.config.onboard.prompter.install_navigation_keys"),
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.select",
+                return_value=select_question,
+            ) as mock_select,
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.confirm",
+                return_value=confirm_question,
+            ) as mock_confirm,
+            patch("EvoScientist.llm.chatgpt_oauth.status", return_value=state),
+            patch("EvoScientist.config.onboard.steps._run_chatgpt_login") as mock_login,
+            patch("EvoScientist.ccproxy_manager.is_ccproxy_available") as mock_ccproxy,
+            patch(
+                "EvoScientist.config.onboard.steps._prompt_ccproxy_port"
+            ) as mock_port,
+            patch("EvoScientist.config.onboard.steps.console") as mock_console,
+        ):
+            result = onboard_steps._step_openai_auth_mode(
+                EvoScientistConfig(openai_auth_mode="oauth")
+            )
+        printed = " ".join(str(c.args[0]) for c in mock_console.print.call_args_list)
+        return {
+            "result": result,
+            "select": mock_select,
+            "confirm": mock_confirm,
+            "login": mock_login,
+            "ccproxy": mock_ccproxy,
+            "port": mock_port,
+            "printed": printed,
+        }
+
+    def test_choices_offer_chatgpt_sign_in_and_back(self):
+        from questionary import Separator
+
+        out = self._run(picked="api_key", signed_in=False)
+
+        assert out["result"] == "api_key"
+        select_call = out["select"].call_args
+        assert select_call.args[0] == "OpenAI authentication mode  [Esc/← to go back]:"
+        assert select_call.kwargs["default"] == "oauth"
+        titles = [
+            choice.title
+            for choice in select_call.kwargs["choices"]
+            if not isinstance(choice, Separator)
+        ]
+        assert titles == [
+            "API Key (direct OpenAI access)",
+            "ChatGPT sign-in (no API key needed)",
+            "← Back (re-pick provider)",
+        ]
+        out["confirm"].assert_not_called()
+
+    def test_not_signed_in_offers_login_without_ccproxy(self):
+        out = self._run(picked="oauth", signed_in=False, confirm=True)
+
+        assert out["result"] == "oauth"
+        assert out["confirm"].call_args.args[0] == "Log in to ChatGPT now?"
+        assert out["confirm"].call_args.kwargs["default"] is True
+        out["login"].assert_called_once_with()
+        out["ccproxy"].assert_not_called()
+        out["port"].assert_not_called()
+        assert "Unofficial; OpenAI's terms apply." in out["printed"]
+
+    def test_signed_in_shows_plan_and_offers_reauthentication(self):
+        out = self._run(picked="oauth", signed_in=True, confirm=False)
+
+        assert out["result"] == "oauth"
+        assert "ChatGPT: signed in (plus)" in out["printed"]
+        assert out["confirm"].call_args.args[0] == (
+            "Re-authenticate to refresh credentials?"
+        )
+        assert out["confirm"].call_args.kwargs["default"] is False
+        out["login"].assert_not_called()
+
+    def test_declining_login_keeps_oauth(self):
+        out = self._run(picked="oauth", signed_in=False, confirm=False)
+
+        assert out["result"] == "oauth"
+        out["login"].assert_not_called()
+
+    def test_back_goes_back(self):
+        from EvoScientist.config.onboard.prompter import BACK_SENTINEL, GoBack
+
+        with pytest.raises(GoBack):
+            self._run(picked=BACK_SENTINEL, signed_in=False)
+
+
+class TestRunChatGPTLogin:
+    @pytest.mark.parametrize(
+        ("platform", "env", "expected"),
+        [
+            ("darwin", {}, True),
+            ("darwin", {"SSH_CONNECTION": "1.2.3.4 5 6.7.8.9 22"}, False),
+            ("darwin", {"SSH_TTY": "/dev/ttys001"}, False),
+            ("linux", {"DISPLAY": ":0"}, True),
+            ("linux", {}, False),
+            ("linux", {"BROWSER": "firefox"}, True),
+            ("win32", {}, True),
+        ],
+    )
+    def test_browser_is_opened_only_where_the_user_can_see_it(
+        self, platform, env, expected, monkeypatch
+    ):
+        from EvoScientist.config.onboard import helpers
+
+        for name in (
+            "SSH_CONNECTION",
+            "SSH_TTY",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "BROWSER",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setattr("EvoScientist.deploy.launcher.sys.platform", platform)
+
+        assert helpers._open_browser_here() is expected
+
+    def test_success_prints_the_status(self):
+        from EvoScientist.config.onboard import helpers
+        from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
+
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=True),
+            patch(
+                "EvoScientist.llm.chatgpt_oauth.login",
+                return_value=ChatGPTLogin(signed_in=True, plan="pro"),
+            ) as mock_login,
+            patch.object(helpers, "console") as mock_console,
+        ):
+            assert helpers._run_chatgpt_login() is True
+
+        mock_login.assert_called_once_with(open_browser=True)
+        assert "ChatGPT: signed in (pro)" in str(mock_console.print.call_args.args[0])
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("Port 1455 is in use"),
+            TimeoutError("Timed out waiting for ChatGPT OAuth callback"),
+            PermissionError(13, "Permission denied"),
+            ValueError("Expecting value: line 1 column 1 (char 0)"),
+            KeyboardInterrupt(),
+        ],
+    )
+    def test_failure_prints_one_line_and_returns_false(self, error):
+        from EvoScientist.config.onboard import helpers
+
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=False),
+            patch("EvoScientist.llm.chatgpt_oauth.login", side_effect=error),
+            patch.object(helpers, "console") as mock_console,
+        ):
+            assert helpers._run_chatgpt_login() is False
+
+        assert mock_console.print.call_count == 1
+
+    def test_http_failure_is_reported_too(self):
+        import httpx
+
+        from EvoScientist.config.onboard import helpers
+
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=True),
+            patch(
+                "EvoScientist.llm.chatgpt_oauth.login",
+                side_effect=httpx.ConnectError("no route"),
+            ),
+            patch.object(helpers, "console") as mock_console,
+        ):
+            assert helpers._run_chatgpt_login() is False
+
+        assert "Login failed: no route" in str(mock_console.print.call_args.args[0])
+
+    def test_failure_text_cannot_break_the_console_markup(self):
+        from rich.console import Console
+
+        from EvoScientist.config.onboard import helpers
+
+        console = Console(record=True, width=120)
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=True),
+            patch(
+                "EvoScientist.llm.chatgpt_oauth.login",
+                side_effect=RuntimeError("server said [/red] and [bold]"),
+            ),
+            patch.object(helpers, "console", console),
+        ):
+            assert helpers._run_chatgpt_login() is False
+
+        assert "Login failed: server said [/red] and [bold]" in console.export_text()
 
 
 class TestStepModel:
@@ -1785,8 +1980,9 @@ class TestRunOnboard:
         assert mock_q.select.return_value.ask.call_count == 4
 
     def test_auxiliary_openai_oauth_skips_api_key(self):
-        """Auxiliary OpenAI now uses the shared auth flow and skips keys on OAuth."""
+        """Auxiliary OpenAI goes through the auth step and skips keys on OAuth."""
         from EvoScientist.config.onboard.wizard import run_onboard
+        from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
 
         mock_q = MagicMock()
         with (
@@ -1797,12 +1993,9 @@ class TestRunOnboard:
             patch("EvoScientist.config.onboard.steps.console"),
             patch("EvoScientist.config.onboard.helpers.console"),
             patch(
-                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
-            ),
-            patch(
-                "EvoScientist.ccproxy_manager.check_ccproxy_auth",
-                return_value=(False, "not authenticated"),
-            ) as mock_auth,
+                "EvoScientist.llm.chatgpt_oauth.status",
+                return_value=ChatGPTLogin(signed_in=False),
+            ) as mock_status,
         ):
             mock_load.return_value = EvoScientistConfig()
             mock_q.select.return_value.ask.side_effect = [
@@ -1811,11 +2004,8 @@ class TestRunOnboard:
                 "oauth",  # OpenAI auth mode
                 "gpt-5.5",  # Auxiliary model
             ]
-            mock_q.text.return_value.ask.side_effect = [
-                "",  # ccproxy port (keep default)
-            ]
             mock_q.confirm.return_value.ask.side_effect = [
-                False,  # Do not log in to Codex now
+                False,  # Do not log in to ChatGPT now
                 True,  # Save config
             ]
 
@@ -1830,7 +2020,7 @@ class TestRunOnboard:
         assert final_config.openai_auth_mode == "oauth"
         assert final_config.openai_api_key == ""
         mock_q.password.assert_not_called()
-        mock_auth.assert_called_once_with("codex")
+        mock_status.assert_called_once_with()
 
     def test_auxiliary_reconfigure_clears_unused_openai_oauth(self):
         """Switching co-pilot away from OpenAI clears stale OpenAI OAuth mode."""

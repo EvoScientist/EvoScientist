@@ -96,6 +96,11 @@ def deploy(
         _configure_logging()
     apply_config_to_env(config)
 
+    # Before anything is created or started.
+    from ..cli.commands import _require_chatgpt_sign_in
+
+    _require_chatgpt_sign_in(config, interactive=False)
+
     # 2. Resolve workspace (CLI > config.default_workdir > cwd)
     from ..paths import start_workspace_path
 
@@ -208,9 +213,9 @@ def deploy(
             "trust.[/bold red]"
         )
 
-    # 6. ccproxy lifecycle (only if any provider uses OAuth)
+    # 6. ccproxy lifecycle (Anthropic OAuth only)
     _ccproxy_proc = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    if config.anthropic_auth_mode == "oauth":
         try:
             from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 
@@ -332,11 +337,11 @@ def _describe_auth(config: Any) -> str:
     anth = getattr(config, "anthropic_auth_mode", "api_key")
     oai = getattr(config, "openai_auth_mode", "api_key")
     if anth == "oauth" and oai == "oauth":
-        return "OAuth (Anthropic + OpenAI via ccproxy)"
+        return "OAuth (Anthropic via ccproxy) + ChatGPT sign-in (OpenAI)"
     if anth == "oauth":
         return "OAuth (Anthropic via ccproxy) + API key (OpenAI)"
     if oai == "oauth":
-        return "API key (Anthropic) + OAuth (OpenAI via ccproxy)"
+        return "API key (Anthropic) + ChatGPT sign-in (OpenAI)"
     return "API key"
 
 

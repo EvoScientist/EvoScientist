@@ -1030,8 +1030,8 @@ _ENV_MAPPINGS = {
 }
 
 
-# Placeholder ``ccproxy_manager.setup_*_env`` writes for a provider's API key
-# when routing it through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
+# Placeholder ``ccproxy_manager.setup_ccproxy_env`` writes for the Anthropic API
+# key when routing through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
 _OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
 
 
@@ -1237,6 +1237,9 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):
         os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "false"
+    # Written for both values: get_chat_model reads it, and the langgraph dev
+    # subprocess re-resolves config without the CLI's --auth-mode override.
+    os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = config.openai_auth_mode
     # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
     # (warning banner, run_in_background) and is inherited by the langgraph dev
     # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)

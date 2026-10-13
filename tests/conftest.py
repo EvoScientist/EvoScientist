@@ -1,5 +1,6 @@
 """Shared fixtures for EvoScientist tests."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -137,6 +138,21 @@ def _isolate_dotenv(monkeypatch):
         "EvoScientist.config.settings.find_dotenv",
         lambda *args, **kwargs: _NONEXISTENT_DOTENV,
     )
+
+
+@pytest.fixture(autouse=True)
+def _restore_openai_auth_mode_env():
+    """Start every test without EVOSCIENTIST_OPENAI_AUTH_MODE and restore it after.
+
+    ``apply_config_to_env`` writes it with a direct ``os.environ`` assignment,
+    which monkeypatch cannot undo.
+    """
+    previous = os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
+    yield
+    if previous is None:
+        os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
+    else:
+        os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = previous
 
 
 @pytest.fixture(autouse=True)

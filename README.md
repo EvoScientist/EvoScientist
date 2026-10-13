@@ -353,7 +353,7 @@ docker build -t evoscientist:dev .
 
 > [!NOTE]
 > Not bundled — install on demand by deriving from the image:
-> - **`stt`** (speech-to-text via `faster-whisper`) and **`oauth`** (`ccproxy-api`)
+> - **`stt`** (speech-to-text via `faster-whisper`) and **`oauth`** (`ccproxy-api`, for Claude subscription OAuth)
 > - **TinyTeX / LaTeX** (`pdflatex`, `latexmk`) for paper-writing skills
 >
 > ```dockerfile
