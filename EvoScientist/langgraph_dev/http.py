@@ -23,14 +23,16 @@ memory.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
 from EvoScientist.llm.models import list_model_picker_entries
+from EvoScientist.local_secret import load_local_secret, require_local_secret
 
 
 async def get_models(_request: Request) -> JSONResponse:
@@ -216,12 +218,30 @@ async def post_policy(request: Request) -> JSONResponse:
     return JSONResponse({"decisions": decisions})
 
 
+async def verify_local_secret(request: Request) -> Response:
+    """``204`` when the request carries the local secret, ``403`` otherwise, so
+    a client can check the value it read."""
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    return Response(status_code=204)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: Starlette):
+    # langgraph-api runs this inside its own lifespan; the file I/O goes to a
+    # thread because blockbuster refuses it on the event loop.
+    await asyncio.to_thread(load_local_secret)
+    yield
+
+
 app = Starlette(
+    lifespan=_lifespan,
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),
         Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
         Route("/api/bg_processes/running", get_bg_processes_running, methods=["GET"]),
         Route("/api/policy", post_policy, methods=["POST"]),
-    ]
+        Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
+    ],
 )

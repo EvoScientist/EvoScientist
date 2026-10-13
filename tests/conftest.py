@@ -158,6 +158,7 @@ def _isolate_user_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", data_dir / "skills")
     monkeypatch.setattr(paths, "GLOBAL_MEMORIES_DIR", data_dir / "memories")
     monkeypatch.setattr(paths, "MEMORIES_DIR", data_dir / "memories")
+    monkeypatch.setattr(paths, "SERVER_HOME", data_dir / "server")
     monkeypatch.setattr(tui_interactive, "DATA_DIR", data_dir)
     monkeypatch.setattr(paths, "CONFIG_DIR", config_dir)
     monkeypatch.setattr(mcp_client, "USER_CONFIG_DIR", config_dir)

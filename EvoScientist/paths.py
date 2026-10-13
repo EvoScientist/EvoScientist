@@ -281,6 +281,10 @@ GLOBAL_SKILLS_DIR: Path = _global_skills_dir()
 # Global memories: shared across all workspaces (~/.evoscientist/memories/)
 GLOBAL_MEMORIES_DIR: Path = _global_memories_dir()
 
+# Server home: files that belong to the langgraph dev server rather than to a
+# workspace, such as the local secret (~/.evoscientist/server/).
+SERVER_HOME: Path = DATA_DIR / "server"
+
 
 # Memories dir: global by default, overridable via env var.
 # Supports both new (EVOSCIENTIST_MEMORIES_DIR) and old (EVOSCIENTIST_MEMORY_DIR) env vars.
