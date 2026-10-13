@@ -1711,7 +1711,7 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
         # ValueError for an entry that resolves outside the folder; the
         # listing skips it.
         path.resolve().relative_to(self.cwd)
-        return (self._media_dir / path.relative_to(self.cwd)).as_posix()
+        return paths.file_tool_path(self._media_dir / path.relative_to(self.cwd))
 
 
 class CustomSandboxBackend(LocalShellBackend):
@@ -1821,6 +1821,7 @@ class CustomSandboxBackend(LocalShellBackend):
         In dangerous (real-filesystem) mode, skip all rewriting and let the
         parent resolve real absolute paths as-is.
         """
+        key = paths.host_file_tool_path(key)
         if self._dangerous:
             return super()._resolve_path(key)
 
@@ -1828,16 +1829,21 @@ class CustomSandboxBackend(LocalShellBackend):
         if media_path is not None:
             return media_path
 
-        cwd_str = str(self.cwd).rstrip("/")
+        cwd_str = self.cwd.as_posix().rstrip("/")
         ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
 
         # Prefer the full cwd match so a parent path that happens to contain
         # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
         # confuse the basename-based fallback below.
-        if key == cwd_str:
-            return super()._resolve_path("/")
-        if key.startswith(cwd_str + "/"):
-            return super()._resolve_path("/" + key[len(cwd_str) + 1 :])
+        key_path = Path(key)
+        if key_path.is_absolute():
+            try:
+                relative = key_path.relative_to(self.cwd)
+            except ValueError:
+                pass
+            else:
+                virtual = relative.as_posix()
+                return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
@@ -1864,10 +1870,8 @@ class CustomSandboxBackend(LocalShellBackend):
 
         return super()._resolve_path(key)
 
-    # On Windows the file tools never reach the media folder here: deepagents'
-    # ``validate_path`` rejects drive-letter paths (``C:\...``, ``C:/...``)
-    # for every file tool before the backend sees them. In run mode a channel
-    # attachment on Windows is reachable through the shell only.
+    # Windows attachment references use a /C:/... file-tool alias so they
+    # pass deepagents' validation before reaching this backend.
     def _media_relative(self, key: str) -> Path | None:
         """*key* relative to the media folder, if it names a path inside it.
 
@@ -1876,7 +1880,7 @@ class CustomSandboxBackend(LocalShellBackend):
         """
         if self._media_dir is None:
             return None
-        path = Path(key)
+        path = Path(paths.host_file_tool_path(key))
         if not path.is_absolute():
             return None
         for base in (self._media_dir, self._media_real):

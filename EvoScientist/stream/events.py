@@ -7,6 +7,7 @@ import asyncio
 import base64
 import inspect
 import mimetypes
+import ntpath
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from ..memory.worker_activity import clear_completed_memory_activity_counts
 from ..middleware.tool_history_repair import (
     _INTERRUPTED_RESULT as _INTERRUPTED_TOOL_RESULT,
 )
+from ..paths import file_tool_path
 from .emitter import StreamEventEmitter
 from .summarization import (
     _extract_summary_message_text,
@@ -1013,9 +1015,19 @@ async def build_agent_stream_input(
             else:
                 file_refs.append(path)
         if file_refs:
-            ref_text = "\n".join(
-                f"[attached file: {os.path.basename(p)}] path: {p}" for p in file_refs
-            )
+            references = []
+            for path in file_refs:
+                tool_path = file_tool_path(path)
+                if tool_path != path:
+                    references.append(
+                        f"[attached file: {ntpath.basename(path)}] "
+                        f"file tools path: {tool_path}; shell path: {path}"
+                    )
+                else:
+                    references.append(
+                        f"[attached file: {os.path.basename(path)}] path: {path}"
+                    )
+            ref_text = "\n".join(references)
             content_blocks.append({"type": "text", "text": ref_text})
         if content_blocks:
             user_content = content_blocks

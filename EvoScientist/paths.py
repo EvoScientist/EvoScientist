@@ -28,6 +28,28 @@ def normalize_path(path: str | Path) -> Path:
     return Path(path).expanduser().resolve()
 
 
+def file_tool_path(path: str | Path) -> str:
+    """Spell a host path so deepagents' virtual-path validator accepts it.
+
+    Windows drive paths need a leading slash (``/C:/project/file``). The
+    sandbox decodes that alias; shell commands still use ``C:/project/file``.
+    POSIX paths and paths that are already virtual are unchanged.
+    """
+    value = str(path)
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return "/" + value.replace("\\", "/")
+    return value
+
+
+def host_file_tool_path(path: str) -> str:
+    """Decode a drive-path alias on Windows, preserving POSIX virtual paths."""
+    if os.name == "nt":
+        if re.match(r"^/[A-Za-z]:/", path):
+            path = path[1:]
+        return path.replace("\\", "/")
+    return path
+
+
 @dataclass(frozen=True)
 class Workspace:
     """A project folder: the unit that owns skills, runs, media and memory.
