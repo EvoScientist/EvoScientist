@@ -29,6 +29,38 @@ class TestModelsRegistry:
         """Test that MODELS is a dictionary."""
         assert isinstance(MODELS, dict)
 
+    @pytest.mark.parametrize(
+        ("custom", "native"),
+        [("custom-openai", "openai"), ("custom-anthropic", "anthropic")],
+    )
+    def test_custom_endpoint_defaults_are_names_the_native_provider_lists(
+        self, custom, native
+    ):
+        """Otherwise a bare name would move a native user onto a custom endpoint."""
+        native_names = {name for name, _ in get_models_for_provider(native)}
+
+        assert {name for name, _ in get_models_for_provider(custom)} <= native_names
+
+    def test_a_native_user_is_never_moved_to_a_provider_picked_on_purpose(self):
+        from EvoScientist.llm.registry import (
+            _ANTHROPIC_ROUTED_PROVIDERS,
+            _OPENAI_ROUTED_PROVIDERS,
+            resolve_provider,
+        )
+
+        chosen_on_purpose = set(_OPENAI_ROUTED_PROVIDERS) | set(
+            _ANTHROPIC_ROUTED_PROVIDERS
+        )
+        moved = {
+            name: resolve_provider(name, native)
+            for name in MODELS
+            for native in ("openai", "anthropic")
+            if name.startswith(("gpt-", "claude-"))
+            and resolve_provider(name, native) in chosen_on_purpose
+        }
+
+        assert moved == {}
+
     def test_entries_has_all_providers(self):
         """Test that _MODEL_ENTRIES covers all registered providers."""
         providers = {p for _, _, p in _MODEL_ENTRIES}
@@ -167,9 +199,9 @@ class TestGetModelInfo:
 
     def test_returns_correct_info(self):
         """Test that get_model_info returns correct info."""
-        model_id, provider = get_model_info("gpt-5-nano")
-        assert model_id == "gpt-5-nano"
-        assert provider == "openai"
+        model_id, provider = get_model_info("claude-haiku-4-5")
+        assert model_id == "claude-haiku-4-5"
+        assert provider == "anthropic"
 
 
 # =============================================================================
@@ -208,10 +240,10 @@ class TestGetChatModel:
         """Test that get_chat_model resolves OpenAI short names."""
         mock_init.return_value = "mock_model"
 
-        get_chat_model("gpt-5-mini")
+        get_chat_model("gpt-6-luna", provider="openai")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "gpt-5-mini"
+        assert call_kwargs["model"] == "gpt-6-luna"
         assert call_kwargs["model_provider"] == "openai"
 
     @patch("EvoScientist.llm.models.init_chat_model")

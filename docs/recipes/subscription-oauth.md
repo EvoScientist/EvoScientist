@@ -119,7 +119,7 @@ In this mode every `openai` model uses your plan: the main model, the auxiliary 
 
 ### 3. Models depend on your plan
 
-Which model IDs the backend serves depends on your ChatGPT plan, and the lineup does **not** match the public OpenAI API. Measured on a ChatGPT **Plus** account (October 2026): `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, the `gpt-5.6` family and `gpt-5.5` complete successfully. Other tiers differ. A model your plan does not include answers:
+Which model IDs the backend serves depends on your ChatGPT plan, and the lineup does **not** match the public OpenAI API. Measured on a ChatGPT **Plus** account (October 2026): `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra` and the `gpt-5.6` family complete successfully. Other tiers differ. A model your plan does not include answers:
 
 ```text
 The '<model>' model is not supported when using Codex with a ChatGPT account.

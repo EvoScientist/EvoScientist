@@ -193,7 +193,7 @@ class TestOAuthModeReconcile:
         config = EvoScientistConfig(
             provider="minimax",
             auxiliary_provider="openai",
-            auxiliary_model="gpt-5.5",
+            auxiliary_model="gpt-6-luna",
             openai_auth_mode="oauth",
             anthropic_auth_mode="oauth",
         )
@@ -1867,7 +1867,7 @@ class TestRunOnboard:
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider (a different company)
                 "api_key",  # Auxiliary OpenAI auth mode
-                "gpt-5.5",  # Auxiliary model
+                "gpt-6-luna",  # Auxiliary model
                 "daemon",  # Workspace mode
                 True,  # Show thinking
             ]
@@ -1889,7 +1889,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_auth_mode == "api_key"
         # The auxiliary provider's key is stored in its per-provider field.
         assert final_config.openai_api_key == "sk-aux-openai"
@@ -1911,13 +1911,13 @@ class TestRunOnboard:
         ):
             mock_load.return_value = EvoScientistConfig(
                 provider="openai",
-                model="gpt-5.5",
+                model="gpt-6-luna",
                 openai_api_key="sk-main-openai",
             )
             mock_q.select.return_value.ask.side_effect = [
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Same provider as the main model
-                "gpt-5.5",  # Auxiliary model
+                "gpt-6-luna",  # Auxiliary model
             ]
             mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
 
@@ -1928,7 +1928,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_api_key == "sk-main-openai"
         mock_q.password.assert_not_called()
         assert mock_q.select.return_value.ask.call_count == 3
@@ -1951,7 +1951,7 @@ class TestRunOnboard:
         ):
             mock_load.return_value = EvoScientistConfig(
                 provider="openai",
-                model="gpt-5.5",
+                model="gpt-6-luna",
                 openai_auth_mode="api_key",
                 openai_api_key="",
             )
@@ -1959,7 +1959,7 @@ class TestRunOnboard:
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Same provider as the main model
                 "api_key",  # Shared OpenAI auth mode
-                "gpt-5.5",  # Auxiliary model
+                "gpt-6-luna",  # Auxiliary model
             ]
             mock_q.password.return_value.ask.side_effect = [
                 "sk-shared-openai",
@@ -1973,7 +1973,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_auth_mode == "api_key"
         assert final_config.openai_api_key == "sk-shared-openai"
         mock_q.password.assert_called_once()
@@ -2002,7 +2002,7 @@ class TestRunOnboard:
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider
                 "oauth",  # OpenAI auth mode
-                "gpt-5.5",  # Auxiliary model
+                "gpt-6-luna",  # Auxiliary model
             ]
             mock_q.confirm.return_value.ask.side_effect = [
                 False,  # Do not log in to ChatGPT now
@@ -2016,7 +2016,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_auth_mode == "oauth"
         assert final_config.openai_api_key == ""
         mock_q.password.assert_not_called()
@@ -2040,7 +2040,7 @@ class TestRunOnboard:
                 model="claude-sonnet-4-6",
                 anthropic_auth_mode="oauth",
                 auxiliary_provider="openai",
-                auxiliary_model="gpt-5.5",
+                auxiliary_model="gpt-6-luna",
                 openai_auth_mode="oauth",
             )
             mock_q.select.return_value.ask.side_effect = [
@@ -2083,7 +2083,7 @@ class TestRunOnboard:
             mock_q.select.return_value.ask.side_effect = [
                 "assemble",  # Auxiliary: Assemble
                 "custom-openai",  # Auxiliary provider
-                "gpt-5.5",  # Auxiliary model (from the custom-openai registry)
+                "gpt-6-luna",  # Auxiliary model (from the custom-openai registry)
             ]
             mock_q.text.return_value.ask.side_effect = [
                 "https://my-endpoint/v1",  # Auxiliary base URL (custom provider)
@@ -2100,7 +2100,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "custom-openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         # Base URL must be collected for the custom auxiliary provider.
         assert final_config.custom_openai_base_url == "https://my-endpoint/v1"
         assert final_config.custom_openai_api_key == "sk-aux-custom"
