@@ -209,8 +209,12 @@ async def test_latest_origin_checkpoints_without_a_table_is_empty(tmp_path):
 
 class _Client:
     def __init__(self, threads):
-        self.threads = SimpleNamespace(get=self._get)
+        self.threads = SimpleNamespace(get=self._get, update=self._update)
         self._threads = threads
+        self.updates = []
+
+    def _update(self, thread_id, *, metadata):
+        self.updates.append((thread_id, metadata))
 
     def _get(self, thread_id):
         if thread_id not in self._threads:
@@ -256,6 +260,8 @@ def test_restore_rearms_the_newest_armed_thread_of_this_workspace(workspace, tmp
     assert result == "t2"
     assert controller.armed == {"t2"}
     assert controller.restored_thread_id == "t2"
+    # The restarted server rebuilt the thread without the flag the tick reads.
+    assert client.updates == [("t2", {"proactive": "on"})]
     assert restored == [
         (
             "t2",
@@ -267,6 +273,16 @@ def test_restore_rearms_the_newest_armed_thread_of_this_workspace(workspace, tmp
             },
         )
     ]
+
+
+def test_restore_leaves_a_flag_that_survived_the_restart(workspace):
+    client = _Client({"t1": {"metadata": {"proactive": "on"}}})
+    controller = ProactiveServe(workspace=workspace, client=client)
+
+    controller.restore([_restore_row(workspace, "t1")], restore_origin=MagicMock())
+
+    assert controller.armed == {"t1"}
+    assert client.updates == []
 
 
 def test_restore_skips_a_thread_disarmed_after_its_last_turn(workspace):

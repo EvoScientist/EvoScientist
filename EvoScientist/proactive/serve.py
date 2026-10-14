@@ -408,7 +408,8 @@ class ProactiveServe:
         per thread, the stored folders, flag and channel origin of its newest
         checkpoint that has an origin. The thread's metadata on the server
         wins over the flag in *rows* when it says ``"off"`` (``/proactive off``
-        after the last turn). The restored thread stays a candidate until the
+        after the last turn), and the flag is written back to that metadata
+        when the restart lost it. The restored thread stays a candidate until the
         fresh thread serve started on has its first turn.
         """
         from langgraph_sdk.errors import NotFoundError
@@ -434,8 +435,14 @@ class ProactiveServe:
                     thread = self.client.threads.get(thread_id)
                 except NotFoundError:
                     continue
-                if (thread.get("metadata") or {}).get("proactive") == "off":
+                flag = (thread.get("metadata") or {}).get("proactive")
+                if flag == "off":
                     continue
+                if flag != "on":
+                    # The tick reads the flag from thread metadata only, which
+                    # a dev-server restart without file persistence rebuilds
+                    # without it; no later run restamps it.
+                    self.client.threads.update(thread_id, metadata={"proactive": "on"})
                 restore_origin(thread_id, origin)
                 self.armed.add(thread_id)
                 self.restored_thread_id = thread_id
