@@ -41,6 +41,10 @@ SIGN_IN_HINT = (
     'ChatGPT sign-in required (openai_auth_mode is "oauth"). '
     "Start EvoSci in a terminal to sign in."
 )
+SIGN_IN_AGAIN = (
+    'ChatGPT sign-in required (openai_auth_mode is "oauth"). Run EvoSci again '
+    "to sign in, or switch with: EvoSci config set openai_auth_mode api_key"
+)
 PORT_FORWARD_HINT = (
     "No browser on this machine? Forward the callback port, then open the "
     "link on your own computer: ssh -L 1455:localhost:1455 <this-host>"
@@ -50,6 +54,9 @@ PORT_IN_USE = (
 )
 SIGN_IN_INCOMPLETE = "OpenAI did not complete the sign-in. Try again."
 DEFAULT_INSTRUCTIONS = "You are a helpful assistant."
+# Codex's default compaction window for this route; the backend takes more, but
+# every turn resends the context against the plan's usage limit.
+CONTEXT_WINDOW = 272_000
 
 
 class NotSignedInError(RuntimeError):
@@ -203,9 +210,11 @@ def build_model(model_id: str, **kwargs: Any) -> EvoChatOpenAICodex:
     with warnings.catch_warnings():
         # Upstream's one-time "experimental and unofficial" notice; onboarding shows ours.
         warnings.simplefilter("ignore", UserWarning)
-        return EvoChatOpenAICodex(
+        model = EvoChatOpenAICodex(
             model=model_id, token_provider=_LockedTokenProvider(path), **kwargs
         )
+    model.profile = {**(model.profile or {}), "max_input_tokens": CONTEXT_WINDOW}
+    return model
 
 
 def status() -> ChatGPTLogin:

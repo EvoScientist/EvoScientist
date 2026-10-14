@@ -944,7 +944,8 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
 
 
 # Levels offered per provider; each one is sent unchanged on every route of
-# that provider (see ``llm.models._ROUTE_REASONING_LEVELS``).
+# that provider (see ``llm.models._ROUTE_REASONING_LEVELS``). "" stores nothing,
+# so each model keeps its own default.
 _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
     # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
     "openrouter": [
@@ -956,9 +957,10 @@ _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
         ("none", "none   — disable reasoning entirely"),
     ],
     "openai": [
+        ("", "default — EvoScientist's level for each model (recommended)"),
         ("low", "low    — fast responses with lighter reasoning"),
         ("medium", "medium — balances speed and reasoning depth"),
-        ("high", "high   — greater reasoning depth (recommended)"),
+        ("high", "high   — greater reasoning depth"),
         ("xhigh", "xhigh  — extra high reasoning depth"),
         ("max", "max    — deepest reasoning; uses your quota fastest"),
     ],
@@ -985,8 +987,9 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
 
     # A stored level (kept from another provider, or set by hand) may not be offered here.
     current = config.reasoning_effort
-    if current not in {value for value, _ in levels}:
-        current = "high"
+    offered = {value for value, _ in levels}
+    if current not in offered:
+        current = "" if "" in offered else "high"
     effort = questionary.select(
         "Select reasoning effort level:",
         choices=effort_choices,

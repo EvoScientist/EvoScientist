@@ -125,9 +125,9 @@ Which model IDs the backend serves depends on your ChatGPT plan, and the lineup 
 The '<model>' model is not supported when using Codex with a ChatGPT account.
 ```
 
-Community measurements also indicate this route enforces a smaller context window than the public API for the same model IDs (~272K for gpt-5.5 vs 1.05M on the API).
+EvoScientist counts a 272K context window for models on this route, so a conversation whose main model is one of them is summarized before it reaches that size (as a fallback model, it gets the main model's budget). The backend accepts longer input, but every turn resends the whole context against your plan's usage limits; 272K is Codex's own default for most of these models.
 
-> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model); a configured `none` or `minimal` is sent as `low`. When unset, EvoScientist applies its own per-model default. Higher effort costs more latency and more of your subscription quota per request.
+> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model, plus `default`, which keeps EvoScientist's level for each model); a configured `none` or `minimal` is sent as `low`. Higher effort costs more latency and more of your subscription quota per request.
 
 ### 4. Machines without a browser
 
@@ -139,7 +139,7 @@ ssh -L 1455:localhost:1455 <host>
 
 ### 5. Docker
 
-Sign in on a machine with a browser, then copy `~/.evoscientist/auth/chatgpt.json` into the container's data volume at `/home/evosci/.evoscientist/auth/chatgpt.json`. Stop EvoScientist in the container before you replace the file, and make sure the file and its `auth/` directory belong to the container user (`evosci`): EvoScientist rewrites the file whenever the token refreshes. Each refresh replaces the stored token, so the copy you started from goes stale; if the container reports `ChatGPT sign-in required`, run `EvoSci onboard` on the machine with the browser, choose ChatGPT sign-in and re-authenticate, then copy the new file.
+Sign in on a machine with a browser, then copy `~/.evoscientist/auth/chatgpt.json` into the container's data volume at `/home/evosci/.evoscientist/auth/chatgpt.json`. Stop EvoScientist in the container before you replace the file, and make sure the file and its `auth/` directory belong to the container user (`evosci`): EvoScientist rewrites the file whenever the token refreshes. Then sign in again on the machine with the browser (`EvoSci onboard`, ChatGPT sign-in, re-authenticate) before you use EvoSci there, so each side holds its own sign-in: OpenAI replaces the stored token on every refresh, and two machines sharing one token sign each other out. If the container later reports `ChatGPT sign-in required`, repeat both steps: copy a fresh file in, then sign in again on the machine with the browser.
 
 ---
 
@@ -178,6 +178,7 @@ print(get_chat_model('gpt-6-sol', provider='openai').invoke('Reply with exactly:
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `ChatGPT sign-in required (openai_auth_mode is "oauth"). Start EvoSci in a terminal to sign in.` | No ChatGPT token on this machine, or OpenAI no longer accepts the stored one | Start `EvoSci` in a terminal and confirm the sign-in prompt |
+| `ChatGPT sign-in required (openai_auth_mode is "oauth"). Run EvoSci again to sign in, ...` | The sign-in prompt was declined or did not complete | Run `EvoSci` again and confirm the prompt, or switch to an API key with `EvoSci config set openai_auth_mode api_key` |
 | `Port 1455 is in use (another sign-in may be running). Close it and try again.` | Another sign-in, or a Codex CLI login, holds the callback port | Finish or close it, then retry |
 | `The '<model>' model is not supported when using Codex with a ChatGPT account.` | Your ChatGPT plan does not include that model | Pick a model your plan serves |
 | OpenAI requests fail with a connection error to `127.0.0.1` right after upgrading | A background server started before the upgrade still routes OpenAI through ccproxy | `EvoSci server stop`, then start again |

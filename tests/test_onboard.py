@@ -850,8 +850,8 @@ class TestStepReasoningEffort:
         result, values, default = self._run("openai", "", picked="max")
 
         assert result == "max"
-        assert values == ["low", "medium", "high", "xhigh", "max"]
-        assert default == "high"
+        assert values == ["", "low", "medium", "high", "xhigh", "max"]
+        assert default == ""
 
     def test_openrouter_list_is_unchanged(self):
         _, values, default = self._run("openrouter", "")
@@ -863,7 +863,8 @@ class TestStepReasoningEffort:
         ("provider", "stored", "default"),
         [
             ("openai", "max", "max"),
-            ("openai", "minimal", "high"),  # carried over from another provider
+            ("openai", "", ""),
+            ("openai", "minimal", ""),  # carried over from another provider
             ("openrouter", "minimal", "minimal"),
             ("openrouter", "max", "high"),
         ],
@@ -883,7 +884,7 @@ class TestStepReasoningEffort:
         _, values, _ = self._run(provider, "")
 
         with patch.dict("os.environ"):
-            for value in values:
+            for value in filter(None, values):
                 os.environ["EVOSCIENTIST_REASONING_EFFORT"] = value
                 assert _resolve_reasoning_effort("high", route) == value
 

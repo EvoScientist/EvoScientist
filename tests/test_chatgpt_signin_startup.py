@@ -7,7 +7,7 @@ import pytest
 import typer
 
 from EvoScientist.cli import commands
-from EvoScientist.llm.chatgpt_oauth import SIGN_IN_HINT, ChatGPTLogin
+from EvoScientist.llm.chatgpt_oauth import SIGN_IN_AGAIN, SIGN_IN_HINT, ChatGPTLogin
 
 
 def _config(mode="oauth"):
@@ -77,7 +77,7 @@ def test_interactive_login_continues_startup():
 @pytest.mark.parametrize(
     ("answer", "login_ok"), [(False, None), (None, None), (True, False)]
 )
-def test_interactive_refusal_or_failure_exits_with_the_hint(answer, login_ok):
+def test_interactive_refusal_or_failure_says_how_to_retry(answer, login_ok):
     question = MagicMock()
     question.ask.return_value = answer
     with (
@@ -96,7 +96,8 @@ def test_interactive_refusal_or_failure_exits_with_the_hint(answer, login_ok):
         commands._require_chatgpt_sign_in(_config(), interactive=True)
 
     assert exc_info.value.exit_code == 1
-    assert SIGN_IN_HINT in _printed(mock_console)
+    assert SIGN_IN_AGAIN in _printed(mock_console)
+    assert "Start EvoSci in a terminal" not in _printed(mock_console)
     assert mock_login.called is (answer is True)
 
 
@@ -190,3 +191,71 @@ def test_serve_runs_the_check_without_a_prompt(monkeypatch):
 
     assert seen == [("oauth", False)]
     assert isinstance(result.exception, _Checked)
+
+
+@pytest.mark.parametrize(
+    ("stored", "flag", "modes"),
+    [
+        ({"provider": "anthropic"}, "oauth", ("oauth", "api_key")),
+        ({"provider": "openai"}, "oauth", ("api_key", "oauth")),
+        ({"provider": "openrouter"}, "oauth", ("api_key", "api_key")),
+        (
+            {"provider": "anthropic", "auxiliary_provider": "openai"},
+            "oauth",
+            ("oauth", "oauth"),
+        ),
+        (
+            {"provider": "openai", "model_fallbacks": "claude-x:anthropic"},
+            "oauth",
+            ("oauth", "oauth"),
+        ),
+        (
+            {"provider": "anthropic", "model_fallbacks": " gpt-6-sol : openai ,"},
+            "oauth",
+            ("oauth", "oauth"),
+        ),
+        (
+            {"provider": "anthropic", "model_fallbacks": "gpt-6-sol:openrouter"},
+            "oauth",
+            ("oauth", "api_key"),
+        ),
+        (
+            {"provider": "anthropic", "openai_auth_mode": "oauth"},
+            "api_key",
+            ("api_key", "api_key"),
+        ),
+    ],
+)
+def test_auth_mode_flag_applies_oauth_only_to_providers_in_use(
+    monkeypatch, stored, flag, modes
+):
+    import dataclasses
+
+    from typer.testing import CliRunner
+
+    import EvoScientist.config as config_module
+    from EvoScientist.cli._app import app
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.stream.console import console
+
+    base = EvoScientistConfig(**stored)
+    seen = []
+
+    def _check(config, *, interactive):
+        seen.append((config.anthropic_auth_mode, config.openai_auth_mode))
+        raise _Checked
+
+    monkeypatch.setattr(
+        config_module,
+        "get_effective_config",
+        lambda overrides=None: dataclasses.replace(base, **(overrides or {})),
+    )
+    monkeypatch.setattr(config_module, "apply_config_to_env", lambda config: None)
+    monkeypatch.setattr(commands, "_require_chatgpt_sign_in", _check)
+    console_file = console.file
+    try:
+        CliRunner().invoke(app, ["--auth-mode", flag, "-p", "hi"])
+    finally:
+        console.file = console_file
+
+    assert seen == [modes]

@@ -118,6 +118,18 @@ def _interactive_start(prompt: str | None) -> bool:
     return not prompt and all(s is not None and s.isatty() for s in streams)
 
 
+def _providers_in_use(config: Any) -> set[str]:
+    """Providers of the main, auxiliary and fallback models."""
+    from ..config.onboard.wizard import _active_llm_providers
+
+    fallbacks = {
+        entry.rsplit(":", 1)[1].strip()
+        for entry in (config.model_fallbacks or "").split(",")
+        if ":" in entry
+    }
+    return _active_llm_providers(config) | fallbacks
+
+
 def _require_chatgpt_sign_in(config: Any, *, interactive: bool) -> None:
     """Stop startup when OpenAI uses ChatGPT sign-in and nobody is signed in.
 
@@ -141,6 +153,8 @@ def _require_chatgpt_sign_in(config: Any, *, interactive: bool) -> None:
         if questionary.confirm("Sign in with ChatGPT now?", default=True).ask():
             if _run_chatgpt_login():
                 return
+        console.print(f"[red]{chatgpt_oauth.SIGN_IN_AGAIN}[/red]")
+        raise typer.Exit(1)
     console.print(f"[red]{chatgpt_oauth.SIGN_IN_HINT}[/red]")
     raise typer.Exit(1)
 
@@ -2623,8 +2637,9 @@ def _main_callback(
     auth_mode: str | None = typer.Option(
         None,
         "--auth-mode",
-        help="Auth mode for Anthropic/OpenAI: api_key (default) or oauth "
-        "(Claude subscription via ccproxy, ChatGPT sign-in).",
+        help="Auth mode: api_key (default) or oauth, which uses the Claude "
+        "subscription (via ccproxy) and ChatGPT sign-in for whichever of "
+        "Anthropic and OpenAI the main, auxiliary or a fallback model uses.",
     ),
     ui: str | None = typer.Option(
         None,
@@ -2738,10 +2753,14 @@ def _main_callback(
     if auth_mode:
         if auth_mode not in ("api_key", "oauth"):
             raise typer.BadParameter("--auth-mode must be 'api_key' or 'oauth'")
-        cli_overrides["anthropic_auth_mode"] = auth_mode
-        cli_overrides["openai_auth_mode"] = auth_mode
 
     config = get_effective_config(cli_overrides)
+    if auth_mode:
+        # oauth only for subscriptions a configured model can use; api_key always.
+        in_use = _providers_in_use(config)
+        for provider in ("anthropic", "openai"):
+            if auth_mode == "api_key" or provider in in_use:
+                setattr(config, f"{provider}_auth_mode", auth_mode)
     apply_config_to_env(config)
 
     _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))

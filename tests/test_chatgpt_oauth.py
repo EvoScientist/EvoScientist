@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import langchain_openai.chat_models.base as _openai_base
 import pytest
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai.chatgpt_oauth import (
@@ -283,6 +284,29 @@ def test_build_model_emits_no_experimental_warning(signed_in, monkeypatch):
         build_model("gpt-6-sol")
 
     assert [w for w in caught if "experimental" in str(w.message)] == []
+
+
+@pytest.mark.parametrize("model_id", ["gpt-6.1-sol", "gpt-6-luna", "gpt-9-unlisted"])
+def test_build_model_uses_the_route_context_window(signed_in, model_id):
+    from EvoScientist.llm.context_window import get_context_window
+
+    model = build_model(model_id)
+
+    assert model.profile["max_input_tokens"] == 272_000
+    assert get_context_window(model.model_copy()) == 272_000
+
+
+def test_sign_in_model_keeps_the_route_context_window(
+    signed_in, whole_tool_args_patch, monkeypatch
+):
+    from EvoScientist.llm import get_chat_model
+
+    monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+
+    assert (
+        get_chat_model("gpt-6.1-sol", provider="openai").profile["max_input_tokens"]
+        == 272_000
+    )
 
 
 # --- token provider ----------------------------------------------------------
@@ -777,11 +801,13 @@ def test_login_passes_other_failures_through(data_dir, monkeypatch):
 # --- parallel tool calls delivered whole -------------------------------------
 
 
-def tool_stream(calls, *, deltas: bool) -> bytes:
+def tool_stream(calls, *, deltas: bool, on_added: int = 0) -> bytes:
     """A Responses stream with function calls.
 
     ``deltas=False`` mimics the backend for parallel calls: the arguments only
     arrive in ``function_call_arguments.done`` and ``output_item.done``.
+    ``on_added`` characters of the arguments already arrive in ``output_item.added``
+    (-1 for all of them), as some servers send; the deltas carry the rest.
     """
     events = [
         {
@@ -807,7 +833,11 @@ def tool_stream(calls, *, deltas: bool) -> bytes:
                 "type": "response.output_item.added",
                 "sequence_number": len(events),
                 "output_index": index,
-                "item": {**item, "arguments": "", "status": "in_progress"},
+                "item": {
+                    **item,
+                    "arguments": arguments[:on_added] if on_added >= 0 else arguments,
+                    "status": "in_progress",
+                },
             }
         )
         if deltas:
@@ -817,7 +847,7 @@ def tool_stream(calls, *, deltas: bool) -> bytes:
                     "sequence_number": len(events),
                     "item_id": f"fc_{index}",
                     "output_index": index,
-                    "delta": arguments,
+                    "delta": arguments[on_added:] if on_added >= 0 else "",
                 }
             )
         events.append(
@@ -870,10 +900,17 @@ TOOLS = [
 ]
 
 
+# Captured at import, before any test can install the process-wide patch.
+_UPSTREAM_CONVERT = _openai_base._convert_responses_chunk_to_generation_chunk
+
+
 @pytest.fixture
-def whole_tool_args_patch():
+def whole_tool_args_patch(monkeypatch):
     from EvoScientist.llm.patches import _patch_openai_responses_whole_tool_args
 
+    monkeypatch.setattr(
+        _openai_base, "_convert_responses_chunk_to_generation_chunk", _UPSTREAM_CONVERT
+    )
     _patch_openai_responses_whole_tool_args()
 
 
@@ -904,6 +941,33 @@ def test_streamed_tool_arguments_are_not_doubled(signed_in, whole_tool_args_patc
     model = build_model("gpt-6-sol", **wire.clients()).bind_tools(TOOLS)
 
     assert _tool_calls(model.invoke([HumanMessage("go")])) == CALLS
+
+
+@pytest.mark.parametrize(
+    ("deltas", "on_added"),
+    [(False, -1), (False, 0), (False, 5), (True, 0), (True, 5)],
+    ids=[
+        "whole-on-added",
+        "done-only",
+        "part-on-added-rest-in-done",
+        "deltas",
+        "part-on-added-rest-in-deltas",
+    ],
+)
+def test_streamed_arguments_are_whole_and_not_doubled(
+    signed_in, whole_tool_args_patch, deltas, on_added
+):
+    wire = Wire(tool_stream(CALLS, deltas=deltas, on_added=on_added))
+    model = build_model("gpt-6-sol", **wire.clients()).bind_tools(TOOLS)
+
+    message = None
+    for chunk in model.stream([HumanMessage("go")]):
+        message = chunk if message is None else message + chunk
+
+    # These strings are what the next turn sends back.
+    assert [c["args"] for c in message.tool_call_chunks] == [
+        json.dumps(args) for _, args in CALLS
+    ]
 
 
 def test_whole_tool_args_patch_is_applied_once(whole_tool_args_patch):
@@ -944,3 +1008,113 @@ def test_upstream_names_this_module_relies_on_exist():
     assert hasattr(_FileChatGPTOAuthTokenProvider, "_read_from_disk")
     assert hasattr(_FileChatGPTOAuthTokenProvider(path=Path("unused")), "_cached")
     assert issubclass(_ChatGPTOAuthRefreshError, RuntimeError)
+
+
+def test_a_call_dropped_from_the_record_is_left_to_upstream(monkeypatch):
+    from types import SimpleNamespace
+
+    from EvoScientist.llm import patches
+
+    seen = []
+    monkeypatch.setattr(
+        _openai_base,
+        "_convert_responses_chunk_to_generation_chunk",
+        lambda chunk, *a, **k: seen.append(chunk),
+    )
+    monkeypatch.setattr(patches, "_WHOLE_TOOL_ARGS_RECORD", 2)
+    patches._patch_openai_responses_whole_tool_args()
+    convert = _openai_base._convert_responses_chunk_to_generation_chunk
+
+    def added(item_id):
+        item = SimpleNamespace(type="function_call", id=item_id, arguments='{"x": 1}')
+        return SimpleNamespace(type="response.output_item.added", item=item)
+
+    for item_id in ("a", "b", "c"):  # "a" falls out of a record of two
+        convert(added(item_id))
+    done = SimpleNamespace(
+        type="response.function_call_arguments.done",
+        item_id="a",
+        arguments='{"x": 1}',
+        output_index=0,
+        sequence_number=9,
+    )
+    convert(done)
+
+    assert seen[-1] is done
+
+
+def test_a_reopened_call_starts_a_fresh_record(monkeypatch):
+    from types import SimpleNamespace
+
+    from EvoScientist.llm import patches
+
+    seen = []
+    monkeypatch.setattr(
+        _openai_base,
+        "_convert_responses_chunk_to_generation_chunk",
+        lambda chunk, *a, **k: seen.append(chunk),
+    )
+    monkeypatch.setattr(patches, "_WHOLE_TOOL_ARGS_RECORD", 1)
+    patches._patch_openai_responses_whole_tool_args()
+    convert = _openai_base._convert_responses_chunk_to_generation_chunk
+
+    def added(item_id, arguments):
+        item = SimpleNamespace(type="function_call", id=item_id, arguments=arguments)
+        return SimpleNamespace(type="response.output_item.added", item=item)
+
+    convert(added("a", '{"x": 1}'))
+    convert(added("b", '{"y": 2}'))  # pushes "a" out; its stream is then cut
+    convert(added("a", ""))  # a later stream reuses the id
+    convert(
+        SimpleNamespace(
+            type="response.function_call_arguments.done",
+            item_id="a",
+            arguments='{"z": 3}',
+            output_index=0,
+            sequence_number=9,
+        )
+    )
+
+    assert seen[-1].type == "response.function_call_arguments.delta"
+    assert seen[-1].delta == '{"z": 3}'
+
+
+def test_later_deltas_of_a_dropped_call_are_not_recorded(monkeypatch):
+    from types import SimpleNamespace
+
+    from EvoScientist.llm import patches
+
+    seen = []
+    monkeypatch.setattr(
+        _openai_base,
+        "_convert_responses_chunk_to_generation_chunk",
+        lambda chunk, *a, **k: seen.append(chunk),
+    )
+    monkeypatch.setattr(patches, "_WHOLE_TOOL_ARGS_RECORD", 2)
+    patches._patch_openai_responses_whole_tool_args()
+    convert = _openai_base._convert_responses_chunk_to_generation_chunk
+
+    def added(item_id, arguments):
+        item = SimpleNamespace(type="function_call", id=item_id, arguments=arguments)
+        return SimpleNamespace(type="response.output_item.added", item=item)
+
+    def delta(item_id, text):
+        return SimpleNamespace(
+            type="response.function_call_arguments.delta", item_id=item_id, delta=text
+        )
+
+    convert(added("a", '{"s": "'))
+    convert(added("b", '{"y": 2}'))
+    convert(added("c", '{"z": 3}'))  # pushes "a" out
+    convert(delta("a", "{"))
+    convert(delta("b", "}"))
+    done = SimpleNamespace(
+        type="response.function_call_arguments.done",
+        item_id="a",
+        arguments='{"s": "{"}',
+        output_index=0,
+        sequence_number=9,
+    )
+    convert(done)
+
+    assert seen[-1] is done

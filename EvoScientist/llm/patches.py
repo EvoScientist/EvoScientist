@@ -14,6 +14,7 @@ Patches:
       (store=false → "Item with id rs_... not found")
     - _patch_openai_responses_whole_tool_args: keep tool-call arguments the
       ChatGPT Codex backend sends only in ``function_call_arguments.done``
+      (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
 
@@ -1239,8 +1240,16 @@ _patch_langgraph_goto_none_crash()
 # builds tool-call arguments from ``.delta`` events alone, leaving them empty.
 # Hand the full arguments through as a single delta when none was streamed.
 # ---------------------------------------------------------------------------
+# Calls whose delivered arguments are remembered at once (across all streams).
+_WHOLE_TOOL_ARGS_RECORD = 256
+
+
 def _patch_openai_responses_whole_tool_args() -> None:
-    """Keep tool-call arguments that arrive only in the ``done`` event."""
+    """Keep tool-call arguments that arrive only in the ``done`` event.
+
+    Process-wide: every ``ChatOpenAI`` Responses stream passes through it, so it
+    changes nothing unless a call's arguments would otherwise be lost.
+    """
     try:
         import langchain_openai.chat_models.base as _base
         from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
@@ -1250,23 +1259,48 @@ def _patch_openai_responses_whole_tool_args() -> None:
         return
     if hasattr(_orig, "_evosci_whole_tool_args"):
         return
-    # Insertion-ordered so a stream cut before ``done`` cannot grow it forever.
-    streamed: dict[str, None] = {}
+    # Arguments delivered so far per call; insertion-ordered so a stream cut
+    # before ``done`` cannot grow it forever. A call pushed out is left to upstream;
+    # only with more than twice the record's calls open at once is one forgotten.
+    delivered: dict[str, str] = {}
+    dropped: dict[str, None] = {}
+
+    def _add(item_id: str, text: str) -> None:
+        if item_id in dropped:
+            return
+        delivered[item_id] = delivered.get(item_id, "") + text
+        if len(delivered) > _WHOLE_TOOL_ARGS_RECORD:
+            oldest = next(iter(delivered))
+            del delivered[oldest]
+            dropped[oldest] = None
+            if len(dropped) > _WHOLE_TOOL_ARGS_RECORD:
+                del dropped[next(iter(dropped))]
 
     @functools.wraps(_orig)
     def _convert(chunk: Any, *args: Any, **kwargs: Any) -> Any:
         kind = getattr(chunk, "type", None)
-        if kind == "response.function_call_arguments.delta":
-            streamed[chunk.item_id] = None
-            if len(streamed) > 4096:
-                streamed.pop(next(iter(streamed)))
+        if kind == "response.output_item.added":
+            item = getattr(chunk, "item", None)
+            # Some servers open the call with (part of) its arguments filled in.
+            if getattr(item, "type", None) == "function_call":
+                # A new call: whatever an earlier, cut stream left under this id is stale.
+                delivered.pop(item.id, None)
+                dropped.pop(item.id, None)
+                if item.arguments:
+                    _add(item.id, item.arguments)
+        elif kind == "response.function_call_arguments.delta":
+            _add(chunk.item_id, chunk.delta)
         elif kind == "response.function_call_arguments.done":
-            had_deltas = chunk.item_id in streamed
-            streamed.pop(chunk.item_id, None)
-            if not had_deltas and chunk.arguments:
+            sent = delivered.pop(chunk.item_id, "")
+            full = chunk.arguments or ""
+            missing = full[len(sent) :] if full.startswith(sent) else ""
+            if chunk.item_id in dropped:
+                del dropped[chunk.item_id]
+                missing = ""
+            if missing:
                 chunk = ResponseFunctionCallArgumentsDeltaEvent.construct(
                     type="response.function_call_arguments.delta",
-                    delta=chunk.arguments,
+                    delta=missing,
                     item_id=chunk.item_id,
                     output_index=chunk.output_index,
                     sequence_number=chunk.sequence_number,
