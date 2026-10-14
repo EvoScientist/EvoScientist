@@ -4153,7 +4153,7 @@ class TestChatGPTSignIn:
 
 
 class TestReasoningEffortAcrossProviders:
-    """One stored level; each provider gets the nearest level it accepts."""
+    """One stored level; a route with a known range gets the nearest level in it."""
 
     @pytest.fixture(autouse=True)
     def _keys(self, monkeypatch):
@@ -4165,20 +4165,18 @@ class TestReasoningEffortAcrossProviders:
     @pytest.mark.parametrize(
         ("provider", "model", "stored", "sent"),
         [
-            ("openai", "gpt-6-sol", "none", "low"),
-            ("openai", "gpt-6-sol", "minimal", "low"),
-            ("openai", "gpt-6-sol", "low", "low"),
+            ("openai", "gpt-6-sol", "none", "none"),
+            ("openai", "gpt-6-sol", "minimal", "minimal"),
             ("openai", "gpt-6-sol", "xhigh", "xhigh"),
             ("openai", "gpt-6-sol", "max", "max"),
             ("openrouter", "gpt-6-sol", "max", "max"),
             ("openrouter", "gpt-6-sol", "minimal", "minimal"),
             ("openrouter", "gpt-6-sol", "none", "none"),
-            # Not a level on the scale: the provider answers for itself.
             ("openai", "gpt-6-sol", "turbo", "turbo"),
             ("openrouter", "gpt-6-sol", "turbo", "turbo"),
         ],
     )
-    def test_stored_level_is_sent_as_the_nearest_supported_one(
+    def test_api_key_routes_get_the_stored_level(
         self, monkeypatch, provider, model, stored, sent
     ):
         monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", stored)
@@ -4189,7 +4187,31 @@ class TestReasoningEffortAcrossProviders:
 
         assert mock_init.call_args[1]["reasoning"]["effort"] == sent
 
-    def test_sign_in_route_gets_the_adapted_level_too(self, monkeypatch):
+    def test_openai_base_url_override_gets_the_stored_level(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:9000/v1")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "minimal")
+
+        with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+            mock_init.return_value = MagicMock()
+            get_chat_model("gpt-6-sol", provider="openai")
+
+        assert mock_init.call_args[1]["reasoning"]["effort"] == "minimal"
+
+    @pytest.mark.parametrize(
+        ("stored", "sent"),
+        [
+            ("none", "low"),
+            ("minimal", "low"),
+            ("low", "low"),
+            ("xhigh", "xhigh"),
+            ("max", "max"),
+            # Not a level on the scale: the backend answers for itself.
+            ("turbo", "turbo"),
+        ],
+    )
+    def test_sign_in_route_gets_the_nearest_level_it_accepts(
+        self, monkeypatch, stored, sent
+    ):
         built = []
         monkeypatch.setattr(
             "EvoScientist.llm.chatgpt_oauth.build_model",
@@ -4199,11 +4221,11 @@ class TestReasoningEffortAcrossProviders:
             "EvoScientist.llm.models.apply_known_context_window", lambda model: None
         )
         monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
-        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "minimal")
+        monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", stored)
 
         get_chat_model("gpt-6.1-sol", provider="openai")
 
-        assert built[0]["reasoning"]["effort"] == "low"
+        assert built[0]["reasoning"]["effort"] == sent
 
     def test_caller_supplied_reasoning_is_left_alone(self, monkeypatch):
         monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "max")

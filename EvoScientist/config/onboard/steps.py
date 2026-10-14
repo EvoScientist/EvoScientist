@@ -943,8 +943,8 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
     return choice == "assemble"
 
 
-# Levels offered per provider; each one is sent to that provider unchanged
-# (see ``llm.models._PROVIDER_REASONING_LEVELS``).
+# Levels offered per provider; each one is sent unchanged on every route of
+# that provider (see ``llm.models._ROUTE_REASONING_LEVELS``).
 _REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
     # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
     "openrouter": [
@@ -983,7 +983,7 @@ def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
     levels = _REASONING_EFFORT_CHOICES[provider]
     effort_choices = [Choice(title=title, value=value) for value, title in levels]
 
-    # A level kept from another provider may not be offered here.
+    # A stored level (kept from another provider, or set by hand) may not be offered here.
     current = config.reasoning_effort
     if current not in {value for value, _ in levels}:
         current = "high"

@@ -873,8 +873,11 @@ class TestStepReasoningEffort:
     ):
         assert self._run(provider, stored)[2] == default
 
-    @pytest.mark.parametrize("provider", ["openai", "openrouter"])
-    def test_every_offered_level_is_one_the_provider_is_sent_unchanged(self, provider):
+    @pytest.mark.parametrize(
+        ("provider", "route"),
+        [("openai", "openai"), ("openai", "chatgpt"), ("openrouter", "openrouter")],
+    )
+    def test_every_offered_level_is_sent_unchanged(self, provider, route):
         from EvoScientist.llm.models import _resolve_reasoning_effort
 
         _, values, _ = self._run(provider, "")
@@ -882,7 +885,7 @@ class TestStepReasoningEffort:
         with patch.dict("os.environ"):
             for value in values:
                 os.environ["EVOSCIENTIST_REASONING_EFFORT"] = value
-                assert _resolve_reasoning_effort("high", provider) == value
+                assert _resolve_reasoning_effort("high", route) == value
 
     @pytest.mark.parametrize(
         ("provider", "asked"),

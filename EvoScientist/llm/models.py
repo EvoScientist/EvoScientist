@@ -56,18 +56,18 @@ _ANTHROPIC_BASE_URL_OVERRIDE_ENV: dict[str, str] = {
 
 
 # Reasoning levels on one scale. One level is stored for every model (main,
-# auxiliary, fallbacks); a provider listed here accepts only a slice of the
+# auxiliary, fallbacks); a route listed here accepts only a slice of the
 # scale, so a level outside it is sent as the nearest one it accepts.
 _REASONING_SCALE = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-_PROVIDER_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
-    "openai": ("low", "medium", "high", "xhigh", "max"),
+_ROUTE_REASONING_LEVELS: dict[str, tuple[str, ...]] = {
+    "chatgpt": ("low", "medium", "high", "xhigh", "max"),
 }
 
 
-def _resolve_reasoning_effort(default: str, provider: str) -> str:
-    """Return the configured reasoning effort (or ``default``) as ``provider`` takes it."""
+def _resolve_reasoning_effort(default: str, route: str) -> str:
+    """Return the configured reasoning effort (or ``default``) as ``route`` takes it."""
     effort = os.environ.get("EVOSCIENTIST_REASONING_EFFORT", "").strip() or default
-    levels = _PROVIDER_REASONING_LEVELS.get(provider)
+    levels = _ROUTE_REASONING_LEVELS.get(route)
     if not levels or effort in levels or effort not in _REASONING_SCALE:
         return effort
     rank = _REASONING_SCALE.index(effort)
@@ -288,6 +288,8 @@ def _apply_auto_config(
     is_third_party: bool,
     kwargs: dict[str, Any],
     original_provider: str | None = None,
+    *,
+    chatgpt_signin: bool = False,
 ) -> None:
     """Auto-enable provider-specific features (thinking, reasoning, etc.).
 
@@ -335,7 +337,9 @@ def _apply_auto_config(
             )
             else "high"
         )
-        _eff = _resolve_reasoning_effort(_default_effort, "openai")
+        _eff = _resolve_reasoning_effort(
+            _default_effort, "chatgpt" if chatgpt_signin else "openai"
+        )
         kwargs["reasoning"] = {"effort": _eff, "summary": "auto"}
 
     # Google GenAI: surface thinking traces
@@ -580,7 +584,14 @@ def get_chat_model(
         if base_url:
             kwargs["base_url"] = base_url
 
-    _apply_auto_config(provider, model_id, _is_third_party, kwargs, _original_provider)
+    _apply_auto_config(
+        provider,
+        model_id,
+        _is_third_party,
+        kwargs,
+        _original_provider,
+        chatgpt_signin=_chatgpt_signin,
+    )
     # OpenAI-routed routers (e.g. Requesty) reassign ``provider`` to "openai"
     # above, so use the original provider name to detect router-level caching.
     _cache_provider = _original_provider or provider
