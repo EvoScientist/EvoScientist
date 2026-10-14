@@ -142,11 +142,13 @@ async def run_shadow_turn(
 ) -> str | None:
     """Run one shadow turn and return the text of its final assistant message.
 
-    Returns ``None``, meaning "do not push", when the turn fails, when it ends
-    without a final assistant message, when that message asks for a tool, or
-    when the model did not finish cleanly (truncated, errored or filtered).
-    The returned text may be empty or ``NO_PUSH``; judging it is the caller's
-    job.
+    Returns ``None``, meaning "do not push", when the model answered but not
+    with a message to send: the turn ends without a final assistant message,
+    that message asks for a tool, the model did not finish cleanly (truncated,
+    errored or filtered), or a tool reached the model. Any other failure (a
+    provider error, a timeout) is raised: the model gave no answer, so the
+    caller must not count the turn as an evaluation. The returned text may be
+    empty or ``NO_PUSH``; judging it is the caller's job.
     """
     task = asyncio.get_running_loop().create_task(
         _run_shadow_turn(graph, flatten_tool_history(source_messages), trigger),
@@ -235,9 +237,6 @@ async def _run_shadow_turn(
         logger.warning(
             "proactive shadow turn aborted: the tool strip regressed", exc_info=True
         )
-        return None
-    except Exception:
-        logger.warning("proactive shadow turn failed", exc_info=True)
         return None
     finally:
         await _delete_shadow_thread(graph, thread_id)

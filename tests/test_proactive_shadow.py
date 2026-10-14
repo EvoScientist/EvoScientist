@@ -113,13 +113,15 @@ def test_unclean_finish_is_discarded(metadata, clean):
     assert (result == "text") is clean
 
 
-def test_a_failing_turn_returns_none():
+def test_a_failing_turn_raises_and_deletes_its_thread():
     class Broken(_ToolModel):
         def _generate(self, *args, **kwargs):
             raise RuntimeError("provider down")
 
     graph = _shadow_graph(Broken(messages=iter([])))
-    assert asyncio.run(run_shadow_turn(graph, SOURCE, "trigger")) is None
+    with pytest.raises(RuntimeError, match="provider down"):
+        asyncio.run(run_shadow_turn(graph, SOURCE, "trigger"))
+    assert list(graph.checkpointer.list(None)) == []
 
 
 def test_shadow_thread_is_deleted_afterwards():

@@ -48,8 +48,9 @@ class ProactiveDecision:
 
     ``stage`` is ``gate_rejected``, ``no_push``, ``stale`` or ``decided``; only
     ``decided`` carries a ``message``. ``evaluated_message_id`` is set whenever
-    the shadow turn ran: it is the thread's last non-proactive message at the
-    time, which the next check compares against.
+    the shadow turn returned (a turn that raised is not an evaluation): it is
+    the thread's last non-proactive message at the time, which the next check
+    compares against.
     """
 
     stage: str

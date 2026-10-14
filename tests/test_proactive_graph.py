@@ -135,6 +135,8 @@ def tick(monkeypatch, workspace):
 
     async def fake_shadow(graph, messages, trigger):
         shadow_calls.append([m.id for m in messages])
+        if reply.get("error") is not None:
+            raise reply.pop("error")
         return reply["text"]
 
     monkeypatch.setattr("EvoScientist.proactive.shadow.run_shadow_turn", fake_shadow)
@@ -261,6 +263,23 @@ def test_threads_that_leave_the_candidates_drop_out_of_the_record(tick, workspac
     state = run(_candidates("t2"))
 
     assert set(state["evaluated"]) == {"t2"}
+
+
+def test_a_failed_shadow_turn_is_retried_on_the_next_tick(tick, workspace):
+    run, threads, shadow_calls, reply = tick
+    threads["t1"] = _thread(workspace)
+    reply["error"] = RuntimeError("provider down")
+
+    state = run(_candidates("t1"))
+
+    assert state["last_tick"] == [{"thread_id": "t1", "stage": "error", "reason": ""}]
+    assert state["evaluated"] == {}
+
+    state = run(_candidates("t1"))
+
+    assert len(shadow_calls) == 2
+    assert state["last_tick"][0]["stage"] == "decided"
+    assert state["evaluated"] == {"t1": "m2"}
 
 
 def test_one_failing_thread_does_not_stop_the_tick(tick, workspace):
