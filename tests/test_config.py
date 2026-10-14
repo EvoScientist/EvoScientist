@@ -87,6 +87,9 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
         "EVOSCIENTIST_MAX_CACHED_FILES",
+        "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+        "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+        "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     ]:
         monkeypatch.delenv(key, raising=False)
     return config_dir
@@ -125,6 +128,9 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
         "EVOSCIENTIST_MAX_CACHED_FILES",
+        "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+        "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+        "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     ]:
         monkeypatch.delenv(key, raising=False)
 
