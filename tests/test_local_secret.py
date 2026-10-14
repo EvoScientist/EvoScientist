@@ -297,6 +297,12 @@ def _sddl(path):
         saved.unlink()
 
 
+def _sddl_name(sid):
+    """How SDDL writes a user's SID: the built-in Administrator and Guest
+    accounts get aliases."""
+    return {"500": "LA", "501": "LG"}.get(sid.rsplit("-", 1)[-1], sid)
+
+
 def _ace_sids(sddl):
     return {
         ace.split(";")[-1] for ace in sddl.split("D:", 1)[1].strip("()").split(")(")
@@ -309,7 +315,11 @@ def test_ensure_local_secret_restricts_the_file_on_windows():
     sddl = _sddl(_secret_file())
     assert sddl.split("D:", 1)[1].startswith("P")  # nothing inherited
     assert ";ID;" not in sddl
-    assert _ace_sids(sddl) == {local_secret._current_user_sid(), "SY", "BA"}
+    user = _sddl_name(local_secret._current_user_sid())
+    # OWNER RIGHTS (OW) comes from the server folder Python creates with mode
+    # 0o700; it names the file's owner, so it lets no other account in.
+    assert user in _ace_sids(sddl)
+    assert _ace_sids(sddl) <= {user, "SY", "BA", "OW"}
 
 
 @windows_only

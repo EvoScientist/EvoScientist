@@ -197,7 +197,10 @@ def _keep_mode(path: Path, mode: int) -> None:
 
 def _restrict_to_owner(path: Path, *, existing: bool = False) -> None:
     """Windows: give *path* an access list for this user, SYSTEM and
-    Administrators only, with nothing inherited.
+    Administrators only, with nothing inherited. An OWNER RIGHTS entry can
+    remain from the server folder, which Python creates with mode ``0o700`` and
+    an access list of SYSTEM, Administrators and OWNER RIGHTS; it names the
+    file's owner, so it lets no other account in.
 
     The grant names this user's SID rather than OWNER RIGHTS: a file created
     from an elevated prompt is owned by Administrators, and OWNER RIGHTS would
