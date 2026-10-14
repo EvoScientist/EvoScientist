@@ -20,6 +20,9 @@ $ProgressPreference = 'SilentlyContinue'
 # EvoSci's output goes to pipes and files here; with the ANSI code page Python
 # fails on its progress symbols, as in install.ps1.
 $env:PYTHONIOENCODING = 'utf-8'
+# ... and their output (and uv's) is UTF-8: decode it as such, not in the
+# console code page (paths with non-ASCII characters).
+try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
 
 $IndexUrl = if ($env:INDEX_URL) { $env:INDEX_URL } else { 'https://pypi.org/simple' }
 $DataDir = if ($env:EVOSCIENTIST_DATA_DIR) { $env:EVOSCIENTIST_DATA_DIR } else { Join-Path $HOME '.evoscientist' }
