@@ -191,14 +191,17 @@ function Block-Network {
         New-NetFirewallRule -DisplayName "evosci-smoke-block-$i" -Direction Outbound -Program $program -Action Block | Out-Null
         Write-Host "blocked: $program"
     }
-    $probe = 'import urllib.request; urllib.request.urlopen("https://pypi.org/simple/", timeout=15)'
+    # Single quotes inside: Windows PowerShell 5.1 drops double quotes from
+    # arguments to native programs. Exit code 3 only when the request itself
+    # fails, so a probe that breaks for another reason never counts as blocked.
+    $probe = "import sys, urllib.request`ntry: urllib.request.urlopen('https://pypi.org/simple/', timeout=15)`nexcept OSError: sys.exit(3)"
     foreach ($exe in @($basePython.Trim(), $Python)) {
         Invoke-Native $exe @('-c', $probe) | Out-Null
-        if ($NativeExitCode -eq 0) { Fail "$exe can still reach https://pypi.org: the network is not blocked" }
+        if ($NativeExitCode -ne 3) { Fail "$exe can still reach https://pypi.org, or the probe failed (exit $NativeExitCode): the network is not proven blocked" }
     }
     if ($node) {
-        Invoke-Native (Join-Path $node.path 'node.exe') @('-e', 'fetch("https://registry.npmjs.org/").then(() => process.exit(0), () => process.exit(1))') | Out-Null
-        if ($NativeExitCode -eq 0) { Fail 'node can still reach https://registry.npmjs.org: the network is not blocked' }
+        Invoke-Native (Join-Path $node.path 'node.exe') @('-e', "fetch('https://registry.npmjs.org/').then(() => process.exit(0), () => process.exit(3))") | Out-Null
+        if ($NativeExitCode -ne 3) { Fail "node can still reach https://registry.npmjs.org, or the probe failed (exit $NativeExitCode): the network is not proven blocked" }
     }
     Write-Host 'network blocked'
 }
@@ -216,3 +219,5 @@ switch ($Mode) {
     'block' { Block-Network }
     'offline' { Test-Offline }
 }
+# The last native command's exit code must not become the script's.
+exit 0

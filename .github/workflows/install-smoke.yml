@@ -228,12 +228,19 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode offline
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      # One path per OS: upload-artifact refuses files without a common root.
       - name: Upload the EvoScientist logs
-        if: failure()
+        if: failure() && runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.os }}${{ matrix.cn && '-cn' || '' }}
-          path: |
-            ${{ runner.temp }}/home/.config/evoscientist/*.log
-            ~/.config/evoscientist/*.log
+          path: ${{ runner.temp }}/home/.config/evoscientist/*.log
+          if-no-files-found: ignore
+
+      - name: Upload the EvoScientist logs (Windows)
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.os }}
+          path: ~/.config/evoscientist/*.log
           if-no-files-found: ignore
