@@ -201,6 +201,8 @@ class ProactiveServe:
     _cron_id: str | None = None
     _cron_thread_id: str | None = None
     _cron_created_at: float = 0.0
+    # The candidate list the cron's input holds, as last sent.
+    _mirrored: list[str] | None = None
     _applied: set[str] = field(default_factory=set)
     _topology: _Topology | None = None
     _last_poll: float = 0.0
@@ -267,25 +269,28 @@ class ProactiveServe:
             for cron in list_proactive_crons(self.client, self.workspace):
                 self.client.crons.delete(cron["cron_id"])
             self._cron_id = None
+            self._mirrored = None
             if not self.armed:
                 return
             thread_id = self._ensure_cron_thread()
             self._cancel_running(thread_id)
+            candidates = self.candidates()
             cron = create_proactive_cron(
                 self.client,
                 self.workspace,
                 thread_id=thread_id,
-                candidates=self.candidates(),
+                candidates=candidates,
                 timezone=self.timezone,
             )
             self._cron_id = str(cron["cron_id"])
+            self._mirrored = candidates
             self._cron_created_at = time.time()
             logger.info(
                 "[proactive] cron %s on thread %s (%s, %d candidate(s))",
                 self._cron_id,
                 thread_id,
                 PROACTIVE_SCHEDULE,
-                len(self.candidates()),
+                len(candidates),
             )
 
     def mirror(self) -> None:
@@ -300,7 +305,9 @@ class ProactiveServe:
                 if self.armed:
                     self.reconcile()
                 return
-            self.client.crons.update(self._cron_id, input=cron_input(self.candidates()))
+            candidates = self.candidates()
+            self.client.crons.update(self._cron_id, input=cron_input(candidates))
+            self._mirrored = candidates
 
     def stop(self) -> None:
         """Delete the workspace's proactive crons (serve stops or moves away)."""
@@ -310,6 +317,7 @@ class ProactiveServe:
             for cron in list_proactive_crons(self.client, self.workspace):
                 self.client.crons.delete(cron["cron_id"])
             self._cron_id = None
+            self._mirrored = None
 
     def move_to(self, workspace: Workspace) -> None:
         """Follow serve into another workspace: its cron belongs to the new one."""
@@ -373,6 +381,10 @@ class ProactiveServe:
         switch: str | None = None
         with self._lock:
             try:
+                # A thread's channel origin can appear after the last mirror
+                # (a channel ``/resume`` re-binds it once the command is done).
+                if self._cron_id is not None and self.candidates() != self._mirrored:
+                    self.mirror()
                 decisions = self._check_cron(now)
             except Exception:
                 logger.warning("[proactive] poll failed", exc_info=True)

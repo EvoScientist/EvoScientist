@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
@@ -436,6 +437,27 @@ def test_guards_skip_the_write(armed, change):
 
     assert client.threads.writes == []
     assert published == []
+
+
+def test_poll_mirrors_a_candidate_whose_origin_appeared_after_the_last_mirror(
+    armed,
+):
+    """A channel ``/resume`` into an armed thread mirrors before the origin is
+    re-bound; the next poll sends the thread."""
+    controller, client, origins, _ = armed
+    controller.armed.add("t2")
+    controller.mirror()
+    _tick(client, controller)
+    origins.add("t2")
+
+    controller.poll(current_thread_id="t2")
+
+    assert client.crons.updated[-1][1] == {
+        "input": {"candidates": [{"thread_id": "t1"}, {"thread_id": "t2"}]}
+    }
+    sent = len(client.crons.updated)
+    controller.poll(current_thread_id="t2", now=time.time() + POLL_INTERVAL_SECONDS)
+    assert len(client.crons.updated) == sent
 
 
 def test_a_push_to_another_thread_switches_serve_to_it(armed):
