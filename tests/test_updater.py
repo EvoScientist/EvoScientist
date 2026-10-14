@@ -939,3 +939,19 @@ def test_ctrl_c_while_uv_runs_still_ends_with_a_terminal_line(uv_install, monkey
     assert code == 130
     assert end["code"] == "install_failed"
     assert "install script" in end["message"]
+
+
+def test_newest_release_answer_for_installs_it_does_not_update(
+    tmp_path, monkeypatch, no_subprocess
+):
+    """An editable install on the newest release is told so, not manual_update;
+    with --version it still gets manual_update."""
+    _plain_env(tmp_path, monkeypatch, editable=True)
+    monkeypatch.setattr(updater, "installed_version", lambda: "0.3.10")
+    code, lines, _ = _run(updater.UpdateOptions(json=True))
+    end = _terminal(lines)
+    assert code == 0
+    assert end["status"] == "done"
+    assert end["detail"] == {"version": "0.3.10"}
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.10", json=True))
+    assert _terminal(lines)["code"] == "manual_update"

@@ -560,7 +560,6 @@ def _update(
             {"version": installed, "latest": latest},
         )
 
-    receipt = read_tool_receipt()
     target = choose_target(opts.version, versions)
     if not opts.version and _version(target) <= _version(installed):
         return (
@@ -568,6 +567,9 @@ def _update(
             {"version": installed},
         )
 
+    # After the two answers that need no install, so every kind of install
+    # gets them.
+    receipt = read_tool_receipt()
     if receipt is None:
         url = constraints_url(target, mirror)
         if (Path(sys.prefix) / DOCKER_MARKER).is_file():
