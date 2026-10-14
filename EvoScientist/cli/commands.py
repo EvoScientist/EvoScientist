@@ -2970,6 +2970,9 @@ def _main_callback(
     prompt: str | None = typer.Option(
         None, "-p", "--prompt", help="Query to execute (single-shot mode)"
     ),
+    prompt_file: str | None = typer.Option(
+        None, "--prompt-file", help="Read query from a file (bypasses Windows CreateProcess 32767-char cmd limit); overrides --prompt if both given"
+    ),
     thread_id: str | None = typer.Option(
         None,
         "--resume",
@@ -3070,6 +3073,16 @@ def _main_callback(
         return
 
     async_runtime = _get_cli_async_runtime(ctx)
+
+    # Resolve --prompt-file before any prompt validation: read file content into
+    # the prompt variable. This bypasses Windows CreateProcess 32767-char cmd
+    # line limit when the query is very long (e.g. papers embedded in prompt).
+    if prompt_file:
+        _pf = Path(prompt_file).expanduser()
+        if not _pf.is_file():
+            raise typer.BadParameter(f"--prompt-file not found: {prompt_file}")
+        prompt = _pf.read_text(encoding="utf-8")
+        typer.echo(f"[prompt-file] loaded {_pf} ({len(prompt)} chars)", err=True)
 
     # Load and apply configuration
     from ..config import apply_config_to_env, get_effective_config
