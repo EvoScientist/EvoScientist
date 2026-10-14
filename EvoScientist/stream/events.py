@@ -87,9 +87,6 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
 
 def _snapshot_has_resume_interrupt(message: object, snapshot: Any) -> bool:
     """Whether a resume input matches an interrupt persisted in the snapshot."""
-    if not _snapshot_has_pending_interrupt(snapshot):
-        return False
-
     resume = getattr(message, "resume", None)
     if not isinstance(resume, Mapping):
         return True
@@ -100,6 +97,8 @@ def _snapshot_has_resume_interrupt(message: object, snapshot: Any) -> bool:
     }
     if not interrupt_ids:
         return True
+    if not _snapshot_has_pending_interrupt(snapshot):
+        return False
 
     pending_ids = set()
     for interrupt in getattr(snapshot, "interrupts", None) or ():
@@ -111,7 +110,7 @@ def _snapshot_has_resume_interrupt(message: object, snapshot: Any) -> bool:
             interrupt_id = getattr(interrupt, "id", None)
             if interrupt_id is not None:
                 pending_ids.add(str(interrupt_id))
-    return not interrupt_ids.isdisjoint(pending_ids)
+    return interrupt_ids.issubset(pending_ids)
 
 
 async def _wait_for_resume_interrupt(
@@ -1520,13 +1519,13 @@ async def stream_agent_events(
     # calls as "was cancelled", re-broadcasts the history to the UI and invites
     # the model to re-issue the batch. A failed repair is logged, not fatal.
     # Also covers the all-writes-uncommitted case (next empty, tasks present).
+    if (
+        isinstance(message, Command)
+        and message.resume is not None
+        and not _snapshot_has_resume_interrupt(message, snapshot)
+    ):
+        snapshot = await _wait_for_resume_interrupt(agent, config, message)
     if _snapshot_needs_recovery(snapshot):
-        if (
-            isinstance(message, Command)
-            and message.resume is not None
-            and not _snapshot_has_resume_interrupt(message, snapshot)
-        ):
-            snapshot = await _wait_for_resume_interrupt(agent, config, message)
         await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
     clear_completed_memory_activity_counts()
