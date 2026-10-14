@@ -75,7 +75,7 @@ async def decide_proactive_push(
     pre_head: str | None,
     source_messages: list[Any],
     shadow_runner: Callable[[list[Any], str], Awaitable[str | None]],
-    read_current_head: Callable[[], str | None | Awaitable[str | None]],
+    read_current_head: Callable[[], str | Awaitable[str | None] | None],
     proactive_id: str,
     trigger: str = PROACTIVE_TRIGGER,
 ) -> ProactiveDecision:
