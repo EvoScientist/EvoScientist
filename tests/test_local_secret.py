@@ -191,7 +191,9 @@ def server(monkeypatch, caplog):
     """The custom app with its lifespan run, as langgraph-api runs it."""
     monkeypatch.setattr(local_secret, "_value", None)
     caplog.set_level(logging.DEBUG)
-    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+    with TestClient(
+        app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000)
+    ) as client:
         yield client
 
 
@@ -216,7 +218,7 @@ def test_verify_route_refuses_when_the_file_is_unusable(content, monkeypatch, ca
     """The server still starts; only routes that need the secret refuse."""
     _write_secret_file(content)
     monkeypatch.setattr(local_secret, "_value", None)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.get(
             "/api/local-secret/verify", headers={local_secret.HEADER: ""}
         )

@@ -556,6 +556,7 @@ class WebUILauncher:
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
                 config_fingerprint=_server_config_fingerprint(self._config),
+                allowed_origins=getattr(self._config, "backend_allowed_origins", ""),
             )
         except Exception as exc:
             self._raise_if_stopped()

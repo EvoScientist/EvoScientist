@@ -6,13 +6,17 @@ process as the graph. We use it to surface the registry the WebUI's
 ``/model`` picker needs.
 
 Why this lives here and not as a separate sidecar: the WebUI talks to
-``EvoSci deploy``'s langgraph endpoint anyway, so one origin keeps the
-WebUI's fetch logic simple — no CORS dance, no extra port to configure.
+``EvoSci deploy``'s langgraph endpoint anyway, so one server keeps the
+WebUI's fetch logic simple — no extra port to configure.
+
+The app's middleware, :class:`~EvoScientist.langgraph_dev.boundary.BrowserBoundary`,
+wraps every route of the server, langgraph-api's included: langgraph-api runs a
+custom app's middleware outside its own.
 
 Why Starlette and not FastAPI: ``langgraph_api`` already depends on
 Starlette; adding FastAPI would pull in pydantic v1-vs-v2 reconciliation
-the deploy doesn't need. The one route here has no input model, just a
-JSON body, so the lower-level surface is sufficient.
+the deploy doesn't need. The routes here have no input models, just JSON
+bodies, so the lower-level surface is sufficient.
 
 Lightweight by design — module-level imports stick to ``config``,
 ``llm.models`` (registry only; no chat-model construction), and
@@ -26,11 +30,13 @@ import asyncio
 import contextlib
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
+from EvoScientist.langgraph_dev.boundary import BrowserBoundary, Trust
 from EvoScientist.llm.models import list_model_picker_entries
 from EvoScientist.local_secret import load_local_secret, require_local_secret
 
@@ -236,6 +242,9 @@ async def _lifespan(_app: Starlette):
 
 app = Starlette(
     lifespan=_lifespan,
+    # Read when langgraph-api imports this app: LANGGRAPH_API_URL is set by
+    # then, and a workspace ``.env`` merged later cannot change it.
+    middleware=[Middleware(BrowserBoundary, trust=Trust.from_env())],
     routes=[
         Route("/api/models", get_models, methods=["GET"]),
         Route("/api/teams", get_teams, methods=["GET"]),

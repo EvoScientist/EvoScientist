@@ -241,6 +241,7 @@ def deploy(
                 jobs_per_worker=jobs_per_worker,
                 tunnel=tunnel,
                 config_fingerprint=_server_config_fingerprint(config),
+                allowed_origins=getattr(config, "backend_allowed_origins", ""),
             )
         atexit.register(stop_langgraph_dev, proc)
     except Exception as exc:

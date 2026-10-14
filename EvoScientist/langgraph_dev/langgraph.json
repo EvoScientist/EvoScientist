@@ -19,6 +19,13 @@
         "recursion_limit": 1000000
     },
     "http": {
-        "app": "EvoScientist.langgraph_dev.http:app"
+        "app": "EvoScientist.langgraph_dev.http:app",
+        "cors": {
+            "allow_origins": [],
+            "allow_origin_regex": "https?://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?",
+            "allow_methods": ["*"],
+            "allow_headers": ["*"],
+            "expose_headers": ["x-pagination-total", "x-pagination-next", "content-location"]
+        }
     }
 }

@@ -486,6 +486,14 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 >
 > On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
 
+**Pages from other origins.** The backend answers browser requests only from pages on this machine (any port), on the machine's own addresses when it listens on the network, and through the tunnel under `--tunnel`; other pages get `403`, shown in the browser as a CORS or network error and logged by the backend. To use the backend from another page, such as LangSmith Studio, add its origin and restart the backend:
+
+```bash
+EvoSci config set backend_allowed_origins https://smith.langchain.com
+```
+
+The same applies to a WebUI opened by a DNS name, to clients that reach a Docker container through the host's address, and to other containers that use a service name such as `http://evoscientist:6174`.
+
 </details>
 
 <details>

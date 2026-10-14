@@ -841,6 +841,12 @@ class TestPriorityChain:
             == 300
         )
 
+    def test_backend_allowed_origins_yaml_list_normalized_to_csv(self):
+        config = EvoScientistConfig(
+            backend_allowed_origins=["https://a.example", "https://b.example"]
+        )
+        assert config.backend_allowed_origins == "https://a.example,https://b.example"
+
     def test_shell_allow_list_yaml_list_normalized_to_csv(self):
         """A YAML list spelling survives ``__post_init__`` as a list; normalize
         to CSV so the policy resolver's ``.split`` never raises AttributeError."""
@@ -1419,3 +1425,10 @@ class TestDotenvIsolation:
 
         assert config.langgraph_dev_port == 6606
         assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+
+
+def test_backend_allowed_origins_ignores_the_environment(temp_config_dir, monkeypatch):
+    """A workspace ``.env`` must not widen the backend's browser boundary."""
+    monkeypatch.setenv("EVOSCIENTIST_BACKEND_ALLOWED_ORIGINS", "https://evil.example")
+    monkeypatch.setenv("BACKEND_ALLOWED_ORIGINS", "https://evil.example")
+    assert get_effective_config().backend_allowed_origins == ""

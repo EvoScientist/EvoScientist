@@ -13,7 +13,7 @@ from EvoScientist.config import EvoScientistConfig
 from EvoScientist.langgraph_dev.http import app
 from EvoScientist.paths import Workspace
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def test_get_models_returns_entries_and_default():
