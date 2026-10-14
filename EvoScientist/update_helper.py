@@ -257,8 +257,9 @@ try {
         }
     }
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath $cfg.temp_dir
-    if (-not $Json) {
-        # The helper's own window closes when it exits.
+    # The helper's own window closes when it exits. Without a visible
+    # desktop (an SSH session, a scheduled task) nobody could answer.
+    if (-not $Json -and [Environment]::UserInteractive) {
         try { Read-Host 'Press Enter to close this window' | Out-Null } catch { }
     }
 }
