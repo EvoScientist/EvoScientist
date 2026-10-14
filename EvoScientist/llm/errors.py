@@ -175,6 +175,7 @@ def _redact_api_keys(message: str) -> str:
 
 _HOST_TO_PROVIDER: dict[str, str] = {
     "api.openai.com": "openai",
+    "chatgpt.com": "openai",  # ChatGPT sign-in (Codex backend)
     "api.anthropic.com": "anthropic",
     "api.atlascloud.ai": "atlascloud",
     "api.deepseek.com": "deepseek",

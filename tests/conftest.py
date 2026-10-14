@@ -1,5 +1,6 @@
 """Shared fixtures for EvoScientist tests."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,21 @@ def _isolate_user_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(mcp_client, "USER_MCP_CONFIG", config_dir / "mcp.yaml")
     monkeypatch.setattr(update_check, "CACHE_DIR", config_dir)
     monkeypatch.setattr(update_check, "CACHE_FILE", config_dir / "latest_version.json")
+
+
+@pytest.fixture(autouse=True)
+def _restore_openai_auth_mode_env():
+    """Start every test without EVOSCIENTIST_OPENAI_AUTH_MODE and restore it after.
+
+    ``apply_config_to_env`` writes it with a direct ``os.environ`` assignment,
+    which monkeypatch cannot undo.
+    """
+    previous = os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
+    yield
+    if previous is None:
+        os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
+    else:
+        os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = previous
 
 
 @pytest.fixture(autouse=True)

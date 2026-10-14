@@ -1133,6 +1133,29 @@ class TestApplyConfigToEnv:
 
         assert os.environ.get("OLLAMA_BASE_URL") == "http://existing:11434"
 
+    def test_openai_auth_mode_oauth_is_exported(self, clean_env):
+        apply_config_to_env(EvoScientistConfig(openai_auth_mode="oauth"))
+
+        assert os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] == "oauth"
+
+    def test_openai_auth_mode_api_key_replaces_a_stale_value(
+        self, clean_env, monkeypatch
+    ):
+        monkeypatch.setenv("EVOSCIENTIST_OPENAI_AUTH_MODE", "oauth")
+
+        apply_config_to_env(EvoScientistConfig(openai_auth_mode="api_key"))
+
+        assert os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] == "api_key"
+
+    def test_cli_override_reaches_a_fresh_resolve(self, clean_env, temp_config_dir):
+        """The langgraph dev child re-resolves config from file + env only."""
+        save_config(EvoScientistConfig(openai_auth_mode="oauth"))
+        resolved = get_effective_config({"openai_auth_mode": "api_key"})
+
+        apply_config_to_env(resolved)
+
+        assert get_effective_config().openai_auth_mode == "api_key"
+
 
 class TestAuxiliaryModelConfig:
     """auxiliary_model / auxiliary_provider config fields (plain str, optional)."""
@@ -1267,35 +1290,36 @@ class TestDotenvIsolation:
     ):
         """A workspace ``.env`` credential must not undo ccproxy OAuth routing.
 
-        ``setup_codex_env`` marks the route with a placeholder key; every later
+        ``setup_ccproxy_env`` marks the route with a placeholder key; every later
         ``get_effective_config`` call re-merges ``.env``, so without the guard
-        the key and base URL flip back mid-session and Codex headers vanish.
+        the key and base URL flip back mid-session.
         """
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "OPENAI_API_KEY=sk-real\nOPENAI_BASE_URL=https://api.openai.com/v1\n"
+            "ANTHROPIC_API_KEY=sk-ant-real\n"
+            "ANTHROPIC_BASE_URL=https://api.anthropic.com\n"
         )
         monkeypatch.setattr(
             "EvoScientist.config.settings.find_dotenv",
             lambda *args, **kwargs: str(env_file),
         )
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
-        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/codex/v1")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:8000/claude")
 
         get_effective_config()
 
-        assert os.environ["OPENAI_API_KEY"] == "ccproxy-oauth"
-        assert os.environ["OPENAI_BASE_URL"] == "http://127.0.0.1:8000/codex/v1"
+        assert os.environ["ANTHROPIC_API_KEY"] == "ccproxy-oauth"
+        assert os.environ["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000/claude"
 
     def test_dotenv_guard_matches_lowercase_keys(self, tmp_path, monkeypatch):
         """Windows env keys are case-insensitive, so a lowercase ``.env`` key
         would reach the same variable; the guard must not depend on case."""
         from EvoScientist.config.settings import _oauth_routed
 
-        monkeypatch.setenv("OPENAI_API_KEY", "ccproxy-oauth")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "ccproxy-oauth")
 
-        assert _oauth_routed("openai_api_key")
-        assert _oauth_routed("openai_base_url")
+        assert _oauth_routed("anthropic_api_key")
+        assert _oauth_routed("anthropic_base_url")
 
     def test_dotenv_credentials_still_merge_without_oauth(
         self, temp_config_dir, tmp_path, monkeypatch

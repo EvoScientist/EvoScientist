@@ -253,6 +253,16 @@ def run_standalone(
         from ..paths import reload_env_dirs, start_workspace_path
 
         config = get_effective_config()
+        if getattr(config, "openai_auth_mode", "api_key") == "oauth":
+            # Nobody is at a terminal here, so there is no sign-in to offer.
+            from ..llm import chatgpt_oauth
+
+            state = chatgpt_oauth.status()
+            if not state.signed_in:
+                if state.problem:
+                    logger.error("ChatGPT: %s", state.problem)
+                logger.error("%s", chatgpt_oauth.SIGN_IN_HINT)
+                raise SystemExit(1)
         reload_env_dirs()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
         # The agent serves ``default_workdir``, else the current directory.

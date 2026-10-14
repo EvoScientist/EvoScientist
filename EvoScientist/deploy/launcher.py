@@ -315,6 +315,19 @@ class _BackendDecision:
     warnings: list[str] = field(default_factory=list)
 
 
+def no_display() -> bool:
+    """True where ``webbrowser`` would fall back to a console browser.
+
+    Linux/BSD without a display and without ``BROWSER`` naming one to use.
+    """
+    return (
+        sys.platform not in ("darwin", "win32")
+        and not os.environ.get("BROWSER")
+        and not os.environ.get("DISPLAY")
+        and not os.environ.get("WAYLAND_DISPLAY")
+    )
+
+
 class WebUILauncher:
     """Orchestrates the backend (langgraph dev) + a pluggable front-end.
 
@@ -460,13 +473,7 @@ class WebUILauncher:
             # in the foreground; skip the open there unless BROWSER says
             # which one to use.
             opened = False
-            headless = (
-                sys.platform not in ("darwin", "win32")
-                and not os.environ.get("BROWSER")
-                and not os.environ.get("DISPLAY")
-                and not os.environ.get("WAYLAND_DISPLAY")
-            )
-            if not headless:
+            if not no_display():
                 try:
                     opened = bool(webbrowser.open(self.webui_url))
                 except Exception:  # pragma: no cover - best-effort

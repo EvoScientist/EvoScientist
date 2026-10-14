@@ -83,11 +83,9 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("claude-haiku-4-5", "claude-haiku-4-5", "custom-anthropic"),
     # Custom OpenAI (third-party OpenAI-compatible endpoints, 3 defaults)
     # Listed BEFORE native openai so MODELS dict defaults to native provider
-    ("gpt-5.5-pro", "gpt-5.5-pro", "custom-openai"),
-    ("gpt-5.5", "gpt-5.5", "custom-openai"),
-    ("gpt-5.4", "gpt-5.4", "custom-openai"),
-    ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
-    ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
+    ("gpt-6.1-sol", "gpt-6.1-sol", "custom-openai"),
+    ("gpt-6-sol", "gpt-6-sol", "custom-openai"),
+    ("gpt-6-luna", "gpt-6-luna", "custom-openai"),
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
     # Anthropic (current generation)
@@ -108,18 +106,6 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.6-sol", "gpt-5.6-sol", "openai"),
     ("gpt-5.6-terra", "gpt-5.6-terra", "openai"),
     ("gpt-5.6-luna", "gpt-5.6-luna", "openai"),
-    ("gpt-5.5-pro", "gpt-5.5-pro", "openai"),
-    ("gpt-5.5", "gpt-5.5", "openai"),
-    ("gpt-5.4", "gpt-5.4", "openai"),
-    ("gpt-5.4-mini", "gpt-5.4-mini", "openai"),
-    ("gpt-5.4-nano", "gpt-5.4-nano", "openai"),
-    ("gpt-5.3-codex", "gpt-5.3-codex", "openai"),
-    ("gpt-5.2-codex", "gpt-5.2-codex", "openai"),
-    ("gpt-5.2", "gpt-5.2", "openai"),
-    ("gpt-5.1", "gpt-5.1", "openai"),
-    ("gpt-5", "gpt-5", "openai"),
-    ("gpt-5-mini", "gpt-5-mini", "openai"),
-    ("gpt-5-nano", "gpt-5-nano", "openai"),
     # Google GenAI
     ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),
@@ -182,7 +168,6 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Opper is selected explicitly via get_models_for_provider.
     ("claude-sonnet-4.6", "claude-sonnet-4-6", "opper"),
     ("claude-opus-5", "claude-opus-5", "opper"),
-    ("gpt-5.5", "gpt-5.5", "opper"),
     ("gemini-3.8-flash", "gemini-3.8-flash", "opper"),
     ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
     ("mistral-large-2512", "mistral-large-2512", "opper"),
@@ -205,10 +190,6 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.6-sol", "openai/gpt-5.6-sol", "openrouter"),
     ("gpt-5.6-terra", "openai/gpt-5.6-terra", "openrouter"),
     ("gpt-5.6-luna", "openai/gpt-5.6-luna", "openrouter"),
-    ("gpt-5.5-pro", "openai/gpt-5.5-pro", "openrouter"),
-    ("gpt-5.5", "openai/gpt-5.5", "openrouter"),
-    ("gpt-5.4", "openai/gpt-5.4", "openrouter"),
-    ("gpt-5.3-codex", "openai/gpt-5.3-codex", "openrouter"),
     ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
     ("gemini-3.7-flash", "google/gemini-3.7-flash", "openrouter"),
     ("gemini-3.6-flash", "google/gemini-3.6-flash", "openrouter"),
