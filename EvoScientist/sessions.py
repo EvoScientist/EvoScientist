@@ -1156,21 +1156,30 @@ async def latest_origin_checkpoints(limit: int = 50) -> list[dict]:
     metadata into the run's checkpoints; HITL resumes, ``/compact`` and stop
     recovery write checkpoints without it, which is why this takes the newest
     checkpoint *with* the keys rather than the newest one. Keys: ``thread_id``,
-    ``updated_at``, ``workspace_dir``, ``run_dir``, ``proactive`` and the
-    ``origin_*`` keys, as stored.
+    ``updated_at``, ``workspace_dir``, ``run_dir`` and the ``origin_*`` keys of
+    that checkpoint, as stored, and ``proactive`` from the thread's newest
+    checkpoint that carries the flag: turns after ``/proactive off`` carry
+    ``"off"`` but no origin.
     """
     db_path = str(get_db_path())
     async with aiosqlite.connect(db_path, timeout=30.0) as conn:
         if not await _table_exists(conn, "checkpoints"):
             return []
         # One MAX() with bare columns: SQLite takes the bare columns from the
-        # row holding the maximum, so every value comes from the same row.
+        # row holding the maximum, so the folders and the origin come from the
+        # same row. The flag comes from its own newest row (subquery).
         query = f"""
             SELECT thread_id,
                    MAX(json_extract(metadata, '$.updated_at')) AS updated_at,
                    json_extract(metadata, '$.workspace_dir'),
                    json_extract(metadata, '$.run_dir'),
-                   json_extract(metadata, '$.proactive'),
+                   (SELECT json_extract(f.metadata, '$.proactive')
+                      FROM checkpoints f
+                     WHERE f.thread_id = checkpoints.thread_id
+                       AND f.checkpoint_ns = ''
+                       AND json_extract(f.metadata, '$.proactive') IS NOT NULL
+                     ORDER BY json_extract(f.metadata, '$.updated_at') DESC
+                     LIMIT 1),
                    json_extract(metadata, '$.origin_channel_type'),
                    json_extract(metadata, '$.origin_chat_id'),
                    json_extract(metadata, '$.origin_sender'),

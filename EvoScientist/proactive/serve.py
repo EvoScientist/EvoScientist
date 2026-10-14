@@ -417,10 +417,10 @@ class ProactiveServe:
         """Re-arm the newest armed thread of this workspace after a restart.
 
         *rows* come from ``sessions.latest_origin_checkpoints``, newest first:
-        per thread, the stored folders, flag and channel origin of its newest
-        checkpoint that has an origin. The thread's metadata on the server
-        wins over the flag in *rows* when it says ``"off"`` (``/proactive off``
-        after the last turn), and the flag is written back to that metadata
+        per thread, the stored folders and channel origin of its newest
+        checkpoint that has an origin, and its newest stored flag. The thread's
+        metadata on the server wins over that flag when it says ``"off"``
+        (``/proactive off`` after the last turn), and the flag is written back to that metadata
         when the restart lost it. The restored thread stays a candidate until the
         fresh thread serve started on has its first turn.
         """

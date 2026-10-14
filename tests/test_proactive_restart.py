@@ -199,6 +199,21 @@ async def test_latest_origin_checkpoints_takes_the_newest_row_with_an_origin(db)
     assert t1["proactive"] == "on"
 
 
+async def test_latest_origin_checkpoints_takes_the_newest_flag(db):
+    origin = {"origin_channel_type": "telegram", "origin_chat_id": "42"}
+    _row(db, "t1", "c1", updated_at="2026-10-01T10:00:00", proactive="on", **origin)
+    # /proactive off, then a turn: the flag reaches the checkpoint, no origin.
+    _row(db, "t1", "c2", updated_at="2026-10-01T11:00:00", proactive="off")
+    _row(db, "t2", "c3", updated_at="2026-10-01T12:00:00", proactive="on", **origin)
+    _row(db, "t2", "c4", updated_at="2026-10-01T13:00:00")  # /compact: no keys
+
+    rows = {r["thread_id"]: r for r in await latest_origin_checkpoints()}
+
+    assert rows["t1"]["proactive"] == "off"
+    assert rows["t1"]["updated_at"] == "2026-10-01T10:00:00"
+    assert rows["t2"]["proactive"] == "on"
+
+
 async def test_latest_origin_checkpoints_without_a_table_is_empty(tmp_path):
     with patch("EvoScientist.sessions.get_db_path", return_value=tmp_path / "x.db"):
         assert await latest_origin_checkpoints() == []
