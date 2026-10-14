@@ -290,7 +290,9 @@ def _sddl(path):
     saved = path.with_name(path.name + ".acl")
     subprocess.run(["icacls", str(path), "/save", str(saved)], check=True)
     try:
-        return saved.read_text(encoding="utf-16").splitlines()[1]
+        # UTF-16 LE, without a byte-order mark (drop one if a version adds it).
+        text = saved.read_bytes().decode("utf-16-le").lstrip("\ufeff")
+        return text.splitlines()[1]
     finally:
         saved.unlink()
 
