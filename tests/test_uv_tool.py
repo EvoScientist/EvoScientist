@@ -21,7 +21,7 @@ requirements = [
     { name = "pkg-sub", git = "https://github.com/o/r?branch=dev&subdirectory=pkg" },
     { name = "pinned", git = "https://github.com/o/p#0123abcd" },
     { name = "wheel", url = "https://example.org/wheel-1.0-py3-none-any.whl" },
-    { name = "local", directory = "/opt/src/local" },
+    { name = "local", directory = "@LOCAL@" },
     { name = "dev", editable = "/opt/src/dev" },
 ]
 constraints = [
@@ -34,6 +34,9 @@ entrypoints = [{ name = "EvoSci", install-path = "/x/bin/EvoSci", from = "evosci
 [tool.options]
 exclude-newer = "2026-10-01T00:00:00Z"
 """
+# An absolute path on every OS (on Windows a path needs a drive).
+LOCAL = (Path(__file__).resolve().parent / "local-src").as_posix()
+RECEIPT = RECEIPT.replace("@LOCAL@", LOCAL)
 
 
 def _env(tmp_path: Path, text: str = RECEIPT) -> Path:
@@ -84,7 +87,7 @@ def test_with_args_keep_specifier_extras_marker_and_sources(tmp_path):
         "--with",
         "wheel @ https://example.org/wheel-1.0-py3-none-any.whl",
         "--with",
-        f"local @ {Path('/opt/src/local').as_uri()}",
+        f"local @ {Path(LOCAL).as_uri()}",
         "--with-editable",
         "/opt/src/dev",
     ]
@@ -143,6 +146,7 @@ def test_missing_receipt_raises(tmp_path):
     "entry",
     [
         {"name": "v", "virtual": "/opt/v"},
+        {"name": "rel", "directory": "relative/dir"},
         {"name": "g", "git": "https://github.com/o/r?path=sub&rev=x"},
         {"specifier": "==1"},
     ],

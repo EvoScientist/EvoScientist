@@ -50,6 +50,9 @@ def uv_install(tmp_path, monkeypatch):
     env.mkdir(parents=True)
     (env / "uv-receipt.toml").write_text(RECEIPT, encoding="utf-8")
     monkeypatch.setattr(sys, "prefix", str(env))
+    # The macOS / Linux path (uv in-process); the Windows handover has its own
+    # tests below.
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(updater, "installed_version", lambda: "0.3.7")
     monkeypatch.setattr(uv_tool, "find_uv", lambda: "/opt/uv")
     monkeypatch.setattr("EvoScientist.config.load_config", lambda: FakeConfig())

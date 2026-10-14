@@ -101,7 +101,11 @@ def requirement_string(entry: dict[str, Any]) -> str:
         return f"{head} @ {url}{tail}"
     for key in ("path", "directory"):
         if key in entry:
-            return f"{head} @ {Path(str(entry[key])).as_uri()}{tail}"
+            try:
+                uri = Path(str(entry[key])).as_uri()
+            except ValueError as exc:  # not an absolute path
+                raise ReceiptError(f"{key} source for {name}: {exc}") from exc
+            return f"{head} @ {uri}{tail}"
     if "virtual" in entry:
         raise ReceiptError(f"virtual source for {name}")
     return f"{head}{entry.get('specifier', '')}{tail}"
