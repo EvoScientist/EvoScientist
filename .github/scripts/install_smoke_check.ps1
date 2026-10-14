@@ -17,6 +17,9 @@ param([Parameter(Mandatory = $true)][ValidateSet('online', 'block', 'offline')][
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+# EvoSci's output goes to pipes and files here; with the ANSI code page Python
+# fails on its progress symbols, as in install.ps1.
+$env:PYTHONIOENCODING = 'utf-8'
 
 $IndexUrl = if ($env:INDEX_URL) { $env:INDEX_URL } else { 'https://pypi.org/simple' }
 $DataDir = if ($env:EVOSCIENTIST_DATA_DIR) { $env:EVOSCIENTIST_DATA_DIR } else { Join-Path $HOME '.evoscientist' }
@@ -32,9 +35,13 @@ function Fail([string]$Text) {
 
 # Runs a native command and returns its stdout as text (stderr goes to the
 # log); native stderr must not become a terminating error.
-function Invoke-Native([string]$Exe, [string[]]$Arguments) {
+function Invoke-Native([string]$Exe, [string[]]$Arguments, [switch]$WithStderr) {
     $ErrorActionPreference = 'Continue'
-    $out = & $Exe @Arguments | ForEach-Object { "$_" }
+    if ($WithStderr) {
+        $out = & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
+    } else {
+        $out = & $Exe @Arguments | ForEach-Object { "$_" }
+    }
     $script:NativeExitCode = $LASTEXITCODE
     return ($out -join "`n")
 }
@@ -127,7 +134,8 @@ function Test-Online {
     # when every installed version is the one constraints.txt pins.
     $frozen = Join-Path ([IO.Path]::GetTempPath()) 'evosci-frozen.txt'
     [IO.File]::WriteAllText($frozen, (Invoke-Native $Uv @('pip', 'freeze', '--python', $Python)))
-    $out = Invoke-Native $Uv @('pip', 'install', '--python', $Python, '--dry-run', '-r', $frozen, '-c', $constraints)
+    # uv reports "Would make no changes" on stderr.
+    $out = Invoke-Native $Uv @('pip', 'install', '--python', $Python, '--dry-run', '-r', $frozen, '-c', $constraints) -WithStderr
     if ($NativeExitCode -ne 0 -or $out -notmatch 'Would make no changes') {
         Fail "The installed versions differ from constraints.txt: $out"
     }
