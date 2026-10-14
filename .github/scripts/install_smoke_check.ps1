@@ -46,7 +46,9 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments, [switch]$WithStderr) 
     return ($out -join "`n")
 }
 
-$Uv = (Get-Content -Raw (Join-Path $DataDir 'tools\uv.json') | ConvertFrom-Json).path
+# The tool records are UTF-8; Windows PowerShell 5.1 would read them in the
+# ANSI code page and garble a path with non-ASCII characters.
+$Uv = (Get-Content -Raw -Encoding UTF8 (Join-Path $DataDir 'tools\uv.json') | ConvertFrom-Json).path
 if (-not (Test-Path $Uv)) { Fail "No uv recorded in $DataDir\tools\uv.json" }
 $BinDir = (Invoke-Native $Uv @('tool', 'dir', '--bin')).Trim()
 $ToolDir = (Invoke-Native $Uv @('tool', 'dir')).Trim()
@@ -181,7 +183,7 @@ function Block-Network {
     $programs = @($basePython.Trim(), $Python)
     $programs += @(Get-ChildItem (Join-Path $ToolDir 'evoscientist\Scripts') -Filter *.exe | ForEach-Object { $_.FullName })
     $programs += @(Get-ChildItem $BinDir -Filter *.exe | ForEach-Object { $_.FullName })
-    $node = Get-Content -Raw -ErrorAction SilentlyContinue (Join-Path $DataDir 'tools\node.json') | ConvertFrom-Json
+    $node = Get-Content -Raw -Encoding UTF8 -ErrorAction SilentlyContinue (Join-Path $DataDir 'tools\node.json') | ConvertFrom-Json
     if ($node) { $programs += Join-Path $node.path 'node.exe' }
     $envPython = Join-Path $DataDir 'envs\default\Scripts\python.exe'
     if (Test-Path $envPython) { $programs += $envPython }
