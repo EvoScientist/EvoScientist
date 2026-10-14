@@ -55,7 +55,7 @@ def test_controller_is_available_on_the_server_gateway(workspace):
     with patch(
         "EvoScientist.langgraph_dev.sdk.get_langgraph_sync_client",
         return_value=MagicMock(),
-    ):
+    ) as build:
         controller = _serve_proactive_controller(
             EvoScientistConfig(),
             _gateways(composite),
@@ -64,6 +64,8 @@ def test_controller_is_available_on_the_server_gateway(workspace):
         )
     assert controller.available is True
     assert controller.workspace == workspace
+    # Serve's message loop makes these calls: never the SDK's 300 s read.
+    assert build.call_args.kwargs["timeout"] == 10.0
 
 
 def test_a_controller_failure_never_raises():
@@ -95,6 +97,7 @@ async def test_resume_in_the_same_workspace_mirrors_the_thread():
 
     await cb("new-tid", dirs)
 
+    proactive.adopt.assert_called_once_with("new-tid")
     proactive.mirror.assert_called_once_with()
     proactive.stop.assert_not_called()
     proactive.move_to.assert_not_called()
@@ -109,6 +112,7 @@ async def test_resume_into_another_workspace_moves_the_cron_with_the_server():
     order = []
     proactive.stop.side_effect = lambda: order.append("stop")
     proactive.move_to.side_effect = lambda ws: order.append(("move_to", ws))
+    proactive.adopt.side_effect = lambda tid: order.append(("adopt", tid))
     proactive.mirror.side_effect = lambda: order.append("mirror")
 
     async def move(*_args, **_kwargs):
@@ -129,6 +133,7 @@ async def test_resume_into_another_workspace_moves_the_cron_with_the_server():
         "stop",
         "move server",
         ("move_to", Workspace("/new-ws")),
+        ("adopt", "new-tid"),
         "mirror",
     ]
 

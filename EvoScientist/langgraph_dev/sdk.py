@@ -57,11 +57,22 @@ def langgraph_dev_headers(headers: Mapping[str, str] | None = None) -> dict[str,
     return dict(LANGGRAPH_DEV_AUTH_HEADERS if headers is None else headers)
 
 
-def get_langgraph_sync_client(*, url: str, headers: Mapping[str, str] | None = None):
-    """Build a sync LangGraph SDK client with EvoScientist's default headers."""
+def get_langgraph_sync_client(
+    *,
+    url: str,
+    headers: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+):
+    """Build a sync LangGraph SDK client with EvoScientist's default headers.
+
+    ``timeout`` (seconds) caps the underlying ``httpx.Client``; ``None``
+    leaves the SDK default (``read=300s``) in place.
+    """
     from langgraph_sdk import get_sync_client
 
-    return get_sync_client(url=url, headers=langgraph_dev_headers(headers))
+    return get_sync_client(
+        url=url, headers=langgraph_dev_headers(headers), timeout=timeout
+    )
 
 
 def get_langgraph_async_client(

@@ -44,6 +44,10 @@ POLL_INTERVAL_SECONDS = 20.0
 # serve recreates it. Shorter than two intervals would recreate a cron whose
 # tick is merely slow.
 STALE_TICK_SECONDS = 25 * 60
+# A decision older than this is not applied. Each tick replaces the last one's
+# decisions, so a live cron's are at most one interval (10 min) plus a poll
+# old; an older one was left in the cron thread while serve was stopped.
+DECISION_MAX_AGE_SECONDS = 15 * 60
 # The graph whose threads serve writes pushes into.
 MAIN_GRAPH_ID = "EvoScientist"
 # Node of the main graph a push is a reply of, for the fallback write.
@@ -53,7 +57,8 @@ _MODEL_NODE = "model"
 # and Discord threads, Feishu's chat type, QQ's passive-reply handle, personal
 # WeChat's context token. Nothing else is stored: the run metadata also
 # reaches thread metadata and ``/threads``, and channels put personal data
-# (email subjects, Signal numbers, nicknames) in the same dict.
+# (email subjects, nicknames) in the same dict. The chat id is the one
+# personal value kept (a Signal number, an email address): a reply needs it.
 ORIGIN_METADATA_KEYS = (
     "thread_ts",
     "thread_id",
@@ -74,7 +79,6 @@ def origin_run_metadata(origin: Any) -> dict[str, str]:
     meta = {
         "origin_channel_type": str(origin.channel_type),
         "origin_chat_id": str(origin.chat_id),
-        "origin_sender": str(origin.sender or ""),
     }
     kept = {
         key: value
@@ -112,7 +116,8 @@ def origin_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "channel_type": str(channel_type),
         "chat_id": str(chat_id),
-        "sender": str(row.get("origin_sender") or ""),
+        # The sender is not stored: delivery needs only the chat.
+        "sender": "",
         "metadata": metadata or None,
     }
 
@@ -178,16 +183,17 @@ class ProactiveServe:
     """Serve's proactive controller for the workspace it currently serves.
 
     ``unavailable_reason`` is set on the ``local`` backend and under #470's
-    fallback; every method is then a no-op, and ``/proactive`` reports the
-    reason.
+    fallback; ``arm`` and ``disarm`` then raise with it (``/proactive``
+    reports it), and every other method is a no-op.
     """
 
     workspace: Workspace
     client: Any = None
     timezone: str | None = None
     unavailable_reason: str | None = None
-    # Threads armed in this serve session. Thread metadata holds the same flag
-    # for the cron and for a restart.
+    # Armed threads of the served workspace, as far as this serve session
+    # knows: set by ``/proactive``, the restore and :meth:`adopt`. Thread
+    # metadata holds the flag the cron and a restart read.
     armed: set[str] = field(default_factory=set)
     # Delivery: (thread_id, text) -> delivered.
     publish: Callable[[str, str], bool] | None = None
@@ -298,6 +304,8 @@ class ProactiveServe:
 
         Idempotent. Creates the cron when a thread is armed and none exists.
         """
+        from langgraph_sdk.errors import NotFoundError
+
         if not self.available:
             return
         with self._lock:
@@ -306,7 +314,12 @@ class ProactiveServe:
                     self.reconcile()
                 return
             candidates = self.candidates()
-            self.client.crons.update(self._cron_id, input=cron_input(candidates))
+            try:
+                self.client.crons.update(self._cron_id, input=cron_input(candidates))
+            except NotFoundError:
+                # The dev server lost the cron (a restart without persistence).
+                self.reconcile()
+                return
             self._mirrored = candidates
 
     def stop(self) -> None:
@@ -320,11 +333,38 @@ class ProactiveServe:
             self._mirrored = None
 
     def move_to(self, workspace: Workspace) -> None:
-        """Follow serve into another workspace: its cron belongs to the new one."""
+        """Follow serve into another workspace: its cron belongs to the new one.
+
+        The armed threads stay with the old workspace: their flag is in their
+        metadata, and :meth:`adopt` arms a thread again when serve resumes it.
+        """
         with self._lock:
             self.workspace = workspace
             self._cron_thread_id = None
+            self._mirrored = None
             self._applied.clear()
+            self.armed.clear()
+            self.restored_thread_id = None
+
+    def adopt(self, thread_id: str) -> None:
+        """Take *thread_id*'s armed flag from its metadata (serve resumed it).
+
+        Mirrors nothing: the caller mirrors once the resume is done.
+        """
+        if not self.available:
+            return
+        from langgraph_sdk.errors import NotFoundError
+
+        try:
+            thread = self.client.threads.get(thread_id)
+        except NotFoundError:
+            return
+        flag = (thread.get("metadata") or {}).get("proactive")
+        with self._lock:
+            if flag == "on":
+                self.armed.add(thread_id)
+            elif flag == "off":
+                self.armed.discard(thread_id)
 
     def _ensure_cron_thread(self) -> str:
         """The cron thread: the one already used in this workspace, else a new one.
@@ -521,6 +561,9 @@ class ProactiveServe:
         # Decided once, applied at most once, whatever the outcome below.
         self._applied.add(proactive_id)
 
+        decided_at = _parse_time(decision.get("decided_at"))
+        if decided_at is None or time.time() - decided_at > DECISION_MAX_AGE_SECONDS:
+            return self._skip(proactive_id, thread_id, "too_old")
         if thread_id not in self.armed:
             return self._skip(proactive_id, thread_id, "disarmed")
         if not (self.can_deliver or (lambda _tid: False))(thread_id):

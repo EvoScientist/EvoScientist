@@ -59,7 +59,7 @@ def test_origin_metadata_keeps_only_the_reply_handles():
     )
     assert meta["origin_channel_type"] == "slack"
     assert meta["origin_chat_id"] == "C1"
-    assert meta["origin_sender"] == "u1"
+    assert "origin_sender" not in meta  # delivery needs only the chat
     assert json.loads(meta["origin_metadata"]) == {
         "thread_ts": "1700.1",
         "event_id": "e1",
@@ -86,7 +86,7 @@ def test_origin_round_trips_through_a_stored_row():
     assert origin_from_row(row) == {
         "channel_type": "slack",
         "chat_id": "C1",
-        "sender": "u1",
+        "sender": "",
         "metadata": {"thread_ts": "1700.1"},
     }
 
@@ -245,7 +245,6 @@ def _restore_row(workspace, thread_id, **overrides):
         "proactive": "on",
         "origin_channel_type": "telegram",
         "origin_chat_id": "42",
-        "origin_sender": "u1",
         "origin_metadata": None,
     }
     row.update(overrides)
@@ -283,7 +282,7 @@ def test_restore_rearms_the_newest_armed_thread_of_this_workspace(workspace, tmp
             {
                 "channel_type": "telegram",
                 "chat_id": "42",
-                "sender": "u1",
+                "sender": "",
                 "metadata": None,
             },
         )

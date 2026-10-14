@@ -1533,6 +1533,12 @@ async def _apply_serve_resume_state(
     thread_changed = thread_id != old_thread_id
     if thread_changed:
         runtime_state.set_thread_id(thread_id, channel_runtime)
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            # A thread armed in an earlier serve session is armed again here.
+            await asyncio.to_thread(
+                _serve_proactive_call, lambda: proactive.adopt(thread_id)
+            )
 
     if workspace_update is not None:
         updated_dirs, updated_agent = workspace_update
@@ -1615,7 +1621,11 @@ def _serve_proactive_controller(
             "in-process; restart serve to use proactive follow-ups"
         )
     else:
-        client = get_langgraph_sync_client(url=configured_langgraph_dev_url())
+        # Serve's message loop makes these calls: a dev server that accepts
+        # connections but stalls must not hold channel messages for minutes.
+        client = get_langgraph_sync_client(
+            url=configured_langgraph_dev_url(), timeout=10.0
+        )
     return ProactiveServe(
         workspace=workspace,
         client=client,

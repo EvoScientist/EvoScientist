@@ -10,8 +10,10 @@ from unittest.mock import MagicMock
 import pytest
 from langgraph_sdk.errors import NotFoundError
 
+from EvoScientist.paths import Workspace
 from EvoScientist.proactive.commit import read_proactive_tag
 from EvoScientist.proactive.serve import (
+    DECISION_MAX_AGE_SECONDS,
     POLL_INTERVAL_SECONDS,
     STALE_TICK_SECONDS,
     ProactiveServe,
@@ -101,6 +103,8 @@ class _Crons:
         return row
 
     def update(self, cron_id, **kwargs):
+        if not any(r["cron_id"] == cron_id for r in self.rows):
+            raise NotFoundError("no cron", response=MagicMock(), body=None)
         self.updated.append((cron_id, kwargs))
 
 
@@ -131,6 +135,9 @@ class _Threads:
         self.threads[tid] = {"thread_id": tid, "metadata": metadata, "status": "idle"}
         self.created.append(tid)
         return {"thread_id": tid}
+
+    def update(self, thread_id, *, metadata):
+        self.threads[thread_id].setdefault("metadata", {}).update(metadata)
 
     def update_state(self, thread_id, values, *, as_node):
         self.writes.append((thread_id, values, as_node))
@@ -202,8 +209,14 @@ def _tick(client, controller, *, decisions=(), age=0.0, status="idle"):
     }
 
 
-def _decision(pid="p1", tid="t1", head="h1", text="The run finished."):
-    return {"proactive_id": pid, "thread_id": tid, "head": head, "text": text}
+def _decision(pid="p1", tid="t1", head="h1", text="The run finished.", age=0.0):
+    return {
+        "proactive_id": pid,
+        "thread_id": tid,
+        "head": head,
+        "text": text,
+        "decided_at": (datetime.now(UTC) - timedelta(seconds=age)).isoformat(),
+    }
 
 
 # ---- unavailable ---------------------------------------------------------------
@@ -316,6 +329,64 @@ def test_mirror_with_nothing_armed_and_no_cron_does_nothing(setup):
     controller.mirror()
     assert client.crons.rows == []
     assert client.crons.updated == []
+
+
+def test_mirror_recreates_a_cron_the_server_lost(setup):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    client.crons.rows.clear()  # a dev-server restart without persistence
+
+    controller.mirror()
+
+    assert len(client.crons.rows) == 1
+    assert controller._cron_id == client.crons.rows[0]["cron_id"]
+
+
+def test_moving_workspace_leaves_the_old_armed_threads_behind(setup, tmp_path):
+    controller, client, origins, _ = setup
+    controller.armed.add("t1")
+    controller.restored_thread_id = "t1"
+    controller.reconcile()
+    controller.stop()
+
+    controller.move_to(Workspace(tmp_path / "other"))
+    client.threads.threads["t2"] = {"thread_id": "t2", "metadata": {}}
+    origins.add("t2")
+    controller.arm("t2")
+    assert len(client.crons.rows) == 1
+    controller.disarm("t2")
+
+    assert controller.armed == set()
+    assert controller.restored_thread_id is None
+    assert client.crons.rows == []
+
+
+@pytest.mark.parametrize(
+    ("metadata", "armed_before", "armed_after"),
+    [
+        ({"proactive": "on"}, set(), {"t1"}),
+        ({"proactive": "off"}, {"t1"}, set()),
+        ({}, {"t1"}, {"t1"}),
+    ],
+)
+def test_adopt_takes_the_flag_from_the_resumed_thread(
+    setup, metadata, armed_before, armed_after
+):
+    controller, client, _, _ = setup
+    client.threads.threads["t1"] = {"thread_id": "t1", "metadata": metadata}
+    controller.armed |= armed_before
+
+    controller.adopt("t1")
+
+    assert controller.armed == armed_after
+    assert client.crons.updated == []  # the resume mirrors once, at its end
+
+
+def test_adopt_ignores_a_thread_the_server_does_not_have(setup):
+    controller, _, _, _ = setup
+    controller.adopt("gone")
+    assert controller.armed == set()
 
 
 def test_stop_deletes_the_cron(setup):
@@ -458,6 +529,20 @@ def test_poll_mirrors_a_candidate_whose_origin_appeared_after_the_last_mirror(
     sent = len(client.crons.updated)
     controller.poll(current_thread_id="t2", now=time.time() + POLL_INTERVAL_SECONDS)
     assert len(client.crons.updated) == sent
+
+
+def test_a_decision_left_from_before_a_restart_is_not_applied(armed):
+    controller, client, _, published = armed
+    _tick(
+        client,
+        controller,
+        decisions=[_decision(age=DECISION_MAX_AGE_SECONDS + 60)],
+    )
+
+    controller.poll(current_thread_id="t1")
+
+    assert client.threads.writes == []
+    assert published == []
 
 
 def test_a_push_to_another_thread_switches_serve_to_it(armed):
