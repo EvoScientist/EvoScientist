@@ -668,3 +668,46 @@ def test_arming_needs_an_available_controller(workspace):
     controller = ProactiveServe(workspace=workspace, unavailable_reason="local backend")
     with pytest.raises(RuntimeError, match="local backend"):
         controller.arm("t1")
+
+
+# ---- the real main graph ------------------------------------------------------
+
+
+def test_on_the_real_main_graph_a_push_leaves_nothing_to_run(workspace, monkeypatch):
+    """A middleware that adds a second edge to ``__end__`` fails here, not by
+    sending every push down the fallback."""
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    import EvoScientist.EvoScientist as es_mod
+    from EvoScientist.config.settings import EvoScientistConfig
+
+    class Fake(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    monkeypatch.setattr(es_mod, "_load_mcp_tools_cached", lambda **kwargs: {})
+    graph = es_mod.create_cli_agent(
+        work_dir=workspace.root,
+        checkpointer=InMemorySaver(),
+        config=EvoScientistConfig(),
+        chat_model=Fake(messages=iter([AIMessage(content="hello")])),
+        workspace=workspace,
+    )
+    # The shape GET /assistants/{id}/graph serves.
+    node = terminal_node(graph.get_graph().to_json())
+    assert node is not None
+
+    config = {"configurable": {"thread_id": "t1"}}
+    graph.invoke({"messages": [HumanMessage(content="hi")]}, config)
+    graph.update_state(
+        config,
+        {"messages": [AIMessage(content="push", id="proactive-p1")]},
+        as_node=node,
+    )
+
+    state = graph.get_state(config)
+    assert state.next == ()
+    assert state.interrupts == ()
+    assert state.values["messages"][-1].id == "proactive-p1"

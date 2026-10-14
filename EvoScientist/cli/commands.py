@@ -2226,8 +2226,9 @@ def serve(
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
 
     # Proactive pushes (#263): serve owns the workspace's proactive cron.
-    # Recreate or delete it now: a cron kept from an earlier run fails every
-    # tick after a dev-server restart, and nothing is armed yet in this one.
+    # Re-arm the conversation armed before a restart, then recreate the cron,
+    # or delete it when nothing is armed: a cron kept from an earlier run
+    # fails every tick after a dev-server restart.
     proactive = _serve_proactive_controller(
         config,
         runtime_gateways,

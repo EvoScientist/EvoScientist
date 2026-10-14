@@ -10,6 +10,7 @@ from langgraph.graph.state import CompiledStateGraph
 from EvoScientist.cli.commands import (
     ServeRuntimeState,
     _make_serve_handle_session_resume_cb,
+    _make_serve_proactive_switch,
     _serve_proactive_call,
     _serve_proactive_controller,
 )
@@ -157,3 +158,25 @@ async def test_a_failed_server_move_turns_proactive_off_for_the_session():
 
     proactive.move_to.assert_not_called()
     assert "did not move" in proactive.unavailable_reason
+
+
+def test_a_push_to_the_restored_thread_resumes_it_in_its_folders(workspace):
+    import asyncio
+
+    state = _state(SessionDirs(Workspace("/fresh-ws")))
+    state.async_runtime.run_sync.side_effect = lambda make: asyncio.run(make())
+    runtime = ChannelRuntime(agent=state.agent, thread_id="old-tid")
+    switch = _make_serve_proactive_switch(state, runtime)
+    apply = AsyncMock()
+    with (
+        patch(
+            "EvoScientist.sessions.get_thread_metadata",
+            new=AsyncMock(return_value={"workspace_dir": workspace.key}),
+        ),
+        patch("EvoScientist.cli.commands._apply_serve_resume_state", new=apply),
+    ):
+        switch("restored-tid")
+
+    apply.assert_awaited_once_with(
+        state, runtime, thread_id="restored-tid", dirs=SessionDirs(workspace)
+    )
