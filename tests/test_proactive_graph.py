@@ -14,6 +14,27 @@ from EvoScientist.proactive import cron as proactive_cron
 from EvoScientist.proactive import graph as proactive_graph
 from EvoScientist.proactive.gate import ProactiveGateSettings
 
+# ---- settings ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("proactive_timezone", "expected"),
+    [("", "Europe/Warsaw"), ("America/New_York", "America/New_York")],
+)
+def test_quiet_hours_use_the_host_zone_not_the_scheduler_zone(
+    monkeypatch, proactive_timezone, expected
+):
+    monkeypatch.setattr("tzlocal.get_localzone_name", lambda: "Europe/Warsaw")
+    cfg = MagicMock(
+        proactive_idle_minutes=60,
+        proactive_quiet_hours="",
+        proactive_timezone=proactive_timezone,
+        scheduler_default_timezone="Asia/Tokyo",
+    )
+
+    assert proactive_graph._gate_settings(cfg).timezone == expected
+
+
 # ---- cron helpers -----------------------------------------------------------
 
 

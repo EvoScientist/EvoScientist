@@ -208,6 +208,23 @@ def test_flatten_keeps_a_tool_call_without_text():
     assert flatten_tool_history([call])[0].content == "[called tool `x` with {}]"
 
 
+def test_flatten_drops_the_tool_block_of_an_unparsable_call():
+    call = AIMessage(
+        content=[
+            {"type": "text", "text": "Trying."},
+            {"type": "tool_use", "id": "c", "name": "x", "input": {}},
+        ],
+        id="a",
+        invalid_tool_calls=[
+            {"name": "x", "args": "{bad", "id": "c", "error": "bad json"}
+        ],
+    )
+
+    [flat] = flatten_tool_history([call])
+
+    assert flat.content == 'Trying.\n[called tool `x` with "{bad"]'
+
+
 class _StrictNoToolsModel(_ToolModel):
     """Refuses tool blocks when no tools are bound, as Anthropic's API does."""
 

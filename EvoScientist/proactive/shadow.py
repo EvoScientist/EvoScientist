@@ -168,9 +168,16 @@ def flatten_tool_history(messages: list[Any]) -> list[Any]:
     """
     flattened: list[Any] = []
     for message in messages:
-        if isinstance(message, AIMessage) and message.tool_calls:
+        # A call whose arguments failed to parse lands in ``invalid_tool_calls``
+        # but keeps its ``tool_use`` content block, so it is flattened too.
+        calls = (
+            [*message.tool_calls, *message.invalid_tool_calls]
+            if isinstance(message, AIMessage)
+            else []
+        )
+        if calls:
             lines = [message.text] if message.text.strip() else []
-            for call in message.tool_calls:
+            for call in calls:
                 args = json.dumps(
                     call.get("args") or {}, ensure_ascii=False, default=str
                 )

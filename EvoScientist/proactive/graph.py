@@ -54,13 +54,20 @@ class _Deps:
     shadows: dict[tuple[str, str | None], Any] = field(default_factory=dict)
 
 
-def _gate_settings(cfg: Any) -> ProactiveGateSettings:
-    from ..langgraph_dev.sdk import default_scheduler_timezone
+def _host_timezone() -> str:
+    try:
+        from tzlocal import get_localzone_name
 
+        return get_localzone_name() or "UTC"
+    except Exception:
+        return "UTC"
+
+
+def _gate_settings(cfg: Any) -> ProactiveGateSettings:
     return ProactiveGateSettings(
         idle_minutes=int(cfg.proactive_idle_minutes),
         quiet_hours=cfg.proactive_quiet_hours,
-        timezone=cfg.proactive_timezone or default_scheduler_timezone(cfg) or "UTC",
+        timezone=cfg.proactive_timezone or _host_timezone(),
     )
 
 
