@@ -192,9 +192,11 @@ def _source(client, tid="t1", *, head="h1", status="idle", interrupts=()):
 def _tick(client, controller, *, decisions=(), age=0.0, status="idle"):
     """Make the cron thread look like it just ticked (``age`` seconds ago)."""
     tid = controller._cron_thread_id
+    ticked_at = (datetime.now(UTC) - timedelta(seconds=age)).isoformat()
     client.threads.threads[tid]["status"] = status
+    client.threads.threads[tid]["updated_at"] = ticked_at
     client.threads.states[tid] = {
-        "created_at": (datetime.now(UTC) - timedelta(seconds=age)).isoformat(),
+        "created_at": ticked_at,
         "values": {"decisions": list(decisions)},
     }
 
@@ -351,13 +353,19 @@ def test_poll_recreates_a_missing_cron(armed):
     assert len(client.crons.rows) == 1
 
 
-def test_poll_recreates_the_cron_after_a_failed_tick(armed):
+def test_poll_recreates_the_cron_once_after_a_failed_tick(armed):
     controller, client, _, published = armed
     before = client.crons.rows[0]["cron_id"]
+    controller._cron_created_at -= 60
     _tick(client, controller, decisions=[_decision()], status="error")
-    controller.poll(current_thread_id="t1")
-    assert client.crons.rows[0]["cron_id"] != before
+    controller.poll(current_thread_id="t1", now=1000.0)
+    recreated = client.crons.rows[0]["cron_id"]
+    assert recreated != before
     assert published == []
+
+    # The thread stays ``error`` until the next tick ends: no second recreate.
+    controller.poll(current_thread_id="t1", now=1000.0 + POLL_INTERVAL_SECONDS)
+    assert client.crons.rows[0]["cron_id"] == recreated
 
 
 def test_poll_recreates_a_stalled_cron(armed):

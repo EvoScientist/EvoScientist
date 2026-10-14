@@ -474,7 +474,10 @@ class ProactiveServe:
             self.reconcile()
             return []
         thread = self.client.threads.get(self._cron_thread_id)
-        if thread.get("status") == "error":
+        # The status stays ``error`` until the next tick ends; only a failure
+        # after the last recreate is a new one.
+        failed_at = _parse_time(thread.get("updated_at")) or 0.0
+        if thread.get("status") == "error" and failed_at > self._cron_created_at:
             logger.warning("[proactive] last tick failed; recreating the cron")
             self.reconcile()
             return []
