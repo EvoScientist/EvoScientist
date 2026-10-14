@@ -242,6 +242,8 @@ class ProactiveServe:
         with self._lock:
             self.client.threads.update(thread_id, metadata={"proactive": "off"})
             self.armed.discard(thread_id)
+            if thread_id == self.restored_thread_id:
+                self.restored_thread_id = None
             if self.armed:
                 self.mirror()
             else:
@@ -249,6 +251,19 @@ class ProactiveServe:
 
     def is_armed(self, thread_id: str) -> bool:
         return thread_id in self.armed
+
+    def conversation_thread(self, thread_id: str) -> str:
+        """The thread ``/proactive`` acts on when serve's current thread is *thread_id*.
+
+        After a restart the chat's conversation is the restored thread until
+        the user talks in serve's fresh thread, so the command acts on it
+        while the fresh thread is not armed itself.
+        """
+        with self._lock:
+            restored = self.restored_thread_id
+            if restored is not None and thread_id not in self.armed:
+                return restored
+            return thread_id
 
     def _require_available(self) -> None:
         if not self.available:

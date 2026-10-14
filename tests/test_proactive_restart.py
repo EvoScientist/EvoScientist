@@ -344,6 +344,32 @@ def test_a_turn_in_the_restored_thread_keeps_it(workspace):
     assert controller.restored_thread_id == "t-old"
 
 
+def test_until_the_fresh_thread_talks_the_command_acts_on_the_restored_thread(
+    workspace,
+):
+    client = _Client({"t-old": {"metadata": {"proactive": "on"}}})
+    controller = ProactiveServe(workspace=workspace, client=client)
+    controller.reconcile = MagicMock()
+    controller.armed.add("t-old")
+    controller.restored_thread_id = "t-old"
+
+    assert controller.conversation_thread("t-fresh") == "t-old"
+    controller.disarm(controller.conversation_thread("t-fresh"))
+
+    assert controller.armed == set()
+    assert controller.restored_thread_id is None
+    assert client.updates == [("t-old", {"proactive": "off"})]
+    # Nothing restored any more: the command acts on serve's current thread.
+    assert controller.conversation_thread("t-fresh") == "t-fresh"
+
+
+def test_an_armed_fresh_thread_is_the_conversation(workspace):
+    controller = ProactiveServe(workspace=workspace, client=MagicMock())
+    controller.armed |= {"t-old", "t-fresh"}
+    controller.restored_thread_id = "t-old"
+    assert controller.conversation_thread("t-fresh") == "t-fresh"
+
+
 def test_restore_channel_origin_feeds_the_delivery_registry():
     restore_channel_origin(
         "t9", channel_type="qq", chat_id="g1", sender="", metadata={"event_id": "e"}

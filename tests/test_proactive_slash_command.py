@@ -36,6 +36,7 @@ def _controller(*, armed=False):
     controller.available = True
     controller.unavailable_reason = None
     controller.is_armed.return_value = armed
+    controller.conversation_thread.side_effect = lambda thread_id: thread_id
     return controller
 
 
@@ -99,3 +100,15 @@ async def test_a_dev_server_error_is_reported():
     controller.arm.side_effect = RuntimeError("connection refused")
     ui = await _run(_ctx(controller), "on")
     assert "Could not change proactive follow-ups: connection refused" in ui.text
+
+
+@pytest.mark.parametrize(("args", "method"), [(("off",), "disarm"), (("on",), "arm")])
+async def test_after_a_restart_it_acts_on_the_restored_conversation(args, method):
+    controller = _controller()
+    controller.conversation_thread.side_effect = None
+    controller.conversation_thread.return_value = "restored"
+
+    await _run(_ctx(controller), *args)
+
+    controller.conversation_thread.assert_called_once_with("t1")
+    getattr(controller, method).assert_called_once_with("restored")
