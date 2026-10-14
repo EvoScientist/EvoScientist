@@ -75,10 +75,10 @@ function Test-Answers([string]$Url) {
 
 function Show-Logs([string]$Log) {
     Write-Host '--- EvoSci output'
-    Get-Content -ErrorAction SilentlyContinue $Log, "$Log.err" | Write-Host
+    Get-Content -Encoding UTF8 -ErrorAction SilentlyContinue $Log, "$Log.err" | Write-Host
     foreach ($file in @("$HOME\.config\evoscientist\langgraph_dev.log", "$HOME\.config\evoscientist\webui.log")) {
         Write-Host "--- $file"
-        Get-Content -Tail 80 -ErrorAction SilentlyContinue $file | Write-Host
+        Get-Content -Encoding UTF8 -Tail 80 -ErrorAction SilentlyContinue $file | Write-Host
     }
 }
 
@@ -140,7 +140,13 @@ function Test-Online {
     $frozen = Join-Path ([IO.Path]::GetTempPath()) 'evosci-frozen.txt'
     [IO.File]::WriteAllText($frozen, (Invoke-Native $Uv @('pip', 'freeze', '--python', $Python)))
     # uv reports "Would make no changes" on stderr.
-    $out = Invoke-Native $Uv @('pip', 'install', '--python', $Python, '--dry-run', '-r', $frozen, '-c', $constraints) -WithStderr
+    # By name from its folder: uv splits a -c path at spaces (astral-sh/uv#12639).
+    Push-Location -LiteralPath (Split-Path -Parent $constraints)
+    try {
+        $out = Invoke-Native $Uv @('pip', 'install', '--python', $Python, '--dry-run', '-r', $frozen, '-c', (Split-Path -Leaf $constraints)) -WithStderr
+    } finally {
+        Pop-Location
+    }
     if ($NativeExitCode -ne 0 -or $out -notmatch 'Would make no changes') {
         Fail "The installed versions differ from constraints.txt: $out"
     }

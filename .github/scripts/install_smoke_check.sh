@@ -129,7 +129,8 @@ online() {
   # when every installed version is the one constraints.txt pins.
   frozen=$(mktemp)
   "$UV" pip freeze --python "$PYTHON" >"$frozen"
-  out=$("$UV" pip install --python "$PYTHON" --dry-run -r "$frozen" -c "$constraints" 2>&1) ||
+  # By name from its folder: uv splits a -c path at spaces (astral-sh/uv#12639).
+  out=$(cd "$(dirname "$constraints")" && "$UV" pip install --python "$PYTHON" --dry-run -r "$frozen" -c "$(basename "$constraints")" 2>&1) ||
     fail "The installed versions do not satisfy constraints.txt: $out"
   echo "$out" | grep -q 'Would make no changes' || fail "The installed versions differ from constraints.txt: $out"
   echo "installed versions match constraints.txt"
