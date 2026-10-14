@@ -26,7 +26,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Command, interrupt
 
 from EvoScientist.middleware.tool_history_repair import ToolHistoryRepairMiddleware
 from EvoScientist.stream.events import (
@@ -283,12 +283,178 @@ def _script_tool_batch_then_ack() -> None:
     )
 
 
-async def _run_turn(agent, message: str, thread_id: str) -> list[dict[str, Any]]:
+async def _run_turn(
+    agent, message: str | Command, thread_id: str
+) -> list[dict[str, Any]]:
     """Stream one full turn through the real ``stream_agent_events``."""
     collected = []
     async for ev in stream_agent_events(agent, message, thread_id):
         collected.append(ev)
     return collected
+
+
+@pytest.mark.filterwarnings(
+    "ignore:The v3 streaming protocol on Pregel is experimental"
+)
+async def test_early_subagent_approval_waits_for_persisted_task_interrupt():
+    """A stale first snapshot must not recover a sub-agent's pending approval."""
+    from types import SimpleNamespace
+
+    from deepagents import create_deep_agent
+    from langchain_core.language_models.fake_chat_models import (
+        FakeMessagesListChatModel,
+    )
+    from langchain_core.messages import ToolCall
+    from langchain_core.tools import tool
+
+    from EvoScientist.backends import build_hitl_resume
+
+    class _ToolCallingFakeModel(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    executed: list[str] = []
+
+    @tool
+    def execute(command: str) -> str:
+        """Record the approved command as a real tool side effect."""
+        executed.append(command)
+        return f"ran: {command}"
+
+    thread_id = "t-early-subagent-approval"
+    cfg = {"configurable": {"thread_id": thread_id}}
+    top_model = _ToolCallingFakeModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        name="task",
+                        args={
+                            "description": "run the command",
+                            "subagent_type": "runner",
+                        },
+                        id="task-1",
+                    )
+                ],
+            ),
+            AIMessage(content="command completed"),
+        ]
+    )
+    subagent_model = _ToolCallingFakeModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        name="execute",
+                        args={"command": "echo hi"},
+                        id="execute-1",
+                    )
+                ],
+            ),
+            AIMessage(content="command completed"),
+        ]
+    )
+    graph = create_deep_agent(
+        model=top_model,
+        subagents=[
+            {
+                "name": "runner",
+                "description": "run a command",
+                "system_prompt": "Run the requested command.",
+                "model": subagent_model,
+            }
+        ],
+        tools=[execute],
+        interrupt_on={"execute": True},
+        checkpointer=InMemorySaver(),
+    )
+
+    result = graph.invoke({"messages": [("user", "delegate the command")]}, config=cfg)
+    interrupts = result.get("__interrupt__", [])
+    assert len(interrupts) == 1
+    assert executed == []
+
+    class _StaleFirstReadAgent:
+        """Expose the pre-interrupt task view once, then the durable snapshot."""
+
+        def __init__(self, inner):
+            self.inner = inner
+            self.stale_reads = 2
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        async def aget_state(self, config):
+            snapshot = await self.inner.aget_state(config)
+            if self.stale_reads:
+                stale_read = self.stale_reads
+                self.stale_reads -= 1
+                task_interrupts = (
+                    (SimpleNamespace(id="other-approval"),) if stale_read == 1 else ()
+                )
+                return SimpleNamespace(
+                    values=snapshot.values,
+                    next=snapshot.next,
+                    tasks=tuple(
+                        SimpleNamespace(name=task.name, interrupts=task_interrupts)
+                        for task in snapshot.tasks
+                    ),
+                    interrupts=(),
+                )
+            return snapshot
+
+    resumed = await _run_turn(
+        _StaleFirstReadAgent(graph),
+        build_hitl_resume(interrupts[0].id, [{"type": "approve"}]),
+        thread_id,
+    )
+
+    assert executed == ["echo hi"]
+    assert any(
+        event.get("type") == "subagent_tool_result"
+        and event.get("id") == "execute-1"
+        and event.get("success")
+        for event in resumed
+    )
+    assert any(
+        event.get("type") == "done" and event.get("content") == "command completed"
+        for event in resumed
+    )
+    assert (await graph.aget_state(cfg)).next == ()
+
+
+async def test_resume_timeout_preserves_uncheckpointed_interrupt_state(monkeypatch):
+    """A missing persisted interrupt times out without recovering the graph."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from EvoScientist.backends import build_hitl_resume
+
+    class _UncheckpointedResumeAgent:
+        def __init__(self):
+            self.astream_events = MagicMock()
+            self.state_updates = []
+
+        async def aget_state(self, _config):
+            return SimpleNamespace(next=("tools",), tasks=(), interrupts=(), values={})
+
+        async def aupdate_state(self, *args, **kwargs):
+            self.state_updates.append((args, kwargs))
+
+    monkeypatch.setattr("EvoScientist.stream.events._RESUME_INTERRUPT_WAIT_SECONDS", 0)
+    agent = _UncheckpointedResumeAgent()
+
+    with pytest.raises(RuntimeError, match="Timed out waiting"):
+        await _run_turn(
+            agent,
+            build_hitl_resume("approval-1", [{"type": "approve"}]),
+            "t-uncheckpointed-resume",
+        )
+
+    assert agent.state_updates == []
+    agent.astream_events.assert_not_called()
 
 
 async def _cancel_mid_tools(agent, thread_id: str) -> None:
