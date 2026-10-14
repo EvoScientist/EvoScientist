@@ -141,6 +141,17 @@ def read_tool_receipt() -> uv_tool.Receipt | None:
                 f"it from there, or run the install script to move to the "
                 f"PyPI releases: {install_command()}"
             )
+        # Every entry must be writable back into the reinstall, or the update
+        # would drop it (a git `path` or a `virtual` source).
+        try:
+            receipt.with_args()
+            receipt.constraint_lines()
+        except uv_tool.ReceiptError as exc:
+            raise _manual(
+                f"{receipt.path} has a requirement EvoSci update cannot "
+                f"reinstall ({exc}). Run the install script again; it warns "
+                f"about what it cannot keep: {install_command()}"
+            ) from exc
         return receipt
     if (Path(sys.prefix) / DOCKER_MARKER).is_file():
         return None  # the Docker image; its message needs the target version

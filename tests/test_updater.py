@@ -1049,3 +1049,20 @@ def test_helper_waits_for_its_exiting_caller(tmp_path):
     events = [json.loads(line) for line in result.stdout.splitlines()]
     assert not any("pending" in e.get("message", "") for e in events), events
     assert any("Installing EvoScientist 0.3.7" in e.get("message", "") for e in events)
+
+
+def test_receipt_entry_that_cannot_be_reinstalled(tmp_path, monkeypatch, no_subprocess):
+    """A --with entry the update cannot write back ends with manual_update,
+    not with install_failed after the lookup."""
+    _plain_env(tmp_path, monkeypatch)
+    (tmp_path / "uv-receipt.toml").write_text(
+        "[tool]\nrequirements = [\n"
+        '  { name = "evoscientist", specifier = "==0.3.7" },\n'
+        '  { name = "wheelpkg", git = "https://example.org/r?path=dist/w.whl&rev=v1" },\n'
+        "]\n"
+    )
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "manual_update"
+    assert "install script" in end["message"]
