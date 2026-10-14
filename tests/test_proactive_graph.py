@@ -228,6 +228,24 @@ def test_gated_threads_get_no_shadow_turn(tick, workspace, thread_kwargs, reason
     ]
 
 
+def test_a_gated_thread_never_builds_the_shadow(tick, workspace, monkeypatch):
+    run, threads, _, _ = tick
+
+    def failing_build(deps, dirs):
+        raise RuntimeError("MCP load failed")
+
+    monkeypatch.setattr(proactive_graph, "_build_shadow", failing_build)
+    threads["t1"] = _thread(workspace, armed=False)
+    threads["t2"] = _thread(workspace)
+
+    state = run(_candidates("t1", "t2"))
+
+    assert state["last_tick"] == [
+        {"thread_id": "t1", "stage": "gate_rejected", "reason": "not_armed"},
+        {"thread_id": "t2", "stage": "error", "reason": ""},
+    ]
+
+
 def test_a_thread_of_another_workspace_is_skipped(tick, workspace, tmp_path):
     run, threads, shadow_calls, _ = tick
     other = tmp_path / "other"

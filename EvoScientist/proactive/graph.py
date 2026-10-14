@@ -157,11 +157,13 @@ async def _check_thread(
     state = await client.threads.get_state(thread_id)
     status = thread.get("status")
     in_flight = status in ("busy", "interrupted") or bool(_state_interrupts(state))
-    shadow = await asyncio.to_thread(_build_shadow, deps, dirs)
 
     async def shadow_runner(messages: list[Any], trigger: str) -> str | None:
         from .shadow import run_shadow_turn
 
+        # Built here, after the gate passed: a thread the gate skips costs no
+        # build, and a failing build cannot hide the gate's reason.
+        shadow = await asyncio.to_thread(_build_shadow, deps, dirs)
         return await run_shadow_turn(shadow, messages, trigger)
 
     async def read_current_head() -> str | None:
