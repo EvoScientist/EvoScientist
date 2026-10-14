@@ -927,3 +927,15 @@ def test_helper_cancel_before_retry_is_install_failed(tmp_path):
     assert end["code"] == "install_failed"
     assert "install-script" in end["message"]
     assert any("trying once more" in e.get("message", "") for e in events)
+
+
+def test_ctrl_c_while_uv_runs_still_ends_with_a_terminal_line(uv_install, monkeypatch):
+    def interrupted(cmd, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(updater.subprocess, "run", interrupted)
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    end = _terminal(lines)
+    assert code == 130
+    assert end["code"] == "install_failed"
+    assert "install script" in end["message"]

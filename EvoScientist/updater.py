@@ -503,6 +503,19 @@ def run_update(
         message, detail = _update(opts, emit, confirm, write_line)
     except HandedOver:
         return 0
+    except KeyboardInterrupt:  # Ctrl+C later on, e.g. while uv or setup runs
+        emit(
+            make_event(
+                STAGE,
+                "error",
+                message=(
+                    "Update interrupted. If EvoSci no longer starts, run the "
+                    f"install script again: {install_command()}"
+                ),
+                code="install_failed",
+            )
+        )
+        return 130
     except click.exceptions.Abort:  # Ctrl+C at the terminal question
         emit(
             make_event(

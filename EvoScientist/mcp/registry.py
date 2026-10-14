@@ -192,19 +192,20 @@ def _install_with_uv_tool_env(package: str) -> bool:
     if env is None or uv is None:
         return False
     constraints: Path | None = None
+    # One finally for the temp constraints file, whichever step fails.
     try:
-        receipt = uv_tool.read_receipt(env)
-        lines = receipt.constraint_lines()
-        if lines:
-            fd, name = tempfile.mkstemp(prefix="evosci-constraints-", suffix=".txt")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write("\n".join(lines) + "\n")
-            constraints = Path(name)
-        cmd = _uv_tool_reinstall_cmd(uv, receipt, package, constraints)
-    except uv_tool.ReceiptError as exc:
-        logger.info(f"Not adding {package} with uv tool install --with: {exc}")
-        return False
-    try:
+        try:
+            receipt = uv_tool.read_receipt(env)
+            lines = receipt.constraint_lines()
+            if lines:
+                fd, name = tempfile.mkstemp(prefix="evosci-constraints-", suffix=".txt")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(lines) + "\n")
+                constraints = Path(name)
+            cmd = _uv_tool_reinstall_cmd(uv, receipt, package, constraints)
+        except Exception as exc:  # the caller falls back to pip
+            logger.info(f"Not adding {package} with uv tool install --with: {exc}")
+            return False
         result = subprocess.run(
             cmd,
             capture_output=True,

@@ -1572,6 +1572,44 @@ class TestUvToolCompat:
             "new-pkg",
         ]
 
+    def test_install_library_uv_tool_command_error_cleans_up(
+        self, monkeypatch, tmp_path
+    ):
+        """A failure while building the reinstall removes the constraints temp
+        file and falls back to pip."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        (venv / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{ name = "evoscientist" }]\n'
+            'constraints = [{ name = "six", specifier = "==1.17.0" }]\n'
+        )
+        _use_tool_env(monkeypatch, venv)
+        monkeypatch.setattr(reg.tempfile, "tempdir", str(tmp_path / "tmp"))
+        (tmp_path / "tmp").mkdir()
+
+        def broken(*args, **kwargs):
+            from importlib.metadata import PackageNotFoundError
+
+            raise PackageNotFoundError("EvoScientist")
+
+        monkeypatch.setattr(reg, "_uv_tool_reinstall_cmd", broken)
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("new-pkg") is True
+        assert [c[:3] for c in captured] == [["uv", "pip", "install"]]
+        assert list((tmp_path / "tmp").iterdir()) == []
+
     def test_install_library_uv_tool_keeps_source_install(self, monkeypatch, tmp_path):
         """EvoScientist installed from a directory stays on that directory."""
         import EvoScientist.mcp.registry as reg
