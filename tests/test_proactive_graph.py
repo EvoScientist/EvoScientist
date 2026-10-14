@@ -342,3 +342,24 @@ def test_one_failing_thread_does_not_stop_the_tick(tick, workspace):
 
     assert state["last_tick"][0] == {"thread_id": "t1", "stage": "error", "reason": ""}
     assert [d["thread_id"] for d in state["decisions"]] == ["t2"]
+
+
+def test_a_tick_whose_dependencies_fail_to_load_fails_alone(
+    tick, workspace, monkeypatch
+):
+    run, threads, shadow_calls, _ = tick
+    threads["t1"] = _thread(workspace)
+    working = proactive_graph._load_deps
+
+    def failing(previous):
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(proactive_graph, "_load_deps", failing)
+    with pytest.raises(RuntimeError, match="config unreadable"):
+        run(_candidates("t1"))
+
+    monkeypatch.setattr(proactive_graph, "_load_deps", working)
+    state = run(_candidates("t1"))
+
+    assert len(shadow_calls) == 1
+    assert state["last_tick"][0]["stage"] == "decided"

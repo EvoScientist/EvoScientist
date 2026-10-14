@@ -240,3 +240,28 @@ def test_a_conversation_with_tool_calls_reaches_a_strict_provider_as_text():
         _StrictNoToolsModel(messages=iter([AIMessage(content="Done.")]))
     )
     assert asyncio.run(run_shadow_turn(graph, TOOL_HISTORY, "trigger")) == "Done."
+
+
+def test_the_real_shadow_stack_calls_the_model_without_tools(workspace, monkeypatch):
+    """No middleware of the real agent binds tools on a shadow turn."""
+    import EvoScientist.EvoScientist as es_mod
+    from EvoScientist.paths import SessionDirs
+    from EvoScientist.proactive.shadow import build_shadow_graph
+
+    monkeypatch.setattr(es_mod, "_load_mcp_tools_cached", lambda **kwargs: {})
+    binds = []
+
+    class Recording(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            binds.append(len(tools))
+            return self
+
+    model = Recording(
+        messages=iter(
+            [AIMessage(content="Done.", response_metadata={"finish_reason": "stop"})]
+        )
+    )
+    graph = build_shadow_graph(EvoScientistConfig(), model, SessionDirs(workspace))
+
+    assert asyncio.run(run_shadow_turn(graph, TOOL_HISTORY, "trigger")) == "Done."
+    assert binds == []
