@@ -661,6 +661,23 @@ class HandedOver(Exception):
     """The Windows helper took over and writes the terminal line itself."""
 
 
+def _exiting_pids() -> list[int]:
+    """This process and, when it runs from the environment (the venv's
+    ``python.exe`` launcher), its parent: they exit right after the handover,
+    and the helper waits for them before it looks for processes still running
+    from the environment."""
+    import psutil
+
+    pids = [os.getpid()]
+    try:
+        parent = psutil.Process(os.getppid())
+        if uv_tool.is_under_env(parent.exe()):
+            pids.append(parent.pid)
+    except (psutil.Error, OSError):
+        pass
+    return pids
+
+
 def _hand_over(
     opts: UpdateOptions,
     emit: Emitter,
@@ -694,6 +711,7 @@ def _hand_over(
         {
             # Expanded, as the helper compares it with process paths.
             "env_dir": os.path.realpath(sys.prefix),
+            "wait_pids": _exiting_pids(),
             "uv": cmd[0],
             "uv_args": cmd[1:],
             "uv_env": {k: v for k, v in env.items() if base.get(k) != v},

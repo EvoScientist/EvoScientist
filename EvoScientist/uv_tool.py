@@ -51,6 +51,13 @@ def tool_env() -> Path | None:
     return prefix if (prefix / RECEIPT_NAME).is_file() else None
 
 
+def is_under_env(path: str) -> bool:
+    """True when *path* lies in the environment this interpreter runs in."""
+    from .setup._install import is_under
+
+    return is_under(Path(path), Path(sys.prefix))
+
+
 def _git_requirement(url: str) -> str:
     """``git+<repo>@<ref>#subdirectory=...`` from the receipt's git URL, which
     keeps the ref and the subdirectory in the query and the commit in the

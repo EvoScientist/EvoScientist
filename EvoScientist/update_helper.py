@@ -180,6 +180,16 @@ $phase = 'waiting'
 try {
     foreach ($p in $cfg.uv_env.PSObject.Properties) { Set-Item -Path "Env:\$($p.Name)" -Value $p.Value }
 
+    # EvoSci, which started this helper, is still exiting: wait for it (at
+    # most 30 s) before looking for processes that block the environment, or
+    # an unattended run would end at once on its own caller.
+    $deadline = (Get-Date).AddSeconds(30)
+    foreach ($exiting in @($cfg.wait_pids)) {
+        $left = [int]($deadline - (Get-Date)).TotalMilliseconds
+        if ($left -le 0) { break }
+        try { [void](Get-Process -Id $exiting -ErrorAction Stop).WaitForExit($left) } catch { }
+    }
+
     if (-not (Wait-Free 0.35)) { return }
     $phase = 'installing'
     Emit 'running' "Installing EvoScientist $($cfg.target)" $null $null 0.4

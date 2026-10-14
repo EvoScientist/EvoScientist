@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -749,6 +750,7 @@ def test_windows_hands_over_to_the_helper(uv_install, monkeypatch):
     assert call["tmp"].is_dir()  # the helper deletes it
     assert (call["tmp"] / "constraints.txt").read_text() == "six==1.17.0\n"
     assert config["env_dir"] == str(Path(sys.prefix).resolve())
+    assert config["wait_pids"][0] == os.getpid()
     assert config["uv"] == "/opt/uv"
     assert config["uv_args"][:3] == ["tool", "install", "--force"]
     assert config["evosci"] == str(uv_install["tmp"] / "bin" / "EvoSci.exe")
@@ -955,3 +957,95 @@ def test_newest_release_answer_for_installs_it_does_not_update(
     assert end["detail"] == {"version": "0.3.10"}
     code, lines, _ = _run(updater.UpdateOptions(version="0.3.10", json=True))
     assert _terminal(lines)["code"] == "manual_update"
+
+
+def test_exiting_pids_include_a_parent_in_the_environment(tmp_path, monkeypatch):
+    import psutil
+
+    env = tmp_path / "env"
+    (env / "Scripts").mkdir(parents=True)
+    monkeypatch.setattr(sys, "prefix", str(env))
+
+    class Parent:
+        def __init__(self, exe):
+            self.pid = 4242
+            self._exe = exe
+
+        def exe(self):
+            return self._exe
+
+    monkeypatch.setattr(
+        psutil, "Process", lambda pid: Parent(str(env / "Scripts" / "python.exe"))
+    )
+    assert updater._exiting_pids() == [os.getpid(), 4242]
+    # A parent outside the environment (a shell, the desktop app) is not waited for.
+    monkeypatch.setattr(psutil, "Process", lambda pid: Parent(str(tmp_path / "node")))
+    assert updater._exiting_pids() == [os.getpid()]
+
+
+@pytest.mark.skipif(
+    shutil.which("pwsh") is None
+    or sys.platform == "win32"
+    or not shutil.which("sleep"),
+    reason="runs the helper under pwsh with POSIX stand-ins",
+)
+def test_helper_waits_for_its_exiting_caller(tmp_path):
+    """The caller still exiting when the helper starts is waited for, not
+    reported as a process that blocks the environment."""
+    from EvoScientist import update_helper
+
+    env = tmp_path / "env"
+    (env / "bin").mkdir(parents=True)
+    caller = env / "bin" / "caller"
+    shutil.copy(shutil.which("sleep"), caller)
+    # Started through a shell that exits at once, so init reaps it when it
+    # exits: a zombie child of this test would still count as running.
+    started = subprocess.run(
+        ["sh", "-c", f"'{caller}' 2 >/dev/null 2>&1 & echo $!"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    exiting_pid = int(started.stdout.strip())
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n")
+    uv.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    config = {
+        "env_dir": str(env),
+        "wait_pids": [exiting_pid],
+        "uv": str(uv),
+        "uv_args": [],
+        "uv_env": {},
+        "evosci": str(tmp_path / "EvoSci"),
+        "skip": [],
+        "installed": "0.3.6",
+        "target": "0.3.7",
+        "install_command": "install-script",
+        "temp_dir": str(work),
+        "json": True,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    script = tmp_path / "helper.ps1"
+    script.write_text(update_helper.HELPER, encoding="utf-8")
+    try:
+        result = subprocess.run(
+            [
+                "pwsh",
+                "-NoProfile",
+                "-File",
+                str(script),
+                "-ConfigPath",
+                str(tmp_path / "config.json"),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        subprocess.run(["kill", str(exiting_pid)], check=False, capture_output=True)
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert not any("pending" in e.get("message", "") for e in events), events
+    assert any("Installing EvoScientist 0.3.7" in e.get("message", "") for e in events)
