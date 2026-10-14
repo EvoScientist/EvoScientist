@@ -75,7 +75,9 @@ def _load_deps(previous: _Deps | None) -> _Deps:
     """Read the effective config; keep *previous* while nothing it uses changed.
 
     Blocking (reads config files): runs in a worker thread. Re-read every tick,
-    so a model or setting change applies without a server restart.
+    so a change of model or of a proactive setting applies without a server
+    restart. Any other change (MCP servers, skills, middleware options) reaches
+    the cached shadow agents only with one of those, or on restart.
     """
     from ..config.settings import get_effective_config
     from ..langgraph_dev.sdk import langgraph_dev_url
@@ -157,7 +159,10 @@ async def _check_thread(
     dirs = await asyncio.to_thread(
         SessionDirs.from_stored, metadata.get("workspace_dir"), metadata.get("run_dir")
     )
-    if dirs is None or dirs.workspace.key != workspace.key:
+    if dirs is None:
+        # No stored folders, or folders that cannot be resolved.
+        return ProactiveDecision("gate_rejected", "no_folders", thread_id)
+    if dirs.workspace.key != workspace.key:
         # A thread of another workspace never gets this workspace's graph.
         return ProactiveDecision("gate_rejected", "other_workspace", thread_id)
 

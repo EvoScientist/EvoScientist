@@ -281,6 +281,18 @@ def test_a_thread_of_another_workspace_is_skipped(tick, workspace, tmp_path):
     assert state["last_tick"][0]["reason"] == "other_workspace"
 
 
+def test_a_thread_without_folders_is_skipped(tick, workspace):
+    run, threads, shadow_calls, _ = tick
+    entry = _thread(workspace)
+    del entry["thread"]["metadata"]["workspace_dir"]
+    threads["t1"] = entry
+
+    state = run(_candidates("t1"))
+
+    assert shadow_calls == []
+    assert state["last_tick"][0]["reason"] == "no_folders"
+
+
 def test_a_deleted_thread_is_reported_and_dropped(tick, workspace):
     run, threads, _, _ = tick
     threads["t1"] = _thread(workspace)
