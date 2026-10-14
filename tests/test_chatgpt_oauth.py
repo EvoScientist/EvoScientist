@@ -218,6 +218,66 @@ def test_request_goes_to_codex_backend_with_our_fields_only(signed_in, monkeypat
     assert "sk-env-must-not-leak" not in str(request.headers)
 
 
+def reasoning_stream(encrypted: str) -> bytes:
+    """A Responses stream with an encrypted reasoning item, then the text ``ok``."""
+    reasoning = {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [{"type": "summary_text", "text": "Thinking."}],
+        "encrypted_content": encrypted,
+    }
+    message = {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+    }
+    events = [
+        {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": _response([], status="in_progress"),
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {**reasoning, "summary": [], "encrypted_content": None},
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {**message, "status": "in_progress", "content": []},
+        },
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_1",
+            "output_index": 1,
+            "content_index": 0,
+            "delta": "ok",
+        },
+        {"type": "response.output_item.done", "output_index": 1, "item": message},
+        {"type": "response.completed", "response": _response([reasoning, message])},
+    ]
+    for number, event in enumerate(events):
+        event["sequence_number"] = number
+    return _sse(events)
+
+
+async def test_encrypted_reasoning_is_sent_back_on_the_next_turn(signed_in):
+    wire = Wire(reasoning_stream("ENC-1"))
+    model = build_model("gpt-6-sol", reasoning=REASONING, **wire.clients())
+
+    first = await model.ainvoke([HumanMessage("hi")])
+    await model.ainvoke([HumanMessage("hi"), first, HumanMessage("and now?")])
+
+    replayed = [
+        item for item in wire.body_json["input"] if item.get("type") == "reasoning"
+    ]
+    assert [item.get("encrypted_content") for item in replayed] == ["ENC-1"]
+
+
 def test_default_instructions_only_when_no_system_message(signed_in):
     wire = Wire()
     model = build_model("gpt-6-sol", **wire.clients())
