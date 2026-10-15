@@ -1182,7 +1182,6 @@ async def latest_origin_checkpoints(limit: int = 50) -> list[dict]:
                      LIMIT 1),
                    json_extract(metadata, '$.origin_channel_type'),
                    json_extract(metadata, '$.origin_chat_id'),
-                   json_extract(metadata, '$.origin_sender'),
                    json_extract(metadata, '$.origin_metadata')
             FROM checkpoints
             WHERE checkpoint_ns = ''
@@ -1202,7 +1201,6 @@ async def latest_origin_checkpoints(limit: int = 50) -> list[dict]:
         "proactive",
         "origin_channel_type",
         "origin_chat_id",
-        "origin_sender",
         "origin_metadata",
     )
     return [dict(zip(keys, row, strict=True)) for row in rows]
