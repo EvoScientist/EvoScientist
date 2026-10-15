@@ -121,6 +121,33 @@ def test_start_passes_this_process_data_folder(monkeypatch, tmp_path, runtime_pa
     assert captured["env"]["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
 
 
+def test_start_trusts_the_bind_host(monkeypatch, tmp_path, runtime_paths):
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(
+            workspace_dir=tmp_path, port=16178, host="myhost.local"
+        )
+    names = json.loads(captured["env"][boundary.BOUNDARY_ENV])["names"]
+    assert "myhost.local" in names
+
+
+def test_ensure_passes_backend_allowed_origins(monkeypatch, tmp_path, runtime_paths):
+    from EvoScientist.config import EvoScientistConfig
+
+    started: dict = {}
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
+    monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
+    monkeypatch.setattr(manager.atexit, "register", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        manager, "start_langgraph_dev", lambda *_a, **kw: started.update(kw)
+    )
+    config = EvoScientistConfig(
+        langgraph_dev_port=16178, backend_allowed_origins="https://smith.langchain.com"
+    )
+    manager.ensure_langgraph_dev(config, workspace_dir=tmp_path)
+    assert started["allowed_origins"] == "https://smith.langchain.com"
+
+
 # =============================================================================
 # Bind host — argv flag + env propagation
 # =============================================================================

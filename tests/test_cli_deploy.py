@@ -130,6 +130,7 @@ def _run_deploy_once(
         allowed_origins="",
     ):
         captured["langgraph_dev_started"] = True
+        captured["allowed_origins_passed"] = allowed_origins
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
         captured["port_passed"] = port
         captured["host_passed"] = host
@@ -321,6 +322,14 @@ def test_deploy_host_defaults_to_config(monkeypatch, tmp_path):
     captured = _run_deploy_once(monkeypatch, config)
 
     assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_passes_backend_allowed_origins(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    config.backend_allowed_origins = "https://smith.langchain.com"
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["allowed_origins_passed"] == "https://smith.langchain.com"
 
 
 def test_deploy_host_falls_back_when_config_lacks_field(monkeypatch, tmp_path):

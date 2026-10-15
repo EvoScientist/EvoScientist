@@ -250,6 +250,17 @@ def test_start_raises_on_foreign_occupant(monkeypatch):
     assert ei.value.code == "port_conflict"
 
 
+def test_start_passes_backend_allowed_origins(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    started: dict = {}
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **kw: started.update(kw) or _FakeProc()
+    )
+    config = SimpleNamespace(backend_allowed_origins="https://smith.langchain.com")
+    lm.WebUILauncher(config, _cfg(), _FakeRunner()).start()
+    assert started["allowed_origins"] == "https://smith.langchain.com"
+
+
 def test_start_failure_after_backend_start_tears_the_backend_down(monkeypatch):
     """A front-end failure after the backend was spawned must not leave that
     backend running: start()'s error path tears down what it started."""
