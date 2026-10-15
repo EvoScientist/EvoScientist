@@ -3,6 +3,7 @@ subprocesses are mocked."""
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -69,6 +70,9 @@ def uv_install(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "download_constraints", fake_download)
     monkeypatch.setattr(updater, "check_server", lambda opts, emit, confirm: None)
     monkeypatch.setattr(updater, "tool_bin_dir", lambda uv: tmp_path / "bin")
+    # The Windows handover creates the data dir's tools folder (its lock).
+    monkeypatch.setattr("EvoScientist.paths.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("EvoScientist.update_helper.has_visible_desktop", lambda: True)
     return {"env": env, "downloads": downloads, "tmp": tmp_path}
 
 
@@ -715,8 +719,8 @@ def test_windows_hands_over_to_the_helper(uv_install, monkeypatch):
     monkeypatch.setattr(
         update_helper,
         "start_helper",
-        lambda tmp, config, json_mode: started.append(
-            {"tmp": tmp, "config": config, "json": json_mode}
+        lambda tmp, config, json_mode, own_window: started.append(
+            {"tmp": tmp, "config": config, "json": json_mode, "own": own_window}
         ),
     )
     runs = Runs()
@@ -729,15 +733,73 @@ def test_windows_hands_over_to_the_helper(uv_install, monkeypatch):
     (call,) = started
     config = call["config"]
     assert call["json"] is True
+    assert call["own"] is False
     assert call["tmp"].is_dir()  # the helper deletes it
     assert (call["tmp"] / "constraints.txt").read_text() == "six==1.17.0\n"
     assert config["env_dir"] == str(Path(sys.prefix).resolve())
     assert config["wait_pids"][0] == os.getpid()
     assert config["uv"] == "/opt/uv"
     assert config["uv_args"][:3] == ["tool", "install", "--force"]
-    assert config["evosci"] == str(uv_install["tmp"] / "bin" / "EvoSci.exe")
+    evosci = uv_install["tmp"] / "bin" / "EvoSci.exe"
+    assert config["evosci"] == str(evosci)
+    assert config["setup_command"] == f"& '{evosci}' setup"
     assert config["skip"] == ["webui"]
     assert (config["installed"], config["target"]) == ("0.3.7", "0.3.10")
+    assert config["lock"] == str(uv_install["tmp"] / "data" / "tools" / "update.lock")
+    assert (uv_install["tmp"] / "data" / "tools").is_dir()
+    assert config["unattended"] is False
+    assert "install_hint" in config
+
+
+def test_windows_handover_passes_the_uv_environment(uv_install, monkeypatch):
+    from EvoScientist import update_helper
+    from EvoScientist.update_check import CN_SIMPLE
+
+    class CnConfig:
+        mirror = "cn"
+
+    started: list[dict] = []
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr("EvoScientist.config.load_config", lambda: CnConfig())
+    for name in ("UV_SYSTEM_CERTS", "UV_NATIVE_TLS", "UV_HTTP_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("UV_DEFAULT_INDEX", raising=False)
+    monkeypatch.delenv("UV_PYTHON_INSTALL_MIRROR", raising=False)
+    monkeypatch.setattr(
+        update_helper, "start_helper", lambda tmp, config, **kw: started.append(config)
+    )
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
+    code, _, _ = _run(updater.UpdateOptions(json=True))
+    assert code == 0
+    assert started[0]["uv_env"] == {
+        "UV_SYSTEM_CERTS": "1",
+        "UV_HTTP_TIMEOUT": "300",
+        "UV_DEFAULT_INDEX": CN_SIMPLE,
+        "UV_PYTHON_INSTALL_MIRROR": uv_tool.CN_PYTHON_MIRROR,
+    }
+
+
+def test_terminal_handover_without_a_desktop_stays_on_this_console(
+    uv_install, monkeypatch
+):
+    """In an SSH session nobody would see a new window: the helper writes to
+    this console and does not wait."""
+    from EvoScientist import update_helper
+
+    started: list[dict] = []
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(update_helper, "has_visible_desktop", lambda: False)
+    monkeypatch.setattr(
+        update_helper,
+        "start_helper",
+        lambda tmp, config, json_mode, own_window: started.append(
+            {"config": config, "own": own_window}
+        ),
+    )
+    _code, lines, _ = _run(updater.UpdateOptions())
+    assert "continues here" in lines[-1]["message"]
+    assert started[0]["own"] is False
+    assert started[0]["config"]["unattended"] is True
 
 
 def test_start_helper_json_keeps_the_callers_pipes(tmp_path, monkeypatch):
@@ -751,18 +813,25 @@ def test_start_helper_json_keeps_the_callers_pipes(tmp_path, monkeypatch):
         "Popen",
         lambda cmd, **kwargs: calls.append({"cmd": cmd, **kwargs}),
     )
-    update_helper.start_helper(tmp_path, {"env_dir": "C:\\env"}, json_mode=True)
+    update_helper.start_helper(
+        tmp_path, {"env_dir": "C:\\env"}, json_mode=True, own_window=False
+    )
     (call,) = calls
     assert call["creationflags"] == 0x200 | 0x8000000
     assert call["stdin"] is sys.stdin
     assert call["stdout"] is sys.stdout
-    assert call["cmd"][-3:] == [
-        str(tmp_path / update_helper.HELPER_NAME),
-        "-ConfigPath",
-        str(tmp_path / "config.json"),
-    ]
+    # A script block, not -File (an AllSigned policy refuses the file); the
+    # paths come through the environment.
+    assert call["cmd"][1:3] == ["-NoProfile", "-Command"]
+    assert call["cmd"][3].startswith(". ([scriptblock]::Create(")
+    assert call["cmd"][3].endswith(" -Json")
+    assert call["env"]["EVOSCI_UPDATE_HELPER"] == str(
+        tmp_path / update_helper.HELPER_NAME
+    )
+    assert call["env"]["EVOSCI_UPDATE_CONFIG"] == str(tmp_path / "config.json")
+    assert call["env"]["EVOSCI_UPDATE_TEMP"] == str(tmp_path)
     config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
-    assert config == {"env_dir": "C:\\env", "temp_dir": str(tmp_path), "json": True}
+    assert config == {"env_dir": "C:\\env"}
 
 
 def test_start_helper_terminal_opens_its_own_window(tmp_path, monkeypatch):
@@ -775,10 +844,13 @@ def test_start_helper_terminal_opens_its_own_window(tmp_path, monkeypatch):
     monkeypatch.setattr(
         update_helper.subprocess,
         "Popen",
-        lambda cmd, **kwargs: calls.append(kwargs),
+        lambda cmd, **kwargs: calls.append({"cmd": cmd, **kwargs}),
     )
-    update_helper.start_helper(tmp_path, {}, json_mode=False)
-    assert calls == [{"creationflags": 0x10}]
+    update_helper.start_helper(tmp_path, {}, json_mode=False, own_window=True)
+    (call,) = calls
+    assert call["creationflags"] == 0x10
+    assert "stdout" not in call
+    assert not call["cmd"][3].endswith(" -Json")
 
 
 def test_terminal_handover_says_new_window(uv_install, monkeypatch):
@@ -842,77 +914,6 @@ def test_truncated_constraints_download_is_download_failed(tmp_path, monkeypatch
     assert exc.value.code == "download_failed"
 
 
-@pytest.mark.skipif(
-    shutil.which("pwsh") is None
-    or sys.platform == "win32"
-    or not shutil.which("sleep"),
-    reason="runs the helper under pwsh with POSIX stand-ins",
-)
-def test_helper_cancel_before_retry_is_install_failed(tmp_path):
-    """A failed uv run may have changed the environment: a wait cancelled
-    before the retry must not claim that nothing was changed."""
-    from EvoScientist import update_helper
-
-    env = tmp_path / "env"
-    (env / "bin").mkdir(parents=True)
-    blocker = env / "bin" / "blocker"
-    shutil.copy(shutil.which("sleep"), blocker)
-    uv = tmp_path / "uv"
-    # Starts a process from the environment, then fails, as a uv run that
-    # met a locked file would leave things.
-    uv.write_text(f"#!/bin/sh\n'{blocker}' 30 >/dev/null 2>&1 &\nexit 1\n")
-    uv.chmod(0o755)
-    work = tmp_path / "work"
-    work.mkdir()
-    config = {
-        "env_dir": str(env),
-        "uv": str(uv),
-        "uv_args": ["tool", "install"],
-        "uv_env": {},
-        "evosci": str(tmp_path / "EvoSci"),
-        "skip": [],
-        "installed": "0.3.6",
-        "target": "0.3.7",
-        "install_command": "install-script",
-        "temp_dir": str(work),
-        "json": True,
-    }
-    (tmp_path / "config.json").write_text(json.dumps(config))
-    script = tmp_path / "helper.ps1"
-    script.write_text(update_helper.HELPER, encoding="utf-8")
-    proc = subprocess.Popen(
-        [
-            "pwsh",
-            "-NoProfile",
-            "-File",
-            str(script),
-            "-ConfigPath",
-            str(tmp_path / "config.json"),
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    events = []
-    try:
-        for line in proc.stdout:
-            event = json.loads(line)
-            events.append(event)
-            detail = event.get("detail") or {}
-            if "cancel_file" in detail:
-                Path(detail["cancel_file"]).write_text("")
-        proc.wait(timeout=60)
-    finally:
-        proc.kill()
-        subprocess.run(["pkill", "-f", str(blocker)], check=False)
-    end = events[-1]
-    assert end["status"] == "error"
-    assert end["code"] == "install_failed"
-    assert "install-script" in end["message"]
-    assert any("trying once more" in e.get("message", "") for e in events)
-
-
 def test_ctrl_c_while_uv_runs_still_ends_with_a_terminal_line(uv_install, monkeypatch):
     def interrupted(cmd, **kwargs):
         raise KeyboardInterrupt
@@ -965,74 +966,6 @@ def test_exiting_pids_include_a_parent_in_the_environment(tmp_path, monkeypatch)
     assert updater._exiting_pids() == [os.getpid()]
 
 
-@pytest.mark.skipif(
-    shutil.which("pwsh") is None
-    or sys.platform == "win32"
-    or not shutil.which("sleep"),
-    reason="runs the helper under pwsh with POSIX stand-ins",
-)
-def test_helper_waits_for_its_exiting_caller(tmp_path):
-    """The caller still exiting when the helper starts is waited for, not
-    reported as a process that blocks the environment."""
-    from EvoScientist import update_helper
-
-    env = tmp_path / "env"
-    (env / "bin").mkdir(parents=True)
-    caller = env / "bin" / "caller"
-    shutil.copy(shutil.which("sleep"), caller)
-    # Started through a shell that exits at once, so init reaps it when it
-    # exits: a zombie child of this test would still count as running.
-    started = subprocess.run(
-        ["sh", "-c", f"'{caller}' 2 >/dev/null 2>&1 & echo $!"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    exiting_pid = int(started.stdout.strip())
-    uv = tmp_path / "uv"
-    uv.write_text("#!/bin/sh\nexit 0\n")
-    uv.chmod(0o755)
-    work = tmp_path / "work"
-    work.mkdir()
-    config = {
-        "env_dir": str(env),
-        "wait_pids": [exiting_pid],
-        "uv": str(uv),
-        "uv_args": [],
-        "uv_env": {},
-        "evosci": str(tmp_path / "EvoSci"),
-        "skip": [],
-        "installed": "0.3.6",
-        "target": "0.3.7",
-        "install_command": "install-script",
-        "temp_dir": str(work),
-        "json": True,
-    }
-    (tmp_path / "config.json").write_text(json.dumps(config))
-    script = tmp_path / "helper.ps1"
-    script.write_text(update_helper.HELPER, encoding="utf-8")
-    try:
-        result = subprocess.run(
-            [
-                "pwsh",
-                "-NoProfile",
-                "-File",
-                str(script),
-                "-ConfigPath",
-                str(tmp_path / "config.json"),
-            ],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    finally:
-        subprocess.run(["kill", str(exiting_pid)], check=False, capture_output=True)
-    events = [json.loads(line) for line in result.stdout.splitlines()]
-    assert not any("pending" in e.get("message", "") for e in events), events
-    assert any("Installing EvoScientist 0.3.7" in e.get("message", "") for e in events)
-
-
 def test_receipt_entry_that_cannot_be_reinstalled(tmp_path, monkeypatch, no_subprocess):
     """A --with entry the update cannot write back ends with manual_update,
     not with install_failed after the lookup."""
@@ -1048,3 +981,334 @@ def test_receipt_entry_that_cannot_be_reinstalled(tmp_path, monkeypatch, no_subp
     assert code == 1
     assert end["code"] == "manual_update"
     assert "install script" in end["message"]
+
+
+# --------------------------------------------------------------------------- #
+# The Windows helper itself, under pwsh with POSIX stand-ins: a copy of
+# `sleep` started from the environment blocks it; shell scripts play uv and
+# EvoSci. macOS kills a copied system binary, so those tests skip there.
+# --------------------------------------------------------------------------- #
+needs_pwsh = pytest.mark.skipif(
+    shutil.which("pwsh") is None or sys.platform == "win32",
+    reason="runs the helper under pwsh with POSIX stand-ins",
+)
+needs_blocker = pytest.mark.skipif(
+    shutil.which("pwsh") is None
+    or sys.platform in ("win32", "darwin")
+    or not shutil.which("sleep"),
+    reason="runs the helper under pwsh with a copy of sleep (macOS kills it)",
+)
+
+
+@contextlib.contextmanager
+def _bounded(*procs, seconds=60):
+    """Kills *procs* after *seconds*, so a stalled helper cannot block a read
+    of its stdout, and fails the test when that happened; kills and reaps
+    them on the way out."""
+    import threading
+
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        for p in procs:
+            p.kill()
+
+    timer = threading.Timer(seconds, expire)
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+        for p in procs:
+            p.kill()
+            p.wait()
+    assert not expired.is_set(), f"still running after {seconds} s"
+
+
+def _script(path: Path, body: str) -> Path:
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+    return path
+
+
+def _start_blocker(path: Path, seconds: int = 30) -> int:
+    """A copy of sleep at *path*, started through a shell that exits at once,
+    so init reaps it: a zombie child of the test would still count."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(shutil.which("sleep"), path)
+    started = subprocess.run(
+        ["sh", "-c", f"'{path}' {seconds} >/dev/null 2>&1 & echo $!"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(started.stdout.strip())
+
+
+def _helper(root: Path, *, json_mode: bool = True, **config) -> list[str]:
+    """Writes the helper and its config under *root* (environment
+    ``root/env``, uv and EvoSci stand-ins that succeed) and returns the
+    command that runs it."""
+    from EvoScientist import update_helper
+
+    (root / "env" / "bin").mkdir(parents=True, exist_ok=True)
+    work = root / "work"
+    work.mkdir(exist_ok=True)
+    if "uv" not in config:
+        config["uv"] = str(_script(root / "uv", "exit 0"))
+    if "evosci" not in config:
+        config["evosci"] = str(
+            _script(
+                root / "EvoSci",
+                'echo \'{"protocol": 1, "stage": "node", "status": "done"}\'',
+            )
+        )
+    full = {
+        "env_dir": str(root / "env"),
+        "wait_pids": [],
+        "uv_args": [],
+        "uv_env": {},
+        "setup_command": "EvoSci setup",
+        "skip": [],
+        "installed": "0.3.6",
+        "target": "0.3.7",
+        "install_command": "install-script",
+        "install_hint": "",
+        "lock": str(root / "update.lock"),
+        "unattended": False,
+        **config,
+    }
+    (root / "config.json").write_text(json.dumps(full))
+    script = root / "helper.ps1"
+    script.write_text(update_helper.HELPER, encoding="utf-8")
+    cmd = ["pwsh", "-NoProfile", "-File", str(script)]
+    cmd += ["-ConfigPath", str(root / "config.json"), "-TempDir", str(work)]
+    return cmd + (["-Json"] if json_mode else [])
+
+
+def _kill(*pids: int) -> None:
+    for pid in pids:
+        subprocess.run(["kill", str(pid)], check=False, capture_output=True)
+
+
+@needs_pwsh
+def test_helper_runs_through_the_start_command(tmp_path):
+    """The script-block start command, with paths that hold a space and
+    non-ASCII characters, runs the helper to its terminal line."""
+    from EvoScientist import update_helper
+
+    root = tmp_path / "Evo Upd ąę"
+    cmd = _helper(root)
+    env = {
+        **os.environ,
+        "EVOSCI_UPDATE_HELPER": cmd[3],
+        "EVOSCI_UPDATE_CONFIG": cmd[5],
+        "EVOSCI_UPDATE_TEMP": cmd[7],
+    }
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", update_helper._START + " -Json"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert events[-1]["status"] == "done", result.stdout + result.stderr
+    assert not (root / "work").exists()  # the helper removes its temp dir
+
+
+@needs_pwsh
+def test_helper_unreadable_config_ends_with_a_terminal_line(tmp_path):
+    cmd = _helper(tmp_path)
+    (tmp_path / "config.json").write_text("{ not json")
+    result = subprocess.run(
+        cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60
+    )
+    (end,) = [json.loads(line) for line in result.stdout.splitlines()]
+    assert end["status"] == "error"
+    assert end["code"] == "install_failed"
+    assert "Nothing was changed" in end["message"]
+    assert not (tmp_path / "work").exists()
+
+
+@needs_pwsh
+def test_helper_keeps_setup_output_that_is_not_an_event_off_stdout(tmp_path):
+    cmd = _helper(
+        tmp_path,
+        evosci=str(
+            _script(
+                tmp_path / "EvoSci",
+                "echo 'stray print'\n"
+                'echo \'{"protocol": 1, "stage": "node", "status": "done"}\'',
+            )
+        ),
+    )
+    result = subprocess.run(
+        cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60
+    )
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert events[-1]["status"] == "done"
+    assert any(e.get("stage") == "node" for e in events)
+    assert "stray print" in result.stderr
+
+
+@needs_pwsh
+def test_helper_install_failure_names_exclude_newer(tmp_path):
+    hint = " ~/.config/uv/uv.toml sets exclude-newer: uv ignores releases."
+    cmd = _helper(
+        tmp_path, uv=str(_script(tmp_path / "uv", "exit 1")), install_hint=hint
+    )
+    result = subprocess.run(
+        cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60
+    )
+    end = json.loads(result.stdout.splitlines()[-1])
+    assert end["code"] == "install_failed"
+    assert "sets exclude-newer" in end["message"]
+    assert "install-script" in end["message"]
+
+
+@needs_blocker
+def test_helper_cancel_before_retry_is_install_failed(tmp_path):
+    """A failed uv run may have changed the environment: a wait cancelled
+    before the retry must not claim that nothing was changed."""
+    blocker = tmp_path / "env" / "bin" / "blocker"
+    blocker.parent.mkdir(parents=True)
+    shutil.copy(shutil.which("sleep"), blocker)
+    # Starts a process from the environment, then fails, as a uv run that
+    # met a locked file would leave things.
+    uv = _script(tmp_path / "uv", f"'{blocker}' 30 >/dev/null 2>&1 &\nexit 1")
+    proc = subprocess.Popen(
+        _helper(tmp_path, uv=str(uv)),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    events = []
+    try:
+        with _bounded(proc):
+            for line in proc.stdout:
+                event = json.loads(line)
+                events.append(event)
+                detail = event.get("detail") or {}
+                if "cancel_file" in detail:
+                    assert (
+                        Path(detail["waiting_for"][0]["path"]).resolve()
+                        == blocker.resolve()
+                    )
+                    Path(detail["cancel_file"]).write_text("")
+    finally:
+        subprocess.run(["pkill", "-f", str(blocker)], check=False)
+    end = events[-1]
+    assert end["status"] == "error"
+    assert end["code"] == "install_failed"
+    assert "install-script" in end["message"]
+    assert any("trying once more" in e.get("message", "") for e in events)
+
+
+@needs_blocker
+def test_helper_cancelled_wait_is_environment_busy(tmp_path):
+    blocker_pid = _start_blocker(tmp_path / "env" / "bin" / "blocker")
+    ran = tmp_path / "uv-ran"
+    cmd = _helper(tmp_path, uv=str(_script(tmp_path / "uv", f"touch '{ran}'")))
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    events = []
+    try:
+        with _bounded(proc):
+            for line in proc.stdout:
+                event = json.loads(line)
+                events.append(event)
+                detail = event.get("detail") or {}
+                if "cancel_file" in detail:
+                    assert detail["waiting_for"][0]["pid"] == blocker_pid
+                    Path(detail["cancel_file"]).write_text("")
+    finally:
+        _kill(blocker_pid)
+    end = events[-1]
+    assert end["status"] == "error"
+    assert end["code"] == "environment_busy"
+    assert end["detail"]["waiting_for"][0]["pid"] == blocker_pid
+    assert not ran.exists()
+
+
+@needs_blocker
+def test_second_helper_ends_while_one_waits(tmp_path):
+    lock = str(tmp_path / "update.lock")
+    first_blocker = _start_blocker(tmp_path / "first" / "env" / "bin" / "blocker")
+    second_ran = tmp_path / "second-uv-ran"
+    first = subprocess.Popen(
+        _helper(tmp_path / "first", lock=lock),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        with _bounded(first):
+            assert "pending" in json.loads(first.stdout.readline())["message"]
+            second = subprocess.run(
+                _helper(
+                    tmp_path / "second",
+                    lock=lock,
+                    uv=str(_script(tmp_path / "uv2", f"touch '{second_ran}'")),
+                ),
+                stdin=subprocess.PIPE,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+    finally:
+        _kill(first_blocker)
+    end = json.loads(second.stdout.splitlines()[-1])
+    assert end["code"] == "environment_busy"
+    assert "Another EvoSci update" in end["message"]
+    assert end["detail"] == {"waiting_for": []}
+    assert not second_ran.exists()
+
+
+@needs_blocker
+def test_helper_waits_for_its_exiting_caller(tmp_path):
+    """The caller still exiting when the helper starts is waited for, not
+    reported as a process that blocks the environment."""
+    exiting_pid = _start_blocker(tmp_path / "env" / "bin" / "caller", seconds=2)
+    try:
+        result = subprocess.run(
+            _helper(tmp_path, wait_pids=[exiting_pid]),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        _kill(exiting_pid)
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert not any("pending" in e.get("message", "") for e in events), events
+    assert any("Installing EvoScientist 0.3.7" in e.get("message", "") for e in events)
+
+
+@needs_blocker
+def test_helper_without_a_desktop_does_not_wait(tmp_path):
+    """Unattended text mode (an SSH session): plain lines on stdout, and a
+    blocked environment ends the update at once."""
+    blocker_pid = _start_blocker(tmp_path / "env" / "bin" / "blocker")
+    try:
+        result = subprocess.run(
+            _helper(tmp_path, json_mode=False, unattended=True),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        _kill(blocker_pid)
+    assert "Update pending until you close: blocker" in result.stdout
+    assert "Ctrl+C" not in result.stdout
+    assert result.stdout.rstrip().endswith("(environment_busy)")

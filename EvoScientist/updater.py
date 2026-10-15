@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -402,6 +403,14 @@ def exclude_newer_hint() -> str:
     )
 
 
+def setup_command(evosci: Path) -> str:
+    """The command that runs *evosci*'s setup, ready to paste: PowerShell
+    runs a quoted path only after ``&``."""
+    if sys.platform == "win32":
+        return "& '" + str(evosci).replace("'", "''") + "' setup"
+    return f"{shlex.quote(str(evosci))} setup"
+
+
 def tool_bin_dir(uv: str) -> Path:
     try:
         # uv writes UTF-8; the locale's code page (Windows) would garble a
@@ -440,7 +449,7 @@ def run_new_setup(
             raise UpdateError(
                 "setup_failed",
                 f"EvoScientist is updated, but EvoSci setup failed (see above). "
-                f"Run it again: {evosci} setup",
+                f"Run it again: {setup_command(evosci)}",
             )
         return
     cmd.append("--json")
@@ -470,7 +479,7 @@ def run_new_setup(
         raise UpdateError(
             "setup_failed",
             f"EvoScientist is updated, but the {stage} stage of EvoSci setup "
-            f"failed. Run it again: {evosci} setup",
+            f"failed. Run it again: {setup_command(evosci)}",
             detail=failed or {"stage": None, "code": None, "exit_code": rc},
         )
 
@@ -685,24 +694,29 @@ def _hand_over(
     installed: str,
     target: str,
 ) -> None:
-    from .update_helper import start_helper
+    from .setup._install import tools_dir
+    from .update_helper import has_visible_desktop, start_helper
 
     base = os.environ
     env = uv_tool.uv_environment(cmd[0], mirror)
-    emit(
-        make_event(
-            STAGE,
-            "running",
-            progress=0.3,
-            message=(
-                "The install continues in a helper once EvoScientist has "
-                "exited; wait for its last line"
-                if opts.json
-                else "The install continues in a new window once EvoScientist "
-                "has exited"
-            ),
+    # Without a visible desktop (an SSH session) nobody would see a new
+    # window: the helper writes to this console and does not wait.
+    own_window = not opts.json and has_visible_desktop()
+    if opts.json:
+        message = (
+            "The install continues in a helper once EvoScientist has exited; "
+            "wait for its last line"
         )
-    )
+    elif own_window:
+        message = "The install continues in a new window once EvoScientist has exited"
+    else:
+        message = (
+            "The install continues here once EvoScientist has exited; it stops "
+            "if anything still runs from it"
+        )
+    emit(make_event(STAGE, "running", progress=0.3, message=message))
+    # The lock lives next to the recorded uv; not every install has the folder.
+    tools_dir().mkdir(parents=True, exist_ok=True)
     start_helper(
         tmp,
         {
@@ -713,10 +727,16 @@ def _hand_over(
             "uv_args": cmd[1:],
             "uv_env": {k: v for k, v in env.items() if base.get(k) != v},
             "evosci": str(evosci),
+            "setup_command": setup_command(evosci),
             "skip": opts.skip,
             "installed": installed,
             "target": target,
             "install_command": install_command(),
+            "install_hint": exclude_newer_hint(),
+            # One helper at a time, whichever window started it.
+            "lock": str(tools_dir() / "update.lock"),
+            "unattended": not opts.json and not own_window,
         },
         json_mode=opts.json,
+        own_window=own_window,
     )
