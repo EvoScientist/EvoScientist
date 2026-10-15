@@ -2,8 +2,8 @@
 
 The langgraph dev server keeps it in ``paths.SERVER_HOME / "local-secret"``:
 on POSIX the file is ``0600`` in a ``0700`` folder; on Windows its access list
-names this user, SYSTEM and Administrators, with nothing inherited (the
-Administrators group can read it, as root can on POSIX). Clients on this
+lets in only this user, SYSTEM and Administrators (the Administrators group can
+read it, as root can on POSIX). Clients on this
 machine read the file and send the value in the ``X-EvoScientist-Local-Secret``
 header; server routes can require it with :func:`require_local_secret`. It
 shows that a caller runs as this user on this machine. It is not
