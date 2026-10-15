@@ -84,8 +84,10 @@ receipt and is removed; add it again afterwards. Close EvoScientist first; on Wi
 processes that still run, because a running process keeps the files locked.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
-reports "Nothing to upgrade". Update with `EvoSci update`, which also keeps
-the extras and added packages, or by running the command again.
+reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
+same packages, or by running the command again. `EvoSci update` waits until
+other EvoScientist sessions, servers and MCP servers started from the install
+have closed, and names them; Ctrl+C cancels and changes nothing.
 
 ## Uninstalling
 

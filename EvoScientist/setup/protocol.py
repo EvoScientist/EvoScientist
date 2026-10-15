@@ -17,11 +17,11 @@ Event fields:
   ``{"source": "system", ...}``; on ``error`` events where the code has one
   (``setup_failed``: the failed stage and its code; ``environment_busy``: the
   processes still running, none when another update holds the lock); on
-  ``running`` events of ``EvoSci update``'s Windows helper while it waits
-  (``{"waiting_for": [{"pid", "name", "path"}], "cancel_file": "<path>"}``:
-  creating that file cancels the wait). The helper's first wait also ends
-  when the program reading its stdout closes the pipe, so a caller reads
-  until the terminal ``update`` line.
+  ``running`` events of ``EvoSci update`` while it waits for other processes
+  that run from the install (``{"waiting_for": [{"pid", "name", "path"}],
+  "cancel_file": "<path>"}``: creating that file cancels the wait). That
+  wait also ends when the program reading stdout closes the pipe, so a
+  caller reads until the terminal ``update`` line.
 - ``code``: a stable error code on ``error`` events (see :data:`ERROR_CODES`).
 """
 

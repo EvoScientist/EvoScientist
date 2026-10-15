@@ -231,6 +231,7 @@ uv tool install EvoScientist
 > ```bash
 > EvoSci update
 > ```
+> On 0.3.6 or older, which have no `EvoSci update`, run `uv tool upgrade EvoScientist` once, with EvoScientist closed.
 
 Or install into the current environment instead:
 
