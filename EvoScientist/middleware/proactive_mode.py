@@ -17,8 +17,9 @@ one, so the tools are stripped before ``tool_selector`` runs; the selector
 then sees no tools and skips its own model call, and memory and the rest of
 the list see the empty tool list too. deepagents places its own core
 middleware (skills, filesystem, sub-agents, summarization, tool-call
-patching) outside that list; none of them calls the model, so the model call
-itself carries no tools.
+patching) outside that list. Of those, only summarization calls a model, to
+write a summary once the history crosses its trigger; that call binds no
+tools. The agent's own model call therefore carries no tools.
 
 Empty tools also removes ``ask_user`` (it is a tool), so a proactive turn can
 never stop on a human-in-the-loop interrupt.
