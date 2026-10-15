@@ -103,6 +103,17 @@ class ProviderStreamError(Exception):
         return self.as_envelope()
 
 
+class ModelErrorFinishError(RuntimeError):
+    """The provider ended the response with ``finish_reason == "error"`` instead of raising."""
+
+    def __init__(self, ai_message: Any) -> None:
+        self.ai_message = ai_message
+        super().__init__(
+            "The model ended its response with finish_reason=error "
+            "(the provider reported a failure)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # API-key redaction — env-driven, prefix-only
 # ---------------------------------------------------------------------------

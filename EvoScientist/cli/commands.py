@@ -1,5 +1,6 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import copy
 import json
 import logging
 import os
@@ -62,6 +63,7 @@ from .channel import (
     _start_channels_bus_mode,
     channel_ask_user_prompt,
     channel_hitl_prompt,
+    channel_session_granted,
     dispatch_channel_slash_command,
     forget_channel_origin,
     get_channel_origin,
@@ -1722,6 +1724,7 @@ def _serve_process_message(
                 interactive=True,
                 metadata=meta,
                 configurable_extra=active_teams_configurable_extra(channel_runtime),
+                approve_all_at_start=channel_session_granted(msg),
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
@@ -2560,6 +2563,64 @@ def _is_fresh_interactive_session(prompt: str | None, thread_id: str | None) -> 
     return not prompt and not thread_id
 
 
+# 2 is Click's usage-error code; 1 stays "the run failed".
+RUBRIC_UNMET_EXIT_CODE = 3
+
+
+def _resolve_rubric_option(value: str | None, *, prompt: str | None) -> str | None:
+    """Return the text given by ``--rubric``, reading ``@path`` from disk."""
+    if value is None:
+        return None
+    if not prompt:
+        raise typer.BadParameter("--rubric requires -p/--prompt (single-shot mode)")
+    from ..rubric_text import RubricTextError, read_rubric_text
+
+    try:
+        return read_rubric_text(value)
+    except RubricTextError as exc:
+        raise typer.BadParameter(f"--rubric {exc}") from exc
+
+
+def _rubric_exit_code(rubric: str | None, result: str | None) -> int | None:
+    """Exit code for a single-shot run that finished; ``None`` keeps the default."""
+    if rubric is None or result == "satisfied":
+        return None
+    return RUBRIC_UNMET_EXIT_CODE
+
+
+def _rubric_exit_notice(result: str | None, exit_code: int) -> str:
+    """The line a graded single-shot run prints before it exits with *exit_code*."""
+    if result is None:
+        # No verdict at all: a cancelled approval or question, the round limit.
+        return (
+            "The run stopped before the acceptance criteria were checked "
+            f"(exit code {exit_code})."
+        )
+    if result == "failed":
+        return (
+            f"The acceptance criteria could not be evaluated (exit code {exit_code})."
+        )
+    if result == "grader_error":
+        return (
+            "The acceptance criteria could not be checked: the grader failed "
+            f"(exit code {exit_code})."
+        )
+    return f"Acceptance criteria not met (exit code {exit_code})."
+
+
+def _single_shot_agent_config(config: Any, rubric: str | None) -> Any:
+    """The config a single-shot run builds its agent from.
+
+    The grader runs when the agent stops, so a graded run keeps sub-agents in-turn. The
+    agent is built from a copy; the background server is compared with the user's config.
+    """
+    if rubric is None:
+        return config
+    agent_config = copy.copy(config)
+    agent_config.enable_async_subagents = False
+    return agent_config
+
+
 def _resolve_stream_json_auto_mode(auto_mode: bool | None, output_format: str) -> bool:
     """Resolve the effective ``--auto-mode`` for a single-shot run.
 
@@ -2663,8 +2724,22 @@ def _main_callback(
             "'stream-json' (line-delimited JSON events to stdout)."
         ),
     ),
-    # Annotated, so a direct call without this argument gets a plain False
+    # Annotated, so a direct call without these arguments gets a plain default
     # rather than Typer's OptionInfo default, which is truthy.
+    rubric: Annotated[
+        str | None,
+        typer.Option(
+            "--rubric",
+            metavar="TEXT|@PATH",
+            help=(
+                "Acceptance criteria for a single-shot (-p) run. The work is "
+                "graded each time the agent stops and sent back with the gaps, "
+                "up to 3 passes. Literal text, or '@path' to read a file. "
+                "Sub-agents run in-turn for this run. Exit code 3 when the run "
+                "ends without a satisfied verdict."
+            ),
+        ),
+    ] = None,
     version_json: Annotated[
         bool,
         typer.Option(
@@ -2703,6 +2778,8 @@ def _main_callback(
         from ..stream.json_sink import redirect_console_to_stderr
 
         redirect_console_to_stderr()
+
+    rubric_text = _resolve_rubric_option(rubric, prompt=prompt)
 
     # stream-json is headless, so auto-mode defaults on (auto-handle approval and
     # ask_user gates) unless the caller explicitly passed --no-auto-mode. Without
@@ -2762,6 +2839,19 @@ def _main_callback(
             if auth_mode == "api_key" or provider in in_use:
                 setattr(config, f"{provider}_auth_mode", auth_mode)
     apply_config_to_env(config)
+
+    if rubric_text is not None:
+        from ..config import GatewaySurface, resolve_gateway_backend
+
+        single_shot_backend = resolve_gateway_backend(
+            config, GatewaySurface.SINGLE_SHOT
+        )
+        if single_shot_backend == "langgraph_server":
+            raise typer.BadParameter(
+                "--rubric needs the local gateway for single-shot runs: on "
+                "langgraph_server the agent runs in the server process, which "
+                "still dispatches background sub-agents the grader cannot wait for"
+            )
 
     _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
 
@@ -2936,9 +3026,10 @@ def _main_callback(
                     work_dir=str(session_dirs.work_dir),
                     workspace=session_dirs.workspace,
                     checkpointer=checkpointer,
-                    config=config,
+                    config=_single_shot_agent_config(config, rubric_text),
                     runtime=async_runtime,
                 )
+                rubric_result: str | None = None
                 try:
                     if effective_output_format == "stream-json":
                         # Headless JSONL path: drive the sink through the gateway
@@ -2952,9 +3043,21 @@ def _main_callback(
                             target=GraphTarget(
                                 local_graph=agent, **session_dirs.metadata()
                             ),
+                            rubric=rubric_text,
                         )
+
+                        def _track_verdict(event: dict) -> None:
+                            nonlocal rubric_result
+                            if event.get("type") == "rubric_evaluation":
+                                result = event.get("result")
+                                rubric_result = (
+                                    result if isinstance(result, str) else None
+                                )
+
                         try:
-                            await stream_json(graph_gateway, request)
+                            await stream_json(
+                                graph_gateway, request, on_event=_track_verdict
+                            )
                         except Exception as exc:
                             # stream_events already emitted a terminal `error`
                             # event onto the JSON stream before re-raising; exit
@@ -2978,10 +3081,11 @@ def _main_callback(
                                 ui_backend=config.ui_backend,
                                 runtime_gateways=runtime_gateways,
                                 async_runtime=async_runtime,
+                                rubric=rubric_text,
                             )
                         )
                         try:
-                            await asyncio.shield(stream_worker)
+                            rubric_result = await asyncio.shield(stream_worker)
                         except asyncio.CancelledError:
                             from ..stream.display import request_stream_cancel
                             from .tui_runtime import settle_cancelled_worker
@@ -2991,6 +3095,11 @@ def _main_callback(
                                 on_cancel=request_stream_cancel,
                             )
                             raise
+                    exit_code = _rubric_exit_code(rubric_text, rubric_result)
+                    if exit_code is not None:
+                        notice = _rubric_exit_notice(rubric_result, exit_code)
+                        console.print(f"[yellow]{notice}[/yellow]")
+                        raise typer.Exit(exit_code)
                 finally:
                     # Model failures can bypass middleware ``after_agent``
                     # hooks. Close any remaining QuickJS workers while this
@@ -3026,6 +3135,30 @@ def _main_callback(
         )
 
 
+# Upstream's logger and its two records for a grader attempt that raised.
+_GRADER_LOGGER = "deepagents.middleware.rubric"
+_GRADER_FAILURE_RECORDS = ("grader failed", "coverage retry raised")
+
+
+def _grader_failure_on_one_line(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy of upstream's grader-failure record with the reason instead of the traceback.
+
+    The verdict already says why; the record itself keeps its traceback for other handlers.
+    """
+    if record.name != _GRADER_LOGGER or not record.exc_info:
+        return record
+    message = record.getMessage()
+    if not any(marker in message for marker in _GRADER_FAILURE_RECORDS):
+        return record
+    exc = record.exc_info[1]
+    short = copy.copy(record)
+    short.msg = f"{message}: {type(exc).__name__}: {exc}"
+    short.args = None
+    short.exc_info = None
+    short.exc_text = None
+    return short
+
+
 def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
@@ -3049,6 +3182,8 @@ def _configure_logging():
         """Custom handler that renders warnings in dim style."""
 
         def emit(self, record: logging.LogRecord) -> None:
+            if not verbose_logging:
+                record = _grader_failure_on_one_line(record)
             if record.levelno == logging.WARNING:
                 # Use Rich console to print dim warning
                 msg = record.getMessage()

@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
+from ..rubric_session import RubricSession
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -72,13 +74,15 @@ class ChannelRuntime:
     """Mutable handle to the agent + thread bound to running channels.
 
     Also holds session-scoped bindings mutated by slash commands — the
-    ``active_teams`` list backs the ``/expert`` command, feeding into
-    ``RunRequest.configurable_extra`` at stream call time.
+    ``active_teams`` list backs the ``/expert`` command and ``rubric`` the
+    ``/rubric`` command, both feeding into ``RunRequest.configurable_extra``
+    at stream call time.
     """
 
     agent: Any = None
     thread_id: str | None = None
     active_teams: list[str] = field(default_factory=list)
+    rubric: RubricSession = field(default_factory=RubricSession)
 
     def bind(self, agent: Any, thread_id: str) -> None:
         self.agent = agent
@@ -129,6 +133,12 @@ class CommandContext:
     # Real LLM input token count from last usage_metadata (includes system
     # prompt + tool schemas).  Used by /compact for accurate display.
     input_tokens_hint: int | None = None
+    # The input after the command name, as typed (newlines and quotes kept);
+    # ``args`` is the shell-split view of the same text.
+    raw_args: str = ""
+    # Set by ``/goal``: once the command returned, the surface starts a run
+    # that carries this request and no message.
+    goal_request: dict[str, Any] | None = None
 
     @property
     def workspace(self) -> Workspace:

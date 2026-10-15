@@ -173,11 +173,14 @@ class TestV3ProtocolStreaming:
 
     async def test_configurable_extra_none_leaves_thread_id_only(self):
         """When no extras are passed, configurable carries the always-written
-        suppression key plus ``thread_id``."""
+        suppression key, the retry tier this run carries, and ``thread_id``."""
         agent = FakeV3Agent([message_delta("hi")])
         await collect_events(agent, thread_id="t1")
         _, kwargs = agent.astream_events.call_args
-        assert kwargs["config"]["configurable"] == {
+        configurable = dict(kwargs["config"]["configurable"])
+        retry = configurable.pop("model_retry")
+        assert set(retry) == {"unattended", "wait_budget_seconds"}
+        assert configurable == {
             "hitl_suppressed": False,
             "thread_id": "t1",
         }
@@ -1490,3 +1493,812 @@ class TestSummarizationHelpers:
         events = await collect_events(agent)
         usage_events = [e for e in events if e.get("type") == "usage_stats"]
         assert len(usage_events) == 0
+
+
+class TestRunInputRubric:
+    async def test_text_message_carries_the_rubric_only_when_given(self):
+        from EvoScientist.stream.events import build_agent_stream_input
+
+        without = await build_agent_stream_input("hi")
+        assert without == {
+            "messages": [{"role": "user", "content": "hi"}],
+            "goal_request": None,
+        }
+        with_rubric = await build_agent_stream_input("hi", rubric="- a")
+        assert with_rubric == {
+            "messages": [{"role": "user", "content": "hi"}],
+            "goal_request": None,
+            "rubric": "- a",
+        }
+
+    async def test_every_message_clears_a_goal_request_left_on_the_thread(self):
+        """A request whose run never finished must not take over this message."""
+        from EvoScientist.stream.events import build_agent_stream_input
+
+        run_input = await build_agent_stream_input("hi")
+        assert "goal_request" in run_input
+        assert run_input["goal_request"] is None
+
+    async def test_a_goal_request_travels_without_a_message(self):
+        from EvoScientist.stream.events import build_agent_stream_input
+
+        request = {"kind": "create", "id": "r1", "objective": "ship it"}
+        run_input = await build_agent_stream_input("", goal_request=request)
+        assert run_input == {"messages": [], "goal_request": request}
+        assert run_input["goal_request"] is not request
+
+    async def test_resume_command_is_passed_through_untouched(self):
+        from EvoScientist.stream.events import build_agent_stream_input
+
+        command = Command(resume={"decisions": []})
+        assert await build_agent_stream_input(command, rubric="- a") is command
+
+
+class TestRubricEvents:
+    async def test_grader_events_become_rubric_ui_events(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "rubric_evaluation_start",
+                        "grading_run_id": "g",
+                        "iteration": 0,
+                    }
+                ),
+                custom_subagent_event(
+                    {
+                        "type": "rubric_evaluation_end",
+                        "grading_run_id": "g",
+                        "iteration": 0,
+                        "result": "needs_revision",
+                        "explanation": "one gap",
+                        "criteria": [{"name": "c1", "passed": False, "gap": "missing"}],
+                        "unverified": False,
+                    }
+                ),
+            ]
+        )
+        events = await collect_events(agent)
+        rubric = [e for e in events if e.get("type", "").startswith("rubric_")]
+        assert rubric == [
+            {"type": "rubric_evaluation_start", "iteration": 0},
+            {
+                "type": "rubric_evaluation",
+                "iteration": 0,
+                "result": "needs_revision",
+                "explanation": "one gap",
+                "criteria": [{"name": "c1", "passed": False, "gap": "missing"}],
+                "unverified": False,
+            },
+        ]
+
+    async def test_deferred_grading_becomes_a_ui_event(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {"type": "rubric_evaluation_deferred", "tasks": 1, "processes": 2}
+                ),
+                custom_subagent_event({"type": "rubric_evaluation_deferred"}),
+            ]
+        )
+        events = await collect_events(agent)
+        deferred = [e for e in events if e.get("type") == "rubric_evaluation_deferred"]
+        assert deferred == [
+            {"type": "rubric_evaluation_deferred", "tasks": 1, "processes": 2},
+            {"type": "rubric_evaluation_deferred", "tasks": 0, "processes": 0},
+        ]
+
+    async def test_malformed_grader_payload_degrades_instead_of_raising(self):
+        agent = FakeV3Agent(
+            [
+                custom_subagent_event(
+                    {
+                        "type": "rubric_evaluation_end",
+                        "iteration": "x",
+                        "result": None,
+                        "explanation": 3,
+                        "criteria": "nope",
+                    }
+                )
+            ]
+        )
+        events = await collect_events(agent)
+        rubric = [e for e in events if e.get("type") == "rubric_evaluation"]
+        assert rubric == [
+            {
+                "type": "rubric_evaluation",
+                "iteration": 0,
+                "result": "",
+                "explanation": "",
+                "criteria": [],
+                "unverified": False,
+            }
+        ]
+
+    async def test_done_response_keeps_every_pass_on_its_own_paragraph(self):
+        agent = FakeV3Agent(
+            [
+                message_delta("First draft."),
+                message_finish(),
+                custom_subagent_event(
+                    {
+                        "type": "rubric_evaluation_end",
+                        "iteration": 0,
+                        "result": "needs_revision",
+                        "explanation": "one gap",
+                        "criteria": [],
+                    }
+                ),
+                message_delta("Revised answer."),
+                message_finish(),
+            ]
+        )
+        events = await collect_events(agent)
+        done = [e for e in events if e.get("type") == "done"]
+        assert done[-1]["response"] == "First draft.\n\nRevised answer."
+        assert done[-1]["last_pass_response"] == "Revised answer."
+
+    @staticmethod
+    def _verdict(result: str, iteration: int = 0):
+        return custom_subagent_event(
+            {
+                "type": "rubric_evaluation_end",
+                "iteration": iteration,
+                "result": result,
+                "explanation": "",
+                "criteria": [],
+            }
+        )
+
+    async def _done(self, *events):
+        collected = await collect_events(FakeV3Agent(list(events)))
+        return [e for e in collected if e.get("type") == "done"][-1]
+
+    async def test_an_ungraded_run_has_no_last_pass_field(self):
+        done = await self._done(message_delta("Answer."), message_finish())
+        assert "last_pass_response" not in done
+
+    async def test_a_run_satisfied_at_once_has_the_whole_answer_as_its_last_pass(self):
+        done = await self._done(
+            message_delta("Answer."), message_finish(), self._verdict("satisfied")
+        )
+        assert done["last_pass_response"] == done["response"] == "Answer."
+
+    async def test_the_last_pass_is_the_text_after_the_last_revision_request(self):
+        done = await self._done(
+            message_delta("One."),
+            message_finish(),
+            self._verdict("needs_revision"),
+            message_delta("Two."),
+            message_finish(),
+            self._verdict("needs_revision", 1),
+            message_delta("Three."),
+            message_finish(),
+            self._verdict("max_iterations_reached", 2),
+        )
+        assert done["response"] == "One.\n\nTwo.\n\nThree."
+        assert done["last_pass_response"] == "Three."
+
+    async def test_a_revision_pass_without_text_has_an_empty_last_pass(self):
+        done = await self._done(
+            message_delta("Draft."),
+            message_finish(),
+            self._verdict("needs_revision"),
+            self._verdict("satisfied", 1),
+        )
+        assert done["response"].startswith("Draft.")
+        assert done["last_pass_response"] == ""
+
+
+class TestModelRetryRollback:
+    """The decoder discards a failed call's output between its model_call start and end events."""
+
+    @staticmethod
+    async def _run(events, *, subagents=None):
+        from tests.stream_v3_fakes import FakeV3Agent, collect_events
+
+        return await collect_events(FakeV3Agent(events, subagents=subagents), "hi")
+
+    @staticmethod
+    def _done(events):
+        return next(e for e in events if e["type"] == "done")
+
+    @staticmethod
+    def _retries(events):
+        return [e for e in events if e["type"] == "model_retry"]
+
+    @staticmethod
+    def _discards(events):
+        return [e for e in events if e["type"] == "model_output_discarded"]
+
+    @staticmethod
+    def _zero():
+        return {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []}
+
+    async def test_retry_after_partial_text_discards_it_and_reports_counts(self):
+        from tests.stream_v3_fakes import (
+            local_text_delta,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                local_text_delta("Half a sen"),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                local_text_delta("Full answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        retry = self._retries(out)[0]
+        assert retry["discarded"] == {
+            "text_chars": len("Half a sen"),
+            "thinking_chars": 0,
+            "tool_call_ids": [],
+        }
+        assert retry["instance_id"] == ""
+        assert retry["subagent"] == ""
+        assert retry["attempt"] == 2
+        assert "message_id" not in retry
+        assert self._done(out)["response"] == "Full answer."
+        assert [e["type"] for e in out if e["type"] == "model_call"] == []
+
+    async def test_a_rolled_back_call_never_reaches_into_an_earlier_pass(self):
+        """A graded run's last pass starts after the verdict; a failed call of
+        the revision pass is cut back to its own start, not past that point."""
+        from tests.stream_v3_fakes import (
+            custom_subagent_event,
+            local_text_delta,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+        )
+
+        def verdict(result, iteration):
+            return custom_subagent_event(
+                {
+                    "type": "rubric_evaluation_end",
+                    "iteration": iteration,
+                    "result": result,
+                    "explanation": "",
+                    "criteria": [],
+                }
+            )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                local_text_delta("Draft."),
+                message_finish(),
+                model_call_end("1"),
+                verdict("needs_revision", 0),
+                model_call_start("2"),
+                local_text_delta("Half a rev"),
+                model_call_end("2", "failed"),
+                retry_event(),
+                model_call_start("3"),
+                local_text_delta("Revised."),
+                message_finish(),
+                model_call_end("3"),
+                verdict("satisfied", 1),
+            ]
+        )
+        done = self._done(out)
+        assert done["response"] == "Draft.\n\nRevised."
+        assert done["last_pass_response"] == "Revised."
+
+    async def test_server_transport_shape_without_message_metadata(self):
+        """langgraph-api strips run metadata before SSE: the boundary events alone must do."""
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Half a sen"),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                text_delta("Full answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._retries(out)[0]["discarded"]["text_chars"] == len("Half a sen")
+        assert self._done(out)["response"] == "Full answer."
+
+    async def test_connect_time_failure_after_tool_step_discards_nothing(self):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            message_tool_call_block,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+            tool_finished,
+            tool_started,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Let me check."),
+                message_tool_call_block("ls", tool_call_id="t1"),
+                message_finish(),
+                model_call_end("1"),
+                tool_started("ls", tool_call_id="t1"),
+                tool_finished("files", tool_call_id="t1"),
+                model_call_start("2"),
+                model_call_end("2", "failed"),  # died at connect: no output
+                retry_event(),
+                model_call_start("3"),
+                text_delta("Done."),
+                message_finish(),
+                model_call_end("3"),
+            ]
+        )
+        assert self._retries(out)[0]["discarded"] == self._zero()
+        assert self._discards(out) == []
+        assert self._done(out)["response"] == "Let me check.Done."
+        assert [
+            e["type"] for e in out if e["type"] in ("tool_call", "tool_result")
+        ] == ["tool_call", "tool_result"]
+
+    async def test_error_finished_call_is_discarded_on_retry(self):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Half"),
+                message_finish(),
+                model_call_end("1", "error"),
+                retry_event(cause="finish_reason"),
+                model_call_start("2"),
+                text_delta("Whole."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._retries(out)[0]["discarded"]["text_chars"] == 4
+        assert self._done(out)["response"] == "Whole."
+
+    async def test_error_finished_primary_then_fallback_discards_the_primary(self):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Half"),
+                message_finish(),
+                model_call_end("1", "error"),
+                model_call_start("2"),
+                text_delta("Fallback answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        discarded = self._discards(out)[0]
+        assert discarded["discarded"]["text_chars"] == 4
+        assert discarded["instance_id"] == ""
+        assert "subagent" not in discarded
+        assert self._done(out)["response"] == "Fallback answer."
+
+    async def test_open_primary_then_fallback_discards_the_primary(self):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("partial "),
+                model_call_end("1", "failed"),
+                model_call_start("2"),
+                text_delta("complete"),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._done(out)["response"] == "complete"
+        assert len(self._discards(out)) == 1
+
+    async def test_error_finished_primary_then_fallback_dying_at_connect_then_retry(
+        self,
+    ):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Half"),
+                message_finish(),
+                model_call_end("1", "error"),
+                model_call_start("2"),
+                model_call_end("2", "failed"),
+                retry_event(cause="exception"),
+                model_call_start("3"),
+                text_delta("Whole."),
+                message_finish(),
+                model_call_end("3"),
+            ]
+        )
+        assert [d["discarded"]["text_chars"] for d in self._discards(out)] == [4]
+        assert self._retries(out)[0]["discarded"] == self._zero()
+        assert self._done(out)["response"] == "Whole."
+
+    async def test_clean_call_is_never_discarded(self):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("First."),
+                message_finish(),
+                model_call_end("1"),
+                retry_event(),
+                model_call_start("2"),
+                text_delta("Second."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._discards(out) == []
+        assert self._retries(out)[0]["discarded"] == self._zero()
+        assert self._done(out)["response"] == "First.Second."
+
+    async def test_whole_message_fallback_after_partial_primary(self):
+        from langchain_core.messages import AIMessage
+
+        from tests.stream_v3_fakes import (
+            model_call_end,
+            model_call_start,
+            text_delta,
+            whole_message,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("partial "),
+                model_call_end("1", "failed"),
+                model_call_start("2"),
+                whole_message(AIMessage("complete", id="lc_run--b-0")),
+                model_call_end("2"),
+            ]
+        )
+        assert self._done(out)["response"] == "complete"
+        assert len(self._discards(out)) == 1
+
+    async def test_tool_calls_of_the_failed_attempt_are_discarded(self):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            message_tool_call_block,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Doing "),
+                message_tool_call_block("ls", tool_call_id="dead"),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                text_delta("Done."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._retries(out)[0]["discarded"]["tool_call_ids"] == ["dead"]
+        assert self._done(out)["response"] == "Done."
+
+    async def test_text_outside_a_call_is_not_tracked(self):
+        """Model streams that bypass the boundary (a tool's own model) are never discarded."""
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                text_delta("A"),
+                text_delta("B"),
+                model_call_start("1"),
+                text_delta("x"),
+                model_call_end("1", "failed"),
+                retry_event(),
+                model_call_start("2"),
+                text_delta("Y"),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._retries(out)[0]["discarded"]["text_chars"] == 1
+        assert self._done(out)["response"] == "ABY"
+
+    async def test_summarization_messages_are_skipped(self):
+        from tests.stream_v3_fakes import (
+            message_delta,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            text_delta,
+        )
+
+        meta = {"lc_source": "summarization"}
+        out = await self._run(
+            [
+                message_delta("sum", meta),
+                model_call_start("1"),
+                text_delta("Answer."),
+                message_finish(),
+                model_call_end("1"),
+            ]
+        )
+        assert self._discards(out) == []
+        assert self._done(out)["response"] == "Answer."
+
+    async def test_grader_namespace_retry_leaves_the_main_answer_alone(self):
+        from tests.stream_v3_fakes import (
+            FakeSubagent,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        grader_ns = ("EvoRubricMiddleware.after_agent:1",)
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Main answer."),
+                message_finish(),
+                model_call_end("1"),
+                model_call_start("g", namespace=grader_ns),
+                text_delta("grading", namespace=grader_ns),
+                model_call_end("g", "failed", namespace=grader_ns),
+                retry_event(namespace=grader_ns),
+                model_call_start("g2", namespace=grader_ns),
+                text_delta("verdict", namespace=grader_ns),
+                message_finish(namespace=grader_ns),
+                model_call_end("g2", namespace=grader_ns),
+            ],
+            subagents=[FakeSubagent(grader_ns, "rubric_grader")],
+        )
+        retry = self._retries(out)[0]
+        assert retry["instance_id"] != ""
+        assert retry["subagent"] == "rubric_grader"
+        # The grader's output was never shown, so there is nothing to take back.
+        assert retry["discarded"]["text_chars"] == 0
+        assert [e["type"] for e in out if e["type"].startswith("subagent")] == []
+        assert self._done(out)["response"] == "Main answer."
+
+    async def test_subagent_retry_is_keyed_by_raw_namespace(self):
+        from tests.stream_v3_fakes import (
+            FakeSubagent,
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        ns1, ns2 = ("tools:t1",), ("tools:t1", "1")
+        out = await self._run(
+            [
+                model_call_start("r", namespace=ns1),
+                text_delta("one ", namespace=ns1),
+                model_call_start("c", namespace=ns2),
+                text_delta("two ", namespace=ns2),
+                model_call_end("c", "failed", namespace=ns2),
+                retry_event(namespace=ns2),
+                model_call_start("c2", namespace=ns2),
+                text_delta("two again", namespace=ns2),
+                message_finish(namespace=ns2),
+                model_call_end("c2", namespace=ns2),
+                text_delta("more", namespace=ns1),
+                message_finish(namespace=ns1),
+                model_call_end("r", namespace=ns1),
+            ],
+            subagents=[FakeSubagent(ns1, "research"), FakeSubagent(ns2, "code")],
+        )
+        retries = self._retries(out)
+        assert len(retries) == 1
+        assert retries[0]["subagent"] == "code"
+        assert retries[0]["discarded"]["text_chars"] == len("two ")
+        assert self._discards(out) == []  # the sibling's open call survived
+
+    async def test_empty_discards_emit_no_event(self):
+        from tests.stream_v3_fakes import model_call_end, model_call_start
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                model_call_end("1", "failed"),
+                model_call_start("2"),
+                model_call_end("2"),
+            ]
+        )
+        assert self._discards(out) == []
+
+    async def test_end_of_another_call_leaves_the_open_record_alone(self):
+        from tests.stream_v3_fakes import (
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("x"),
+                model_call_end("other"),
+                retry_event(),
+            ]
+        )
+        assert self._retries(out)[0]["discarded"]["text_chars"] == 1
+
+    async def test_call_without_an_end_mark_is_left_alone_by_the_next_start(self):
+        """A lost end mark must not cost a good answer: only a call known to have ended badly is dropped."""
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("First."),
+                message_finish(),
+                model_call_start("2"),
+                text_delta("Second."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._discards(out) == []
+        assert self._done(out)["response"] == "First.Second."
+
+    async def test_retry_names_the_agent_from_the_event_not_the_namespace(self):
+        """The server tracker names a namespace after its graph node; the event knows the agent."""
+        from tests.stream_v3_fakes import (
+            FakeSubagent,
+            model_call_end,
+            model_call_start,
+            retry_event,
+        )
+
+        ns = ("tools:t1",)
+        out = await self._run(
+            [
+                model_call_start("c", namespace=ns),
+                model_call_end("c", "failed", namespace=ns),
+                retry_event(namespace=ns, agent="research-agent"),
+            ],
+            subagents=[FakeSubagent(ns, "tools")],
+        )
+        assert self._retries(out)[0]["subagent"] == "research-agent"
+
+    async def test_retry_without_an_agent_name_falls_back_to_the_namespace_name(self):
+        from tests.stream_v3_fakes import FakeSubagent, retry_event
+
+        ns = ("tools:t1",)
+        out = await self._run(
+            [retry_event(namespace=ns)], subagents=[FakeSubagent(ns, "research")]
+        )
+        assert self._retries(out)[0]["subagent"] == "research"
+
+    async def test_main_agent_retry_carries_no_name(self):
+        from tests.stream_v3_fakes import retry_event
+
+        out = await self._run([retry_event(agent="EvoScientist")])
+        assert self._retries(out)[0]["subagent"] == ""
+
+    @staticmethod
+    def _screen(events):
+        """The answer text a client holds after applying every event."""
+        from EvoScientist.stream.state import StreamState
+
+        state = StreamState()
+        for event in events:
+            state.handle_event(event)
+        return state.response_text
+
+    async def test_root_text_after_a_failed_call_is_trimmed_on_both_sides(self):
+        """What the decoder cuts from the answer is exactly what it tells clients to trim."""
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                model_call_end("1", "failed"),
+                text_delta("SUMMARY "),  # root text that bypassed the boundary
+                model_call_start("2"),
+                text_delta("Answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._discards(out)[0]["discarded"]["text_chars"] == len("SUMMARY ")
+        assert self._done(out)["response"] == "Answer."
+        assert self._screen(out) == "Answer."
+
+    async def test_stray_root_text_before_a_retry_is_trimmed_on_both_sides(self):
+        from tests.stream_v3_fakes import (
+            message_finish,
+            model_call_end,
+            model_call_start,
+            retry_event,
+            text_delta,
+        )
+
+        out = await self._run(
+            [
+                model_call_start("1"),
+                text_delta("Half"),
+                model_call_end("1", "failed"),
+                text_delta("ST"),
+                retry_event(),
+                model_call_start("2"),
+                text_delta("Answer."),
+                message_finish(),
+                model_call_end("2"),
+            ]
+        )
+        assert self._retries(out)[0]["discarded"]["text_chars"] == len("HalfST")
+        assert self._done(out)["response"] == "Answer."
+        assert self._screen(out) == "Answer."

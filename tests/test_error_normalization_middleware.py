@@ -537,3 +537,55 @@ class TestMiddleware:
             _request(_openai_model()), handler
         )
         assert result is response
+
+
+# --- finish_reason == "error": a failure the provider did not raise ---------
+
+from EvoScientist.llm.errors import ModelErrorFinishError  # noqa: E402
+from EvoScientist.middleware.error_normalization import (  # noqa: E402
+    _check_truncated_output,
+)
+
+
+def _response(message: AIMessage) -> ModelResponse:
+    return ModelResponse(result=[message], structured_response=None)
+
+
+def test_check_truncated_output_raises_on_error_finish_before_truncation():
+    # Empty content plus status "incomplete" would match the truncation rule;
+    # the error finish must win and carry the message.
+    message = AIMessage(
+        content="",
+        id="lc_run--abc",
+        response_metadata={"finish_reason": "error", "status": "incomplete"},
+    )
+    with pytest.raises(ModelErrorFinishError) as info:
+        _check_truncated_output(_response(message))
+    assert info.value.ai_message is message
+    text = str(info.value).lower()
+    assert "400" not in text
+    assert "invalid request" not in text
+    assert "malformed" not in text
+
+
+def test_check_truncated_output_raises_on_error_finish_with_content_or_tool_calls():
+    with_text = AIMessage(
+        content="Half a sen", response_metadata={"finish_reason": "error"}
+    )
+    with pytest.raises(ModelErrorFinishError):
+        _check_truncated_output(_response(with_text))
+    with_tool = AIMessage(
+        content="",
+        tool_calls=[{"name": "ls", "args": {}, "id": "t1"}],
+        response_metadata={"finish_reason": "error"},
+    )
+    with pytest.raises(ModelErrorFinishError):
+        _check_truncated_output(_response(with_tool))
+
+
+def test_check_truncated_output_keeps_the_truncation_rule_and_normal_completion():
+    truncated = AIMessage(content="", response_metadata={"finish_reason": "length"})
+    with pytest.raises(ModelOutputTruncatedError):
+        _check_truncated_output(_response(truncated))
+    fine = AIMessage(content="ok", response_metadata={"finish_reason": "stop"})
+    assert _check_truncated_output(_response(fine)).result[0] is fine

@@ -84,6 +84,11 @@ class TestStreamEventEmitter:
         assert ev.type == "subagent_end"
         assert ev.data["name"] == "research-agent"
         assert ev.data["instance_id"] == "task:abc"
+        assert "paused" not in ev.data
+
+    def test_subagent_end_at_a_pause(self):
+        ev = StreamEventEmitter.subagent_end("research-agent", "task:abc", paused=True)
+        assert ev.data["paused"] is True
 
     def test_done(self):
         ev = StreamEventEmitter.done("final answer")
@@ -93,6 +98,18 @@ class TestStreamEventEmitter:
     def test_done_empty(self):
         ev = StreamEventEmitter.done()
         assert ev.data["response"] == ""
+
+    def test_done_carries_the_last_pass_only_for_a_graded_run(self):
+        assert "last_pass_response" not in StreamEventEmitter.done("a").data
+        graded = StreamEventEmitter.done("a\n\nb", last_pass_response="b").data
+        assert graded["last_pass_response"] == "b"
+        assert graded["response"] == "a\n\nb"
+        assert (
+            StreamEventEmitter.done("a", last_pass_response="").data[
+                "last_pass_response"
+            ]
+            == ""
+        )
 
     def test_error(self):
         ev = StreamEventEmitter.error("something broke")

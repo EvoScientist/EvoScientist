@@ -198,7 +198,9 @@ class TestResolveApproval:
         p.grant_session("tg:c1")
         io = FakeIO()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
-        assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
+        assert result == I.ApprovalOutcome(
+            decisions=[{"type": "approve"}], session_granted=True, grant_in_force=True
+        )
         assert result.prompted is False
         assert io.sent == []  # no prompt, silent
 
@@ -210,7 +212,38 @@ class TestResolveApproval:
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome(decisions=[{"type": "approve"}])
         assert result.prompted is False
+        # Config rules auto-answer too, but they are not the session grant.
+        assert result.session_granted is False
         assert io.sent == []
+
+    async def test_the_reply_that_grants_is_not_reported_as_granted(self, monkeypatch):
+        """Only an answer produced by a grant already in force reports it: the
+        reply that grants is a human answer and its decisions must be applied."""
+        monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
+        p = I.ApprovalPolicy()
+        granting = await I.resolve_approval(REQS, FakeIO(["3"]), p, "tg:c1")
+        assert granting.prompted is True
+        assert granting.session_granted is False
+        # ... but the chat's grant is in force from here on.
+        assert granting.grant_in_force is True
+
+        after = await I.resolve_approval(REQS, FakeIO(), p, "tg:c1")
+        assert after.prompted is False
+        assert after.session_granted is True
+        assert after.grant_in_force is True
+
+        other_chat = await I.resolve_approval(REQS, FakeIO(["1"]), p, "tg:c2")
+        assert other_chat.session_granted is False
+        assert other_chat.grant_in_force is False
+
+    async def test_empty_requests_under_a_grant_do_not_report_it(self, monkeypatch):
+        monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
+        p = I.ApprovalPolicy()
+        p.grant_session("tg:c1")
+        result = await I.resolve_approval([], FakeIO(), p, "tg:c1")
+        assert result.decisions == []
+        assert result.session_granted is False
+        assert result.grant_in_force is True
 
     async def test_approve(self, monkeypatch):
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
@@ -226,7 +259,7 @@ class TestResolveApproval:
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
         io = FakeIO(["2"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome(prompted=True)
+        assert result == I.ApprovalOutcome(prompted=True, rejected=True)
         assert io.contents[-1] == I.REJECTED_FEEDBACK
 
     async def test_approve_all_grants_session(self, monkeypatch):
@@ -235,7 +268,7 @@ class TestResolveApproval:
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
         assert result == I.ApprovalOutcome(
-            decisions=[{"type": "approve"}], prompted=True
+            decisions=[{"type": "approve"}], prompted=True, grant_in_force=True
         )
         assert io.contents[-1] == I.APPROVED_AUTO_FEEDBACK
         assert p.is_session_granted("tg:c1")  # future prompts auto-approve
@@ -259,6 +292,8 @@ class TestResolveApproval:
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result.decisions is None
         assert result.unrecognized_reply == "huh?"
+        # A human replied and did not approve: a rejection, not silence.
+        assert result.rejected is True
         # No feedback sent by the engine itself on the unrecognized path.
         assert I.UNRECOGNIZED_FEEDBACK not in io.contents
         assert I.REJECTED_FEEDBACK not in io.contents
@@ -268,13 +303,14 @@ class TestResolveApproval:
         io = FakeIO([])  # times out
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
         assert result == I.ApprovalOutcome(prompted=True)
+        assert result.rejected is False  # nobody answered
         assert io.contents[-1] == I.APPROVAL_TIMEOUT_FEEDBACK
 
-    async def test_stop_command_silent_cancel(self, monkeypatch):
+    async def test_stop_command_is_a_silent_refusal(self, monkeypatch):
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))
         io = FakeIO(["/stop"])
         result = await I.resolve_approval(REQS, io, I.ApprovalPolicy(), "tg:c1")
-        assert result == I.ApprovalOutcome(prompted=True)
+        assert result == I.ApprovalOutcome(prompted=True, rejected=True)
         # /stop already got its own ack; no reject/unrecognized feedback here.
         assert I.REJECTED_FEEDBACK not in io.contents
         assert I.UNRECOGNIZED_FEEDBACK not in io.contents
@@ -318,7 +354,7 @@ class TestResolveApproval:
         p = I.ApprovalPolicy()
         result = await I.resolve_approval(REQS, io, p, "tg:c1")
         assert result == I.ApprovalOutcome(
-            decisions=[{"type": "approve"}], prompted=True
+            decisions=[{"type": "approve"}], prompted=True, grant_in_force=True
         )
         assert p.is_session_granted("tg:c1")
 

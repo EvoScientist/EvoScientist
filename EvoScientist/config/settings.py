@@ -209,6 +209,10 @@ class EvoScientistConfig:
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
+    # Transient model-call failures (5xx, 429, connection drops): how long one
+    # model call keeps retrying after it first fails, in seconds; 0 = no retry.
+    model_retry_wait_seconds: int = 60
+    auto_mode_retry_wait_seconds: int = 1800  # unattended runs: auto_mode, scheduler
     # Optional auxiliary model for background/helper LLM calls (memory workers +
     # tool selector). Empty = fall back to the main model/provider.
     auxiliary_provider: str = ""  # empty = use main provider
@@ -570,6 +574,17 @@ class EvoScientistConfig:
                 "Invalid sandbox_execute_timeout %r; falling back to 300.", t
             )
             self.sandbox_execute_timeout = 300
+
+        # A retry budget that is not a whole number of seconds (a hand-edited
+        # ``60s``) goes back to its default; ``0`` or less switches the retry off.
+        for name in ("model_retry_wait_seconds", "auto_mode_retry_wait_seconds"):
+            budget = getattr(self, name)
+            if not isinstance(budget, int) or isinstance(budget, bool):
+                default = type(self).__dataclass_fields__[name].default
+                logging.getLogger(__name__).warning(
+                    "Invalid %s %r; falling back to %d.", name, budget, default
+                )
+                setattr(self, name, default)
 
         # A non-positive cache cap would evict every file entry immediately,
         # defeating the cache entirely.
@@ -998,6 +1013,8 @@ _ENV_MAPPINGS = {
     "gateway_backend_tui": "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
     "gateway_backend_standalone": "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
+    "model_retry_wait_seconds": "EVOSCIENTIST_MODEL_RETRY_WAIT_SECONDS",
+    "auto_mode_retry_wait_seconds": "EVOSCIENTIST_AUTO_MODE_RETRY_WAIT_SECONDS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",

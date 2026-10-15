@@ -76,6 +76,8 @@ class SubAgentWidget(Vertical):
         # Ordered lists to track completed / running tools for collapsing
         self._completed_ids: list[str] = []
         self._running_ids: list[str] = []
+        # Calls a finalize marked interrupted, for a box that is re-opened.
+        self._cut: list[ToolCallWidget] = []
 
     @property
     def sa_name(self) -> str:
@@ -126,7 +128,7 @@ class SubAgentWidget(Vertical):
             )
         else:
             line.append(f"\u2713 {self._display_name()}", style="bold green")
-            line.append(f"  ({self._tool_count} tools)", style="dim")
+            line.append(f"  ({len(self._tool_widgets)} tools)", style="dim")
         header.update(line)
 
     def _render_footer(self) -> None:
@@ -168,6 +170,24 @@ class SubAgentWidget(Vertical):
         self._running_ids.append(key)
         self._update_visibility()
         return w
+
+    async def discard_tool_calls(self, tool_call_ids: list[str]) -> None:
+        """Remove the tool calls a failed model attempt emitted."""
+        for tool_call_id in tool_call_ids:
+            widget = self._tool_widgets.pop(tool_call_id, None)
+            if tool_call_id in self._running_ids:
+                self._running_ids.remove(tool_call_id)
+            if tool_call_id in self._completed_ids:
+                self._completed_ids.remove(tool_call_id)
+            if widget is not None:
+                # A call a finalize had cut is not put back by a re-open.
+                if widget in self._cut:
+                    self._cut.remove(widget)
+                try:
+                    await widget.remove()
+                except Exception:
+                    pass
+        self._update_visibility()
 
     def complete_tool(
         self,
@@ -289,17 +309,52 @@ class SubAgentWidget(Vertical):
         else:
             summary_w.remove_class("--visible")
 
-    def finalize(self) -> None:
-        """Mark sub-agent as completed and stop all nested timers."""
+    def asks(self, action_requests: list[dict]) -> bool:
+        """Whether an approval's *action_requests* name a call of this box that has no result."""
+        asked = [
+            (request.get("name"), request.get("args") or {})
+            for request in action_requests
+            if isinstance(request, dict)
+        ]
+        return any(
+            tw._status == "running" and (tw._tool_name, tw._tool_args) in asked
+            for tw in self._tool_widgets.values()
+        )
+
+    def reopen(self) -> None:
+        """Show the sub-agent as working again: the turn went on after a pause
+        and the calls a finalize cut short are still open."""
+        if self._is_active:
+            return
+        self._is_active = True
+        self.remove_class("--completed")
+        if self._timer_handle is None:
+            self._timer_handle = self.set_interval(0.1, self._tick)
+        for tw in self._cut:
+            if tw._status == "interrupted":
+                tw.set_running()
+        self._cut = []
+        self._render_header()
+        self._render_footer()
+
+    def finalize(self, *, rejected: bool = False) -> None:
+        """Mark sub-agent as completed and stop all nested timers.
+
+        Calls without a result read interrupted, or rejected when the turn
+        ended at an approval nobody granted.
+        """
         self._is_active = False
         if self._timer_handle is not None:
             self._timer_handle.stop()
             self._timer_handle = None
-        # Mark any nested ToolCallWidgets still running as interrupted
         for tw in self._tool_widgets.values():
             if tw._status == "running":
                 try:
-                    tw.set_interrupted()
+                    if rejected:
+                        tw.set_rejected()
+                    else:
+                        tw.set_interrupted()
+                        self._cut.append(tw)
                 except Exception:
                     pass
         self.add_class("--completed")
