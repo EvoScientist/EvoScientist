@@ -70,6 +70,8 @@ def uv_install(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "download_constraints", fake_download)
     monkeypatch.setattr(updater, "check_server", lambda opts, emit, confirm: None)
     monkeypatch.setattr(updater, "tool_bin_dir", lambda uv: tmp_path / "bin")
+    # Nothing else runs from the environment (tests below set blockers).
+    monkeypatch.setattr(updater, "running_from_env", lambda: [])
     # The Windows handover creates the data dir's tools folder (its lock).
     monkeypatch.setattr("EvoScientist.paths.DATA_DIR", tmp_path / "data")
     monkeypatch.setattr("EvoScientist.update_helper.has_visible_desktop", lambda: True)
@@ -1312,3 +1314,154 @@ def test_helper_without_a_desktop_does_not_wait(tmp_path):
     assert "Update pending until you close: blocker" in result.stdout
     assert "Ctrl+C" not in result.stdout
     assert result.stdout.rstrip().endswith("(environment_busy)")
+
+
+# --------------------------------------------------------------------------- #
+# macOS and Linux: waiting for other processes that run from the environment
+# --------------------------------------------------------------------------- #
+TUI = {"pid": 4321, "name": "EvoSci", "path": "/env/bin/python"}
+
+
+@pytest.fixture
+def waits(uv_install, monkeypatch):
+    """Blockers for the first *n* checks (``state["n"]``), a piped stdin and
+    no sleeping."""
+    state = {"n": 1, "checks": 0}
+
+    def blockers():
+        state["checks"] += 1
+        return [TUI] if state["checks"] <= state["n"] else []
+
+    monkeypatch.setattr(updater, "running_from_env", blockers)
+    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: True)
+    monkeypatch.setattr(updater, "_reader_gone", lambda: False)
+    monkeypatch.setattr(updater.time, "sleep", lambda s: None)
+    return state
+
+
+def test_update_waits_until_other_processes_close(waits, monkeypatch):
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen([]))
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    assert code == 0
+    pending = [e for e in lines if "pending" in e.get("message", "")]
+    assert len(pending) == 1
+    assert pending[0]["detail"]["waiting_for"] == [TUI]
+    assert pending[0]["detail"]["cancel_file"].endswith("cancel")
+    assert runs.calls[0]["cmd"][0] == "/opt/uv"
+    assert _terminal(lines)["status"] == "done"
+
+
+def test_cancel_file_ends_the_wait_and_changes_nothing(waits, monkeypatch):
+    waits["n"] = 100
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+
+    def cancel_on_first_check(s):
+        raise AssertionError("cancelled before sleeping")
+
+    out = io.StringIO()
+
+    def emit_line(line):
+        out.write(line + "\n")
+
+    def emit(event):
+        out.write(json.dumps(event) + "\n")
+        cancel = (event.get("detail") or {}).get("cancel_file")
+        if cancel:
+            Path(cancel).write_text("")
+
+    monkeypatch.setattr(updater.time, "sleep", cancel_on_first_check)
+    code = updater.run_update(
+        updater.UpdateOptions(version="0.3.8", json=True),
+        emit,
+        confirm=None,
+        emit_line=emit_line,
+    )
+    lines = [json.loads(line) for line in out.getvalue().splitlines()]
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "environment_busy"
+    assert end["detail"] == {"waiting_for": [TUI]}
+    assert "Nothing was changed" in end["message"]
+    assert runs.calls == []
+
+
+def test_unattended_json_update_does_not_wait(waits, monkeypatch):
+    waits["n"] = 100
+    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: False)
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    assert code == 1
+    assert _terminal(lines)["code"] == "environment_busy"
+    assert runs.calls == []
+
+
+def test_gone_reader_ends_the_wait(waits, monkeypatch):
+    waits["n"] = 100
+    monkeypatch.setattr(updater, "_reader_gone", lambda: True)
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "environment_busy"
+    assert "has exited" in end["message"]
+
+
+def test_ctrl_c_while_waiting_is_environment_busy(waits, monkeypatch):
+    waits["n"] = 100
+    monkeypatch.setattr(updater.sys.stdin, "isatty", lambda: True, raising=False)
+
+    def interrupted(s):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(updater.time, "sleep", interrupted)
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8"))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "environment_busy"
+    assert "Ctrl+C cancels" in lines[-2]["message"]
+    assert runs.calls == []
+
+
+def test_running_from_env_matches_the_interpreter_on_the_command_line(
+    tmp_path, monkeypatch
+):
+    import psutil
+
+    env = tmp_path / "env"
+    (env / "bin").mkdir(parents=True)
+    monkeypatch.setattr(sys, "prefix", str(env))
+
+    class Proc:
+        def __init__(self, pid, cmdline, exe):
+            self.info = {"pid": pid, "name": f"p{pid}", "cmdline": cmdline, "exe": exe}
+
+    base = "/usr/lib/uv-python/cpython-3.12/bin/python3.12"
+    procs = [
+        Proc(os.getpid(), [str(env / "bin" / "python")], base),  # this process
+        Proc(11, [str(env / "bin" / "python"), str(env / "bin" / "EvoSci")], base),
+        Proc(12, ["node", "server.js"], "/usr/bin/node"),
+        Proc(13, ["tool"], str(env / "bin" / "tool")),  # a binary in the env
+        Proc(14, [], None),  # access denied
+    ]
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: procs)
+    assert [p["pid"] for p in updater.running_from_env()] == [11, 13]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="poll on a pipe")
+def test_reader_gone_sees_a_closed_pipe(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    out = os.fdopen(write_fd, "w")
+    monkeypatch.setattr(sys, "stdout", out)
+    try:
+        assert updater._reader_gone() is False
+        os.close(read_fd)
+        assert updater._reader_gone() is True
+    finally:
+        monkeypatch.undo()
+        out.close()

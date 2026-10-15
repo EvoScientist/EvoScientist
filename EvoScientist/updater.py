@@ -20,11 +20,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -633,6 +636,7 @@ def _update(
             _hand_over(opts, emit, tmp, cmd, mirror, evosci, installed, target)
             handed_over = True
             raise HandedOver
+        wait_until_free(opts, emit, tmp)
         emit(
             make_event(
                 STAGE,
@@ -665,6 +669,127 @@ def _update(
 
 class HandedOver(Exception):
     """The Windows helper took over and writes the terminal line itself."""
+
+
+def running_from_env() -> list[dict[str, Any]]:
+    """Other processes that run from this environment (macOS and Linux):
+    another TUI, an MCP server, a background job. Matched by the
+    interpreter path on their command line, which names the environment's
+    ``bin/python`` (``exe()`` resolves that symlink to the base Python), or by
+    an executable inside the environment. This process and its parent (the
+    shell, or the program that started the update) are left out."""
+    import psutil
+
+    root = os.path.realpath(sys.prefix)
+
+    def under_root(path: str, cwd: str | None) -> bool:
+        if not os.path.isabs(path):
+            if not cwd:
+                return False
+            path = os.path.join(cwd, path)
+        # The folder resolved, not the file: bin/python is a symlink out of
+        # the environment.
+        folder = os.path.realpath(os.path.dirname(path))
+        return os.path.commonpath([folder, root]) == root
+
+    skip = {os.getpid(), os.getppid()}
+    found = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "exe", "cwd"]):
+        info = proc.info
+        if info["pid"] in skip:
+            continue
+        cmdline = info.get("cmdline") or []
+        for path in (cmdline[0] if cmdline else None, info.get("exe")):
+            if path and under_root(path, info.get("cwd")):
+                found.append({"pid": info["pid"], "name": info["name"], "path": path})
+                break
+    return found
+
+
+def _stdin_is_pipe() -> bool:
+    try:
+        mode = os.fstat(sys.stdin.fileno()).st_mode
+    except (OSError, ValueError, AttributeError):
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
+def _reader_gone() -> bool:
+    """True once the program reading stdout (a pipe) has closed it."""
+    try:
+        fd = sys.stdout.fileno()
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            return False
+        poller = select.poll()
+        poller.register(fd, select.POLLOUT)
+        return any(ev & (select.POLLERR | select.POLLHUP) for _, ev in poller.poll(0))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def wait_until_free(opts: UpdateOptions, emit: Emitter, tmp: Path) -> None:
+    """Waits until no other process runs from the environment (macOS and
+    Linux), as the Windows helper does: one would load modules of the new
+    version into its old code. Prints ``running`` lines naming them, with
+    ``detail.waiting_for`` and ``detail.cancel_file`` under ``--json``.
+    Raises ``environment_busy`` when cancelled (Ctrl+C, the cancel file, the
+    reader of stdout gone) or unattended (no terminal, or under ``--json`` a
+    stdin that is not a pipe), and changes nothing."""
+    cancel = tmp / "cancel"
+    unattended = not _stdin_is_pipe() if opts.json else not sys.stdin.isatty()
+    last: list[int] | None = None
+    blockers: list[dict[str, Any]] = []
+
+    def busy(why: str) -> UpdateError:
+        names = ", ".join(f"{b['name']} ({b['pid']})" for b in blockers)
+        return UpdateError(
+            "environment_busy",
+            f"Update {why} while these still ran from EvoScientist: {names}. "
+            f"Nothing was changed. Close them and run EvoSci update again.",
+            detail={"waiting_for": blockers},
+        )
+
+    try:
+        while True:
+            blockers = running_from_env()
+            if not blockers:
+                return
+            key = [b["pid"] for b in blockers]
+            if key != last:
+                names = ", ".join(f"{b['name']} ({b['pid']})" for b in blockers)
+                if opts.json:
+                    emit(
+                        make_event(
+                            STAGE,
+                            "running",
+                            progress=0.25,
+                            message=f"Update pending until you close: {names}",
+                            detail={
+                                "waiting_for": blockers,
+                                "cancel_file": str(cancel),
+                            },
+                        )
+                    )
+                else:
+                    suffix = "" if unattended else " (Ctrl+C cancels)"
+                    emit(
+                        make_event(
+                            STAGE,
+                            "running",
+                            progress=0.25,
+                            message=f"Update pending until you close: {names}{suffix}",
+                        )
+                    )
+                last = key
+            if unattended:
+                raise busy("stopped")
+            if cancel.exists():
+                raise busy("cancelled")
+            if opts.json and _reader_gone():
+                raise busy("stopped: the program that started it has exited,")
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        raise busy("cancelled") from None
 
 
 def _exiting_pids() -> list[int]:
