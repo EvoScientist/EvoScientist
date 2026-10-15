@@ -11,9 +11,12 @@ on trusted host names and only when ``Host`` is one of them:
 - the loopback names, on any port;
 - the configured bind host and the machine's own addresses, when the backend
   listens on the network;
-- the quick-tunnel name under ``--tunnel``;
 - the origins in ``backend_allowed_origins`` (exact), whose host names also
   join the ``Host`` list.
+
+Under ``--tunnel`` the quick-tunnel name joins the ``Host`` list only: a page
+on any other origin that calls the tunnel URL needs that origin in
+``backend_allowed_origins``.
 
 Requests without ``Origin`` (the CLI, SDK scripts, the WebUI's Node server)
 are only checked for ``Host``. Non-browser programs can send any header, so
