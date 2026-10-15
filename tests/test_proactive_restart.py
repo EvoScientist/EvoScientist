@@ -68,15 +68,17 @@ def test_origin_metadata_keeps_only_the_reply_handles():
     assert not set(meta) & RESERVED_REQUEST_METADATA_KEYS
 
 
-def test_origin_without_reply_handles_stores_no_metadata_key():
-    assert "origin_metadata" not in origin_run_metadata(_origin({"subject": "x"}))
-    assert "origin_metadata" not in origin_run_metadata(_origin(None))
+def test_origin_without_reply_handles_clears_the_metadata_key():
+    # Metadata merges: an empty value replaces an older reply handle.
+    assert origin_run_metadata(_origin({"subject": "x"}))["origin_metadata"] == ""
+    assert origin_run_metadata(_origin(None))["origin_metadata"] == ""
+    assert origin_from_row(origin_run_metadata(_origin(None)))["metadata"] is None
 
 
 def test_an_origin_value_that_does_not_encode_is_dropped_with_a_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="EvoScientist.proactive.serve"):
         meta = origin_run_metadata(_origin({"thread_ts": object()}))
-    assert "origin_metadata" not in meta
+    assert meta["origin_metadata"] == ""
     assert meta["origin_chat_id"] == "C1"
     assert "does not encode" in caplog.text
 
@@ -224,9 +226,18 @@ async def test_latest_origin_checkpoints_without_a_table_is_empty(tmp_path):
 
 class _Client:
     def __init__(self, threads):
-        self.threads = SimpleNamespace(get=self._get, update=self._update)
+        self.threads = SimpleNamespace(
+            get=self._get, update=self._update, search=self._search
+        )
         self._threads = threads
         self.updates = []
+
+    def _search(self, *, metadata, sort_by, sort_order, limit):
+        return [
+            {"thread_id": tid, "metadata": t.get("metadata") or {}}
+            for tid, t in self._threads.items()
+            if all((t.get("metadata") or {}).get(k) == v for k, v in metadata.items())
+        ][:limit]
 
     def _update(self, thread_id, *, metadata):
         self.updates.append((thread_id, metadata))
@@ -309,6 +320,42 @@ def test_restore_skips_a_thread_disarmed_after_its_last_turn(workspace):
     assert controller.armed == set()
 
 
+def test_restore_finds_a_thread_armed_after_its_last_turn_on_the_server(workspace):
+    metadata = {
+        "proactive": "on",
+        "workspace_dir": workspace.key,
+        "origin_channel_type": "telegram",
+        "origin_chat_id": "42",
+        "origin_metadata": "",
+    }
+    client = _Client({"t1": {"metadata": metadata}})
+    controller = ProactiveServe(workspace=workspace, client=client)
+    restored = []
+
+    # No stored row, or a row from before ``/proactive off`` then ``on`` again.
+    for rows in ([], [_restore_row(workspace, "t1", proactive="off")]):
+        controller.armed.clear()
+        result = controller.restore(
+            rows, restore_origin=lambda tid, origin: restored.append(tid)
+        )
+        assert result == "t1"
+
+    assert restored == ["t1", "t1"]
+    assert client.updates == []
+
+
+def test_restore_skips_a_thread_serve_had_left(workspace):
+    client = _Client({"t1": {"metadata": {"proactive": "paused"}}})
+    controller = ProactiveServe(workspace=workspace, client=client)
+
+    result = controller.restore(
+        [_restore_row(workspace, "t1")], restore_origin=MagicMock()
+    )
+
+    assert result is None
+    assert controller.armed == set()
+
+
 def test_restore_does_nothing_when_unavailable(workspace):
     controller = ProactiveServe(workspace=workspace, unavailable_reason="local backend")
     origin = MagicMock()
@@ -321,27 +368,42 @@ def test_restore_does_nothing_when_unavailable(workspace):
 
 def test_a_turn_in_the_fresh_thread_ends_the_restored_thread(workspace):
     forgotten = []
+    client = _Client({"t-old": {"metadata": {"proactive": "on"}}})
     controller = ProactiveServe(
-        workspace=workspace, client=MagicMock(), forget_origin=forgotten.append
+        workspace=workspace, client=client, forget_origin=forgotten.append
     )
     controller.armed.add("t-old")
     controller.restored_thread_id = "t-old"
-    controller.mirror = MagicMock()
+    controller.reconcile = MagicMock()
 
     controller.on_turn("t-fresh")
 
     assert controller.restored_thread_id is None
     assert controller.armed == set()
     assert forgotten == ["t-old"]
-    controller.mirror.assert_called_once_with()
+    assert client.updates == [("t-old", {"proactive": "paused"})]
+    controller.reconcile.assert_called_once_with()
 
 
-def test_a_turn_in_the_restored_thread_keeps_it(workspace):
+def test_an_unavailable_controller_leaves_the_restored_thread_alone(workspace):
+    client = _Client({"t-old": {"metadata": {"proactive": "on"}}})
+    controller = ProactiveServe(workspace=workspace, client=client)
+    controller.armed.add("t-old")
+    controller.restored_thread_id = "t-old"
+    controller.unavailable_reason = "the background agent server did not move"
+
+    controller.on_turn("t-other")
+
+    assert client.updates == []
+
+
+def test_a_turn_in_the_restored_thread_makes_it_the_conversation(workspace):
     controller = ProactiveServe(workspace=workspace, client=MagicMock())
     controller.armed.add("t-old")
     controller.restored_thread_id = "t-old"
     controller.on_turn("t-old")
-    assert controller.restored_thread_id == "t-old"
+    assert controller.restored_thread_id is None
+    assert controller.armed == {"t-old"}
 
 
 def test_until_the_fresh_thread_talks_the_command_acts_on_the_restored_thread(

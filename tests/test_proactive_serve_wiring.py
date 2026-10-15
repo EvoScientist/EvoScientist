@@ -98,6 +98,8 @@ async def test_resume_in_the_same_workspace_mirrors_the_thread():
 
     await cb("new-tid", dirs)
 
+    proactive.leave.assert_called_once_with("old-tid")
+    proactive.on_turn.assert_called_once_with("new-tid")
     proactive.adopt.assert_called_once_with("new-tid")
     proactive.mirror.assert_called_once_with()
     proactive.stop.assert_not_called()

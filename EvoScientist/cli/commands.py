@@ -1535,10 +1535,15 @@ async def _apply_serve_resume_state(
         runtime_state.set_thread_id(thread_id, channel_runtime)
         proactive = getattr(channel_runtime, "proactive", None)
         if proactive is not None:
-            # A thread armed in an earlier serve session is armed again here.
-            await asyncio.to_thread(
-                _serve_proactive_call, lambda: proactive.adopt(thread_id)
-            )
+            # Within a workspace, serve pauses the thread it leaves and ends the
+            # wait on a thread restored after a restart; a thread armed or
+            # paused earlier is armed again here.
+            for call in (
+                lambda: proactive.leave(old_thread_id),
+                lambda: proactive.on_turn(thread_id),
+                lambda: proactive.adopt(thread_id),
+            ):
+                await asyncio.to_thread(_serve_proactive_call, call)
 
     if workspace_update is not None:
         updated_dirs, updated_agent = workspace_update
@@ -1634,6 +1639,7 @@ def _serve_proactive_controller(
         publish=publish_to_channel_origin,
         can_deliver=lambda thread_id: get_channel_origin(thread_id) is not None,
         forget_origin=forget_channel_origin,
+        origin_of=get_channel_origin,
     )
 
 

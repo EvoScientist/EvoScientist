@@ -343,6 +343,89 @@ def test_mirror_recreates_a_cron_the_server_lost(setup):
     assert controller._cron_id == client.crons.rows[0]["cron_id"]
 
 
+def test_arm_stores_the_chat_with_the_flag(setup):
+    controller, client, _, _ = setup
+    updates = []
+    client.threads.update = lambda tid, *, metadata: updates.append((tid, metadata))
+    controller.origin_of = lambda tid: MagicMock(
+        channel_type="telegram", chat_id="42", metadata={"thread_ts": "1.2"}
+    )
+
+    controller.arm("t1")
+
+    assert updates == [
+        (
+            "t1",
+            {
+                "proactive": "on",
+                "origin_channel_type": "telegram",
+                "origin_chat_id": "42",
+                "origin_metadata": '{"thread_ts": "1.2"}',
+            },
+        )
+    ]
+
+
+def _refuse_crons(client):
+    def refuse(*args, **kwargs):
+        raise RuntimeError("assistant not found")
+
+    client.crons.create_for_thread = refuse
+    client.crons.update = refuse
+
+
+def test_a_failed_arm_leaves_the_thread_disarmed(setup):
+    controller, client, _, _ = setup
+    _source(client)
+    _refuse_crons(client)
+
+    with pytest.raises(RuntimeError, match="assistant not found"):
+        controller.arm("t1")
+
+    assert not controller.is_armed("t1")
+    assert client.threads.threads["t1"]["metadata"] == {"proactive": "off"}
+
+
+def test_a_failed_arm_of_an_armed_thread_keeps_it_armed(setup):
+    controller, client, _, _ = setup
+    _source(client)
+    controller.arm("t1")
+    _refuse_crons(client)
+
+    with pytest.raises(RuntimeError, match="assistant not found"):
+        controller.arm("t1")
+
+    assert controller.is_armed("t1")
+    assert client.threads.threads["t1"]["metadata"] == {"proactive": "on"}
+
+
+def test_leaving_an_armed_thread_pauses_it_until_serve_resumes_it(setup):
+    controller, client, _, _ = setup
+    _source(client)
+    controller.arm("t1")
+
+    controller.leave("t1")
+
+    assert not controller.is_armed("t1")
+    assert client.threads.threads["t1"]["metadata"] == {"proactive": "paused"}
+    assert client.crons.rows == []
+
+    controller.adopt("t1")
+
+    assert controller.is_armed("t1")
+    assert client.threads.threads["t1"]["metadata"] == {"proactive": "on"}
+
+
+def test_reconcile_writes_back_a_flag_a_restart_dropped(setup):
+    controller, client, _, _ = setup
+    _source(client)
+    controller.armed.add("t1")
+
+    controller.reconcile()
+
+    assert client.threads.threads["t1"]["metadata"] == {"proactive": "on"}
+
+
 def test_moving_workspace_leaves_the_old_armed_threads_behind(setup, tmp_path):
     controller, client, origins, _ = setup
     controller.armed.add("t1")

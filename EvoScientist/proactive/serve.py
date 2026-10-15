@@ -88,6 +88,9 @@ def origin_run_metadata(origin: Any) -> dict[str, str]:
         for key, value in (origin.metadata or {}).items()
         if key in ORIGIN_METADATA_KEYS and value is not None
     }
+    # Always sent: metadata merges, so a missing key would keep an older reply
+    # handle (a Slack thread the chat has since left).
+    meta["origin_metadata"] = ""
     if kept:
         try:
             meta["origin_metadata"] = json.dumps(kept, sort_keys=True)
@@ -204,8 +207,10 @@ class ProactiveServe:
     can_deliver: Callable[[str], bool] | None = None
     # Drop a thread's channel origin (serve stops delivering to it).
     forget_origin: Callable[[str], None] | None = None
-    # The armed thread restored at startup, while serve's fresh thread has
-    # had no turn yet.
+    # A thread's channel origin, or None (a ``cli.channel._ChannelOrigin``).
+    origin_of: Callable[[str], Any] | None = None
+    # The armed thread restored at startup, until serve's thread changes or
+    # its fresh thread has its first turn.
     restored_thread_id: str | None = None
     _cron_id: str | None = None
     _cron_thread_id: str | None = None
@@ -228,13 +233,26 @@ class ProactiveServe:
 
         The flag goes to thread metadata at once (a slash command runs no agent
         turn, so it writes no checkpoint); the runtime merges thread metadata
-        into every later run, so the flag reaches the checkpoints too.
+        into every later run, so the flag reaches the checkpoints too. The chat
+        goes with it, so a restart before the next turn still finds where to
+        deliver. A first arm whose cron cannot be created is undone.
         """
         self._require_available()
+        origin = self.origin_of(thread_id) if self.origin_of is not None else None
+        metadata = {"proactive": "on"}
+        if origin is not None:
+            metadata.update(origin_run_metadata(origin))
         with self._lock:
-            self.client.threads.update(thread_id, metadata={"proactive": "on"})
+            was_armed = thread_id in self.armed
+            self.client.threads.update(thread_id, metadata=metadata)
             self.armed.add(thread_id)
-            self.mirror()
+            try:
+                self.mirror()
+            except Exception:
+                if not was_armed:
+                    self.armed.discard(thread_id)
+                    self.client.threads.update(thread_id, metadata={"proactive": "off"})
+                raise
 
     def disarm(self, thread_id: str) -> None:
         """Disarm *thread_id*; delete the cron when it was the last armed thread.
@@ -251,6 +269,26 @@ class ProactiveServe:
                 self.mirror()
             else:
                 self.reconcile()
+
+    def leave(self, thread_id: str) -> None:
+        """Serve moved off *thread_id*: pause its follow-ups until it comes back.
+
+        ``paused`` keeps a restart from restoring a conversation the user left;
+        :meth:`adopt` turns it on again on ``/resume``.
+        """
+        if not self.available:
+            return
+        with self._lock:
+            if thread_id in self.armed:
+                self._pause(thread_id)
+
+    def _pause(self, thread_id: str) -> None:
+        self.client.threads.update(thread_id, metadata={"proactive": "paused"})
+        self.armed.discard(thread_id)
+        if self.armed:
+            self.mirror()
+        else:
+            self.reconcile()
 
     def is_armed(self, thread_id: str) -> bool:
         return thread_id in self.armed
@@ -296,6 +334,7 @@ class ProactiveServe:
             self._mirrored = None
             if not self.armed:
                 return
+            self._restamp_armed()
             thread_id = self._ensure_cron_thread()
             self._cancel_running(thread_id)
             candidates = self.candidates()
@@ -371,7 +410,8 @@ class ProactiveServe:
     def adopt(self, thread_id: str) -> None:
         """Take *thread_id*'s armed flag from its metadata (serve resumed it).
 
-        Mirrors nothing: the caller mirrors once the resume is done.
+        A thread serve paused when it left is turned on again. Mirrors nothing:
+        the caller mirrors once the resume is done.
         """
         if not self.available:
             return
@@ -383,10 +423,28 @@ class ProactiveServe:
             return
         flag = (thread.get("metadata") or {}).get("proactive")
         with self._lock:
-            if flag == "on":
+            if flag == "paused":
+                self.client.threads.update(thread_id, metadata={"proactive": "on"})
+            if flag in ("on", "paused"):
                 self.armed.add(thread_id)
             elif flag == "off":
                 self.armed.discard(thread_id)
+
+    def _restamp_armed(self) -> None:
+        """Write the flag back where a dev-server restart without persistence lost it.
+
+        The tick reads the flag from thread metadata only, and no later run
+        stamps it again.
+        """
+        from langgraph_sdk.errors import NotFoundError
+
+        for thread_id in sorted(self.armed):
+            try:
+                metadata = self.client.threads.get(thread_id).get("metadata") or {}
+            except NotFoundError:
+                continue
+            if "proactive" not in metadata:
+                self.client.threads.update(thread_id, metadata={"proactive": "on"})
 
     def _ensure_cron_thread(self) -> str:
         """The cron thread: the one already used in this workspace, else a new one.
@@ -478,13 +536,16 @@ class ProactiveServe:
     ) -> str | None:
         """Re-arm the newest armed thread of this workspace after a restart.
 
-        *rows* come from ``sessions.latest_origin_checkpoints``, newest first:
-        per thread, the stored folders and channel origin of its newest
-        checkpoint that has an origin, and its newest stored flag. The thread's
-        metadata on the server wins over that flag when it says ``"off"``
-        (``/proactive off`` after the last turn), and the flag is written back to that metadata
-        when the restart lost it. The restored thread stays a candidate until the
-        fresh thread serve started on has its first turn.
+        The server's thread metadata holds the flag and the chat (``/proactive
+        on`` writes both; serve pauses a thread it leaves), so the newest armed
+        thread there comes first. *rows* come from
+        ``sessions.latest_origin_checkpoints``, newest first: per thread, the
+        stored folders and channel origin of its newest checkpoint that has an
+        origin, and its newest stored flag; they stand in when a restart without
+        file persistence lost the metadata, and the flag is written back then.
+        A flag still on the server wins over a stored one. The restored thread
+        stays a candidate until serve's thread changes or its fresh thread has
+        its first turn.
         """
         from langgraph_sdk.errors import NotFoundError
 
@@ -493,7 +554,17 @@ class ProactiveServe:
         if not self.available:
             return None
         with self._lock:
-            for row in rows:
+            armed = self.client.threads.search(
+                metadata={"proactive": "on", "workspace_dir": self.workspace.key},
+                sort_by="updated_at",
+                sort_order="desc",
+                limit=1,
+            )
+            on_server = [
+                {**(t.get("metadata") or {}), "thread_id": t["thread_id"]}
+                for t in armed or []
+            ]
+            for row in [*on_server, *rows]:
                 if row.get("proactive") != "on":
                     continue
                 dirs = SessionDirs.from_stored(
@@ -510,7 +581,8 @@ class ProactiveServe:
                 except NotFoundError:
                     continue
                 flag = (thread.get("metadata") or {}).get("proactive")
-                if flag == "off":
+                if flag not in (None, "on"):
+                    # ``off``, or ``paused``: serve had left the thread.
                     continue
                 if flag != "on":
                     # The tick reads the flag from thread metadata only, which
@@ -525,20 +597,25 @@ class ProactiveServe:
         return None
 
     def on_turn(self, thread_id: str) -> None:
-        """A channel turn ran on *thread_id*.
+        """A channel turn ran on *thread_id*, or serve moved to it.
 
         After a restart the restored thread is a candidate only until the user
-        talks in the fresh thread: from then on that is the conversation.
+        talks in, or moves to, another thread: from then on that is the
+        conversation, and the restored one is paused. Moving to the restored
+        thread makes it the current one.
         """
+        if not self.available:
+            return
         with self._lock:
             restored = self.restored_thread_id
-            if restored is None or restored == thread_id:
+            if restored is None:
                 return
             self.restored_thread_id = None
-            self.armed.discard(restored)
+            if restored == thread_id:
+                return
             if self.forget_origin is not None:
                 self.forget_origin(restored)
-            self.mirror()
+            self._pause(restored)
 
     def _check_cron(self, now: float) -> list[dict[str, Any]]:
         """Recreate a missing, failed or stalled cron; return the latest decisions."""
