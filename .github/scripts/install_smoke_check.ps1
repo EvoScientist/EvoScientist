@@ -25,7 +25,9 @@ $env:PYTHONIOENCODING = 'utf-8'
 try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
 
 $IndexUrl = if ($env:INDEX_URL) { $env:INDEX_URL } else { 'https://pypi.org/simple' }
-$DataDir = if ($env:EVOSCIENTIST_DATA_DIR) { $env:EVOSCIENTIST_DATA_DIR } else { Join-Path $HOME '.evoscientist' }
+# The home folder as Python finds it (USERPROFILE first), as install.ps1 does.
+$UserHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+$DataDir = if ($env:EVOSCIENTIST_DATA_DIR) { $env:EVOSCIENTIST_DATA_DIR } else { Join-Path $UserHome '.evoscientist' }
 $BackendPort = if ($env:EVOSCIENTIST_LANGGRAPH_DEV_PORT) { $env:EVOSCIENTIST_LANGGRAPH_DEV_PORT } else { '6174' }
 $WebuiPort = if ($env:EVOSCIENTIST_WEBUI_PORT) { $env:EVOSCIENTIST_WEBUI_PORT } else { '4716' }
 $BackendUrl = "http://127.0.0.1:$BackendPort/ok"
@@ -76,7 +78,7 @@ function Test-Answers([string]$Url) {
 function Show-Logs([string]$Log) {
     Write-Host '--- EvoSci output'
     Get-Content -Encoding UTF8 -ErrorAction SilentlyContinue $Log, "$Log.err" | Write-Host
-    foreach ($file in @("$HOME\.config\evoscientist\langgraph_dev.log", "$HOME\.config\evoscientist\webui.log")) {
+    foreach ($file in @("$UserHome\.config\evoscientist\langgraph_dev.log", "$UserHome\.config\evoscientist\webui.log")) {
         Write-Host "--- $file"
         Get-Content -Encoding UTF8 -Tail 80 -ErrorAction SilentlyContinue $file | Write-Host
     }

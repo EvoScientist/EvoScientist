@@ -26,6 +26,8 @@
 # only the small type behind Get-LongPath stays loaded; errors are thrown,
 # never `exit`, which would close the window.
 
+# Refuses an unknown or misspelled option instead of ignoring it.
+[CmdletBinding()]
 param(
     [switch]$Cn,
     [string]$Version = '',
@@ -197,9 +199,12 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
         return $process.ExitCode
     }
 
+    # Not -OutFile, which Windows PowerShell 5.1 resolves as a wildcard path:
+    # a profile folder with [ or ] in its name would fail.
     function Get-Download([string]$Url, [string]$OutFile) {
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $OutFile
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Url
+            [IO.File]::WriteAllBytes($OutFile, $response.RawContentStream.ToArray())
         } catch {
             throw "Download failed: $Url ($($_.Exception.Message))"
         }
@@ -242,14 +247,17 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
 
     # The data dir rule of EvoScientist's paths module: EVOSCIENTIST_DATA_DIR
     # when set and not empty (with ~ expanded), else ~\.evoscientist; made
-    # absolute.
+    # absolute. The home folder as Python finds it: USERPROFILE first, while
+    # Windows PowerShell 5.1 sets $HOME from HOMEDRIVE + HOMEPATH, which point
+    # at a network home folder on some domain accounts.
     function Get-DataDir {
+        $userHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
         $dir = $env:EVOSCIENTIST_DATA_DIR
-        if (-not $dir) { $dir = Join-Path $HOME '.evoscientist' }
+        if (-not $dir) { $dir = Join-Path $userHome '.evoscientist' }
         if ($dir -eq '~') {
-            $dir = $HOME
+            $dir = $userHome
         } elseif ($dir.StartsWith('~\') -or $dir.StartsWith('~/')) {
-            $dir = Join-Path $HOME $dir.Substring(2)
+            $dir = Join-Path $userHome $dir.Substring(2)
         }
         if (-not [IO.Path]::IsPathRooted($dir)) {
             $dir = Join-Path (Get-Location).ProviderPath $dir
@@ -303,36 +311,36 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
             Write-Info "Downloading uv $UvVersion..."
             Get-Download "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip" $archive
         }
-        $actual = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLower()
         if ($actual -ne $expected) {
             throw "The uv download does not match its pinned SHA-256 (expected $expected, got $actual). Nothing was installed."
         }
         $unpacked = Join-Path $TempDir 'uv-unpacked'
-        Expand-Archive -Path $archive -DestinationPath $unpacked -Force
+        Expand-Archive -LiteralPath $archive -DestinationPath $unpacked -Force
         $exe = if ($Cn) { Join-Path $unpacked "uv-$UvVersion.data\scripts\uv.exe" } else { Join-Path $unpacked 'uv.exe' }
         New-Item -ItemType Directory -Force -Path $staged | Out-Null
-        Move-Item -Path $exe -Destination (Join-Path $staged 'uv.exe')
-        if (Test-Path $final) { Remove-Item -Recurse -Force $final }
-        Move-Item -Path $staged -Destination $final
+        Move-Item -LiteralPath $exe -Destination (Join-Path $staged 'uv.exe')
+        if (Test-Path -LiteralPath $final) { Remove-Item -LiteralPath $final -Recurse -Force }
+        Move-Item -LiteralPath $staged -Destination $final
         $uv = Join-Path $final 'uv.exe'
         # UTF-8 without a BOM: EvoScientist reads it with json.loads.
         $json = [ordered]@{ version = $UvVersion; path = $uv } | ConvertTo-Json -Compress
         $record = Join-Path $tools 'uv.json'
         [IO.File]::WriteAllText("$record.tmp", $json, (New-Object Text.UTF8Encoding $false))
-        Move-Item -Force -Path "$record.tmp" -Destination $record
+        Move-Item -Force -LiteralPath "$record.tmp" -Destination $record
         return $uv
     }
 
     function Get-Constraints([string]$InstallVersion, [string]$TempDir) {
         $file = Join-Path $TempDir 'constraints.txt'
         if ($env:EVOSCI_INSTALL_CONSTRAINTS) {
-            Copy-Item -Path $env:EVOSCI_INSTALL_CONSTRAINTS -Destination $file
+            Copy-Item -LiteralPath $env:EVOSCI_INSTALL_CONSTRAINTS -Destination $file
             return $file
         }
         $base = if ($Cn) { "$CnRawBase@v$InstallVersion" } else { "$RawBase/v$InstallVersion" }
         Write-Info "Downloading the constraints of EvoScientist $InstallVersion..."
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri "$base/constraints.txt" -OutFile $file
+            Get-Download "$base/constraints.txt" $file
         } catch {
             throw "Cannot download $base/constraints.txt, so EvoScientist $InstallVersion cannot be installed with its tested dependencies."
         }
@@ -441,7 +449,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
             $receipt = Join-Path $envDir 'uv-receipt.toml'
             $python = Join-Path $envDir 'Scripts\python.exe'
             $lost = 'Extras and packages added with --with (such as MCP servers) may be dropped by the reinstall.'
-            if ((Test-Path $receipt) -and (Test-Path $python)) {
+            if ((Test-Path -LiteralPath $receipt) -and (Test-Path -LiteralPath $python)) {
                 $reader = Join-Path $tempDir 'read_receipt.py'
                 [IO.File]::WriteAllText($reader, $ReceiptReader, (New-Object Text.UTF8Encoding $false))
                 $read = Invoke-Captured $python @('-X', 'utf8', '-I', $reader, $receipt) -WithStderr
@@ -531,7 +539,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
         foreach ($name in $envNames) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process') }
         [Net.ServicePointManager]::SecurityProtocol = $savedProtocol
         try { [Net.WebRequest]::DefaultWebProxy.Credentials = $savedCredentials } catch { }
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tempDir
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
