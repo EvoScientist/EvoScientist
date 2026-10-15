@@ -8,6 +8,7 @@
 #             WebUI release in the core's range
 #   offline   EvoSci setup and the WebUI launch; run with the network blocked
 #   blocked   succeeds only when https://pypi.org cannot be reached
+#   update    EvoSci update to a release (install_smoke_update.py)
 #
 # EXPECTED_VERSION (else the newest release on INDEX_URL) and
 # EVOSCI_INSTALL_CONSTRAINTS (else constraints.txt at the release tag) are
@@ -180,9 +181,35 @@ blocked() {
   echo "network blocked"
 }
 
+# EvoSci update to a release through this code's updater. With
+# EVOSCI_INSTALL_SOURCE (a pull request) the install is the newest release
+# from the scripts, whose receipt the update reads, and this wheel goes over
+# it with uv pip, which leaves the receipt alone; the update then moves it to
+# the newest release. Without it, the installed release is reinstalled, once
+# a release has EvoSci update.
+update() {
+  local key=version check target base
+  if [ -n "${EVOSCI_INSTALL_SOURCE:-}" ]; then
+    # uv splits a -c path at spaces (astral-sh/uv#12639): by name, from its folder.
+    (cd "$(dirname "$EVOSCI_INSTALL_CONSTRAINTS")" &&
+      "$UV" pip install -q --python "$PYTHON" --reinstall-package evoscientist \
+        -c "$(basename "$EVOSCI_INSTALL_CONSTRAINTS")" "$EVOSCI_INSTALL_SOURCE")
+    key=latest
+  elif ! "$EVOSCI" update --help >/dev/null 2>&1; then
+    echo "This release has no EvoSci update yet; nothing to check."
+    return 0
+  fi
+  check=$("$EVOSCI" update --check --json </dev/null | tail -n 1)
+  target=$("$PYTHON" -c 'import json, sys; print(json.loads(sys.argv[1])["detail"][sys.argv[2]])' "$check" "$key")
+  # Not the environment's Python: it would run from the install being replaced.
+  base=$("$PYTHON" -c 'import sys; print(sys._base_executable)')
+  "$base" "$(dirname "$0")/install_smoke_update.py" "$EVOSCI" "$target"
+}
+
 case "${1:-}" in
   online) online ;;
   offline) offline ;;
   blocked) blocked ;;
-  *) fail "usage: $0 online|offline|blocked" ;;
+  update) update ;;
+  *) fail "usage: $0 online|offline|blocked|update" ;;
 esac

@@ -1,8 +1,8 @@
 name: Installer smoke test
 
 # Runs scripts/install.sh and scripts/install.ps1 on clean runners, then checks
-# that EvoScientist works online and with the network blocked
-# (.github/scripts/install_smoke_check.{sh,ps1}).
+# that EvoScientist works online and with the network blocked, and that
+# EvoSci update moves it to a release (.github/scripts/install_smoke_*).
 #
 # Pull requests: the scripts from the pull request first install the newest
 # release, then over it a wheel built from the pull request, with a
@@ -21,11 +21,15 @@ on:
       - "EvoScientist/cli/**"
       - "EvoScientist/langgraph_dev/**"
       - "EvoScientist/paths.py"
+      # EvoSci update, the last check.
+      - "EvoScientist/updater.py"
+      - "EvoScientist/update_helper.py"
+      - "EvoScientist/uv_tool.py"
       - "constraints.txt"
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/install-smoke.yml"
-      - ".github/scripts/install_smoke_check.*"
+      - ".github/scripts/install_smoke_*"
   workflow_run:
     workflows: ["Publish to PyPI"]
     types: [completed]
@@ -243,6 +247,39 @@ jobs:
           & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode block
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode offline
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # EvoSci update through this code (on Windows its helper), last: it
+      # replaces the install. A pull request installs the newest release
+      # again first, since the wheel install's receipt names a file, which
+      # EvoSci update does not reinstall; the check puts the wheel's code
+      # over it and updates to the newest release. After a release it
+      # reinstalls the installed one.
+      - name: EvoSci update
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$MODE" = pr ]; then
+            "$RUNNER_TEMP/clean" bash "$GITHUB_WORKSPACE/scripts/install.sh" $CN_FLAG --no-setup --no-modify-path
+          fi
+          "$RUNNER_TEMP/clean" ${EVOSCI_INSTALL_SOURCE:+EVOSCI_INSTALL_SOURCE="$EVOSCI_INSTALL_SOURCE"} \
+            ${EVOSCI_INSTALL_CONSTRAINTS:+EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS"} \
+            bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" update
+
+      - name: EvoSci update (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          Set-Location $env:RUNNER_TEMP
+          Get-NetFirewallRule -DisplayName 'evosci-smoke-block-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+          if ($env:MODE -eq 'pr') {
+            & ([scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\scripts\install.ps1"))) -NoSetup -NoModifyPath
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            $env:EVOSCI_INSTALL_SOURCE = (Get-ChildItem "$env:RUNNER_TEMP\dist\*.whl").FullName
+            $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt"
+          }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode update
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       # One path per OS: upload-artifact refuses files without a common root.
