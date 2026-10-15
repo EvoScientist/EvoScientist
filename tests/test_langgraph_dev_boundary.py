@@ -317,16 +317,22 @@ def test_boundary_accepts_a_loopback_websocket(guarded, reached, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("api_url", "trusted"),
+    ("api_url", "host", "trusted"),
     [
-        ("https://quiet-river-bend.trycloudflare.com", True),
-        ("https://api.trycloudflare.com", False),  # the tunnel could not be created
-        ("http://127.0.0.1:6174", False),
-        (None, False),
+        (
+            "https://quiet-river-bend.trycloudflare.com",
+            "quiet-river-bend.trycloudflare.com",
+            True,
+        ),
+        # the tunnel could not be created
+        ("https://api.trycloudflare.com", "api.trycloudflare.com", False),
+        ("https://attacker.example", "attacker.example", False),
+        ("http://127.0.0.1:6174", "quiet-river-bend.trycloudflare.com", False),
+        (None, "quiet-river-bend.trycloudflare.com", False),
     ],
 )
 def test_boundary_trusts_only_a_quick_tunnel_name(
-    api_url, trusted, guarded, monkeypatch
+    api_url, host, trusted, guarded, monkeypatch
 ):
     _set_trust(monkeypatch)
     if api_url is None:
@@ -334,9 +340,7 @@ def test_boundary_trusts_only_a_quick_tunnel_name(
     else:
         monkeypatch.setenv("LANGGRAPH_API_URL", api_url)
     client = guarded()
-    tunnel = client.get(
-        "/threads", headers={"Host": "quiet-river-bend.trycloudflare.com"}
-    )
+    tunnel = client.get("/threads", headers={"Host": host})
     assert (tunnel.status_code == 200) == trusted
     other = client.get("/threads", headers={"Host": "other.trycloudflare.com"})
     assert other.status_code == 403
