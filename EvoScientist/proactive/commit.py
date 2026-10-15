@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 # The shadow model returns this to decline.
 NO_PUSH_SENTINEL = "NO_PUSH"
+# Stripped from a line before it is compared with the sentinel: models wrap
+# or punctuate it (``**NO_PUSH**``, ``NO_PUSH.``).
+_SENTINEL_WRAPPING = "`*_\"'.!:- "
 
 # Longest reply that still reads as one channel message (Telegram's limit is
 # 4096). Anything longer is a runaway generation, not a push.
@@ -84,6 +87,20 @@ class CommitDecision:
     message: AIMessage | None = None
 
 
+def _is_no_push(text: str) -> bool:
+    """Whether the first or last non-empty line is the sentinel, wrapping aside.
+
+    Models add markdown, punctuation or a line of justification around it.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    bare = {
+        line.strip().strip(_SENTINEL_WRAPPING).upper() for line in (lines[0], lines[-1])
+    }
+    return NO_PUSH_SENTINEL in bare
+
+
 def decide_commit(
     reply: str | None,
     *,
@@ -95,7 +112,7 @@ def decide_commit(
 ) -> CommitDecision:
     """Decide what to do with the shadow's reply.
 
-    - no reply, an empty one, or ``NO_PUSH``: skip;
+    - no reply, an empty one, or ``NO_PUSH`` as its first or last line: skip;
     - longer than ``max_reply_chars`` (counted on the text that would be
       sent): skip as ``too_long``;
     - a tool-call envelope written as text: skip as ``tool_call_text``;
@@ -107,7 +124,7 @@ def decide_commit(
         reason = "no_reply"
     elif not text:
         reason = "empty"
-    elif text == NO_PUSH_SENTINEL:
+    elif _is_no_push(text):
         reason = "no_push"
     elif len(text) > max_reply_chars:
         reason = "too_long"

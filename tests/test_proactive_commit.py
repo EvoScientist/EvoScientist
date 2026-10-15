@@ -47,6 +47,13 @@ def test_push_is_a_tagged_ai_message_with_the_stripped_text():
         ("   ", "empty"),
         ("NO_PUSH", "no_push"),
         (" NO_PUSH\n", "no_push"),
+        ("NO_PUSH.", "no_push"),
+        ("**NO_PUSH**", "no_push"),
+        ("`NO_PUSH`", "no_push"),
+        ("no_push", "no_push"),
+        ("NO_PUSH:", "no_push"),
+        ("NO_PUSH\nNothing new since the last reply.", "no_push"),
+        ("Nothing new since the last reply.\n\nNO_PUSH", "no_push"),
         ("x" * (MAX_PUSH_CHARS + 1), "too_long"),
         ("<tool_call>execute ls</tool_call>", "tool_call_text"),
     ],
@@ -56,6 +63,12 @@ def test_skips(reply, reason):
     assert decision.action == "skip"
     assert decision.reason == reason
     assert decision.message is None
+
+
+def test_a_message_that_mentions_the_sentinel_is_pushed():
+    assert (
+        _decide("I could answer NO_PUSH here,\nbut the run finished.").action == "push"
+    )
 
 
 def test_length_is_counted_on_the_text_that_would_be_sent():
