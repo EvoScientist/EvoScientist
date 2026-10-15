@@ -118,13 +118,13 @@ There is no `--uninstall` option. On macOS and Linux:
 On Windows (PowerShell):
 
 1. ```powershell
-   $uv = (Get-Content -Raw -Encoding UTF8 "$env:USERPROFILE\.evoscientist\tools\uv.json" | ConvertFrom-Json).path
+   $uv = (Get-Content -Raw -Encoding UTF8 -LiteralPath "$env:USERPROFILE\.evoscientist\tools\uv.json" | ConvertFrom-Json).path
    & $uv tool uninstall EvoScientist
    ```
    For a full removal, as on macOS and Linux: `& $uv python uninstall 3.12` and
    `& $uv cache clean`.
 2. ```powershell
-   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:USERPROFILE\.evoscientist\tools", "$env:USERPROFILE\.evoscientist\envs"
+   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath "$env:USERPROFILE\.evoscientist\tools", "$env:USERPROFILE\.evoscientist\envs"
    ```
 3. As on macOS and Linux: `$env:USERPROFILE\.config\evoscientist` and
    `$env:USERPROFILE\.evoscientist` hold your settings and data.
