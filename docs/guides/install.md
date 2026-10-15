@@ -48,7 +48,8 @@ above for them.
    changed.
 2. Picks the newest EvoScientist release on the package index it installs from
    (or `--version`), and downloads that release's `constraints.txt`.
-3. Installs EvoScientist as a uv tool on uv's own Python 3.12, with exactly the
+3. Installs EvoScientist as a uv tool on uv's own Python 3.12 (a re-run keeps
+   the Python version of the existing install), with exactly the
    dependency versions the release was tested with. uv downloads that Python
    once; a Python already on the machine is not used.
 4. Puts uv's tool bin directory (`~/.local/bin`, or what `uv tool dir --bin`

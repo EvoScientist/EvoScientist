@@ -11,8 +11,8 @@
 #
 # Steps: download a pinned uv and check its SHA-256, keep it under
 # <data dir>\tools, install EvoScientist as a uv tool with the release's
-# constraints.txt on uv's own Python 3.12, put the tool bin directory on the
-# user PATH, then run `EvoSci setup`. The data dir is $env:EVOSCIENTIST_DATA_DIR
+# constraints.txt on uv's own Python (3.12, or on a re-run the one the existing
+# install asked for), put the tool bin directory on the user PATH, then run `EvoSci setup`. The data dir is $env:EVOSCIENTIST_DATA_DIR
 # when set and not empty, else ~\.evoscientist. A uv installed by the user is
 # never touched.
 #
@@ -59,10 +59,12 @@ function Install-EvoScientist {
 
     # Reads an existing uv-receipt.toml (argv[1]) with the old tool
     # environment's own Python and prints what a reinstall needs to keep, one
-    # tab-separated line each: "extras<TAB>a,b" for EvoScientist's extras,
-    # "with<TAB><requirement>" and "with-editable<TAB><path>" for the other
-    # requirements (added with --with, e.g. by the MCP installer),
-    # "warn<TAB><text>" for anything it cannot keep. Same code as install.sh.
+    # tab-separated line each: "python<TAB><request>" for the receipt's Python
+    # (else this interpreter's X.Y), "extras<TAB>a,b" for EvoScientist's
+    # extras, "with<TAB><requirement>" and "with-editable<TAB><path>" for the
+    # other requirements (added with --with, e.g. by the MCP installer),
+    # "warn<TAB><text>" for anything it cannot keep. Same code as install.sh;
+    # tests/test_install_scripts.py runs both on the same receipts.
     $ReceiptReader = @'
 import re, sys, tomllib
 from pathlib import Path
@@ -106,10 +108,13 @@ def requirement(entry):
     return "with", head + entry.get("specifier", "") + tail
 
 try:
-    entries = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["tool"]["requirements"]
+    tool = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["tool"]
+    entries = tool["requirements"]
 except Exception as exc:
     print("warn\tcannot read " + sys.argv[1] + ": " + str(exc))
     sys.exit(0)
+python = tool.get("python")
+print("python\t" + (python if isinstance(python, str) else "%d.%d" % sys.version_info[:2]))
 for entry in entries:
     try:
         if norm(entry["name"]) == "evoscientist":
@@ -459,6 +464,7 @@ public static extern uint GetLongPathName(string shortPath, System.Text.StringBu
                     foreach ($line in $read.Lines) {
                         $kind, $value = "$line".Split("`t", 2)
                         switch ($kind) {
+                            'python' { $PythonVersion = $value }
                             'extras' { $extras = "[$value]" }
                             'with' { $withArgs += @('--with', $value) }
                             'with-editable' { $withArgs += @('--with-editable', $value) }
