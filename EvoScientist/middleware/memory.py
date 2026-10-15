@@ -87,7 +87,8 @@ These profile notes live under `/memories/profile/`:
 - `/memories/profile/RESEARCH_TASTE.md`: research interests, standards, methods that fit, and things to avoid.
 - `/memories/profile/projects/{project_id}/PROJECT_PROFILE.md`: conventions, commands, and pitfalls for this workspace.
 
-No file tools are available on this turn; use the profile context below as it is.
+No file tools are available on this turn; use the profile context below as it is,
+and do not try to read a part marked as omitted.
 """
 
 OBSERVATION_MEMORY_READ_INSTRUCTIONS = """

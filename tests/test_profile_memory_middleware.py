@@ -1614,6 +1614,27 @@ def test_tool_less_async_request_gets_no_memory_tool_directives(tmp_path):
     assert "No memory tools are available on this turn" in without
 
 
+def test_tool_less_request_with_a_truncated_profile_is_not_told_to_read_it(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(memory_module, "_warned_profile_truncations", set())
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace, max_inline_profile_chars=4_000
+    )
+    middleware.modify_request(_request())
+    (memories / "profile" / "USER_PROFILE.md").write_text(
+        "".join(f"- preference {i:04d}\n" for i in range(1_000)), encoding="utf-8"
+    )
+
+    without = _system(middleware.modify_request(_request_with_tools([])))
+
+    assert "characters omitted" in without
+    assert "do not try to read a part marked as omitted" in without
+
+
 def test_index_too_large_to_inline_mentions_search_only_with_hints():
     from EvoScientist.memory.observations.index import (
         _truncated_observation_index_context,
