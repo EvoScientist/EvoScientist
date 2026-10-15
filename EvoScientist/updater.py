@@ -603,68 +603,80 @@ def _update(
             f"{install_command()}"
         )
 
-    tmp = Path(tempfile.mkdtemp(prefix="evosci-update-"))
-    handed_over = False
+    # Held from the first wait to the end of the new setup (macOS and Linux):
+    # one update at a time, as the Windows helper's lock.
+    lock = None
     try:
-        constraints = tmp / "constraints.txt"
-        emit(
-            make_event(
-                STAGE,
-                "running",
-                progress=0.1,
-                message=f"Downloading the constraints of EvoScientist {target}",
-            )
-        )
-        download_constraints(target, mirror, constraints)
-        check_server(opts, emit, confirm)
-        if _version(target) < _version(installed):
-            backup = backup_config(installed)
-            if backup is not None:
-                emit(
-                    make_event(
-                        STAGE,
-                        "running",
-                        progress=0.2,
-                        message=f"Copied the config to {backup} before the rollback",
-                    )
+        tmp = Path(tempfile.mkdtemp(prefix="evosci-update-"))
+        handed_over = False
+        try:
+            constraints = tmp / "constraints.txt"
+            emit(
+                make_event(
+                    STAGE,
+                    "running",
+                    progress=0.1,
+                    message=f"Downloading the constraints of EvoScientist {target}",
                 )
-        cmd = uv_install_command(uv, receipt, target, constraints)
-        evosci = tool_bin_dir(uv) / (
-            "EvoSci.exe" if sys.platform == "win32" else "EvoSci"
-        )
-        if sys.platform == "win32":
-            _hand_over(opts, emit, tmp, cmd, mirror, evosci, installed, target)
-            handed_over = True
-            raise HandedOver
-        wait_until_free(opts, emit, tmp)
-        emit(
-            make_event(
-                STAGE,
-                "running",
-                progress=0.3,
-                message=f"Installing EvoScientist {target}",
             )
-        )
-        # uv's own output goes to stderr under --json: stdout is for events.
-        result = subprocess.run(
-            cmd,
-            cwd=tmp,
-            env=uv_tool.uv_environment(cmd[0], mirror),
-            stdout=sys.stderr if opts.json else None,
-        )
-        if result.returncode != 0:
-            raise UpdateError(
-                "install_failed",
-                f"uv could not install EvoScientist {target} (see uv's output); "
-                f"the installed version is unchanged.{exclude_newer_hint()}",
+            download_constraints(target, mirror, constraints)
+            if sys.platform != "win32":
+                lock = _hold_update_lock()
+                # Before the server is stopped: a run that cannot wait then ends
+                # with nothing changed. The server itself is stopped next.
+                wait_until_free(opts, emit, tmp, skip_server=True)
+            check_server(opts, emit, confirm)
+            if _version(target) < _version(installed):
+                backup = backup_config(installed)
+                if backup is not None:
+                    emit(
+                        make_event(
+                            STAGE,
+                            "running",
+                            progress=0.25,
+                            message=f"Copied the config to {backup} before the rollback",
+                        )
+                    )
+            cmd = uv_install_command(uv, receipt, target, constraints)
+            evosci = tool_bin_dir(uv) / (
+                "EvoSci.exe" if sys.platform == "win32" else "EvoSci"
             )
-    finally:
-        if not handed_over:  # the helper deletes it when it ends
-            shutil.rmtree(tmp, ignore_errors=True)
+            if sys.platform == "win32":
+                _hand_over(opts, emit, tmp, cmd, mirror, evosci, installed, target)
+                handed_over = True
+                raise HandedOver
+            wait_until_free(opts, emit, tmp)
+            emit(
+                make_event(
+                    STAGE,
+                    "running",
+                    progress=0.3,
+                    message=f"Installing EvoScientist {target}",
+                )
+            )
+            # uv's own output goes to stderr under --json: stdout is for events.
+            result = subprocess.run(
+                cmd,
+                cwd=tmp,
+                env=uv_tool.uv_environment(cmd[0], mirror),
+                stdout=sys.stderr if opts.json else None,
+            )
+            if result.returncode != 0:
+                raise UpdateError(
+                    "install_failed",
+                    f"uv could not install EvoScientist {target} (see uv's output); "
+                    f"the installed version is unchanged.{exclude_newer_hint()}",
+                )
+        finally:
+            if not handed_over:  # the helper deletes it when it ends
+                shutil.rmtree(tmp, ignore_errors=True)
 
-    emit(make_event(STAGE, "running", progress=0.8, message="Running EvoSci setup"))
-    run_new_setup(evosci, opts, write_line)
-    return f"Updated EvoScientist {installed} -> {target}", {"version": target}
+        emit(make_event(STAGE, "running", progress=0.8, message="Running EvoSci setup"))
+        run_new_setup(evosci, opts, write_line)
+        return f"Updated EvoScientist {installed} -> {target}", {"version": target}
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 class HandedOver(Exception):
@@ -718,10 +730,13 @@ def _stdin_is_pipe() -> bool:
 
 
 def _reader_gone() -> bool:
-    """True once the program reading stdout (a pipe) has closed it."""
+    """True once the program reading stdout (a pipe or a socket) has closed
+    it."""
     try:
         fd = sys.stdout.fileno()
-        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+        mode = os.fstat(fd).st_mode
+        # Node (the desktop app) gives a child UNIX socketpairs, not pipes.
+        if not (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)):
             return False
         poller = select.poll()
         poller.register(fd, select.POLLOUT)
@@ -730,14 +745,54 @@ def _reader_gone() -> bool:
         return False
 
 
-def wait_until_free(opts: UpdateOptions, emit: Emitter, tmp: Path) -> None:
+def _server_tree() -> set[int]:
+    """The recorded langgraph server and its children."""
+    import psutil
+
+    from .langgraph_dev.manager import _read_workspace_sidecar
+
+    try:
+        server = psutil.Process(int((_read_workspace_sidecar() or {})["pid"]))
+        return {server.pid, *(c.pid for c in server.children(recursive=True))}
+    except (KeyError, TypeError, ValueError, OverflowError, psutil.Error):
+        return set()
+
+
+def _hold_update_lock():
+    """One update at a time on macOS and Linux, as the Windows helper's lock
+    (the same file): held until the returned file is closed. A second update
+    ends at once with ``environment_busy`` and changes nothing."""
+    import fcntl
+
+    from .setup._install import tools_dir
+
+    folder = tools_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    handle = open(folder / "update.lock", "a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise UpdateError(
+            "environment_busy",
+            "Another EvoSci update is already waiting or installing. Nothing "
+            "was changed.",
+            detail={"waiting_for": []},
+        ) from None
+    return handle
+
+
+def wait_until_free(
+    opts: UpdateOptions, emit: Emitter, tmp: Path, skip_server: bool = False
+) -> None:
     """Waits until no other process runs from the environment (macOS and
     Linux), as the Windows helper does: one would load modules of the new
     version into its old code. Prints ``running`` lines naming them, with
     ``detail.waiting_for`` and ``detail.cancel_file`` under ``--json``.
     Raises ``environment_busy`` when cancelled (Ctrl+C, the cancel file, the
     reader of stdout gone) or unattended (no terminal, or under ``--json`` a
-    stdin that is not a pipe), and changes nothing."""
+    stdin that is not a pipe), and changes nothing. With *skip_server*, the
+    recorded server and its children are not waited for."""
     cancel = tmp / "cancel"
     unattended = not _stdin_is_pipe() if opts.json else not sys.stdin.isatty()
     last: list[int] | None = None
@@ -745,6 +800,12 @@ def wait_until_free(opts: UpdateOptions, emit: Emitter, tmp: Path) -> None:
 
     def busy(why: str) -> UpdateError:
         names = ", ".join(f"{b['name']} ({b['pid']})" for b in blockers)
+        if not names:  # before the first look
+            return UpdateError(
+                "environment_busy",
+                f"Update {why.rstrip(',')}. Nothing was changed.",
+                detail={"waiting_for": blockers},
+            )
         return UpdateError(
             "environment_busy",
             f"Update {why} while these still ran from EvoScientist: {names}. "
@@ -754,7 +815,8 @@ def wait_until_free(opts: UpdateOptions, emit: Emitter, tmp: Path) -> None:
 
     try:
         while True:
-            blockers = running_from_env()
+            keep = _server_tree() if skip_server else set()
+            blockers = [b for b in running_from_env() if b["pid"] not in keep]
             if not blockers:
                 return
             key = [b["pid"] for b in blockers]

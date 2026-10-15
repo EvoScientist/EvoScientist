@@ -72,6 +72,7 @@ def uv_install(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "tool_bin_dir", lambda uv: tmp_path / "bin")
     # Nothing else runs from the environment (tests below set blockers).
     monkeypatch.setattr(updater, "running_from_env", lambda: [])
+    monkeypatch.setattr(updater, "_server_tree", set)
     # The Windows handover creates the data dir's tools folder (its lock).
     monkeypatch.setattr("EvoScientist.paths.DATA_DIR", tmp_path / "data")
     monkeypatch.setattr("EvoScientist.update_helper.has_visible_desktop", lambda: True)
@@ -1558,3 +1559,156 @@ def test_server_refusal_comes_before_uv(uv_install, server, monkeypatch):
     assert "--yes" in end["message"]
     assert runs.calls == []
     assert server["stopped"] == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="poll on a socket")
+def test_reader_gone_sees_a_closed_socket(monkeypatch):
+    """Node (the desktop app) gives a child UNIX socketpairs, not pipes."""
+    import socket
+
+    stdin_ours, stdin_theirs = socket.socketpair()
+    stdout_ours, stdout_theirs = socket.socketpair()
+    stdin = os.fdopen(stdin_ours.detach(), "r")
+    out = os.fdopen(stdout_ours.detach(), "w")
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(sys, "stdout", out)
+    try:
+        assert updater._stdin_is_pipe() is True
+        assert updater._reader_gone() is False
+        stdout_theirs.close()
+        assert updater._reader_gone() is True
+    finally:
+        monkeypatch.undo()
+        stdin.close()
+        out.close()
+        stdin_theirs.close()
+
+
+SERVER = {"pid": 42, "name": "python3.12", "path": "/env/bin/python"}
+
+
+def test_unattended_yes_leaves_the_server_running_when_something_blocks(
+    uv_install, server, monkeypatch
+):
+    monkeypatch.setattr(updater, "check_server", _CHECK_SERVER)
+    monkeypatch.setattr(updater, "_server_tree", lambda: {42})
+    monkeypatch.setattr(updater, "running_from_env", lambda: [SERVER, TUI])
+    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: False)
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True, yes=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "environment_busy"
+    assert end["detail"] == {"waiting_for": [TUI]}
+    assert server["stopped"] == 0
+    assert runs.calls == []
+
+
+def test_the_server_is_not_waited_for_before_it_is_stopped(
+    uv_install, server, monkeypatch
+):
+    monkeypatch.setattr(updater, "check_server", _CHECK_SERVER)
+    monkeypatch.setattr(updater, "_server_tree", lambda: {42})
+    monkeypatch.setattr(
+        updater, "running_from_env", lambda: [] if server["stopped"] else [SERVER]
+    )
+    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: False)
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen([]))
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True, yes=True))
+    assert code == 0
+    assert _terminal(lines)["status"] == "done"
+    assert server["stopped"] == 1
+    assert runs.calls[0]["cmd"][0] == "/opt/uv"
+
+
+def test_a_server_child_started_during_the_wait_is_not_waited_for(
+    uv_install, server, monkeypatch
+):
+    child = {"pid": 43, "name": "python3.12", "path": "/env/bin/python"}
+    checks = {"n": 0}
+
+    def blockers():
+        checks["n"] += 1
+        if server["stopped"]:
+            return []
+        return [SERVER, TUI] if checks["n"] == 1 else [SERVER, child]
+
+    def tree():
+        return {42} if checks["n"] < 2 else {42, 43}
+
+    def sleep(s):
+        if checks["n"] > 5:
+            raise AssertionError("still waiting")
+
+    monkeypatch.setattr(updater, "check_server", _CHECK_SERVER)
+    monkeypatch.setattr(updater, "_server_tree", tree)
+    monkeypatch.setattr(updater, "running_from_env", blockers)
+    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: True)
+    monkeypatch.setattr(updater, "_reader_gone", lambda: False)
+    monkeypatch.setattr(updater.time, "sleep", sleep)
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
+    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen([]))
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True, yes=True))
+    assert code == 0
+    assert _terminal(lines)["status"] == "done"
+    assert server["stopped"] == 1
+
+
+def test_server_tree_reads_the_recorded_server(monkeypatch):
+    import EvoScientist.langgraph_dev.manager as manager
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        monkeypatch.setattr(
+            manager, "_read_workspace_sidecar", lambda: {"pid": os.getpid()}
+        )
+        assert {os.getpid(), child.pid} <= updater._server_tree()
+        monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: None)
+        assert updater._server_tree() == set()
+        monkeypatch.setattr(manager, "_read_workspace_sidecar", lambda: {"pid": "x"})
+        assert updater._server_tree() == set()
+        monkeypatch.setattr(
+            manager, "_read_workspace_sidecar", lambda: {"pid": float("inf")}
+        )
+        assert updater._server_tree() == set()
+    finally:
+        child.kill()
+        child.wait()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the Windows helper holds it")
+def test_second_update_ends_while_one_holds_the_lock(uv_install, monkeypatch):
+    """macOS and Linux: one update at a time, as on Windows."""
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    held = updater._hold_update_lock()
+    try:
+        code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    finally:
+        held.close()
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "environment_busy"
+    assert "Another EvoSci update" in end["message"]
+    assert end["detail"] == {"waiting_for": []}
+    assert runs.calls == []
+    # Released at the end: the next update runs.
+    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen([]))
+    code, _, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    assert code == 0
+
+
+def test_ctrl_c_before_the_first_look_has_a_plain_message(uv_install, monkeypatch):
+    def interrupted():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(updater, "running_from_env", interrupted)
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "environment_busy"
+    assert end["message"] == "Update cancelled. Nothing was changed."
