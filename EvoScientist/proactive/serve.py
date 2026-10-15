@@ -51,6 +51,12 @@ DECISION_MAX_AGE_SECONDS = 15 * 60
 # ``unavailable_reason`` while the dev server stays behind after a workspace
 # move; the next move that succeeds clears it.
 MOVE_FAILED_REASON = "the background agent server did not move to this workspace"
+# Sent to the chat after a push from another conversation made that one
+# serve's current thread: the user's next message goes there.
+SWITCH_NOTICE = (
+    "Your next message continues the conversation of this follow-up. "
+    "Use /resume to go back to the previous one."
+)
 # The graph whose threads serve writes pushes into.
 MAIN_GRAPH_ID = "EvoScientist"
 # Node of the main graph a push is a reply of, for the fallback write.
@@ -97,6 +103,10 @@ def origin_run_metadata(origin: Any) -> dict[str, str]:
                 "after a restart may land outside the chat's thread"
             )
     return meta
+
+
+def _no_publish(_thread_id: str, _text: str) -> bool:
+    return False
 
 
 def origin_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -429,8 +439,11 @@ class ProactiveServe:
         """Check the cron's health and apply new decisions; throttled.
 
         Called from serve's idle branch. *switch_to* makes a thread serve's
-        current thread, for a push applied to a thread that is not current
-        (the thread restored after a restart). It runs after the lock is
+        current thread, for a push applied to a thread that is not current, so
+        the user's reply to the push continues that conversation. That is the
+        thread restored after a restart, or an armed thread serve moved away
+        from with ``/new`` or ``/resume``; in the second case the chat is told
+        with :data:`SWITCH_NOTICE`. *switch_to* runs after the lock is
         released: switching mirrors the cron input, which takes the lock from
         another thread.
         """
@@ -441,6 +454,7 @@ class ProactiveServe:
             return
         self._last_poll = now
         switch: str | None = None
+        restored = False
         with self._lock:
             try:
                 # A thread's channel origin can appear after the last mirror
@@ -465,8 +479,17 @@ class ProactiveServe:
                     switch = applied_to
             if switch is not None and switch == self.restored_thread_id:
                 self.restored_thread_id = None
+                restored = True
         if switch is not None and switch_to is not None:
             switch_to(switch)
+            # The restored thread is the conversation the chat last had; any
+            # other switch moves the chat away from the one it was in.
+            if not restored and not (self.publish or _no_publish)(
+                switch, SWITCH_NOTICE
+            ):
+                logger.warning(
+                    "[proactive] switch notice for thread %s not delivered", switch
+                )
 
     # ---- restart survival --------------------------------------------------
 
@@ -598,7 +621,7 @@ class ProactiveServe:
             return self._skip(proactive_id, thread_id, "stale")
 
         self._append(thread_id, proactive_id, text)
-        publish = self.publish or (lambda _tid, _text: False)
+        publish = self.publish or _no_publish
         if publish(thread_id, text):
             logger.info(
                 "[proactive] push %s delivered to thread %s (%d chars)",
