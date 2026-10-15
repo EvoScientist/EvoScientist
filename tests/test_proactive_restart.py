@@ -363,6 +363,20 @@ def test_until_the_fresh_thread_talks_the_command_acts_on_the_restored_thread(
     assert controller.conversation_thread("t-fresh") == "t-fresh"
 
 
+def test_on_in_the_fresh_thread_survives_its_first_turn(workspace):
+    client = _Client({"t-old": {"metadata": {"proactive": "on"}}})
+    controller = ProactiveServe(workspace=workspace, client=client)
+    controller.mirror = MagicMock()
+    controller.armed.add("t-old")
+    controller.restored_thread_id = "t-old"
+
+    controller.arm("t-fresh")  # what ``/proactive on`` arms
+    controller.on_turn("t-fresh")
+
+    assert controller.armed == {"t-fresh"}
+    assert controller.conversation_thread("t-fresh") == "t-fresh"
+
+
 def test_an_armed_fresh_thread_is_the_conversation(workspace):
     controller = ProactiveServe(workspace=workspace, client=MagicMock())
     controller.armed |= {"t-old", "t-fresh"}

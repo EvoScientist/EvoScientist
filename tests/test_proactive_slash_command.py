@@ -102,13 +102,22 @@ async def test_a_dev_server_error_is_reported():
     assert "Could not change proactive follow-ups: connection refused" in ui.text
 
 
-@pytest.mark.parametrize(("args", "method"), [(("off",), "disarm"), (("on",), "arm")])
-async def test_after_a_restart_it_acts_on_the_restored_conversation(args, method):
+async def test_after_a_restart_off_acts_on_the_restored_conversation():
     controller = _controller()
     controller.conversation_thread.side_effect = None
     controller.conversation_thread.return_value = "restored"
 
-    await _run(_ctx(controller), *args)
+    await _run(_ctx(controller), "off")
 
     controller.conversation_thread.assert_called_once_with("t1")
-    getattr(controller, method).assert_called_once_with("restored")
+    controller.disarm.assert_called_once_with("restored")
+
+
+async def test_after_a_restart_on_arms_serves_current_thread():
+    controller = _controller()
+    controller.conversation_thread.side_effect = None
+    controller.conversation_thread.return_value = "restored"
+
+    await _run(_ctx(controller), "on")
+
+    controller.arm.assert_called_once_with("t1")

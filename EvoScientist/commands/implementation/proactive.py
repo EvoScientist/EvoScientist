@@ -70,7 +70,13 @@ class ProactiveCommand(Command):
         if action not in ("", "on", "off"):
             ctx.ui.append_system("Usage: /proactive [on|off]", style="yellow")
             return
-        thread_id = controller.conversation_thread(ctx.thread_id)
+        # ``off`` and the status act on the restored conversation after a
+        # restart; ``on`` arms serve's own thread (the restored one is armed).
+        thread_id = (
+            ctx.thread_id
+            if action == "on"
+            else controller.conversation_thread(ctx.thread_id)
+        )
         try:
             if action == "on":
                 await asyncio.to_thread(controller.arm, thread_id)
