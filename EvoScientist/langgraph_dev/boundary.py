@@ -234,10 +234,10 @@ class BrowserBoundary:
     middleware, so it runs before CORS and every route, WebSockets included.
     Requests langgraph-api makes to itself in process (``root_path``
     ``/noauth``, which no request from outside can set) pass, as they pass its
-    auth. *trust* defaults to :meth:`Trust.from_env` on the first request.
+    auth.
     """
 
-    def __init__(self, app, trust: Trust | None = None) -> None:
+    def __init__(self, app, trust: Trust) -> None:
         self.app = app
         self._trust = trust
 
@@ -247,8 +247,6 @@ class BrowserBoundary:
         ):
             await self.app(scope, receive, send)
             return
-        if self._trust is None:
-            self._trust = Trust.from_env()
         headers = {
             k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]
         }

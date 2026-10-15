@@ -50,7 +50,9 @@ def guarded(reached):
                 Route("/threads", ok, methods=["GET", "POST", "OPTIONS"]),
                 WebSocketRoute("/threads/t/stream/events", ws),
             ],
-            middleware=[Middleware(boundary.BrowserBoundary)],
+            middleware=[
+                Middleware(boundary.BrowserBoundary, trust=boundary.Trust.from_env())
+            ],
         )
         return TestClient(app, base_url="http://127.0.0.1:6174", **client_kw)
 
