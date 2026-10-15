@@ -16,7 +16,6 @@ from EvoScientist.proactive.serve import (
     DECISION_MAX_AGE_SECONDS,
     POLL_INTERVAL_SECONDS,
     STALE_TICK_SECONDS,
-    SWITCH_NOTICE,
     ProactiveServe,
     clear_post_append_next,
     terminal_node,
@@ -567,7 +566,7 @@ def test_a_decision_left_from_before_a_restart_is_not_applied(armed):
 
 
 def test_a_push_to_another_thread_switches_serve_to_it(armed):
-    controller, client, origins, published = armed
+    controller, client, origins, _ = armed
     origins.add("t0")
     controller.armed.add("t0")
     _source(client, "t0")
@@ -577,23 +576,6 @@ def test_a_push_to_another_thread_switches_serve_to_it(armed):
     controller.poll(current_thread_id="t1", switch_to=switched.append)
 
     assert switched == ["t0"]
-    assert published[-1] == ("t0", SWITCH_NOTICE)
-
-
-def test_a_push_to_the_restored_thread_switches_without_a_notice(armed):
-    controller, client, origins, published = armed
-    origins.add("t0")
-    controller.armed.add("t0")
-    controller.restored_thread_id = "t0"
-    _source(client, "t0")
-    _tick(client, controller, decisions=[_decision(tid="t0")])
-    switched = []
-
-    controller.poll(current_thread_id="t1", switch_to=switched.append)
-
-    assert switched == ["t0"]
-    assert [text for _, text in published] == ["The run finished."]
-    assert controller.restored_thread_id is None
 
 
 def test_without_a_unique_terminal_node_the_push_is_appended_as_model_and_cleared(

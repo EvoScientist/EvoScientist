@@ -1668,9 +1668,8 @@ def _make_serve_proactive_switch(
 ) -> Callable[[str], None]:
     """Make a thread serve's current one after a push was applied to it.
 
-    The thread restored after a restart, or an armed thread serve moved away
-    from: the user's reply to the push then continues that conversation, as
-    after ``/resume``.
+    Used for the thread restored after a restart: the user's reply to the
+    push then continues that conversation, as after ``/resume``.
     """
 
     def _switch(thread_id: str) -> None:
