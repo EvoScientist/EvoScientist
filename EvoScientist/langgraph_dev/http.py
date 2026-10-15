@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -36,7 +37,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
-from EvoScientist.langgraph_dev.boundary import BrowserBoundary, Trust
+from EvoScientist.langgraph_dev.boundary import BOUNDARY_ENV, BrowserBoundary, Trust
 from EvoScientist.llm.models import list_model_picker_entries
 from EvoScientist.local_secret import load_local_secret, require_local_secret
 
@@ -240,17 +241,32 @@ async def _lifespan(_app: Starlette):
     yield
 
 
-app = Starlette(
-    lifespan=_lifespan,
-    # Read when langgraph-api imports this app: LANGGRAPH_API_URL is set by
-    # then, and a workspace ``.env`` merged later cannot change it.
-    middleware=[Middleware(BrowserBoundary, trust=Trust.from_env())],
-    routes=[
-        Route("/api/models", get_models, methods=["GET"]),
-        Route("/api/teams", get_teams, methods=["GET"]),
-        Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
-        Route("/api/bg_processes/running", get_bg_processes_running, methods=["GET"]),
-        Route("/api/policy", post_policy, methods=["POST"]),
-        Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
-    ],
-)
+def _build_app() -> Starlette:
+    """The custom app, then the boundary's variables removed from the environment.
+
+    Both are read by then (langgraph-api imports its config before this app,
+    and the guard keeps its ``Trust``); the agent's commands, such as a
+    ``langgraph dev`` of the user's own project, must not inherit them.
+    """
+    app = Starlette(
+        lifespan=_lifespan,
+        # Read when langgraph-api imports this app: LANGGRAPH_API_URL is set by
+        # then, and a workspace ``.env`` merged later cannot change it.
+        middleware=[Middleware(BrowserBoundary, trust=Trust.from_env())],
+        routes=[
+            Route("/api/models", get_models, methods=["GET"]),
+            Route("/api/teams", get_teams, methods=["GET"]),
+            Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
+            Route(
+                "/api/bg_processes/running", get_bg_processes_running, methods=["GET"]
+            ),
+            Route("/api/policy", post_policy, methods=["POST"]),
+            Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
+        ],
+    )
+    os.environ.pop("CORS_CONFIG", None)
+    os.environ.pop(BOUNDARY_ENV, None)
+    return app
+
+
+app = _build_app()

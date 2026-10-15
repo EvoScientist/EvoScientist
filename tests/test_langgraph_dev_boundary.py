@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import socket
 from collections import namedtuple
@@ -364,6 +365,21 @@ def test_server_app_is_behind_the_boundary(monkeypatch):
     _set_trust(monkeypatch)
     middleware = [m.cls for m in server_app.user_middleware]
     assert boundary.BrowserBoundary in middleware
+
+
+def test_server_app_keeps_its_boundary_from_the_agent_commands(monkeypatch):
+    """The agent's shell inherits the server's environment, and a ``langgraph
+    dev`` started there would take this CORS_CONFIG over its own settings."""
+    from EvoScientist.langgraph_dev import http
+
+    env = boundary.server_env("127.0.0.1", "https://smith.langchain.com")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    app = http._build_app()
+    (guard,) = app.user_middleware
+    assert "https://smith.langchain.com" in guard.kwargs["trust"].origins
+    assert "CORS_CONFIG" not in os.environ
+    assert boundary.BOUNDARY_ENV not in os.environ
 
 
 def test_boundary_passes_langgraph_api_in_process_calls(guarded, monkeypatch):
