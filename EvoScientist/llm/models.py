@@ -170,6 +170,65 @@ def _env_flag_disabled(name: str) -> bool:
     return value is not None and value.strip().lower() in _FALSEY_ENV_VALUES
 
 
+# Providers for which a placeholder-key warning has already been emitted, so
+# the message is not repeated on every model build (once per process).
+_PLACEHOLDER_WARNED: set[str] = set()
+
+
+def _require_routed_api_key(
+    provider: str,
+    api_key_env: str,
+    kwargs: dict[str, Any],
+    *,
+    allow_placeholder: bool = False,
+) -> str:
+    """Resolve a routed provider's API key, or fail fast.
+
+    A routed provider (one that shares the OpenAI / Anthropic vendor SDK but
+    points at a different ``base_url``) must not silently fall back to the
+    vendor key, which would send the routed provider's requests to the wrong
+    host with the user's vendor credentials.
+
+    Args:
+        provider: Name of the routed provider (e.g. ``"minimax"``).
+        api_key_env: Environment variable name for the provider's own key.
+        kwargs: Keyword arguments passed through to ``get_chat_model``.
+        allow_placeholder: When True, inject ``"not-needed"`` instead of
+            raising (used by ``custom-*`` providers, which cover keyless
+            local servers such as vLLM / LM Studio).
+
+    Returns:
+        The resolved API key (env var, explicit kwarg, or ``"not-needed"``).
+
+    Raises:
+        ValueError: with a clear message naming the missing env var.
+    """
+    # Read the env var once; callers use the returned value and don't re-read it.
+    api_key = os.environ.get(api_key_env, "")
+    if api_key:
+        return api_key
+    if kwargs.get("api_key"):
+        return kwargs["api_key"]
+    if allow_placeholder:
+        # Gateways that used to authenticate with OPENAI_API_KEY /
+        # ANTHROPIC_API_KEY need to set CUSTOM_*_API_KEY explicitly -- users
+        # never see docstrings, so warn once and name the config key.
+        if provider not in _PLACEHOLDER_WARNED:
+            _PLACEHOLDER_WARNED.add(provider)
+            warnings.warn(
+                f"No `{api_key_env.lower()}` is set; sending a placeholder key. "
+                "Set it if your endpoint requires authentication.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return "not-needed"
+    raise ValueError(
+        f"The '{provider}' provider requires an API key. Please set the "
+        f"{api_key_env} environment variable (or configure it in your "
+        "config.yaml / .env) before using this provider."
+    )
+
+
 def _supports_openrouter_anthropic_prompt_cache(
     provider: str | None, model_id: str
 ) -> bool:
@@ -457,9 +516,12 @@ def get_chat_model(
             base_url = base_url_default
         if base_url:
             kwargs["base_url"] = base_url
-        api_key = os.environ.get(api_key_env, "")
-        if api_key:
-            kwargs["api_key"] = api_key
+        kwargs["api_key"] = _require_routed_api_key(
+            provider,
+            api_key_env,
+            kwargs,
+            allow_placeholder=provider == "custom-openai",
+        )
         _apply_openai_compat_reasoning_config(provider, model_id, kwargs)
         # SiliconFlow: disable thinking — LangChain drops reasoning_content
         # from history, causing error 20015 on multi-turn requests.
@@ -567,9 +629,12 @@ def get_chat_model(
             base_url = base_url_default
         if base_url:
             kwargs["base_url"] = base_url
-        api_key = os.environ.get(api_key_env, "")
-        if api_key:
-            kwargs["api_key"] = api_key
+        kwargs["api_key"] = _require_routed_api_key(
+            provider,
+            api_key_env,
+            kwargs,
+            allow_placeholder=provider == "custom-anthropic",
+        )
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
