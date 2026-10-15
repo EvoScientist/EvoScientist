@@ -107,10 +107,11 @@ def _uv_tool_bin_dir() -> Path | None:
     if cached is not _UNSET:
         return cached  # type: ignore[return-value]
     result: Path | None = None
-    if shutil.which("uv"):
+    uv = uv_tool.find_uv()
+    if uv:
         try:
             proc = subprocess.run(
-                ["uv", "tool", "dir", "--bin"],
+                [uv, "tool", "dir", "--bin"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -139,6 +140,14 @@ def _uv_tool_bin(command: str) -> Path | None:
         if cand_exe.is_file():
             return cand_exe
     return None
+
+
+def _uv_env(uv: str) -> dict[str, str]:
+    """The environment to run *uv* in, with the configured mirror, as for
+    ``EvoSci update``."""
+    from ..config import load_config
+
+    return uv_tool.uv_environment(uv, load_config().mirror)
 
 
 def _uv_tool_reinstall_cmd(
@@ -219,6 +228,9 @@ def _install_with_uv_tool_env(package: str) -> bool:
                     fh.write("\n".join(lines) + "\n")
                 constraints = Path(name)
             cmd = _uv_tool_reinstall_cmd(uv, receipt, package, constraints)
+            # It resolves the whole environment again: through the same
+            # certificates and mirrors as EvoSci update.
+            uv_env = _uv_env(uv)
         except Exception as exc:  # the caller falls back to pip
             logger.info(f"Not adding {package} with uv tool install --with: {exc}")
             return False
@@ -228,6 +240,7 @@ def _install_with_uv_tool_env(package: str) -> bool:
             text=True,
             timeout=600,
             cwd=constraints.parent if constraints is not None else None,
+            env=uv_env,
         )
         if result.returncode == 0:
             import importlib
@@ -252,15 +265,23 @@ def _install_via_pip(package: str) -> bool:
     Importable from the current interpreter on success. Not durable under
     ``uv sync`` — the reconcile will remove anything not in the lockfile.
     """
-    commands: list[list[str]] = []
-    if shutil.which("uv"):
+    commands: list[tuple[list[str], dict[str, str] | None]] = []
+    # The uv the install scripts recorded first: on Windows a script install
+    # has no uv on PATH, and its environment has no pip.
+    uv = uv_tool.find_uv()
+    if uv:
         commands.append(
-            ["uv", "pip", "install", "--python", sys.executable, "-q", package]
+            (
+                [uv, "pip", "install", "--python", sys.executable, "-q", package],
+                _uv_env(uv),
+            )
         )
-    commands.append([sys.executable, "-m", "pip", "install", "-q", package])
-    for cmd in commands:
+    commands.append(([sys.executable, "-m", "pip", "install", "-q", package], None))
+    for cmd, cmd_env in commands:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120, env=cmd_env
+            )
             if result.returncode == 0:
                 import importlib
 
@@ -315,10 +336,11 @@ def install_cli_tool(package: str, *, verify_command: str) -> bool:
     # branch.
     if _install_with_uv_tool_env(package):
         return True
-    if shutil.which("uv"):
+    uv = uv_tool.find_uv()
+    if uv:
         try:
             result = subprocess.run(
-                ["uv", "tool", "install", "-q", package],
+                [uv, "tool", "install", "-q", package],
                 capture_output=True,
                 text=True,
                 timeout=180,

@@ -14,7 +14,9 @@ being guessed.
 
 from __future__ import annotations
 
+import functools
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -212,6 +214,43 @@ def find_uv() -> str | None:
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return shutil.which("uv")
+
+
+CN_PYTHON_MIRROR = "https://registry.npmmirror.com/-/binary/python-build-standalone/"
+
+
+@functools.lru_cache(maxsize=4)
+def _knows_system_certs(uv: str) -> bool:
+    """Whether *uv* reads ``UV_SYSTEM_CERTS``; an older uv (such as one on
+    PATH) knows only ``UV_NATIVE_TLS``, which a newer one warns about."""
+    try:
+        result = subprocess.run(
+            [uv, "pip", "install", "--help"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return "--native-tls" not in result.stdout or "--system-certs" in result.stdout
+
+
+def uv_environment(uv: str, mirror: str) -> dict[str, str]:
+    """The environment to run *uv* in, as the install scripts set it: the
+    system certificate store (TLS inspection) unless the user chose, a long
+    download timeout for slow mirrors, and the mainland China mirrors with
+    ``mirror: cn``."""
+    from .update_check import CN_SIMPLE
+
+    env = dict(os.environ)
+    if "UV_SYSTEM_CERTS" not in env and "UV_NATIVE_TLS" not in env:
+        env["UV_SYSTEM_CERTS" if _knows_system_certs(uv) else "UV_NATIVE_TLS"] = "1"
+    env.setdefault("UV_HTTP_TIMEOUT", "300")
+    if mirror == "cn":
+        env["UV_DEFAULT_INDEX"] = CN_SIMPLE
+        env["UV_PYTHON_INSTALL_MIRROR"] = CN_PYTHON_MIRROR
+    return env
 
 
 def runs_on_managed_python(uv: str) -> bool:

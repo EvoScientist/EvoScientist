@@ -11,6 +11,18 @@ import pytest
 
 from EvoScientist import paths, uv_tool
 
+# The real functions; conftest stubs them for every other test.
+_FIND_UV = uv_tool.find_uv
+_KNOWS_SYSTEM_CERTS = uv_tool._knows_system_certs
+
+
+@pytest.fixture(autouse=True)
+def _real_uv_lookups(monkeypatch):
+    monkeypatch.setattr(uv_tool, "find_uv", _FIND_UV)
+    monkeypatch.setattr(uv_tool, "_knows_system_certs", _KNOWS_SYSTEM_CERTS)
+    _KNOWS_SYSTEM_CERTS.cache_clear()
+
+
 RECEIPT = """\
 [tool]
 requirements = [
@@ -233,3 +245,58 @@ def test_runs_on_managed_python_false_when_uv_fails(monkeypatch):
 
     monkeypatch.setattr(uv_tool.subprocess, "run", fake_run)
     assert uv_tool.runs_on_managed_python("uv") is False
+
+
+def _help(text: str):
+    return lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, text, "")
+
+
+@pytest.mark.parametrize(
+    ("help_text", "expected"),
+    [
+        ("      --system-certs\n", True),
+        ("      --native-tls\n", False),  # uv before UV_SYSTEM_CERTS
+        ("", True),  # cannot tell: the current name
+    ],
+)
+def test_knows_system_certs(monkeypatch, help_text, expected):
+    monkeypatch.setattr(uv_tool.subprocess, "run", _help(help_text))
+    assert uv_tool._knows_system_certs("uv") is expected
+
+
+def test_uv_environment_old_uv_gets_native_tls(monkeypatch):
+    for name in ("UV_SYSTEM_CERTS", "UV_NATIVE_TLS", "UV_HTTP_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(uv_tool.subprocess, "run", _help("      --native-tls\n"))
+    env = uv_tool.uv_environment("old-uv", "default")
+    assert env["UV_NATIVE_TLS"] == "1"
+    assert "UV_SYSTEM_CERTS" not in env
+    assert env["UV_HTTP_TIMEOUT"] == "300"
+
+
+def test_uv_environment_cn_mirror(monkeypatch):
+    for name in ("UV_SYSTEM_CERTS", "UV_NATIVE_TLS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(uv_tool.subprocess, "run", _help("      --system-certs\n"))
+    env = uv_tool.uv_environment("uv", "cn")
+    assert env["UV_DEFAULT_INDEX"] == "https://pypi.tuna.tsinghua.edu.cn/simple"
+    assert env["UV_PYTHON_INSTALL_MIRROR"] == uv_tool.CN_PYTHON_MIRROR
+    assert env["UV_SYSTEM_CERTS"] == "1"
+    assert "UV_NATIVE_TLS" not in env
+
+
+def test_uv_environment_keeps_user_settings(monkeypatch):
+    monkeypatch.setenv("UV_NATIVE_TLS", "0")
+    monkeypatch.setenv("UV_HTTP_TIMEOUT", "30")
+    monkeypatch.delenv("UV_SYSTEM_CERTS", raising=False)
+    monkeypatch.delenv("UV_DEFAULT_INDEX", raising=False)
+
+    def no_probe(cmd, **kw):
+        raise AssertionError("no probe when the user chose")
+
+    monkeypatch.setattr(uv_tool.subprocess, "run", no_probe)
+    env = uv_tool.uv_environment("uv", "default")
+    assert env["UV_NATIVE_TLS"] == "0"
+    assert "UV_SYSTEM_CERTS" not in env
+    assert env["UV_HTTP_TIMEOUT"] == "30"
+    assert "UV_DEFAULT_INDEX" not in env

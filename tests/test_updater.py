@@ -256,24 +256,6 @@ def _write_receipt(tmp_path, text=RECEIPT):
     return env
 
 
-def test_cn_mirror_environment(monkeypatch):
-    monkeypatch.delenv("UV_SYSTEM_CERTS", raising=False)
-    env = updater.uv_environment("cn")
-    assert env["UV_DEFAULT_INDEX"] == "https://pypi.tuna.tsinghua.edu.cn/simple"
-    assert env["UV_PYTHON_INSTALL_MIRROR"] == (
-        "https://registry.npmmirror.com/-/binary/python-build-standalone/"
-    )
-    assert env["UV_SYSTEM_CERTS"] == "1"
-
-
-def test_default_mirror_keeps_user_settings(monkeypatch):
-    monkeypatch.setenv("UV_SYSTEM_CERTS", "0")
-    monkeypatch.delenv("UV_DEFAULT_INDEX", raising=False)
-    env = updater.uv_environment("default")
-    assert env["UV_SYSTEM_CERTS"] == "0"
-    assert "UV_DEFAULT_INDEX" not in env
-
-
 def test_exclude_newer_hint_names_the_config(tmp_path, monkeypatch):
     monkeypatch.setattr(updater.sys, "platform", "linux")
     monkeypatch.delenv("UV_EXCLUDE_NEWER", raising=False)

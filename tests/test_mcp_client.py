@@ -1667,6 +1667,58 @@ class TestUvToolCompat:
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         assert with_args == ["six"]
 
+    def test_install_library_uv_tool_uses_uv_environment(self, monkeypatch, tmp_path):
+        """The reinstall resolves through the configured mirror and the
+        system certificates, as EvoSci update does."""
+        import EvoScientist.mcp.registry as reg
+        from EvoScientist.update_check import CN_SIMPLE
+
+        class CnConfig:
+            mirror = "cn"
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        (venv / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{ name = "evoscientist" }]\n'
+        )
+        _use_tool_env(monkeypatch, venv)
+        monkeypatch.setattr("EvoScientist.config.load_config", lambda: CnConfig())
+        monkeypatch.delenv("UV_SYSTEM_CERTS", raising=False)
+        envs: list[dict] = []
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                envs.append(kw["env"]) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("new-pkg") is True
+        assert envs[0]["UV_DEFAULT_INDEX"] == CN_SIMPLE
+        assert envs[0]["UV_SYSTEM_CERTS"] == "1"
+
+    def test_install_library_windows_uses_recorded_uv(self, monkeypatch, tmp_path):
+        """A Windows script install has no uv on PATH and no pip in its
+        environment: uv pip install with the uv the scripts recorded."""
+        import EvoScientist.mcp.registry as reg
+
+        (tmp_path / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{ name = "evoscientist" }]\n'
+        )
+        _use_tool_env(monkeypatch, tmp_path)
+        monkeypatch.setattr(reg.sys, "platform", "win32")
+        monkeypatch.setattr(reg.uv_tool, "find_uv", lambda: "C:/evo/tools/uv.exe")
+        monkeypatch.setattr(reg.shutil, "which", lambda x: None)
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("new-pkg") is True
+        assert captured[0][:3] == ["C:/evo/tools/uv.exe", "pip", "install"]
+
     def test_install_library_own_extra_on_editable_falls_back(
         self, monkeypatch, tmp_path
     ):
@@ -1934,7 +1986,7 @@ class TestUvToolCompat:
         result = reg.install_library("some-library")
         assert result is True
         assert len(captured) == 1
-        assert captured[0][:3] == ["uv", "pip", "install"]
+        assert captured[0][:3] == ["/usr/bin/uv", "pip", "install"]
         assert sys.executable in captured[0]
 
     def test_install_cli_tool_prefers_standalone_uv_tool_install(
@@ -1965,7 +2017,7 @@ class TestUvToolCompat:
         result = reg.install_cli_tool("some-cli", verify_command="some-cli")
         assert result is True
         assert len(captured) == 1
-        assert captured[0][:3] == ["uv", "tool", "install"]
+        assert captured[0][:3] == ["/usr/bin/uv", "tool", "install"]
         assert "some-cli" in captured[0]
 
     def test_install_cli_tool_missing_bin_triggers_pip_fallback(self, monkeypatch):
@@ -1992,7 +2044,7 @@ class TestUvToolCompat:
         )
         assert result is True
         assert len(captured) == 2
-        assert captured[0][:3] == ["uv", "tool", "install"]
+        assert captured[0][:3] == ["/usr/bin/uv", "tool", "install"]
         assert "--python" in captured[1]
         assert sys.executable in captured[1]
 
@@ -2032,7 +2084,7 @@ class TestUvToolCompat:
         )
         assert result is True
         assert len(captured) == 1
-        assert captured[0][:3] == ["uv", "tool", "install"]
+        assert captured[0][:3] == ["/usr/bin/uv", "tool", "install"]
 
     def test_install_library_falls_back_to_pip_when_no_uv(self, monkeypatch):
 

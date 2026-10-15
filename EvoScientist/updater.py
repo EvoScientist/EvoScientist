@@ -45,7 +45,6 @@ STAGE = "update"
 LAST_UNSUPPORTED = "0.3.5"
 RAW_BASE = "https://raw.githubusercontent.com/EvoScientist/EvoScientist"
 CN_RAW_BASE = "https://cdn.jsdelivr.net/gh/EvoScientist/EvoScientist"
-CN_PYTHON_MIRROR = "https://registry.npmmirror.com/-/binary/python-build-standalone/"
 INSTALL_COMMAND = (
     "curl -fsSL https://raw.githubusercontent.com/EvoScientist/EvoScientist/"
     "main/scripts/install.sh | bash"
@@ -344,19 +343,6 @@ def backup_config(installed: str) -> Path | None:
 # --------------------------------------------------------------------------- #
 # uv
 # --------------------------------------------------------------------------- #
-def uv_environment(mirror: str) -> dict[str, str]:
-    """The environment for uv: the system certificate store unless the user
-    chose otherwise, and the mainland China mirrors with ``mirror: cn``."""
-    from .update_check import CN_SIMPLE
-
-    env = dict(os.environ)
-    env.setdefault("UV_SYSTEM_CERTS", "1")
-    if mirror == "cn":
-        env["UV_DEFAULT_INDEX"] = CN_SIMPLE
-        env["UV_PYTHON_INSTALL_MIRROR"] = CN_PYTHON_MIRROR
-    return env
-
-
 def uv_install_command(
     uv: str, receipt: uv_tool.Receipt, target: str, constraints: Path
 ) -> list[str]:
@@ -650,7 +636,7 @@ def _update(
         result = subprocess.run(
             cmd,
             cwd=tmp,
-            env=uv_environment(mirror),
+            env=uv_tool.uv_environment(cmd[0], mirror),
             stdout=sys.stderr if opts.json else None,
         )
         if result.returncode != 0:
@@ -702,7 +688,7 @@ def _hand_over(
     from .update_helper import start_helper
 
     base = os.environ
-    env = uv_environment(mirror)
+    env = uv_tool.uv_environment(cmd[0], mirror)
     emit(
         make_event(
             STAGE,

@@ -209,6 +209,20 @@ def _no_agent_python_probe(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_uv_probes(monkeypatch):
+    """Keep uv lookups away from the real machine: no ``uv ... --help`` run
+    (a test's faked ``subprocess`` would record it), and no uv recorded in
+    the developer's data dir, only ``uv`` on PATH (a test's faked
+    ``shutil.which``). ``tests/test_uv_tool.py`` tests the real functions."""
+    import shutil
+
+    from EvoScientist import uv_tool
+
+    monkeypatch.setattr(uv_tool, "_knows_system_certs", lambda uv: True)
+    monkeypatch.setattr(uv_tool, "find_uv", lambda: shutil.which("uv"))
+
+
+@pytest.fixture(autouse=True)
 def _no_agent_bash(monkeypatch):
     """Keep the agent-shell bash decision away from the real machine.
 
