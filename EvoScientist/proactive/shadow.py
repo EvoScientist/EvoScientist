@@ -18,8 +18,10 @@ run against a live setup:
   tool.
 - **No tools.** The run carries ``configurable.proactive_mode``, so
   ``ProactiveModeMiddleware`` strips every tool from the model request. The
-  shadow model also refuses to bind any tool, so a regression in the strip
-  fails the turn instead of running a tool against the real sandbox.
+  shadow's primary model also refuses to bind any tool, so a regression in
+  the strip fails the turn instead of running a tool against the real
+  sandbox. Fallback models come from the server's process-wide chain and are
+  built without that check; the strip covers them as well.
 
 Prompt, memory injection and model are the real ones: the point is to judge as
 the real agent would.
@@ -93,21 +95,28 @@ def install_tool_strip_spy(model: Any) -> Any:
 
 # The config flags a shadow turn overrides. The first three turn off the
 # writers that are not tools; ``auto_mode`` / ``auto_approve`` declare that no
-# human is present (no profile bootstrap question, no approval prompt), and
-# ``model_fallbacks`` pins the turn to the primary model.
+# human is present (no profile bootstrap question, no approval prompt). The
+# fallback chain is process-wide, so the shadow uses the server's chain.
 _SHADOW_FLAGS: dict[str, Any] = {
     "enable_scheduler": False,
     "memory_workers_enabled": False,
     "enable_ask_user": False,
     "auto_mode": True,
     "auto_approve": True,
-    "model_fallbacks": "",
 }
 
 
 def shadow_cfg(cfg: EvoScientistConfig) -> EvoScientistConfig:
-    """A copy of *cfg* with the shadow turn's overrides."""
-    return dataclasses.replace(cfg, **_SHADOW_FLAGS)
+    """A copy of *cfg* with the shadow turn's overrides.
+
+    ``auto_mode`` would give each model call the unattended retry budget, which
+    outlasts the cron interval; a failed turn is retried on a later tick.
+    """
+    return dataclasses.replace(
+        cfg,
+        **_SHADOW_FLAGS,
+        auto_mode_retry_wait_seconds=cfg.model_retry_wait_seconds,
+    )
 
 
 def build_shadow_graph(
@@ -171,9 +180,14 @@ def flatten_tool_history(messages: list[Any]) -> list[Any]:
     flattened: list[Any] = []
     for message in messages:
         # A call whose arguments failed to parse lands in ``invalid_tool_calls``
-        # but keeps its ``tool_use`` content block, so it is flattened too.
+        # but keeps its ``tool_use`` content block, so it is flattened too. Read
+        # back from the server, that list arrives in ``additional_kwargs``.
         calls = (
-            [*message.tool_calls, *message.invalid_tool_calls]
+            [
+                *message.tool_calls,
+                *message.invalid_tool_calls,
+                *(message.additional_kwargs.get("invalid_tool_calls") or []),
+            ]
             if isinstance(message, AIMessage)
             else []
         )
@@ -191,7 +205,8 @@ def flatten_tool_history(messages: list[Any]) -> list[Any]:
                     additional_kwargs={
                         k: v
                         for k, v in message.additional_kwargs.items()
-                        if k not in ("tool_calls", "function_call")
+                        if k
+                        not in ("tool_calls", "function_call", "invalid_tool_calls")
                     },
                 )
             )
@@ -272,12 +287,23 @@ _CLEAN_FINISH_REASONS = frozenset({"stop", "end_turn", "STOP", "stop_sequence"})
 
 
 def _finish_reason(message: Any) -> str | None:
-    # OpenAI-style providers write ``finish_reason``, Anthropic ``stop_reason``;
-    # reading only one would let an Anthropic ``max_tokens`` cut pass as clean.
+    # OpenAI-style providers write ``finish_reason``, Anthropic ``stop_reason``,
+    # Ollama ``done_reason``; the OpenAI Responses API writes ``status`` with
+    # ``incomplete_details`` instead. Reading only one would let a cut pass.
     metadata = getattr(message, "response_metadata", None) or {}
     if not isinstance(metadata, dict):
         return None
-    reason = metadata.get("finish_reason") or metadata.get("stop_reason")
+    reason = (
+        metadata.get("finish_reason")
+        or metadata.get("stop_reason")
+        or metadata.get("done_reason")
+    )
+    status = metadata.get("status")
+    if not reason and status and status != "completed":
+        details = metadata.get("incomplete_details")
+        reason = (
+            details.get("reason") if isinstance(details, dict) else None
+        ) or status
     return str(reason) if reason else None
 
 

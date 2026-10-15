@@ -63,7 +63,16 @@ def test_shadow_cfg_overrides_only_the_side_effect_flags():
     assert cfg.enable_ask_user is False
     assert cfg.auto_mode is True
     assert cfg.auto_approve is True
-    assert cfg.model_fallbacks == ""
+    assert cfg.model_fallbacks == "a,b"
+
+
+def test_shadow_cfg_keeps_the_attended_retry_budget():
+    cfg = shadow_cfg(
+        EvoScientistConfig(
+            model_retry_wait_seconds=60, auto_mode_retry_wait_seconds=1800
+        )
+    )
+    assert cfg.auto_mode_retry_wait_seconds == 60
 
 
 def test_spy_refuses_tools_and_keeps_the_model_type():
@@ -104,6 +113,16 @@ def test_a_final_tool_call_is_not_a_reply():
         ({"finish_reason": "length"}, False),
         ({"stop_reason": "max_tokens"}, False),
         ({"finish_reason": "content_filter"}, False),
+        ({"status": "completed"}, True),
+        (
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+            False,
+        ),
+        ({"done_reason": "stop"}, True),
+        ({"done_reason": "length"}, False),
     ],
 )
 def test_unclean_finish_is_discarded(metadata, clean):
@@ -240,6 +259,27 @@ def test_flatten_puts_a_placeholder_for_an_image_result():
     [flat] = flatten_tool_history([result])
 
     assert flat.content == "[result of tool `read_file`]\nplot.png\n[image]"
+
+
+def test_flatten_drops_the_tool_block_of_an_unparsable_call_read_from_the_server():
+    from EvoScientist.gateway.server import _messages_from_state
+
+    call = AIMessage(
+        content=[
+            {"type": "text", "text": "Trying."},
+            {"type": "tool_use", "id": "c", "name": "x", "input": {}},
+        ],
+        id="a",
+        invalid_tool_calls=[
+            {"name": "x", "args": "{bad", "id": "c", "error": "bad json"}
+        ],
+    )
+    [read_back] = _messages_from_state({"values": {"messages": [call.model_dump()]}})
+
+    [flat] = flatten_tool_history([read_back])
+
+    assert flat.content == 'Trying.\n[called tool `x` with "{bad"]'
+    assert "invalid_tool_calls" not in flat.additional_kwargs
 
 
 class _StrictNoToolsModel(_ToolModel):
