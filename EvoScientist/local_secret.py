@@ -5,10 +5,9 @@ on POSIX the file is ``0600`` in a ``0700`` folder; on Windows its access list
 names this user, SYSTEM and Administrators, with nothing inherited (the
 Administrators group can read it, as root can on POSIX). Clients on this
 machine read the file and send the value in the ``X-EvoScientist-Local-Secret``
-header; server routes that change state check it with
-:func:`require_local_secret`. It shows that a caller runs as this user on this
-machine. It is not authentication: anyone who can start a run can have the
-agent read the file.
+header; server routes can require it with :func:`require_local_secret`. It
+shows that a caller runs as this user on this machine. It is not
+authentication: anyone who can start a run can have the agent read the file.
 
 The value is created once and reused by every server, so two servers running
 at the same time accept the same clients. It is never printed. To get a new

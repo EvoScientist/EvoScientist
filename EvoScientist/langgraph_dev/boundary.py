@@ -20,7 +20,7 @@ on any other origin that calls the tunnel URL needs that origin in
 
 Requests without ``Origin`` (the CLI, SDK scripts, the WebUI's Node server)
 are only checked for ``Host``. Non-browser programs can send any header, so
-this stops pages, not programs; the local secret covers the routes that need
+this stops pages, not programs; the local secret is for the routes that need
 more.
 
 The manager computes the trusted names when it starts the server
