@@ -1929,15 +1929,25 @@ class CustomSandboxBackend(LocalShellBackend):
     def _in_media(self, file_path: str) -> bool:
         return not self._dangerous and self._media_relative(file_path) is not None
 
+    def _tool_paths(self, items: list | None) -> list | None:
+        """Spell dangerous-mode result paths the way the file tools accept them."""
+        if not self._dangerous or not items:
+            return items
+        return [{**item, "path": paths.file_tool_path(item["path"])} for item in items]
+
     def ls(self, path: str) -> LsResult:
         if self._in_media(path):
             return self._media_view.ls(path)
-        return super().ls(path)
+        result = super().ls(path)
+        result.entries = self._tool_paths(result.entries)
+        return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         if path is not None and self._in_media(path):
             return self._media_view.glob(pattern, path)
-        return super().glob(pattern, path)
+        result = super().glob(pattern, path)
+        result.matches = self._tool_paths(result.matches)
+        return result
 
     def grep(
         self,
@@ -1952,9 +1962,11 @@ class CustomSandboxBackend(LocalShellBackend):
             return self._media_view.grep(
                 pattern, path, glob, max_count=max_count, context_lines=context_lines
             )
-        return super().grep(
+        result = super().grep(
             pattern, path, glob, max_count=max_count, context_lines=context_lines
         )
+        result.matches = self._tool_paths(result.matches)
+        return result
 
     def write(self, file_path: str, content: str) -> WriteResult:
         if self._in_media(file_path):

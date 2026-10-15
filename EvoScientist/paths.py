@@ -42,7 +42,10 @@ def file_tool_path(path: str | Path) -> str:
 
 
 def host_file_tool_path(path: str) -> str:
-    """Decode a drive-path alias on Windows, preserving POSIX virtual paths."""
+    """On Windows, use forward slashes for every path and decode `/C:/...` aliases.
+
+    Other platforms get *path* back unchanged.
+    """
     if os.name == "nt":
         if re.match(r"^/[A-Za-z]:/", path):
             path = path[1:]
