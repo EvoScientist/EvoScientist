@@ -207,10 +207,24 @@ def flatten_tool_history(messages: list[Any]) -> list[Any]:
 
 
 def _text_of(message: BaseMessage) -> str:
+    """A tool result as text: text blocks as they are, any other block by its type.
+
+    An image result (``read_file`` on a PNG) holds base64 data that would
+    otherwise reach the shadow prompt as text.
+    """
     content = message.content
     if isinstance(content, str):
         return content
-    return message.text or json.dumps(content, ensure_ascii=False, default=str)
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(str(block.get("text", "")))
+        else:
+            kind = block.get("type", "block") if isinstance(block, dict) else "block"
+            parts.append(f"[{kind}]")
+    return "\n".join(parts)
 
 
 async def _run_shadow_turn(

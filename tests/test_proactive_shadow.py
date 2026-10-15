@@ -225,6 +225,23 @@ def test_flatten_drops_the_tool_block_of_an_unparsable_call():
     assert flat.content == 'Trying.\n[called tool `x` with "{bad"]'
 
 
+def test_flatten_puts_a_placeholder_for_an_image_result():
+    data = "A" * 200_000
+    result = ToolMessage(
+        content=[
+            {"type": "text", "text": "plot.png"},
+            {"type": "image", "base64": data, "mime_type": "image/png"},
+        ],
+        tool_call_id="c",
+        name="read_file",
+        id="t",
+    )
+
+    [flat] = flatten_tool_history([result])
+
+    assert flat.content == "[result of tool `read_file`]\nplot.png\n[image]"
+
+
 class _StrictNoToolsModel(_ToolModel):
     """Refuses tool blocks when no tools are bound, as Anthropic's API does."""
 
