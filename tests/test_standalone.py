@@ -244,8 +244,7 @@ def test_ensure_ccproxy_starts_and_registers_shutdown(monkeypatch):
     standalone._ensure_ccproxy(cfg)
 
     assert calls == [cfg]
-    assert len(registered) == 1
-    assert registered[0][1] is proc
+    assert registered == [(ccproxy_mod.stop_ccproxy, proc)]
 
 
 def test_ensure_ccproxy_reused_instance_registers_no_shutdown(monkeypatch):
@@ -277,7 +276,7 @@ def test_ensure_ccproxy_noop_with_openai_oauth_only(monkeypatch):
     assert calls == []
 
 
-def test_ensure_ccproxy_reraises_runtime_error(monkeypatch, caplog):
+def test_ensure_ccproxy_exits_when_the_proxy_cannot_start(monkeypatch, caplog):
     import EvoScientist.ccproxy_manager as ccproxy_mod
 
     def _boom(config):
@@ -285,8 +284,11 @@ def test_ensure_ccproxy_reraises_runtime_error(monkeypatch, caplog):
 
     monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", _boom)
 
-    with pytest.raises(RuntimeError, match="ccproxy is required"):
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exc_info:
         standalone._ensure_ccproxy(_oauth_config(anthropic_auth_mode="oauth"))
+
+    assert exc_info.value.code == 1
+    assert "ccproxy startup failed: ccproxy is required" in caplog.text
 
 
 def test_run_standalone_ensures_ccproxy_only_with_agent(monkeypatch):
@@ -351,3 +353,31 @@ def test_run_standalone_starts_ccproxy_after_chatgpt_sign_in(monkeypatch):
     standalone.run_standalone(channel=None, bus=None, use_agent=True)
 
     assert len(ensured) == 1
+
+
+def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
+    """The dev server copies env from ``os.environ`` at spawn, so the proxy
+    env must be force-set before the dev server starts."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    import EvoScientist.langgraph_dev.manager as manager_mod
+
+    _standalone_ready(
+        monkeypatch, signed_in=True, anthropic_auth_mode="oauth", ccproxy_port=8000
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
+    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda provider: (True, ""))
+    monkeypatch.setattr(ccproxy_mod, "ensure_ccproxy", lambda port: None)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        manager_mod,
+        "ensure_langgraph_dev",
+        lambda cfg, *, workspace_dir, backend=None: seen.append(
+            os.environ["ANTHROPIC_BASE_URL"]
+        ),
+    )
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert seen == ["http://127.0.0.1:8000/claude"]
