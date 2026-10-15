@@ -762,15 +762,21 @@ def _hold_update_lock():
     """One update at a time on macOS and Linux, as the Windows helper's lock
     (the same file): held until the returned file is closed. A second update
     ends at once with ``environment_busy`` and changes nothing."""
-    import fcntl
-
     from .setup._install import tools_dir
 
     folder = tools_dir()
     folder.mkdir(parents=True, exist_ok=True)
     handle = open(folder / "update.lock", "a+")
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.name == "nt":  # no fcntl (the tests run this path on Windows)
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         handle.close()
         raise UpdateError(
