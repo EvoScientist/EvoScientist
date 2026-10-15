@@ -48,9 +48,10 @@ class ProactiveDecision:
 
     ``stage`` is ``gate_rejected``, ``no_push``, ``stale`` or ``decided``; only
     ``decided`` carries a ``message``. ``evaluated_message_id`` is set whenever
-    the shadow turn returned (a turn that raised is not an evaluation): it is
-    the thread's last non-proactive message at the time, which the next check
-    compares against.
+    the shadow turn returned and its reply was judged (a turn that raised is
+    not an evaluation, and neither is a ``stale`` one: the thread moved under
+    it, so the next check runs again): it is the thread's last non-proactive
+    message at the time, which the next check compares against.
     """
 
     stage: str
@@ -120,5 +121,5 @@ async def decide_proactive_push(
         proactive_id=proactive_id if decision.message is not None else None,
         message=decision.message,
         pre_head=pre_head,
-        evaluated_message_id=last_message_id,
+        evaluated_message_id=None if stage == "stale" else last_message_id,
     )

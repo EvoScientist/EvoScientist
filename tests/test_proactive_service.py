@@ -91,3 +91,4 @@ def test_stale_when_the_head_moved_during_the_shadow():
     decision, _ = _decide(read_current_head=head)
     assert decision.stage == "stale"
     assert decision.message is None
+    assert decision.evaluated_message_id is None  # the next check runs again
