@@ -13,7 +13,9 @@ from langgraph_sdk.errors import NotFoundError
 from EvoScientist.paths import Workspace
 from EvoScientist.proactive.commit import read_proactive_tag
 from EvoScientist.proactive.serve import (
+    CRON_THREAD_MAX_AGE_SECONDS,
     DECISION_MAX_AGE_SECONDS,
+    MAX_POLL_BACKOFF_SECONDS,
     POLL_INTERVAL_SECONDS,
     STALE_TICK_SECONDS,
     ProactiveServe,
@@ -114,6 +116,7 @@ class _Threads:
         self.states = {}
         self.created = []
         self.writes = []
+        self.deleted = []
 
     def get(self, thread_id):
         if thread_id not in self.threads:
@@ -121,14 +124,18 @@ class _Threads:
         return self.threads[thread_id]
 
     def get_state(self, thread_id):
-        return self.states[thread_id]
+        return self.states.get(thread_id, {"values": {}})
 
-    def search(self, *, metadata, limit):
+    def search(self, *, metadata, limit, sort_by=None, sort_order=None):
         return [
             {"thread_id": tid}
             for tid, t in self.threads.items()
             if all((t.get("metadata") or {}).get(k) == v for k, v in metadata.items())
         ][:limit]
+
+    def delete(self, thread_id):
+        self.threads.pop(thread_id, None)
+        self.deleted.append(thread_id)
 
     def create(self, *, metadata):
         tid = f"cron-thread-{len(self.created) + 1}"
@@ -265,19 +272,59 @@ def test_reconcile_creates_one_cron_on_a_new_cron_thread(setup, workspace):
     )
 
 
-def test_reconcile_recreates_instead_of_keeping_and_reuses_the_cron_thread(setup):
+def test_reconcile_moves_the_cron_to_a_fresh_thread_with_the_old_record(setup):
     controller, client, _, _ = setup
     controller.armed.add("t1")
     controller.reconcile()
     first = client.crons.rows[0]["cron_id"]
+    record = {
+        "evaluated": {"t1": "m2"},
+        "failures": {"t2": {"message_id": "m5", "count": 2, "skip": 1}},
+    }
+    client.threads.states["cron-thread-1"] = {
+        "values": {**record, "decisions": [_decision()]}
+    }
     controller._cron_thread_id = None  # a new serve process
 
     controller.reconcile()
 
     assert [r["cron_id"] for r in client.crons.rows] != [first]
     assert len(client.crons.rows) == 1
-    assert client.crons.rows[0]["thread_id"] == "cron-thread-1"
-    assert client.threads.created == ["cron-thread-1"]
+    assert client.crons.rows[0]["thread_id"] == "cron-thread-2"
+    assert client.threads.writes == [("cron-thread-2", record, "tick")]
+    assert client.threads.deleted == ["cron-thread-1"]
+    assert controller._cron_thread_id == "cron-thread-2"
+
+
+def test_a_cron_thread_that_cannot_be_deleted_is_retired_next_time(setup):
+    controller, client, _, _ = setup
+    controller.armed.add("t1")
+    controller.reconcile()
+    real_delete = client.threads.delete
+
+    def refuse(thread_id):
+        raise RuntimeError("busy")
+
+    client.threads.delete = refuse
+    controller.reconcile()
+    assert "cron-thread-1" in client.threads.threads
+    client.threads.delete = real_delete
+
+    controller.reconcile()
+
+    assert set(client.threads.deleted) == {"cron-thread-1", "cron-thread-2"}
+    assert client.crons.rows[0]["thread_id"] == "cron-thread-3"
+
+
+def test_poll_moves_a_day_old_cron_to_a_fresh_thread(armed):
+    controller, client, _, _ = armed
+    _tick(client, controller)
+    controller._cron_created_at = time.time() - CRON_THREAD_MAX_AGE_SECONDS - 60
+
+    controller.poll(current_thread_id="t1")
+
+    assert client.crons.rows[0]["thread_id"] == "cron-thread-2"
+    assert client.threads.deleted == ["cron-thread-1"]
 
 
 def test_reconcile_cancels_a_tick_left_running(setup):
@@ -519,6 +566,28 @@ def test_poll_is_throttled(armed):
     _tick(client, controller, decisions=[_decision(pid="p2")])
     controller.poll(current_thread_id="t1", now=1000.0 + POLL_INTERVAL_SECONDS - 1)
     assert [p[1] for p in published] == ["The run finished."]
+
+
+def test_poll_backs_off_after_a_failure(armed):
+    controller, client, _, _ = armed
+    calls = []
+
+    def failing_search(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("cron store down")
+
+    client.crons.search = failing_search
+    for step in range(30):
+        controller.poll(
+            current_thread_id="t1", now=1000.0 + step * POLL_INTERVAL_SECONDS
+        )
+
+    # Ten minutes of 20 s polls; with the doubling wait only a few reach the server.
+    assert 1 < len(calls) <= 5
+
+    controller._failed_polls = 5000
+    controller.poll(current_thread_id="t1", now=10_000.0)
+    assert controller._next_poll == 10_000.0 + MAX_POLL_BACKOFF_SECONDS
 
 
 def test_poll_recreates_a_missing_cron(armed):

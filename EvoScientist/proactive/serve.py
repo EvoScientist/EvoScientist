@@ -44,6 +44,11 @@ POLL_INTERVAL_SECONDS = 20.0
 # serve recreates it. Shorter than two intervals would recreate a cron whose
 # tick is merely slow.
 STALE_TICK_SECONDS = 25 * 60
+# After a failed poll serve waits longer, doubling up to this cap.
+MAX_POLL_BACKOFF_SECONDS = 10 * 60
+# The runtime keeps every run of a thread a cron is bound to (one per tick) and
+# never removes them; the cron moves to a fresh thread at least this often.
+CRON_THREAD_MAX_AGE_SECONDS = 24 * 60 * 60
 # A decision older than this is not applied. Each tick replaces the last one's
 # decisions, so a live cron's are at most one interval (10 min) plus a poll
 # old; an older one was left in the cron thread while serve was stopped.
@@ -219,7 +224,8 @@ class ProactiveServe:
     _mirrored: list[str] | None = None
     _applied: set[str] = field(default_factory=set)
     _topology: _Topology | None = None
-    _last_poll: float = 0.0
+    _next_poll: float = 0.0
+    _failed_polls: int = 0
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
     @property
@@ -320,10 +326,9 @@ class ProactiveServe:
     def reconcile(self) -> None:
         """Recreate the workspace's proactive cron, or delete it when nothing is armed.
 
-        Deletes every proactive cron of the workspace, unblocks the cron thread
-        (a tick killed with SIGKILL stays ``running`` and makes every later
-        fire fail with 409), and, while a thread is armed, creates one cron on
-        the cron thread with the current candidates.
+        Deletes every proactive cron of the workspace and, while a thread is
+        armed, creates one on a fresh cron thread with the current candidates
+        (:meth:`_rotate_cron_thread`).
         """
         if not self.available:
             return
@@ -335,8 +340,7 @@ class ProactiveServe:
             if not self.armed:
                 return
             self._restamp_armed()
-            thread_id = self._ensure_cron_thread()
-            self._cancel_running(thread_id)
+            thread_id = self._rotate_cron_thread()
             candidates = self.candidates()
             cron = create_proactive_cron(
                 self.client,
@@ -446,26 +450,49 @@ class ProactiveServe:
             if "proactive" not in metadata:
                 self.client.threads.update(thread_id, metadata={"proactive": "on"})
 
-    def _ensure_cron_thread(self) -> str:
-        """The cron thread: the one already used in this workspace, else a new one.
+    def _rotate_cron_thread(self) -> str:
+        """A new cron thread carrying the newest old one's record; the old ones go.
 
-        Reusing it keeps the record of what each thread was last evaluated on
-        across serve restarts.
+        The runtime keeps every run of a thread a cron is bound to and never
+        removes them, so each reconcile moves the cron to a fresh thread.
+        ``evaluated`` and ``failures`` are copied over, so the move costs no
+        extra shadow turn and no reset of a backoff. An old thread is unblocked
+        first (a tick killed with SIGKILL stays ``running``) and then deleted;
+        one that cannot be deleted is tried again at the next reconcile.
         """
-        from langgraph_sdk.errors import NotFoundError
-
-        if self._cron_thread_id is not None:
-            try:
-                self.client.threads.get(self._cron_thread_id)
-                return self._cron_thread_id
-            except NotFoundError:
-                self._cron_thread_id = None
         metadata = {"run_kind": PROACTIVE_RUN_KIND, "workspace_dir": self.workspace.key}
-        for thread in self.client.threads.search(metadata=metadata, limit=1) or []:
-            self._cron_thread_id = str(thread["thread_id"])
-            return self._cron_thread_id
-        self._cron_thread_id = create_proactive_thread(self.client, self.workspace)
-        return self._cron_thread_id
+        old = [
+            str(t["thread_id"])
+            for t in self.client.threads.search(
+                metadata=metadata, sort_by="updated_at", sort_order="desc", limit=100
+            )
+            or []
+        ]
+        new = create_proactive_thread(self.client, self.workspace)
+        carried = False
+        for thread_id in old:
+            try:
+                self._cancel_running(thread_id)
+                if not carried:
+                    carried = self._carry_record(thread_id, new)
+                self.client.threads.delete(thread_id)
+            except Exception:
+                logger.warning(
+                    "[proactive] could not retire cron thread %s",
+                    thread_id,
+                    exc_info=True,
+                )
+        self._cron_thread_id = new
+        return new
+
+    def _carry_record(self, source: str, target: str) -> bool:
+        """Copy *source*'s ``evaluated`` and ``failures`` to *target*."""
+        values = self.client.threads.get_state(source).get("values") or {}
+        record = {k: values[k] for k in ("evaluated", "failures") if values.get(k)}
+        if not record:
+            return False
+        self.client.threads.update_state(target, record, as_node="tick")
+        return True
 
     def _cancel_running(self, thread_id: str) -> None:
         for run in self.client.runs.list(thread_id, status="running") or []:
@@ -495,9 +522,9 @@ class ProactiveServe:
         if not self.available or not self.armed:
             return
         now = time.time() if now is None else now
-        if now - self._last_poll < POLL_INTERVAL_SECONDS:
+        if now < self._next_poll:
             return
-        self._last_poll = now
+        self._next_poll = now + POLL_INTERVAL_SECONDS
         switch: str | None = None
         with self._lock:
             try:
@@ -507,8 +534,20 @@ class ProactiveServe:
                     self.mirror()
                 decisions = self._check_cron(now)
             except Exception:
-                logger.warning("[proactive] poll failed", exc_info=True)
+                # A dev server that keeps refusing (one from before the upgrade,
+                # with no ``proactive`` graph) would log a traceback every poll.
+                self._failed_polls += 1
+                logger.warning(
+                    "[proactive] poll failed (%d in a row)",
+                    self._failed_polls,
+                    exc_info=self._failed_polls == 1,
+                )
+                self._next_poll = now + min(
+                    POLL_INTERVAL_SECONDS * 2 ** min(self._failed_polls, 6),
+                    MAX_POLL_BACKOFF_SECONDS,
+                )
                 return
+            self._failed_polls = 0
             for decision in decisions:
                 try:
                     applied_to = self._apply(decision)
@@ -523,6 +562,14 @@ class ProactiveServe:
                     switch = applied_to
             if switch is not None and switch == self.restored_thread_id:
                 self.restored_thread_id = None
+            if (
+                self._cron_id is not None
+                and now - self._cron_created_at > CRON_THREAD_MAX_AGE_SECONDS
+            ):
+                try:
+                    self.reconcile()
+                except Exception:
+                    logger.warning("[proactive] cron rotation failed", exc_info=True)
         if switch is not None and switch_to is not None:
             switch_to(switch)
 

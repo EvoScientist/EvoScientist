@@ -42,7 +42,12 @@ def list_proactive_crons(client: Any, workspace: Workspace) -> list[Any]:
 def create_proactive_thread(client: Any, workspace: Workspace) -> str:
     """Create the thread a proactive cron is bound to, and return its id."""
     thread = client.threads.create(
-        metadata={"run_kind": PROACTIVE_RUN_KIND, **SessionDirs(workspace).metadata()}
+        metadata={
+            "run_kind": PROACTIVE_RUN_KIND,
+            # Set before the first run, so state can be written to the thread.
+            "graph_id": PROACTIVE_GRAPH_ID,
+            **SessionDirs(workspace).metadata(),
+        }
     )
     return str(thread["thread_id"])
 

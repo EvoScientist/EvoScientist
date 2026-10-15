@@ -1527,6 +1527,8 @@ async def _apply_serve_resume_state(
                 proactive.unavailable_reason = MOVE_FAILED_REASON
         elif proactive is not None and moves_workspace:
             proactive.move_to(new_dirs.workspace)
+            # Clears a proactive cron an earlier serve left in that workspace.
+            await asyncio.to_thread(_serve_proactive_call, proactive.reconcile)
         workspace_update = (new_dirs, new_agent)
 
     old_thread_id = runtime_state.thread_id

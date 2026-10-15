@@ -117,6 +117,9 @@ async def test_resume_into_another_workspace_moves_the_cron_with_the_server():
     proactive.move_to.side_effect = lambda ws: order.append(("move_to", ws))
     proactive.adopt.side_effect = lambda tid: order.append(("adopt", tid))
     proactive.mirror.side_effect = lambda: order.append("mirror")
+    proactive.reconcile.side_effect = lambda: order.append("reconcile")
+    proactive.leave.side_effect = lambda tid: order.append(("leave", tid))
+    proactive.on_turn.side_effect = lambda tid: order.append(("on_turn", tid))
 
     async def move(*_args, **_kwargs):
         order.append("move server")
@@ -136,6 +139,9 @@ async def test_resume_into_another_workspace_moves_the_cron_with_the_server():
         "stop",
         "move server",
         ("move_to", Workspace("/new-ws")),
+        "reconcile",
+        ("leave", "old-tid"),
+        ("on_turn", "new-tid"),
         ("adopt", "new-tid"),
         "mirror",
     ]
@@ -182,3 +188,25 @@ def test_a_push_to_the_restored_thread_resumes_it_in_its_folders(workspace):
     apply.assert_awaited_once_with(
         state, runtime, thread_id="restored-tid", dirs=SessionDirs(workspace)
     )
+
+
+def test_serve_restores_then_reconciles_and_deletes_the_cron_when_it_stops(
+    monkeypatch, tmp_path
+):
+    from EvoScientist.cli import commands
+    from tests.test_cli_serve import _make_config, _run_serve_once
+
+    calls = []
+    controller = MagicMock()
+    controller.reconcile.side_effect = lambda: calls.append("reconcile")
+    controller.stop.side_effect = lambda: calls.append("stop")
+    monkeypatch.setattr(
+        commands, "_serve_proactive_controller", lambda *a, **k: controller
+    )
+    monkeypatch.setattr(
+        commands, "_serve_restore_proactive", lambda *a: calls.append("restore")
+    )
+
+    _run_serve_once(monkeypatch, _make_config(), workdir=str(tmp_path))
+
+    assert calls == ["restore", "reconcile", "stop"]

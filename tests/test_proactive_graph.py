@@ -67,6 +67,7 @@ def test_create_proactive_thread_is_tagged_with_the_workspace(workspace):
     assert proactive_cron.create_proactive_thread(client, workspace) == "t-cron"
     assert client.threads.create.call_args.kwargs["metadata"] == {
         "run_kind": "proactive_check",
+        "graph_id": "proactive",
         "workspace_dir": workspace.key,
     }
 
