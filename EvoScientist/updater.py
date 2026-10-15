@@ -690,7 +690,10 @@ def running_from_env() -> list[dict[str, Any]]:
         # The folder resolved, not the file: bin/python is a symlink out of
         # the environment.
         folder = os.path.realpath(os.path.dirname(path))
-        return os.path.commonpath([folder, root]) == root
+        try:
+            return os.path.commonpath([folder, root]) == root
+        except ValueError:  # another drive (Windows)
+            return False
 
     skip = {os.getpid(), os.getppid()}
     found = []
