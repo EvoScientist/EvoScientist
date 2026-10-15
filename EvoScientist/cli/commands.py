@@ -1522,9 +1522,9 @@ async def _apply_serve_resume_state(
                 "subagents and EvoMemory workers may be unavailable.[/yellow]"
             )
             if proactive is not None and moves_workspace:
-                proactive.unavailable_reason = (
-                    "the background agent server did not move to this workspace"
-                )
+                from ..proactive.serve import MOVE_FAILED_REASON
+
+                proactive.unavailable_reason = MOVE_FAILED_REASON
         elif proactive is not None and moves_workspace:
             proactive.move_to(new_dirs.workspace)
         workspace_update = (new_dirs, new_agent)

@@ -48,6 +48,9 @@ STALE_TICK_SECONDS = 25 * 60
 # decisions, so a live cron's are at most one interval (10 min) plus a poll
 # old; an older one was left in the cron thread while serve was stopped.
 DECISION_MAX_AGE_SECONDS = 15 * 60
+# ``unavailable_reason`` while the dev server stays behind after a workspace
+# move; the next move that succeeds clears it.
+MOVE_FAILED_REASON = "the background agent server did not move to this workspace"
 # The graph whose threads serve writes pushes into.
 MAIN_GRAPH_ID = "EvoScientist"
 # Node of the main graph a push is a reply of, for the fallback write.
@@ -352,8 +355,12 @@ class ProactiveServe:
 
         The armed threads stay with the old workspace: their flag is in their
         metadata, and :meth:`adopt` arms a thread again when serve resumes it.
+        Called after the dev server moved, so a controller left unavailable by
+        an earlier failed move is available again.
         """
         with self._lock:
+            if self.unavailable_reason == MOVE_FAILED_REASON:
+                self.unavailable_reason = None
             self.workspace = workspace
             self._cron_thread_id = None
             self._mirrored = None

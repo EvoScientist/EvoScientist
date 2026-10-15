@@ -362,6 +362,26 @@ def test_moving_workspace_leaves_the_old_armed_threads_behind(setup, tmp_path):
     assert client.crons.rows == []
 
 
+def test_a_successful_move_ends_an_earlier_failed_move(setup, tmp_path):
+    from EvoScientist.proactive.serve import MOVE_FAILED_REASON
+
+    controller, _, _, _ = setup
+    controller.unavailable_reason = MOVE_FAILED_REASON
+
+    controller.move_to(Workspace(tmp_path / "other"))
+
+    assert controller.available
+
+
+def test_a_move_keeps_a_reason_it_did_not_cause(setup, tmp_path):
+    controller, _, _, _ = setup
+    controller.unavailable_reason = "the local gateway backend runs in-process"
+
+    controller.move_to(Workspace(tmp_path / "other"))
+
+    assert not controller.available
+
+
 @pytest.mark.parametrize(
     ("metadata", "armed_before", "armed_after"),
     [
