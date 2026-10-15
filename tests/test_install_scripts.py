@@ -107,7 +107,8 @@ def _cases(local: Path) -> dict[str, tuple[str, list[str]]]:
     }
 
 
-CASE_NAMES = list(_cases(Path("/x")))
+# Any absolute path: only the names are needed here.
+CASE_NAMES = list(_cases(Path(__file__).resolve().parent / "local pkg"))
 
 
 @pytest.mark.parametrize("script", list(READERS))

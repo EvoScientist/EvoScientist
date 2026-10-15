@@ -190,8 +190,11 @@ print(found[0], found[-1])
 # Blocks outbound traffic of every Python and Node executable that the
 # install uses; loopback traffic is not filtered by Windows Firewall.
 function Block-Network {
-    $basePython = Invoke-Native $Python @('-c', 'import sys; print(sys._base_executable)')
-    $programs = @($basePython.Trim(), $Python)
+    # uv's base Python, by the path the environment uses and by its real one:
+    # uv reaches it through a minor-version link (cpython-3.12-...), and a
+    # firewall rule on the link path does not match the running process.
+    $bases = @((Invoke-Native $Python @('-c', 'import os, sys; print(sys._base_executable); print(os.path.realpath(sys._base_executable))')) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    $programs = @($bases) + @($Python)
     $programs += @(Get-ChildItem (Join-Path $ToolDir 'evoscientist\Scripts') -Filter *.exe | ForEach-Object { $_.FullName })
     $programs += @(Get-ChildItem $BinDir -Filter *.exe | ForEach-Object { $_.FullName })
     $node = Get-Content -Raw -Encoding UTF8 -ErrorAction SilentlyContinue (Join-Path $DataDir 'tools\node.json') | ConvertFrom-Json
@@ -208,7 +211,7 @@ function Block-Network {
     # arguments to native programs. Exit code 3 only when the request itself
     # fails, so a probe that breaks for another reason never counts as blocked.
     $probe = "import sys, urllib.request`ntry: urllib.request.urlopen('https://pypi.org/simple/', timeout=15)`nexcept OSError: sys.exit(3)"
-    foreach ($exe in @($basePython.Trim(), $Python)) {
+    foreach ($exe in @($bases) + @($Python)) {
         Invoke-Native $exe @('-c', $probe) | Out-Null
         if ($NativeExitCode -ne 3) { Fail "$exe can still reach https://pypi.org, or the probe failed (exit $NativeExitCode): the network is not proven blocked" }
     }
