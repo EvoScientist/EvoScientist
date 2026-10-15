@@ -56,6 +56,8 @@ def test_push_is_a_tagged_ai_message_with_the_stripped_text():
         ("Nothing new since the last reply.\n\nNO_PUSH", "no_push"),
         ("x" * (MAX_PUSH_CHARS + 1), "too_long"),
         ("<tool_call>execute ls</tool_call>", "tool_call_text"),
+        ('Checking.\n[called tool `execute` with {"command": "ls"}]', "tool_call_text"),
+        ('<function_calls><invoke name="execute">', "tool_call_text"),
     ],
 )
 def test_skips(reply, reason):

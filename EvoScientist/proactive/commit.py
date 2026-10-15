@@ -28,9 +28,15 @@ _SENTINEL_WRAPPING = "`*_\"'.!:- "
 MAX_PUSH_CHARS = 4000
 
 # A model with no tools bound sometimes writes its tool-call envelope as text
-# (seen: ``<tool_call>execute...</tool_call>``). That is an attempted action,
-# not a message.
-_TOOL_CALL_TEXT_MARKERS = ("<tool_call>", "</tool_call>")
+# (seen: ``<tool_call>execute...</tool_call>``; Claude writes
+# ``<function_calls>``), or copies the form the flattened history uses for past
+# calls. That is an attempted action, not a message.
+_TOOL_CALL_TEXT_MARKERS = (
+    "<tool_call>",
+    "</tool_call>",
+    "<function_calls>",
+    "[called tool `",
+)
 
 # A push is tagged under this ``additional_kwargs`` namespace:
 # ``{"evoscientist": {"is_proactive_push": True, "proactive_id": "<id>"}}``.
