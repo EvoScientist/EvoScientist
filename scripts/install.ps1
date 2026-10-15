@@ -23,8 +23,8 @@
 #
 # Under irm | iex this code runs in the caller's session: everything lives in
 # one function, environment, TLS and proxy settings are restored at the end, so
-# only the small type behind Get-LongPath stays loaded; errors are thrown,
-# never `exit`, which would close the window.
+# nothing stays behind; errors are thrown, never `exit`, which would close the
+# window.
 
 # Refuses an unknown or misspelled option instead of ignoring it.
 [CmdletBinding()]
@@ -140,21 +140,19 @@ for entry in entries:
         return [version]($parts -join '.')
     }
 
-    # Expands 8.3 short names (C:\Users\JWX140~1\...), which Get-Process and
-    # %TEMP% can return, so paths compare equal.
+    # Expands 8.3 short names (C:\Users\JOHNSM~1\...), which Get-Process and
+    # %TEMP% can return, so paths compare equal. A folder search matches short
+    # names too and returns the long one. Not GetLongPathName through Add-Type:
+    # its compiler fails when %TEMP% has a character outside the ANSI code page.
     function Get-LongPath([string]$Path) {
-        if (-not ('EvoSciInstall.Win32' -as [type])) {
-            Add-Type -Namespace EvoSciInstall -Name Win32 -MemberDefinition @'
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferSize);
-'@
-        }
         try { $full = [IO.Path]::GetFullPath($Path) } catch { return $Path.TrimEnd('\') }
-        $sb = New-Object System.Text.StringBuilder 32768
-        try {
-            if ([EvoSciInstall.Win32]::GetLongPathName($full, $sb, [uint32]$sb.Capacity) -gt 0) { $full = $sb.ToString() }
-        } catch { }
-        return $full.TrimEnd('\')
+        $long = [IO.Path]::GetPathRoot($full)
+        foreach ($part in $full.Substring($long.Length).Split([char[]]'\', [StringSplitOptions]::RemoveEmptyEntries)) {
+            $found = @()
+            try { if ([IO.Directory]::Exists($long)) { $found = @([IO.Directory]::GetFileSystemEntries($long, $part)) } } catch { }
+            $long = if ($found.Count -eq 1) { $found[0] } else { [IO.Path]::Combine($long, $part) }
+        }
+        return $long.TrimEnd('\')
     }
 
     function Test-SamePath([string]$A, [string]$B) {
