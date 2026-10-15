@@ -239,12 +239,27 @@ def test_runs_on_managed_python(tmp_path, monkeypatch):
     assert uv_tool.runs_on_managed_python("uv") is False
 
 
-def test_runs_on_managed_python_false_when_uv_fails(monkeypatch):
+def test_runs_on_managed_python_unknown_when_uv_fails(monkeypatch):
     def fake_run(cmd, **kwargs):
         raise OSError("no uv")
 
     monkeypatch.setattr(uv_tool.subprocess, "run", fake_run)
-    assert uv_tool.runs_on_managed_python("uv") is False
+    assert uv_tool.runs_on_managed_python("uv") is None
+
+
+def test_runs_on_managed_python_unknown_for_uv_python_elsewhere(tmp_path, monkeypatch):
+    """uv run with other settings than at install time names another folder."""
+    base = tmp_path / "old-uv-python" / "cpython-3.12.15-linux-x86_64-gnu"
+    base.mkdir(parents=True)
+    monkeypatch.setattr(sys, "base_prefix", str(base))
+    monkeypatch.setattr(
+        uv_tool.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 0, f"{tmp_path / 'uv-python'}\n", ""
+        ),
+    )
+    assert uv_tool.runs_on_managed_python("uv") is None
 
 
 def _help(text: str):

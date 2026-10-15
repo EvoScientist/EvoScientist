@@ -1667,6 +1667,31 @@ class TestUvToolCompat:
         with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
         assert with_args == ["six"]
 
+    def test_install_library_uv_tool_unknown_python_falls_back(
+        self, monkeypatch, tmp_path
+    ):
+        """When uv cannot tell which Python the environment runs on, the
+        environment is not rebuilt: uv pip install instead."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        (venv / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{ name = "evoscientist", specifier = "==0.3.6" }]\n'
+        )
+        _use_tool_env(monkeypatch, venv)
+        monkeypatch.setattr(reg.uv_tool, "runs_on_managed_python", lambda uv: None)
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("new-pkg") is True
+        assert [c[:3] for c in captured] == [["uv", "pip", "install"]]
+
     def test_install_library_uv_tool_uses_uv_environment(self, monkeypatch, tmp_path):
         """The reinstall resolves through the configured mirror and the
         system certificates, as EvoSci update does."""

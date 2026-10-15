@@ -181,14 +181,13 @@ def _uv_tool_reinstall_cmd(
     else:
         suffix = f"[{','.join(extras)}]" if extras else ""
         own = [f"EvoScientist{suffix}=={version('EvoScientist')}"]
+    managed = uv_tool.runs_on_managed_python(uv)
+    if managed is None:
+        raise RuntimeError("uv cannot tell which kind of Python the environment uses")
     cmd = [uv, "tool", "install", "-q", "--python", uv_tool.python_request(receipt)]
     # Stay on the kind of interpreter the environment has: uv prefers its
     # own Python when one is installed.
-    cmd.append(
-        "--managed-python"
-        if uv_tool.runs_on_managed_python(uv)
-        else "--no-managed-python"
-    )
+    cmd.append("--managed-python" if managed else "--no-managed-python")
     if constraints is not None:
         # By name, run from its folder: uv splits a -c path at spaces
         # (astral-sh/uv#12639).

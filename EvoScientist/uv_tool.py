@@ -27,6 +27,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 RECEIPT_NAME = "uv-receipt.toml"
+# The folder of a Python that uv installed: cpython-3.12.15-macos-aarch64-none.
+_MANAGED_PYTHON_DIR = re.compile(r"[a-z]+-\d+\.\d+\.\d+[^-]*(-[^-]+){3}")
 # The package's own name as uv writes it in the receipt (normalized).
 PACKAGE = "evoscientist"
 # Requirement keys that name where a package comes from instead of the index.
@@ -253,9 +255,13 @@ def uv_environment(uv: str, mirror: str) -> dict[str, str]:
     return env
 
 
-def runs_on_managed_python(uv: str) -> bool:
+def runs_on_managed_python(uv: str) -> bool | None:
     """True when this environment's base interpreter is one uv installed
-    (``uv python dir``). False when uv cannot tell."""
+    (``uv python dir``), False when it is another Python. None when uv cannot
+    tell: it fails, or it names another folder while the interpreter's folder
+    is named like one uv installs, as when uv runs with other settings
+    (``UV_PYTHON_INSTALL_DIR``, ``XDG_DATA_HOME``) than when it built the
+    environment."""
     from .setup._install import is_under
 
     try:
@@ -268,11 +274,14 @@ def runs_on_managed_python(uv: str) -> bool:
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
     managed_root = result.stdout.strip()
     if result.returncode != 0 or not managed_root:
-        return False
-    return is_under(Path(sys.base_prefix), Path(managed_root))
+        return None
+    base = Path(sys.base_prefix)
+    if is_under(base, Path(managed_root)):
+        return True
+    return None if _MANAGED_PYTHON_DIR.fullmatch(base.name) else False
 
 
 def python_request(receipt: Receipt) -> str:
