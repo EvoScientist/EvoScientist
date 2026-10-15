@@ -158,6 +158,8 @@ def tick(monkeypatch, workspace):
         shadow_calls.append([m.id for m in messages])
         if reply.get("error") is not None:
             raise reply.pop("error")
+        if reply.get("always_error") is not None:
+            raise reply["always_error"]
         return reply["text"]
 
     monkeypatch.setattr("EvoScientist.proactive.shadow.run_shadow_turn", fake_shadow)
@@ -331,6 +333,56 @@ def test_a_failed_shadow_turn_is_retried_on_the_next_tick(tick, workspace):
     assert len(shadow_calls) == 2
     assert state["last_tick"][0]["stage"] == "decided"
     assert state["evaluated"] == {"t1": "m2"}
+
+
+def test_a_thread_that_keeps_failing_is_tried_1_2_4_ticks_apart(tick, workspace):
+    run, threads, shadow_calls, reply = tick
+    threads["t1"] = _thread(workspace)
+    reply["always_error"] = RuntimeError("context window exceeded")
+
+    tried = []
+    for n in range(1, 9):
+        before = len(shadow_calls)
+        state = run(_candidates("t1"))
+        if len(shadow_calls) > before:
+            tried.append(n)
+            assert state["last_tick"][0]["stage"] == "error"
+        else:
+            assert state["last_tick"][0]["reason"] == "backoff"
+
+    assert tried == [1, 2, 4, 8]
+    assert state["failures"]["t1"]["count"] == 4
+    assert state["evaluated"] == {}
+
+
+def test_a_new_message_ends_the_backoff(tick, workspace):
+    run, threads, shadow_calls, reply = tick
+    threads["t1"] = _thread(workspace)
+    reply["always_error"] = RuntimeError("context window exceeded")
+    run(_candidates("t1"))
+    run(_candidates("t1"))  # second failure: the next tick is skipped
+    threads["t1"] = _thread(workspace, last_id="m3")
+    del reply["always_error"]
+
+    state = run(_candidates("t1"))
+
+    assert len(shadow_calls) == 3
+    assert state["last_tick"][0]["stage"] == "decided"
+    assert state["failures"] == {}
+    assert state["evaluated"] == {"t1": "m3"}
+
+
+def test_the_backoff_stops_growing_at_six_hours():
+    record = None
+    for _ in range(20):
+        record = proactive_graph._failure_after(record, "m2")
+    assert record["skip"] == proactive_graph.MAX_BACKOFF_TICKS
+    assert (record["skip"] + 1) * 10 == 6 * 60
+    assert proactive_graph._failure_after(record, "m3") == {
+        "message_id": "m3",
+        "count": 1,
+        "skip": 0,
+    }
 
 
 def test_one_failing_thread_does_not_stop_the_tick(tick, workspace):

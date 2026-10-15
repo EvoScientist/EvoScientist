@@ -10,6 +10,11 @@ in the cron thread's state:
 - ``evaluated``: per candidate thread, the last non-proactive message the
   previous shadow turn saw, so a thread with nothing new is skipped. Threads
   that are no longer candidates drop out.
+- ``failures``: per candidate thread whose shadow turn raised, the message it
+  failed on, how often, and how many ticks to skip before the next try (1, 2,
+  4, ... ticks apart, at most :data:`MAX_BACKOFF_TICKS`). A context overflow
+  or a revoked key fails every time, and each try is a model call the size of
+  the conversation. A new message, or a turn that returns, clears the record.
 - ``last_tick``: thread, stage and reason for every candidate (never text), to
   see why a tick did or did not push.
 
@@ -30,16 +35,22 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from ..paths import SessionDirs, Workspace
+from .commit import last_non_proactive_message_id
 from .gate import ProactiveGateSettings
 from .service import ProactiveDecision, decide_proactive_push
 
 logger = logging.getLogger(__name__)
+
+# Most ticks a failing thread waits between two tries: six hours at the
+# cron's ten-minute interval.
+MAX_BACKOFF_TICKS = 35
 
 
 class ProactiveTickState(TypedDict, total=False):
     candidates: list[dict[str, Any]]
     decisions: list[dict[str, Any]]
     evaluated: dict[str, str]
+    failures: dict[str, dict[str, Any]]
     last_tick: list[dict[str, Any]]
 
 
@@ -125,6 +136,25 @@ def _parse_time(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
+class _ShadowTurnFailed(Exception):
+    """The shadow turn raised; carries the message it was run on."""
+
+    def __init__(self, message_id: str | None) -> None:
+        super().__init__(message_id)
+        self.message_id = message_id
+
+
+def _failure_after(
+    record: dict[str, Any] | None, message_id: str | None
+) -> dict[str, Any]:
+    """The failure record after one more failed try on *message_id*."""
+    count = 1
+    if record is not None and record.get("message_id") == message_id:
+        count = int(record.get("count") or 0) + 1
+    skip = min(2 ** (count - 1) - 1, MAX_BACKOFF_TICKS)
+    return {"message_id": message_id, "count": count, "skip": skip}
+
+
 def _checkpoint_id(state: Any) -> str | None:
     checkpoint = state.get("checkpoint") if isinstance(state, dict) else None
     if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_id"):
@@ -150,8 +180,14 @@ async def _check_thread(
     *,
     now: datetime,
     last_evaluated_id: str | None,
+    failure: dict[str, Any] | None = None,
 ) -> ProactiveDecision:
-    """Read one candidate thread from this server and decide for it."""
+    """Read one candidate thread from this server and decide for it.
+
+    A thread whose last shadow turn failed on the same message is skipped as
+    ``backoff`` while its *failure* record has ticks left to skip. A shadow
+    turn that raises raises :class:`_ShadowTurnFailed`.
+    """
     from ..gateway.server import _messages_from_state, _state_interrupts
 
     thread = await client.threads.get(thread_id)
@@ -170,13 +206,25 @@ async def _check_thread(
     status = thread.get("status")
     in_flight = status in ("busy", "interrupted") or bool(_state_interrupts(state))
 
+    source_messages = _messages_from_state(state)
+    last_message_id = last_non_proactive_message_id(source_messages)
+    if (
+        failure is not None
+        and failure.get("message_id") == last_message_id
+        and int(failure.get("skip") or 0) > 0
+    ):
+        return ProactiveDecision("gate_rejected", "backoff", thread_id)
+
     async def shadow_runner(messages: list[Any], trigger: str) -> str | None:
         from .shadow import run_shadow_turn
 
         # Built here, after the gate passed: a thread the gate skips costs no
         # build, and a failing build cannot hide the gate's reason.
-        shadow = await asyncio.to_thread(_build_shadow, deps, dirs)
-        return await run_shadow_turn(shadow, messages, trigger)
+        try:
+            shadow = await asyncio.to_thread(_build_shadow, deps, dirs)
+            return await run_shadow_turn(shadow, messages, trigger)
+        except Exception as exc:
+            raise _ShadowTurnFailed(last_message_id) from exc
 
     async def read_current_head() -> str | None:
         return _checkpoint_id(await client.threads.get_state(thread_id))
@@ -195,7 +243,7 @@ async def _check_thread(
         ),
         last_evaluated_id=last_evaluated_id,
         pre_head=_checkpoint_id(state),
-        source_messages=_messages_from_state(state),
+        source_messages=source_messages,
         shadow_runner=shadow_runner,
         read_current_head=read_current_head,
         proactive_id=uuid.uuid4().hex,
@@ -219,6 +267,7 @@ def build_proactive_graph(*, workspace: Workspace) -> Any:
 
         now = datetime.now(UTC)
         evaluated_before = state.get("evaluated") or {}
+        failures_before = state.get("failures") or {}
         candidates = [
             str(c["thread_id"])
             for c in state.get("candidates") or []
@@ -226,8 +275,10 @@ def build_proactive_graph(*, workspace: Workspace) -> Any:
         ]
         decisions: list[dict[str, Any]] = []
         evaluated: dict[str, str] = {}
+        failures: dict[str, dict[str, Any]] = {}
         last_tick: list[dict[str, Any]] = []
         for thread_id in candidates:
+            failure = failures_before.get(thread_id)
             try:
                 decision = await _check_thread(
                     client,
@@ -236,11 +287,28 @@ def build_proactive_graph(*, workspace: Workspace) -> Any:
                     thread_id,
                     now=now,
                     last_evaluated_id=evaluated_before.get(thread_id),
+                    failure=failure,
                 )
             except NotFoundError:
                 last_tick.append(
                     {"thread_id": thread_id, "stage": "gone", "reason": ""}
                 )
+                continue
+            except _ShadowTurnFailed as exc:
+                failures[thread_id] = _failure_after(failure, exc.message_id)
+                logger.warning(
+                    "[proactive] shadow turn failed for thread %s (%d in a row); "
+                    "next try in %d tick(s)",
+                    thread_id,
+                    failures[thread_id]["count"],
+                    failures[thread_id]["skip"] + 1,
+                    exc_info=exc.__cause__,
+                )
+                last_tick.append(
+                    {"thread_id": thread_id, "stage": "error", "reason": ""}
+                )
+                if thread_id in evaluated_before:
+                    evaluated[thread_id] = evaluated_before[thread_id]
                 continue
             except Exception:
                 logger.warning(
@@ -251,6 +319,8 @@ def build_proactive_graph(*, workspace: Workspace) -> Any:
                 )
                 if thread_id in evaluated_before:
                     evaluated[thread_id] = evaluated_before[thread_id]
+                if failure is not None:
+                    failures[thread_id] = failure
                 continue
             last_tick.append(
                 {
@@ -263,10 +333,20 @@ def build_proactive_graph(*, workspace: Workspace) -> Any:
                 evaluated[thread_id] = decision.evaluated_message_id
             elif thread_id in evaluated_before:
                 evaluated[thread_id] = evaluated_before[thread_id]
+            if decision.reason == "backoff" and failure is not None:
+                failures[thread_id] = {**failure, "skip": failure["skip"] - 1}
+            elif decision.evaluated_message_id is None and failure is not None:
+                # Gated or stale: the failed message is still the one to retry.
+                failures[thread_id] = failure
             if decision.stage == "decided":
                 decisions.append(_decision_record(decision, now))
         logger.info("[proactive] tick: %s", last_tick)
-        return {"decisions": decisions, "evaluated": evaluated, "last_tick": last_tick}
+        return {
+            "decisions": decisions,
+            "evaluated": evaluated,
+            "failures": failures,
+            "last_tick": last_tick,
+        }
 
     builder = StateGraph(ProactiveTickState)
     builder.add_node("tick", tick)
