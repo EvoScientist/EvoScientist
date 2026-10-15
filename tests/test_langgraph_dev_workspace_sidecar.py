@@ -472,6 +472,101 @@ def test_reuse_clears_drift_flag_on_matching_fingerprint(
     assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
 
 
+def _plain_server_config():
+    """Config the server process would load: file + environment, no CLI flags."""
+    cfg = manager.EvoScientistConfig()
+    cfg.enable_async_subagents = True
+    return cfg
+
+
+def test_reuse_ignores_cli_override_when_server_config_matches(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A session flag such as ``--auto-mode`` is not part of what the running
+    server loaded. Comparing that flag would warn even though the server is
+    unchanged."""
+    plain = _plain_server_config()
+    fp = manager._server_config_fingerprint(plain)
+    session = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
+    session.auto_mode = True
+
+    manager.ensure_langgraph_dev(
+        session, workspace_dir=tmp_path / "A", server_config=plain
+    )
+
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
+
+
+def test_reuse_reports_drift_when_server_loaded_config_differs(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """Drift still fires when the config the server actually loaded changed,
+    even if the session config matches the sidecar."""
+    plain = _plain_server_config()
+    fp = manager._server_config_fingerprint(plain)
+    session = _reuse_setup(tmp_path, monkeypatch, runtime_paths, fp)
+    loaded = _plain_server_config()
+    loaded.dangerous_mode = True
+
+    manager.ensure_langgraph_dev(
+        session, workspace_dir=tmp_path / "A", server_config=loaded
+    )
+
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is True
+
+
+def test_started_server_records_server_loaded_config_fingerprint(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """A session that starts the server with a CLI override records the
+    fingerprint of what the server loaded, so a later session without the
+    flag does not warn."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from EvoScientist.mcp import client as mcp_client
+
+    up = {"running": False}
+    spawned = []
+
+    def _popen(*_a, **kw):
+        spawned.append(kw["env"])
+        up["running"] = True
+        return SimpleNamespace(pid=4242, poll=lambda: None)
+
+    monkeypatch.setattr(mcp_client, "load_mcp_config", lambda: {})
+    monkeypatch.setattr(manager, "_langgraph_exe", lambda: "/usr/bin/langgraph")
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_: up["running"])
+    monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
+    monkeypatch.setattr(manager, "_wait_for_port_bindable", lambda *_a, **_kw: True)
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    monkeypatch.setattr(manager, "_PROCESS_WORKSPACE", None)
+
+    plain = _plain_server_config()
+    session = _plain_server_config()
+    session.auto_mode = True
+    session.langgraph_dev_keepalive = True
+    # Launch settings stay on the session config; only the fingerprint moves.
+    session.langgraph_dev_port = plain.langgraph_dev_port + 1
+
+    manager.ensure_langgraph_dev(
+        session, workspace_dir=tmp_path / "A", server_config=plain
+    )
+    recorded = json.loads(runtime_paths.workspace_sidecar.read_text())
+    assert recorded["config_fingerprint"] == manager._server_config_fingerprint(plain)
+    assert recorded["config_fingerprint"] != manager._server_config_fingerprint(session)
+    assert spawned[0]["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == str(
+        session.langgraph_dev_port
+    )
+
+    monkeypatch.setattr(manager, "_PROCESS", None)
+    later = _plain_server_config()
+    assert manager.ensure_langgraph_dev(later, workspace_dir=tmp_path / "A") is None
+    assert manager.CONFIG_DRIFT_SINCE_LAUNCH is False
+    assert len(spawned) == 1
+
+
 def test_server_config_fingerprint_ignores_the_agent_python(monkeypatch):
     """The fingerprint covers launch settings only; a PATH difference is
     reported on its own (``AGENT_SHELL_DRIFT``)."""

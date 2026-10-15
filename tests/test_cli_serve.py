@@ -104,10 +104,11 @@ def _run_serve_once(
         def get(self, timeout=None):
             raise KeyboardInterrupt()
 
-    def _fake_ensure_async_server(cfg, *, dirs, backend=None):
+    def _fake_ensure_async_server(cfg, *, dirs, backend=None, server_config=None):
         captured["dirs"] = dirs
         captured["ensure_config"] = cfg
         captured["ensure_backend"] = backend
+        captured["server_config"] = server_config
 
     monkeypatch.setattr(commands, "ensure_dirs", _fake_ensure_dirs)
     monkeypatch.setattr(commands, "reload_env_dirs", _fake_reload_env_dirs)
@@ -128,9 +129,14 @@ def _run_serve_once(
         monkeypatch.setattr(commands, "_serve_process_message", process_message)
 
     def _fake_get_effective_config(cli_overrides=None):
-        captured["cli_overrides"] = dict(cli_overrides or {})
+        overrides = dict(cli_overrides or {})
+        captured.setdefault("config_loads", []).append(overrides)
+        # The session load carries the flags. A later no-override load, used
+        # only for the server fingerprint, must not clobber that record.
+        if overrides or "cli_overrides" not in captured:
+            captured["cli_overrides"] = overrides
         merged = vars(config).copy()
-        merged.update(cli_overrides or {})
+        merged.update(overrides)
         return SimpleNamespace(**merged)
 
     monkeypatch.setattr(config_mod, "get_effective_config", _fake_get_effective_config)
@@ -424,3 +430,22 @@ def test_serve_sigint_cancels_active_message_scope_before_interrupt(
     )
 
     assert cancelled_scopes == ["channel:telegram:chat-2:message-2"]
+
+
+def test_serve_auto_mode_passes_the_config_the_server_loads(monkeypatch, tmp_path):
+    """``EvoSci serve --auto-mode`` must fingerprint the no-override load."""
+    ws = str((tmp_path / "ws").resolve())
+    _, captured = _run_serve_once(
+        monkeypatch,
+        _make_config(default_workdir=ws),
+        workdir=ws,
+        auto_mode=True,
+    )
+
+    assert captured["ensure_config"].auto_mode is True
+    server_config = captured["server_config"]
+    assert server_config is not None
+    assert server_config is not captured["ensure_config"]
+    assert server_config.auto_mode is False
+    assert captured["config_loads"][-1] == {}
+    assert captured["cli_overrides"]["auto_mode"] is True

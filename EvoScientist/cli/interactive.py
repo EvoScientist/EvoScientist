@@ -296,6 +296,7 @@ async def _resolve_startup_session(
     graph_gateway: GraphGateway,
     config: Any,
     backend: str | None = None,
+    server_config: Any | None = None,
 ) -> _StartupSession:
     """Resolve/create the initial CLI session before shared REPL state exists."""
     if not requested_thread_id:
@@ -335,6 +336,7 @@ async def _resolve_startup_session(
             graph_gateway=graph_gateway,
             config=config,
             backend=backend,
+            **({} if server_config is None else {"server_config": server_config}),
         ),
         resumed=True,
     )
@@ -347,6 +349,7 @@ async def _new_session_dirs(
     backend: str | None,
     mode: str | None,
     run_name: str | None,
+    server_config: Any | None = None,
 ) -> SessionDirs:
     """The folders ``/new`` starts in, with the background agent server moved there.
 
@@ -370,6 +373,7 @@ async def _new_session_dirs(
         backend=backend,
         new_run_dir=True,
         status_message="[dim]Moving background agent server to the new session...[/dim]",
+        **({} if server_config is None else {"server_config": server_config}),
     ):
         console.print(
             "[yellow]Background agent server sync failed; started the new "
@@ -438,6 +442,7 @@ def cmd_interactive(
     async_runtime: "AsyncRuntime | None" = None,
     *,
     dirs: SessionDirs,
+    server_config=None,
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -455,6 +460,9 @@ def cmd_interactive(
         ui_backend: UI backend ('cli' or 'tui')
         dirs: The session's workspace, and its run folder under
             ``--mode=run`` (``/new`` then moves to a fresh run folder)
+        server_config: Config the background server loaded, when CLI flags
+            made ``config`` differ from that. A later restart fingerprints
+            it. ``None`` fingerprints ``config``.
     """
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
@@ -476,6 +484,7 @@ def cmd_interactive(
             create_run_dir=_create_run_dir,
             config=config,
             async_runtime=async_runtime,
+            server_config=server_config,
         )
         return
 
@@ -872,6 +881,7 @@ def cmd_interactive(
                 graph_gateway=graph_gateway,
                 config=config,
                 backend=gateway_backend,
+                server_config=server_config,
             )
             state["thread_id"] = startup.thread_id
             state["dirs"] = startup.dirs
@@ -902,6 +912,7 @@ def cmd_interactive(
                     backend=gateway_backend,
                     mode=mode,
                     run_name=run_name,
+                    server_config=server_config,
                 )
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
                 state["dirs"] = new_dirs
@@ -944,6 +955,11 @@ def cmd_interactive(
                         target=dirs,
                         current=state["dirs"],
                         backend=gateway_backend,
+                        **(
+                            {}
+                            if server_config is None
+                            else {"server_config": server_config}
+                        ),
                     ):
                         console.print(
                             "[yellow]Background agent server sync failed; "

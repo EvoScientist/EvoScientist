@@ -50,8 +50,9 @@ def _run(
         merged.update(cli_overrides or {})
         return SimpleNamespace(**merged)
 
-    def _fake_ensure_server(cfg, *, dirs, backend=None):
+    def _fake_ensure_server(cfg, *, dirs, backend=None, server_config=None):
         captured["server_dirs"] = dirs
+        captured["server_config"] = server_config
 
     def _fake_cmd_interactive(**kwargs):
         captured.update(kwargs)
@@ -353,3 +354,83 @@ def test_webui_mode_run_works_in_root(monkeypatch, tmp_path):
 
     assert launched == [str(tmp_path.resolve())]
     assert not (tmp_path / "runs").exists()
+
+
+def _run_tracking_server_config(monkeypatch, tmp_path, *, auto_mode):
+    """Drive the main callback and record each config load plus the server args."""
+    import EvoScientist.cli.interactive as interactive_mod
+    import EvoScientist.config as config_mod
+
+    monkeypatch.chdir(tmp_path)
+    base = _config()
+    loads: list[dict] = []
+    captured: dict = {}
+
+    def _fake_get_effective_config(cli_overrides=None):
+        overrides = dict(cli_overrides or {})
+        loads.append(overrides)
+        merged = vars(base).copy()
+        merged.update(overrides)
+        return SimpleNamespace(**merged)
+
+    def _fake_ensure_server(cfg, *, dirs, backend=None, server_config=None):
+        captured["config"] = cfg
+        captured["server_config"] = server_config
+
+    def _fake_cmd_interactive(**kwargs):
+        captured["interactive_server_config"] = kwargs.get("server_config")
+
+    monkeypatch.setattr(config_mod, "get_effective_config", _fake_get_effective_config)
+    monkeypatch.setattr(config_mod, "apply_config_to_env", lambda _cfg: None)
+    monkeypatch.setattr(config_mod, "resolve_gateway_backend", lambda *_a: "local")
+    monkeypatch.setattr(commands, "_get_cli_async_runtime", lambda _ctx: None)
+    monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(commands, "reload_env_dirs", lambda: None)
+    monkeypatch.setattr(commands, "_ensure_async_subagent_server", _fake_ensure_server)
+    monkeypatch.setattr(interactive_mod, "cmd_interactive", _fake_cmd_interactive)
+
+    commands._main_callback(
+        SimpleNamespace(invoked_subcommand=None),
+        version=None,
+        mode=None,
+        name=None,
+        prompt=None,
+        thread_id=None,
+        workdir=None,
+        use_cwd=False,
+        no_thinking=False,
+        auto_approve=False,
+        auto_mode=auto_mode,
+        ask_user=False,
+        dangerous=False,
+        auth_mode=None,
+        ui=None,
+        host=None,
+        output_format=None,
+    )
+    captured["loads"] = loads
+    return captured
+
+
+def test_auto_mode_passes_the_config_the_server_loads(monkeypatch, tmp_path):
+    """``--auto-mode`` stays on the session config. The fingerprint uses a
+    fresh load with no CLI overrides — the same load the server does."""
+    captured = _run_tracking_server_config(monkeypatch, tmp_path, auto_mode=True)
+
+    assert captured["config"].auto_mode is True
+    server_config = captured["server_config"]
+    assert server_config is not None
+    assert server_config is not captured["config"]
+    assert getattr(server_config, "auto_mode", False) is False
+    assert captured["loads"][0]["auto_mode"] is True
+    assert captured["loads"][-1] == {}
+    assert captured["interactive_server_config"] is server_config
+
+
+def test_no_cli_overrides_does_not_reload_config_for_the_server(monkeypatch, tmp_path):
+    """With no flags, the session config is already what the server loads."""
+    captured = _run_tracking_server_config(monkeypatch, tmp_path, auto_mode=None)
+
+    assert captured["server_config"] is None
+    assert captured["interactive_server_config"] is None
+    assert captured["loads"] == [{}]

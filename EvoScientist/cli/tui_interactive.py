@@ -528,6 +528,7 @@ def run_textual_interactive(
     create_run_dir: Callable[[Workspace, str | None], Path],
     config: Any | None = None,
     async_runtime: AsyncRuntime | None = None,
+    server_config: Any | None = None,
 ) -> None:
     """Run full-screen Textual interactive chat loop.
 
@@ -979,6 +980,11 @@ def run_textual_interactive(
                     current=self._dirs,
                     backend=gateway_backend,
                     new_run_dir=new_run_dir,
+                    **(
+                        {}
+                        if server_config is None
+                        else {"server_config": server_config}
+                    ),
                 )
             finally:
                 await sync_widget.cleanup()
@@ -4487,6 +4493,11 @@ def run_textual_interactive(
                                 target=stored,
                                 current=dirs,
                                 backend=gateway_backend,
+                                **(
+                                    {}
+                                    if server_config is None
+                                    else {"server_config": server_config}
+                                ),
                             ):
                                 resume_warning = (
                                     "Background agent server sync failed; "

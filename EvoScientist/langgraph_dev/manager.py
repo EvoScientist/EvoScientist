@@ -1380,6 +1380,7 @@ def ensure_langgraph_dev(
     *,
     run_dir: Path | str | None = None,
     backend: str | None = None,
+    server_config: EvoScientistConfig | None = None,
 ) -> subprocess.Popen | None:
     """Start or reuse langgraph dev for async/background agent work.
 
@@ -1400,6 +1401,11 @@ def ensure_langgraph_dev(
         backend: The calling surface's resolved gateway backend. When ``None``,
             falls back to the global ``config.gateway_backend``. Determines
             whether the server is needed at all.
+        server_config: Config the server process will load (config file and
+            environment, no command-line overrides). When given, the launch
+            fingerprint — both the one written at start and the one compared
+            on reuse — is computed from it. When omitted, from ``config``.
+            Port, host, keepalive, and the rest still come from ``config``.
 
     Errors during startup are logged but don't abort the CLI — the user can
     still chat with sync sub-agents; only async sub-agent calls and EvoMemory
@@ -1431,7 +1437,10 @@ def ensure_langgraph_dev(
         with FileLock(str(RUNTIME.lock_file), timeout=_FILE_LOCK_TIMEOUT):
             with _LOCK:
                 return _ensure_langgraph_dev_locked(
-                    config, workspace_dir, run_dir=run_dir
+                    config,
+                    workspace_dir,
+                    run_dir=run_dir,
+                    server_config=server_config,
                 )
     except FileLockTimeout:
         logger.warning(
@@ -1450,11 +1459,17 @@ def _ensure_langgraph_dev_locked(
     workspace_dir: Path | str | None,
     *,
     run_dir: Path | str | None = None,
+    server_config: EvoScientistConfig | None = None,
 ) -> subprocess.Popen | None:
     """Locked critical section of ``ensure_langgraph_dev`` — must hold ``_LOCK``."""
     global _ASYNC_SUBAGENTS_AVAILABLE, CONFIG_DRIFT_SINCE_LAUNCH, AGENT_SHELL_DRIFT
     global SERVED_WORKSPACE
-    config_fp = _server_config_fingerprint(config)
+    # CLI flags live only on ``config``. The subprocess loads the file and
+    # the environment (``server_config``), so fingerprinting the session
+    # config reports drift the server never had.
+    config_fp = _server_config_fingerprint(
+        config if server_config is None else server_config
+    )
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))

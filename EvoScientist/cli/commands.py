@@ -710,8 +710,27 @@ class CompactSummaryRenderable:
         yield render_compact_summary_panel(self.summary_text)
 
 
+def _config_loaded_by_server(cli_overrides: dict[str, Any]) -> Any | None:
+    """Config the background server will load, when this process applied flags.
+
+    The server calls ``get_effective_config()`` with no command-line overrides,
+    so flags that exist only here must not enter the drift fingerprint.
+    Returns None when nothing was overridden: the session config is already
+    that load, and a second one would change nothing.
+    """
+    if not cli_overrides:
+        return None
+    from ..config import get_effective_config
+
+    return get_effective_config()
+
+
 def _ensure_async_subagent_server(
-    config: Any, *, dirs: SessionDirs, backend: str | None = None
+    config: Any,
+    *,
+    dirs: SessionDirs,
+    backend: str | None = None,
+    server_config: Any | None = None,
 ) -> None:
     """Start the langgraph dev subprocess for background agent work.
 
@@ -723,6 +742,10 @@ def _ensure_async_subagent_server(
     ``ensure_langgraph_dev`` so whether a server is needed follows the
     surface's choice rather than re-reading the global flag. ``None`` keeps the
     global-read behavior.
+
+    ``server_config`` is what the server process will load. Pass it when
+    ``config`` carries CLI-only flags so the drift fingerprint ignores them.
+    ``None`` fingerprints ``config``.
 
     Raises ``typer.Exit(1)`` (after surfacing a red error) when an
     externally-managed langgraph dev is already running for a different
@@ -744,12 +767,14 @@ def _ensure_async_subagent_server(
             "[dim]Starting background agent server (langgraph dev)...[/dim]",
             spinner="dots",
         ):
-            ensure_langgraph_dev(
-                config,
-                workspace_dir=dirs.workspace.root,
-                run_dir=dirs.run_dir,
-                backend=backend,
-            )
+            ensure_kwargs: dict[str, Any] = {
+                "workspace_dir": dirs.workspace.root,
+                "run_dir": dirs.run_dir,
+                "backend": backend,
+            }
+            if server_config is not None:
+                ensure_kwargs["server_config"] = server_config
+            ensure_langgraph_dev(config, **ensure_kwargs)
             _reconcile_autoskill_schedule(config, workspace=dirs.workspace)
             _adopt_stale_scheduled_tasks(workspace=dirs.workspace)
     except WorkspaceMismatchError as exc:
@@ -941,6 +966,7 @@ async def _sync_background_agent_server_workspace(
     dirs: SessionDirs,
     backend: str | None = None,
     status_message: str = _RESUME_SYNC_STATUS,
+    server_config: Any | None = None,
 ) -> None:
     """Sync langgraph dev to a resumed workspace for background agent work.
 
@@ -952,6 +978,10 @@ async def _sync_background_agent_server_workspace(
     ``backend`` is the calling surface's resolved gateway backend, forwarded so
     whether a server is needed follows the surface's choice; ``None`` keeps
     the global-read behavior.
+
+    ``server_config`` is what the server process will load, forwarded so a
+    restart records the same fingerprint the original launch did. ``None``
+    fingerprints ``config``.
     """
     import asyncio
 
@@ -969,13 +999,14 @@ async def _sync_background_agent_server_workspace(
             await asyncio.to_thread(
                 _wait_for_memory_workers, timeout_action="moving the server anyway"
             )
-        await asyncio.to_thread(
-            ensure_langgraph_dev,
-            config,
-            workspace_dir=dirs.workspace.root,
-            run_dir=dirs.run_dir,
-            backend=backend,
-        )
+        ensure_kwargs: dict[str, Any] = {
+            "workspace_dir": dirs.workspace.root,
+            "run_dir": dirs.run_dir,
+            "backend": backend,
+        }
+        if server_config is not None:
+            ensure_kwargs["server_config"] = server_config
+        await asyncio.to_thread(ensure_langgraph_dev, config, **ensure_kwargs)
         await asyncio.to_thread(
             _reconcile_autoskill_schedule,
             config,
@@ -992,6 +1023,7 @@ async def _move_server_or_keep_session(
     backend: str | None = None,
     new_run_dir: bool = False,
     status_message: str = _RESUME_SYNC_STATUS,
+    server_config: Any | None = None,
 ) -> bool:
     """Move the background agent server to *target* before a session goes there.
 
@@ -1013,9 +1045,14 @@ async def _move_server_or_keep_session(
     from ..langgraph_dev.manager import WorkspaceMismatchError
 
     try:
-        await _sync_background_agent_server_workspace(
-            config, dirs=target, backend=backend, status_message=status_message
-        )
+        sync_kwargs: dict[str, Any] = {
+            "dirs": target,
+            "backend": backend,
+            "status_message": status_message,
+        }
+        if server_config is not None:
+            sync_kwargs["server_config"] = server_config
+        await _sync_background_agent_server_workspace(config, **sync_kwargs)
     except WorkspaceMismatchError:
         if new_run_dir:
             _remove_unused_run_dir(target.run_dir)
@@ -1038,6 +1075,7 @@ async def _restore_thread_dirs(
     graph_gateway: GraphGateway,
     config: Any,
     backend: str | None = None,
+    server_config: Any | None = None,
 ) -> SessionDirs:
     """Return the folders to resume *thread_id* in, with the server moved there.
 
@@ -1056,9 +1094,14 @@ async def _restore_thread_dirs(
         or dirs
     )
     try:
-        synced = await _move_server_or_keep_session(
-            config, target=restored, current=served, backend=backend
-        )
+        move_kwargs: dict[str, Any] = {
+            "target": restored,
+            "current": served,
+            "backend": backend,
+        }
+        if server_config is not None:
+            move_kwargs["server_config"] = server_config
+        synced = await _move_server_or_keep_session(config, **move_kwargs)
     except WorkspaceMismatchError as exc:
         _remove_unused_run_dir(dirs.run_dir)
         console.print(f"[red]{exc}[/red]")
@@ -1404,6 +1447,10 @@ class ServeRuntimeState:
     async_runtime: AsyncRuntime
     resume_warning_thread_id: str | None = None
     gateway_backend: str | None = None
+    # What the server process loaded. None when the session config is that
+    # load (no CLI-only flags); a later restart fingerprints this, not the
+    # session flags.
+    server_config: Any | None = None
 
     def set_agent(
         self,
@@ -1505,12 +1552,14 @@ async def _apply_serve_resume_state(
             config=effective_config,
             runtime=runtime_state.async_runtime,
         )
-        if not await _move_server_or_keep_session(
-            effective_config,
-            target=new_dirs,
-            current=runtime_state.dirs,
-            backend=runtime_state.gateway_backend,
-        ):
+        move_kwargs: dict[str, Any] = {
+            "target": new_dirs,
+            "current": runtime_state.dirs,
+            "backend": runtime_state.gateway_backend,
+        }
+        if runtime_state.server_config is not None:
+            move_kwargs["server_config"] = runtime_state.server_config
+        if not await _move_server_or_keep_session(effective_config, **move_kwargs):
             console.print(
                 "[yellow]Background agent server sync failed; async "
                 "subagents and EvoMemory workers may be unavailable.[/yellow]"
@@ -2011,7 +2060,13 @@ def serve(
 
     # Auto-start langgraph dev (after workspace resolution, so deployed
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
-    _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
+    # Snapshot after apply_config_to_env / ccproxy: the child inherits that
+    # environment, and CLI-only flags are not in it.
+    server_config = _config_loaded_by_server(cli_overrides)
+    ensure_call: dict[str, Any] = {"dirs": dirs, "backend": gateway_backend}
+    if server_config is not None:
+        ensure_call["server_config"] = server_config
+    _ensure_async_subagent_server(config, **ensure_call)
 
     if config.dangerous_mode:
         from ._constants import DANGEROUS_BANNER_LABEL, DANGEROUS_BANNER_MESSAGE
@@ -2045,6 +2100,7 @@ def serve(
         runtime_gateways=runtime_gateways,
         async_runtime=async_runtime,
         gateway_backend=gateway_backend,
+        server_config=server_config,
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
@@ -3037,9 +3093,15 @@ def _main_callback(
     # async sub-agents inherit the CLI's workspace via EVOSCIENTIST_WORKSPACE_DIR).
     # A one-shot resume starts it for the thread's own folders instead, unless
     # the server gateway backend needs a running server to be built.
+    # Snapshot after apply_config_to_env / ccproxy: the child inherits that
+    # environment, and CLI-only flags are not in it.
+    server_config = _config_loaded_by_server(cli_overrides)
     prespawn = not (prompt and thread_id) or gateway_backend == "langgraph_server"
     if prespawn:
-        _ensure_async_subagent_server(config, dirs=dirs, backend=gateway_backend)
+        ensure_call: dict[str, Any] = {"dirs": dirs, "backend": gateway_backend}
+        if server_config is not None:
+            ensure_call["server_config"] = server_config
+        _ensure_async_subagent_server(config, **ensure_call)
 
     if prompt:
         # Single-shot mode: wrap in persistent checkpointer
@@ -3064,14 +3126,16 @@ def _main_callback(
                     resolution = await graph_gateway.resolve_thread(thread_id)
                     if resolution.thread_id:
                         tid = resolution.thread_id
-                        session_dirs = await _restore_thread_dirs(
-                            tid,
-                            dirs=dirs,
-                            served=dirs if prespawn else None,
-                            graph_gateway=graph_gateway,
-                            config=config,
-                            backend=gateway_backend,
-                        )
+                        restore_kwargs: dict[str, Any] = {
+                            "dirs": dirs,
+                            "served": dirs if prespawn else None,
+                            "graph_gateway": graph_gateway,
+                            "config": config,
+                            "backend": gateway_backend,
+                        }
+                        if server_config is not None:
+                            restore_kwargs["server_config"] = server_config
+                        session_dirs = await _restore_thread_dirs(tid, **restore_kwargs)
                     elif resolution.matches:
                         console.print(
                             f"[yellow]Ambiguous thread ID '{escape(thread_id)}'. Matches:[/yellow]"
@@ -3187,19 +3251,22 @@ def _main_callback(
         from .interactive import cmd_interactive
 
         # Interactive mode (default) — checkpointer managed inside cmd_interactive
-        cmd_interactive(
-            show_thinking=show_thinking,
-            channel_send_thinking=effective_channel_thinking,
-            dirs=dirs,
-            mode=effective_mode,
-            model=config.model,
-            provider=config.provider,
-            run_name=name,
-            thread_id=thread_id,
-            ui_backend=config.ui_backend,
-            config=config,
-            async_runtime=async_runtime,
-        )
+        interactive_kwargs: dict[str, Any] = {
+            "show_thinking": show_thinking,
+            "channel_send_thinking": effective_channel_thinking,
+            "dirs": dirs,
+            "mode": effective_mode,
+            "model": config.model,
+            "provider": config.provider,
+            "run_name": name,
+            "thread_id": thread_id,
+            "ui_backend": config.ui_backend,
+            "config": config,
+            "async_runtime": async_runtime,
+        }
+        if server_config is not None:
+            interactive_kwargs["server_config"] = server_config
+        cmd_interactive(**interactive_kwargs)
 
 
 # Upstream's logger and its two records for a grader attempt that raised.
