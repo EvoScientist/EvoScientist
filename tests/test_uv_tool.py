@@ -137,6 +137,38 @@ def test_unreadable_receipt_raises(tmp_path, text):
         uv_tool.read_receipt(_env(tmp_path, text))
 
 
+def test_several_own_entries_join_their_extras(tmp_path):
+    """A receipt written with ``--with 'evoscientist[x]'`` stays readable:
+    the extras-only entries join the one with the version."""
+    receipt = uv_tool.read_receipt(
+        _env(
+            tmp_path,
+            "[tool]\nrequirements = [\n"
+            '  { name = "evoscientist", extras = ["telegram"] },\n'
+            '  { name = "EvoScientist", extras = ["oauth"], specifier = "==0.3.6" },\n'
+            '  { name = "six" },\n'
+            "]\n",
+        )
+    )
+    assert receipt.own == {
+        "name": "EvoScientist",
+        "extras": ["telegram", "oauth"],
+        "specifier": "==0.3.6",
+    }
+    assert receipt.with_args() == ["--with", "six"]
+
+
+def test_two_versioned_own_entries_raise(tmp_path):
+    text = (
+        "[tool]\nrequirements = [\n"
+        '  { name = "evoscientist", specifier = "==0.3.6" },\n'
+        '  { name = "evoscientist", extras = ["x"], specifier = ">=0.3" },\n'
+        "]\n"
+    )
+    with pytest.raises(uv_tool.ReceiptError):
+        uv_tool.read_receipt(_env(tmp_path, text))
+
+
 def test_missing_receipt_raises(tmp_path):
     with pytest.raises(uv_tool.ReceiptError):
         uv_tool.read_receipt(tmp_path)

@@ -1634,6 +1634,69 @@ class TestUvToolCompat:
         assert reg.install_library("new-pkg") is True
         assert captured[0][-1] == f"evoscientist @ {src.as_uri()}"
 
+    def test_install_library_own_extra_joins_own_requirement(
+        self, monkeypatch, tmp_path
+    ):
+        """``evoscientist[telegram]`` (a channel in EvoSci onboard) adds the
+        extra to EvoScientist's requirement instead of a second evoscientist
+        entry, which would leave a receipt EvoSci update refuses."""
+        from importlib.metadata import version
+
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        (venv / "uv-receipt.toml").write_text(
+            "[tool]\nrequirements = [\n"
+            '  { name = "evoscientist", extras = ["oauth"], specifier = "==0.3.6" },\n'
+            '  { name = "six" },\n'
+            "]\n"
+        )
+        _use_tool_env(monkeypatch, venv)
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("evoscientist[telegram]") is True
+        (cmd,) = captured
+        assert cmd[-1] == f"EvoScientist[oauth,telegram]=={version('EvoScientist')}"
+        with_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "--with"]
+        assert with_args == ["six"]
+
+    def test_install_library_own_extra_on_editable_falls_back(
+        self, monkeypatch, tmp_path
+    ):
+        """An editable install cannot take extras through ``--editable``: no
+        reinstall, uv pip install instead."""
+        import EvoScientist.mcp.registry as reg
+
+        venv = tmp_path / "uv" / "tools" / "evoscientist"
+        venv.mkdir(parents=True)
+        src = tmp_path / "checkout"
+        (venv / "uv-receipt.toml").write_text(
+            "[tool]\nrequirements = [\n"
+            f'  {{ name = "evoscientist", editable = "{src.as_posix()}" }},\n'
+            "]\n"
+        )
+        _use_tool_env(monkeypatch, venv)
+        monkeypatch.setattr(
+            reg.shutil, "which", lambda x: "/usr/bin/uv" if x == "uv" else None
+        )
+        captured: list[list[str]] = []
+        monkeypatch.setattr(
+            reg.subprocess,
+            "run",
+            lambda cmd, **kw: (
+                captured.append(list(cmd)) or type("R", (), {"returncode": 0})()
+            ),
+        )
+        assert reg.install_library("evoscientist[telegram]") is True
+        assert [c[:3] for c in captured] == [["uv", "pip", "install"]]
+
     def test_install_library_uv_tool_env_skipped_on_windows(
         self, monkeypatch, tmp_path
     ):

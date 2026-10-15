@@ -147,16 +147,31 @@ def _uv_tool_reinstall_cmd(
     """The ``uv tool install`` that adds *package* and keeps what the receipt
     records: EvoScientist's version (or the source it came from) and extras,
     the Python, every ``--with`` requirement and, through *constraints*, the
-    constraints. A package already in the receipt keeps its recorded spec."""
+    constraints. A package already in the receipt keeps its recorded spec.
+    EvoScientist's own extras (``evoscientist[telegram]``) join its own
+    requirement: a second evoscientist entry would make the receipt one that
+    ``EvoSci update`` refuses."""
     from importlib.metadata import version
 
-    if "editable" in receipt.own:
-        own = ["--editable", uv_tool.requirement_string(receipt.own)]
+    from packaging.requirements import Requirement
+
+    own_entry = dict(receipt.own)
+    bare = uv_tool.normalize(_bare_package_name(package))
+    if bare == uv_tool.PACKAGE:
+        added = sorted(set(Requirement(package).extras) - set(receipt.extras))
+        if added and "editable" in own_entry:
+            raise uv_tool.ReceiptError(
+                f"cannot add extras {added} to an editable EvoScientist install"
+            )
+        own_entry["extras"] = receipt.extras + added
+    extras = own_entry.get("extras") or []
+    if "editable" in own_entry:
+        own = ["--editable", uv_tool.requirement_string(own_entry)]
     elif receipt.source is not None:
-        own = [uv_tool.requirement_string(receipt.own)]
+        own = [uv_tool.requirement_string(own_entry)]
     else:
-        extras = f"[{','.join(receipt.extras)}]" if receipt.extras else ""
-        own = [f"EvoScientist{extras}=={version('EvoScientist')}"]
+        suffix = f"[{','.join(extras)}]" if extras else ""
+        own = [f"EvoScientist{suffix}=={version('EvoScientist')}"]
     cmd = [uv, "tool", "install", "-q", "--python", uv_tool.python_request(receipt)]
     # Stay on the kind of interpreter the environment has: uv prefers its
     # own Python when one is installed.
@@ -170,8 +185,9 @@ def _uv_tool_reinstall_cmd(
         # (astral-sh/uv#12639).
         cmd += ["-c", constraints.name]
     cmd += receipt.with_args()
-    bare = uv_tool.normalize(_bare_package_name(package))
-    if all(uv_tool.normalize(e["name"]) != bare for e in receipt.others):
+    if bare != uv_tool.PACKAGE and all(
+        uv_tool.normalize(e["name"]) != bare for e in receipt.others
+    ):
         cmd += ["--with", package]
     return cmd + own
 

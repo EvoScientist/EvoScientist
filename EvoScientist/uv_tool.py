@@ -156,6 +156,22 @@ class Receipt:
         return [requirement_string(entry) for entry in self.constraints]
 
 
+def _own_requirement(entries: list[dict[str, Any]], path: Path) -> dict[str, Any]:
+    """The evoscientist requirement. A receipt can hold more than one when
+    an extra was added with ``--with 'evoscientist[x]'`` (by hand, or by the
+    MCP installer before it merged extras): entries with only a name and
+    extras then join the one that carries the version or source, so the
+    next reinstall writes a single entry again."""
+    own = [e for e in entries if normalize(e["name"]) == PACKAGE]
+    main = [e for e in own if set(e) - {"name", "extras"}] or own[:1]
+    if len(main) != 1:
+        raise ReceiptError(f"no single {PACKAGE} requirement in {path}")
+    extras: list[str] = []
+    for entry in own:
+        extras += [x for x in entry.get("extras") or [] if x not in extras]
+    return {**main[0], "extras": extras} if extras else main[0]
+
+
 def read_receipt(env: Path) -> Receipt:
     """Read ``<env>/uv-receipt.toml``. Raises :class:`ReceiptError` when it
     cannot be read or has no evoscientist requirement."""
@@ -173,13 +189,10 @@ def read_receipt(env: Path) -> Receipt:
         isinstance(e, dict) and isinstance(e.get("name"), str) for e in entries
     ):
         raise ReceiptError(f"unexpected requirements in {path}")
-    own = [e for e in entries if normalize(e["name"]) == PACKAGE]
-    if len(own) != 1:
-        raise ReceiptError(f"no single {PACKAGE} requirement in {path}")
     python = tool.get("python")
     return Receipt(
         path=path,
-        own=own[0],
+        own=_own_requirement(entries, path),
         others=tuple(e for e in entries if normalize(e["name"]) != PACKAGE),
         constraints=tuple(e for e in constraints if isinstance(e, dict)),
         python=python if isinstance(python, str) else None,
