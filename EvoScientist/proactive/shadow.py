@@ -13,14 +13,16 @@ run against a live setup:
   conversation into the cron thread.
 - **No side effects.** ``_shadow_cfg`` turns off the scheduler, the memory
   workers and ``ask_user``, and sets ``auto_mode`` (no profile bootstrap, no
-  approval prompts). Every other writer is a tool.
+  approval prompts). Summarization, which would offload history through the
+  backend, passes a ``proactive_mode`` run through. Every other writer is a
+  tool.
 - **No tools.** The run carries ``configurable.proactive_mode``, so
   ``ProactiveModeMiddleware`` strips every tool from the model request. The
   shadow model also refuses to bind any tool, so a regression in the strip
   fails the turn instead of running a tool against the real sandbox.
 
-Prompt, memory injection, model and context management are the real ones: the
-point is to judge as the real agent would.
+Prompt, memory injection and model are the real ones: the point is to judge as
+the real agent would.
 """
 
 from __future__ import annotations

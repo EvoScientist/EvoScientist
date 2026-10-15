@@ -865,3 +865,41 @@ async def test_stock_middleware_stays_frozen_under_same_override(tmp_path):
     # Frozen 200k trigger: the full oversized history is sent untouched.
     assert len(sent) == len(messages)
     assert not list((tmp_path / "conversation_history").glob("*.md"))
+
+
+# ---------------------------------------------------------------------------
+# Proactive shadow turns
+# ---------------------------------------------------------------------------
+
+
+async def test_a_proactive_turn_passes_through_without_summarizing():
+    """No summary call and no history offload on a proactive shadow turn."""
+    mw, construction = _make_mw(window=1_000)
+    backend = mw._backend
+    messages = [
+        HumanMessage(content="x " * 5_000, id=f"h{i}")
+        if i % 2 == 0
+        else AIMessage(content="y " * 5_000, id=f"a{i}")
+        for i in range(8)
+    ]
+    request = _fake_model_request(construction, messages)
+    handler = AsyncMock(return_value=MagicMock())
+
+    with _patched_config({"proactive_mode": True}):
+        await mw.awrap_model_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+    assert backend.mock_calls == []
+    construction.invoke.assert_not_called()
+    construction.ainvoke.assert_not_called()
+
+
+def test_a_proactive_turn_passes_through_on_the_sync_path():
+    mw, construction = _make_mw(window=1_000)
+    request = _fake_model_request(construction, [HumanMessage(content="x " * 5_000)])
+    handler = MagicMock(return_value=MagicMock())
+
+    with _patched_config({"proactive_mode": True}):
+        mw.wrap_model_call(request, handler)
+
+    handler.assert_called_once_with(request)
