@@ -39,9 +39,9 @@ Cancelling the wait changes nothing and ends the update with
   ``install_failed``, not ``environment_busy``: that uv run may have left the
   environment broken. That wait goes on when the reader has gone.
 
-Under Constrained Language Mode, or a TEMP its compiler cannot write to,
-``Add-Type`` fails: the helper then cannot tell an unattended run or a gone
-reader, and waits for the cancel file as an attended run.
+When ``Add-Type`` fails (a TEMP its compiler cannot write to: a character
+outside the ANSI code page), the helper cannot tell an unattended run or a
+gone reader, and waits for the cancel file as an attended run.
 """
 
 from __future__ import annotations
@@ -104,6 +104,8 @@ function Emit([string]$Status, [string]$Message, $Detail, [string]$Code, $Progre
 # compiler fails when %TEMP% has a character outside the ANSI code page.
 function Get-LongPath([string]$Path) {
     try { $full = [IO.Path]::GetFullPath($Path) } catch { return $Path }
+    # Only an 8.3 name has a ~ (it runs for every process on every poll).
+    if ($full.IndexOf('~') -lt 0) { return $full }
     $long = [IO.Path]::GetPathRoot($full)
     foreach ($part in $full.Substring($long.Length).Split([char[]]'\/', [StringSplitOptions]::RemoveEmptyEntries)) {
         $found = @()
@@ -324,7 +326,12 @@ public static extern bool WriteFile(IntPtr hFile, byte[] buffer, uint count, out
             # The wait was cancelled: Ctrl+C, the cancel file, nobody
             # attached, or the program reading stdout has gone.
             $why = if ($ReaderGone) { 'the program that started it has exited' } else { 'cancelled' }
-            Emit 'error' "Update $why while these still ran: $(Get-Names). Nothing was changed." @{ waiting_for = $blockers } 'environment_busy'
+            if ($blockers.Count -eq 0) {
+                # Before the first look (while the caller was still exiting).
+                Emit 'error' "Update $why. Nothing was changed." @{ waiting_for = @() } 'environment_busy'
+            } else {
+                Emit 'error' "Update $why while these still ran: $(Get-Names). Nothing was changed." @{ waiting_for = $blockers } 'environment_busy'
+            }
         } elseif ($phase -eq 'retry-waiting') {
             # Cancelled before the retry: the failed uv run may have left the
             # environment broken, so this is not "nothing was changed".

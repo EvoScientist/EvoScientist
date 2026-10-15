@@ -149,6 +149,8 @@ if own_extras:
     # its compiler fails when %TEMP% has a character outside the ANSI code page.
     function Get-LongPath([string]$Path) {
         try { $full = [IO.Path]::GetFullPath($Path) } catch { return $Path.TrimEnd('\') }
+        # Only an 8.3 name has a ~.
+        if ($full.IndexOf('~') -lt 0) { return $full.TrimEnd('\') }
         $long = [IO.Path]::GetPathRoot($full)
         foreach ($part in $full.Substring($long.Length).Split([char[]]'\', [StringSplitOptions]::RemoveEmptyEntries)) {
             $found = @()

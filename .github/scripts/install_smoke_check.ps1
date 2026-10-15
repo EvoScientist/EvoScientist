@@ -61,7 +61,8 @@ $ToolDir = (Invoke-Native $Uv @('tool', 'dir')).Trim()
 $EvoSci = Join-Path $BinDir 'EvoSci.exe'
 $Python = Join-Path $ToolDir 'evoscientist\Scripts\python.exe'
 
-function Test-Answers([string]$Url) {
+# Any answer below *Below*; the backend's /ok must be a success (300).
+function Test-Answers([string]$Url, [int]$Below = 500) {
     try {
         $request = [Net.WebRequest]::Create($Url)
         $request.Proxy = $null
@@ -73,7 +74,7 @@ function Test-Answers([string]$Url) {
         if (-not $_.Exception.Response) { return $false }
         $code = [int]$_.Exception.Response.StatusCode
     }
-    return ($code -ge 200 -and $code -lt 500)
+    return ($code -ge 200 -and $code -lt $Below)
 }
 
 function Show-Logs([string]$Log) {
@@ -95,7 +96,7 @@ function Test-Launch {
         -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
     $up = $false
     for ($i = 0; $i -lt 240; $i++) {
-        if ((Test-Answers $BackendUrl) -and (Test-Answers $WebuiUrl)) { $up = $true; break }
+        if ((Test-Answers $BackendUrl 300) -and (Test-Answers $WebuiUrl)) { $up = $true; break }
         if ($proc.HasExited) { break }
         Start-Sleep -Seconds 1
     }

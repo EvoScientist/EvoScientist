@@ -32,10 +32,11 @@ TOOL_DIR=$("$UV" tool dir)
 EVOSCI="$BIN_DIR/EvoSci"
 PYTHON="$TOOL_DIR/evoscientist/bin/python"
 
+# Any answer below $2 (default 500); the backend's /ok must be a success (300).
 answers() {
   local code
   code=$(curl -s --noproxy '*' --max-time 5 -o /dev/null -w '%{http_code}' "$1" || true)
-  [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 500 ]
+  [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt "${2:-500}" ]
 }
 
 show_logs() {
@@ -56,7 +57,7 @@ launch_check() {
   "$EVOSCI" --ui webui --workdir "$work" </dev/null >"$log" 2>&1 &
   pid=$!
   for i in $(seq 1 240); do
-    if answers "$BACKEND_URL" && answers "$WEBUI_URL"; then
+    if answers "$BACKEND_URL" 300 && answers "$WEBUI_URL"; then
       up=1
       break
     fi

@@ -55,8 +55,8 @@ ERROR_CODES = frozenset(
         # target; the target has no constraints.txt; a stage of the new
         # EvoSci setup failed; the install is not one the command changes
         # (the message says what to run); a server runs and was not stopped;
-        # the wait for processes running from the environment was cancelled
-        # (Windows).
+        # the wait for processes running from the environment was cancelled,
+        # or another update holds the lock.
         "unknown_version",
         "no_constraints",
         "setup_failed",
