@@ -12,6 +12,7 @@ from langgraph_sdk.errors import NotFoundError
 
 from EvoScientist.proactive import cron as proactive_cron
 from EvoScientist.proactive import graph as proactive_graph
+from EvoScientist.proactive.commit import build_proactive_tag
 from EvoScientist.proactive.gate import ProactiveGateSettings
 
 # ---- settings ---------------------------------------------------------------
@@ -383,6 +384,46 @@ def test_the_backoff_stops_growing_at_six_hours():
         "count": 1,
         "skip": 0,
     }
+
+
+def test_a_thread_back_in_the_candidates_after_its_push_is_not_pushed_again(
+    tick, workspace
+):
+    run, threads, shadow_calls, _ = tick
+    threads["t1"] = _thread(workspace)
+    run(_candidates("t1"))
+    threads["t1"]["state"]["values"]["messages"].append(
+        {
+            "type": "ai",
+            "content": "The benchmark finished: all green.",
+            "id": "proactive-p1",
+            "additional_kwargs": build_proactive_tag("p1"),
+        }
+    )
+    run(_candidates())
+
+    state = run(_candidates("t1"))
+
+    assert len(shadow_calls) == 1
+    assert state["decisions"] == []
+    assert state["last_tick"][0]["reason"] == "no_new_information"
+
+
+def test_a_decision_is_stamped_when_it_is_made(tick, workspace, monkeypatch):
+    run, threads, _, _ = tick
+    threads["t1"] = _thread(workspace)
+    returned_at = []
+
+    async def slow_shadow(graph, messages, trigger):
+        await asyncio.sleep(0.05)
+        returned_at.append(datetime.now(UTC))
+        return "The benchmark finished: all green."
+
+    monkeypatch.setattr("EvoScientist.proactive.shadow.run_shadow_turn", slow_shadow)
+
+    [decision] = run(_candidates("t1"))["decisions"]
+
+    assert datetime.fromisoformat(decision["decided_at"]) >= returned_at[0]
 
 
 def test_one_failing_thread_does_not_stop_the_tick(tick, workspace):

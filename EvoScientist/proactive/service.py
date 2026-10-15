@@ -17,7 +17,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from .commit import decide_commit, last_non_proactive_message_id
+from .commit import decide_commit, last_non_proactive_message_id, read_proactive_tag
 from .gate import ProactiveGateSettings, evaluate_gate
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,11 @@ async def decide_proactive_push(
     again, so a reply the thread outgrew while the shadow ran is discarded.
     """
     last_message_id = last_non_proactive_message_id(source_messages)
+    newest = source_messages[-1] if source_messages else None
+    if read_proactive_tag(getattr(newest, "additional_kwargs", None)) is not None:
+        # Nothing arrived since the last push, whatever this thread's record
+        # says: a thread can drop out of the candidates and lose its record.
+        last_evaluated_id = last_message_id
     gate = evaluate_gate(
         settings,
         now=now,

@@ -339,7 +339,9 @@ def build_proactive_graph(*, workspace: Workspace) -> Any:
                 # Gated or stale: the failed message is still the one to retry.
                 failures[thread_id] = failure
             if decision.stage == "decided":
-                decisions.append(_decision_record(decision, now))
+                # Stamped when made: serve skips a decision older than its
+                # limit, and a long tick would otherwise age it at once.
+                decisions.append(_decision_record(decision, datetime.now(UTC)))
         logger.info("[proactive] tick: %s", last_tick)
         return {
             "decisions": decisions,

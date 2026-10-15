@@ -84,6 +84,15 @@ def test_no_push_records_the_evaluation():
     assert decision.evaluated_message_id == "m2"
 
 
+def test_a_thread_that_ends_with_a_push_is_not_evaluated_without_a_record():
+    push = AIMessage(
+        content="p", id="proactive-p0", additional_kwargs=build_proactive_tag("p0")
+    )
+    decision, calls = _decide(last_evaluated_id=None, source_messages=[*MESSAGES, push])
+    assert decision.reason == "no_new_information"
+    assert calls == []
+
+
 def test_stale_when_the_head_moved_during_the_shadow():
     async def head():
         return "h2"
