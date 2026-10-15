@@ -4,9 +4,10 @@ name: Installer smoke test
 # that EvoScientist works online and with the network blocked
 # (.github/scripts/install_smoke_check.{sh,ps1}).
 #
-# Pull requests: the scripts from the pull request install a wheel built from
-# it, with a constraints.txt exported from its uv.lock (the committed file is
-# refreshed only at release), through the test-only EVOSCI_INSTALL_SOURCE and
+# Pull requests: the scripts from the pull request first install the newest
+# release, then over it a wheel built from the pull request, with a
+# constraints.txt exported from its uv.lock (the committed file is refreshed
+# only at release), through the test-only EVOSCI_INSTALL_SOURCE and
 # EVOSCI_INSTALL_CONSTRAINTS.
 # After a release, weekly and on demand: the public one-line commands,
 # unchanged, so a changed download URL or mirror shows up early.
@@ -15,6 +16,11 @@ on:
     paths:
       - "scripts/**"
       - "EvoScientist/setup/**"
+      # The checks also run EvoSci --version, the WebUI and server stop, and
+      # rely on the data dir rule.
+      - "EvoScientist/cli/**"
+      - "EvoScientist/langgraph_dev/**"
+      - "EvoScientist/paths.py"
       - "constraints.txt"
       - "pyproject.toml"
       - "uv.lock"
@@ -80,7 +86,7 @@ jobs:
   smoke:
     needs: [lint, build]
     if: >-
-      always() && needs.lint.result == 'success' &&
+      !cancelled() && needs.lint.result == 'success' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
     strategy:
       fail-fast: false
@@ -135,6 +141,14 @@ jobs:
             echo "EVOSCI_INSTALL_SOURCE=$(ls "$RUNNER_TEMP"/dist/*.whl)" >> "$GITHUB_ENV"
             echo "EVOSCI_INSTALL_CONSTRAINTS=$RUNNER_TEMP/dist/constraints.txt" >> "$GITHUB_ENV"
           fi
+
+      # The release lookup and the constraints download by tag, which the
+      # wheel install skips; the wheel install then runs over an existing
+      # install. The clean environment drops the test-only variables.
+      - name: Install the newest release (pull request scripts)
+        if: runner.os != 'Windows' && env.MODE == 'pr'
+        run: |
+          "$RUNNER_TEMP/clean" bash "$GITHUB_WORKSPACE/scripts/install.sh" $CN_FLAG --no-setup --no-modify-path
 
       - name: Install (pull request scripts and wheel)
         if: runner.os != 'Windows' && env.MODE == 'pr'
@@ -193,6 +207,9 @@ jobs:
           }
           Set-Location $env:RUNNER_TEMP
           if ($env:MODE -eq 'pr') {
+            # The newest release first, as on macOS and Linux.
+            & ([scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\scripts\install.ps1"))) -NoSetup -NoModifyPath
+            if ($LASTEXITCODE -ne 0) { exit 1 }
             $env:EVOSCI_INSTALL_SOURCE = (Get-ChildItem "$env:RUNNER_TEMP\dist\*.whl").FullName
             $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt"
             & ([scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\scripts\install.ps1")))
