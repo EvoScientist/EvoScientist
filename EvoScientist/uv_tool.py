@@ -145,13 +145,11 @@ class Receipt:
                 return str(self.own[key])
         return None
 
-    def with_args(self, *, skip: str | None = None) -> list[str]:
+    def with_args(self) -> list[str]:
         """``--with`` / ``--with-editable`` arguments for every other
-        requirement, except the one named *skip*."""
+        requirement."""
         args: list[str] = []
         for entry in self.others:
-            if skip is not None and normalize(entry["name"]) == normalize(skip):
-                continue
             args += requirement_args(entry)
         return args
 

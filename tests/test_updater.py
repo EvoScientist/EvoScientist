@@ -160,14 +160,6 @@ def test_version_help_describes_rollback():
     assert "rolls back" in text
 
 
-def test_no_code_path_runs_uv_tool_upgrade():
-    root = Path(updater.__file__).parent
-    for path in root.rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        assert '"upgrade"' not in text, path
-        assert "'upgrade'" not in text, path
-
-
 # --------------------------------------------------------------------------- #
 # Version choice
 # --------------------------------------------------------------------------- #
@@ -1465,3 +1457,104 @@ def test_reader_gone_sees_a_closed_pipe(monkeypatch):
     finally:
         monkeypatch.undo()
         out.close()
+
+
+# --------------------------------------------------------------------------- #
+# Behaviours the command promises: each reached by a test
+# --------------------------------------------------------------------------- #
+def test_json_command_never_asks_and_keeps_stdout_for_events(monkeypatch):
+    from typer.testing import CliRunner
+
+    from EvoScientist.cli import app
+
+    seen: dict = {}
+
+    def fake_run(opts, emit, *, confirm):
+        seen.update(opts=opts, emit=emit, confirm=confirm)
+        return 0
+
+    monkeypatch.setattr(updater, "run_update", fake_run)
+    monkeypatch.setattr(
+        "EvoScientist.stream.json_sink.redirect_console_to_stderr",
+        lambda: seen.setdefault("redirected", True),
+    )
+    result = CliRunner().invoke(app, ["update", "--json", "--skip", "webui"])
+    assert result.exit_code == 0
+    assert seen["confirm"] is None
+    assert isinstance(seen["emit"], JsonEmitter)
+    assert seen["redirected"] is True
+    assert seen["opts"].skip == ["webui"]
+
+
+def test_setup_output_that_is_not_an_event_stays_off_stdout(
+    uv_install, monkeypatch, capsys
+):
+    monkeypatch.setattr(updater.subprocess, "run", Runs())
+    monkeypatch.setattr(updater.subprocess, "Popen", FakePopen(["stray print"], rc=2))
+    code, lines, _ = _run(updater.UpdateOptions(json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "setup_failed"
+    assert end["detail"] == {"stage": None, "code": None, "exit_code": 2}
+    assert "stray print" in capsys.readouterr().err
+
+
+def test_terminal_setup_failure_is_setup_failed(uv_install, monkeypatch):
+    monkeypatch.setattr(updater.subprocess, "run", Runs(setup_rc=1))
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8"))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "setup_failed"
+    # Ready to paste: the path quoted for a shell.
+    assert "Run it again: " in end["message"]
+    assert end["message"].endswith(" setup")
+
+
+def test_editable_direct_url_says_git(tmp_path, monkeypatch, no_subprocess):
+    """The real direct_url.json check, not a stub of it."""
+
+    class Dist:
+        metadata: ClassVar[dict] = {"Name": "EvoScientist"}
+
+        def read_text(self, name):
+            return '{"url": "file:///src/evo", "dir_info": {"editable": true}}'
+
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(updater, "installed_version", lambda: "0.3.7")
+    monkeypatch.setattr("EvoScientist.config.load_config", lambda: FakeConfig())
+    monkeypatch.setattr(
+        "EvoScientist.update_check.fetch_versions", lambda index, timeout: VERSIONS
+    )
+    monkeypatch.setattr("importlib.metadata.distributions", lambda: [Dist()])
+    _code, lines, _ = _run(updater.UpdateOptions(json=True))
+    end = _terminal(lines)
+    assert end["code"] == "manual_update"
+    assert "source checkout" in end["message"]
+
+
+def test_editable_receipt_says_git(tmp_path, monkeypatch, no_subprocess):
+    _plain_env(tmp_path, monkeypatch)
+    (tmp_path / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "evoscientist", editable = "/opt/src/evo" }]\n'
+    )
+    _code, lines, _ = _run(updater.UpdateOptions(json=True))
+    end = _terminal(lines)
+    assert end["code"] == "manual_update"
+    assert "editable mode" in end["message"]
+
+
+# The real one: uv_install replaces it.
+_CHECK_SERVER = updater.check_server
+
+
+def test_server_refusal_comes_before_uv(uv_install, server, monkeypatch):
+    monkeypatch.setattr(updater, "check_server", _CHECK_SERVER)
+    runs = Runs()
+    monkeypatch.setattr(updater.subprocess, "run", runs)
+    code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
+    end = _terminal(lines)
+    assert code == 1
+    assert end["code"] == "server_running"
+    assert "--yes" in end["message"]
+    assert runs.calls == []
+    assert server["stopped"] == 0

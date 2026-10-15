@@ -105,12 +105,6 @@ def test_with_args_keep_specifier_extras_marker_and_sources(tmp_path):
     ]
 
 
-def test_with_args_skip_matches_normalized_name(tmp_path):
-    receipt = uv_tool.read_receipt(_env(tmp_path))
-    args = receipt.with_args(skip="PyJokes")
-    assert not any("pyjokes" in a for a in args)
-
-
 @pytest.mark.parametrize(
     ("key", "value"),
     [
