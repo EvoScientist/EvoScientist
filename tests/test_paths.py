@@ -442,6 +442,18 @@ class TestSharedDirFromEnv:
         monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "data")
         assert paths._shared_dir_from_env("EVOSCIENTIST_DATA_DIR") == tmp_path / "data"
 
+    @pytest.mark.parametrize("value", [None, "data"])
+    def test_data_dir_follows_evoscientist_data_dir(self, value, tmp_path, monkeypatch):
+        _fake_home(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        if value is None:
+            monkeypatch.delenv("EVOSCIENTIST_DATA_DIR", raising=False)
+            expected = tmp_path / ".evoscientist"
+        else:
+            monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", value)
+            expected = tmp_path / value
+        assert paths._data_dir() == expected
+
     @pytest.mark.parametrize("xdg", [None, "cfg"])
     def test_config_dir_follows_xdg_config_home(self, xdg, tmp_path, monkeypatch):
         _fake_home(monkeypatch, tmp_path)

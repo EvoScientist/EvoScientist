@@ -222,14 +222,16 @@ def _shared_dir_from_env(key: str) -> Path | None:
     return Path(os.path.abspath(value))
 
 
-def _global_data_dir() -> Path:
-    """Global application data directory (~/.evoscientist/ by default).
+def _data_dir() -> Path:
+    """Data folder: ``$EVOSCIENTIST_DATA_DIR``, by default ``~/.evoscientist``.
 
     This is the base for sessions.db, skills/, memories/, history — things
     that are NOT configuration but application state. Config files (config.yaml,
     mcp.yaml) live in CONFIG_DIR.
     """
-    return Path.home() / ".evoscientist"
+    return (
+        _shared_dir_from_env("EVOSCIENTIST_DATA_DIR") or Path.home() / ".evoscientist"
+    )
 
 
 def _config_dir() -> Path:
@@ -243,7 +245,7 @@ def _config_dir() -> Path:
 # Both folders are read once, when this module is imported: a workspace ``.env``
 # loaded later does not move them, and processes this one starts get them as
 # absolute paths (see ``dir_env``).
-DATA_DIR: Path = _shared_dir_from_env("EVOSCIENTIST_DATA_DIR") or _global_data_dir()
+DATA_DIR: Path = _data_dir()
 CONFIG_DIR: Path = _config_dir()
 # Whether XDG_CONFIG_HOME was set when this process started (see ``dir_env``).
 _XDG_CONFIG_HOME_SET: bool = _shared_dir_from_env("XDG_CONFIG_HOME") is not None
