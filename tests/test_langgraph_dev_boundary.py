@@ -77,6 +77,14 @@ def test_parse_allowed_origins_keeps_only_origins(caplog):
     assert caplog.text.count("Ignoring") == 5
 
 
+def test_parse_allowed_origins_strips_a_trailing_slash(caplog):
+    value = "https://smith.langchain.com/,https://x.example/path/"
+    with caplog.at_level(logging.WARNING):
+        origins = boundary.parse_allowed_origins(value)
+    assert origins == ["https://smith.langchain.com"]
+    assert caplog.text.count("Ignoring") == 1
+
+
 @pytest.mark.parametrize(
     "origin", ["HTTPS://Smith.LangChain.com", "https://x.example:443"]
 )

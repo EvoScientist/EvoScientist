@@ -57,10 +57,11 @@ def parse_allowed_origins(value: str) -> list[str]:
     """The valid origins in a comma-separated ``backend_allowed_origins``.
 
     An origin is ``http`` or ``https``, a host and an optional port, with no
-    path; other entries are left out with a warning.
+    path; a trailing ``/``, as copied from the address bar, is dropped. Other
+    entries are left out with a warning.
     """
     origins = []
-    for item in (part.strip() for part in value.split(",")):
+    for item in (part.strip().removesuffix("/") for part in value.split(",")):
         if not item:
             continue
         try:
