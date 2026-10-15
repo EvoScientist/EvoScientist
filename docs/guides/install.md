@@ -76,9 +76,11 @@ installed (its `onnxruntime` has no Intel macOS build).
 ## Running it again
 
 Running the command again repairs the install or moves it to the newest release
-(or to `--version`). It keeps the extras and the packages added to
-EvoScientist's environment, for example by the MCP installer. Close
-EvoScientist first; on Windows the script stops and names the EvoScientist
+(or to `--version`). It keeps the extras and the packages recorded in the
+tool's receipt, which the MCP installer adds with `--with` on macOS and Linux.
+A package that went into the environment another way (on Windows, or with an
+older release, when you added a channel or an MCP server) is not in the
+receipt and is removed; add it again afterwards. Close EvoScientist first; on Windows the script stops and names the EvoScientist
 processes that still run, because a running process keeps the files locked.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
@@ -88,16 +90,18 @@ reports "Nothing to upgrade". Update by running the command again.
 
 There is no `--uninstall` option. On macOS and Linux:
 
-1. Remove the package with the uv the script installed (before step 2, which
-   deletes it), or with your own uv:
+1. Remove the package with the uv the script installed, which
+   `~/.evoscientist/tools/uv.json` names (before step 2, which deletes it), or
+   with your own uv:
    ```bash
-   ~/.evoscientist/tools/uv-0.12.23/uv tool uninstall EvoScientist
+   uv=$(sed -E 's/.*"path": *"([^"]*)".*/\1/' ~/.evoscientist/tools/uv.json)
+   "$uv" tool uninstall EvoScientist
    ```
    For a full removal, and only if no other uv on the machine uses them, also
    remove the Python 3.12 that uv downloaded and uv's download cache:
    ```bash
-   ~/.evoscientist/tools/uv-0.12.23/uv python uninstall 3.12
-   ~/.evoscientist/tools/uv-0.12.23/uv cache clean
+   "$uv" python uninstall 3.12
+   "$uv" cache clean
    ```
 2. Delete the downloaded tools and the agent's Python environment:
    ```bash
@@ -114,16 +118,16 @@ There is no `--uninstall` option. On macOS and Linux:
 On Windows (PowerShell):
 
 1. ```powershell
-   & "$HOME\.evoscientist\tools\uv-0.12.23\uv.exe" tool uninstall EvoScientist
+   $uv = (Get-Content -Raw -Encoding UTF8 "$env:USERPROFILE\.evoscientist\tools\uv.json" | ConvertFrom-Json).path
+   & $uv tool uninstall EvoScientist
    ```
-   For a full removal, as on macOS and Linux:
-   `& "$HOME\.evoscientist\tools\uv-0.12.23\uv.exe" python uninstall 3.12` and
-   `... cache clean`.
+   For a full removal, as on macOS and Linux: `& $uv python uninstall 3.12` and
+   `& $uv cache clean`.
 2. ```powershell
-   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$HOME\.evoscientist\tools", "$HOME\.evoscientist\envs"
+   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:USERPROFILE\.evoscientist\tools", "$env:USERPROFILE\.evoscientist\envs"
    ```
-3. As on macOS and Linux: `$HOME\.config\evoscientist` and `$HOME\.evoscientist`
-   hold your settings and data.
+3. As on macOS and Linux: `$env:USERPROFILE\.config\evoscientist` and
+   `$env:USERPROFILE\.evoscientist` hold your settings and data.
 4. Remove `%USERPROFILE%\.local\bin` from your user PATH (Settings > System >
    About > Advanced system settings > Environment Variables), unless other
    tools live there.
