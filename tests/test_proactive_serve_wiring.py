@@ -176,6 +176,75 @@ async def test_a_restart_in_the_workspace_serve_moved_from_restores_nothing(tmp_
     assert restarted.restore([], restore_origin=lambda tid, origin: None) is None
 
 
+async def test_a_refused_server_move_keeps_the_current_thread_armed(tmp_path):
+    from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
+    from EvoScientist.proactive.serve import ProactiveServe
+    from tests.test_proactive_serve import _Client, _source
+
+    old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
+    client = _Client()
+    _source(client, "old-tid")
+    proactive = ProactiveServe(
+        workspace=old_ws, client=client, can_deliver=lambda tid: True
+    )
+    proactive.arm("old-tid")
+    state = _state(SessionDirs(old_ws))
+    runtime = ChannelRuntime(
+        agent=state.agent, thread_id="old-tid", proactive=proactive
+    )
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=state.config)
+    with (
+        patch("EvoScientist.cli.commands._load_agent", return_value=MagicMock()),
+        patch(
+            "EvoScientist.cli.commands._move_server_or_keep_session",
+            new=AsyncMock(side_effect=WorkspaceMismatchError("held elsewhere")),
+        ),
+        pytest.raises(WorkspaceMismatchError),
+    ):
+        await cb("new-tid", SessionDirs(new_ws))
+
+    assert state.thread_id == "old-tid"
+    assert proactive.is_armed("old-tid")
+    assert client.threads.get("old-tid")["metadata"]["proactive"] == "on"
+    assert len(client.crons.rows) == 1
+
+
+async def test_a_refused_server_move_does_not_arm_a_thread_that_was_not_armed(
+    tmp_path,
+):
+    from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
+    from EvoScientist.proactive.serve import ProactiveServe
+    from tests.test_proactive_serve import _Client, _source
+
+    old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
+    client = _Client()
+    _source(client, "old-tid")
+    client.threads.update("old-tid", metadata={"proactive": "paused"})
+    proactive = ProactiveServe(
+        workspace=old_ws, client=client, can_deliver=lambda tid: True
+    )
+    proactive.armed.add("other-tid")
+    state = _state(SessionDirs(old_ws))
+    runtime = ChannelRuntime(
+        agent=state.agent, thread_id="old-tid", proactive=proactive
+    )
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=state.config)
+    with (
+        patch("EvoScientist.cli.commands._load_agent", return_value=MagicMock()),
+        patch(
+            "EvoScientist.cli.commands._move_server_or_keep_session",
+            new=AsyncMock(side_effect=WorkspaceMismatchError("held elsewhere")),
+        ),
+        pytest.raises(WorkspaceMismatchError),
+    ):
+        await cb("new-tid", SessionDirs(new_ws))
+
+    assert not proactive.is_armed("old-tid")
+    assert client.threads.get("old-tid")["metadata"]["proactive"] == "paused"
+    assert proactive.is_armed("other-tid")
+    assert len(client.crons.rows) == 1
+
+
 async def test_a_failed_server_move_turns_proactive_off_for_the_session():
     state = _state(SessionDirs(Workspace("/old-ws")))
     proactive = MagicMock()

@@ -18,6 +18,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
+from ..paths import file_tool_path
 from ..runtime import AsyncRuntime
 from .bus.events import InboundMessage, OutboundMessage
 from .capabilities import ChannelCapabilities
@@ -1048,7 +1049,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         parts = []
         if raw.text:
             parts.append(raw.text)
-        parts.extend(raw.content_annotations)
+        for annotation in raw.content_annotations:
+            for path in raw.media_files:
+                annotation = annotation.replace(path, file_tool_path(path))
+            parts.append(annotation)
         content = "\n".join(p for p in parts if p)
         if not content and not raw.media_files:
             return None

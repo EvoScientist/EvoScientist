@@ -1495,10 +1495,13 @@ async def _apply_serve_resume_state(
     # Serve pauses the thread it leaves and ends the wait on a thread restored
     # after a restart, in the store of the workspace it leaves them in.
     left_thread = False
+    # Whether the thread serve leaves was armed: a refused move re-arms it.
+    left_armed = False
 
     async def leave_thread(proactive: Any) -> None:
-        nonlocal left_thread
+        nonlocal left_thread, left_armed
         left_thread = True
+        left_armed = proactive.is_armed(old_thread_id)
         for call in (
             lambda: proactive.leave(old_thread_id),
             lambda: proactive.on_turn(thread_id),
@@ -1528,12 +1531,27 @@ async def _apply_serve_resume_state(
             if thread_changed:
                 await leave_thread(proactive)
             await asyncio.to_thread(_serve_proactive_call, proactive.stop)
-        if not await _move_server_or_keep_session(
-            effective_config,
-            target=new_dirs,
-            current=runtime_state.dirs,
-            backend=runtime_state.gateway_backend,
-        ):
+        from ..langgraph_dev.manager import WorkspaceMismatchError
+
+        try:
+            moved = await _move_server_or_keep_session(
+                effective_config,
+                target=new_dirs,
+                current=runtime_state.dirs,
+                backend=runtime_state.gateway_backend,
+            )
+        except WorkspaceMismatchError:
+            if proactive is not None and moves_workspace:
+                if left_armed:
+                    # The session stays on the thread it was leaving: arm it again.
+                    await asyncio.to_thread(
+                        _serve_proactive_call, lambda: proactive.adopt(old_thread_id)
+                    )
+                # ``stop`` deleted the cron above; bring it back for the threads
+                # that stay armed.
+                await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+            raise
+        if not moved:
             console.print(
                 "[yellow]Background agent server sync failed; async "
                 "subagents and EvoMemory workers may be unavailable.[/yellow]"
