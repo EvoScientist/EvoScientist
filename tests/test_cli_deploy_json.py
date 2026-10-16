@@ -79,7 +79,7 @@ class Harness:
         self._stdin_write: int | None = None
 
         # redirect_console_to_stderr() rebinds the shared console's file.
-        monkeypatch.setattr(console, "file", console.file)
+        monkeypatch.setattr(console, "_file", console._file)
         monkeypatch.setattr(
             config_mod, "get_effective_config", lambda _o=None: self.config
         )
