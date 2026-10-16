@@ -722,6 +722,12 @@ _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
         "mirror",
     }
 )
+# Fields the server reads from config.yaml itself: no environment variable
+# carries them, so a command-line override (--auto-approve, --auto-mode, the
+# ask_user switch) never reaches it. The fingerprint takes them from the file
+# too, so a server started with such a flag is not drift, while a change in
+# the file still is.
+_FINGERPRINT_FILE_FIELDS = frozenset({"auto_approve", "auto_mode", "enable_ask_user"})
 
 
 def _server_config_fingerprint(config: EvoScientistConfig) -> str:
@@ -738,7 +744,12 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     only feed a truncated one-way digest; nothing recoverable is stored.
     getattr with defaults: deploy/WebUI (and their tests) routinely hand
     this module duck-typed config objects missing dataclass fields.
+    :data:`_FINGERPRINT_FILE_FIELDS` come from ``config.yaml``, not from
+    ``config``, so every caller hashes what the server reads.
     """
+    from EvoScientist.config.settings import load_config
+
+    file_config = load_config()
     parts = []
     for field in dataclass_fields(EvoScientistConfig):
         name = field.name
@@ -746,7 +757,8 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
             _FINGERPRINT_EXCLUDED_PREFIXES
         ):
             continue
-        parts.append((name, str(getattr(config, name, None))))
+        source = file_config if name in _FINGERPRINT_FILE_FIELDS else config
+        parts.append((name, str(getattr(source, name, None))))
     try:
         parts.append(("version", importlib.metadata.version("EvoScientist")))
     except importlib.metadata.PackageNotFoundError:

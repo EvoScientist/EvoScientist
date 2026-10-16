@@ -204,6 +204,28 @@ def test_launcher_error_fields_default_to_empty():
     assert lm.LauncherError("port_conflict", "m").fields == {}
 
 
+def test_resolve_backend_no_drift_for_a_session_started_with_auto_flags(monkeypatch):
+    """``EvoSci --auto-approve`` / ``--auto-mode`` override fields the server
+    reads from config.yaml; a second launcher with the file's values must not
+    report drift (and advise ``EvoSci server stop``)."""
+    from EvoScientist.config.settings import EvoScientistConfig
+
+    fingerprint = lgm._server_config_fingerprint
+    recorded = fingerprint(
+        EvoScientistConfig(auto_approve=True, auto_mode=True, enable_ask_user=False)
+    )
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsA", "config_fingerprint": recorded},
+    )
+    monkeypatch.setattr(lgm, "_server_config_fingerprint", fingerprint)
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), EvoScientistConfig())
+    assert decision.action == "reuse"
+    assert decision.warnings == []
+
+
 def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
     from EvoScientist.setup import research_env
 
