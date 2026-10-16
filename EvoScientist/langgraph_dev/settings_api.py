@@ -385,6 +385,10 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
         return 409, _unreadable(e)
     except store.ConfigLockedError as e:
         return 409, {"error": "config_locked", "detail": str(e)}
+    except OSError as e:
+        # For example a Windows replace that kept failing while another
+        # program had the file open; nothing was written.
+        return 500, {"error": "config_write_failed", "detail": str(e)}
     warnings.update(setting_warnings)
 
     mapping = store.read_config_mapping()

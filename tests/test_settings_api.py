@@ -322,6 +322,22 @@ class TestPatch:
         assert response.status_code == 409
         assert response.json()["error"] == "config_locked"
 
+    def test_failed_write_is_a_json_error(self, server, secret, config_file):
+        config_file.write_text("model: m1\n", encoding="utf-8")
+        with (
+            patch(
+                "EvoScientist.config.store.os.replace",
+                side_effect=PermissionError("in use"),
+            ),
+            patch("EvoScientist.config.store.time.sleep"),
+        ):
+            response = server.patch(
+                "/api/settings", json={"model": "m2"}, headers=secret
+            )
+        assert response.status_code == 500
+        assert response.json()["error"] == "config_write_failed"
+        assert _mapping(config_file) == {"model": "m1"}
+
     def test_invalid_key_is_rejected(self, server, secret, config_file):
         with patch.object(
             settings_api,
