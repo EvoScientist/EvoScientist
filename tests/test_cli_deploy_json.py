@@ -118,6 +118,7 @@ class Harness:
 
         monkeypatch.setattr(json_mode._Events, "__call__", _emit_then_close)
         monkeypatch.setattr(json_mode, "_TICK", 0.01)
+        monkeypatch.setattr(json_mode, "_TUNNEL_WAIT", 0.2)
         monkeypatch.setattr(json_mode, "HEALTH_INTERVAL", 0.0)
 
     # -- fakes ------------------------------------------------------------ #
@@ -283,6 +284,39 @@ def test_tunnel_adds_public_url(h, capsys):
     _, lines = h.run(capsys, tunnel=True)
     assert _by_event(lines, "ready")["public_url"] == "https://demo.trycloudflare.com"
     assert h.started["tunnel"] is True
+
+
+def test_a_stop_during_the_tunnel_wait_ends_it(h, capsys, monkeypatch):
+    """The app stops while cloudflared has not reported a URL yet: no
+    ``ready``, and no wait for the rest of the 35 s."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    reads: list[float] = []
+
+    def _read(timeout=35.0, **_k):
+        reads.append(timeout)
+        if len(reads) == 1:
+            h.close_stdin()
+            _wait_for_stdin_watcher()
+        return None
+
+    monkeypatch.setattr(lgm, "read_tunnel_url", _read)
+    code, lines = h.run(capsys, tunnel=True)
+    assert code == 0
+    assert _events(lines) == ["starting", "stopped"]
+    assert reads == [json_mode._TICK]
+    assert ("backend stop", h.proc) in h.log
+
+
+def test_tunnel_url_is_read_in_short_waits(h, capsys, monkeypatch):
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    answers = iter([None, None, "https://late.trycloudflare.com"])
+    monkeypatch.setattr(
+        lgm, "read_tunnel_url", lambda timeout=35.0, **_k: next(answers)
+    )
+    _, lines = h.run(capsys, tunnel=True)
+    assert _by_event(lines, "ready")["public_url"] == "https://late.trycloudflare.com"
 
 
 def test_tunnel_without_url_reports_null(h, capsys):

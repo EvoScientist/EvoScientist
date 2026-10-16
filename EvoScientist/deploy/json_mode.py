@@ -96,6 +96,8 @@ _TICK = 0.5
 # A stdin line longer than this is not a command and is dropped.
 _MAX_LINE = 65536
 _STDIN_THREAD = "deploy-json-stdin"
+# How long ``--tunnel`` waits for cloudflared's URL, as ``read_tunnel_url``.
+_TUNNEL_WAIT = 35.0
 
 
 class _Failure(Exception):
@@ -311,7 +313,9 @@ class _Run:
                 warnings.append(self.job.warning)
             hint = setup_hint()
             if tunnel:
-                public_url = lgm.read_tunnel_url()
+                public_url = self._wait_for_tunnel_url()
+                if self.stop.is_set():
+                    return
         if hint is not None:
             warnings.append(hint)
 
@@ -374,6 +378,18 @@ class _Run:
                 f"langgraph dev startup failed: {exc}",
                 {"log_file": str(lgm.RUNTIME.log_file)},
             ) from exc
+
+    def _wait_for_tunnel_url(self) -> str | None:
+        """The tunnel URL, in short waits that check for a stop between them;
+        each read scans the log from this server's start."""
+        from ..langgraph_dev import manager as lgm
+
+        deadline = time.monotonic() + _TUNNEL_WAIT
+        while not self.stop.is_set() and time.monotonic() < deadline:
+            url = lgm.read_tunnel_url(timeout=_TICK)
+            if url:
+                return url
+        return None
 
     def wait(self) -> None:
         """Block until a stop is asked for; raise ``backend_exited`` when the
