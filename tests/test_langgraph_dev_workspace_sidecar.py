@@ -121,6 +121,18 @@ def test_read_workspace_sidecar_round_trip(tmp_path, monkeypatch, runtime_paths)
     }
 
 
+def test_write_workspace_sidecar_records_the_bind_host(
+    tmp_path, monkeypatch, runtime_paths
+):
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    manager._write_workspace_sidecar(workspace_dir=tmp_path, pid=7, host="0.0.0.0")
+    assert manager._read_workspace_sidecar()["host"] == "0.0.0.0"
+
+
 def test_write_workspace_sidecar_records_the_data_and_config_folders(
     tmp_path, monkeypatch, runtime_paths
 ):

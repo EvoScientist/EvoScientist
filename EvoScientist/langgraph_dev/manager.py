@@ -283,6 +283,7 @@ def _write_workspace_sidecar(
     agent_python: str | object | None = _NOT_RECORDED,
     agent_bash: str | object | None = _NOT_RECORDED,
     run_dir: Path | None = None,
+    host: str | None = None,
 ) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
 
@@ -298,6 +299,8 @@ def _write_workspace_sidecar(
     same way. ``data_dir`` and ``config_dir`` are this process's data and
     config folders, which the server inherits (``paths.dir_env``), so a
     client attaching from another environment reads the server's own.
+    ``host`` is the interface the server binds, so such a client can tell
+    whether the server is reachable from other machines.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -321,6 +324,8 @@ def _write_workspace_sidecar(
         }
         if run_dir is not None:
             payload["run_dir"] = str(run_dir)
+        if host is not None:
+            payload["host"] = host
         if config_fingerprint is not None:
             payload["config_fingerprint"] = config_fingerprint
         if agent_python is not _NOT_RECORDED:
@@ -1198,6 +1203,7 @@ def start_langgraph_dev(
         agent_python=agent_python(),
         agent_bash=sidecar_bash(),
         run_dir=run_dir,
+        host=host,
     )
 
     # langgraph dev cold-starts in ~10-15s normally; first-time npx-based MCP

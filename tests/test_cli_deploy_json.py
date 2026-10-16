@@ -481,6 +481,24 @@ def test_attached_legacy_stripped_backend_gets_the_drift_warning(h, capsys):
     assert any("EvoSci server stop" in w for w in ready["warnings"])
 
 
+@pytest.mark.parametrize(
+    ("recorded", "requested", "warns"),
+    [
+        ("0.0.0.0", "127.0.0.1", True),  # the backend is public, the request not
+        ("127.0.0.1", "0.0.0.0", False),  # the request is public, the backend not
+        (None, "0.0.0.0", False),  # an older record: no bind to report
+    ],
+)
+def test_attached_public_bind_warning_follows_the_backend(
+    h, capsys, recorded, requested, warns
+):
+    record = {} if recorded is None else {"host": recorded}
+    _attach(h, **record)
+    _, lines = h.run(capsys, host=requested)
+    warnings = _by_event(lines, "ready")["warnings"]
+    assert any(w.startswith("Listening on") for w in warnings) is warns
+
+
 def test_attached_tunnel_warns_and_reports_null(h, capsys):
     _attach(h)
     h.tunnel_url = "https://stale.trycloudflare.com"

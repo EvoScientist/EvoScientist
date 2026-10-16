@@ -275,15 +275,15 @@ class _Run:
         if self.stop.is_set():
             return
         warnings = list(decision.warnings)
-        # The human mode's banners, for the app to show.
-        if not lgm._is_loopback_host(self.host):
-            warnings.append(
-                f"Listening on {self.host}: no auth, and the agent can run "
-                "shell. Trusted networks only."
-            )
         public_url: str | None = None
         if decision.action == "reuse":
             record = decision.sidecar or {}
+            # The running backend's bind, from its record; a record written
+            # before it carried one gives no warning, since --host here says
+            # nothing about that backend.
+            bound = record.get("host")
+            if isinstance(bound, str) and not lgm._is_loopback_host(bound):
+                warnings.append(_public_bind_warning(bound))
             owned = False
             workspace = record.get("workspace", ws)
             data_dir = record.get("data_dir") or str(paths.DATA_DIR)
@@ -297,6 +297,9 @@ class _Run:
         else:
             owned = True
             workspace = ws
+            # The human mode's banners, for the app to show.
+            if not lgm._is_loopback_host(self.host):
+                warnings.append(_public_bind_warning(self.host))
             if getattr(config, "dangerous_mode", False):
                 from ..cli._constants import (
                     DANGEROUS_BANNER_LABEL,
@@ -450,6 +453,13 @@ class _Run:
             finally:
                 if self.job is not None:
                     self.job.close()
+
+
+def _public_bind_warning(host: str) -> str:
+    return (
+        f"Listening on {host}: no auth, and the agent can run shell. "
+        "Trusted networks only."
+    )
 
 
 def _check_sign_in(config: Any) -> None:
