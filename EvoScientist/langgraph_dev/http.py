@@ -225,6 +225,25 @@ async def post_policy(request: Request) -> JSONResponse:
     return JSONResponse({"decisions": decisions})
 
 
+async def get_workspace(_request: Request) -> JSONResponse:
+    """Return the folder this server serves as ``{workspace_dir, run_dir}``.
+
+    ``workspace_dir`` is the project root in the form thread and checkpoint
+    metadata use (:attr:`~EvoScientist.paths.Workspace.key`), so a client
+    can compare it with them and derive the folder's assistant IDs without
+    resolving paths itself. ``run_dir`` is the run folder of a ``--mode=run``
+    session that holds the server, else ``null``.
+
+    Offloaded to a thread because resolving the folders touches the
+    filesystem, which blockbuster refuses on the event loop.
+    """
+    from EvoScientist.paths import process_session_dirs
+
+    dirs = await asyncio.to_thread(process_session_dirs)
+    # The same serialisation as thread and checkpoint stamps.
+    return JSONResponse({"run_dir": None} | dirs.metadata())
+
+
 async def verify_local_secret(request: Request) -> Response:
     """``204`` when the request carries the local secret, ``403`` otherwise, so
     a client can check the value it read."""
@@ -261,6 +280,7 @@ def _build_app() -> Starlette:
                 "/api/bg_processes/running", get_bg_processes_running, methods=["GET"]
             ),
             Route("/api/policy", post_policy, methods=["POST"]),
+            Route("/api/workspace", get_workspace, methods=["GET"]),
             Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
         ],
     )

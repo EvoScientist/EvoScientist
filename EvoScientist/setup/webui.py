@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 PACKAGE = "@evoscientist/webui"
 # The WebUI releases this core supports. A WebUI patch release reaches users
 # without a core release; a breaking WebUI release needs a core change here.
-WEBUI_COMPAT = ">=0.3,<0.4"
+WEBUI_COMPAT = ">=0.3,<0.5"
 # Test-only override of the range (e.g. to install an older release and
 # exercise the update path). Never saved to the config.
 COMPAT_ENV = "EVOSCIENTIST_WEBUI_COMPAT"
