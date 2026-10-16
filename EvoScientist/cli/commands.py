@@ -2971,7 +2971,13 @@ def _main_callback(
         None, "-p", "--prompt", help="Query to execute (single-shot mode)"
     ),
     prompt_file: str | None = typer.Option(
-        None, "--prompt-file", help="Read query from a file (bypasses Windows CreateProcess 32767-char cmd limit); overrides --prompt if both given"
+        None,
+        "--prompt-file",
+        help=(
+            "Read the query from a UTF-8 file instead of the command line "
+            "(avoids the Windows 32767-character limit); overrides -p/--prompt "
+            "if both are given"
+        ),
     ),
     thread_id: str | None = typer.Option(
         None,
@@ -3081,7 +3087,16 @@ def _main_callback(
         _pf = Path(prompt_file).expanduser()
         if not _pf.is_file():
             raise typer.BadParameter(f"--prompt-file not found: {prompt_file}")
-        prompt = _pf.read_text(encoding="utf-8")
+        try:
+            # utf-8-sig also drops the BOM that Windows Notepad writes.
+            prompt = _pf.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise typer.BadParameter(
+                f"--prompt-file could not be read as UTF-8: {exc}"
+            ) from exc
+        if not prompt.strip():
+            # An empty prompt would silently fall through to interactive mode.
+            raise typer.BadParameter(f"--prompt-file is empty: {prompt_file}")
         typer.echo(f"[prompt-file] loaded {_pf} ({len(prompt)} chars)", err=True)
 
     # Load and apply configuration
