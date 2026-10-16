@@ -319,8 +319,30 @@ class _FakeJob:
         self.log = log
         self.warning = warning
 
+    def adopt(self, process):
+        self.log.append(("job adopt", process))
+
     def close(self):
         self.log.append("job close")
+
+
+def test_a_ccproxy_this_run_started_joins_the_job(h, capsys):
+    h.job = _FakeJob(h.log)
+    h.config.anthropic_auth_mode = "oauth"
+    h.run(capsys)
+    assert h.log.index("ccproxy start") < h.log.index(("job adopt", "ccproxy"))
+    assert h.log.index(("job adopt", "ccproxy")) < h.log.index("backend start")
+
+
+def test_a_reused_ccproxy_is_left_out_of_the_job(h, capsys, monkeypatch):
+    from EvoScientist import ccproxy_manager
+
+    monkeypatch.setattr(ccproxy_manager, "maybe_start_ccproxy", lambda _c: None)
+    h.job = _FakeJob(h.log)
+    h.config.anthropic_auth_mode = "oauth"
+    code, _ = h.run(capsys)
+    assert code == 0
+    assert not any(isinstance(e, tuple) and e[0] == "job adopt" for e in h.log)
 
 
 def test_job_is_closed_only_after_the_backend_stopped(h, capsys):

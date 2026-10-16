@@ -335,6 +335,9 @@ class _Run:
         from ..langgraph_dev import manager as lgm
         from .backend_job import backend_job
 
+        # First, so ccproxy joins it too: Node's job lets children break away,
+        # so a ccproxy outside ours would outlive a killed app.
+        self.job = backend_job()
         if config.anthropic_auth_mode == "oauth":
             from ..ccproxy_manager import maybe_start_ccproxy
 
@@ -344,8 +347,10 @@ class _Run:
                 raise _Failure(
                     "ccproxy_failed", f"ccproxy startup failed: {exc}"
                 ) from exc
+            # None: another session's ccproxy, reused and left alone.
+            if self.ccproxy is not None and self.job is not None:
+                self.job.adopt(self.ccproxy)
 
-        self.job = backend_job()
         self.starting = True
         try:
             self.proc = lgm.start_langgraph_dev(

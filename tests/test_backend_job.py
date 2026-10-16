@@ -113,3 +113,26 @@ def test_only_windows_gets_a_job(monkeypatch, api):
     assert backend_job.backend_job() is None
     monkeypatch.setattr(backend_job.sys, "platform", "win32")
     assert isinstance(backend_job.backend_job(), backend_job.BackendJob)
+
+
+def test_a_running_process_is_adopted_without_suspend_or_resume(api):
+    job = backend_job.BackendJob()
+    job.adopt(FakeProcess(555))
+    assert api.calls[-1] == ("assign", 77, 555)
+    assert ("resume", 555) not in api.calls
+    assert job.warning is None
+
+
+def test_a_failed_adopt_names_ccproxy(api):
+    api.assign_ok = False
+    job = backend_job.BackendJob()
+    job.adopt(FakeProcess(555))
+    assert "ccproxy" in job.warning
+
+
+def test_adopt_without_a_job_does_nothing(monkeypatch):
+    fake = FakeJobApi(create_ok=False)
+    monkeypatch.setattr(backend_job, "_job_api", lambda: fake)
+    job = backend_job.BackendJob()
+    job.adopt(FakeProcess(555))
+    assert ("assign", 77, 555) not in fake.calls

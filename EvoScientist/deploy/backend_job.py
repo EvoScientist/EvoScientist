@@ -34,6 +34,8 @@ class BackendJob:
     def __init__(self) -> None:
         self._handle: int | None = None
         self._error: int | None = None
+        # What the failed step was for, in the warning.
+        self._what = "the backend"
         try:
             api = _job_api()
             job = api.create()
@@ -67,14 +69,24 @@ class BackendJob:
         finally:
             api.resume(int(process._handle))
 
+    def adopt(self, process: subprocess.Popen) -> None:
+        """Put an already running ``process`` in the job (ccproxy). It needs
+        no suspended start: what matters is that it ends with the command."""
+        if self._handle is None:
+            return
+        api = _job_api()
+        if not api.assign(self._handle, int(process._handle)) and self._error is None:
+            self._error = api.last_error()
+            self._what = "ccproxy"
+
     @property
     def warning(self) -> str | None:
         if self._error is None:
             return None
         return (
-            f"Could not put the backend in a Windows job object (error "
+            f"Could not put {self._what} in a Windows job object (error "
             f"{self._error}). If the app that started this command exits "
-            "without closing its stdin, or is killed, the backend keeps running."
+            f"without closing its stdin, or is killed, {self._what} keeps running."
         )
 
     def close(self) -> None:
