@@ -338,6 +338,29 @@ def test_job_warning_lands_in_ready(h, capsys):
     )
 
 
+def test_a_failed_backend_stop_still_stops_ccproxy_and_closes_the_job(
+    h, capsys, monkeypatch
+):
+    """``stop_langgraph_dev()`` lets ``psutil.AccessDenied`` through; the
+    later steps still run and the run ends with ``internal_error``."""
+    import psutil
+
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    def _stop(proc=None):
+        h.log.append(("backend stop", proc))
+        raise psutil.AccessDenied(proc.pid)
+
+    monkeypatch.setattr(lgm, "stop_langgraph_dev", _stop)
+    h.config.anthropic_auth_mode = "oauth"
+    h.job = _FakeJob(h.log)
+    code, lines = h.run(capsys)
+    assert code == 1
+    assert lines[-1]["code"] == "internal_error"
+    assert h.log.index(("backend stop", h.proc)) < h.log.index("ccproxy stop")
+    assert h.log.index("ccproxy stop") < h.log.index("job close")
+
+
 def test_job_is_closed_after_a_failed_start(h, capsys):
     def _fail(**_kw):
         raise RuntimeError("boom")

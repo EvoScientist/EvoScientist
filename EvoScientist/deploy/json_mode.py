@@ -403,7 +403,8 @@ class _Run:
 
     def cleanup(self) -> None:
         """Stop what this command started: the backend, then ccproxy, then
-        close the job (which would end a backend the stop missed)."""
+        close the job (which would end a backend the stop missed). Each step
+        runs even when the one before raised; ``run_json`` reports the error."""
         from ..langgraph_dev import manager as lgm
 
         try:
@@ -413,13 +414,15 @@ class _Run:
                 proc = self.proc if self.proc is not None else lgm._PROCESS
                 if proc is not None:
                     lgm.stop_langgraph_dev(proc)
-            if self.ccproxy is not None:
-                from ..ccproxy_manager import stop_ccproxy
-
-                stop_ccproxy(self.ccproxy)
         finally:
-            if self.job is not None:
-                self.job.close()
+            try:
+                if self.ccproxy is not None:
+                    from ..ccproxy_manager import stop_ccproxy
+
+                    stop_ccproxy(self.ccproxy)
+            finally:
+                if self.job is not None:
+                    self.job.close()
 
 
 def _check_sign_in(config: Any) -> None:
