@@ -330,7 +330,10 @@ def test_get_workspace_returns_the_run_folder_of_a_run_mode_server(
 
     resp = client.get("/api/workspace")
 
-    assert resp.json()["run_dir"] == run_dir.resolve().as_posix()
+    assert resp.json() == {
+        "workspace_dir": Workspace(tmp_path).key,
+        "run_dir": run_dir.resolve().as_posix(),
+    }
 
 
 def test_get_workspace_refuses_a_foreign_origin():

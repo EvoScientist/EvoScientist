@@ -240,8 +240,8 @@ async def get_workspace(_request: Request) -> JSONResponse:
     from EvoScientist.paths import process_session_dirs
 
     dirs = await asyncio.to_thread(process_session_dirs)
-    run_dir = dirs.run_dir.as_posix() if dirs.run_dir is not None else None
-    return JSONResponse({"workspace_dir": dirs.workspace.key, "run_dir": run_dir})
+    # The same serialisation as thread and checkpoint stamps.
+    return JSONResponse({"run_dir": None} | dirs.metadata())
 
 
 async def verify_local_secret(request: Request) -> Response:
