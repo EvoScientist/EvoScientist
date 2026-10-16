@@ -10,6 +10,7 @@ from deepagents.backends.utils import file_data_to_string, validate_path
 
 from EvoScientist import agent_shell, backends, paths
 from EvoScientist.channels.base import Channel, RawIncoming
+from EvoScientist.cli.file_mentions import resolve_file_mentions
 from EvoScientist.stream.events import build_agent_stream_input
 
 
@@ -219,6 +220,29 @@ async def test_query_results_can_be_read(tmp_path, tool, asynchronous, dangerous
     read = await backend.aread(file_path) if asynchronous else backend.read(file_path)
     assert read.error is None
     assert file_data_to_string(read.file_data) == content
+
+
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("notes.txt", b"before\nneedle\nafter\n"),
+        ("big.txt", b"x" * (300 * 1024)),
+        ("fig.png", b"\x89PNG\r\n\x1a\n\x00\x00"),
+    ],
+    ids=["inline", "too-large", "binary"],
+)
+@pytest.mark.parametrize("dangerous", [False, True])
+def test_file_mention_path_can_be_read(tmp_path, name, data, dangerous):
+    (tmp_path / name).write_bytes(data)
+    backend = backends.CustomSandboxBackend(str(tmp_path), dangerous=dangerous)
+
+    _, prompt, _ = resolve_file_mentions(f"read @{name}", str(tmp_path))
+    file_path = validate_path(prompt.split("Path: `", 1)[1].split("`", 1)[0])
+    read = backend.read(file_path)
+
+    assert read.error is None
+    if name == "notes.txt":
+        assert file_data_to_string(read.file_data) == data.decode()
 
 
 def test_channel_annotation_names_the_file_tool_path():
