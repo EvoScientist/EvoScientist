@@ -333,6 +333,12 @@ def test_get_workspace_returns_the_run_folder_of_a_run_mode_server(
     assert resp.json()["run_dir"] == run_dir.resolve().as_posix()
 
 
+def test_get_workspace_refuses_a_foreign_origin():
+    resp = client.get("/api/workspace", headers={"Origin": "https://evil.example"})
+
+    assert resp.status_code == 403
+
+
 # ---- /api/bg_process_status -----------------------------------------------
 # The bg-process reader polls this route (server backend) to detect a process
 # exit from the server process's registry.
