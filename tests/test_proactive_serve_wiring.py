@@ -70,7 +70,7 @@ def test_controller_is_available_on_the_server_gateway(workspace):
 
 
 def test_the_controller_can_put_back_an_origin_it_forgot(workspace):
-    from EvoScientist.cli.channel import restore_channel_origin
+    from EvoScientist.cli.channel import forget_channel_origin, restore_channel_origin
 
     composite = MagicMock(spec=CompositeGraphGateway)
     with patch(
@@ -86,13 +86,15 @@ def test_the_controller_can_put_back_an_origin_it_forgot(workspace):
     restore_channel_origin(
         "t-origin", channel_type="slack", chat_id="C1", sender="", metadata=None
     )
-    origin = controller.origin_of("t-origin")
-    controller.forget_origin("t-origin")
+    try:
+        origin = controller.origin_of("t-origin")
+        controller.forget_origin("t-origin")
 
-    controller.remember_origin("t-origin", origin)
+        controller.remember_origin("t-origin", origin)
 
-    assert controller.origin_of("t-origin") == origin
-    controller.forget_origin("t-origin")
+        assert controller.origin_of("t-origin") == origin
+    finally:
+        forget_channel_origin("t-origin")
 
 
 def test_a_controller_failure_never_raises():

@@ -318,20 +318,26 @@ class ProactiveServe:
         if not self.available:
             return
         with self._lock:
-            if snapshot.armed:
-                self.adopt(snapshot.thread_id)
-            restored = snapshot.restored_thread_id
-            if restored is None or restored == snapshot.thread_id:
-                return
-            # Armed again only from its stored flag: a thread deleted meanwhile
-            # stays out.
-            self.armed.discard(restored)
-            self.adopt(restored)
-            if restored not in self.armed:
-                return
-            if snapshot.restored_origin is not None and self.remember_origin:
-                self.remember_origin(restored, snapshot.restored_origin)
-            self.restored_thread_id = restored
+            try:
+                self._put_back_restored(snapshot)
+            finally:
+                if snapshot.armed:
+                    self.adopt(snapshot.thread_id)
+
+    def _put_back_restored(self, snapshot: LeaveSnapshot) -> None:
+        """Arm the restored thread again and reopen the restore window."""
+        restored = snapshot.restored_thread_id
+        if restored is None or restored == snapshot.thread_id:
+            return
+        # Armed again only from its stored flag: a thread deleted meanwhile
+        # stays out.
+        self.armed.discard(restored)
+        self.adopt(restored)
+        if restored not in self.armed:
+            return
+        if snapshot.restored_origin is not None and self.remember_origin:
+            self.remember_origin(restored, snapshot.restored_origin)
+        self.restored_thread_id = restored
 
     def _pause(self, thread_id: str) -> None:
         self.client.threads.update(thread_id, metadata={"proactive": "paused"})

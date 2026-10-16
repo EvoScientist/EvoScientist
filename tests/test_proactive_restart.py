@@ -406,6 +406,40 @@ def test_undo_leave_skips_a_restored_thread_deleted_meanwhile(workspace):
     assert controller.restored_thread_id is None
 
 
+@pytest.mark.parametrize("failing", ["t-left", "t-old"])
+def test_undo_leave_puts_back_each_thread_when_the_other_fails(workspace, failing):
+    client = _Client(
+        {
+            "t-left": {"metadata": {"proactive": "paused"}},
+            "t-old": {"metadata": {"proactive": "paused"}},
+        }
+    )
+    controller = ProactiveServe(workspace=workspace, client=client)
+    controller.armed.update({"t-left", "t-old"})
+    controller.restored_thread_id = "t-old"
+    snapshot = controller.snapshot_leave("t-left")
+    # What leave and on_turn did before the move was refused.
+    controller.armed.clear()
+    controller.restored_thread_id = None
+    get = client.threads.get
+
+    def flaky(thread_id):
+        if thread_id == failing:
+            raise RuntimeError("dev server down")
+        return get(thread_id)
+
+    client.threads.get = flaky
+    with pytest.raises(RuntimeError):
+        controller.undo_leave(snapshot)
+
+    if failing == "t-left":
+        assert controller.armed == {"t-old"}
+        assert controller.restored_thread_id == "t-old"
+    else:
+        assert controller.armed == {"t-left"}
+        assert controller.restored_thread_id is None
+
+
 def test_an_unavailable_controller_leaves_the_restored_thread_alone(workspace):
     client = _Client({"t-old": {"metadata": {"proactive": "on"}}})
     controller = ProactiveServe(workspace=workspace, client=client)
