@@ -500,7 +500,6 @@ class TestEnsureLanggraphDev:
         cfg.enable_async_subagents = False
         cfg.memory_workers_enabled = True
         cfg.langgraph_dev_port = 6174
-        cfg.langgraph_dev_file_persistence = True
         proc = MagicMock()
         with (
             patch.object(manager, "is_langgraph_dev_running", return_value=False),
@@ -535,7 +534,6 @@ class TestEnsureLanggraphDev:
         cfg.enable_scheduler = False  # scheduler crons also require the backend
         cfg.memory_skill_synthesis_enabled = False
         cfg.langgraph_dev_port = 6174
-        cfg.langgraph_dev_file_persistence = True
         with (
             patch.object(manager, "is_langgraph_dev_running") as mock_running,
             patch.object(manager, "start_langgraph_dev") as start,
@@ -601,7 +599,6 @@ class TestEnsureLanggraphDev:
         cfg = EvoScientistConfig()
         cfg.enable_async_subagents = True
         cfg.langgraph_dev_port = 6174
-        cfg.langgraph_dev_file_persistence = True
         with (
             patch.object(
                 manager, "is_langgraph_dev_running", return_value=True

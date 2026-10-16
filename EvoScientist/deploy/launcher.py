@@ -548,9 +548,6 @@ class WebUILauncher:
         jobs_per_worker = int(
             getattr(self._config, "langgraph_dev_jobs_per_worker", 10)
         )
-        file_persistence = bool(
-            getattr(self._config, "langgraph_dev_file_persistence", True)
-        )
         # Mark in-flight before the (up-to-60s blocking) call so a concurrent
         # stop() can tear down our in-flight process even though our proc handle
         # is not wired until this returns.
@@ -560,7 +557,6 @@ class WebUILauncher:
                 workspace_dir=Path(self._cfg.workspace_dir),
                 port=self._cfg.backend_port,
                 host=self._cfg.backend_host,
-                file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
                 config_fingerprint=_server_config_fingerprint(self._config),
                 allowed_origins=getattr(self._config, "backend_allowed_origins", ""),

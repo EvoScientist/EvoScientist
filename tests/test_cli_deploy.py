@@ -30,7 +30,6 @@ def _make_config(
     openai_auth_mode: str = "api_key",
     log_level: str = "warning",
     langgraph_dev_jobs_per_worker: int = 10,
-    langgraph_dev_file_persistence: bool = True,
     dangerous_mode: bool = False,
 ):
     return SimpleNamespace(
@@ -41,7 +40,6 @@ def _make_config(
         openai_auth_mode=openai_auth_mode,
         log_level=log_level,
         langgraph_dev_jobs_per_worker=langgraph_dev_jobs_per_worker,
-        langgraph_dev_file_persistence=langgraph_dev_file_persistence,
         dangerous_mode=dangerous_mode,
     )
 
@@ -123,7 +121,6 @@ def _run_deploy_once(
         *,
         port=None,
         host=None,
-        file_persistence=True,
         jobs_per_worker=10,
         tunnel=False,
         config_fingerprint=None,
@@ -135,7 +132,6 @@ def _run_deploy_once(
         captured["port_passed"] = port
         captured["host_passed"] = host
         captured["jobs_per_worker_passed"] = jobs_per_worker
-        captured["file_persistence_passed"] = file_persistence
         captured["tunnel_passed"] = tunnel
         return SimpleNamespace(pid=99999)
 
