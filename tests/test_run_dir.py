@@ -21,7 +21,7 @@ import pytest
 
 from EvoScientist.gateway.server import _build_thread_metadata
 from EvoScientist.langgraph_dev import manager
-from EvoScientist.paths import SessionDirs, Workspace
+from EvoScientist.paths import SessionDirs, Workspace, file_tool_path
 from tests.fakes import FakeGraphGateway, FakeThreadStore
 
 TS_RUN = "20260930_120000"
@@ -750,12 +750,33 @@ def _tool_path(path: Path) -> str:
     """*path* as the ``ls``/``glob``/``grep`` tools hand it to the backend."""
     from deepagents.backends.utils import validate_path
 
-    return validate_path(str(path))
+    return validate_path(file_tool_path(path))
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32", reason="the file tools reject drive-letter paths"
-)
+@pytest.mark.usefixtures("_plain_config")
+@pytest.mark.parametrize("mode", ["daemon", "run"])
+async def test_channel_attachment_reference_reaches_file_tools(
+    run_dirs, media_file, mode
+):
+    from base64 import b64decode
+
+    from deepagents.backends.utils import validate_path
+
+    from EvoScientist.EvoScientist import _get_default_backend
+    from EvoScientist.stream.events import build_agent_stream_input
+
+    work_dir = run_dirs.work_dir if mode == "run" else run_dirs.workspace.root
+    work_dir.mkdir(parents=True, exist_ok=True)
+    backend = _get_default_backend(run_dirs.workspace, work_dir=work_dir)
+    request = await build_agent_stream_input("Read the paper", media=[str(media_file)])
+    reference = request["messages"][0]["content"][-1]["text"]
+    tool_path = reference.split("path: ", 1)[1].split(";", 1)[0]
+
+    result = backend.read(validate_path(tool_path))
+    assert result.error is None
+    assert b64decode(result.file_data["content"]) == b"attachment"
+
+
 @pytest.mark.usefixtures("_plain_config")
 def test_run_mode_file_tools_list_channel_media(run_dirs, media_file):
     """An agent finds attachments by listing or searching ``<root>/media``."""
@@ -768,13 +789,10 @@ def test_run_mode_file_tools_list_channel_media(run_dirs, media_file):
     listed = [entry["path"] for entry in backend.ls(media).entries]
     globbed = [match["path"] for match in backend.glob("*.pdf", media).matches]
     grepped = [match["path"] for match in backend.grep("attachment", media).matches]
-    assert listed == globbed == grepped == [media_file.as_posix()]
+    assert listed == globbed == grepped == [file_tool_path(media_file)]
     assert backend.read(listed[0]).error is None
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32", reason="the file tools reject drive-letter paths"
-)
 @pytest.mark.usefixtures("_plain_config")
 @pytest.mark.parametrize("folder", ["media", "uploads"])
 def test_run_mode_lists_media_through_symlinked_folder(run_dirs, folder):
@@ -790,14 +808,11 @@ def test_run_mode_lists_media_through_symlinked_folder(run_dirs, folder):
     backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
     listed = _tool_path(run_dirs.workspace.root / folder)
 
-    referenced = (run_dirs.workspace.media_dir / "paper.pdf").as_posix()
+    referenced = file_tool_path(run_dirs.workspace.media_dir / "paper.pdf")
     assert [entry["path"] for entry in backend.ls(listed).entries] == [referenced]
     assert [m["path"] for m in backend.glob("*.pdf", listed).matches] == [referenced]
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32", reason="the file tools reject drive-letter paths"
-)
 @pytest.mark.usefixtures("_plain_config")
 def test_run_mode_media_listing_stays_inside_media_folder(run_dirs, media_file):
     from EvoScientist.EvoScientist import _get_default_backend
@@ -810,7 +825,7 @@ def test_run_mode_media_listing_stays_inside_media_folder(run_dirs, media_file):
     backend = _get_default_backend(run_dirs.workspace, work_dir=run_dirs.work_dir)
     media = _tool_path(run_dirs.workspace.media_dir)
 
-    expected = [media_file.as_posix()]
+    expected = [file_tool_path(media_file)]
     assert [entry["path"] for entry in backend.ls(media).entries] == expected
     assert [match["path"] for match in backend.glob("*", media).matches] == expected
     matches = backend.grep("attachment", media).matches
