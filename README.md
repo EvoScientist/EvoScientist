@@ -449,6 +449,7 @@ EvoSci --ui cli                   # classic CLI (lightweight)
 EvoSci --ui webui                 # browser workspace UI (needs Node.js)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
+EvoSci deploy --json              # the same, for a program (the desktop app): JSON lines on stdout, stops when stdin closes
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
 EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a checklist; exit code 3 without a satisfied verdict (docs/guides/rubric.md)
 # In the TUI / interactive CLI: /rubric set @criteria.md grades every turn of the thread, /rubric next only the next task (docs/guides/rubric.md#interactive-sessions)

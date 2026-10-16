@@ -10,6 +10,10 @@ startup progress, the Ready banner, and then blocks until Ctrl+C.
 
 The server is the same one ``EvoSci`` / ``EvoSci serve`` start in the
 background.
+
+``--json`` is for a program that starts the server (the desktop app): JSON
+event lines on stdout, an attach to a running server for the same workspace,
+and a stop when stdin closes. :mod:`.json_mode` documents the events.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import os
 import signal
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import typer  # type: ignore[import-untyped]
 from rich.panel import Panel
@@ -59,6 +63,14 @@ def deploy(
         "--debug",
         help="Enable debug logging",
     ),
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print one JSON event per line, attach to a running backend "
+            "for the same workspace, and stop when stdin closes",
+        ),
+    ] = False,
 ):
     """Deploy EvoScientist main agent as a standalone LangGraph dev server.
 
@@ -66,10 +78,17 @@ def deploy(
     Connect any LangChain-compatible UI or SDK client to the printed
     endpoint. Press Ctrl+C to stop.
     """
-    from ..config import apply_config_to_env, get_effective_config
+    if json_output:
+        from .json_mode import run_json
+
+        code = run_json(
+            workdir=workdir, port=port, host=host, tunnel=tunnel, debug=debug
+        )
+        if code:
+            raise typer.Exit(code)
+        return
+
     from ..langgraph_dev.manager import (
-        _DEFAULT_HOST,
-        _DEFAULT_PORT,
         RUNTIME,
         _base_url,
         _is_loopback_host,
@@ -85,16 +104,7 @@ def deploy(
 
     # 1. Load config (no CLI overrides here — deploy is opinionated about
     # full MCP + async; user-facing flags are workspace/port/debug only).
-    cli_overrides: dict[str, Any] = {}
-    if debug:
-        cli_overrides["log_level"] = "DEBUG"
-    config = get_effective_config(cli_overrides)
-    if debug:
-        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
-        from ..cli.commands import _configure_logging
-
-        _configure_logging()
-    apply_config_to_env(config)
+    config = _load_config(debug)
 
     # Before anything is created or started.
     from ..cli.commands import _require_chatgpt_sign_in
@@ -110,30 +120,15 @@ def deploy(
     # process's paths module state — the deploy parent has no in-process agent.
     os.makedirs(ws, exist_ok=True)
 
-    # 3. Resolve port (explicit None check — don't treat --port 0 as "unset"),
-    # then validate range so misconfigurations fail fast with a clear message
-    # instead of an opaque socket error from langgraph dev later.
-    effective_port = (
-        int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
-        if port is None
-        else port
-    )
-    if not (1 <= effective_port <= 65535):
-        console.print(
-            f"[red]Invalid port {effective_port}. Use an integer in [1, 65535].[/red]"
-        )
+    # 3. Resolve port, then validate range so misconfigurations fail fast
+    # with a clear message instead of an opaque socket error from langgraph
+    # dev later.
+    effective_port = _resolve_port(port, config)
+    if not _port_in_range(effective_port):
+        console.print(f"[red]{_invalid_port_message(effective_port)}[/red]")
         raise typer.Exit(1)
 
-    # A blank ``--host`` means "not passed" (matching serve), so it can never
-    # discard the configured bind. Both branches strip: whitespace reaching
-    # socket.bind() surfaces as an opaque gaierror, and duck-typed configs
-    # handed to this function never ran ``__post_init__`` normalization.
-    cli_host = host.strip() if host is not None else ""
-    effective_host = (
-        cli_host
-        or str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
-        or _DEFAULT_HOST
-    )
+    effective_host = _resolve_host(host, config)
 
     # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
     # holding the port. If an existing EvoSci langgraph dev is already up,
@@ -331,6 +326,60 @@ def deploy(
         console.print(
             "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]"
         )
+
+
+def _load_config(debug: bool) -> Any:
+    """The effective config, applied to the environment, with ``--debug``
+    logging switched on."""
+    from ..config import apply_config_to_env, get_effective_config
+
+    cli_overrides: dict[str, Any] = {}
+    if debug:
+        cli_overrides["log_level"] = "DEBUG"
+    config = get_effective_config(cli_overrides)
+    if debug:
+        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
+        from ..cli.commands import _configure_logging
+
+        _configure_logging()
+    apply_config_to_env(config)
+    return config
+
+
+def _resolve_port(port: int | None, config: Any) -> int:
+    """``--port``, else the configured port. An explicit None check, so
+    ``--port 0`` is not taken for "unset" and fails the range check."""
+    from ..langgraph_dev.manager import _DEFAULT_PORT
+
+    if port is not None:
+        return port
+    return int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
+
+
+def _port_in_range(port: int) -> bool:
+    return 1 <= port <= 65535
+
+
+def _invalid_port_message(port: int) -> str:
+    return f"Invalid port {port}. Use an integer in [1, 65535]."
+
+
+def _resolve_host(host: str | None, config: Any) -> str:
+    """``--host``, else the configured host, else loopback.
+
+    A blank ``--host`` means "not passed" (matching serve), so it can never
+    discard the configured bind. Both branches strip: whitespace reaching
+    socket.bind() surfaces as an opaque gaierror, and duck-typed configs
+    handed to this function never ran ``__post_init__`` normalization.
+    """
+    from ..langgraph_dev.manager import _DEFAULT_HOST
+
+    cli_host = host.strip() if host is not None else ""
+    return (
+        cli_host
+        or str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
+        or _DEFAULT_HOST
+    )
 
 
 def _describe_auth(config: Any) -> str:
