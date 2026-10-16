@@ -189,6 +189,17 @@ def _parse_time(value: Any) -> float | None:
     return parsed.timestamp()
 
 
+@dataclass(frozen=True)
+class LeaveSnapshot:
+    """What serve puts back when the move it left *thread_id* for is refused."""
+
+    thread_id: str
+    armed: bool
+    restored_thread_id: str | None
+    # ``origin_of(restored_thread_id)``: ``on_turn`` forgets it.
+    restored_origin: Any = None
+
+
 @dataclass
 class ProactiveServe:
     """Serve's proactive controller for the workspace it currently serves.
@@ -214,6 +225,8 @@ class ProactiveServe:
     forget_origin: Callable[[str], None] | None = None
     # A thread's channel origin, or None (a ``cli.channel._ChannelOrigin``).
     origin_of: Callable[[str], Any] | None = None
+    # Record a thread's channel origin again (a value ``origin_of`` returned).
+    remember_origin: Callable[[str, Any], None] | None = None
     # The armed thread restored at startup, until serve's thread changes or
     # its fresh thread has its first turn.
     restored_thread_id: str | None = None
@@ -287,6 +300,38 @@ class ProactiveServe:
         with self._lock:
             if thread_id in self.armed:
                 self._pause(thread_id)
+
+    def snapshot_leave(self, thread_id: str) -> LeaveSnapshot:
+        """What :meth:`undo_leave` needs, taken before serve leaves *thread_id*."""
+        with self._lock:
+            restored = self.restored_thread_id
+            origin = None
+            if restored is not None and self.origin_of is not None:
+                origin = self.origin_of(restored)
+            return LeaveSnapshot(thread_id, thread_id in self.armed, restored, origin)
+
+    def undo_leave(self, snapshot: LeaveSnapshot) -> None:
+        """Serve stays where it was: arm again what :meth:`leave` and :meth:`on_turn` paused.
+
+        Mirrors nothing: the caller mirrors.
+        """
+        if not self.available:
+            return
+        with self._lock:
+            if snapshot.armed:
+                self.adopt(snapshot.thread_id)
+            restored = snapshot.restored_thread_id
+            if restored is None or restored == snapshot.thread_id:
+                return
+            # Armed again only from its stored flag: a thread deleted meanwhile
+            # stays out.
+            self.armed.discard(restored)
+            self.adopt(restored)
+            if restored not in self.armed:
+                return
+            if snapshot.restored_origin is not None and self.remember_origin:
+                self.remember_origin(restored, snapshot.restored_origin)
+            self.restored_thread_id = restored
 
     def _pause(self, thread_id: str) -> None:
         self.client.threads.update(thread_id, metadata={"proactive": "paused"})

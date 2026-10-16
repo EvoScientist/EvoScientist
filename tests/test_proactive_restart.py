@@ -385,6 +385,27 @@ def test_a_turn_in_the_fresh_thread_ends_the_restored_thread(workspace):
     controller.reconcile.assert_called_once_with()
 
 
+def test_undo_leave_skips_a_restored_thread_deleted_meanwhile(workspace):
+    client = _Client({"t-old": {"metadata": {"proactive": "on"}}})
+    controller = ProactiveServe(workspace=workspace, client=client)
+    controller.armed.add("t-old")
+    controller.restored_thread_id = "t-old"
+    snapshot = controller.snapshot_leave("t-fresh")
+
+    def gone(thread_id, *, metadata):
+        raise NotFoundError("gone", response=MagicMock(), body=None)
+
+    client.threads.update = gone
+    del client._threads["t-old"]
+    with pytest.raises(NotFoundError):
+        controller.on_turn("t-other")
+
+    controller.undo_leave(snapshot)
+
+    assert not controller.is_armed("t-old")
+    assert controller.restored_thread_id is None
+
+
 def test_an_unavailable_controller_leaves_the_restored_thread_alone(workspace):
     client = _Client({"t-old": {"metadata": {"proactive": "on"}}})
     controller = ProactiveServe(workspace=workspace, client=client)

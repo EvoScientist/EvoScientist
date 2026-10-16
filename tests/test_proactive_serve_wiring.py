@@ -69,6 +69,32 @@ def test_controller_is_available_on_the_server_gateway(workspace):
     assert build.call_args.kwargs["timeout"] == 10.0
 
 
+def test_the_controller_can_put_back_an_origin_it_forgot(workspace):
+    from EvoScientist.cli.channel import restore_channel_origin
+
+    composite = MagicMock(spec=CompositeGraphGateway)
+    with patch(
+        "EvoScientist.langgraph_dev.sdk.get_langgraph_sync_client",
+        return_value=MagicMock(),
+    ):
+        controller = _serve_proactive_controller(
+            EvoScientistConfig(),
+            _gateways(composite),
+            gateway_backend="langgraph_server",
+            workspace=workspace,
+        )
+    restore_channel_origin(
+        "t-origin", channel_type="slack", chat_id="C1", sender="", metadata=None
+    )
+    origin = controller.origin_of("t-origin")
+    controller.forget_origin("t-origin")
+
+    controller.remember_origin("t-origin", origin)
+
+    assert controller.origin_of("t-origin") == origin
+    controller.forget_origin("t-origin")
+
+
 def test_a_controller_failure_never_raises():
     def boom():
         raise RuntimeError("dev server down")
@@ -206,6 +232,60 @@ async def test_a_refused_server_move_keeps_the_current_thread_armed(tmp_path):
     assert state.thread_id == "old-tid"
     assert proactive.is_armed("old-tid")
     assert client.threads.get("old-tid")["metadata"]["proactive"] == "on"
+    assert len(client.crons.rows) == 1
+
+
+@pytest.mark.parametrize("fresh_armed", [False, True])
+async def test_a_refused_move_right_after_a_restart_keeps_the_restored_thread(
+    tmp_path, fresh_armed
+):
+    from types import SimpleNamespace
+
+    from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
+    from EvoScientist.proactive.serve import ProactiveServe
+    from tests.test_proactive_serve import _Client, _source
+
+    old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
+    client = _Client()
+    origins = {
+        tid: SimpleNamespace(channel_type="telegram", chat_id=tid, metadata=None)
+        for tid in ("restored-tid", "fresh-tid")
+    }
+    for tid in origins:
+        _source(client, tid)
+    proactive = ProactiveServe(
+        workspace=old_ws,
+        client=client,
+        can_deliver=lambda tid: tid in origins,
+        forget_origin=lambda tid: origins.pop(tid, None),
+        origin_of=origins.get,
+        remember_origin=origins.__setitem__,
+    )
+    proactive.arm("restored-tid")
+    proactive.restored_thread_id = "restored-tid"
+    if fresh_armed:
+        proactive.arm("fresh-tid")
+    state = _state(SessionDirs(old_ws))
+    state.thread_id = "fresh-tid"
+    runtime = ChannelRuntime(
+        agent=state.agent, thread_id="fresh-tid", proactive=proactive
+    )
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=state.config)
+    with (
+        patch("EvoScientist.cli.commands._load_agent", return_value=MagicMock()),
+        patch(
+            "EvoScientist.cli.commands._move_server_or_keep_session",
+            new=AsyncMock(side_effect=WorkspaceMismatchError("held elsewhere")),
+        ),
+        pytest.raises(WorkspaceMismatchError),
+    ):
+        await cb("new-tid", SessionDirs(new_ws))
+
+    assert state.thread_id == "fresh-tid"
+    assert proactive.restored_thread_id == "restored-tid"
+    assert client.threads.get("restored-tid")["metadata"]["proactive"] == "on"
+    expected = ["fresh-tid", "restored-tid"] if fresh_armed else ["restored-tid"]
+    assert proactive.candidates() == expected
     assert len(client.crons.rows) == 1
 
 
