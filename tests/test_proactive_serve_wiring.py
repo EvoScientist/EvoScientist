@@ -136,15 +136,44 @@ async def test_resume_into_another_workspace_moves_the_cron_with_the_server():
         await cb("new-tid", SessionDirs(Workspace("/new-ws")))
 
     assert order == [
+        ("leave", "old-tid"),
+        ("on_turn", "new-tid"),
         "stop",
         "move server",
         ("move_to", Workspace("/new-ws")),
         "reconcile",
-        ("leave", "old-tid"),
-        ("on_turn", "new-tid"),
         ("adopt", "new-tid"),
         "mirror",
     ]
+
+
+async def test_a_restart_in_the_workspace_serve_moved_from_restores_nothing(tmp_path):
+    from EvoScientist.proactive.serve import ProactiveServe
+    from tests.test_proactive_serve import _Client, _source
+
+    old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
+    client = _Client()
+    _source(client, "old-tid")
+    client.threads.update("old-tid", metadata=SessionDirs(old_ws).metadata())
+    proactive = ProactiveServe(workspace=old_ws, client=client)
+    proactive.arm("old-tid")
+    state = _state(SessionDirs(old_ws))
+    runtime = ChannelRuntime(
+        agent=state.agent, thread_id="old-tid", proactive=proactive
+    )
+    cb = _make_serve_handle_session_resume_cb(state, runtime, config=state.config)
+    with (
+        patch("EvoScientist.cli.commands._load_agent", return_value=MagicMock()),
+        patch(
+            "EvoScientist.cli.commands._move_server_or_keep_session",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        await cb("new-tid", SessionDirs(new_ws))
+
+    assert client.threads.get("old-tid")["metadata"]["proactive"] == "paused"
+    restarted = ProactiveServe(workspace=old_ws, client=client)
+    assert restarted.restore([], restore_origin=lambda tid, origin: None) is None
 
 
 async def test_a_failed_server_move_turns_proactive_off_for_the_session():

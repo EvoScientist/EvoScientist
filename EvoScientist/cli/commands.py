@@ -1490,6 +1490,20 @@ async def _apply_serve_resume_state(
 
     new_dirs = dirs if dirs is not None and dirs != runtime_state.dirs else None
     workspace_update: tuple[SessionDirs, CompiledStateGraph] | None = None
+    old_thread_id = runtime_state.thread_id
+    thread_changed = thread_id != old_thread_id
+    # Serve pauses the thread it leaves and ends the wait on a thread restored
+    # after a restart, in the store of the workspace it leaves them in.
+    left_thread = False
+
+    async def leave_thread(proactive: Any) -> None:
+        nonlocal left_thread
+        left_thread = True
+        for call in (
+            lambda: proactive.leave(old_thread_id),
+            lambda: proactive.on_turn(thread_id),
+        ):
+            await asyncio.to_thread(_serve_proactive_call, call)
 
     if new_dirs is not None:
         effective_config = _serve_resume_config(runtime_state, config)
@@ -1508,8 +1522,11 @@ async def _apply_serve_resume_state(
         proactive = getattr(channel_runtime, "proactive", None)
         moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace
         if proactive is not None and moves_workspace:
-            # Until C17 each workspace has its own cron store: delete this
-            # workspace's proactive cron while its store is still the served one.
+            # Until C17 each workspace has its own cron store: pause the thread
+            # serve leaves and delete this workspace's proactive cron while its
+            # store is still the served one.
+            if thread_changed:
+                await leave_thread(proactive)
             await asyncio.to_thread(_serve_proactive_call, proactive.stop)
         if not await _move_server_or_keep_session(
             effective_config,
@@ -1531,21 +1548,16 @@ async def _apply_serve_resume_state(
             await asyncio.to_thread(_serve_proactive_call, proactive.reconcile)
         workspace_update = (new_dirs, new_agent)
 
-    old_thread_id = runtime_state.thread_id
-    thread_changed = thread_id != old_thread_id
     if thread_changed:
         runtime_state.set_thread_id(thread_id, channel_runtime)
         proactive = getattr(channel_runtime, "proactive", None)
         if proactive is not None:
-            # Within a workspace, serve pauses the thread it leaves and ends the
-            # wait on a thread restored after a restart; a thread armed or
-            # paused earlier is armed again here.
-            for call in (
-                lambda: proactive.leave(old_thread_id),
-                lambda: proactive.on_turn(thread_id),
-                lambda: proactive.adopt(thread_id),
-            ):
-                await asyncio.to_thread(_serve_proactive_call, call)
+            if not left_thread:
+                await leave_thread(proactive)
+            # A thread armed or paused earlier is armed again here.
+            await asyncio.to_thread(
+                _serve_proactive_call, lambda: proactive.adopt(thread_id)
+            )
 
     if workspace_update is not None:
         updated_dirs, updated_agent = workspace_update
