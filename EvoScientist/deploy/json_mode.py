@@ -239,7 +239,7 @@ class _Run:
         from ..agent_shell import server_setup_hint, setup_hint
         from ..langgraph_dev import manager as lgm
         from . import server
-        from .launcher import BackendTarget, LauncherError, _resolve_backend
+        from .launcher import BackendTarget
 
         config = server._load_config(debug)
         _check_sign_in(config)
@@ -259,20 +259,10 @@ class _Run:
         target = BackendTarget(
             workspace_dir=ws, backend_host=self.host, backend_port=self.port
         )
-        try:
-            decision = _resolve_backend(target, config, require_record=True)
-        except LauncherError as exc:
-            detail = dict(exc.fields)
-            if exc.detail:
-                detail["hint"] = exc.detail
-            code = _LAUNCHER_CODES.get(exc.code)
-            if code is None:
-                detail["launcher_code"] = exc.code
-                code = "internal_error"
-            raise _Failure(code, exc.message, detail) from exc
-
-        # A stop asked for while the decision ran: nothing started yet.
-        if self.stop.is_set():
+        decision = self._decide_and_start(target, config, ws, tunnel)
+        # A stop asked for while waiting for the lock, during the decision or
+        # during the start: stop now, without the tunnel wait or ready.
+        if decision is None or self.stop.is_set():
             return
         warnings = list(decision.warnings)
         public_url: str | None = None
@@ -313,11 +303,6 @@ class _Run:
                 )
             data_dir = str(paths.DATA_DIR)
             config_dir = str(paths.CONFIG_DIR)
-            self._start_backend(config, ws, tunnel)
-            # A stop asked for during the start: stop now, without the
-            # tunnel wait or ready.
-            if self.stop.is_set():
-                return
             if self.job is not None and self.job.warning:
                 warnings.append(self.job.warning)
             hint = setup_hint()
@@ -341,6 +326,63 @@ class _Run:
         if tunnel:
             fields["public_url"] = public_url
         self.events("ready", **fields)
+
+    def _decide_and_start(self, target: Any, config: Any, ws: str, tunnel: bool) -> Any:
+        """The backend decision, and the start it calls for, under the lock
+        the TUI's ``ensure_langgraph_dev()`` takes.
+
+        Without it a second starter can see a backend that is bound but not
+        answering yet and kill it as stale, or overwrite its ownership
+        record. With it, a second ``deploy --json`` waits for the first
+        backend to answer, then attaches. None when a stop came first.
+        """
+        from filelock import FileLock
+
+        from ..langgraph_dev import manager as lgm
+        from .launcher import LauncherError, _resolve_backend
+
+        lgm.RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(lgm.RUNTIME.lock_file))
+        if not self._acquire(lock, lgm._FILE_LOCK_TIMEOUT):
+            return None
+        try:
+            try:
+                decision = _resolve_backend(target, config, require_record=True)
+            except LauncherError as exc:
+                detail = dict(exc.fields)
+                if exc.detail:
+                    detail["hint"] = exc.detail
+                code = _LAUNCHER_CODES.get(exc.code)
+                if code is None:
+                    detail["launcher_code"] = exc.code
+                    code = "internal_error"
+                raise _Failure(code, exc.message, detail) from exc
+            if decision.action == "start" and not self.stop.is_set():
+                self._start_backend(config, ws, tunnel)
+            return decision
+        finally:
+            lock.release()
+
+    def _acquire(self, lock: Any, limit: float) -> bool:
+        """Take ``lock`` in short waits that check for a stop; False on a
+        stop. Waiting longer than ``limit`` is ``backend_start_failed``: the
+        holder is stuck in its own start."""
+        from filelock import Timeout
+
+        deadline = time.monotonic() + limit
+        while not self.stop.is_set():
+            try:
+                lock.acquire(timeout=_TICK)
+                return True
+            except Timeout:
+                if time.monotonic() >= deadline:
+                    raise _Failure(
+                        "backend_start_failed",
+                        f"Another EvoScientist process has been starting a "
+                        f"backend for over {limit:.0f} s.",
+                        {"lock_file": str(lock.lock_file)},
+                    ) from None
+        return False
 
     def _start_backend(self, config: Any, ws: str, tunnel: bool) -> None:
         from pathlib import Path

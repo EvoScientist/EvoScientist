@@ -96,6 +96,10 @@ class Harness:
         monkeypatch.setattr(lgm, "stop_langgraph_dev", self._stop)
         monkeypatch.setattr(lgm, "read_tunnel_url", lambda *a, **k: self.tunnel_url)
         monkeypatch.setattr(lgm, "_PROCESS", None)
+        # The pid file, sidecar, log and start lock under tmp_path.
+        monkeypatch.setattr(
+            lgm, "RUNTIME", lgm.LanggraphRuntimePaths.for_directory(tmp_path / "rt")
+        )
 
         monkeypatch.setattr(agent_shell, "setup_hint", lambda: None)
         monkeypatch.setattr(agent_shell, "server_setup_hint", lambda _s: None)
@@ -769,6 +773,91 @@ def test_a_pipe_stdin_is_not_handed_on(h, capsys):
     assert stdin_is_pipe() is False
 
 
+class _LockHolder:
+    """Another process's start: holds the start lock until released."""
+
+    def __init__(self) -> None:
+        from filelock import FileLock
+
+        from EvoScientist.langgraph_dev import manager as lgm
+
+        lgm.RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        self.lock = FileLock(str(lgm.RUNTIME.lock_file))
+        self.held = threading.Event()
+        self.release = threading.Event()
+        self.thread = threading.Thread(target=self._hold, daemon=True)
+        self.thread.start()
+        assert self.held.wait(5)
+
+    def _hold(self) -> None:
+        with self.lock:
+            self.held.set()
+            self.release.wait(10)
+
+    def done(self) -> None:
+        self.release.set()
+        self.thread.join(5)
+
+
+def test_a_second_start_waits_for_the_lock(h, capsys, monkeypatch):
+    """Decision and start wait until another start released the lock."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    holder = _LockHolder()
+    decided: list[bool] = []
+    occupied = lgm._is_port_occupied
+
+    def _occupied(*a, **k):
+        decided.append(holder.release.is_set())
+        return occupied(*a, **k)
+
+    monkeypatch.setattr(lgm, "_is_port_occupied", _occupied)
+    threading.Timer(0.3, holder.done).start()
+    code, _ = h.run(capsys)
+    assert code == 0
+    assert decided
+    assert all(decided)
+    assert h.started is not None
+
+
+def test_a_stop_while_waiting_for_the_lock_starts_nothing(h, capsys):
+    holder = _LockHolder()
+    threading.Timer(0.3, h.close_stdin).start()
+    try:
+        code, lines = h.run(capsys)
+    finally:
+        holder.done()
+    assert code == 0
+    assert _events(lines) == ["starting", "stopped"]
+    assert h.started is None
+
+
+def test_a_lock_held_too_long_is_backend_start_failed(h, capsys, monkeypatch):
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
+    holder = _LockHolder()
+    try:
+        code, lines = h.run(capsys)
+    finally:
+        holder.done()
+    assert code == 1
+    assert lines[-1]["code"] == "backend_start_failed"
+    assert lines[-1]["detail"] == {"lock_file": str(lgm.RUNTIME.lock_file)}
+    assert h.started is None
+
+
+def test_the_lock_is_released_after_the_start(h, capsys):
+    from filelock import FileLock
+
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    h.run(capsys)
+    lock = FileLock(str(lgm.RUNTIME.lock_file))
+    lock.acquire(timeout=0.5)
+    lock.release()
+
+
 def test_closed_stdout_stops_the_run(h, monkeypatch):
     """The reader is gone: the run stops its backend and writes nothing more.
     The exit code of a real process is checked in a child below."""
@@ -905,6 +994,8 @@ def _spawn_child(tmp_path, *, grandchild: bool = False):
         "import EvoScientist.config as c\n"
         "from EvoScientist import agent_shell\n"
         "from EvoScientist.langgraph_dev import manager as m\n"
+        "from pathlib import Path\n"
+        "m.RUNTIME = m.LanggraphRuntimePaths.for_directory(Path(sys.argv[1]).parent / 'rt')\n"
         "cfg = SimpleNamespace(default_workdir=sys.argv[1], langgraph_dev_port=6174,\n"
         "    langgraph_dev_host='127.0.0.1', anthropic_auth_mode='api_key',\n"
         "    openai_auth_mode='api_key')\n"
