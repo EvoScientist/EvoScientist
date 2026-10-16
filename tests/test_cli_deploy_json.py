@@ -659,6 +659,16 @@ def test_a_long_stdin_line_without_newline_is_dropped(h, capsys, monkeypatch):
     assert lines[-1]["event"] == "stopped"
 
 
+def test_a_pipe_stdin_is_not_handed_on(h, capsys):
+    """While the run watches the pipe, stdin itself is the null device, so a
+    child the run starts does not inherit the pipe."""
+    from EvoScientist.setup.protocol import stdin_is_pipe
+
+    code, _ = h.run(capsys)
+    assert code == 0
+    assert stdin_is_pipe() is False
+
+
 def test_closed_stdout_stops_the_run(h, monkeypatch):
     """The reader is gone: the run stops its backend and writes nothing more.
     The exit code of a real process is checked in a child below."""
@@ -768,8 +778,26 @@ def test_devnull_stdin_does_not_stop_the_run(h, capsys):
     assert lines[-1]["code"] == "backend_exited"
 
 
-def _spawn_child(tmp_path):
-    """The real command in a child, with the backend and the probes faked."""
+_GRANDCHILD = (
+    "def start(**k):\n"
+    "    import subprocess\n"
+    "    code = ('import os, stat; m = os.fstat(0).st_mode; '\n"
+    '            \'print("pipe" if stat.S_ISFIFO(m) or stat.S_ISSOCK(m) else "other")\')\n'
+    "    try:\n"
+    "        out = subprocess.run([sys.executable, '-c', code], capture_output=True,\n"
+    "                             text=True, timeout=10).stdout.strip()\n"
+    "    except subprocess.TimeoutExpired:\n"
+    "        out = 'hung'\n"
+    "    print('grandchild stdin: ' + out, file=sys.stderr, flush=True)\n"
+    "    return P()\n"
+    "m.start_langgraph_dev = start\n"
+)
+
+
+def _spawn_child(tmp_path, *, grandchild: bool = False):
+    """The real command in a child, with the backend and the probes faked.
+    With ``grandchild``, the faked start runs a Python child that inherits
+    stdin, as the backend does, and reports what its stdin is."""
     script = tmp_path / "child.py"
     script.write_text(
         "import sys\n"
@@ -791,7 +819,8 @@ def _spawn_child(tmp_path):
         "m._server_config_fingerprint = lambda _c: 'fp'\n"
         "m.start_langgraph_dev = lambda **k: P()\n"
         "m.stop_langgraph_dev = lambda p=None: print('stopped backend', file=sys.stderr)\n"
-        "from EvoScientist.deploy import json_mode\n"
+        + (_GRANDCHILD if grandchild else "")
+        + "from EvoScientist.deploy import json_mode\n"
         "sys.exit(json_mode.run_json(workdir=None, port=None, host=None,\n"
         "    tunnel=False, debug=False))\n"
     )
@@ -836,3 +865,18 @@ def test_subprocess_with_closed_stdout_exits_zero(tmp_path):
     assert b"stopped backend" in err
     assert b"Exception ignored" not in err
     assert b"BrokenPipeError" not in err
+
+
+@pytest.mark.timeout(60)
+def test_a_child_of_the_run_inherits_no_stdin_pipe(tmp_path):
+    """On Windows a child that inherits a pipe another thread is reading hangs
+    in its start-up; the backend gets the null device instead (every
+    platform), and still starts while the run watches stdin."""
+    proc = _spawn_child(tmp_path, grandchild=True)
+    assert proc.stdout is not None
+    assert json.loads(proc.stdout.readline())["event"] == "starting"
+    assert json.loads(proc.stdout.readline())["event"] == "ready"
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0
+    assert b"grandchild stdin: other" in err
+    assert [json.loads(x)["event"] for x in out.splitlines()] == ["stopped"]

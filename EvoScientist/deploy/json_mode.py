@@ -148,13 +148,38 @@ class _Events:
                 pass
 
 
-def _watch_stdin(stop: threading.Event) -> None:
-    """Set ``stop`` at the end of stdin or on a ``{"command": "stop"}`` line.
+def _take_stdin() -> int:
+    """Move the stdin pipe to a private descriptor and give stdin the null
+    device; returns the private descriptor.
 
-    Reads the file descriptor itself: a thread blocked in ``sys.stdin`` holds
-    its buffer lock, which interpreter shutdown may need.
+    On Windows a read pending on a pipe stalls every other process that holds
+    the same pipe: a child that inherits it (the backend, ccproxy, and the MCP
+    servers and shell commands the backend starts) hangs in its start-up. The
+    copy is not inheritable (PEP 446), so children inherit the null device
+    instead. The end of input still arrives: it depends on the writer only.
     """
-    fd = sys.stdin.fileno()
+    stdin_fd = sys.stdin.fileno()
+    private = os.dup(stdin_fd)
+    null = os.open(os.devnull, os.O_RDONLY)
+    try:
+        os.dup2(null, stdin_fd)
+    finally:
+        os.close(null)
+    if sys.platform == "win32" and stdin_fd == 0:
+        # What ``Popen`` hands a child as its stdin.
+        import ctypes
+        import msvcrt
+
+        ctypes.windll.kernel32.SetStdHandle(-10, msvcrt.get_osfhandle(0))
+    return private
+
+
+def _watch_stdin(fd: int, stop: threading.Event) -> None:
+    """Set ``stop`` at the end of ``fd`` or on a ``{"command": "stop"}`` line.
+
+    Reads the descriptor itself: a thread blocked in ``sys.stdin`` holds its
+    buffer lock, which interpreter shutdown may need.
+    """
     pending = b""
     try:
         while True:
@@ -169,6 +194,8 @@ def _watch_stdin(stop: threading.Event) -> None:
                 pending = b""  # not a command line; drop it
     except OSError as exc:
         logger.debug(f"stdin read failed: {exc}")
+    finally:
+        os.close(fd)
     stop.set()
 
 
@@ -444,7 +471,10 @@ def run_json(
     # stops it as soon as the start returns.
     if stdin_is_pipe():
         threading.Thread(
-            target=_watch_stdin, args=(stop,), name=_STDIN_THREAD, daemon=True
+            target=_watch_stdin,
+            args=(_take_stdin(), stop),
+            name=_STDIN_THREAD,
+            daemon=True,
         ).start()
     terminal: dict[str, Any] = {"event": "stopped"}
     try:
