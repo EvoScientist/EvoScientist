@@ -8,7 +8,8 @@ import pytest
 from deepagents.backends.protocol import GlobResult, GrepResult, LsResult
 from deepagents.backends.utils import file_data_to_string, validate_path
 
-from EvoScientist import backends, paths
+from EvoScientist import agent_shell, backends, paths
+from EvoScientist.channels.base import Channel, RawIncoming
 from EvoScientist.stream.events import build_agent_stream_input
 
 
@@ -68,6 +69,30 @@ def test_windows_file_tool_alias_resolves_working_directory(
     assert (
         backend._resolve_path(validate_path(f"/{drive}:/project/paper.pdf")) == expected
     )
+
+
+@pytest.mark.parametrize("key", ["/D:/", "/d:/"])
+def test_windows_drive_root_alias_is_decoded(monkeypatch, key):
+    monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
+    assert paths.host_file_tool_path(validate_path(key)) == f"{key[1]}:/"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (
+            "python parse.py /C:/proj/media/paper.pdf",
+            "python parse.py C:/proj/media/paper.pdf",
+        ),
+        ("cp '/C:/proj/media/my paper.pdf' .", "cp 'C:/proj/media/my paper.pdf' ."),
+        ("python parse.py /data.csv", "python parse.py ./data.csv"),
+    ],
+)
+def test_windows_file_tool_alias_in_commands(monkeypatch, command, expected):
+    monkeypatch.setattr(paths, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(backends, "_is_windows", lambda: True)
+    monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+    assert backends.convert_virtual_paths_in_command(command, "r1") == expected
 
 
 def test_windows_alias_conversion_does_not_change_posix_paths():
@@ -194,3 +219,18 @@ async def test_query_results_can_be_read(tmp_path, tool, asynchronous, dangerous
     read = await backend.aread(file_path) if asynchronous else backend.read(file_path)
     assert read.error is None
     assert file_data_to_string(read.file_data) == content
+
+
+def test_channel_annotation_names_the_file_tool_path():
+    local = r"C:\project\media\paper.pdf"
+    raw = RawIncoming(
+        sender_id="u",
+        chat_id="c",
+        text="Read the paper",
+        media_files=[local],
+        content_annotations=[f"[document: {local}]"],
+    )
+    message = Channel._raw_to_inbound(SimpleNamespace(name="test"), raw)
+
+    assert message.content == "Read the paper\n[document: /C:/project/media/paper.pdf]"
+    assert message.media == [local]

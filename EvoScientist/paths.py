@@ -47,8 +47,8 @@ def host_file_tool_path(path: str) -> str:
     Other platforms get *path* back unchanged.
     """
     if os.name == "nt":
-        if re.match(r"^/[A-Za-z]:/", path):
-            path = path[1:]
+        if re.match(r"^/[A-Za-z]:(/|$)", path):
+            path = f"{path[1:3]}/{path[4:]}"
         return path.replace("\\", "/")
     return path
 

@@ -1149,7 +1149,14 @@ def _resolve_virtual_mount_path(
     outside the workspace's ``media/``: the folder as configured (how channel
     attachments are referenced) and its resolved target, both kept as they
     are.
+
+    On Windows a ``/C:/...`` file-tool alias becomes the drive path the shell
+    takes.
     """
+    host = paths.host_file_tool_path(token)
+    if not host.startswith("/"):
+        return _platform_quote(host)
+
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
         for tier in _skills_tier_paths(skills_dir):
@@ -1818,8 +1825,8 @@ class CustomSandboxBackend(LocalShellBackend):
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
-        In dangerous (real-filesystem) mode, skip all rewriting and let the
-        parent resolve real absolute paths as-is.
+        In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
+        alias and let the parent resolve real absolute paths as-is.
         """
         key = paths.host_file_tool_path(key)
         if self._dangerous:
