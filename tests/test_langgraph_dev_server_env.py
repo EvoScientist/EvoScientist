@@ -334,6 +334,7 @@ def test_start_puts_the_server_in_the_callers_job(monkeypatch, tmp_path, runtime
     """The server is spawned with the job's flags and joins the job before the
     PID file is written (``started`` stops the run here)."""
     captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    monkeypatch.setattr(manager, "_PROCESS", None)
     proc = SimpleNamespace(pid=4242)
 
     def _popen(args, **kwargs):
@@ -347,12 +348,15 @@ def test_start_puts_the_server_in_the_callers_job(monkeypatch, tmp_path, runtime
 
         def started(self, process):
             captured["started"] = process
+            # Already recorded, so a caller's stop reaches it if this fails.
+            captured["recorded"] = manager._PROCESS
             raise _PopenAbort("joined")
 
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179, job=_Job())
     assert captured["kwargs"]["creationflags"] & 0x4
     assert captured["started"] is proc
+    assert captured["recorded"] is proc
     assert not manager.RUNTIME.pid_file.exists()
 
 

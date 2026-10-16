@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -72,7 +73,10 @@ class Harness:
         self.pid_serves = True
         self.tunnel_url: str | None = None
         self.job: Any = None
+        # "eof": a pipe closed right after ``ready``; "eof-now": already
+        # closed; "devnull"; or a file object.
         self.stdin_kind = "eof"
+        self._stdin_write: int | None = None
 
         # redirect_console_to_stderr() rebinds the shared console's file.
         monkeypatch.setattr(console, "file", console.file)
@@ -105,6 +109,14 @@ class Harness:
         monkeypatch.setattr(
             ccproxy_manager, "stop_ccproxy", lambda _p: self.log.append("ccproxy stop")
         )
+        emit = json_mode._Events.__call__
+
+        def _emit_then_close(events, event, **fields):
+            emit(events, event, **fields)
+            if event == "ready":
+                self.close_stdin()
+
+        monkeypatch.setattr(json_mode._Events, "__call__", _emit_then_close)
         monkeypatch.setattr(json_mode, "_TICK", 0.01)
         monkeypatch.setattr(json_mode, "HEALTH_INTERVAL", 0.0)
 
@@ -121,10 +133,17 @@ class Harness:
         self.log.append(("backend stop", proc))
 
     # -- running ---------------------------------------------------------- #
+    def close_stdin(self) -> None:
+        if self._stdin_write is not None:
+            os.close(self._stdin_write)
+            self._stdin_write = None
+
     def _set_stdin(self) -> None:
-        if self.stdin_kind == "eof":
+        if self.stdin_kind in ("eof", "eof-now"):
             read, write = os.pipe()
-            os.close(write)
+            self._stdin_write = write
+            if self.stdin_kind == "eof-now":
+                self.close_stdin()
             stdin = os.fdopen(read, "r")
         elif self.stdin_kind == "devnull":
             stdin = open(os.devnull)
@@ -151,7 +170,20 @@ class Harness:
 
 @pytest.fixture
 def h(monkeypatch, tmp_path):
-    return Harness(monkeypatch, tmp_path)
+    harness = Harness(monkeypatch, tmp_path)
+    yield harness
+    harness.close_stdin()  # lets a watcher left by an error run end
+
+
+def _wait_for_stdin_watcher():
+    """Until the stdin watcher has seen the end of stdin and set the stop."""
+    deadline = time.monotonic() + 5
+    while any(
+        t.name == json_mode._STDIN_THREAD and t.is_alive()
+        for t in threading.enumerate()
+    ):
+        assert time.monotonic() < deadline, "stdin watcher still running"
+        time.sleep(0.01)
 
 
 def _events(lines):
@@ -578,12 +610,68 @@ def test_ctrl_c_stops_cleanly(h, capsys):
     assert ("backend stop", h.proc) in h.log
 
 
+def test_stdin_closed_during_the_start_stops_without_ready(h, capsys, monkeypatch):
+    """The app went away while the backend started: it is stopped as soon as
+    the start returns, without the tunnel wait or ``ready``."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    def _start(**kwargs):
+        proc = h._start(**kwargs)
+        h.close_stdin()
+        _wait_for_stdin_watcher()
+        return proc
+
+    reads: list[int] = []
+    monkeypatch.setattr(lgm, "start_langgraph_dev", _start)
+    monkeypatch.setattr(lgm, "read_tunnel_url", lambda *a, **k: reads.append(1))
+    code, lines = h.run(capsys, tunnel=True)
+    assert code == 0
+    assert _events(lines) == ["starting", "stopped"]
+    assert ("backend stop", h.proc) in h.log
+    assert reads == []
+
+
+def test_stdin_closed_before_the_decision_starts_nothing(h, capsys, monkeypatch):
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    def _occupied(*_a, **_k):
+        _wait_for_stdin_watcher()
+        return False
+
+    monkeypatch.setattr(lgm, "_is_port_occupied", _occupied)
+    h.stdin_kind = "eof-now"
+    code, lines = h.run(capsys)
+    assert code == 0
+    assert _events(lines) == ["starting", "stopped"]
+    assert h.started is None
+
+
+def test_a_long_stdin_line_without_newline_is_dropped(h, capsys, monkeypatch):
+    monkeypatch.setattr(json_mode, "_MAX_LINE", 8)
+    read, write = os.pipe()
+    h.stdin_kind = os.fdopen(read, "r")
+    os.write(write, b"x" * 20 + b'"command": "stop"}\n{"command": "stop"}\n')
+    try:
+        code, lines = h.run(capsys)
+    finally:
+        os.close(write)
+    assert code == 0
+    assert lines[-1]["event"] == "stopped"
+
+
 def test_closed_stdout_stops_the_run(h, monkeypatch):
-    """The reader is gone: the run stops its backend and prints nothing more."""
+    """The reader is gone: the run stops its backend and writes nothing more.
+    The exit code of a real process is checked in a child below."""
 
     class _Closed:
+        """The reader leaves after ``starting``."""
+
+        lines = 0
+
         def write(self, _s):
-            raise BrokenPipeError
+            self.lines += 1
+            if self.lines > 1:
+                raise BrokenPipeError
 
         def flush(self):
             pass
@@ -680,12 +768,8 @@ def test_devnull_stdin_does_not_stop_the_run(h, capsys):
     assert lines[-1]["code"] == "backend_exited"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell and pipes")
-def test_subprocess_closing_stdin_prints_stopped(tmp_path):
-    """End to end in a child: a parent closes the stdin pipe, the child stops.
-
-    The child runs the real command with the backend and the probes faked.
-    """
+def _spawn_child(tmp_path):
+    """The real command in a child, with the backend and the probes faked."""
     script = tmp_path / "child.py"
     script.write_text(
         "import sys\n"
@@ -711,20 +795,44 @@ def test_subprocess_closing_stdin_prints_stopped(tmp_path):
         "sys.exit(json_mode.run_json(workdir=None, port=None, host=None,\n"
         "    tunnel=False, debug=False))\n"
     )
-    proc = subprocess.Popen(
+    return subprocess.Popen(
         [sys.executable, str(script), str(tmp_path / "ws")],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell and pipes")
+def test_subprocess_closing_stdin_prints_stopped(tmp_path):
+    """End to end in a child: a parent closes the stdin pipe, the child stops."""
+    proc = _spawn_child(tmp_path)
     assert proc.stdout is not None
     assert proc.stdin is not None
     starting = json.loads(proc.stdout.readline())
     ready = json.loads(proc.stdout.readline())
     assert (starting["event"], ready["event"]) == ("starting", "ready")
-    proc.stdin.close()
-    assert proc.stderr is not None
-    out, err = proc.stdout.read(), proc.stderr.read()
-    assert proc.wait(timeout=30) == 0
+    out, err = proc.communicate(timeout=30)  # closes stdin
+    assert proc.returncode == 0
     assert [json.loads(x)["event"] for x in out.splitlines()] == ["stopped"]
     assert b"stopped backend" in err
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell and pipes")
+def test_subprocess_with_closed_stdout_exits_zero(tmp_path):
+    """The reader closes stdout, then stdin: the `stopped` line cannot be
+    written, and the process still exits 0 without a shutdown error."""
+    proc = _spawn_child(tmp_path)
+    assert proc.stdout is not None
+    assert proc.stdin is not None
+    assert json.loads(proc.stdout.readline())["event"] == "starting"
+    assert json.loads(proc.stdout.readline())["event"] == "ready"
+    proc.stdout.close()
+    proc.stdin.close()
+    assert proc.wait(timeout=30) == 0
+    err = proc.stderr.read()
+    assert b"stopped backend" in err
+    assert b"Exception ignored" not in err
+    assert b"BrokenPipeError" not in err

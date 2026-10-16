@@ -1165,6 +1165,12 @@ def start_langgraph_dev(
             log_handle.close()
         except Exception:
             pass
+    # Recorded before anything else can fail or be interrupted, so every
+    # later failure path, and a caller's stop_langgraph_dev(), reaches it.
+    global _PROCESS_WORKSPACE, _PROCESS_RUN_DIR
+    _PROCESS = proc
+    _PROCESS_WORKSPACE = workspace_dir
+    _PROCESS_RUN_DIR = run_dir
     if job is not None:
         job.started(proc)
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
@@ -1181,10 +1187,6 @@ def start_langgraph_dev(
         agent_bash=sidecar_bash(),
         run_dir=run_dir,
     )
-    global _PROCESS_WORKSPACE, _PROCESS_RUN_DIR
-    _PROCESS = proc
-    _PROCESS_WORKSPACE = workspace_dir
-    _PROCESS_RUN_DIR = run_dir
 
     # langgraph dev cold-starts in ~10-15s normally; first-time npx-based MCP
     # servers can push this to 30-60s while npm fetches packages, so the budget

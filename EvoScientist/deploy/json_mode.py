@@ -27,7 +27,8 @@ Events:
 Every run that reaches the command ends with exactly one ``stopped`` or
 ``error`` line, then exits (0 after ``stopped``, 1 after ``error``). Option
 errors reported before the command runs print no event, and a killed process
-prints nothing.
+prints nothing. When the reader closes stdout, the command stops as on a stop
+request and writes nothing more.
 
 How a program runs the command:
 
@@ -92,6 +93,9 @@ HEALTH_INTERVAL = 2.0
 HEALTH_FAILURES = 3
 # How often the wait loop looks at the stop request and the owned process.
 _TICK = 0.5
+# A stdin line longer than this is not a command and is dropped.
+_MAX_LINE = 65536
+_STDIN_THREAD = "deploy-json-stdin"
 
 
 class _Failure(Exception):
@@ -133,6 +137,15 @@ class _Events:
         except (OSError, ValueError):
             self._broken = True
             self._on_broken.set()
+            # The failed line stays in sys.stdout's buffer; the flush at
+            # interpreter shutdown would fail again and exit 120. Later
+            # writes go nowhere instead.
+            try:
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(devnull, sys.stdout.fileno())
+                os.close(devnull)
+            except (OSError, ValueError, AttributeError):
+                pass
 
 
 def _watch_stdin(stop: threading.Event) -> None:
@@ -152,6 +165,8 @@ def _watch_stdin(stop: threading.Event) -> None:
             *lines, pending = pending.split(b"\n")
             if any(_is_stop(line) for line in lines):
                 break
+            if len(pending) > _MAX_LINE:
+                pending = b""  # not a command line; drop it
     except OSError as exc:
         logger.debug(f"stdin read failed: {exc}")
     stop.set()
@@ -221,6 +236,9 @@ class _Run:
                 code = "internal_error"
             raise _Failure(code, exc.message, detail) from exc
 
+        # A stop asked for while the decision ran: nothing started yet.
+        if self.stop.is_set():
+            return
         warnings = list(decision.warnings)
         # The human mode's banners, for the app to show.
         if not lgm._is_loopback_host(self.host):
@@ -258,6 +276,10 @@ class _Run:
             data_dir = str(paths.DATA_DIR)
             config_dir = str(paths.CONFIG_DIR)
             self._start_backend(config, ws, tunnel)
+            # A stop asked for during the start: stop now, without the
+            # tunnel wait or ready.
+            if self.stop.is_set():
+                return
             if self.job is not None and self.job.warning:
                 warnings.append(self.job.warning)
             hint = setup_hint()
@@ -326,10 +348,6 @@ class _Run:
         backend goes away first."""
         from ..langgraph_dev import manager as lgm
 
-        if stdin_is_pipe():
-            threading.Thread(
-                target=_watch_stdin, args=(self.stop,), daemon=True
-            ).start()
         failures = 0
         next_check = time.monotonic() + HEALTH_INTERVAL
         while not self.stop.wait(_TICK):
@@ -363,7 +381,8 @@ class _Run:
 
         try:
             if self.starting:
-                # An interrupted start returns no handle; the manager keeps it.
+                # An interrupted or failed start returns no handle; the
+                # manager records it right after spawning.
                 proc = self.proc if self.proc is not None else lgm._PROCESS
                 if proc is not None:
                     lgm.stop_langgraph_dev(proc)
@@ -421,6 +440,12 @@ def run_json(
         stop.set()
 
     previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
+    # From the start, so an app that goes away while the backend starts
+    # stops it as soon as the start returns.
+    if stdin_is_pipe():
+        threading.Thread(
+            target=_watch_stdin, args=(stop,), name=_STDIN_THREAD, daemon=True
+        ).start()
     terminal: dict[str, Any] = {"event": "stopped"}
     try:
         try:
