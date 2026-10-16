@@ -1541,12 +1541,15 @@ async def _apply_serve_resume_state(
                 backend=runtime_state.gateway_backend,
             )
         except WorkspaceMismatchError:
-            if left_armed:
-                # The session stays on the thread it was leaving: arm it again,
-                # and the next poll recreates the cron.
-                await asyncio.to_thread(
-                    _serve_proactive_call, lambda: proactive.adopt(old_thread_id)
-                )
+            if proactive is not None and moves_workspace:
+                if left_armed:
+                    # The session stays on the thread it was leaving: arm it again.
+                    await asyncio.to_thread(
+                        _serve_proactive_call, lambda: proactive.adopt(old_thread_id)
+                    )
+                # ``stop`` deleted the cron above; bring it back for the threads
+                # that stay armed.
+                await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
             raise
         if not moved:
             console.print(

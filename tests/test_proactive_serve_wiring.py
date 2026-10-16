@@ -206,7 +206,6 @@ async def test_a_refused_server_move_keeps_the_current_thread_armed(tmp_path):
     assert state.thread_id == "old-tid"
     assert proactive.is_armed("old-tid")
     assert client.threads.get("old-tid")["metadata"]["proactive"] == "on"
-    proactive.poll(current_thread_id="old-tid")
     assert len(client.crons.rows) == 1
 
 
@@ -242,6 +241,8 @@ async def test_a_refused_server_move_does_not_arm_a_thread_that_was_not_armed(
 
     assert not proactive.is_armed("old-tid")
     assert client.threads.get("old-tid")["metadata"]["proactive"] == "paused"
+    assert proactive.is_armed("other-tid")
+    assert len(client.crons.rows) == 1
 
 
 async def test_a_failed_server_move_turns_proactive_off_for_the_session():
