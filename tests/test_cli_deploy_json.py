@@ -520,6 +520,7 @@ def test_foreign_process_is_port_conflict(h, capsys):
     assert code == 1
     assert _events(lines) == ["starting", "error"]
     assert lines[-1]["code"] == "port_conflict"
+    assert lines[-1]["detail"]["reason"] == "foreign"
     assert "hint" in lines[-1]["detail"]
     assert h.started is None
 
@@ -530,6 +531,7 @@ def test_server_without_a_record_is_port_conflict(h, capsys):
     _, lines = h.run(capsys)
     assert lines[-1]["code"] == "port_conflict"
     assert "no ownership record" in lines[-1]["message"]
+    assert lines[-1]["detail"]["reason"] == "no_record"
 
 
 def test_record_for_another_port_is_port_conflict(h, capsys):
@@ -537,6 +539,7 @@ def test_record_for_another_port_is_port_conflict(h, capsys):
     h.pid_serves = False
     _, lines = h.run(capsys)
     assert lines[-1]["code"] == "port_conflict"
+    assert lines[-1]["detail"]["reason"] == "record_mismatch"
 
 
 def test_other_workspace_is_workspace_conflict(h, capsys):

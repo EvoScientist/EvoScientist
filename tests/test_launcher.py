@@ -60,6 +60,7 @@ def test_resolve_backend_foreign_occupant_is_port_conflict(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(), object())
     assert ei.value.code == "port_conflict"
+    assert ei.value.fields == {"reason": "foreign"}
 
 
 def test_resolve_backend_other_workspace_is_mismatch(monkeypatch):
@@ -168,6 +169,7 @@ def test_resolve_backend_record_less_server_is_port_conflict_when_required(
         lm._resolve_backend(_cfg(), object(), require_record=True)
     assert ei.value.code == "port_conflict"
     assert "no ownership record" in ei.value.message
+    assert ei.value.fields == {"reason": "no_record"}
 
 
 def test_resolve_backend_takes_a_backend_target(monkeypatch):
@@ -285,6 +287,7 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert ei.value.code == "sidecar_port_mismatch"
+    assert ei.value.fields == {"reason": "record_mismatch"}
     # The remedy must not misdirect to `EvoSci server stop` (which stops the
     # recorded server on another port, not the one occupying this one).
     assert "not this one" in (ei.value.detail or "")

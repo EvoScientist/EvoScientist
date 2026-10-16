@@ -656,6 +656,7 @@ def _resolve_backend(
             f"Port {cfg.backend_port} is occupied by another process.",
             f"Free it (lsof -i :{cfg.backend_port}) or change it with "
             f"'EvoSci config set langgraph_dev_port <port>'.",
+            fields={"reason": "foreign"},
         )
 
     # An EvoSci server is already there — reuse only if it serves THIS
@@ -673,6 +674,7 @@ def _resolve_backend(
                 f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
                 f"has no ownership record for, so its workspace is unknown.",
                 "Stop it, or use another port (--port).",
+                fields={"reason": "no_record"},
             )
         return _BackendDecision(action="reuse", warnings=warnings)
     # A sidecar is present. It is a single global record with no port field, so a
@@ -688,6 +690,7 @@ def _resolve_backend(
             f"change it with 'EvoSci config set langgraph_dev_port <port>'. "
             f"'EvoSci server stop' stops EvoSci's recorded server on another "
             f"port, not this one.",
+            fields={"reason": "record_mismatch"},
         )
     if Path(sidecar["workspace"]).resolve() != ws:
         raise LauncherError(

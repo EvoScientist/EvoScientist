@@ -20,7 +20,11 @@ Events:
   compare as strings: one folder can have more than one spelling (an 8.3
   short name on Windows, a symlink).
 - ``error``: ``code``, ``message``, ``detail`` (an object, possibly empty).
-  See :data:`ERROR_CODES`.
+  See :data:`ERROR_CODES`. A ``port_conflict`` always has ``detail.reason``:
+  ``foreign`` (another program holds the port), ``no_record`` (a langgraph
+  dev without an ownership record, so its workspace is unknown) or
+  ``record_mismatch`` (the ownership record names a process that does not
+  serve this port).
 - ``stopped``: a clean exit. An owned backend has been stopped; an attached
   one is left running.
 
@@ -62,8 +66,10 @@ logger = logging.getLogger(__name__)
 
 ASSISTANT_ID = "EvoScientist"
 
-# ``port_conflict``: another program holds the port, or a langgraph dev
-# without an ownership record (its workspace is unknown). ``workspace_conflict``:
+# ``port_conflict``: another program holds the port, a langgraph dev without
+# an ownership record, or a record for a process that does not serve the port
+# (``detail.reason``: ``foreign``, ``no_record``, ``record_mismatch``).
+# ``workspace_conflict``:
 # the backend on the port serves another workspace (``detail.workspace``) or
 # a run folder of this one (``detail.run_dir``). ``backend_exited``: the
 # backend stopped, or stopped answering, while this command ran.
