@@ -291,7 +291,9 @@ def _write_workspace_sidecar(
     None when they have none; reuse compares it to warn about a session whose
     PATH resolves another one. ``agent_bash`` (optional) is the Git Bash
     their commands run in, None for cmd.exe or a POSIX shell; compared the
-    same way.
+    same way. ``data_dir`` and ``config_dir`` are this process's data and
+    config folders, which the server inherits (``paths.dir_env``), so a
+    client attaching from another environment reads the server's own.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -307,7 +309,12 @@ def _write_workspace_sidecar(
     try:
         RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
-        payload: dict = {"workspace": str(workspace_dir), "pid": pid}
+        payload: dict = {
+            "workspace": str(workspace_dir),
+            "pid": pid,
+            "data_dir": str(paths.DATA_DIR),
+            "config_dir": str(paths.CONFIG_DIR),
+        }
         if run_dir is not None:
             payload["run_dir"] = str(run_dir)
         if config_fingerprint is not None:
