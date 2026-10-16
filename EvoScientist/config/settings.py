@@ -790,18 +790,21 @@ def load_config() -> EvoScientistConfig:
     try:
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-
-        # Filter to only valid fields; a blank ``key:`` loads as None, which no
-        # field accepts, so it falls back to the default.
-        valid_fields = {f.name for f in fields(EvoScientistConfig)}
-        filtered_data = {
-            k: v for k, v in data.items() if k in valid_fields and v is not None
-        }
-
-        return EvoScientistConfig(**filtered_data)
+        return config_from_mapping(data)
     except Exception:
         # On any error, return defaults
         return EvoScientistConfig()
+
+
+def config_from_mapping(data: dict[str, Any]) -> EvoScientistConfig:
+    """Build a config from the file's mapping, defaults for what it lacks."""
+    # Filter to only valid fields; a blank ``key:`` loads as None, which no
+    # field accepts, so it falls back to the default.
+    valid_fields = {f.name for f in fields(EvoScientistConfig)}
+    filtered_data = {
+        k: v for k, v in data.items() if k in valid_fields and v is not None
+    }
+    return EvoScientistConfig(**filtered_data)
 
 
 def save_config(config: EvoScientistConfig) -> None:

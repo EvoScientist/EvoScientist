@@ -1,0 +1,446 @@
+"""The settings API behind ``/api/settings``: read and write ``config.yaml``.
+
+Kept apart from the Starlette routes in :mod:`.http` so it can be tested
+without a server. Every function here does blocking file and network I/O;
+the routes run them in a thread.
+
+- :func:`read_settings` builds the ``GET`` body. Secret values never leave
+  the server: each reads as ``{"set": ..., "hint": ...}``.
+- :func:`patch_settings` validates a ``PATCH`` body, checks changed API keys
+  online, and writes through :func:`~EvoScientist.config.settings.set_config_values`.
+- :func:`check_key_request` runs one key check without saving anything.
+- :func:`capture_restart_baseline` records the file as the server read it
+  when it built its graphs; :func:`pending_restart` names the fields that
+  changed since then.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import importlib.metadata
+import os
+from dataclasses import fields
+from typing import Any
+from urllib.parse import urlparse
+
+from EvoScientist.config import store
+from EvoScientist.config.provider_keys import (
+    KEY_SPECS,
+    PROVIDERS,
+    KeyCheck,
+    KeySpec,
+    configured_base_url,
+    run_check,
+)
+from EvoScientist.config.settings import (
+    _ENV_MAPPINGS,
+    API_KEY_FIELDS,
+    SECRET_FIELDS,
+    EvoScientistConfig,
+    SettingsError,
+    _config_to_dict,
+    config_from_mapping,
+    get_config_dir,
+    get_effective_config,
+    secret_hint,
+    set_config_values,
+    validate_setting,
+)
+
+# Fields that decide what the agent may run and who can reach the server.
+# The WebUI may be reachable from other machines, so they change only with
+# ``EvoSci config set``.
+READ_ONLY_FIELDS: frozenset[str] = frozenset(
+    {
+        "dangerous_mode",
+        "auto_approve",
+        "auto_mode",
+        "shell_allow_list",
+        "langgraph_dev_host",
+        "webui_host",
+        "backend_allowed_origins",
+    }
+)
+
+_READ_ONLY_MESSAGE = "read-only over this API; use EvoSci config set"
+
+
+def _config_fields() -> list[str]:
+    return [f.name for f in fields(EvoScientistConfig)]
+
+
+# =============================================================================
+# Restart baseline
+# =============================================================================
+
+_SUBAGENTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "subagents")
+_baseline: dict[str, str] | None = None
+
+
+def _digest(data: Any) -> str:
+    """A short one-way digest; the baseline never holds a secret's value."""
+    if not isinstance(data, bytes):
+        data = repr(data).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _reaches_server(name: str) -> bool:
+    """Whether the server reads ``name`` when it builds its graphs.
+
+    The launcher's drift fingerprint keeps the list of fields that never
+    reach the server; ``default_workdir`` is on it, but the server serves
+    the workspace it was started with, so a change needs a restart too.
+    """
+    from EvoScientist.langgraph_dev.manager import (
+        _FINGERPRINT_EXCLUDED_FIELDS,
+        _FINGERPRINT_EXCLUDED_PREFIXES,
+    )
+
+    if name == "default_workdir":
+        return True
+    return not (
+        name in _FINGERPRINT_EXCLUDED_FIELDS
+        or name.startswith(_FINGERPRINT_EXCLUDED_PREFIXES)
+    )
+
+
+def _file_digests(mapping: dict[str, Any]) -> dict[str, str]:
+    """Per-field digests of the file's values (defaults for what it lacks),
+    plus ``mcp.yaml``, the packaged sub-agent specs and the version."""
+    values = _config_to_dict(config_from_mapping(mapping))
+    digests = {
+        name: _digest(value) for name, value in values.items() if _reaches_server(name)
+    }
+    mcp_yaml = os.path.join(get_config_dir(), "mcp.yaml")
+    try:
+        with open(mcp_yaml, "rb") as f:
+            digests["mcp.yaml"] = _digest(f.read())
+    except OSError:
+        digests["mcp.yaml"] = _digest(None)
+    specs = hashlib.sha256()
+    try:
+        for name in sorted(os.listdir(_SUBAGENTS_DIR)):
+            if name.endswith(".yaml"):
+                specs.update(name.encode("utf-8"))
+                with open(os.path.join(_SUBAGENTS_DIR, name), "rb") as f:
+                    specs.update(f.read())
+    except OSError:
+        pass
+    digests["subagents"] = specs.hexdigest()[:16]
+    try:
+        version = importlib.metadata.version("EvoScientist")
+    except importlib.metadata.PackageNotFoundError:
+        version = None
+    digests["version"] = _digest(version)
+    return digests
+
+
+def capture_restart_baseline() -> None:
+    """Record the file as the server reads it to build its graphs.
+
+    Called before the graphs are built; the first call wins. A file that
+    does not parse is recorded as the defaults the server then runs with.
+    """
+    global _baseline
+    if _baseline is not None:
+        return
+    try:
+        mapping = store.read_config_mapping()
+    except store.ConfigParseError:
+        mapping = {}
+    _baseline = _file_digests(mapping)
+
+
+def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
+    """Fields whose saved value changed since the server started.
+
+    ``shadowed`` fields are left out: the environment overrides them, so a
+    restart would not apply the saved value either.
+    """
+    capture_restart_baseline()
+    assert _baseline is not None
+    now = _file_digests(mapping)
+    return sorted(
+        name
+        for name, digest in now.items()
+        if digest != _baseline.get(name) and name not in shadowed
+    )
+
+
+# =============================================================================
+# Sources
+# =============================================================================
+
+
+def config_sources(mapping: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Where each field's value comes from in this server.
+
+    ``env`` when a mapped environment variable is set (it wins over the
+    file, so ``shadowed`` is true), else ``file`` when the file holds it,
+    else ``default``.
+    """
+    sources: dict[str, dict[str, Any]] = {}
+    for name in _config_fields():
+        env_key = _ENV_MAPPINGS.get(name)
+        if env_key and os.environ.get(env_key):
+            sources[name] = {"source": "env", "shadowed": True}
+        elif mapping.get(name) is not None:
+            sources[name] = {"source": "file", "shadowed": False}
+        else:
+            sources[name] = {"source": "default", "shadowed": False}
+    return sources
+
+
+# =============================================================================
+# GET
+# =============================================================================
+
+
+def _masked(name: str, value: Any) -> Any:
+    if name not in SECRET_FIELDS:
+        return value
+    if not value:
+        return {"set": False}
+    hint = secret_hint(name, str(value))
+    return {"set": True, "hint": hint} if hint else {"set": True}
+
+
+def setup_needed(config: EvoScientistConfig) -> bool:
+    """Whether the selected provider cannot run with this configuration.
+
+    Follows the runtime: a key from the environment or a ``.env`` counts,
+    Ollama needs no key, OAuth mode needs none, and only the custom
+    endpoints need a base URL (the others have a default address).
+    """
+    spec = PROVIDERS.get(config.provider)
+    if spec is None:
+        return True
+    if spec.needs_base_url and not getattr(config, spec.base_url_field or "", ""):
+        return True
+    if not spec.needs_key:
+        return False
+    if (config.provider == "anthropic" and config.anthropic_auth_mode == "oauth") or (
+        config.provider == "openai" and config.openai_auth_mode == "oauth"
+    ):
+        return False
+    return not getattr(config, spec.key_field or "", "")
+
+
+def _provider_view(spec: KeySpec) -> dict[str, Any]:
+    return {
+        "label": spec.label,
+        "key_field": spec.key_field,
+        "base_url_field": spec.base_url_field,
+        "needs_key": spec.needs_key,
+        "needs_base_url": spec.needs_base_url,
+        "has_check": spec.has_check,
+        "lists_models": spec.lists_models,
+    }
+
+
+def read_settings() -> dict[str, Any]:
+    """The ``GET /api/settings`` body."""
+    raw = store.read_config_bytes()
+    config_error = None
+    try:
+        mapping = store.parse_config_mapping(raw)
+    except store.ConfigParseError as e:
+        mapping = {}
+        config_error = {
+            "error": "config_unreadable",
+            "path": str(e.path),
+            "detail": e.detail,
+        }
+    values = _config_to_dict(config_from_mapping(mapping))
+    sources = config_sources(mapping)
+    shadowed = {name for name, s in sources.items() if s["shadowed"]}
+    if config_error is None:
+        restart_fields = pending_restart(mapping, shadowed)
+        needed = setup_needed(get_effective_config())
+    else:
+        restart_fields = []
+        needed = False
+    return {
+        "settings": {name: _masked(name, value) for name, value in values.items()},
+        "sources": sources,
+        "read_only": sorted(READ_ONLY_FIELDS),
+        "providers": {name: _provider_view(spec) for name, spec in PROVIDERS.items()},
+        "setup_needed": needed,
+        "restart_required": bool(restart_fields),
+        "restart_fields": restart_fields,
+        "revision": store.revision_of(raw),
+        "config_error": config_error,
+    }
+
+
+# =============================================================================
+# PATCH
+# =============================================================================
+
+
+def _key_spec_for(field: str) -> KeySpec | None:
+    for spec in KEY_SPECS.values():
+        if spec.key_field == field:
+            return spec
+    return None
+
+
+def _check_changed_keys(
+    changes: dict[str, Any], current: dict[str, Any]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Check every API key that changes; return ``(errors, warnings)``.
+
+    Runs before the lock is taken, so the lock is never held for a network
+    call. An invalid key rejects the write; an inconclusive check (offline,
+    timeout) keeps it with a warning.
+    """
+    errors: dict[str, str] = {}
+    warnings: dict[str, str] = {}
+    effective = None
+    for name, value in changes.items():
+        if name not in API_KEY_FIELDS or not value or value == current.get(name):
+            continue
+        spec = _key_spec_for(name)
+        if spec is None or spec.lists_models:
+            continue
+        if effective is None:
+            effective = get_effective_config()
+        base_url = ""
+        if spec.base_url_field:
+            base_url = changes.get(spec.base_url_field) or configured_base_url(
+                spec, effective
+            )
+        result = run_check(spec, str(value), base_url)
+        if result.status == "invalid":
+            errors[name] = result.message
+        elif result.status == "inconclusive":
+            warnings[name] = _scrub(result.message, str(value))
+    return errors, warnings
+
+
+def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
+    """Apply a ``PATCH /api/settings`` body; return ``(status, payload)``."""
+    if not isinstance(body, dict):
+        return 400, {"errors": {"body": "expected a JSON object"}}
+    body = dict(body)
+    revision = body.pop("revision", store.UNSET)
+    if (
+        revision is not store.UNSET
+        and revision is not None
+        and not isinstance(revision, str)
+    ):
+        return 400, {"errors": {"revision": "expected a string or null"}}
+
+    errors: dict[str, str] = {}
+    changes: dict[str, Any] = {}
+    for name, value in body.items():
+        if name in READ_ONLY_FIELDS:
+            errors[name] = _READ_ONLY_MESSAGE
+        elif name in SECRET_FIELDS and value == "":
+            continue  # an empty secret keeps the stored one
+        elif value is None:
+            changes[name] = None
+        else:
+            try:
+                changes[name], _ = validate_setting(name, value)
+            except ValueError as e:
+                errors[name] = str(e)
+    if errors:
+        return 400, {"errors": errors}
+
+    try:
+        current = store.read_config_mapping()
+    except store.ConfigParseError as e:
+        return 409, _unreadable(e)
+    key_errors, warnings = _check_changed_keys(changes, current)
+    if key_errors:
+        return 400, {"errors": key_errors}
+
+    try:
+        new_revision, setting_warnings = set_config_values(
+            {name: body[name] for name in changes}, expected_revision=revision
+        )
+    except SettingsError as e:
+        return 400, {"errors": e.errors}
+    except store.RevisionMismatchError as e:
+        return 409, {"error": "revision_mismatch", "revision": e.current}
+    except store.ConfigParseError as e:
+        return 409, _unreadable(e)
+    except store.ConfigLockedError as e:
+        return 409, {"error": "config_locked", "detail": str(e)}
+    warnings.update(setting_warnings)
+
+    mapping = store.read_config_mapping()
+    shadowed = {n for n, s in config_sources(mapping).items() if s["shadowed"]}
+    restart_fields = pending_restart(mapping, shadowed)
+    return 200, {
+        "revision": new_revision,
+        "changed": sorted(changes),
+        "restart_required": bool(restart_fields),
+        "restart_fields": restart_fields,
+        "warnings": warnings,
+    }
+
+
+def _unreadable(e: store.ConfigParseError) -> dict[str, Any]:
+    return {"error": "config_unreadable", "path": str(e.path), "detail": e.detail}
+
+
+# =============================================================================
+# test-key
+# =============================================================================
+
+
+def _scrub(message: str, key: str) -> str:
+    """Never echo the key, even inside an SDK's error text."""
+    return message.replace(key, "***") if key else message
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
+    """Run one key check without saving; return ``(status, payload)``.
+
+    Without ``key``, the stored effective key (``config.yaml``, the
+    environment or a ``.env``) is tested. Without ``base_url``, the stored
+    base URL or the provider's default is used.
+    """
+    if not isinstance(body, dict):
+        return 400, {"errors": {"body": "expected a JSON object"}}
+    name = body.get("provider")
+    spec = KEY_SPECS.get(name) if isinstance(name, str) else None
+    if spec is None:
+        return 400, {"errors": {"provider": "unknown provider"}}
+
+    base_url = body.get("base_url")
+    if base_url is not None:
+        if spec.base_url_field is None:
+            return 400, {"errors": {"base_url": "this provider takes no base URL"}}
+        if not isinstance(base_url, str) or not _is_http_url(base_url):
+            return 400, {"errors": {"base_url": "must be an http or https URL"}}
+
+    key = body.get("key")
+    if key is not None and not isinstance(key, str):
+        return 400, {"errors": {"key": "expected a string"}}
+    effective = None
+    if key is None or base_url is None:
+        effective = get_effective_config()
+    if key is None:
+        key = (
+            str(getattr(effective, spec.key_field, "") or "") if spec.key_field else ""
+        )
+    if base_url is None:
+        base_url = configured_base_url(spec, effective)
+
+    result: KeyCheck = run_check(spec, key, base_url)
+    payload: dict[str, Any] = {
+        "ok": result.ok,
+        "status": result.status,
+        "message": _scrub(result.message, key),
+    }
+    if spec.lists_models and result.status == "valid":
+        payload["models"] = list(result.models)
+    return 200, payload
