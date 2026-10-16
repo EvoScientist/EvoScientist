@@ -446,9 +446,11 @@ def setup(
         selected = (found,)
 
     if cn:
+        from ..config.store import ConfigError
+
         try:
             set_config_value("mirror", "cn")
-        except OSError as exc:
+        except (OSError, ConfigError) as exc:
             # Saving the choice is secondary; this run still uses the mirror.
             logging.getLogger(__name__).warning(
                 f"Could not save mirror: cn to the config ({exc}); "
@@ -610,15 +612,28 @@ def channel_setup(ctx: typer.Context):
     Guides you through selecting and configuring messaging channels
     (Telegram, Discord, or iMessage).
     """
-    from ..config import load_config, save_config
+    from ..config import load_config
     from ..config.onboard.channels import _step_channels
+    from ..config.settings import SettingsError, set_config_values
+    from ..config.store import ConfigError, read_config_mapping
 
+    try:
+        # Refuse up front when the file does not parse: load_config() would
+        # hand the wizard defaults to edit.
+        read_config_mapping()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
     config = load_config()
     updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
     if updates:
-        for key, value in updates.items():
-            setattr(config, key, value)
-        save_config(config)
+        try:
+            set_config_values(updates)
+        except (SettingsError, ConfigError) as e:
+            console.print(
+                f"[red]Channel configuration not saved: {escape(str(e))}[/red]"
+            )
+            raise typer.Exit(1) from None
         console.print("[green]Channel configuration saved.[/green]")
     else:
         console.print("[dim]No changes made.[/dim]")
@@ -2469,6 +2484,7 @@ def config_callback(ctx: typer.Context):
 def config_list():
     """List all configuration values"""
     from ..config import get_config_path, list_config
+    from ..config.settings import display_config_value
 
     config_data = list_config()
 
@@ -2476,13 +2492,11 @@ def config_list():
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
 
-    # Mask API keys
+    # Mask API keys, tokens, secrets and passwords
     def format_value(key: str, value: Any) -> str:
-        if "api_key" in key and value:
-            return "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
         if value == "":
             return "[dim](not set)[/dim]"
-        return str(value)
+        return escape(display_config_value(key, value))
 
     for key, value in config_data.items():
         table.add_row(key, format_value(key, value))
@@ -2495,21 +2509,17 @@ def config_list():
 def config_get(key: str = typer.Argument(..., help="Configuration key to get")):
     """Get a single configuration value"""
     from ..config import get_config_value
+    from ..config.settings import display_config_value
 
     value = get_config_value(key)
     if value is None:
         console.print(f"[red]Unknown key: {key}[/red]")
         raise typer.Exit(1)
 
-    # Mask API keys
-    if "api_key" in key and value:
-        display_value = "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
-    elif value == "":
-        display_value = "(not set)"
-    else:
-        display_value = str(value)
+    # Mask API keys, tokens, secrets and passwords
+    display_value = display_config_value(key, value)
 
-    console.print(f"[cyan]{key}[/cyan]: {display_value}")
+    console.print(f"[cyan]{key}[/cyan]: {escape(display_value)}")
 
 
 @config_app.command("set")
@@ -2518,13 +2528,21 @@ def config_set(
     value: str = typer.Argument(..., help="New value"),
 ):
     """Set a single configuration value"""
-    from ..config import set_config_value
+    from ..config.settings import SettingsError, set_config_values
+    from ..config.store import ConfigError
 
-    if set_config_value(key, value):
-        console.print(f"[green]Set {escape(key)}[/green]")
-    else:
-        console.print(f"[red]Could not set {escape(key)}: invalid key or value[/red]")
-        raise typer.Exit(1)
+    try:
+        _, warnings = set_config_values({key: value})
+    except SettingsError as e:
+        reason = e.errors.get(key, "invalid key or value")
+        console.print(f"[red]Could not set {escape(key)}: {escape(reason)}[/red]")
+        raise typer.Exit(1) from None
+    except ConfigError as e:
+        console.print(f"[red]Could not set {escape(key)}: {escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
+    console.print(f"[green]Set {escape(key)}[/green]")
+    if key in warnings:
+        console.print(f"[yellow]Note: {escape(warnings[key])}[/yellow]")
 
 
 @config_app.command("reset")
@@ -2546,7 +2564,13 @@ def config_reset(
             console.print("[dim]Cancelled.[/dim]")
             return
 
-    reset_config()
+    from ..config.store import ConfigError
+
+    try:
+        reset_config()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
     console.print("[green]Configuration reset to defaults.[/green]")
 
 

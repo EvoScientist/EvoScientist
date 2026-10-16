@@ -20,6 +20,7 @@ import yaml
 from dotenv import dotenv_values, find_dotenv
 
 from .. import paths
+from . import store
 
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
@@ -804,45 +805,108 @@ def load_config() -> EvoScientistConfig:
 
 
 def save_config(config: EvoScientistConfig) -> None:
-    """Save configuration to file.
+    """Save the whole configuration to file, atomically and under the lock.
+
+    Raises :class:`~EvoScientist.config.store.ConfigParseError` when the
+    existing file does not parse: ``config`` then most likely holds the
+    defaults :func:`load_config` fell back to, and writing it would replace
+    the user's configuration. Raises
+    :class:`~EvoScientist.config.store.ConfigLockedError` while another
+    process (``EvoSci onboard``) holds the lock.
 
     Args:
         config: EvoScientistConfig instance to save.
     """
-    config_path = get_config_path()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        config_path.parent.chmod(0o700)
-    except OSError:
-        pass
-
-    data = _config_to_dict(config)
-
     # Save all fields including empty API keys (users can set them via env vars instead)
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(
-            data,
-            f,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
-    try:
-        config_path.chmod(0o600)
-    except OSError:
-        pass
+    data = store.dump_config_mapping(_config_to_dict(config))
+    with store.config_lock():
+        store.read_config_mapping()
+        store.write_config_bytes(data)
 
 
 def reset_config() -> None:
     """Reset configuration to defaults by deleting the config file."""
-    config_path = get_config_path()
-    if config_path.exists():
-        config_path.unlink()
+    with store.config_lock():
+        store.remove_config_file()
 
 
 def _config_to_dict(config: EvoScientistConfig) -> dict[str, Any]:
     """Return a plain serializable config dict."""
     return {key: _plain_config_value(value) for key, value in asdict(config).items()}
+
+
+# Secret fields, listed by name rather than matched on it: a name rule would
+# miss ``feishu_encrypt_key`` and catch ``mimo_token_plan_base_url``.
+API_KEY_FIELDS: frozenset[str] = frozenset(
+    {
+        "anthropic_api_key",
+        "openai_api_key",
+        "nvidia_api_key",
+        "google_api_key",
+        "minimax_api_key",
+        "siliconflow_api_key",
+        "openrouter_api_key",
+        "atlascloud_api_key",
+        "requesty_api_key",
+        "novita_api_key",
+        "mimo_api_key",
+        "mimo_token_plan_api_key",
+        "opper_api_key",
+        "deepseek_api_key",
+        "zhipu_api_key",
+        "volcengine_api_key",
+        "dashscope_api_key",
+        "moonshot_api_key",
+        "kimi_api_key",
+        "custom_openai_api_key",
+        "custom_anthropic_api_key",
+        "tavily_api_key",
+    }
+)
+CHANNEL_SECRET_FIELDS: frozenset[str] = frozenset(
+    {
+        "telegram_bot_token",
+        "discord_bot_token",
+        "slack_bot_token",
+        "slack_app_token",
+        "feishu_app_secret",
+        "feishu_verification_token",
+        "feishu_encrypt_key",
+        "wechat_wecom_secret",
+        "wechat_wecom_token",
+        "wechat_wecom_encoding_aes_key",
+        "wechat_mp_app_secret",
+        "wechat_mp_token",
+        "wechat_mp_encoding_aes_key",
+        "wechat_personal_token",
+        "dingtalk_client_secret",
+        "email_imap_password",
+        "email_smtp_password",
+        "qq_app_secret",
+    }
+)
+SECRET_FIELDS: frozenset[str] = API_KEY_FIELDS | CHANNEL_SECRET_FIELDS
+
+
+def secret_hint(key: str, value: str) -> str | None:
+    """The last four characters of an API key longer than eight, else ``None``.
+
+    Passwords, tokens and channel secrets get no hint: it would show a large
+    part of a short password.
+    """
+    if key in API_KEY_FIELDS and len(value) > 8:
+        return "…" + value[-4:]
+    return None
+
+
+def display_config_value(key: str, value: Any) -> str:
+    """A value for printing: secrets masked, an empty value as ``(not set)``."""
+    if value == "" or value is None:
+        return "(not set)"
+    if key in SECRET_FIELDS:
+        hint = secret_hint(key, str(value))
+        return "***" + hint[1:] if hint else "***"
+    return str(value)
 
 
 # =============================================================================
@@ -1007,6 +1071,113 @@ def get_config_value(key: str) -> Any:
     return _plain_config_value(value)
 
 
+class SettingsError(ValueError):
+    """One or more settings failed validation; ``errors`` maps field to reason."""
+
+    def __init__(self, errors: dict[str, str]) -> None:
+        self.errors = errors
+        super().__init__(
+            "; ".join(f"{key}: {reason}" for key, reason in errors.items())
+        )
+
+
+def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
+    """Validate and coerce one setting; return ``(value, warning)``.
+
+    The one rule set for ``EvoSci config set``, the TUI's writers and the
+    settings API. Raises ``ValueError`` with the reason when the value is not
+    accepted. The returned value is the plain form written to the file.
+    """
+    field_info = next((f for f in fields(EvoScientistConfig) if f.name == key), None)
+    if field_info is None:
+        raise ValueError("unknown setting")
+    field_type = _config_field_type(key, field_info.type)
+
+    # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
+    # (_coerce_value(True, int) would turn it into 1 and slip past).
+    if key in ("sandbox_execute_timeout", "proactive_idle_minutes") and isinstance(
+        value, bool
+    ):
+        raise ValueError("expected a number")
+
+    try:
+        value = _coerce_value(value, field_type)
+    except (ValueError, TypeError) as e:
+        if get_origin(field_type) is Literal or _is_str_enum_type(field_type):
+            raise ValueError(str(e)) from None
+        raise ValueError(
+            f"expected {getattr(field_type, '__name__', field_type)}"
+        ) from None
+
+    warning = None
+    if key == "sandbox_execute_timeout" and value <= 0:
+        raise ValueError("must be greater than 0")
+    if key == "memory_skill_synthesis_time":
+        value = _normalize_hhmm(value)
+        if value is None:
+            raise ValueError("expected a time as HH:MM")
+    if key == "proactive_idle_minutes" and value < 0:
+        raise ValueError("must be 0 or more")
+    if key == "proactive_quiet_hours":
+        value = _normalize_quiet_hours(value)
+        if value is None:
+            raise ValueError("expected a time range as HH:MM-HH:MM")
+    if key == "proactive_timezone":
+        value = _valid_timezone(value)
+        if value is None:
+            raise ValueError("unknown time zone")
+    if key in ("provider", "auxiliary_provider") and (value or key == "provider"):
+        from .provider_keys import PROVIDERS
+
+        if value not in PROVIDERS:
+            raise ValueError("unknown provider")
+    if key == "default_workdir" and value:
+        path = Path(os.path.expanduser(value))
+        if not path.is_absolute():
+            raise ValueError("must be an absolute path")
+        if path.exists() and not path.is_dir():
+            raise ValueError("is a file, not a folder")
+        if not path.exists():
+            warning = "the folder does not exist yet; it is created at start"
+    return _plain_config_value(value), warning
+
+
+def set_config_values(
+    changes: dict[str, Any], *, expected_revision: Any = store.UNSET
+) -> tuple[str | None, dict[str, str]]:
+    """Validate ``changes`` and write them to the file in one locked step.
+
+    A ``None`` value removes the setting from the file, so its default
+    applies. Nothing is written when any value fails: :class:`SettingsError`
+    names every failing field. Returns ``(new_revision, warnings)``.
+
+    Raises :class:`~EvoScientist.config.store.ConfigError` subclasses when
+    the file does not parse, is locked, or changed since
+    ``expected_revision`` (``None`` = "no file expected"; omitted = no check).
+    """
+    coerced: dict[str, Any] = {}
+    warnings: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    for key, value in changes.items():
+        if value is None:
+            if key in {f.name for f in fields(EvoScientistConfig)}:
+                coerced[key] = None
+            else:
+                errors[key] = "unknown setting"
+            continue
+        try:
+            coerced[key], warning = validate_setting(key, value)
+        except ValueError as e:
+            errors[key] = str(e)
+            continue
+        if warning:
+            warnings[key] = warning
+    if errors:
+        raise SettingsError(errors)
+    revision = store.update_config_mapping(coerced, expected_revision=expected_revision)
+    return revision, warnings
+
+
 def set_config_value(key: str, value: Any) -> bool:
     """Set a single configuration value.
 
@@ -1015,49 +1186,16 @@ def set_config_value(key: str, value: Any) -> bool:
         value: New value.
 
     Returns:
-        True if successful, False if key is invalid.
+        True if successful, False if the key or value is invalid.
+
+    Raises:
+        ConfigError: the file does not parse or another process holds the
+            lock (see :mod:`EvoScientist.config.store`).
     """
-    valid_fields = {f.name for f in fields(EvoScientistConfig)}
-    if key not in valid_fields:
-        return False
-
-    config = load_config()
-
-    # Type coercion based on field type
-    field_info = next(f for f in fields(EvoScientistConfig) if f.name == key)
-    field_type = _config_field_type(key, field_info.type)
-
-    # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
-    # (_coerce_value(True, int) would turn it into 1 and slip past).
-    if key in ("sandbox_execute_timeout", "proactive_idle_minutes") and isinstance(
-        value, bool
-    ):
-        return False
-
     try:
-        value = _coerce_value(value, field_type)
-    except (ValueError, TypeError):
+        set_config_values({key: value})
+    except SettingsError:
         return False
-
-    if key == "sandbox_execute_timeout" and value <= 0:
-        return False
-    if key == "memory_skill_synthesis_time":
-        value = _normalize_hhmm(value)
-        if value is None:
-            return False
-    if key == "proactive_idle_minutes" and value < 0:
-        return False
-    if key == "proactive_quiet_hours":
-        value = _normalize_quiet_hours(value)
-        if value is None:
-            return False
-    if key == "proactive_timezone":
-        value = _valid_timezone(value)
-        if value is None:
-            return False
-
-    setattr(config, key, value)
-    save_config(config)
     return True
 
 

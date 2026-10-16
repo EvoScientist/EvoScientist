@@ -6,6 +6,7 @@ import copy
 import os
 
 import questionary
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -17,6 +18,13 @@ from ..settings import (
     get_config_path,
     load_config,
     save_config,
+)
+from ..store import (
+    ConfigError,
+    config_lock,
+    read_config_mapping,
+    remove_config_file,
+    write_config_bytes,
 )
 from .channels import _step_channels
 from .steps import (
@@ -130,13 +138,15 @@ _CUSTOM_PROVIDER_BASE_URL = {
 def _autosave(config: EvoScientistConfig) -> None:
     """Persist current config to disk between phases.
 
-    Silently swallows IO errors so a transient disk issue doesn't abort the
-    wizard — the final save at the end will surface anything broken.
+    A failure does not abort the wizard (the final save tries again), but it
+    is shown, so a refused write never vanishes silently.
     """
     try:
         save_config(config)
-    except Exception:
-        pass
+    except Exception as exc:
+        console.print(
+            f"[yellow]Could not autosave the configuration: {escape(str(exc))}[/yellow]"
+        )
 
 
 def _skills_workspace(config: EvoScientistConfig) -> Workspace:
@@ -487,6 +497,35 @@ def _open_existing_config_prompt(
 
 
 def run_onboard(
+    skip_validation: bool = False,
+    prompter=None,
+    only_sections: set[str] | frozenset[str] | None = None,
+    runtime: AsyncRuntime | None = None,
+) -> bool:
+    """Run the onboarding wizard while holding the config lock.
+
+    The lock is held from start to end, so no other writer (the settings
+    API, ``EvoSci config set``, the TUI) changes the file under the wizard;
+    they are refused with a message that names ``EvoSci onboard``. A file
+    that does not parse is refused before anything is asked, since the
+    wizard would otherwise start from defaults and autosave them over it.
+    See :func:`_run_onboard` for the arguments.
+    """
+    try:
+        with config_lock():
+            read_config_mapping()
+            return _run_onboard(
+                skip_validation=skip_validation,
+                prompter=prompter,
+                only_sections=only_sections,
+                runtime=runtime,
+            )
+    except ConfigError as exc:
+        console.print(f"[red]✗ {escape(str(exc))}[/red]")
+        return False
+
+
+def _run_onboard(
     skip_validation: bool = False,
     prompter=None,
     only_sections: set[str] | frozenset[str] | None = None,
@@ -942,10 +981,9 @@ def run_onboard(
                 #      leaving the mid-wizard state in place.
                 try:
                     if not original_file_existed:
-                        if config_path.exists():
-                            config_path.unlink()
+                        remove_config_file()
                     elif original_file_bytes is not None:
-                        config_path.write_bytes(original_file_bytes)
+                        write_config_bytes(original_file_bytes)
                     else:
                         save_config(snapshot)
                 except OSError as exc:
