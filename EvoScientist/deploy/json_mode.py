@@ -28,6 +28,12 @@ Events:
 - ``stopped``: a clean exit. An owned backend has been stopped; an attached
   one is left running.
 
+``backend_exited`` for an owned backend means its process ended, or nothing
+listens on its port any more. An owned backend that keeps its port but stops
+answering is left running: the app decides when to stop it. An attached
+backend is reported as exited when ``/ok`` fails three times in a row, and is
+never stopped.
+
 Every run that reaches the command ends with exactly one ``stopped`` or
 ``error`` line, then exits (0 after ``stopped``, 1 after ``error``). Option
 errors reported before the command runs print no event, and a killed process
@@ -71,8 +77,8 @@ ASSISTANT_ID = "EvoScientist"
 # (``detail.reason``: ``foreign``, ``no_record``, ``record_mismatch``).
 # ``workspace_conflict``:
 # the backend on the port serves another workspace (``detail.workspace``) or
-# a run folder of this one (``detail.run_dir``). ``backend_exited``: the
-# backend stopped, or stopped answering, while this command ran.
+# a run folder of this one (``detail.run_dir``). ``backend_exited``: see the
+# module docstring.
 # ``internal_error``: anything else, with the traceback on stderr.
 ERROR_CODES = frozenset(
     {
@@ -444,9 +450,19 @@ class _Run:
 
     def wait(self) -> None:
         """Block until a stop is asked for; raise ``backend_exited`` when the
-        backend goes away first."""
+        backend goes away first.
+
+        An owned backend is gone when its process ends, or when nothing
+        listens on its port any more (a server that stopped serving but did
+        not exit). A slow ``/ok`` never counts for it: a stalled backend
+        (swapping, a paused process, a blocked event loop) keeps its port,
+        and killing it would lose the runs in progress; the app decides.
+        An attached backend has no process handle here, so ``/ok`` is the
+        check, and nothing is stopped.
+        """
         from ..langgraph_dev import manager as lgm
 
+        owned = self.proc is not None
         failures = 0
         next_check = time.monotonic() + HEALTH_INTERVAL
         while not self.stop.wait(_TICK):
@@ -462,14 +478,19 @@ class _Run:
             if time.monotonic() < next_check:
                 continue
             next_check = time.monotonic() + HEALTH_INTERVAL
-            if lgm.is_langgraph_dev_running(port=self.port, host=self.host):
+            if owned:
+                healthy = lgm._is_port_occupied(self.port, self.host)
+            else:
+                healthy = lgm.is_langgraph_dev_running(port=self.port, host=self.host)
+            if healthy:
                 failures = 0
                 continue
             failures += 1
             if failures >= HEALTH_FAILURES:
+                what = "stopped listening" if owned else "stopped answering"
                 raise _Failure(
                     "backend_exited",
-                    f"The backend on port {self.port} stopped answering.",
+                    f"The backend on port {self.port} {what}.",
                     {"url": lgm._base_url(self.port, self.host)},
                 )
 

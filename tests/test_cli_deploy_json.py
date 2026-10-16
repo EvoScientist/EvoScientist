@@ -68,6 +68,8 @@ class Harness:
         self.started: dict[str, Any] | None = None
         self.proc = _Proc()
         self.occupied = False
+        # The port once this run's backend started: True, False or a callable.
+        self.listening: Any = True
         self.running = True
         self.sidecar: dict[str, Any] | None = None
         self.pid_serves = True
@@ -87,7 +89,7 @@ class Harness:
         monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
         monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path / "config" / "evoscientist")
 
-        monkeypatch.setattr(lgm, "_is_port_occupied", lambda *_a, **_k: self.occupied)
+        monkeypatch.setattr(lgm, "_is_port_occupied", self._occupied)
         monkeypatch.setattr(lgm, "is_langgraph_dev_running", self._running)
         monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: self.sidecar)
         monkeypatch.setattr(lgm, "_pid_serves_port", lambda *_a, **_k: self.pid_serves)
@@ -128,6 +130,11 @@ class Harness:
     # -- fakes ------------------------------------------------------------ #
     def _running(self, *_a, **_k):
         return self.running() if callable(self.running) else self.running
+
+    def _occupied(self, *_a, **_k):
+        if self.started is None:
+            return self.occupied
+        return self.listening() if callable(self.listening) else self.listening
 
     def _start(self, **kwargs):
         self.started = kwargs
@@ -678,36 +685,63 @@ def test_owned_backend_dying_is_backend_exited(h, capsys):
     assert ("backend stop", h.proc) in h.log
 
 
-def test_backend_that_stops_answering_is_backend_exited(h, capsys):
+def _then_interrupt(values):
+    """A probe answering ``values`` in turn, then Ctrl+C (ends the run)."""
+    answers = iter(values)
+
+    def _probe():
+        value = next(answers, None)
+        if value is None:
+            raise KeyboardInterrupt
+        return value
+
+    return _probe
+
+
+def test_owned_backend_that_stops_answering_keeps_running(h, capsys):
+    """A stalled owned backend keeps its port: it is not reported as exited,
+    and not stopped while the run waits."""
     h.stdin_kind = "devnull"
-    h.running = False
+    h.running = False  # /ok never answers
+    h.listening = _then_interrupt([True] * 6)
+    code, lines = h.run(capsys)
+    assert code == 0
+    assert _events(lines) == ["starting", "ready", "stopped"]
+
+
+def test_owned_backend_that_stops_listening_is_backend_exited(h, capsys):
+    h.stdin_kind = "devnull"
+    h.listening = False
     code, lines = h.run(capsys)
     assert code == 1
     assert lines[-1]["code"] == "backend_exited"
+    assert "stopped listening" in lines[-1]["message"]
+    assert ("backend stop", h.proc) in h.log
+
+
+def test_attached_backend_that_stops_answering_is_backend_exited(h, capsys):
+    _attach(h)
+    h.stdin_kind = "devnull"
+    checks = iter([True])
+    h.running = lambda: next(checks, False)
+    code, lines = h.run(capsys)
+    assert code == 1
+    assert lines[-1]["code"] == "backend_exited"
+    assert "stopped answering" in lines[-1]["message"]
+    assert not any(isinstance(e, tuple) and e[0] == "backend stop" for e in h.log)
 
 
 def test_one_failed_health_check_is_not_an_exit(h, capsys):
-    checks = iter([False, True, False, True, False, True])
-
-    def _health():
-        value = next(checks, None)
-        if value is None:
-            raise KeyboardInterrupt  # ends the run like Ctrl+C
-        return value
-
     h.stdin_kind = "devnull"
-    h.running = _health
+    h.listening = _then_interrupt([False, True, False, True, False, True])
     code, lines = h.run(capsys)
     assert code == 0
     assert lines[-1]["event"] == "stopped"
 
 
 def test_ctrl_c_stops_cleanly(h, capsys):
-    def _interrupt():
-        raise KeyboardInterrupt
-
     h.stdin_kind = "devnull"
-    h.running = _interrupt
+    h.listening = _then_interrupt([])
     code, lines = h.run(capsys)
     assert code == 0
     assert _events(lines) == ["starting", "ready", "stopped"]
@@ -962,7 +996,7 @@ def test_devnull_stdin_does_not_stop_the_run(h, capsys):
     """Only the backend going away ends this run, not stdin."""
     h.stdin_kind = "devnull"
     checks = iter([True] * 5 + [False] * 3)
-    h.running = lambda: next(checks, False)
+    h.listening = lambda: next(checks, False)
     _, lines = h.run(capsys)
     assert lines[-1]["code"] == "backend_exited"
 
@@ -1005,7 +1039,9 @@ def _spawn_child(tmp_path, *, grandchild: bool = False):
         "class P:\n"
         "    pid = 1; returncode = None\n"
         "    def poll(self): return None\n"
-        "m._is_port_occupied = lambda *a, **k: False\n"
+        "probes = []\n"
+        "# Free for the decision, then the started backend's port.\n"
+        "m._is_port_occupied = lambda *a, **k: bool(probes.append(1)) or len(probes) > 1\n"
         "m.is_langgraph_dev_running = lambda *a, **k: True\n"
         "m._server_config_fingerprint = lambda _c: 'fp'\n"
         "m.start_langgraph_dev = lambda **k: P()\n"
