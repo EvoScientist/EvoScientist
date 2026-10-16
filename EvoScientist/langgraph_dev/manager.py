@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import psutil
@@ -38,6 +39,9 @@ from EvoScientist.config import (
     MemoryObservationTarget,
 )
 from EvoScientist.langgraph_dev import boundary
+
+if TYPE_CHECKING:
+    from EvoScientist.deploy.backend_job import BackendJob
 
 logger = logging.getLogger(__name__)
 
@@ -912,6 +916,7 @@ def start_langgraph_dev(
     tunnel: bool = False,
     config_fingerprint: str | None = None,
     allowed_origins: str = "",
+    job: BackendJob | None = None,
 ) -> subprocess.Popen:
     """Start langgraph dev as a background subprocess.
 
@@ -938,6 +943,8 @@ def start_langgraph_dev(
             ``*.trycloudflare.com`` URL is written to the log; read it back
             with :func:`read_tunnel_url`. SECURITY: the tunnel has no auth and
             the deployed agent can run shell — only enable for trusted use.
+        job: A Windows job object the server joins before it runs (started
+            suspended, then resumed), so it ends with the caller's process.
 
     Returns:
         The Popen handle for the langgraph dev process.
@@ -1122,6 +1129,10 @@ def start_langgraph_dev(
         }
     else:
         _spawn_kwargs = {"start_new_session": True}
+    if job is not None:
+        _spawn_kwargs["creationflags"] = (
+            _spawn_kwargs.get("creationflags", 0) | job.creationflags
+        )
 
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
@@ -1154,6 +1165,8 @@ def start_langgraph_dev(
             log_handle.close()
         except Exception:
             pass
+    if job is not None:
+        job.started(proc)
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
     from EvoScientist.agent_shell import sidecar_bash
     from EvoScientist.setup.research_env import agent_python

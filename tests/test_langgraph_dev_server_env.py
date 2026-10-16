@@ -10,6 +10,7 @@ import dataclasses
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -327,3 +328,50 @@ def test_start_records_the_agent_python_in_the_sidecar(
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
     sidecar = json.loads((tmp_path / "workspace.json").read_text())
     assert sidecar["agent_python"] == "/env/bin/python"
+
+
+def test_start_puts_the_server_in_the_callers_job(monkeypatch, tmp_path, runtime_paths):
+    """The server is spawned with the job's flags and joins the job before the
+    PID file is written (``started`` stops the run here)."""
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    proc = SimpleNamespace(pid=4242)
+
+    def _popen(args, **kwargs):
+        captured["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+
+    class _Job:
+        creationflags = 0x4
+
+        def started(self, process):
+            captured["started"] = process
+            raise _PopenAbort("joined")
+
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179, job=_Job())
+    assert captured["kwargs"]["creationflags"] & 0x4
+    assert captured["started"] is proc
+    assert not manager.RUNTIME.pid_file.exists()
+
+
+def test_start_without_a_job_keeps_the_spawn_flags(
+    monkeypatch, tmp_path, runtime_paths
+):
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+
+    def _popen(args, **kwargs):
+        captured["kwargs"] = kwargs
+        raise _PopenAbort("spawned")
+
+    monkeypatch.setattr(subprocess, "Popen", _popen)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16179)
+    if manager.os.name == "nt":
+        assert (
+            captured["kwargs"]["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    else:
+        assert captured["kwargs"]["start_new_session"] is True
+        assert "creationflags" not in captured["kwargs"]
