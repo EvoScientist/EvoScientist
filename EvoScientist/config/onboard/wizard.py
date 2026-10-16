@@ -11,6 +11,7 @@ from rich.text import Text
 
 from ...paths import Workspace, start_workspace_path
 from ...runtime import AsyncRuntime
+from ..provider_keys import PROVIDERS
 from ..settings import (
     EvoScientistConfig,
     get_config_path,
@@ -115,29 +116,7 @@ def render_progress(current_step: int, completed: set[int]) -> Panel:
 
 
 _PROVIDER_KEY_ATTR = {
-    "anthropic": "anthropic_api_key",
-    "minimax": "minimax_api_key",
-    "nvidia": "nvidia_api_key",
-    "google-genai": "google_api_key",
-    "siliconflow": "siliconflow_api_key",
-    "openrouter": "openrouter_api_key",
-    "atlascloud": "atlascloud_api_key",
-    "requesty": "requesty_api_key",
-    "novita": "novita_api_key",
-    "opper": "opper_api_key",
-    "deepseek": "deepseek_api_key",
-    "zhipu": "zhipu_api_key",
-    "zhipu-code": "zhipu_api_key",
-    "volcengine": "volcengine_api_key",
-    "volcengine-code": "volcengine_api_key",
-    "dashscope": "dashscope_api_key",
-    "dashscope-code": "dashscope_api_key",
-    "moonshot": "moonshot_api_key",
-    "kimi-coding": "kimi_api_key",
-    "xiaomi": "mimo_api_key",
-    "xiaomi-token-plan": "mimo_token_plan_api_key",
-    "custom-openai": "custom_openai_api_key",
-    "custom-anthropic": "custom_anthropic_api_key",
+    name: spec.key_field for name, spec in PROVIDERS.items() if spec.key_field
 }
 
 _MINIMAX_GLOBAL_BASE_URL = "https://api.minimax.io/anthropic"
