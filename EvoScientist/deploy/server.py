@@ -347,7 +347,10 @@ def _load_config(debug: bool, host: str | None = None, port: int | None = None) 
         cli_overrides["log_level"] = "DEBUG"
     config = get_effective_config(cli_overrides)
     if debug:
+        from ..config.settings import record_env_origin
+
         os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
+        record_env_origin("EVOSCIENTIST_LOG_LEVEL", "cli")
         from ..cli.commands import _configure_logging
 
         _configure_logging()

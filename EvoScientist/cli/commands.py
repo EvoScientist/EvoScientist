@@ -2201,8 +2201,12 @@ def serve(
     config = get_effective_config(cli_overrides)
     async_runtime = _get_cli_async_runtime(ctx)
     if debug:
+        from ..config.settings import record_env_origin
+
         os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
         os.environ["EVOSCIENTIST_CHANNEL_DEBUG_TRACING"] = "true"
+        record_env_origin("EVOSCIENTIST_LOG_LEVEL", "cli")
+        record_env_origin("EVOSCIENTIST_CHANNEL_DEBUG_TRACING", "cli")
     apply_config_to_env(config)
     if debug:
         _configure_logging()

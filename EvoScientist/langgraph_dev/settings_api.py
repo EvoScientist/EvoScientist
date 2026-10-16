@@ -40,6 +40,7 @@ from EvoScientist.config.settings import (
     SettingsError,
     _config_to_dict,
     config_from_mapping,
+    env_origin,
     get_config_dir,
     get_effective_config,
     secret_hint,
@@ -175,15 +176,28 @@ def pending_restart(mapping: dict[str, Any], shadowed: set[str]) -> list[str]:
 def config_sources(mapping: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Where each field's value comes from in this server.
 
-    ``env`` when a mapped environment variable is set (it wins over the
-    file, so ``shadowed`` is true), else ``file`` when the file holds it,
-    else ``default``.
+    A mapped environment variable wins over the file. When our own code set
+    it (see :func:`~EvoScientist.config.settings.record_env_origin`), its
+    recorded source is reported: ``file`` and ``default`` are copies, not
+    overrides; ``cli``, ``ccproxy`` and ``dotenv`` (with the ``.env`` path)
+    override the saved value, so ``shadowed`` is true. A variable our code
+    did not set is the user's: ``env``, shadowed. Without a variable, the
+    source is ``file`` when the file holds the field, else ``default``.
     """
     sources: dict[str, dict[str, Any]] = {}
     for name in _config_fields():
         env_key = _ENV_MAPPINGS.get(name)
         if env_key and os.environ.get(env_key):
-            sources[name] = {"source": "env", "shadowed": True}
+            origin = env_origin(env_key)
+            if origin is None:
+                sources[name] = {"source": "env", "shadowed": True}
+            else:
+                source = origin["source"]
+                entry: dict[str, Any] = {"source": source}
+                if "path" in origin:
+                    entry["path"] = origin["path"]
+                entry["shadowed"] = source not in ("file", "default")
+                sources[name] = entry
         elif mapping.get(name) is not None:
             sources[name] = {"source": "file", "shadowed": False}
         else:
@@ -240,6 +254,9 @@ def _provider_view(spec: KeySpec) -> dict[str, Any]:
 
 def read_settings() -> dict[str, Any]:
     """The ``GET /api/settings`` body."""
+    # First: it merges a workspace ``.env`` into the environment, as the
+    # graphs' own config reads do, so ``sources`` sees what they see.
+    effective = get_effective_config()
     raw = store.read_config_bytes()
     config_error = None
     try:
@@ -256,7 +273,7 @@ def read_settings() -> dict[str, Any]:
     shadowed = {name for name, s in sources.items() if s["shadowed"]}
     if config_error is None:
         restart_fields = pending_restart(mapping, shadowed)
-        needed = setup_needed(get_effective_config())
+        needed = setup_needed(effective)
     else:
         restart_fields = []
         needed = False

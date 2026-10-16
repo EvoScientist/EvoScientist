@@ -8,6 +8,7 @@ asymmetrically with respect to workspace ``.env`` handling.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import asdict, dataclass, fields
@@ -1305,6 +1306,91 @@ _ENV_MAPPINGS = {
 
 # Placeholder ``ccproxy_manager.setup_ccproxy_env`` writes for the Anthropic API
 # key when routing through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
+_ENV_FIELDS: dict[str, str] = {env: field for field, env in _ENV_MAPPINGS.items()}
+
+
+# =============================================================================
+# Where environment values came from
+# =============================================================================
+
+# The process environment cannot tell the user's own exports from values our
+# code put there: apply_config_to_env() copies saved keys, get_effective_config()
+# merges a ``.env``, flags and ccproxy write variables too. Each such write is
+# recorded here, by variable name: ``{"source": "file" | "default" | "cli" |
+# "ccproxy" | "dotenv", "path"?: <.env path>}``. A variable with no record is
+# the user's (``env``). The settings API reports it as ``sources``.
+#
+# The launcher passes its record to the langgraph dev server in
+# ENV_ORIGINS_VAR (server environment only); this module reads and removes it
+# at import, so nothing the server starts inherits it.
+ENV_ORIGINS_VAR = "EVOSCIENTIST_CONFIG_ORIGINS"
+_ENV_ORIGINS: dict[str, dict[str, str]] = {}
+
+
+def _load_env_origins() -> None:
+    raw = os.environ.pop(ENV_ORIGINS_VAR, None)
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return
+    if isinstance(data, dict):
+        _ENV_ORIGINS.update(
+            {
+                str(k): {str(a): str(b) for a, b in v.items()}
+                for k, v in data.items()
+                if isinstance(v, dict)
+            }
+        )
+
+
+_load_env_origins()
+
+
+def record_env_origin(env_key: str, source: str, path: str | None = None) -> None:
+    """Record that our code set ``env_key``, and from where."""
+    origin = {"source": source}
+    if path:
+        origin["path"] = path
+    _ENV_ORIGINS[env_key] = origin
+
+
+def env_origin(env_key: str) -> dict[str, str] | None:
+    """Where ``env_key`` came from, or ``None`` when our code did not set it."""
+    return _ENV_ORIGINS.get(env_key)
+
+
+def env_origins() -> dict[str, dict[str, str]]:
+    return {key: dict(value) for key, value in _ENV_ORIGINS.items()}
+
+
+def _same_value(field: str, a: Any, b: Any) -> bool:
+    if field == "default_workdir":
+        a, b = (
+            os.path.abspath(os.path.expanduser(str(v))) if v else "" for v in (a, b)
+        )
+    return str(_plain_config_value(a)) == str(_plain_config_value(b))
+
+
+def config_value_origin(field: str, value: Any) -> str:
+    """``file`` when the file holds ``value`` for ``field``, ``default`` when
+    the file lacks the field and ``value`` is its default, else ``cli``: the
+    value can then only have come from a command-line flag."""
+    try:
+        mapping = store.read_config_mapping()
+    except store.ConfigError:
+        mapping = {}
+    saved = mapping.get(field)
+    if saved is not None and saved != "":
+        return "file" if _same_value(field, saved, value) else "cli"
+    default = next(f.default for f in fields(EvoScientistConfig) if f.name == field)
+    if field == "default_workdir":
+        # An empty default_workdir means "the current folder".
+        return "default" if _same_value(field, os.getcwd(), value) else "cli"
+    return "default" if _same_value(field, default, value) else "cli"
+
+
 _OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
 
 
@@ -1384,10 +1470,12 @@ def get_effective_config(
         if env_key.startswith("EVOSCIENTIST_"):
             if not os.environ.get(env_key):
                 os.environ[env_key] = env_value
+                record_env_origin(env_key, "dotenv", dotenv_path)
         elif _oauth_routed(env_key):
             continue  # ccproxy OAuth routing must survive later re-merges
         else:
             os.environ[env_key] = env_value
+            record_env_origin(env_key, "dotenv", dotenv_path)
 
     # Start with file config (includes defaults for missing values)
     config = load_config()
@@ -1421,11 +1509,26 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
     """Apply config API keys to environment variables if not already set.
 
     This allows the config file to provide API keys that downstream
-    libraries (like langchain-anthropic) can pick up.
+    libraries (like langchain-anthropic) can pick up. Every variable it
+    sets is recorded as coming from the file, the defaults or a flag (see
+    :func:`record_env_origin`).
 
     Args:
         config: Configuration to apply.
     """
+    before = dict(os.environ)
+    _apply_config_to_env(config)
+    for env_key, field in _ENV_FIELDS.items():
+        value = os.environ.get(env_key)
+        if value is None:
+            _ENV_ORIGINS.pop(env_key, None)
+        elif value != before.get(env_key):
+            record_env_origin(
+                env_key, config_value_origin(field, getattr(config, field))
+            )
+
+
+def _apply_config_to_env(config: EvoScientistConfig) -> None:
     if config.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
         os.environ["ANTHROPIC_API_KEY"] = config.anthropic_api_key
     if config.anthropic_base_url and not os.environ.get("ANTHROPIC_BASE_URL"):

@@ -38,6 +38,11 @@ from EvoScientist.config import (
     MemoryControls,
     MemoryObservationTarget,
 )
+from EvoScientist.config.settings import (
+    ENV_ORIGINS_VAR,
+    config_value_origin,
+    env_origins,
+)
 from EvoScientist.langgraph_dev import boundary
 
 if TYPE_CHECKING:
@@ -922,6 +927,21 @@ def _packaged_langgraph_config() -> Path:
 # =============================================================================
 
 
+def _server_env_origins(workspace: str, port: str, host: str) -> dict:
+    """This process's record of environment origins, plus the workspace, port
+    and host :func:`start_langgraph_dev` always sets for the server."""
+    origins = env_origins()
+    for env_key, field, value in (
+        ("EVOSCIENTIST_WORKSPACE_DIR", "default_workdir", workspace),
+        ("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "langgraph_dev_port", port),
+        ("EVOSCIENTIST_LANGGRAPH_DEV_HOST", "langgraph_dev_host", host),
+    ):
+        if os.environ.get(env_key) == value and env_key not in origins:
+            continue  # the user's own export, passed on unchanged
+        origins[env_key] = {"source": config_value_origin(field, value)}
+    return origins
+
+
 def start_langgraph_dev(
     workspace_dir: Path | None = None,
     *,
@@ -1133,6 +1153,11 @@ def start_langgraph_dev(
     sub_env.update(boundary.server_env(host, allowed_origins))
     sub_env.pop("CORS_ALLOW_ORIGINS", None)
     sub_env.pop("TUNNEL_HTTP_HOST_HEADER", None)
+    # Where the server's config-mapped variables came from, for the settings
+    # API's ``sources``: this process's record plus the three values set above.
+    sub_env[ENV_ORIGINS_VAR] = json.dumps(
+        _server_env_origins(str(workspace_dir), str(port), host)
+    )
 
     # POSIX: own session so the child can be group-signalled on cleanup.
     # Windows: own process group, so Ctrl+C in the terminal does not reach the
