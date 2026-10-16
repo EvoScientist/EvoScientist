@@ -301,6 +301,38 @@ def test_get_teams_calls_loader_with_include_system_true(monkeypatch, tmp_path):
     assert calls == [(True, Workspace(tmp_path))]
 
 
+# ---- /api/workspace -------------------------------------------------------
+# The WebUI reads the served folder here instead of from a file on its own
+# machine, and uses the string as-is.
+
+
+def test_get_workspace_returns_the_served_folder_key(monkeypatch, tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "link"))
+    monkeypatch.delenv("EVOSCIENTIST_RUN_DIR", raising=False)
+
+    resp = client.get("/api/workspace")
+
+    assert resp.json() == {
+        "workspace_dir": Workspace(tmp_path / "real").key,
+        "run_dir": None,
+    }
+
+
+def test_get_workspace_returns_the_run_folder_of_a_run_mode_server(
+    monkeypatch, tmp_path
+):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", str(run_dir))
+
+    resp = client.get("/api/workspace")
+
+    assert resp.json()["run_dir"] == run_dir.resolve().as_posix()
+
+
 # ---- /api/bg_process_status -----------------------------------------------
 # The bg-process reader polls this route (server backend) to detect a process
 # exit from the server process's registry.
