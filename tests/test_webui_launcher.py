@@ -43,7 +43,6 @@ def _make_config(
         webui_port=webui_port,
         webui_host=webui_host,
         langgraph_dev_jobs_per_worker=10,
-        langgraph_dev_file_persistence=True,
         langgraph_dev_keepalive=langgraph_dev_keepalive,
     )
 
