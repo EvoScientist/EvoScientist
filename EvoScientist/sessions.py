@@ -52,7 +52,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Overwrite
 
-from .message_meta import is_pinned_skill
+from .message_meta import is_pinned_skill, is_rubric_feedback
 from .paths import SessionDirs, process_session_dirs
 
 _logger = logging.getLogger(__name__)
@@ -73,6 +73,20 @@ if not hasattr(aiosqlite.Connection, "is_alive"):
 # ---------------------------------------------------------------------------
 
 AGENT_NAME = "EvoScientist"
+
+# The proactive cron's graph (``EvoScientist.proactive.cron.PROACTIVE_GRAPH_ID``).
+# Its thread checkpoints every tick, so it is pruned like the main agent's.
+PROACTIVE_GRAPH_ID = "proactive"
+
+# Rows the pruning checkpointer may delete: (metadata key, value, whether to
+# keep ancestors back to a ``messages`` snapshot, a cap on the rows kept or
+# None for ``keep_per_ns``). A thread matches one rule. The proactive cron
+# state needs only its latest checkpoint; the cap keeps it at two rows instead
+# of the 1000 a conversation keeps by default.
+_PRUNED_ROWS: tuple[tuple[str, str, bool, int | None], ...] = (
+    ("agent_name", AGENT_NAME, True, None),
+    ("graph_id", PROACTIVE_GRAPH_ID, False, 2),
+)
 MAIN_THREAD_FILTER_SQL = (
     "json_extract(metadata, '$.agent_name') = ? "
     "AND (json_extract(metadata, '$.graph_id') IS NULL "
@@ -267,53 +281,65 @@ class PruningCheckpointer(AsyncSqliteSaver):
         alongside the anchor set. Anchors form a contiguous head, so a
         single walk from the oldest one covers all of them.
 
-        Restricted to rows whose ``metadata.agent_name == AGENT_NAME``.
-        ``json_extract(metadata, '$.agent_name') = ?`` evaluates to NULL
-        (and so fails the predicate) for any row whose metadata lacks an
-        ``agent_name`` key — by design, those rows belong to third-party
-        LangGraph users and must never be pruned by us.
+        Restricted to the rows ``_PRUNED_ROWS`` names: the main agent's
+        (``metadata.agent_name == AGENT_NAME``) and the proactive cron
+        thread's (``metadata.graph_id == "proactive"``). ``json_extract``
+        evaluates to NULL (and so fails the predicate) for a row whose
+        metadata lacks the key: by design, other rows belong to third-party
+        LangGraph users and must never be pruned by us. The proactive state
+        has no ``messages`` channel, so it skips the snapshot walk, which
+        would otherwise keep every ancestor up to the walk cap.
 
         Walk + DELETEs held under ``self.lock`` for atomicity with
         concurrent ``aput()`` on the same thread.
         """
         keep = self._keep_per_ns
-        agent = AGENT_NAME
         async with self.lock:
             # ``writes`` table is checked inside ``_delete_outside`` so a
             # legacy DB that only has ``checkpoints`` still gets pruned
             # (writes DELETE silently skipped; checkpoints DELETE runs).
             # The migration sweep depends on this — it walks legacy DBs
             # that often pre-date the ``writes`` table entirely.
-            anchor_ids = await self._fetch_recent_checkpoint_ids(
-                thread_id, checkpoint_ns, agent, keep
-            )
-            if len(anchor_ids) < keep:
-                return  # nothing to prune yet
+            for key, value, walk_to_snapshot, max_keep in _PRUNED_ROWS:
+                rule_keep = keep if max_keep is None else min(keep, max_keep)
+                anchor_ids = await self._fetch_recent_checkpoint_ids(
+                    thread_id, checkpoint_ns, key, value, rule_keep
+                )
+                if not anchor_ids:
+                    continue  # a thread of the other kind
+                if len(anchor_ids) < rule_keep:
+                    return  # nothing to prune yet
 
-            extra_preserve = await self._walk_to_snapshot_ancestor(
-                thread_id, checkpoint_ns, anchor_ids[-1]
-            )
-            kept = set(anchor_ids) | extra_preserve
+                kept = set(anchor_ids)
+                if walk_to_snapshot:
+                    kept |= await self._walk_to_snapshot_ancestor(
+                        thread_id, checkpoint_ns, anchor_ids[-1]
+                    )
 
-            await self._delete_outside(thread_id, checkpoint_ns, agent, kept)
-            await self.conn.commit()
+                await self._delete_outside(thread_id, checkpoint_ns, key, value, kept)
+                await self.conn.commit()
+                return
 
     async def _fetch_recent_checkpoint_ids(
         self,
         thread_id: str,
         checkpoint_ns: str,
-        agent: str,
+        key: str,
+        value: str,
         limit: int,
     ) -> list[str]:
-        """Return the ``limit`` most-recent checkpoint ids (newest first)."""
+        """Return the ``limit`` most-recent ids of rows with ``metadata[key] == value``.
+
+        Newest first. *key* is one of the fixed names in ``_PRUNED_ROWS``.
+        """
         query = (
             "SELECT checkpoint_id FROM checkpoints "
             "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND json_extract(metadata, '$.agent_name') = ? "
+            f"  AND json_extract(metadata, '$.{key}') = ? "
             "ORDER BY checkpoint_id DESC LIMIT ?"
         )
         async with self.conn.execute(
-            query, (thread_id, checkpoint_ns, agent, limit)
+            query, (thread_id, checkpoint_ns, value, limit)
         ) as cur:
             rows = await cur.fetchall()
         return [r[0] for r in rows]
@@ -392,7 +418,8 @@ class PruningCheckpointer(AsyncSqliteSaver):
         self,
         thread_id: str,
         checkpoint_ns: str,
-        agent: str,
+        key: str,
+        value: str,
         kept_ids: set[str],
     ) -> None:
         """DELETE rows whose ``checkpoint_id`` is NOT in ``kept_ids``.
@@ -421,7 +448,7 @@ class PruningCheckpointer(AsyncSqliteSaver):
                 "  AND checkpoint_id IN ("
                 "    SELECT checkpoint_id FROM checkpoints "
                 "    WHERE thread_id = ? AND checkpoint_ns = ? "
-                "      AND json_extract(metadata, '$.agent_name') = ? "
+                f"      AND json_extract(metadata, '$.{key}') = ? "
                 f"     AND checkpoint_id NOT IN ({placeholders})"
                 "  )"
             )
@@ -432,7 +459,7 @@ class PruningCheckpointer(AsyncSqliteSaver):
                     checkpoint_ns,
                     thread_id,
                     checkpoint_ns,
-                    agent,
+                    value,
                     *kept_list,
                 ),
             )
@@ -440,12 +467,12 @@ class PruningCheckpointer(AsyncSqliteSaver):
         del_checkpoints = (
             "DELETE FROM checkpoints "
             "WHERE thread_id = ? AND checkpoint_ns = ? "
-            "  AND json_extract(metadata, '$.agent_name') = ? "
+            f"  AND json_extract(metadata, '$.{key}') = ? "
             f" AND checkpoint_id NOT IN ({placeholders})"
         )
         await self.conn.execute(
             del_checkpoints,
-            (thread_id, checkpoint_ns, agent, *kept_list),
+            (thread_id, checkpoint_ns, value, *kept_list),
         )
 
 
@@ -873,7 +900,11 @@ def _apply_summarization_event(messages: list, event: dict | None) -> list:
 def _extract_preview(messages: list, max_len: int = 50) -> str:
     """Extract the first human message as a preview string."""
     for msg in messages:
-        if getattr(msg, "type", None) != "human" or is_pinned_skill(msg):
+        if (
+            getattr(msg, "type", None) != "human"
+            or is_pinned_skill(msg)
+            or is_rubric_feedback(msg)
+        ):
             continue
         content = getattr(msg, "content", "") or ""
         if isinstance(content, list):
@@ -1115,6 +1146,64 @@ async def get_thread_metadata(thread_id: str) -> dict | None:
                 "model": row[1],
                 "updated_at": row[2],
             }
+
+
+async def latest_origin_checkpoints(limit: int = 50) -> list[dict]:
+    """Per main thread, its newest checkpoint that carries a channel origin.
+
+    Newest thread first. Serve stamps the origin (``origin_*`` keys) on the
+    run metadata of an armed conversation's turns, and the runtime copies run
+    metadata into the run's checkpoints; HITL resumes, ``/compact`` and stop
+    recovery write checkpoints without it, which is why this takes the newest
+    checkpoint *with* the keys rather than the newest one. Keys: ``thread_id``,
+    ``updated_at``, ``workspace_dir``, ``run_dir`` and the ``origin_*`` keys of
+    that checkpoint, as stored, and ``proactive`` from the thread's newest
+    checkpoint that carries the flag: turns after ``/proactive off`` carry
+    ``"off"`` but no origin.
+    """
+    db_path = str(get_db_path())
+    async with aiosqlite.connect(db_path, timeout=30.0) as conn:
+        if not await _table_exists(conn, "checkpoints"):
+            return []
+        # One MAX() with bare columns: SQLite takes the bare columns from the
+        # row holding the maximum, so the folders and the origin come from the
+        # same row. The flag comes from its own newest row (subquery).
+        query = f"""
+            SELECT thread_id,
+                   MAX(json_extract(metadata, '$.updated_at')) AS updated_at,
+                   json_extract(metadata, '$.workspace_dir'),
+                   json_extract(metadata, '$.run_dir'),
+                   (SELECT json_extract(f.metadata, '$.proactive')
+                      FROM checkpoints f
+                     WHERE f.thread_id = checkpoints.thread_id
+                       AND f.checkpoint_ns = ''
+                       AND json_extract(f.metadata, '$.proactive') IS NOT NULL
+                     ORDER BY json_extract(f.metadata, '$.updated_at') DESC
+                     LIMIT 1),
+                   json_extract(metadata, '$.origin_channel_type'),
+                   json_extract(metadata, '$.origin_chat_id'),
+                   json_extract(metadata, '$.origin_metadata')
+            FROM checkpoints
+            WHERE checkpoint_ns = ''
+              AND json_extract(metadata, '$.origin_channel_type') IS NOT NULL
+              AND {MAIN_THREAD_FILTER_SQL}
+            GROUP BY thread_id
+            ORDER BY updated_at DESC
+            LIMIT ?
+        """
+        async with conn.execute(query, (*MAIN_THREAD_FILTER_PARAMS, limit)) as cur:
+            rows = await cur.fetchall()
+    keys = (
+        "thread_id",
+        "updated_at",
+        "workspace_dir",
+        "run_dir",
+        "proactive",
+        "origin_channel_type",
+        "origin_chat_id",
+        "origin_metadata",
+    )
+    return [dict(zip(keys, row, strict=True)) for row in rows]
 
 
 async def get_thread_messages(thread_id: str) -> list:

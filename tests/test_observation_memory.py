@@ -1904,6 +1904,30 @@ def test_turn_compaction_uses_latest_user_turn_only():
     ]
 
 
+def test_turn_compaction_leaves_out_the_graders_revision_request():
+    messages = [
+        HumanMessage("write results/table.csv"),
+        AIMessage("done", name="EvoScientist"),
+        HumanMessage(
+            "results/table.csv is missing",
+            name="rubric_grader",
+            additional_kwargs={"lc_source": "rubric_grader"},
+        ),
+        AIMessage("fixed", name="EvoScientist"),
+    ]
+
+    compact = source_context._compact_turn_messages(
+        messages,
+        source_agent="EvoScientist",
+    )
+
+    assert compact == [
+        {"role": "human", "content": "write results/table.csv"},
+        {"role": "ai", "content": "done", "name": "EvoScientist"},
+        {"role": "ai", "content": "fixed", "name": "EvoScientist"},
+    ]
+
+
 async def test_lifecycle_schedules_turn_worker_without_awaiting(tmp_path, monkeypatch):
     memory_dir = tmp_path / "memories"
     workspace_dir = tmp_path / "workspace"

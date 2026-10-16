@@ -437,9 +437,7 @@ def activate_runtime() -> Path | None:
     record = _read_record()
     if record is None:
         return None
-    # Absolute even for a record written from a relative DATA_DIR, so children
-    # in other working dirs resolve the same `node`.
-    install_dir = Path(record["path"]).resolve()
+    install_dir = Path(record["path"])
     bin_dir = _bin_dir(install_dir)
     if not _node_exe(install_dir).exists():
         return None

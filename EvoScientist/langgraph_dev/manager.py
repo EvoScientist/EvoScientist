@@ -31,11 +31,13 @@ import psutil
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
+from EvoScientist import paths
 from EvoScientist.config import (
     EvoScientistConfig,
     MemoryControls,
     MemoryObservationTarget,
 )
+from EvoScientist.langgraph_dev import boundary
 
 logger = logging.getLogger(__name__)
 
@@ -902,6 +904,7 @@ def start_langgraph_dev(
     jobs_per_worker: int = 10,
     tunnel: bool = False,
     config_fingerprint: str | None = None,
+    allowed_origins: str = "",
 ) -> subprocess.Popen:
     """Start langgraph dev as a background subprocess.
 
@@ -1047,7 +1050,9 @@ def start_langgraph_dev(
     # purposes mean "this is the user's workspace", so they don't conflict;
     # the explicit write below always wins for the subprocess regardless of
     # what the parent had inherited from its own environment.
-    sub_env = os.environ.copy()
+    # The server runs in the workspace and loads its ``.env``; it gets this
+    # process's data and config folders so both use the same files.
+    sub_env = paths.dir_env(os.environ)
     sub_env["EVOSCIENTIST_WORKSPACE_DIR"] = str(workspace_dir)
     if run_dir is not None:
         sub_env["EVOSCIENTIST_RUN_DIR"] = str(run_dir)
@@ -1089,6 +1094,14 @@ def start_langgraph_dev(
     # this caller (``EvoSci deploy --host X``) must reach the subprocess too,
     # or async sub-agent launches would target whatever the config file says.
     sub_env["EVOSCIENTIST_LANGGRAPH_DEV_HOST"] = host
+    # The browser boundary: which pages and host names the server accepts
+    # (``boundary.server_env``), always set here so nothing inherited, such as
+    # a workspace ``.env``, widens it. CORS_ALLOW_ORIGINS would only matter
+    # without our CORS_CONFIG; TUNNEL_HTTP_HOST_HEADER would make cloudflared,
+    # which inherits this environment, send tunnel requests with a local Host.
+    sub_env.update(boundary.server_env(host, allowed_origins))
+    sub_env.pop("CORS_ALLOW_ORIGINS", None)
+    sub_env.pop("TUNNEL_HTTP_HOST_HEADER", None)
 
     # POSIX: own session so the child can be group-signalled on cleanup.
     # Windows: own process group, so Ctrl+C in the terminal does not reach the
@@ -1568,6 +1581,7 @@ def _ensure_langgraph_dev_locked(
             file_persistence=file_persistence,
             jobs_per_worker=jobs_per_worker,
             config_fingerprint=config_fp,
+            allowed_origins=getattr(config, "backend_allowed_origins", ""),
         )
     except (FileNotFoundError, RuntimeError) as exc:
         # Startup failed — keep async subagents disabled so the main agent

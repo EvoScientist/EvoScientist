@@ -43,6 +43,7 @@ from langchain_core.runnables.retry import RunnableRetry
 
 from ..llm.context_window import get_context_window, resolve_context_window
 from .configurable_model import _read_model_override
+from .proactive_mode import _read_proactive_mode
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest
@@ -334,10 +335,17 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
         self._publish_limits(target)
 
     def wrap_model_call(self, request: ModelRequest, handler):
+        if _read_proactive_mode():
+            return handler(request)
         self._sync_limits()
         return super().wrap_model_call(request, handler)
 
     async def awrap_model_call(self, request: ModelRequest, handler) -> Any:
+        # A proactive shadow turn writes nothing: summarizing would make another
+        # model call and offload the evicted history through the real backend.
+        # Its messages already carry the source thread's summary.
+        if _read_proactive_mode():
+            return await handler(request)
         await self._async_sync_limits()
         return await super().awrap_model_call(request, handler)
 

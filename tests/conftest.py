@@ -1,5 +1,6 @@
 """Shared fixtures for EvoScientist tests."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,15 @@ def _fresh_process_workspace():
 
 
 @pytest.fixture
+def no_mcp(monkeypatch):
+    """For tests that build the real agent: it would load the user's MCP servers,
+    which cannot start inside a running loop. Opt in with ``usefixtures``."""
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._load_mcp_tools_cached", lambda *a, **k: {}
+    )
+
+
+@pytest.fixture
 def workspace(tmp_path):
     """A ``Workspace`` rooted at a fresh temporary folder."""
     from EvoScientist.paths import Workspace
@@ -140,6 +150,49 @@ def _isolate_dotenv(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_user_dirs(tmp_path_factory, monkeypatch):
+    """Keep the developer's real data and config folders out of every test.
+
+    Both are read once at import (``paths.DATA_DIR``, ``paths.CONFIG_DIR``), so
+    setting ``EVOSCIENTIST_DATA_DIR`` or ``XDG_CONFIG_HOME`` in a test does not
+    move them; point them, and the copies taken at import, at fresh folders.
+    """
+    from EvoScientist import paths, update_check
+    from EvoScientist.cli import tui_interactive
+    from EvoScientist.mcp import client as mcp_client
+
+    root = tmp_path_factory.mktemp("user")
+    data_dir = root / ".evoscientist"
+    config_dir = root / "config" / "evoscientist"
+    monkeypatch.setattr(paths, "DATA_DIR", data_dir)
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", data_dir / "skills")
+    monkeypatch.setattr(paths, "GLOBAL_MEMORIES_DIR", data_dir / "memories")
+    monkeypatch.setattr(paths, "MEMORIES_DIR", data_dir / "memories")
+    monkeypatch.setattr(paths, "SERVER_HOME", data_dir / "server")
+    monkeypatch.setattr(tui_interactive, "DATA_DIR", data_dir)
+    monkeypatch.setattr(paths, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(mcp_client, "USER_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(mcp_client, "USER_MCP_CONFIG", config_dir / "mcp.yaml")
+    monkeypatch.setattr(update_check, "CACHE_DIR", config_dir)
+    monkeypatch.setattr(update_check, "CACHE_FILE", config_dir / "latest_version.json")
+
+
+@pytest.fixture(autouse=True)
+def _restore_openai_auth_mode_env():
+    """Start every test without EVOSCIENTIST_OPENAI_AUTH_MODE and restore it after.
+
+    ``apply_config_to_env`` writes it with a direct ``os.environ`` assignment,
+    which monkeypatch cannot undo.
+    """
+    previous = os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
+    yield
+    if previous is None:
+        os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
+    else:
+        os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = previous
+
+
+@pytest.fixture(autouse=True)
 def _no_agent_python_probe(monkeypatch):
     """Keep the agent-shell python decision away from the real machine.
 
@@ -153,6 +206,20 @@ def _no_agent_python_probe(monkeypatch):
     from EvoScientist.setup import research_env
 
     monkeypatch.setattr(research_env, "_agent_python", lambda: (None, None))
+
+
+@pytest.fixture(autouse=True)
+def _no_uv_probes(monkeypatch):
+    """Keep uv lookups away from the real machine: no ``uv ... --help`` run
+    (a test's faked ``subprocess`` would record it), and no uv recorded in
+    the developer's data dir, only ``uv`` on PATH (a test's faked
+    ``shutil.which``). ``tests/test_uv_tool.py`` tests the real functions."""
+    import shutil
+
+    from EvoScientist import uv_tool
+
+    monkeypatch.setattr(uv_tool, "_knows_system_certs", lambda uv: True)
+    monkeypatch.setattr(uv_tool, "find_uv", lambda: shutil.which("uv"))
 
 
 @pytest.fixture(autouse=True)

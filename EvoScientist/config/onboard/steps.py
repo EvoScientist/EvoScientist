@@ -20,6 +20,7 @@ from ...paths import Workspace
 from ..settings import EvoScientistConfig
 from .helpers import (
     _auto_install_latexmk,
+    _chatgpt_status_text,
     _check_latex_components,
     _detect_tinytex_install_method,
     _ensure_npx,
@@ -30,6 +31,7 @@ from .helpers import (
     _prompt_ccproxy_port,
     _provider_key_info,
     _run_ccproxy_login,
+    _run_chatgpt_login,
 )
 from .style import (
     CONFIRM_STYLE,
@@ -464,7 +466,7 @@ def _step_oauth_auth_mode(
     status_label: str | None = None,
     question_label: str | None = None,
 ) -> str:
-    """Select API-key vs ccproxy OAuth authentication for a provider.
+    """Select API-key vs ccproxy OAuth authentication (Anthropic).
 
     Args:
         config: Current configuration.
@@ -604,7 +606,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
 
 
 def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
-    """Step 2b: Select OpenAI authentication mode (API key vs Codex OAuth).
+    """Step 2b: Select OpenAI authentication mode (API key vs ChatGPT sign-in).
 
     Args:
         config: Current configuration.
@@ -612,16 +614,57 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key" or "oauth".
     """
-    return _step_oauth_auth_mode(
-        config,
-        provider_label="OpenAI",
-        ccproxy_provider="codex",
-        config_attr="openai_auth_mode",
-        prompt_login_label="Codex",
-        oauth_choice_label="Codex OAuth",
-        status_label="Codex OAuth",
-        question_label="OpenAI authentication mode",
+    from .prompter import BACK_SENTINEL, GoBack, install_navigation_keys
+
+    choices = [
+        Choice(title="API Key (direct OpenAI access)", value="api_key"),
+        Choice(title="ChatGPT sign-in (no API key needed)", value="oauth"),
+        questionary.Separator(),
+        Choice(title="← Back (re-pick provider)", value=BACK_SENTINEL),
+    ]
+    current = config.openai_auth_mode
+    if current not in ("api_key", "oauth"):
+        current = "api_key"
+
+    question = questionary.select(
+        "OpenAI authentication mode  [Esc/← to go back]:",
+        choices=choices,
+        default=current,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+        use_indicator=True,
     )
+    install_navigation_keys(question, with_back=True)
+    auth_mode = question.ask()
+
+    if auth_mode is None:
+        raise KeyboardInterrupt()
+    if auth_mode == BACK_SENTINEL:
+        raise GoBack()
+    if auth_mode != "oauth":
+        return auth_mode
+
+    from ...llm import chatgpt_oauth
+
+    console.print(
+        "  [dim]Uses your ChatGPT plan through OpenAI's Codex sign-in. "
+        "Unofficial; OpenAI's terms apply.[/dim]"
+    )
+    state = chatgpt_oauth.status()
+    if state.signed_in:
+        console.print(f"  [green]✓ {_chatgpt_status_text(state)}[/green]")
+        question_text, default = "Re-authenticate to refresh credentials?", False
+    else:
+        console.print("  [yellow]ChatGPT: not signed in[/yellow]")
+        question_text, default = "Log in to ChatGPT now?", True
+    answer = questionary.confirm(
+        question_text, default=default, style=CONFIRM_STYLE, qmark=QMARK
+    ).ask()
+    if answer is None:
+        raise KeyboardInterrupt()
+    if answer:
+        _run_chatgpt_login()
+    return auth_mode
 
 
 def _step_provider_api_key(
@@ -900,28 +943,53 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
     return choice == "assemble"
 
 
-def _step_reasoning_effort(config: EvoScientistConfig) -> str:
-    """Step 3.5: Configure OpenRouter reasoning effort level.
+# Levels offered per provider; each one is sent unchanged on every route of
+# that provider (see ``llm.models._ROUTE_REASONING_LEVELS``). "" stores nothing,
+# so each model keeps its own default.
+_REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
+    # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+    "openrouter": [
+        ("xhigh", "xhigh  — ~95% of max_tokens for reasoning"),
+        ("high", "high   — ~80% of max_tokens (recommended)"),
+        ("medium", "medium — ~50% of max_tokens"),
+        ("low", "low    — ~20% of max_tokens"),
+        ("minimal", "minimal — ~10% of max_tokens"),
+        ("none", "none   — disable reasoning entirely"),
+    ],
+    "openai": [
+        ("", "default — EvoScientist's level for each model (recommended)"),
+        ("low", "low    — fast responses with lighter reasoning"),
+        ("medium", "medium — balances speed and reasoning depth"),
+        ("high", "high   — greater reasoning depth"),
+        ("xhigh", "xhigh  — extra high reasoning depth"),
+        ("max", "max    — deepest reasoning; uses your quota fastest"),
+    ],
+}
 
-    Only shown when the selected provider is OpenRouter. See:
-    https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+
+def _asks_reasoning_effort(provider: str) -> bool:
+    """Whether onboarding offers a reasoning level for ``provider``."""
+    return provider in _REASONING_EFFORT_CHOICES
+
+
+def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
+    """Step 3.5: Pick the reasoning effort level for OpenRouter or OpenAI.
 
     Args:
         config: Current configuration.
+        provider: The selected provider; it decides which levels are offered.
 
     Returns:
-        Selected reasoning effort level, or empty string to use default.
+        Selected reasoning effort level.
     """
-    effort_choices = [
-        Choice(title="xhigh  — ~95% of max_tokens for reasoning", value="xhigh"),
-        Choice(title="high   — ~80% of max_tokens (recommended)", value="high"),
-        Choice(title="medium — ~50% of max_tokens", value="medium"),
-        Choice(title="low    — ~20% of max_tokens", value="low"),
-        Choice(title="minimal — ~10% of max_tokens", value="minimal"),
-        Choice(title="none   — disable reasoning entirely", value="none"),
-    ]
+    levels = _REASONING_EFFORT_CHOICES[provider]
+    effort_choices = [Choice(title=title, value=value) for value, title in levels]
 
-    current = config.reasoning_effort or "high"
+    # A stored level (kept from another provider, or set by hand) may not be offered here.
+    current = config.reasoning_effort
+    offered = {value for value, _ in levels}
+    if current not in offered:
+        current = "" if "" in offered else "high"
     effort = questionary.select(
         "Select reasoning effort level:",
         choices=effort_choices,

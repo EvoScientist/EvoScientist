@@ -2221,6 +2221,159 @@ class TestIsHitlSuppressed:
         assert is_hitl_suppressed() is True
 
 
+_APPROVE_DECISION = {"type": "approve"}
+
+
+class TestResumeDeclines:
+    """Which answers must never travel with a session grant."""
+
+    @pytest.mark.parametrize(
+        "decision",
+        [
+            {"type": "reject"},
+            {"type": "edit", "edited_action": {"name": "execute", "args": {}}},
+            {"type": "respond", "message": "use another tool"},
+            {"type": "something new"},
+            {},
+            "approve",
+        ],
+    )
+    def test_any_decision_other_than_approve_declines(self, decision):
+        from langgraph.types import Command
+
+        from EvoScientist.backends import build_hitl_resume, resume_declines
+
+        assert resume_declines(build_hitl_resume("i1", [_APPROVE_DECISION, decision]))
+        assert resume_declines(Command(resume={"decisions": [decision]}))
+
+    def test_one_declined_interrupt_among_several_declines(self):
+        from langgraph.types import Command
+
+        from EvoScientist.backends import resume_declines
+
+        resume = {
+            "i1": {"decisions": [_APPROVE_DECISION]},
+            "i2": {"decisions": [_APPROVE_DECISION, {"type": "reject"}]},
+        }
+        assert resume_declines(Command(resume=resume))
+
+    def test_approvals_questions_and_messages_do_not_decline(self):
+        from langgraph.types import Command
+
+        from EvoScientist.backends import build_hitl_resume, resume_declines
+
+        assert not resume_declines(build_hitl_resume("i1", [_APPROVE_DECISION] * 2))
+        assert not resume_declines(Command(resume={"decisions": [_APPROVE_DECISION]}))
+        answered = {"answers": ["yes"], "status": "answered"}
+        assert not resume_declines(Command(resume={"i1": answered}))
+        assert not resume_declines(Command(resume=answered))
+        assert not resume_declines(Command(resume={"status": "cancelled"}))
+        mixed = {"i1": answered, "i2": {"decisions": [_APPROVE_DECISION]}}
+        assert not resume_declines(Command(resume=mixed))
+        assert not resume_declines(Command(update={"messages": []}))
+        assert not resume_declines("a typed message")
+        assert not resume_declines(None)
+
+    def test_only_an_all_approve_answer_the_grant_produced_keeps_it(self):
+        from EvoScientist.backends import answer_keeps_grant
+
+        assert answer_keeps_grant(True, [_APPROVE_DECISION] * 2)
+        assert not answer_keeps_grant(False, [_APPROVE_DECISION])
+        assert not answer_keeps_grant(True, [_APPROVE_DECISION, {"type": "reject"}])
+        assert not answer_keeps_grant(True, [])
+
+    @pytest.mark.parametrize(
+        "resume",
+        [
+            [{"type": "reject"}, {"type": "reject"}],
+            {"i1": [{"type": "reject"}]},
+            {"i1": {"decision": {"type": "approve"}}},
+            {"i1": {"decisions": []}},
+            {"decisions": "approve"},
+            {},
+            "continue",
+        ],
+        ids=[
+            "a list",
+            "a list under an id",
+            "a misspelt key",
+            "no decision",
+            "decisions that are not a list",
+            "an empty mapping",
+            "a string",
+        ],
+    )
+    def test_a_resume_it_cannot_read_declines(self, resume):
+        """The grant travels only with answers it can read as approvals or a
+        question's answer; anything else drops it."""
+        from langgraph.types import Command
+
+        from EvoScientist.backends import resume_declines
+
+        assert resume_declines(Command(resume=resume))
+
+
+class TestIsHitlApproveAll:
+    """The session's "approve all" grant read off configurable.hitl_approve_all."""
+
+    def test_explicit_true(self):
+        from EvoScientist.backends import HITL_APPROVE_ALL_KEY, is_hitl_approve_all
+
+        assert HITL_APPROVE_ALL_KEY == "hitl_approve_all"
+        assert is_hitl_approve_all({"configurable": {"hitl_approve_all": True}}) is True
+
+    def test_absent_key_is_not_a_grant(self, monkeypatch):
+        """No fallback to the serving process: only a client that sent the key grants."""
+        from types import SimpleNamespace
+
+        import EvoScientist.EvoScientist as evo_mod
+        from EvoScientist.backends import is_hitl_approve_all
+
+        monkeypatch.setattr(
+            evo_mod,
+            "_ensure_config",
+            lambda config=None: SimpleNamespace(auto_approve=True),
+        )
+        assert is_hitl_approve_all({"configurable": {}}) is False
+        assert is_hitl_approve_all({}) is False
+
+    def test_only_a_literal_true_grants(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        for value in ("true", 1, [True], {"on": True}, None, False):
+            config = {"configurable": {"hitl_approve_all": value}}
+            assert is_hitl_approve_all(config) is False, value
+
+    def test_malformed_configurable_is_false(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        assert is_hitl_approve_all({"configurable": "nope"}) is False
+        assert is_hitl_approve_all("not-a-dict") is False
+
+    def test_no_ambient_config_is_false(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        assert is_hitl_approve_all() is False
+
+    def test_reads_ambient_config_when_none_passed(self, monkeypatch):
+        import langgraph.config as lg_config
+
+        from EvoScientist.backends import is_hitl_approve_all
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {"configurable": {"hitl_approve_all": True}},
+        )
+        assert is_hitl_approve_all() is True
+
+    def test_configurable_extra_helper(self):
+        from EvoScientist.backends import approve_all_configurable_extra
+
+        assert approve_all_configurable_extra(True) == {"hitl_approve_all": True}
+        assert approve_all_configurable_extra(False) is None
+
+
 class TestHitlSuppressedForRun:
     """Pre-run derivation of the suppression flag from config.auto_mode."""
 
@@ -2296,6 +2449,20 @@ class TestEffectiveGuardDangerous:
         import EvoScientist.backends as backends_mod
 
         monkeypatch.setattr(backends_mod, "is_hitl_suppressed", lambda: False)
+        be = self._backend(tmp_path, guard_dangerous=False)
+        assert be._effective_guard_dangerous() is False
+
+    def test_session_grant_alone_does_not_guard(self, tmp_path, monkeypatch):
+        """A human "approve all" approves everything: the grant key must not arm the guard."""
+        import langgraph.config as lg_config
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {
+                "configurable": {"hitl_suppressed": False, "hitl_approve_all": True}
+            },
+        )
         be = self._backend(tmp_path, guard_dangerous=False)
         assert be._effective_guard_dangerous() is False
 

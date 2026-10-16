@@ -9,7 +9,8 @@
         "evomemory-subagent-worker": "EvoScientist.langgraph_dev.graphs:evomemory_subagent_worker",
         "evomemory-turn-worker": "EvoScientist.langgraph_dev.graphs:evomemory_turn_worker",
         "evomemory-observation-linker": "EvoScientist.langgraph_dev.graphs:evomemory_observation_linker",
-        "evomemory-autoskills": "EvoScientist.langgraph_dev.graphs:evomemory_autoskills"
+        "evomemory-autoskills": "EvoScientist.langgraph_dev.graphs:evomemory_autoskills",
+        "proactive": "EvoScientist.langgraph_dev.graphs:proactive"
     },
     "checkpointer": {
         "backend": "custom",
@@ -19,6 +20,13 @@
         "recursion_limit": 1000000
     },
     "http": {
-        "app": "EvoScientist.langgraph_dev.http:app"
+        "app": "EvoScientist.langgraph_dev.http:app",
+        "cors": {
+            "allow_origins": [],
+            "allow_origin_regex": "https?://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?",
+            "allow_methods": ["*"],
+            "allow_headers": ["*"],
+            "expose_headers": ["x-pagination-total", "x-pagination-next", "content-location"]
+        }
     }
 }

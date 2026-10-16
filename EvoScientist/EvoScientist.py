@@ -324,6 +324,8 @@ def _inject_subagent_middleware(
     cfg=None,
     chat_model=None,
     backend=None,
+    unattended: bool = False,
+    model_retry_honors_run_key: bool = True,
 ) -> None:
     """Ensure every subagent gets error handling and context management middleware.
 
@@ -359,6 +361,7 @@ def _inject_subagent_middleware(
         create_runtime_context_middleware,
         default_memory_scheduler,
     )
+    from .middleware.model_retry import ModelCallBoundaryMiddleware
 
     cfg = cfg if cfg is not None else _ensure_config()
     memory_controls = MemoryControls.from_config(cfg)
@@ -380,9 +383,13 @@ def _inject_subagent_middleware(
             memory_scheduler=memory_scheduler,
         )
         middleware = [
-            # Outermost — catches provider-SDK exceptions from the
-            # model call (including inner middlewares) and normalizes
-            # them into a non-dataclass envelope wrapper before
+            # Retries transient provider failures around everything below.
+            _model_retry_middleware(
+                cfg, unattended=unattended, honor_run_key=model_retry_honors_run_key
+            ),
+            # Right inside the retry layer — catches provider-SDK exceptions
+            # from the model call (including inner middlewares) and
+            # normalizes them into a non-dataclass envelope wrapper before
             # anything downstream sees them.
             ErrorNormalizationMiddleware(),
             # Sync subagents replay their own history to strict providers too.
@@ -402,6 +409,9 @@ def _inject_subagent_middleware(
             ToolErrorHandlerMiddleware(),
             TodoListMiddleware(),
             ContextOverflowMapperMiddleware(),
+            # Inside the retry layer: marks each provider call for the
+            # stream decoder.
+            ModelCallBoundaryMiddleware(),
         ]
         if memory_controls.memory_enabled:
             middleware.append(memory_middleware)
@@ -890,6 +900,32 @@ def _get_default_backend(
     )
 
 
+def _model_retry_middleware(
+    cfg=None, *, unattended: bool = False, honor_run_key: bool = True
+):
+    """The retry layer for one middleware list; always mounted, the budget may be 0."""
+    from .middleware.model_retry import ModelRetryMiddleware
+
+    cfg = cfg if cfg is not None else _ensure_config()
+    tier_unattended = unattended or bool(getattr(cfg, "auto_mode", False))
+    budget = (
+        cfg.auto_mode_retry_wait_seconds
+        if tier_unattended
+        else cfg.model_retry_wait_seconds
+    )
+    # The config puts a malformed value back to its default itself; this only
+    # meets an object built some other way, where both readers agree on no retry.
+    try:
+        budget = max(0, int(budget))
+    except (TypeError, ValueError, OverflowError):
+        budget = 0
+    return ModelRetryMiddleware(
+        wait_budget_seconds=budget,
+        unattended=tier_unattended,
+        honor_run_key=honor_run_key,
+    )
+
+
 def _get_default_middleware(
     *,
     workspace: Workspace,
@@ -900,6 +936,8 @@ def _get_default_middleware(
     backend=None,
     memory_source_agent: str = "EvoScientist",
     events: "MiddlewareEventSink | None" = None,
+    unattended: bool = False,
+    model_retry_honors_run_key: bool = True,
 ):
     """Build the default middleware list.
 
@@ -951,6 +989,7 @@ def _get_default_middleware(
         create_memory_lifecycle_middleware,
         create_memory_middleware,
         create_per_run_summarization_middleware,
+        create_proactive_mode_middleware,
         create_runtime_context_middleware,
         create_scheduler_middleware,
         create_tool_selector_middleware,
@@ -964,6 +1003,7 @@ def _get_default_middleware(
     # the server gateway can render them client-side.
     from .middleware.events import resolve_middleware_event_sink
     from .middleware.model_fallback import seed_fallback_chain
+    from .middleware.model_retry import ModelCallBoundaryMiddleware
 
     events = resolve_middleware_event_sink(
         events, for_async_subagent=for_async_subagent
@@ -1026,10 +1066,15 @@ def _get_default_middleware(
 
             tool_selector_model = get_chat_model(model=aux_model, provider=aux_provider)
     mw = [
-        # Outermost — catches provider-SDK exceptions from the model
-        # call (including exceptions surfaced through inner
-        # middlewares) and normalizes them into a non-dataclass
-        # envelope wrapper before anything downstream sees them.
+        # Retries transient provider failures around everything below: one
+        # attempt is the primary model plus the fallback chain.
+        _model_retry_middleware(
+            cfg, unattended=unattended, honor_run_key=model_retry_honors_run_key
+        ),
+        # Right inside the retry layer — catches provider-SDK exceptions
+        # from the model call (including exceptions surfaced through inner
+        # middlewares) and normalizes them into a non-dataclass envelope
+        # wrapper before anything downstream sees them.
         ErrorNormalizationMiddleware(),
         ToolHistoryRepairMiddleware(),
         ConfigurableModelMiddleware(),
@@ -1050,6 +1095,9 @@ def _get_default_middleware(
             timeout=cfg.code_interpreter_timeout,
             max_result_chars=cfg.code_interpreter_max_result_chars,
         ),
+        # Inside the fallback chain and the tool selector: marks each
+        # provider call for the stream decoder.
+        ModelCallBoundaryMiddleware(),
     ]
     if cfg.enable_scheduler and not for_async_subagent:
         mw.append(create_scheduler_middleware(workspace))
@@ -1081,6 +1129,17 @@ def _get_default_middleware(
     # into its own baked-in persona.
     if not for_async_subagent:
         mw.insert(0, create_active_team_middleware(workspace))
+
+    # Proactive shadow turns (#263) strip every tool, so the model returns a
+    # text-only push or no-push decision. Inserted last at index 0 so it wraps
+    # every middleware in this list: tool_selector, memory and the rest then
+    # see the empty tool list. deepagents places its own core middleware
+    # (skills, filesystem, sub-agents, summarization, tool-call patching)
+    # outside this list; none of them calls the model. It acts only on runs
+    # with configurable.proactive_mode; main agent only, since no async
+    # sub-agent run carries the flag.
+    if not for_async_subagent:
+        mw.insert(0, create_proactive_mode_middleware())
 
     # Background-process tools (run_in_background / check_process / stop_process /
     # list_processes) — main agent only. Async sub-agents run on langgraph-dev and
@@ -1123,35 +1182,108 @@ def _get_default_middleware(
     if backend is not None:
         mw.append(create_per_run_summarization_middleware(model, backend))
 
+    # Last on purpose: after_agent hooks run in reverse order, so a revision
+    # jumps back to the model before the memory worker launches or the code
+    # interpreter slot is released. Same helper model as the tool selector.
+    if backend is not None and not for_async_subagent:
+        from .background import poll_status
+        from .message_meta import this_run_messages
+        from .middleware.rubric import (
+            MAIN_RUBRIC_MAX_ITERATIONS,
+            create_rubric_middleware,
+            dev_server_reachable,
+            live_task_status,
+        )
+
+        mw.append(
+            create_rubric_middleware(
+                model=tool_selector_model,
+                backend=backend,
+                max_iterations=MAIN_RUBRIC_MAX_ITERATIONS,
+                prepare_messages=this_run_messages,
+                require_run_marker=True,
+                task_status=live_task_status,
+                process_status=poll_status,
+                server_available=dev_server_reachable,
+                model_retry=_model_retry_middleware(
+                    cfg, unattended=unattended, honor_run_key=model_retry_honors_run_key
+                ),
+            )
+        )
+        from .middleware.goal import GoalContextMiddleware, GoalMiddleware
+
+        # After the grader in the list, which is safe only because it has no
+        # end hook; its block then closes our part of the system prompt.
+        mw.append(GoalContextMiddleware())
+        # First: its start hook answers a /goal request before any other
+        # start hook runs, and the message it adds at acceptance is then an
+        # ordinary user turn for skill pinning and checklist selection.
+        mw.insert(
+            0,
+            GoalMiddleware(
+                model=model,
+                backend=backend,
+                model_retry=_model_retry_middleware(
+                    cfg, unattended=unattended, honor_run_key=model_retry_honors_run_key
+                ),
+                # Nobody answers a review in auto mode.
+                unattended=bool(getattr(cfg, "auto_mode", False)),
+            ),
+        )
+
     return mw
 
 
 def _hitl_when(request) -> bool:
-    """HITL ``when`` predicate: interrupt unless the run is suppressed.
+    """HITL ``when`` predicate: interrupt unless the call says not to.
 
-    Reads ``configurable.hitl_suppressed`` off the run's own config, carried
-    on ``request.runtime.config`` — langchain builds the runtime for both its
+    A call skips the interrupt when its config carries
+    ``configurable.hitl_suppressed`` (an unattended run, backend-guarded) or
+    ``configurable.hitl_approve_all`` (the session's human "approve all").
+    Both are read off the run's own config, carried on
+    ``request.runtime.config`` — langchain builds the runtime for both its
     batch (``tool=None``) and per-call request shapes, so the request always
     carries it (batch mode falls back to an empty config when langgraph has
     none, which arms — same as before). Falls back to the ambient
     ``get_config()`` when there is no runtime, and arms (``True``) when there
-    is no config at all: outside a run there is nothing to suppress.
+    is no config at all: outside a run there is nothing to skip.
+
+    The predicate is evaluated again when a parked approval is resumed, and a
+    call that skips then drops that resume's decisions. Clients therefore send
+    the grant with an approval answer only when the grant itself produced it
+    (all approve; never the reply that grants), and otherwise with a
+    question's answer or a turn's first call while a grant is in force.
+    """
+    from .backends import is_hitl_approve_all
+
+    config = getattr(getattr(request, "runtime", None), "config", None)
+    return _hitl_when_served(request) and not is_hitl_approve_all(config)
+
+
+def _hitl_when_served(request) -> bool:
+    """``_hitl_when`` for the graph a server serves: only ``hitl_suppressed`` skips.
+
+    No server run has a use for the session grant (the server gateway drops
+    it), so a client that sends the key anyway is still asked.
     """
     from .backends import is_hitl_suppressed
 
-    runtime = getattr(request, "runtime", None)
-    config = getattr(runtime, "config", None)
+    config = getattr(getattr(request, "runtime", None), "config", None)
     return not is_hitl_suppressed(config)
 
 
-def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
+def _build_hitl_interrupt_on(
+    *, honor_approve_all: bool
+) -> dict[str, "InterruptOnConfig"]:
     """Return the always-armed HITL config for ``create_deep_agent``.
 
-    The main graph is *always* armed; per-run suppression is delegated to the
-    :func:`_hitl_when` predicate rather than keyed on ``auto_approve`` at
-    construction — otherwise a graph built once for an unattended session would
-    silently disable HITL for a later attended session on the same keepalive
-    server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
+    The main graph is *always* armed; per-run suppression is left to the
+    ``when`` predicate rather than keyed on ``auto_approve`` at construction:
+    :func:`_hitl_when` (``honor_approve_all``, the CLI agent) also skips under
+    the session grant, :func:`_hitl_when_served` (a served graph) only under
+    ``hitl_suppressed``. Otherwise a graph built once for an unattended session
+    would silently disable HITL for a later attended session on the same
+    keepalive server. Passing it to ``create_deep_agent`` (not ``HumanInTheLoopMiddleware``)
     lets declarative sub-agents inherit it while ``AsyncSubAgent`` specs do not —
     so async agents can't hang on an approval nobody can deliver.
     """
@@ -1160,7 +1292,7 @@ def _build_hitl_interrupt_on() -> dict[str, "InterruptOnConfig"]:
     return {
         tool: InterruptOnConfig(
             allowed_decisions=["approve", "edit", "reject", "respond"],
-            when=_hitl_when,
+            when=_hitl_when if honor_approve_all else _hitl_when_served,
         )
         for tool in HITL_INTERRUPT_ON
     }
@@ -1191,7 +1323,7 @@ def _get_default_agent():
 
         _EvoScientist_agent = create_deep_agent(
             **kwargs,
-            interrupt_on=_build_hitl_interrupt_on(),
+            interrupt_on=_build_hitl_interrupt_on(honor_approve_all=False),
         ).with_config({"recursion_limit": cfg.recursion_limit})
     return _EvoScientist_agent
 
@@ -1345,5 +1477,5 @@ def create_cli_agent(
     return create_deep_agent(
         **kwargs,
         checkpointer=checkpointer,
-        interrupt_on=_build_hitl_interrupt_on(),
+        interrupt_on=_build_hitl_interrupt_on(honor_approve_all=True),
     ).with_config({"recursion_limit": cfg.recursion_limit})

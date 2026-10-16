@@ -7,12 +7,13 @@ process and a plain ``import EvoScientist`` leave it unset.
 from __future__ import annotations
 
 import dataclasses
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from EvoScientist.langgraph_dev import manager
+from EvoScientist.langgraph_dev import boundary, manager
 
 
 class _PopenAbort(Exception):
@@ -84,6 +85,67 @@ def test_start_sets_workspace_dir_env(monkeypatch, tmp_path, runtime_paths):
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
     assert captured["env"].get("EVOSCIENTIST_WORKSPACE_DIR") == str(tmp_path)
+
+
+def test_start_sets_the_browser_boundary(monkeypatch, tmp_path, runtime_paths):
+    """Set on every start, so nothing inherited (a workspace ``.env``) widens
+    it; cloudflared inherits the server's environment."""
+    monkeypatch.setenv("CORS_CONFIG", '{"allow_origins": ["*"]}')
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "*")
+    monkeypatch.setenv("TUNNEL_HTTP_HOST_HEADER", "localhost")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(
+            workspace_dir=tmp_path,
+            port=16178,
+            allowed_origins="https://smith.langchain.com",
+        )
+    env = captured["env"]
+    cors = json.loads(env["CORS_CONFIG"])
+    assert cors["allow_origins"] == ["https://smith.langchain.com"]
+    assert json.loads(env[boundary.BOUNDARY_ENV])["origins"] == cors["allow_origins"]
+    assert "CORS_ALLOW_ORIGINS" not in env
+    assert "TUNNEL_HTTP_HOST_HEADER" not in env
+
+
+def test_start_passes_this_process_data_folder(monkeypatch, tmp_path, runtime_paths):
+    """The server runs in the workspace and loads its ``.env``; a relative or
+    later-changed variable must not give it another folder."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "rel-data")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16178)
+    assert captured["env"]["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
+
+
+def test_start_trusts_the_bind_host(monkeypatch, tmp_path, runtime_paths):
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(
+            workspace_dir=tmp_path, port=16178, host="myhost.local"
+        )
+    names = json.loads(captured["env"][boundary.BOUNDARY_ENV])["names"]
+    assert "myhost.local" in names
+
+
+def test_ensure_passes_backend_allowed_origins(monkeypatch, tmp_path, runtime_paths):
+    from EvoScientist.config import EvoScientistConfig
+
+    started: dict = {}
+    monkeypatch.setattr(manager, "is_langgraph_dev_running", lambda **_kw: False)
+    monkeypatch.setattr(manager, "_is_port_occupied", lambda *_a, **_kw: False)
+    monkeypatch.setattr(manager.atexit, "register", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        manager, "start_langgraph_dev", lambda *_a, **kw: started.update(kw)
+    )
+    config = EvoScientistConfig(
+        langgraph_dev_port=16178, backend_allowed_origins="https://smith.langchain.com"
+    )
+    manager.ensure_langgraph_dev(config, workspace_dir=tmp_path)
+    assert started["allowed_origins"] == "https://smith.langchain.com"
 
 
 # =============================================================================

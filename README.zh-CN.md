@@ -236,10 +236,11 @@ uv tool install EvoScientist
 ```
 
 > [!NOTE]
-> 更新已安装的版本到最新，请使用 `uv tool upgrade`：
+> 更新已安装的版本到最新（并使用该版本测试过的依赖版本），请使用 `EvoSci update`：
 > ```bash
-> uv tool upgrade EvoScientist
+> EvoSci update
 > ```
+> 0.3.6 及更早的版本还没有 `EvoSci update`，请先关闭 EvoScientist，再运行一次 `uv tool upgrade EvoScientist`。
 
 或安装到当前环境：
 
@@ -362,7 +363,7 @@ docker build -t evoscientist:dev .
 
 > [!NOTE]
 > 镜像中**未捆绑**以下内容，需要时基于镜像派生安装：
-> - **`stt`**（基于 `faster-whisper` 的语音转文字）和 **`oauth`**（`ccproxy-api`）
+> - **`stt`**（基于 `faster-whisper` 的语音转文字）和 **`oauth`**（`ccproxy-api`，用于 Claude 订阅 OAuth）
 > - **TinyTeX / LaTeX**（`pdflatex`、`latexmk`），供论文写作类技能使用
 >
 > ```dockerfile
@@ -457,6 +458,9 @@ EvoSci --ui cli                   # 经典 CLI（轻量）
 EvoSci --ui webui                 # 浏览器工作区界面（需 Node.js）
 EvoSci serve                      # 无头模式——仅渠道，无交互提示符
 EvoSci deploy                     # 独立 LangGraph 服务器——供外部 UI / SDK 客户端使用
+EvoSci -p "query" --rubric @criteria.md --auto-mode  # 按验收清单评分；没有得到 satisfied 判定时退出码为 3（docs/guides/rubric.md）
+# TUI / 交互式 CLI 里：/rubric set @criteria.md 对该线程的每一轮评分，/rubric next 只评下一个任务（docs/guides/rubric.md#interactive-sessions）
+# /goal <目标> 会草拟验收标准供你审核，之后每轮都按验收标准检查（docs/guides/goal.md）
 ```
 
 </details>

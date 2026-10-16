@@ -234,10 +234,33 @@ class TestHitlPromptBridge:
             chat_id="chat1",
             bus_ref=object(),
         )
-        assert (
-            channel_mod.channel_hitl_prompt([{"name": "execute"}], msg).decisions
-            is None
+        outcome = channel_mod.channel_hitl_prompt([{"name": "execute"}], msg)
+        assert outcome.decisions is None
+        assert outcome.rejected is False  # nobody could be asked
+
+    def test_an_engine_that_fails_is_not_a_rejection(self, monkeypatch):
+        """Nobody refused when the prompt itself broke."""
+        monkeypatch.setattr(
+            interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
         )
+
+        async def _broken(*_args, **_kwargs):
+            raise RuntimeError("send failed")
+
+        monkeypatch.setattr(channel_mod, "resolve_approval", _broken)
+        msg = ChannelMessage(
+            msg_id="m1",
+            content="",
+            sender="u1",
+            channel_type="fake",
+            chat_id="chat1",
+            bus_ref=object(),
+        )
+        with _BusLoopThread() as loop:
+            monkeypatch.setattr(channel_mod, "_bus_loop", loop)
+            outcome = channel_mod.channel_hitl_prompt([{"name": "execute"}], msg)
+        assert outcome.decisions is None
+        assert outcome.rejected is False
 
     def test_session_grant_approves_when_bus_loop_down(self, monkeypatch):
         monkeypatch.setattr(
@@ -255,9 +278,46 @@ class TestHitlPromptBridge:
 
         channel_mod._approval_policy.grant_session("fake:chat1")
 
-        assert channel_mod.channel_hitl_prompt(
-            [{"name": "execute"}], msg
-        ).decisions == [{"type": "approve"}]
+        outcome = channel_mod.channel_hitl_prompt([{"name": "execute"}], msg)
+        assert outcome.decisions == [{"type": "approve"}]
+        assert outcome.session_granted is True
+        assert outcome.grant_in_force is True
+
+    def test_config_auto_answer_is_not_reported_as_a_grant(self, monkeypatch):
+        monkeypatch.setattr(
+            interaction_mod,
+            "config_policy_snapshot",
+            lambda reqs: ([{"type": "approve"}], {}),
+        )
+        monkeypatch.setattr(channel_mod, "_bus_loop", None)
+        msg = ChannelMessage(
+            msg_id="m1",
+            content="",
+            sender="u1",
+            channel_type="fake",
+            chat_id="chat1",
+            bus_ref=object(),
+        )
+        outcome = channel_mod.channel_hitl_prompt([{"name": "execute"}], msg)
+        assert outcome.decisions == [{"type": "approve"}]
+        assert outcome.session_granted is False
+        assert outcome.grant_in_force is False
+
+    def test_channel_session_granted_is_per_chat(self):
+        def _msg(chat_id):
+            return ChannelMessage(
+                msg_id="m1",
+                content="",
+                sender="u1",
+                channel_type="fake",
+                chat_id=chat_id,
+                bus_ref=object(),
+            )
+
+        assert channel_mod.channel_session_granted(_msg("chat1")) is False
+        channel_mod._approval_policy.grant_session("fake:chat1")
+        assert channel_mod.channel_session_granted(_msg("chat1")) is True
+        assert channel_mod.channel_session_granted(_msg("chat2")) is False
 
     def test_approve_round_trip(self, monkeypatch):
         # Force the manual-prompt path (no config auto-approve).
@@ -335,6 +395,7 @@ class TestHitlPromptBridge:
                 [{"name": "execute", "args": {"command": "ls"}}], msg
             )
             assert result.decisions is None
+            assert result.rejected is True  # the user replied, not with a yes
 
             # Outbound: prompt, then the exact old unrecognized notice.
             async def _drain():

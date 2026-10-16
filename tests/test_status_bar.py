@@ -336,3 +336,48 @@ def test_make_usage_status_snapshot_marks_usage_source(monkeypatch):
     assert snapshot.context_window == 128_000
     assert snapshot.context_percent == 33
     assert snapshot.context_source == "usage"
+
+
+class TestRubricBadge:
+    def _snapshot(self):
+        from EvoScientist.cli.status_bar import SessionStatusSnapshot
+
+        return SessionStatusSnapshot(
+            model_full="claude-sonnet-4-6",
+            model_short="sonnet-4-6",
+            context_tokens=1000,
+            context_window=200000,
+            context_percent=1,
+        )
+
+    def test_badge_is_a_strong_fragment_on_wide_bars(self):
+        from datetime import datetime
+
+        from EvoScientist.cli.status_bar import build_status_fragments
+
+        frags = build_status_fragments(
+            self._snapshot(), datetime.now(), 120, rubric_badge="on+next"
+        )
+        assert ("class:status-bar-strong", "rubric: on+next") in frags
+        plain = build_status_fragments(self._snapshot(), datetime.now(), 120)
+        assert not any("rubric" in text for _style, text in plain)
+
+    def test_badge_is_left_out_of_narrow_bars(self):
+        from datetime import datetime
+
+        from EvoScientist.cli.status_bar import build_status_fragments
+
+        narrow = build_status_fragments(
+            self._snapshot(), datetime.now(), 60, rubric_badge="on"
+        )
+        assert not any("rubric" in text for _style, text in narrow)
+
+    def test_rich_text_carries_the_badge(self):
+        from datetime import datetime
+
+        from EvoScientist.cli.status_bar import build_status_text
+
+        text = build_status_text(
+            self._snapshot(), datetime.now(), 120, rubric_badge="next"
+        )
+        assert "rubric: next" in text.plain

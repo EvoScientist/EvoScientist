@@ -21,7 +21,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
-from ..message_meta import is_pinned_skill
+from ..message_meta import is_pinned_skill, is_rubric_feedback
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
@@ -87,7 +87,11 @@ def _build_thread_metadata(
 
 def _thread_preview(messages: list[BaseMessage]) -> str:
     for message in reversed(messages):
-        if getattr(message, "type", None) != "human" or is_pinned_skill(message):
+        if (
+            getattr(message, "type", None) != "human"
+            or is_pinned_skill(message)
+            or is_rubric_feedback(message)
+        ):
             continue
         content = message.content
         if isinstance(content, str):
@@ -456,7 +460,14 @@ class _ServerSubagentTracker:
                 events.extend(self._end(namespace))
         elif method == "tasks":
             if "result" in data:
-                events.extend(self._end_triggered_child(namespace, data.get("id")))
+                # A result that carries interrupts is a child that only paused.
+                events.extend(
+                    self._end_triggered_child(
+                        namespace,
+                        data.get("id"),
+                        paused=bool(data.get("interrupts")),
+                    )
+                )
             elif namespace:
                 events.extend(self._ensure_registered(namespace, tool_call_id=None))
         return events
@@ -492,24 +503,29 @@ class _ServerSubagentTracker:
             ).data
         ]
 
-    def _end(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
+    def _end(
+        self, path: tuple[str, ...], *, paused: bool = False
+    ) -> list[dict[str, Any]]:
         active = self._active.pop(path, None)
         if active is None:
             return []
         name, _tool_call_id = active
-        return [self.emitter.subagent_end(name, instance_id=":".join(path)).data]
+        end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
+        return [end.data]
 
     def _end_triggered_child(
         self,
         namespace: tuple[str, ...],
         result_id: object,
+        *,
+        paused: bool = False,
     ) -> list[dict[str, Any]]:
         if not result_id:
             return []
         events: list[dict[str, Any]] = []
         for path, (_name, tool_call_id) in list(self._active.items()):
             if path[:-1] == namespace and tool_call_id == result_id:
-                events.extend(self._end(path))
+                events.extend(self._end(path, paused=paused))
         return events
 
     @staticmethod
@@ -626,6 +642,7 @@ class LangGraphServerGateway:
         configurable_extra: Mapping[str, Any] | None,
         *,
         target: GraphTarget | None = None,
+        rubric_run: bool = False,
     ) -> dict[str, Any]:
         """Assemble this run's config, reading the live session config here.
 
@@ -640,7 +657,11 @@ class LangGraphServerGateway:
         server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
         overrides the server's construction-time ``.with_config`` binding.
         """
-        from ..backends import hitl_suppressed_for_run
+        from ..backends import (
+            HITL_APPROVE_ALL_KEY,
+            hitl_suppressed_for_run,
+            model_retry_for_run,
+        )
         from ..EvoScientist import _ensure_config
 
         cfg = _ensure_config()
@@ -662,10 +683,14 @@ class LangGraphServerGateway:
             if target is not None
             else {}
         )
+        # The session grant never reaches the server. The server turns a new
+        # message on a thread parked at an approval into a resume and keeps
+        # this run's config, so a keyed run would execute a batch nobody
+        # approved.
         extra = {
             key: value
             for key, value in (configurable_extra or {}).items()
-            if key not in folders
+            if key not in folders and key != HITL_APPROVE_ALL_KEY
         }
         config = resolve_per_run_config(
             thread_id,
@@ -673,6 +698,8 @@ class LangGraphServerGateway:
             per_run_overrides=overrides,
             recursion_limit=recursion_limit,
             hitl_suppressed=hitl_suppressed_for_run(cfg),
+            rubric_run=rubric_run,
+            model_retry=model_retry_for_run(cfg),
         )
         for key, value in folders.items():
             if value:
@@ -699,7 +726,10 @@ class LangGraphServerGateway:
         on_run_attempt: Callable[[], None],
     ) -> None:
         config = self._resolve_run_config(
-            request.thread_id, request.configurable_extra, target=request.target
+            request.thread_id,
+            request.configurable_extra,
+            target=request.target,
+            rubric_run=request.rubric is not None,
         )
         # ``_stream_events`` already registered the thread before the pre-run
         # state read. Skip the second ``threads.create(if_exists="do_nothing")``
@@ -735,9 +765,11 @@ class LangGraphServerGateway:
             if request.message.resume is not None:
                 # Known divergence: the resume goes through run.respond,
                 # which takes no config, so the per-run overrides above
-                # (model / recursion_limit) are NOT applied to a resumed
-                # turn - it runs with the thread's construction-time
-                # binding until the next fresh run re-applies them. The
+                # (model / recursion_limit / the rubric marker / the
+                # model_retry tier) are NOT
+                # applied to a resumed turn - it runs with the thread's
+                # construction-time binding until the next fresh run
+                # re-applies them. The
                 # primitive that would carry config on a resume is
                 # run.start with Command(resume=...); switching to it needs
                 # live-server verification first.
@@ -755,6 +787,8 @@ class LangGraphServerGateway:
         run_input = await build_agent_stream_input(
             request.message,
             media=request.media,
+            rubric=request.rubric,
+            goal_request=request.goal_request,
         )
         on_run_attempt()
         await stream.run.start(

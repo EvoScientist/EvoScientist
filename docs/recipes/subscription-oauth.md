@@ -1,13 +1,8 @@
-# Using EvoScientist with Your AI Subscriptions (Claude + ChatGPT/Codex OAuth)
+# Using EvoScientist with Your AI Subscriptions (Claude OAuth + ChatGPT sign-in)
 
-Run EvoScientist on the subscriptions you already pay for — **Claude Pro/Max**
-and/or **ChatGPT Plus/Pro** — with no API keys and no per-token billing.
-Requests are routed through [ccproxy](https://pypi.org/project/ccproxy-api/),
-a local proxy that authenticates with the same OAuth tokens your Claude Code
-or Codex CLI login produced.
+Run EvoScientist on the subscriptions you already pay for — **Claude Pro/Max** and/or **ChatGPT Plus/Pro** — with no API keys and no per-token billing.
 
-This recipe covers both providers, including three non-obvious pitfalls on the
-ChatGPT/Codex path that produce misleading errors or behavior.
+The two providers connect differently: Claude requests go through [ccproxy](https://pypi.org/project/ccproxy-api/), a local proxy that reuses your Claude Code OAuth login; ChatGPT needs no proxy, because EvoScientist signs in to your ChatGPT account itself.
 
 ---
 
@@ -15,28 +10,29 @@ ChatGPT/Codex path that produce misleading errors or behavior.
 
 ```txt
 EvoScientist (LangChain client)
-    │  ANTHROPIC_BASE_URL=http://127.0.0.1:8000/claude      (Claude OAuth)
-    │  OPENAI_BASE_URL=http://127.0.0.1:8000/codex/v1       (Codex OAuth)
-    ▼
-ccproxy  (localhost:8000)
-    │  Claude:  OAuth token from ~/.claude/.credentials.json
-    │  Codex:   OAuth token from ~/.codex/auth.json
-    ▼
-api.anthropic.com  /  chatgpt.com/backend-api/codex
-    (billed against your subscription quota, not API credits)
+    │
+    ├─ Claude:   ANTHROPIC_BASE_URL=http://127.0.0.1:8000/claude
+    │            ▼
+    │        ccproxy (localhost:8000), OAuth token from ~/.claude/.credentials.json
+    │            ▼
+    │        api.anthropic.com
+    │
+    └─ ChatGPT:  token from ~/.evoscientist/auth/chatgpt.json
+                 ▼
+             chatgpt.com/backend-api/codex
+
+    (both billed against your subscription quota, not API credits)
 ```
 
-EvoScientist manages all of this for you: when an `*_auth_mode` config key is
-set to `oauth`, `EvoSci` starts ccproxy automatically (or reuses a running
-instance on `ccproxy_port`) and points the provider's base URL at it.
+- **Claude** (`anthropic_auth_mode: oauth`): `EvoSci` starts ccproxy automatically (or reuses a running instance on `ccproxy_port`) and points the Anthropic base URL at it.
+- **ChatGPT** (`openai_auth_mode: oauth`): EvoScientist opens OpenAI's sign-in page once, stores the token under `~/.evoscientist/auth/chatgpt.json`, and calls the Codex backend with it. No proxy and no Codex CLI are involved.
 
 ---
 
 ## Prerequisites
 
-- An active **Claude Pro/Max** subscription (for Claude models) and/or an
-  active **ChatGPT Plus/Pro** subscription (for GPT models)
-- EvoScientist installed with the OAuth extra:
+- An active **Claude Pro/Max** subscription (for Claude models) and/or an active **ChatGPT Plus/Pro** subscription (for GPT models)
+- For Claude only, EvoScientist installed with the OAuth extra (ChatGPT sign-in needs nothing extra):
 
 ```bash
 pip install 'evoscientist[oauth]'
@@ -87,119 +83,69 @@ placeholder key and routes through ccproxy's `/claude` endpoint.
 
 ---
 
-## Part 2 — GPT models via ChatGPT subscription (Codex OAuth)
+## Part 2 — GPT models via ChatGPT subscription (ChatGPT sign-in)
 
-### 1. Authenticate (once per machine)
+This uses the ChatGPT sign-in that ships with `langchain-openai`, the same kind of sign-in the Codex CLI uses. It is unofficial, and OpenAI's terms apply to how you use your plan.
+
+### 1. Sign in (once per machine)
+
+Either run the wizard:
 
 ```bash
-ccproxy auth login codex
-ccproxy auth status codex   # shows email, subscription tier, status
+EvoSci onboard
 ```
+
+pick **OpenAI**, then **ChatGPT sign-in (no API key needed)**, and confirm `Log in to ChatGPT now?`.
+
+Or set the mode yourself and start EvoScientist in a terminal, which asks `Sign in with ChatGPT now?`:
+
+```bash
+EvoSci config set openai_auth_mode oauth
+EvoSci
+```
+
+Your browser opens OpenAI's sign-in page and returns to a local callback on `localhost:1455`. You stay signed in afterwards: the token refreshes itself before a request needs it.
 
 ### 2. Configure EvoScientist
 
 ```bash
 EvoSci config set openai_auth_mode oauth
 EvoSci config set provider         openai
-EvoSci config set model            gpt-5.5
+EvoSci config set model            gpt-6-sol
 EvoSci config set reasoning_effort high     # optional; see note below
 ```
 
-### 3. Know the three Codex-route pitfalls
+In this mode every `openai` model uses your plan: the main model, the auxiliary model and any OpenAI entry in the fallback chain. `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `EVOSCIENTIST_USE_RESPONSES_API` are ignored while it is on.
 
-The ChatGPT Codex backend is not a plain OpenAI-compatible API, and ccproxy's
-defaults interact badly with it in three ways. **EvoScientist handles all of
-them automatically when it starts ccproxy itself** — read this section if you
-are on an older version, run your own ccproxy instance (e.g. as a
-launchd/systemd service), or need to debug the errors.
+### 3. Models depend on your plan
 
-#### Pitfall A — ccproxy silently rewrites your model
-
-ccproxy ships default Codex *model mappings* that rewrite **any** model whose
-name starts with `gpt-`, `o1-`, `o3-`, or `claude-` to `gpt-5.3-codex` before
-forwarding. Your configured model never reaches the backend. On accounts
-where `gpt-5.3-codex` is not served, every request fails with an error naming
-a model you never asked for:
+Which model IDs the backend serves depends on your ChatGPT plan, and the lineup does **not** match the public OpenAI API. Measured on a ChatGPT **Plus** account (October 2026): `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra` and the `gpt-5.6` family complete successfully. Other tiers differ. A model your plan does not include answers:
 
 ```text
-The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.
+The '<model>' model is not supported when using Codex with a ChatGPT account.
 ```
 
-**Fix:** disable the mappings so requested models pass through unmodified.
-When EvoScientist starts ccproxy itself it sets these two keys through
-ccproxy's environment overrides (`PLUGINS__CODEX__MODEL_MAPPINGS=[]`,
-`PLUGINS__CODEX__INJECT_DETECTION_PAYLOAD=false`), which layer on top of any
-config file ccproxy finds on its own, so your other ccproxy settings keep
-working. (`ccproxy serve --config` does not reach the server's plugin
-settings.) For a ccproxy instance you manage yourself, add this section to
-your global config (`~/.config/ccproxy/config.toml`) and restart it:
+EvoScientist counts a 272K context window for models on this route, so a conversation whose main model is one of them is summarized before it reaches that size (as a fallback model, it gets the main model's budget). The backend accepts longer input, but every turn resends the whole context against your plan's usage limits; 272K is Codex's own default for most of these models.
 
-```toml
-[plugins.codex]
-model_mappings = []
-inject_detection_payload = false   # see Pitfall C
+> **`reasoning_effort`:** these models take `low`, `medium`, `high`, `xhigh` or `max` (`EvoSci onboard` offers the list after you pick a model, plus `default`, which keeps EvoScientist's level for each model); a configured `none` or `minimal` is sent as `low`. Higher effort costs more latency and more of your subscription quota per request.
+
+### 4. Machines without a browser
+
+Over SSH, EvoScientist prints the sign-in link instead of opening a browser. Forward the callback port from your own computer, then open the link there:
+
+```bash
+ssh -L 1455:localhost:1455 <host>
 ```
 
-(Note: ccproxy loads only the first config file it finds — a `.ccproxy.toml`
-in its working directory or a `ccproxy.toml` in a git repository root takes
-precedence and silently overrides the global config.)
+### 5. Docker
 
-#### Pitfall B — the backend gates models on client identity
-
-ccproxy forwards your client's own `User-Agent` upstream and only gap-fills
-its Codex headers. The backend then sees a generic HTTP client instead of a
-Codex client and rejects current models:
-
-```text
-The 'gpt-5.5' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.
-```
-
-**Fix:** send Codex-CLI-shaped headers with every request. EvoScientist
-(with #324) does this automatically whenever it detects the ccproxy Codex
-route. It advertises the installed Codex CLI version, with
-`EVOSCIENTIST_CODEX_CLIENT_VERSION` taking explicit precedence. Otherwise,
-it advertises the newer of the installed CLI version and EvoScientist's
-minimum fallback. If you probe the route manually (curl, scripts), supply
-the headers yourself — see Verification below.
-
-#### Pitfall C — ccproxy injects the Codex CLI system prompt
-
-By default ccproxy prepends the Codex CLI's own system prompt to every
-request's `instructions`, ahead of EvoScientist's. That prompt tells the model
-to edit files with an `apply_patch` tool, which EvoScientist does not provide
-(it edits through `edit_file` / `write_file`). The model then tries to run
-`apply_patch` as a shell command, and may refuse to edit files at all once it
-finds the command missing.
-
-**Fix:** `inject_detection_payload = false` in the same `[plugins.codex]`
-section. EvoScientist sets it through the environment override above; the
-Codex backend accepts requests that carry only EvoScientist's own
-instructions.
-
-### 4. Model availability is account-specific
-
-Which model IDs the Codex backend serves depends on your ChatGPT plan, and
-the lineup does **not** match the public OpenAI API. Measured on a ChatGPT
-**Plus** account (July 2026): plain `gpt-5.5` and `gpt-5.4` complete
-successfully, while `gpt-5.3-codex` is rejected. Other tiers differ. If a
-model errors, try the adjacent one (`gpt-5.4`) before assuming the setup is
-broken. Community measurements also indicate the Codex route enforces a
-smaller context window than the public API for the same model IDs
-(~272K for gpt-5.5 vs 1.05M on the API).
-
-> **`reasoning_effort`:** with #324, the ccproxy Codex route uses the
-> Responses API and accepts reasoning configuration. With
-> [#321](https://github.com/EvoScientist/EvoScientist/pull/321), EvoScientist
-> passes an explicitly configured effort (`low`/`medium`/`high`/`xhigh`);
-> when unset, EvoScientist applies its own per-model default. Older releases
-> that used Chat Completions on this route ignored reasoning effort. Higher
-> effort costs more latency and more of your subscription quota per request.
+Sign in on a machine with a browser, then copy `~/.evoscientist/auth/chatgpt.json` into the container's data volume at `/home/evosci/.evoscientist/auth/chatgpt.json`. Stop EvoScientist in the container before you replace the file, and make sure the file and its `auth/` directory belong to the container user (`evosci`): EvoScientist rewrites the file whenever the token refreshes. Then sign in again on the machine with the browser (`EvoSci onboard`, ChatGPT sign-in, re-authenticate) before you use EvoSci there, so each side holds its own sign-in: OpenAI replaces the stored token on every refresh, and two machines sharing one token sign each other out. If the container later reports `ChatGPT sign-in required`, repeat both steps: copy a fresh file in, then sign in again on the machine with the browser.
 
 ---
 
 ## Verification
 
-Health check (default port 8000; change if you set `ccproxy_port`):
+Claude: ccproxy health check (default port 8000; change if you set `ccproxy_port`):
 
 ```bash
 curl -s http://127.0.0.1:8000/health | head -c 60
@@ -215,22 +161,15 @@ print(get_chat_model('claude-sonnet-4-6', provider='anthropic').invoke('Reply wi
 "
 ```
 
-End-to-end Codex probe (headers required — Pitfall B).
-Any recent Codex CLI version string works here; the backend only checks that the client is new enough:
+End-to-end ChatGPT probe (after signing in):
 
 ```bash
-CODEX_VERSION="<recent Codex CLI version>"   # e.g. what `codex --version` prints
-curl -sN http://127.0.0.1:8000/codex/v1/responses \
-  -H "content-type: application/json" \
-  -H "originator: codex_cli_rs" \
-  -H "version: ${CODEX_VERSION}" \
-  -H "user-agent: codex_cli_rs/${CODEX_VERSION} (probe)" \
-  -d '{"model":"gpt-5.5","stream":true,"store":false,
-       "input":[{"role":"user","content":[{"type":"input_text","text":"Reply with exactly: OK"}]}]}'
+EVOSCIENTIST_OPENAI_AUTH_MODE=oauth \
+python -c "
+from EvoScientist.llm import get_chat_model
+print(get_chat_model('gpt-6-sol', provider='openai').invoke('Reply with exactly: OK').text)
+"
 ```
-
-Success is an SSE stream ending in `response.completed` whose payload shows
-`"model":"gpt-5.5"` — confirming the model was not rewritten en route.
 
 ---
 
@@ -238,24 +177,20 @@ Success is an SSE stream ending in `response.completed` whose payload shows
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.` (you requested a different model) | ccproxy's default model mappings rewrote your model (Pitfall A) | Disable `model_mappings` and restart ccproxy |
-| `The '<model>' model requires a newer version of Codex. Please upgrade…` | Backend rejected the client identity (Pitfall B) | Use an EvoScientist build containing #324, or send Codex headers; `EVOSCIENTIST_CODEX_CLIENT_VERSION` is the explicit override |
-| `The '<model>' model is not supported…` for the model you actually requested | Your ChatGPT tier does not serve that ID | Try `gpt-5.4`; check tier |
-| The agent tries `apply_patch` or refuses to edit files, citing a developer instruction | ccproxy injected the Codex CLI system prompt (Pitfall C) | Set `inject_detection_payload = false` and restart ccproxy |
-| `Run: ccproxy auth login codex` (or `claude_api`) on startup | No OAuth credentials on this machine | Run the login command shown |
-| `ccproxy not found` | OAuth extra not installed | `pip install 'evoscientist[oauth]'` |
-| Config change has no effect | A long-running ccproxy instance predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | Restart that ccproxy instance; check for a shadowing config file |
+| `ChatGPT sign-in required (openai_auth_mode is "oauth"). Start EvoSci in a terminal to sign in.` | No ChatGPT token on this machine, or OpenAI no longer accepts the stored one | Start `EvoSci` in a terminal and confirm the sign-in prompt |
+| `ChatGPT sign-in required (openai_auth_mode is "oauth"). Run EvoSci again to sign in, ...` | The sign-in prompt was declined or did not complete | Run `EvoSci` again and confirm the prompt, or switch to an API key with `EvoSci config set openai_auth_mode api_key` |
+| `Port 1455 is in use (another sign-in may be running). Close it and try again.` | Another sign-in, or a Codex CLI login, holds the callback port | Finish or close it, then retry |
+| `The '<model>' model is not supported when using Codex with a ChatGPT account.` | Your ChatGPT plan does not include that model | Pick a model your plan serves |
+| OpenAI requests fail with a connection error to `127.0.0.1` right after upgrading | A background server started before the upgrade still routes OpenAI through ccproxy | `EvoSci server stop`, then start again |
+| `Run: ccproxy auth login claude_api` on startup | No Claude OAuth credentials on this machine | Run the login command shown |
+| `ccproxy is required for OAuth mode but not found` | OAuth extra not installed (Claude only) | `pip install 'evoscientist[oauth]'` |
+| ccproxy config change has no effect | A long-running ccproxy instance predates the config, or a higher-precedence `.ccproxy.toml`/`ccproxy.toml` shadows it | Restart that ccproxy instance; check for a shadowing config file |
 
-**Debugging tip:** `ccproxy serve --port 8001 --log-level debug` on a spare
-port shows exactly what is forwarded upstream. **Warning:** debug logs print
-`Authorization` bearer tokens — never paste raw log lines anywhere.
+**Debugging tip (Claude):** `ccproxy serve --port 8001 --log-level debug` on a spare port shows exactly what is forwarded upstream. **Warning:** debug logs print `Authorization` bearer tokens — never paste raw log lines anywhere. The same goes for `chatgpt.json`: it holds your ChatGPT tokens.
 
 ---
 
 ## Quota and billing notes
 
-- OAuth routing consumes your **subscription's** usage limits (the same pool
-  as Claude Code / the Codex app). Nothing is billed to an API key, but heavy
-  agent workloads can exhaust subscription rate limits faster than chat use.
-- Tokens auto-refresh via ccproxy; re-run `ccproxy auth login …` only if
-  status shows expired/not authenticated.
+- Subscription routing consumes your **subscription's** usage limits (the same pool as Claude Code / the Codex app). Nothing is billed to an API key, but heavy agent workloads can exhaust subscription rate limits faster than chat use.
+- Tokens refresh on their own: Claude's via ccproxy (re-run `ccproxy auth login claude_api` only if status shows expired/not authenticated), ChatGPT's by EvoScientist before a request.

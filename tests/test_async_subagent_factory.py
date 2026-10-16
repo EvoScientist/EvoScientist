@@ -102,6 +102,8 @@ def test_factory_requests_async_safe_middleware(
         work_dir=None,
         for_async_subagent=True,
         memory_source_agent="writing-agent",
+        unattended=False,
+        model_retry_honors_run_key=True,
         backend=mock_backend.return_value,
         chat_model=mock_chat.return_value,
     )
@@ -366,3 +368,77 @@ def test_async_subagent_disables_tool_selector_stream_tracking(
     # so they never drive the main-agent tool-selection widget.
     mock_tool_selector.assert_called_once()
     assert isinstance(mock_tool_selector.call_args.kwargs["events"], NoOpSink)
+
+
+@patch(
+    "EvoScientist.middleware.create_per_run_summarization_middleware",
+    return_value=MagicMock(name="summarization"),
+)
+@patch(
+    "EvoScientist.middleware.create_tool_selector_middleware",
+    return_value=[MagicMock()],
+)
+@patch("EvoScientist.EvoScientist._ensure_chat_model")
+@patch("EvoScientist.EvoScientist._ensure_config")
+def test_main_agent_mounts_the_grader_after_our_other_after_agent_hooks(
+    mock_config, mock_chat, mock_tool_selector, mock_summarization, workspace, tmp_path
+):
+    from deepagents.backends import FilesystemBackend
+
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    cfg.memory_profile_enabled = True
+    cfg.memory_observations_enabled = True
+    cfg.memory_observation_writer = MemoryObservationWriter.ALL
+    cfg.memory_workers_enabled = True
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    mock_config.return_value = cfg
+    mock_chat.return_value = MagicMock(profile={"max_input_tokens": 200_000})
+
+    from EvoScientist.EvoScientist import _get_default_middleware
+    from EvoScientist.message_meta import this_run_messages
+    from EvoScientist.middleware.rubric import EvoRubricMiddleware
+
+    backend = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
+    main = _get_default_middleware(workspace=workspace, backend=backend)
+
+    from langchain.agents.middleware.types import AgentMiddleware
+
+    def _has(m, *hooks):
+        # The tool selector and summarization are mocked in this test.
+        return isinstance(m, AgentMiddleware) and any(
+            getattr(type(m), hook) is not getattr(AgentMiddleware, hook)
+            for hook in hooks
+        )
+
+    # End hooks run in reverse list order, so the grader must be the last
+    # middleware that has one; what follows it may only shape model calls.
+    with_end_hook = [m for m in main if _has(m, "after_agent", "aafter_agent")]
+    grader = with_end_hook[-1]
+    assert isinstance(grader, EvoRubricMiddleware)
+    assert grader.max_iterations == 3
+    assert grader._prepare_run_messages is this_run_messages
+    assert grader._require_run_marker is True
+    after_grader = main[main.index(grader) + 1 :]
+    assert [type(m).__name__ for m in after_grader] == ["GoalContextMiddleware"]
+    assert not _has(
+        after_grader[0], "before_agent", "abefore_agent", "after_agent", "aafter_agent"
+    )
+    names = [type(m).__name__ for m in main]
+    assert {"EvoMemoryLifecycleMiddleware", "EvoCodeInterpreterMiddleware"} <= set(
+        names[: main.index(grader)]
+    )
+    # The goal's start hook answers a request before any other start hook.
+    assert names[0] == "GoalMiddleware"
+
+    sub = _get_default_middleware(
+        workspace=workspace, backend=backend, for_async_subagent=True
+    )
+    assert not any(isinstance(m, EvoRubricMiddleware) for m in sub)
+
+    no_backend = _get_default_middleware(workspace=workspace)
+    assert not any(isinstance(m, EvoRubricMiddleware) for m in no_backend)

@@ -227,10 +227,11 @@ uv tool install EvoScientist
 ```
 
 > [!NOTE]
-> To update an existing installation to the latest version, use `uv tool upgrade`:
+> To update an existing installation to the latest version, with the dependency versions that release was tested with, use `EvoSci update`:
 > ```bash
-> uv tool upgrade EvoScientist
+> EvoSci update
 > ```
+> On 0.3.6 or older, which have no `EvoSci update`, run `uv tool upgrade EvoScientist` once, with EvoScientist closed.
 
 Or install into the current environment instead:
 
@@ -353,7 +354,7 @@ docker build -t evoscientist:dev .
 
 > [!NOTE]
 > Not bundled — install on demand by deriving from the image:
-> - **`stt`** (speech-to-text via `faster-whisper`) and **`oauth`** (`ccproxy-api`)
+> - **`stt`** (speech-to-text via `faster-whisper`) and **`oauth`** (`ccproxy-api`, for Claude subscription OAuth)
 > - **TinyTeX / LaTeX** (`pdflatex`, `latexmk`) for paper-writing skills
 >
 > ```dockerfile
@@ -449,6 +450,9 @@ EvoSci --ui webui                 # browser workspace UI (needs Node.js)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
+EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a checklist; exit code 3 without a satisfied verdict (docs/guides/rubric.md)
+# In the TUI / interactive CLI: /rubric set @criteria.md grades every turn of the thread, /rubric next only the next task (docs/guides/rubric.md#interactive-sessions)
+# /goal <objective> drafts acceptance criteria for you to review, then grades each turn against them (docs/guides/goal.md)
 ```
 
 `--output-format stream-json` makes a single-shot (`-p`) run emit its native events as line-delimited JSON on stdout (one object per line), with all human output on stderr — the integration surface for headless clients (e.g. an agent runtime). See [docs/guides/stream-json.md](docs/guides/stream-json.md) for the event schema.
@@ -485,6 +489,14 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 > **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so `--host` puts port 6174 on the network in every mode. The front-end port (4716) is WebUI-only but not harmless either: its API reads, writes and uploads workspace files and installs skills, so it gets the same banner and the same trusted-network rule.
 >
 > On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
+
+**Pages from other origins.** In every mode, `EvoSci deploy` included, the backend answers browser requests only from pages on this machine (any port) and on the machine's own addresses when it listens on the network. Other pages get `403`, shown in the browser as a CORS or network error and logged by the backend; under `--tunnel` this includes pages that call the public URL. To use the backend from another page, such as LangSmith Studio, add its origin and restart the backend:
+
+```bash
+EvoSci config set backend_allowed_origins https://smith.langchain.com
+```
+
+The same applies to a WebUI opened by a DNS name, to clients that reach a Docker container through the host's address, and to other containers that use a service name such as `http://evoscientist:6174`.
 
 </details>
 

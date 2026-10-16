@@ -15,7 +15,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ..gateway import GraphGateway, GraphRunInput, GraphTarget, RunRequest
 from .base import Channel
@@ -32,6 +32,9 @@ from .interaction import (
     resolve_approval,
     resolve_ask_user,
 )
+
+if TYPE_CHECKING:
+    from ..backends import ParkedCloseReason
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,41 @@ def _format_todo_list(todos: list[dict]) -> str:
         lines.append(f"{i}. {content}")
     lines.append(f"\n\U0001f680 {len(todos)} tasks")  # 🚀
     return "\n".join(lines)
+
+
+def trim_text(text: str, chars: int) -> str:
+    """Drop ``chars`` characters from the end of ``text`` (a failed model attempt's output)."""
+    return text[: max(0, len(text) - chars)] if chars > 0 else text
+
+
+def apply_model_discard(
+    event: dict,
+    final_content: str,
+    subagent_text_buffers: dict[str, tuple[str, list[str]]],
+    thinking_buffer: list[str],
+) -> str:
+    """Drop a failed model attempt's output from the reply buffers; the trimmed main text."""
+    discarded = event.get("discarded") or {}
+    chars = int(discarded.get("text_chars") or 0)
+    instance_id = event.get("instance_id") or ""
+    if instance_id:
+        if instance_id in subagent_text_buffers:
+            trim_buffer(subagent_text_buffers[instance_id][1], chars)
+        return final_content
+    trim_buffer(thinking_buffer, int(discarded.get("thinking_chars") or 0))
+    return trim_text(final_content, chars)
+
+
+def trim_buffer(chunks: list[str], chars: int) -> None:
+    """Drop ``chars`` characters from the end of a chunk list in place."""
+    remaining = chars
+    while remaining > 0 and chunks:
+        last = chunks[-1]
+        if len(last) <= remaining:
+            remaining -= len(chunks.pop())
+        else:
+            chunks[-1] = last[: len(last) - remaining]
+            remaining = 0
 
 
 def _join_subagent_text(buffers: dict[str, tuple[str, list[str]]]) -> str:
@@ -421,6 +459,25 @@ class InboundConsumer:
                     refeed, channel, thread_id, session_key
                 )
 
+    async def _close_parked(self, thread_id: str, reason: ParkedCloseReason) -> None:
+        """Close the pause this turn ends at; the turn ends the same if that fails."""
+        from ..backends import close_parked_checkpoint
+
+        try:
+            await close_parked_checkpoint(
+                self.graph_gateway,
+                GraphTarget(local_graph=self.agent),
+                thread_id,
+                reason=reason,
+            )
+        except Exception:
+            # The close has logged why.
+            logger.debug(
+                "Parked HITL checkpoint close failed on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+
     async def _stream_with_hitl(
         self,
         msg: InboundMessage,
@@ -451,7 +508,11 @@ class InboundConsumer:
             # Total cap is checked after each stream, before the next
             # decision. The human budget is checked only when a prompt
             # would be shown (issue #469).
+            from ..backends import approve_all_configurable_extra
             from .hitl_budget import HITL_BUDGET_STOP_NOTICE, hitl_budget_stop
+
+            # Which calls carry this chat's grant: see ``_hitl_when``.
+            approve_all_carry = self._approval_policy.is_session_granted(session_key)
 
             while True:
                 _hitl_round += 1
@@ -494,6 +555,9 @@ class InboundConsumer:
                                 if isinstance(stream_input, str)
                                 else None,
                                 target=GraphTarget(local_graph=self.agent),
+                                configurable_extra=approve_all_configurable_extra(
+                                    approve_all_carry
+                                ),
                             )
                         ),
                         self._inference_timeout,
@@ -537,6 +601,14 @@ class InboundConsumer:
                                 subagent_text_buffers[instance_id] = (sa_name, [])
                             subagent_text_buffers[instance_id][1].append(
                                 event.get("content", "")
+                            )
+
+                        elif event_type in ("model_retry", "model_output_discarded"):
+                            final_content = apply_model_discard(
+                                event,
+                                final_content,
+                                subagent_text_buffers,
+                                thinking_buffer,
                             )
 
                         elif event_type == "done":
@@ -598,6 +670,9 @@ class InboundConsumer:
                     )
 
                     stream_input = Command(resume=result)
+                    approve_all_carry = self._approval_policy.is_session_granted(
+                        session_key
+                    )
                     continue
 
                 # HITL: resolve the interrupt through the shared engine.
@@ -629,6 +704,9 @@ class InboundConsumer:
                     # returned to ``_handle_message`` so chat-lock ordering
                     # stays serialized.
                     await io.send(REJECTED_FEEDBACK)
+                    # Closed before the reply is fed back, so the new turn
+                    # does not land on the parked approval.
+                    await self._close_parked(thread_id, "rejected")
                     # In this flow, the final wait_reply call is exactly the
                     # unrecognized approval reply. ask_user does not read this.
                     refeed_msg = io.take_reply_context()
@@ -639,12 +717,19 @@ class InboundConsumer:
                         )
                     return refeed_msg
                 if outcome.decisions is None:
-                    return None  # reject / timeout / stop — end the turn
+                    # reject / timeout / stop — end the turn
+                    await self._close_parked(
+                        thread_id, "rejected" if outcome.rejected else "unanswered"
+                    )
+                    return None
 
-                from ..backends import build_hitl_resume
+                from ..backends import answer_keeps_grant, build_hitl_resume
 
                 stream_input = build_hitl_resume(
                     interrupt_data.get("interrupt_id"), outcome.decisions
+                )
+                approve_all_carry = answer_keeps_grant(
+                    outcome.session_granted, outcome.decisions
                 )
                 # continue to next HITL round
 
@@ -652,21 +737,7 @@ class InboundConsumer:
             # resuming the agent (a rejecting resume runs another model
             # step), send any partial answer from the last real round, then
             # the stop notice (issue #469).
-            from ..backends import close_parked_checkpoint
-
-            try:
-                await close_parked_checkpoint(
-                    self.graph_gateway,
-                    GraphTarget(local_graph=self.agent),
-                    thread_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to close parked HITL checkpoint for %s in %s",
-                    msg.sender_id,
-                    session_key,
-                    exc_info=True,
-                )
+            await self._close_parked(thread_id, "round_limit")
             logger.warning(
                 "HITL round limit reached for %s in %s", msg.sender_id, session_key
             )

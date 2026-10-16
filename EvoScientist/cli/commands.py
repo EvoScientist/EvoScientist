@@ -1,5 +1,6 @@
 """Typer command registrations — onboard, config, mcp, main callback."""
 
+import copy
 import json
 import logging
 import os
@@ -62,6 +63,7 @@ from .channel import (
     _start_channels_bus_mode,
     channel_ask_user_prompt,
     channel_hitl_prompt,
+    channel_session_granted,
     dispatch_channel_slash_command,
     forget_channel_origin,
     get_channel_origin,
@@ -110,6 +112,53 @@ def _get_cli_async_runtime(ctx: typer.Context) -> AsyncRuntime:
     if not isinstance(runtime, AsyncRuntime):  # pragma: no cover - defensive
         raise RuntimeError("CLI async runtime context is invalid")
     return runtime
+
+
+def _interactive_start(prompt: str | None) -> bool:
+    """True when a person is at the terminal: no ``-p`` and both streams are ttys."""
+    streams = (sys.stdin, sys.stdout)
+    return not prompt and all(s is not None and s.isatty() for s in streams)
+
+
+def _providers_in_use(config: Any) -> set[str]:
+    """Providers of the main, auxiliary and fallback models."""
+    from ..config.onboard.wizard import _active_llm_providers
+
+    fallbacks = {
+        entry.rsplit(":", 1)[1].strip()
+        for entry in (config.model_fallbacks or "").split(",")
+        if ":" in entry
+    }
+    return _active_llm_providers(config) | fallbacks
+
+
+def _require_chatgpt_sign_in(config: Any, *, interactive: bool) -> None:
+    """Stop startup when OpenAI uses ChatGPT sign-in and nobody is signed in.
+
+    An interactive start offers the browser sign-in first.
+    """
+    if getattr(config, "openai_auth_mode", "api_key") != "oauth":
+        return
+
+    from ..llm import chatgpt_oauth
+
+    state = chatgpt_oauth.status()
+    if state.signed_in:
+        return
+    if state.problem:
+        console.print(f"[yellow]ChatGPT: {state.problem}[/yellow]")
+    if interactive:
+        import questionary
+
+        from ..config.onboard.helpers import _run_chatgpt_login
+
+        if questionary.confirm("Sign in with ChatGPT now?", default=True).ask():
+            if _run_chatgpt_login():
+                return
+        console.print(f"[red]{chatgpt_oauth.SIGN_IN_AGAIN}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[red]{chatgpt_oauth.SIGN_IN_HINT}[/red]")
+    raise typer.Exit(1)
 
 
 # =============================================================================
@@ -253,6 +302,73 @@ def onboard(
         prompter=prompter,
         runtime=_get_cli_async_runtime(ctx),
     )
+
+
+# =============================================================================
+# Update command
+# =============================================================================
+
+
+@app.command()
+def update(
+    version: str | None = typer.Option(
+        None,
+        "--version",
+        help=(
+            "Install this release instead of the newest one; an older one rolls "
+            "back. An older release keeps only the config keys and values it "
+            "knows: its next config save drops the rest (all settings, if it "
+            "cannot read the file), so config.yaml is copied to "
+            "config.yaml.bak-<current version> first. sessions.db is used as it is."
+        ),
+    ),
+    check: bool = typer.Option(
+        False, "--check", help="Only print the installed and the newest version"
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Stop a running server without asking"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON event per line; never asks"
+    ),
+    skip: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skip", help="Pass --skip <id> to the new EvoSci setup (repeatable)"
+        ),
+    ] = None,
+):
+    """Update EvoScientist to the newest release, with its tested dependencies.
+
+    A uv tool install (the install scripts, or uv tool install) is reinstalled
+    with the release's constraints.txt, keeping its extras, Python version and
+    packages added with --with, on uv's own Python (an install made without
+    --python moves to uv's Python of the same version on its first update).
+    The new version's EvoSci setup runs afterwards. For pip, conda, an
+    editable install or the Docker image, it prints what to run instead.
+    """
+    from ..setup.protocol import ConsoleEmitter, JsonEmitter
+    from ..updater import UpdateOptions, run_update
+
+    if json_output:
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+        emit = JsonEmitter()
+        confirm = None
+    else:
+        emit = ConsoleEmitter(console)
+        confirm = (
+            (lambda question: typer.confirm(question, default=False))
+            if sys.stdin.isatty()
+            else None
+        )
+    opts = UpdateOptions(
+        version=version, check=check, yes=yes, json=json_output, skip=list(skip or ())
+    )
+    code = run_update(opts, emit, confirm=confirm)
+    if code:
+        raise typer.Exit(code)
 
 
 # =============================================================================
@@ -433,7 +549,7 @@ def configure_provider(
 
 @configure_app.command("model")
 def configure_model():
-    """Re-run model selection (and reasoning effort for OpenRouter)."""
+    """Re-run model selection (and reasoning effort for OpenRouter and OpenAI)."""
     _configure_section("model")
 
 
@@ -1374,6 +1490,23 @@ async def _apply_serve_resume_state(
 
     new_dirs = dirs if dirs is not None and dirs != runtime_state.dirs else None
     workspace_update: tuple[SessionDirs, CompiledStateGraph] | None = None
+    old_thread_id = runtime_state.thread_id
+    thread_changed = thread_id != old_thread_id
+    # Serve pauses the thread it leaves and ends the wait on a thread restored
+    # after a restart, in the store of the workspace it leaves them in.
+    left_thread = False
+    # Whether the thread serve leaves was armed: a refused move re-arms it.
+    left_armed = False
+
+    async def leave_thread(proactive: Any) -> None:
+        nonlocal left_thread, left_armed
+        left_thread = True
+        left_armed = proactive.is_armed(old_thread_id)
+        for call in (
+            lambda: proactive.leave(old_thread_id),
+            lambda: proactive.on_turn(thread_id),
+        ):
+            await asyncio.to_thread(_serve_proactive_call, call)
 
     if new_dirs is not None:
         effective_config = _serve_resume_config(runtime_state, config)
@@ -1389,28 +1522,219 @@ async def _apply_serve_resume_state(
             config=effective_config,
             runtime=runtime_state.async_runtime,
         )
-        if not await _move_server_or_keep_session(
-            effective_config,
-            target=new_dirs,
-            current=runtime_state.dirs,
-            backend=runtime_state.gateway_backend,
-        ):
+        proactive = getattr(channel_runtime, "proactive", None)
+        moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace
+        if proactive is not None and moves_workspace:
+            # Until C17 each workspace has its own cron store: pause the thread
+            # serve leaves and delete this workspace's proactive cron while its
+            # store is still the served one.
+            if thread_changed:
+                await leave_thread(proactive)
+            await asyncio.to_thread(_serve_proactive_call, proactive.stop)
+        from ..langgraph_dev.manager import WorkspaceMismatchError
+
+        try:
+            moved = await _move_server_or_keep_session(
+                effective_config,
+                target=new_dirs,
+                current=runtime_state.dirs,
+                backend=runtime_state.gateway_backend,
+            )
+        except WorkspaceMismatchError:
+            if proactive is not None and moves_workspace:
+                if left_armed:
+                    # The session stays on the thread it was leaving: arm it again.
+                    await asyncio.to_thread(
+                        _serve_proactive_call, lambda: proactive.adopt(old_thread_id)
+                    )
+                # ``stop`` deleted the cron above; bring it back for the threads
+                # that stay armed.
+                await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+            raise
+        if not moved:
             console.print(
                 "[yellow]Background agent server sync failed; async "
                 "subagents and EvoMemory workers may be unavailable.[/yellow]"
             )
+            if proactive is not None and moves_workspace:
+                from ..proactive.serve import MOVE_FAILED_REASON
+
+                proactive.unavailable_reason = MOVE_FAILED_REASON
+        elif proactive is not None and moves_workspace:
+            proactive.move_to(new_dirs.workspace)
+            # Clears a proactive cron an earlier serve left in that workspace.
+            await asyncio.to_thread(_serve_proactive_call, proactive.reconcile)
         workspace_update = (new_dirs, new_agent)
 
-    old_thread_id = runtime_state.thread_id
-    thread_changed = thread_id != old_thread_id
     if thread_changed:
         runtime_state.set_thread_id(thread_id, channel_runtime)
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            if not left_thread:
+                await leave_thread(proactive)
+            # A thread armed or paused earlier is armed again here.
+            await asyncio.to_thread(
+                _serve_proactive_call, lambda: proactive.adopt(thread_id)
+            )
 
     if workspace_update is not None:
         updated_dirs, updated_agent = workspace_update
         runtime_state.dirs = updated_dirs
         _set_channels_media_dir(updated_dirs.workspace.media_dir)
         runtime_state.set_agent(updated_agent, channel_runtime)
+
+    # Tell the proactive cron which threads serve can now deliver to. Last, so
+    # the thread, folders and agent are already the new ones. Idempotent:
+    # ``/resume`` reaches this function twice.
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None:
+        await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+
+
+def _serve_turn_metadata(
+    dirs: SessionDirs,
+    model: str | None,
+    thread_id: str,
+    channel_runtime: ChannelRuntime | None,
+) -> dict[str, str]:
+    """Run metadata of a serve turn: ``build_metadata`` plus, for a thread armed
+    for proactive pushes, its channel origin.
+
+    The runtime copies run metadata into the run's checkpoints, which is how
+    the origin survives a restart. ``build_metadata`` itself stays as it is:
+    the TUI, the CLI and single-shot runs share it.
+    """
+    from ..proactive.serve import origin_run_metadata
+
+    meta = build_metadata(dirs, model)
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None and proactive.is_armed(thread_id):
+        origin = get_channel_origin(thread_id)
+        if origin is not None:
+            meta.update(origin_run_metadata(origin))
+    return meta
+
+
+def _serve_proactive_call(call: Callable[[], None]) -> None:
+    """Run a proactive-controller call; a failure is logged, never raised.
+
+    Proactive pushes are best effort: a dev-server error must not break the
+    channel turn or the ``/new`` / ``/resume`` that triggered the call.
+    """
+    try:
+        call()
+    except Exception:
+        _serve_logger.warning("Proactive push bookkeeping failed", exc_info=True)
+
+
+def _serve_proactive_controller(
+    config: "EvoScientistConfig",
+    runtime_gateways: "RuntimeGateways",
+    *,
+    gateway_backend: str | None,
+    workspace: Workspace,
+) -> Any:
+    """Build serve's proactive controller, marked unavailable with the reason.
+
+    The cron runs on the dev server, so the feature needs serve's gateway to
+    be the server one: not the ``local`` backend, and not #470's fallback to
+    the in-process gateway when the dev server was unavailable at startup.
+    """
+    from ..gateway.composite import CompositeGraphGateway
+    from ..langgraph_dev.sdk import (
+        configured_langgraph_dev_url,
+        default_scheduler_timezone,
+        get_langgraph_sync_client,
+    )
+    from ..proactive.serve import ProactiveServe
+
+    reason = None
+    client = None
+    if gateway_backend != "langgraph_server":
+        reason = "proactive follow-ups need `gateway_backend_serve: langgraph_server`"
+    elif not isinstance(runtime_gateways.graph_gateway, CompositeGraphGateway):
+        reason = (
+            "the dev server was unavailable when serve started, so serve runs "
+            "in-process; restart serve to use proactive follow-ups"
+        )
+    else:
+        # Serve's message loop makes these calls: a dev server that accepts
+        # connections but stalls must not hold channel messages for minutes.
+        client = get_langgraph_sync_client(
+            url=configured_langgraph_dev_url(), timeout=10.0
+        )
+    return ProactiveServe(
+        workspace=workspace,
+        client=client,
+        timezone=default_scheduler_timezone(config),
+        unavailable_reason=reason,
+        publish=publish_to_channel_origin,
+        can_deliver=lambda thread_id: get_channel_origin(thread_id) is not None,
+        forget_origin=forget_channel_origin,
+        origin_of=get_channel_origin,
+    )
+
+
+def _serve_restore_proactive(proactive: Any, async_runtime: AsyncRuntime) -> None:
+    """Re-arm the conversation that was armed before serve restarted.
+
+    Its channel origin comes back from checkpoint metadata, so a push can
+    reach the chat even though serve starts on a fresh thread.
+    """
+    from ..sessions import latest_origin_checkpoints
+    from .channel import restore_channel_origin
+
+    if not proactive.available:
+        return
+    rows = async_runtime.run_sync(latest_origin_checkpoints)
+    restored = proactive.restore(
+        rows,
+        restore_origin=lambda thread_id, origin: restore_channel_origin(
+            thread_id, **origin
+        ),
+    )
+    if restored is not None:
+        console.print(
+            f"[dim]Proactive follow-ups: waiting on thread {restored[:8]} "
+            "from before the restart.[/dim]"
+        )
+
+
+def _make_serve_proactive_switch(
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None,
+) -> Callable[[str], None]:
+    """Make a thread serve's current one after a push was applied to it.
+
+    Used for the thread restored after a restart: the user's reply to the
+    push then continues that conversation, as after ``/resume``.
+    """
+
+    def _switch(thread_id: str) -> None:
+        import asyncio
+
+        from ..sessions import get_thread_metadata
+
+        async def _go() -> None:
+            stored = await get_thread_metadata(thread_id) or {}
+            dirs = await asyncio.to_thread(
+                SessionDirs.from_stored,
+                stored.get("workspace_dir"),
+                stored.get("run_dir"),
+            )
+            await _apply_serve_resume_state(
+                runtime_state,
+                channel_runtime,
+                thread_id=thread_id,
+                dirs=dirs or runtime_state.dirs,
+            )
+
+        runtime_state.async_runtime.run_sync(_go)
+        console.print(
+            f"[dim][serve] Continuing thread {thread_id} (proactive push)[/dim]"
+        )
+
+    return _switch
 
 
 def _make_serve_handle_session_resume_cb(
@@ -1664,7 +1988,13 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(dirs, model)
+        meta = _serve_turn_metadata(
+            dirs, model, runtime_state.thread_id, channel_runtime
+        )
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            # A turn in serve's fresh thread ends a restored thread's candidacy.
+            _serve_proactive_call(lambda: proactive.on_turn(runtime_state.thread_id))
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1675,6 +2005,7 @@ def _serve_process_message(
                 interactive=True,
                 metadata=meta,
                 configurable_extra=active_teams_configurable_extra(channel_runtime),
+                approve_all_at_start=channel_session_granted(msg),
                 on_thinking=_send_thinking,
                 on_todo=_send_todo,
                 on_file_write=_send_media,
@@ -1726,8 +2057,8 @@ def _serve_drain_notifications(
             console.print(line_text, style=line_style, markup=False)
         # Use the current folders from runtime_state (updated by /resume's
         # session-rebind callback).
-        meta = build_metadata(runtime_state.dirs, model)
         tid = runtime_state.thread_id
+        meta = _serve_turn_metadata(runtime_state.dirs, model, tid, channel_runtime)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1859,9 +2190,11 @@ def serve(
     if debug:
         _configure_logging()
 
-    # Auto-start ccproxy if any provider uses OAuth mode
+    _require_chatgpt_sign_in(config, interactive=False)
+
+    # Auto-start ccproxy when Anthropic uses OAuth mode
     _ccproxy_proc_serve = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    if config.anthropic_auth_mode == "oauth":
         try:
             from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 
@@ -1929,6 +2262,23 @@ def serve(
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
+
+    # Proactive pushes (#263): serve owns the workspace's proactive cron.
+    # Re-arm the conversation armed before a restart, then recreate the cron,
+    # or delete it when nothing is armed: a cron kept from an earlier run
+    # fails every tick after a dev-server restart.
+    proactive = _serve_proactive_controller(
+        config,
+        runtime_gateways,
+        gateway_backend=gateway_backend,
+        workspace=dirs.workspace,
+    )
+    channel_runtime.proactive = proactive
+    _serve_proactive_call(lambda: _serve_restore_proactive(proactive, async_runtime))
+    _serve_proactive_call(proactive.reconcile)
+    _serve_proactive_switch = _make_serve_proactive_switch(
+        runtime_state, channel_runtime
+    )
 
     # Build the slash-dispatch callbacks once; the poll loop reuses
     # them for every inbound message.  Without this hoist each message
@@ -2080,12 +2430,23 @@ def serve(
                 # finished -> start writing) that would otherwise sit in state
                 # with the reader disarmed until an inbound channel message.
                 runtime_state.async_runtime.run_sync(_serve_enqueue_completions)
+
+            # Apply proactive pushes the cron decided (throttled inside).
+            _serve_proactive_call(
+                lambda: proactive.poll(
+                    current_thread_id=runtime_state.thread_id,
+                    switch_to=_serve_proactive_switch,
+                )
+            )
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
+        # Before the atexit hook stops the dev server serve started: without
+        # serve nothing can be delivered, so the cron would only cost calls.
+        _serve_proactive_call(proactive.stop)
         _channels_stop(runtime=channel_runtime)
         console.print("[dim]Stopped.[/dim]")
 
@@ -2511,6 +2872,64 @@ def _is_fresh_interactive_session(prompt: str | None, thread_id: str | None) -> 
     return not prompt and not thread_id
 
 
+# 2 is Click's usage-error code; 1 stays "the run failed".
+RUBRIC_UNMET_EXIT_CODE = 3
+
+
+def _resolve_rubric_option(value: str | None, *, prompt: str | None) -> str | None:
+    """Return the text given by ``--rubric``, reading ``@path`` from disk."""
+    if value is None:
+        return None
+    if not prompt:
+        raise typer.BadParameter("--rubric requires -p/--prompt (single-shot mode)")
+    from ..rubric_text import RubricTextError, read_rubric_text
+
+    try:
+        return read_rubric_text(value)
+    except RubricTextError as exc:
+        raise typer.BadParameter(f"--rubric {exc}") from exc
+
+
+def _rubric_exit_code(rubric: str | None, result: str | None) -> int | None:
+    """Exit code for a single-shot run that finished; ``None`` keeps the default."""
+    if rubric is None or result == "satisfied":
+        return None
+    return RUBRIC_UNMET_EXIT_CODE
+
+
+def _rubric_exit_notice(result: str | None, exit_code: int) -> str:
+    """The line a graded single-shot run prints before it exits with *exit_code*."""
+    if result is None:
+        # No verdict at all: a cancelled approval or question, the round limit.
+        return (
+            "The run stopped before the acceptance criteria were checked "
+            f"(exit code {exit_code})."
+        )
+    if result == "failed":
+        return (
+            f"The acceptance criteria could not be evaluated (exit code {exit_code})."
+        )
+    if result == "grader_error":
+        return (
+            "The acceptance criteria could not be checked: the grader failed "
+            f"(exit code {exit_code})."
+        )
+    return f"Acceptance criteria not met (exit code {exit_code})."
+
+
+def _single_shot_agent_config(config: Any, rubric: str | None) -> Any:
+    """The config a single-shot run builds its agent from.
+
+    The grader runs when the agent stops, so a graded run keeps sub-agents in-turn. The
+    agent is built from a copy; the background server is compared with the user's config.
+    """
+    if rubric is None:
+        return config
+    agent_config = copy.copy(config)
+    agent_config.enable_async_subagents = False
+    return agent_config
+
+
 def _resolve_stream_json_auto_mode(auto_mode: bool | None, output_format: str) -> bool:
     """Resolve the effective ``--auto-mode`` for a single-shot run.
 
@@ -2588,7 +3007,9 @@ def _main_callback(
     auth_mode: str | None = typer.Option(
         None,
         "--auth-mode",
-        help="Auth mode for Anthropic/OpenAI: api_key (default) or oauth (ccproxy).",
+        help="Auth mode: api_key (default) or oauth, which uses the Claude "
+        "subscription (via ccproxy) and ChatGPT sign-in for whichever of "
+        "Anthropic and OpenAI the main, auxiliary or a fallback model uses.",
     ),
     ui: str | None = typer.Option(
         None,
@@ -2612,8 +3033,22 @@ def _main_callback(
             "'stream-json' (line-delimited JSON events to stdout)."
         ),
     ),
-    # Annotated, so a direct call without this argument gets a plain False
+    # Annotated, so a direct call without these arguments gets a plain default
     # rather than Typer's OptionInfo default, which is truthy.
+    rubric: Annotated[
+        str | None,
+        typer.Option(
+            "--rubric",
+            metavar="TEXT|@PATH",
+            help=(
+                "Acceptance criteria for a single-shot (-p) run. The work is "
+                "graded each time the agent stops and sent back with the gaps, "
+                "up to 3 passes. Literal text, or '@path' to read a file. "
+                "Sub-agents run in-turn for this run. Exit code 3 when the run "
+                "ends without a satisfied verdict."
+            ),
+        ),
+    ] = None,
     version_json: Annotated[
         bool,
         typer.Option(
@@ -2652,6 +3087,8 @@ def _main_callback(
         from ..stream.json_sink import redirect_console_to_stderr
 
         redirect_console_to_stderr()
+
+    rubric_text = _resolve_rubric_option(rubric, prompt=prompt)
 
     # stream-json is headless, so auto-mode defaults on (auto-handle approval and
     # ask_user gates) unless the caller explicitly passed --no-auto-mode. Without
@@ -2702,15 +3139,34 @@ def _main_callback(
     if auth_mode:
         if auth_mode not in ("api_key", "oauth"):
             raise typer.BadParameter("--auth-mode must be 'api_key' or 'oauth'")
-        cli_overrides["anthropic_auth_mode"] = auth_mode
-        cli_overrides["openai_auth_mode"] = auth_mode
 
     config = get_effective_config(cli_overrides)
+    if auth_mode:
+        # oauth only for subscriptions a configured model can use; api_key always.
+        in_use = _providers_in_use(config)
+        for provider in ("anthropic", "openai"):
+            if auth_mode == "api_key" or provider in in_use:
+                setattr(config, f"{provider}_auth_mode", auth_mode)
     apply_config_to_env(config)
 
-    # Auto-start ccproxy if any provider uses OAuth mode
+    if rubric_text is not None:
+        from ..config import GatewaySurface, resolve_gateway_backend
+
+        single_shot_backend = resolve_gateway_backend(
+            config, GatewaySurface.SINGLE_SHOT
+        )
+        if single_shot_backend == "langgraph_server":
+            raise typer.BadParameter(
+                "--rubric needs the local gateway for single-shot runs: on "
+                "langgraph_server the agent runs in the server process, which "
+                "still dispatches background sub-agents the grader cannot wait for"
+            )
+
+    _require_chatgpt_sign_in(config, interactive=_interactive_start(prompt))
+
+    # Auto-start ccproxy when Anthropic uses OAuth mode
     _ccproxy_proc = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    if config.anthropic_auth_mode == "oauth":
         try:
             from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 
@@ -2879,9 +3335,10 @@ def _main_callback(
                     work_dir=str(session_dirs.work_dir),
                     workspace=session_dirs.workspace,
                     checkpointer=checkpointer,
-                    config=config,
+                    config=_single_shot_agent_config(config, rubric_text),
                     runtime=async_runtime,
                 )
+                rubric_result: str | None = None
                 try:
                     if effective_output_format == "stream-json":
                         # Headless JSONL path: drive the sink through the gateway
@@ -2895,9 +3352,21 @@ def _main_callback(
                             target=GraphTarget(
                                 local_graph=agent, **session_dirs.metadata()
                             ),
+                            rubric=rubric_text,
                         )
+
+                        def _track_verdict(event: dict) -> None:
+                            nonlocal rubric_result
+                            if event.get("type") == "rubric_evaluation":
+                                result = event.get("result")
+                                rubric_result = (
+                                    result if isinstance(result, str) else None
+                                )
+
                         try:
-                            await stream_json(graph_gateway, request)
+                            await stream_json(
+                                graph_gateway, request, on_event=_track_verdict
+                            )
                         except Exception as exc:
                             # stream_events already emitted a terminal `error`
                             # event onto the JSON stream before re-raising; exit
@@ -2921,10 +3390,11 @@ def _main_callback(
                                 ui_backend=config.ui_backend,
                                 runtime_gateways=runtime_gateways,
                                 async_runtime=async_runtime,
+                                rubric=rubric_text,
                             )
                         )
                         try:
-                            await asyncio.shield(stream_worker)
+                            rubric_result = await asyncio.shield(stream_worker)
                         except asyncio.CancelledError:
                             from ..stream.display import request_stream_cancel
                             from .tui_runtime import settle_cancelled_worker
@@ -2934,6 +3404,11 @@ def _main_callback(
                                 on_cancel=request_stream_cancel,
                             )
                             raise
+                    exit_code = _rubric_exit_code(rubric_text, rubric_result)
+                    if exit_code is not None:
+                        notice = _rubric_exit_notice(rubric_result, exit_code)
+                        console.print(f"[yellow]{notice}[/yellow]")
+                        raise typer.Exit(exit_code)
                 finally:
                     # Model failures can bypass middleware ``after_agent``
                     # hooks. Close any remaining QuickJS workers while this
@@ -2969,6 +3444,30 @@ def _main_callback(
         )
 
 
+# Upstream's logger and its two records for a grader attempt that raised.
+_GRADER_LOGGER = "deepagents.middleware.rubric"
+_GRADER_FAILURE_RECORDS = ("grader failed", "coverage retry raised")
+
+
+def _grader_failure_on_one_line(record: logging.LogRecord) -> logging.LogRecord:
+    """A copy of upstream's grader-failure record with the reason instead of the traceback.
+
+    The verdict already says why; the record itself keeps its traceback for other handlers.
+    """
+    if record.name != _GRADER_LOGGER or not record.exc_info:
+        return record
+    message = record.getMessage()
+    if not any(marker in message for marker in _GRADER_FAILURE_RECORDS):
+        return record
+    exc = record.exc_info[1]
+    short = copy.copy(record)
+    short.msg = f"{message}: {type(exc).__name__}: {exc}"
+    short.args = None
+    short.exc_info = None
+    short.exc_text = None
+    return short
+
+
 def _configure_logging():
     """Configure logging with warning symbols for better visibility."""
     from rich.logging import RichHandler
@@ -2992,6 +3491,8 @@ def _configure_logging():
         """Custom handler that renders warnings in dim style."""
 
         def emit(self, record: logging.LogRecord) -> None:
+            if not verbose_logging:
+                record = _grader_failure_on_one_line(record)
             if record.levelno == logging.WARNING:
                 # Use Rich console to print dim warning
                 msg = record.getMessage()

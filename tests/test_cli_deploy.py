@@ -5,7 +5,7 @@ Verifies the orchestration:
 - port resolution (CLI > config > default)
 - host resolution (CLI > config > default) + the public-bind warning
 - port collision pre-flight
-- ccproxy lifecycle (only if OAuth configured)
+- ccproxy lifecycle (only if Anthropic OAuth configured)
 - ``start_langgraph_dev`` invocation
 - clean shutdown via signal handler / KeyboardInterrupt
 """
@@ -127,8 +127,10 @@ def _run_deploy_once(
         jobs_per_worker=10,
         tunnel=False,
         config_fingerprint=None,
+        allowed_origins="",
     ):
         captured["langgraph_dev_started"] = True
+        captured["allowed_origins_passed"] = allowed_origins
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
         captured["port_passed"] = port
         captured["host_passed"] = host
@@ -200,7 +202,11 @@ def _run_deploy_once(
     # os.makedirs / os.getcwd
     import os
 
-    monkeypatch.setattr(os, "makedirs", lambda *a, **k: None)
+    # Recorded on the helper too, so a test whose deploy() exits can read it.
+    made_dirs: list[str] = []
+    captured["made_dirs"] = made_dirs
+    _run_deploy_once.made_dirs = made_dirs
+    monkeypatch.setattr(os, "makedirs", lambda path, *a, **k: made_dirs.append(path))
     if cwd is not None:
         monkeypatch.setattr(os, "getcwd", lambda: cwd)
 
@@ -316,6 +322,14 @@ def test_deploy_host_defaults_to_config(monkeypatch, tmp_path):
     captured = _run_deploy_once(monkeypatch, config)
 
     assert captured["host_passed"] == "192.168.1.5"
+
+
+def test_deploy_passes_backend_allowed_origins(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    config.backend_allowed_origins = "https://smith.langchain.com"
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["allowed_origins_passed"] == "https://smith.langchain.com"
 
 
 def test_deploy_host_falls_back_when_config_lacks_field(monkeypatch, tmp_path):
@@ -445,11 +459,49 @@ def test_deploy_starts_ccproxy_when_anthropic_oauth(monkeypatch, tmp_path):
     assert captured["ccproxy_started"] is True
 
 
-def test_deploy_starts_ccproxy_when_openai_oauth(monkeypatch, tmp_path):
+def test_deploy_needs_no_ccproxy_for_openai_oauth(monkeypatch, tmp_path):
+    from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
+
+    monkeypatch.setattr(
+        "EvoScientist.llm.chatgpt_oauth.status",
+        lambda: ChatGPTLogin(signed_in=True, plan="plus"),
+    )
     config = _make_config(default_workdir=str(tmp_path), openai_auth_mode="oauth")
     captured = _run_deploy_once(monkeypatch, config)
 
-    assert captured["ccproxy_started"] is True
+    assert captured["ccproxy_started"] is False
+    assert captured["langgraph_dev_started"] is True
+
+
+def test_deploy_refuses_openai_oauth_without_sign_in(monkeypatch, tmp_path):
+    from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
+
+    monkeypatch.setattr(
+        "EvoScientist.llm.chatgpt_oauth.status",
+        lambda: ChatGPTLogin(signed_in=False),
+    )
+    config = _make_config(default_workdir=str(tmp_path), openai_auth_mode="oauth")
+
+    with pytest.raises(typer.Exit) as exc_info:
+        _run_deploy_once(monkeypatch, config)
+
+    assert exc_info.value.exit_code == 1
+    assert _run_deploy_once.made_dirs == []
+
+
+@pytest.mark.parametrize(
+    ("anthropic", "openai", "expected"),
+    [
+        ("api_key", "api_key", "API key"),
+        ("oauth", "api_key", "OAuth (Anthropic via ccproxy) + API key (OpenAI)"),
+        ("api_key", "oauth", "API key (Anthropic) + ChatGPT sign-in (OpenAI)"),
+        ("oauth", "oauth", "OAuth (Anthropic via ccproxy) + ChatGPT sign-in (OpenAI)"),
+    ],
+)
+def test_describe_auth(anthropic, openai, expected):
+    config = _make_config(anthropic_auth_mode=anthropic, openai_auth_mode=openai)
+
+    assert deploy_server._describe_auth(config) == expected
 
 
 def test_deploy_refuses_when_port_occupied_by_evosci(monkeypatch, tmp_path):
