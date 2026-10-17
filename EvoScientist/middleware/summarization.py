@@ -277,9 +277,10 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
         # One-time shim install (identity check): the shared write happens
         # only here, and every installer writes an equivalent immutable shim
         # that reads the same ContextVar, so a racing double install is
-        # harmless (last write wins).
+        # harmless (last write wins). ``model`` is the readiness marker other
+        # threads check, so it is written last.
         if not isinstance(self._lc_helper.model, _ProfileWindowShim):
-            self._lc_helper.model = _ProfileWindowShim(
+            window_shim = _ProfileWindowShim(
                 self._synced_state,
                 self._construction_model,
             )
@@ -287,6 +288,9 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
                 self._synced_state,
                 self._upstream_summary_model,
             )
+            # langchain sizes the summary call's overflow retry from this model's profile.
+            self._lc_helper._summary_chat_model = window_shim
+            self._lc_helper.model = window_shim
         self._synced_state.set((target, resolved))
 
     def _target_for_override(self, model_name: str | None, provider: str | None) -> Any:

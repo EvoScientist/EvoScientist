@@ -916,3 +916,30 @@ def test_a_proactive_turn_passes_through_on_the_sync_path():
         mw.wrap_model_call(request, handler)
 
     handler.assert_called_once_with(request)
+
+
+def test_summary_overflow_retry_fits_the_run_window():
+    """The cut-down prompt after a summary overflow is sized for the run's model."""
+    mw, _ = _make_mw(window=1_000_000)
+    _sync_to(mw, _UnhashableModel(100_000))
+    prompt = mw._lc_helper._overflow_retry_prompt([HumanMessage("word " * 600_000)])
+    assert len(prompt) < 4 * 100_000
+
+
+def test_shim_install_publishes_the_readiness_marker_last():
+    """A thread that sees the window shim on ``model`` skips the install, so
+    the summary shims must already be in place by then."""
+    mw, _ = _make_mw(window=1_000_000)
+    helper = mw._lc_helper
+    order: list[str] = []
+
+    class _Recording(type(helper)):
+        def __setattr__(self, name, value):
+            if name in ("model", "_summary_model", "_summary_chat_model"):
+                order.append(name)
+            super().__setattr__(name, value)
+
+    helper.__class__ = _Recording
+    _sync_to(mw, _UnhashableModel(100_000))
+    assert order[-1] == "model"
+    assert set(order) == {"model", "_summary_model", "_summary_chat_model"}
