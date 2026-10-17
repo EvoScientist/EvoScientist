@@ -1600,6 +1600,12 @@ class TestThirdPartyRouting:
         """A blank override must not drop base_url and route the key to api.anthropic.com."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv(env, "  ")
+        # Provide the routed provider's own key so the test isolates the
+        # base_url fallback; it does not test the missing-key check.
+        from EvoScientist.llm.registry import _ANTHROPIC_ROUTED_PROVIDERS
+
+        _, api_key_env = _ANTHROPIC_ROUTED_PROVIDERS[provider]
+        monkeypatch.setenv(api_key_env, "test-key")
 
         get_chat_model(model, provider=provider)
 
@@ -3537,9 +3543,12 @@ class TestAutoConfig:
         assert call_kwargs["max_tokens"] == 16000
 
     @patch("EvoScientist.llm.models.init_chat_model")
-    def test_kimi_coding_declares_thinking(self, mock_init):
+    def test_kimi_coding_declares_thinking(self, mock_init, monkeypatch):
         """Kimi For Coding plan models declare thinking on the kimi-coding provider."""
         mock_init.return_value = "mock_model"
+        # Set the key explicitly: without it the test only passes when other
+        # test files leak KIMI_API_KEY, making it order-dependent / flaky.
+        monkeypatch.setenv("KIMI_API_KEY", "test-key")
 
         get_chat_model("kimi-for-coding", provider="kimi-coding")
 
