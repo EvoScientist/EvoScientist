@@ -15,7 +15,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.7" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -160,6 +160,7 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 <details>
 <summary>📦 版本更新摘要（changelog）</summary>
 
+- **[2026 年 10 月 17 日]** **[v0.3.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.7)** — macOS、Windows、Linux 一行命令安装，`EvoSci update` 可在版本之间切换；验收标准与目标：`--rubric`、`/rubric`、`/goal` 按你设定的标准检查工作结果；主动性：`EvoSci serve` 会在频道对话里主动跟进（`/proactive`）；可直接用 ChatGPT 账号登录；后端只响应可信页面的浏览器请求；模型调用遇到临时故障会在等待时限内重试；新增模型：Claude Haiku 5.5（Anthropic）、Gemini 4 Argon、Muse Wonder、Muse Spark Open（OpenRouter），Claude 列表精简为当前的四个模型，默认模型改为 Claude Sonnet 5.5；Windows 下频道附件和 `@file` 提及的文件可直接用文件工具打开；deepagents 0.7.28。
 - **[2026 年 10 月 9 日]** **[v0.3.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.6)** — 新增模型：Claude Haiku 5.5（OpenRouter）；新增 Opper 提供商；安装的 skill 从下一条消息起生效，无需 `/new`，`/skill-name` 可在消息中点名使用某个 skill；WebUI 改为本地安装，可离线启动；Windows 下 agent 的命令改在 `EvoSci setup` 配置的 Git Bash 中运行；会话、记忆与定时任务按项目隔离，`/threads` 显示每个会话所属的工作区；响应慢的 MCP 服务不再拖住服务启动；deepagents 0.7.23。
 - **[2026 年 10 月 3 日]** **[v0.3.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.5)** — 新增模型：GPT-6.1 Sol（OpenAI 与 OpenRouter）；新增 `EvoSci setup` 命令，为安装分发做准备；优化 profile 记忆注入，超出预算时只截断超出的文件，不再整体丢弃；优化 observation 索引，最新的条目优先；deepagents 0.7.21。
 - **[2026 年 9 月 29 日]** **[v0.3.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.4)** — 新增模型：Claude Sonnet 5.5（Anthropic 与 OpenRouter）；桌面端铺垫：WebUI 启动器重构为与 shell 无关的核心，并提供后台任务检测；Windows 修复：系统代理下能正确识别本地服务、langgraph dev 服务不再被终端 Ctrl+C 波及、`EvoSci server stop` 命令可用；修复原生 DeepSeek 下的记忆 worker 与定时任务验收评分。
@@ -526,6 +527,14 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # 持久化，后端（6174 端�
 > **这不是 WebUI 独有的问题。** `tui`、`cli`、`serve`、`deploy` 都会自动启动同一个 langgraph dev 后端，因此 `--host` 会让 6174 端口在所有模式下都暴露到网络上。前端端口 4716 虽然只在 WebUI 模式下存在，但同样不是无害的：它的 API 可以读写、上传工作区文件并安装 skill，因此同样会打印横幅、同样只应在可信网络放开。
 >
 > 网络不可信时，请让后端留在回环地址，改用 SSH 隧道访问：`ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <主机>`。
+
+**来自其他来源的页面。** 在所有模式下（包括 `EvoSci deploy`），后端只响应本机页面（任意端口）的浏览器请求；后端监听网络时，也响应本机自身地址上的页面。其他页面会收到 `403`，浏览器里显示为 CORS 或网络错误，后端日志会记下被拒的来源；使用 `--tunnel` 时，调用公网地址的页面也在此列。要让其他页面（例如 LangSmith Studio）使用后端，请加入它的来源并重启后端：
+
+```bash
+EvoSci config set backend_allowed_origins https://smith.langchain.com
+```
+
+通过域名打开的 WebUI、经由宿主机地址访问 Docker 容器的客户端，以及用服务名（例如 `http://evoscientist:6174`）访问的其他容器，同样需要这样配置。
 
 </details>
 
