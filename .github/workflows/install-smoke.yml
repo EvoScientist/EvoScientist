@@ -10,7 +10,8 @@ name: Installer smoke test
 # only at release), through the test-only EVOSCI_INSTALL_SOURCE and
 # EVOSCI_INSTALL_CONSTRAINTS.
 # After a release, weekly and on demand: the public one-line commands,
-# unchanged, so a changed download URL or mirror shows up early.
+# unchanged, so a changed download URL or mirror shows up early. After a
+# release they first wait until the index lists it, and the checks expect it.
 on:
   pull_request:
     paths:
@@ -159,6 +160,68 @@ jobs:
         run: |
           "$RUNNER_TEMP/clean" EVOSCI_INSTALL_SOURCE="$EVOSCI_INSTALL_SOURCE" EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS" \
             bash "$GITHUB_WORKSPACE/scripts/install.sh" $CN_FLAG
+
+      # After a release, the run can start before the index lists the release,
+      # and the installer and the version check could then each see a
+      # different newest release. Wait until the index the installer reads
+      # (the mirror for --cn) lists the version of the release tag, with the
+      # installer's request, and have the checks expect that version.
+      - name: Wait for the release on the index
+        if: runner.os != 'Windows' && github.event_name == 'workflow_run'
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          version=${RELEASE_TAG#v}
+          if ! [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::The triggering run is not for a release tag such as v0.3.7: $RELEASE_TAG"
+            exit 1
+          fi
+          # The versions the index lists, read as scripts/install.sh reads them.
+          listed() {
+            curl -fsS --max-time 30 -H 'Accept: application/vnd.pypi.simple.v1+json' "$INDEX_URL/evoscientist/" | tr -d '\n' |
+              sed -nE 's/.*"versions"[[:space:]]*:[[:space:]]*\[([^]]*)\].*/\1/p' |
+              tr ',' '\n' | tr -d ' "'
+          }
+          echo "Waiting up to 10 minutes for $INDEX_URL to list EvoScientist $version"
+          deadline=$((SECONDS + 600))
+          until listed | grep -Fqx "$version"; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::$INDEX_URL did not list EvoScientist $version within 10 minutes"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "$INDEX_URL lists EvoScientist $version"
+          echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Wait for the release on the index (Windows)
+        if: runner.os == 'Windows' && github.event_name == 'workflow_run'
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          $version = $env:RELEASE_TAG -creplace '^v', ''
+          if ($version -notmatch '^[0-9]+(\.[0-9]+)*$') {
+            Write-Host "::error::The triggering run is not for a release tag such as v0.3.7: $env:RELEASE_TAG"
+            exit 1
+          }
+          Write-Host "Waiting up to 10 minutes for $env:INDEX_URL to list EvoScientist $version"
+          $deadline = (Get-Date).AddMinutes(10)
+          while ($true) {
+            try {
+              $listing = Invoke-RestMethod -UseBasicParsing -TimeoutSec 30 -Uri "$env:INDEX_URL/evoscientist/" -Headers @{ Accept = 'application/vnd.pypi.simple.v1+json' }
+              if ($listing.versions -contains $version) { break }
+            } catch {
+              Write-Host "Cannot read $env:INDEX_URL/evoscientist/: $($_.Exception.Message)"
+            }
+            if ((Get-Date) -ge $deadline) {
+              Write-Host "::error::$env:INDEX_URL did not list EvoScientist $version within 10 minutes"
+              exit 1
+            }
+            Start-Sleep -Seconds 10
+          }
+          Write-Host "$env:INDEX_URL lists EvoScientist $version"
+          "EXPECTED_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install (public command)
         if: runner.os != 'Windows' && env.MODE == 'release'
