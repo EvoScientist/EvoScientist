@@ -65,6 +65,18 @@ class LauncherConfig:
 
 
 @dataclass(frozen=True)
+class BackendTarget:
+    """The backend part of :class:`LauncherConfig`, for a caller without a
+    front-end (``EvoSci deploy --json``). Same field names, so
+    :func:`_resolve_backend` takes either."""
+
+    workspace_dir: str
+    backend_host: str
+    backend_port: int
+    keepalive: bool = False
+
+
+@dataclass(frozen=True)
 class LaunchResult:
     """Outcome of a successful :meth:`WebUILauncher.start` / ``wait_ready``."""
 
@@ -82,13 +94,23 @@ class LauncherError(Exception):
     ``code`` is the stable contract every front-end maps from: the CLI to a Rich
     panel, other front-ends to their own error display. ``message`` is
     human-readable and actionable; ``detail`` is an optional secondary line.
+    ``fields`` carries the same facts for a program, e.g. ``{"workspace": ...}``
+    or ``{"run_dir": ...}`` on ``workspace_mismatch``.
     """
 
-    def __init__(self, code: str, message: str, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        detail: str | None = None,
+        *,
+        fields: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.detail = detail
+        self.fields = dict(fields or {})
 
 
 # --------------------------------------------------------------------------- #
@@ -313,6 +335,8 @@ class InstalledWebUIRunner:
 class _BackendDecision:
     action: str  # "reuse" | "start"
     warnings: list[str] = field(default_factory=list)
+    # The ownership record the decision read, when it reuses a recorded server.
+    sidecar: dict[str, Any] | None = None
 
 
 def no_display() -> bool:
@@ -387,7 +411,7 @@ class WebUILauncher:
         stops mid-boot would orphan the backend holding the port.
         """
         from ..agent_shell import server_setup_hint
-        from ..langgraph_dev.manager import _is_port_occupied, _read_workspace_sidecar
+        from ..langgraph_dev.manager import _is_port_occupied
 
         self._runner.preflight(self._cfg)
 
@@ -397,8 +421,7 @@ class WebUILauncher:
             # The agent is built inside the server, so its own hint lands in
             # the server log; the launching process shows it, for the server
             # it reuses or the one it starts.
-            reused = _read_workspace_sidecar() if decision.action == "reuse" else None
-            hint = server_setup_hint(reused)
+            hint = server_setup_hint(decision.sidecar)
             if hint is not None:
                 self._warnings.append(hint)
             if decision.action == "start":
@@ -600,13 +623,20 @@ class WebUILauncher:
         )
 
 
-def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
+def _resolve_backend(
+    cfg: BackendTarget | LauncherConfig,
+    config: Any,
+    *,
+    require_record: bool = False,
+) -> _BackendDecision:
     """Decide whether to reuse an already-running backend or start a fresh one.
 
     Pure decision logic: raises :class:`LauncherError` for foreign occupants,
     workspace mismatch and sidecar port mismatches; returns ``reuse`` or
     ``start`` otherwise. Config-fingerprint drift (configuration or version)
-    is a warning, not an error.
+    is a warning, not an error. A reuse carries the ownership record it was
+    decided on. With ``require_record``, a server without one is a
+    ``port_conflict`` instead of a reuse.
     """
     from ..langgraph_dev.manager import (
         _is_port_occupied,
@@ -637,6 +667,13 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
         # sidecar is unlinked when any EvoSci server stops, so a surviving
         # sibling on another port can be left record-less. Reuse it anyway
         # (backward-compat: pre-sidecar and externally-managed servers).
+        if require_record:
+            raise LauncherError(
+                "port_conflict",
+                f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
+                f"has no ownership record for, so its workspace is unknown.",
+                "Stop it, or use another port (--port).",
+            )
         return _BackendDecision(action="reuse", warnings=warnings)
     # A sidecar is present. It is a single global record with no port field, so a
     # launch on another port can overwrite it. Confirm its PID actually serves
@@ -659,6 +696,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
             f"for a different workspace ({sidecar['workspace']}).",
             f"Stop that EvoSci session, or launch from that workspace "
             f"(--workdir {sidecar['workspace']}).",
+            fields={"workspace": sidecar["workspace"]},
         )
     # The WebUI works in the workspace root; a server started for a
     # ``--mode=run`` session works in one of its run folders.
@@ -674,6 +712,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
                 if cfg.keepalive
                 else ""
             ),
+            fields={"workspace": sidecar["workspace"], "run_dir": sidecar["run_dir"]},
         )
     recorded_fp = sidecar.get("config_fingerprint")
     if isinstance(recorded_fp, str) and recorded_fp != _server_config_fingerprint(
@@ -689,7 +728,7 @@ def _resolve_backend(cfg: LauncherConfig, config: Any) -> _BackendDecision:
     drift = shell_drift_message(sidecar)
     if drift is not None:
         warnings.append(drift)
-    return _BackendDecision(action="reuse", warnings=warnings)
+    return _BackendDecision(action="reuse", warnings=warnings, sidecar=sidecar)
 
 
 # --------------------------------------------------------------------------- #

@@ -40,6 +40,7 @@ import click
 from . import uv_tool
 from .setup.download import _NETWORK_ERRORS
 from .setup.protocol import Emitter, StageError, make_event
+from .setup.protocol import stdin_is_pipe as _stdin_is_pipe
 
 logger = logging.getLogger(__name__)
 
@@ -719,14 +720,6 @@ def running_from_env() -> list[dict[str, Any]]:
                 found.append({"pid": info["pid"], "name": info["name"], "path": path})
                 break
     return found
-
-
-def _stdin_is_pipe() -> bool:
-    try:
-        mode = os.fstat(sys.stdin.fileno()).st_mode
-    except (OSError, ValueError, AttributeError):
-        return False
-    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
 
 
 def _reader_gone() -> bool:

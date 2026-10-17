@@ -21,6 +21,7 @@ import json
 
 import pytest
 
+from EvoScientist import paths
 from EvoScientist.langgraph_dev import manager
 
 
@@ -112,7 +113,30 @@ def test_read_workspace_sidecar_round_trip(tmp_path, monkeypatch, runtime_paths)
     workspace = tmp_path / "x" / "y"
     manager._write_workspace_sidecar(workspace_dir=workspace, pid=42)
     data = manager._read_workspace_sidecar()
-    assert data == {"workspace": str(workspace), "pid": 42}
+    assert data == {
+        "workspace": str(workspace),
+        "pid": 42,
+        "data_dir": str(paths.DATA_DIR),
+        "config_dir": str(paths.CONFIG_DIR),
+    }
+
+
+def test_write_workspace_sidecar_records_the_data_and_config_folders(
+    tmp_path, monkeypatch, runtime_paths
+):
+    """The server inherits this process's folders, so the record names them
+    for a client that attaches from another environment."""
+    monkeypatch.setattr(
+        manager,
+        "RUNTIME",
+        dataclasses.replace(runtime_paths, workspace_sidecar=tmp_path / "ws.json"),
+    )
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data dir é")
+    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path / "config" / "evoscientist")
+    manager._write_workspace_sidecar(workspace_dir=tmp_path / "ws", pid=7)
+    data = manager._read_workspace_sidecar()
+    assert data["data_dir"] == str(tmp_path / "data dir é")
+    assert data["config_dir"] == str(tmp_path / "config" / "evoscientist")
 
 
 def test_workspace_mismatch_error_is_runtime_error_subclass():

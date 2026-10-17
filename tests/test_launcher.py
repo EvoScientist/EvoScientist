@@ -146,6 +146,86 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch, lega
     assert any("EvoSci server stop" in w for w in decision.warnings)
 
 
+def test_resolve_backend_reuse_returns_the_record_it_read(monkeypatch):
+    sidecar = {"workspace": "/tmp/wsA", "config_fingerprint": "fp-now"}
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert decision.sidecar is sidecar
+
+
+def test_resolve_backend_record_less_server_reuses_by_default(monkeypatch):
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    decision = lm._resolve_backend(_cfg(), object())
+    assert decision.action == "reuse"
+    assert decision.sidecar is None
+
+
+def test_resolve_backend_record_less_server_is_port_conflict_when_required(
+    monkeypatch,
+):
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(), object(), require_record=True)
+    assert ei.value.code == "port_conflict"
+    assert "no ownership record" in ei.value.message
+
+
+def test_resolve_backend_takes_a_backend_target(monkeypatch):
+    """A caller without a front-end passes only the backend fields."""
+    _patch_backend_probes(
+        monkeypatch, occupied=True, running=True, sidecar={"workspace": "/tmp/wsB"}
+    )
+    target = lm.BackendTarget(
+        workspace_dir="/tmp/wsA", backend_host="127.0.0.1", backend_port=6174
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(target, object())
+    assert ei.value.code == "workspace_mismatch"
+
+
+def test_workspace_mismatch_carries_the_workspace(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch, occupied=True, running=True, sidecar={"workspace": "/tmp/wsB"}
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.fields == {"workspace": "/tmp/wsB"}
+
+
+def test_run_folder_mismatch_carries_the_run_folder(monkeypatch):
+    sidecar = {"workspace": "/tmp/wsA", "run_dir": "/tmp/wsA/runs/20260930_120000"}
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.fields == sidecar
+
+
+def test_launcher_error_fields_default_to_empty():
+    assert lm.LauncherError("port_conflict", "m").fields == {}
+
+
+def test_resolve_backend_no_drift_for_a_session_started_with_auto_flags(monkeypatch):
+    """``EvoSci --auto-approve`` / ``--auto-mode`` override fields the server
+    reads from config.yaml; a second launcher with the file's values must not
+    report drift (and advise ``EvoSci server stop``)."""
+    from EvoScientist.config.settings import EvoScientistConfig
+
+    fingerprint = lgm._server_config_fingerprint
+    recorded = fingerprint(
+        EvoScientistConfig(auto_approve=True, auto_mode=True, enable_ask_user=False)
+    )
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsA", "config_fingerprint": recorded},
+    )
+    monkeypatch.setattr(lgm, "_server_config_fingerprint", fingerprint)
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), EvoScientistConfig())
+    assert decision.action == "reuse"
+    assert decision.warnings == []
+
+
 def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
     from EvoScientist.setup import research_env
 
