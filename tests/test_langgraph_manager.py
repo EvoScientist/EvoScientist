@@ -967,6 +967,41 @@ class TestReadTunnelUrl:
             == "https://happy-tiger-demo.trycloudflare.com"
         )
 
+    @pytest.mark.parametrize("api_host", ["api", "API"])
+    def test_ignores_api_url_on_tunnel_failure(
+        self, tmp_path, runtime_paths, monkeypatch, api_host
+    ):
+        log = tmp_path / "langgraph_dev.log"
+        log.write_text(
+            "[cloudflared] failed to request quick Tunnel: Post "
+            f'"https://{api_host}.trycloudflare.com/tunnel": i/o timeout\n'
+            f"- API: https://{api_host}.trycloudflare.com\n"
+        )
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=0.2, poll_interval=0.05) is None
+
+    @pytest.mark.parametrize("tunnel_host", ["happy-tiger-demo", "api-friendly-demo"])
+    def test_returns_tunnel_url_after_api_url(
+        self, tmp_path, runtime_paths, monkeypatch, tunnel_host
+    ):
+        log = tmp_path / "langgraph_dev.log"
+        public_url = f"https://{tunnel_host}.trycloudflare.com"
+        log.write_text(
+            "[cloudflared] failed to request quick Tunnel: Post "
+            '"https://api.trycloudflare.com/tunnel": i/o timeout\n'
+            f"[cloudflared] {public_url}\n"
+        )
+        monkeypatch.setattr(
+            manager, "RUNTIME", dataclasses.replace(runtime_paths, log_file=log)
+        )
+        monkeypatch.setattr(manager, "_LOG_OFFSET_AT_START", 0)
+
+        assert manager.read_tunnel_url(timeout=1.0) == public_url
+
     def test_returns_none_on_timeout(self, tmp_path, runtime_paths, monkeypatch):
         log = tmp_path / "langgraph_dev.log"
         log.write_text("INFO server up — but no tunnel line ever printed\n")
