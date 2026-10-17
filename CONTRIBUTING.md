@@ -80,7 +80,7 @@ EvoScientist is a multi-agent AI system for automated scientific experimentation
 | Language | Python 3.11+ |
 | License | Apache 2.0 |
 | Framework | [DeepAgents](https://github.com/langchain-ai/deepagents) + [LangChain](https://python.langchain.com/) + [LangGraph](https://langchain-ai.github.io/langgraph/) |
-| Default model | `claude-sonnet-4-6` (Anthropic) |
+| Default model | `claude-sonnet-5-5` (Anthropic) |
 | Tests | ~890 across 36 files, no API keys needed |
 | Config file | `~/.config/evoscientist/config.yaml` |
 

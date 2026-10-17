@@ -54,8 +54,8 @@ class TestModelsRegistry:
         moved = {
             name: resolve_provider(name, native)
             for name in MODELS
-            for native in ("openai", "anthropic")
-            if name.startswith(("gpt-", "claude-"))
+            for native in ("openai", "anthropic", "google-genai")
+            if name.startswith(("gpt-", "claude-", "gemini-"))
             and resolve_provider(name, native) in chosen_on_purpose
         }
 
@@ -187,7 +187,7 @@ class TestListModels:
 class TestGetModelInfo:
     def test_returns_tuple_for_valid_model(self):
         """Test that get_model_info returns tuple for valid model."""
-        result = get_model_info("claude-sonnet-4-6")
+        result = get_model_info("claude-sonnet-5-5")
         assert result is not None
         assert isinstance(result, tuple)
         assert len(result) == 2
@@ -199,8 +199,8 @@ class TestGetModelInfo:
 
     def test_returns_correct_info(self):
         """Test that get_model_info returns correct info."""
-        model_id, provider = get_model_info("claude-haiku-4-5")
-        assert model_id == "claude-haiku-4-5"
+        model_id, provider = get_model_info("claude-haiku-5-5")
+        assert model_id == "claude-haiku-5-5"
         assert provider == "anthropic"
 
 
@@ -229,10 +229,10 @@ class TestGetChatModel:
         """Test that get_chat_model resolves short names correctly."""
         mock_init.return_value = "mock_model"
 
-        get_chat_model("claude-opus-4-8")
+        get_chat_model("claude-opus-5-5")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "claude-opus-4-8"
+        assert call_kwargs["model"] == "claude-opus-5-5"
         assert call_kwargs["model_provider"] == "anthropic"
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -566,13 +566,13 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("OPPER_API_KEY", "op-key-123")
 
-        # Short name is dotted (``claude-sonnet-4.6``); the pool id Opper
-        # serves is dashed (``claude-sonnet-4-6``). Go through the short name
+        # Short name is dotted (``claude-sonnet-5.5``); the pool id Opper
+        # serves is dashed (``claude-sonnet-5-5``). Go through the short name
         # so the registry lookup is actually exercised.
-        get_chat_model("claude-sonnet-4.6", provider="opper")
+        get_chat_model("claude-sonnet-5.5", provider="opper")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        assert call_kwargs["model"] == "claude-sonnet-5-5"
         assert call_kwargs["model_provider"] == "openai"
         assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
         assert call_kwargs["api_key"] == "op-key-123"
@@ -597,7 +597,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPPER_API_KEY", "op-key")
         monkeypatch.setenv("EVOSCIENTIST_REASONING_EFFORT", "low")
 
-        get_chat_model("claude-sonnet-4.6", provider="opper")
+        get_chat_model("claude-sonnet-5.5", provider="opper")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["base_url"] == "https://api.opper.ai/v3/compat"
@@ -610,7 +610,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPPER_API_KEY", "op-key")
         monkeypatch.delenv("EVOSCIENTIST_REASONING_EFFORT", raising=False)
 
-        get_chat_model("claude-sonnet-4.6", provider="opper")
+        get_chat_model("claude-sonnet-5.5", provider="opper")
 
         assert "reasoning_effort" not in mock_init.call_args[1]
 
@@ -623,10 +623,10 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPPER_API_KEY", "op-key")
         monkeypatch.delenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", raising=False)
 
-        get_chat_model("claude-sonnet-4.6", provider="opper")
+        get_chat_model("claude-sonnet-5.5", provider="opper")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        assert call_kwargs["model"] == "claude-sonnet-5-5"
         assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
 
     @patch("EvoScientist.llm.models.init_chat_model")
@@ -651,7 +651,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPPER_API_KEY", "op-key")
         monkeypatch.setenv("EVOSCIENTIST_OPPER_ANTHROPIC_PROMPT_CACHE", "false")
 
-        get_chat_model("claude-sonnet-4.6", provider="opper")
+        get_chat_model("claude-sonnet-5.5", provider="opper")
 
         call_kwargs = mock_init.call_args[1]
         assert "cache_control" not in call_kwargs
@@ -1073,7 +1073,7 @@ class TestThirdPartyRouting:
         for _env in self._APP_ATTR_ENV:
             monkeypatch.delenv(_env, raising=False)
 
-        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+        get_chat_model("claude-sonnet-5.5", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         # Existing behavior intact.
@@ -1172,12 +1172,34 @@ class TestThirdPartyRouting:
             "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", raising=False
         )
 
-        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+        get_chat_model("claude-sonnet-5.5", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "openrouter"
-        assert call_kwargs["model"] == "anthropic/claude-sonnet-4.6"
+        assert call_kwargs["model"] == "anthropic/claude-sonnet-5.5"
         assert call_kwargs["model_kwargs"]["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @pytest.mark.parametrize(
+        "model",
+        # A short name the registry no longer lists, and one that resolves to
+        # another provider's bare id (native Google's ``gemini-3.1-pro-preview``).
+        ["claude-sonnet-4.6", "gemini-3.1-pro"],
+    )
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_rejects_a_bare_model_id(self, mock_init, provider, model):
+        with pytest.raises(ValueError, match="not in EvoScientist's"):
+            get_chat_model(model, provider=provider)
+
+        mock_init.assert_not_called()
+
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_accepts_a_full_model_id(self, mock_init, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+        get_chat_model("anthropic/claude-sonnet-4.6", provider="openrouter")
+
+        assert mock_init.call_args[1]["model"] == "anthropic/claude-sonnet-4.6"
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_openrouter_anthropic_prompt_cache_opt_out(self, mock_init, monkeypatch):
@@ -1186,7 +1208,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
         monkeypatch.setenv("EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE", "false")
 
-        get_chat_model("claude-sonnet-4.6", provider="openrouter")
+        get_chat_model("claude-sonnet-5.5", provider="openrouter")
 
         call_kwargs = mock_init.call_args[1]
         assert "cache_control" not in call_kwargs
@@ -1218,7 +1240,7 @@ class TestThirdPartyRouting:
         override = {"type": "ephemeral", "ttl": "1h"}
 
         get_chat_model(
-            "claude-sonnet-4.6",
+            "claude-sonnet-5.5",
             provider="openrouter",
             cache_control=override,
         )
@@ -1238,7 +1260,7 @@ class TestThirdPartyRouting:
         override = {"type": "ephemeral", "ttl": "1h"}
 
         get_chat_model(
-            "claude-sonnet-4.6",
+            "claude-sonnet-5.5",
             provider="openrouter",
             model_kwargs={"cache_control": override},
         )
@@ -1258,7 +1280,7 @@ class TestThirdPartyRouting:
 
         with pytest.warns(UserWarning, match="model_kwargs` is not a dict"):
             get_chat_model(
-                "claude-sonnet-4.6",
+                "claude-sonnet-5.5",
                 provider="openrouter",
                 model_kwargs="bad",
             )
@@ -4169,11 +4191,11 @@ class TestReasoningEffortAcrossProviders:
             ("openai", "gpt-6-sol", "minimal", "minimal"),
             ("openai", "gpt-6-sol", "xhigh", "xhigh"),
             ("openai", "gpt-6-sol", "max", "max"),
-            ("openrouter", "gpt-6-sol", "max", "max"),
-            ("openrouter", "gpt-6-sol", "minimal", "minimal"),
-            ("openrouter", "gpt-6-sol", "none", "none"),
+            ("openrouter", "gpt-6.1-sol", "max", "max"),
+            ("openrouter", "gpt-6.1-sol", "minimal", "minimal"),
+            ("openrouter", "gpt-6.1-sol", "none", "none"),
             ("openai", "gpt-6-sol", "turbo", "turbo"),
-            ("openrouter", "gpt-6-sol", "turbo", "turbo"),
+            ("openrouter", "gpt-6.1-sol", "turbo", "turbo"),
         ],
     )
     def test_api_key_routes_get_the_stored_level(

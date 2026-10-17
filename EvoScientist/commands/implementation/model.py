@@ -58,7 +58,7 @@ class ModelCommand(Command):
         Argument(
             name="model_name",
             type=str,
-            description="Model short name (e.g. claude-sonnet-4-6). Opens picker if omitted.",
+            description="Model short name (e.g. claude-sonnet-5-5). Opens picker if omitted.",
             required=False,
         ),
         Argument(

@@ -42,6 +42,7 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.runnables.retry import RunnableRetry
 
 from ..llm.context_window import get_context_window, resolve_context_window
+from ..llm.registry import UnknownModelError
 from .configurable_model import _read_model_override
 from .proactive_mode import _read_proactive_mode
 
@@ -293,6 +294,8 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             return self._construction_model
         try:
             return self._resolve_override_model(model_name, provider)
+        except UnknownModelError:
+            raise
         except Exception:
             logger.warning(
                 "SummarizationMiddleware failed to resolve model=%r "
@@ -321,7 +324,7 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             target = await asyncio.to_thread(
                 self._resolve_override_model, model_name, provider
             )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, UnknownModelError):
             raise
         except Exception:
             logger.warning(

@@ -318,6 +318,19 @@ async def test_resolution_failure_keeps_construction_limits():
     assert mw._lc_helper._get_profile_limits() == CONSTRUCTION_WINDOW
 
 
+async def test_unknown_router_model_is_not_hidden_behind_construction_limits():
+    from EvoScientist.llm.registry import UnknownModelError
+
+    mw, construction = _make_mw()
+    handler = AsyncMock(return_value=MagicMock())
+    with (
+        _patched_config({"model": "claude-sonnet-4.6", "model_provider": "openrouter"}),
+        pytest.raises(UnknownModelError),
+    ):
+        await mw.awrap_model_call(_fake_model_request(construction), handler)
+    handler.assert_not_called()
+
+
 async def test_unsynced_shim_reports_construction_profile_not_resolved_window():
     """After an override, clearing the sync must not invent a window.
 

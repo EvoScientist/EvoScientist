@@ -149,7 +149,7 @@ class TestEvoScientistConfig:
         assert config.openai_api_key == ""
         assert config.tavily_api_key == ""
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-6"
+        assert config.model == "claude-sonnet-5-5"
         assert config.default_mode == "daemon"
         assert config.default_workdir == ""
         assert config.show_thinking is True
@@ -410,7 +410,7 @@ class TestLoadSaveReset:
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-6"
+        assert config.model == "claude-sonnet-5-5"
 
     def test_save_creates_file(self, temp_config_dir, clean_env):
         """Test that save creates the config file."""
