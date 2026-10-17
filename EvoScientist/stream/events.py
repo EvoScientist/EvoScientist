@@ -54,6 +54,8 @@ UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
 LangGraphStreamInput: TypeAlias = dict[str, object] | Command
 _ValueMessageKey: TypeAlias = tuple[str, ...]
+_RESUME_INTERRUPT_WAIT_SECONDS = 5.0
+_RESUME_INTERRUPT_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +85,67 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
         if getattr(task, "interrupts", None):
             return True
     return False
+
+
+def _snapshot_has_resume_interrupt(message: object, snapshot: Any) -> bool:
+    """Whether a resume input matches an interrupt persisted in the snapshot."""
+    resume = getattr(message, "resume", None)
+    if not isinstance(resume, Mapping):
+        return True
+    interrupt_ids = {
+        str(key)
+        for key, value in resume.items()
+        if isinstance(value, Mapping) and "decisions" in value
+    }
+    if not interrupt_ids:
+        return True
+    if not _snapshot_has_pending_interrupt(snapshot):
+        return False
+
+    pending_ids = set()
+    for interrupt in getattr(snapshot, "interrupts", None) or ():
+        interrupt_id = getattr(interrupt, "id", None)
+        if interrupt_id is not None:
+            pending_ids.add(str(interrupt_id))
+    for task in getattr(snapshot, "tasks", None) or ():
+        for interrupt in getattr(task, "interrupts", None) or ():
+            interrupt_id = getattr(interrupt, "id", None)
+            if interrupt_id is not None:
+                pending_ids.add(str(interrupt_id))
+    return interrupt_ids.issubset(pending_ids)
+
+
+async def _wait_for_resume_interrupt(
+    agent: Any,
+    config: dict[str, Any],
+    message: Command,
+) -> Any:
+    """Wait briefly for a streamed interrupt to reach the thread checkpoint."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RESUME_INTERRUPT_WAIT_SECONDS
+    last_error: Exception | None = None
+    while True:
+        try:
+            snapshot = await agent.aget_state(config)
+        except Exception as exc:
+            last_error = exc
+        else:
+            if _snapshot_has_resume_interrupt(message, snapshot):
+                return snapshot
+
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(_RESUME_INTERRUPT_POLL_SECONDS, remaining))
+
+    thread_id = config.get("configurable", {}).get("thread_id", "?")
+    error = RuntimeError(
+        "Timed out waiting for the pending interrupt to be checkpointed "
+        f"before resuming thread {thread_id!r}"
+    )
+    if last_error is not None:
+        raise error from last_error
+    raise error
 
 
 def _snapshot_needs_recovery(snapshot: Any) -> bool:
@@ -1469,6 +1532,12 @@ async def stream_agent_events(
     # calls as "was cancelled", re-broadcasts the history to the UI and invites
     # the model to re-issue the batch. A failed repair is logged, not fatal.
     # Also covers the all-writes-uncommitted case (next empty, tasks present).
+    if (
+        isinstance(message, Command)
+        and message.resume is not None
+        and not _snapshot_has_resume_interrupt(message, snapshot)
+    ):
+        snapshot = await _wait_for_resume_interrupt(agent, config, message)
     if _snapshot_needs_recovery(snapshot):
         await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
