@@ -208,6 +208,36 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 ## 📦 Installation
 
+### Quick Install
+
+**macOS, Linux, WSL2**
+
+```bash
+curl -fsSL https://evoscientist.ai/install.sh | bash
+```
+
+**Windows** (native, PowerShell)
+
+```powershell
+irm https://evoscientist.ai/install.ps1 | iex
+```
+
+> [!NOTE]
+> Native Windows runs EvoScientist without WSL: the CLI, the TUI, the WebUI and the agent's tools all work, and the agent's shell commands run in Git Bash. If you prefer WSL2, the macOS/Linux command works there too. Found a bug? Please [open an issue](https://github.com/EvoScientist/EvoScientist/issues).
+
+The installer needs no uv, Python, Node.js or Git on the machine. It downloads a checksum-verified uv into EvoScientist's tool folder (`~/.evoscientist/tools`) and installs EvoScientist on uv's own Python 3.12, with the exact dependency versions the release was tested with. It then runs `EvoSci setup`, which adds Node.js when yours is missing or older than 20.9, a Python environment for the agent's shell when no usable `python` is found, the WebUI, and on Windows a checksum-verified Git for Windows when none is installed. It does not replace your system Python, Node.js or Git. Options, mirrors for mainland China, proxies and uninstalling are covered in the [installation guide](docs/guides/install.md).
+
+When it finishes, open a new terminal and run `EvoSci onboard`, then `EvoSci`.
+
+> [!NOTE]
+> To update an existing installation to the latest version, with the dependency versions that release was tested with, use `EvoSci update`:
+> ```bash
+> EvoSci update
+> ```
+> On 0.3.6 or older, which have no `EvoSci update`, run `uv tool upgrade EvoScientist` once, with EvoScientist closed.
+
+### Install with uv or pip
+
 > [!TIP]
 > Requires **Python 3.11+** (**< 3.14**). We recommend [**uv**](https://docs.astral.sh/uv/) or **conda** for dependency management and virtual environments. Prefer to skip a local Python install entirely? Jump to [🐳 Docker](#-docker).
 
@@ -220,18 +250,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 </details>
 
-### Quick Install
-
 ```bash
 uv tool install EvoScientist
 ```
-
-> [!NOTE]
-> To update an existing installation to the latest version, with the dependency versions that release was tested with, use `EvoSci update`:
-> ```bash
-> EvoSci update
-> ```
-> On 0.3.6 or older, which have no `EvoSci update`, run `uv tool upgrade EvoScientist` once, with EvoScientist closed.
 
 Or install into the current environment instead:
 

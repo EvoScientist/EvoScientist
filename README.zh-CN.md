@@ -217,6 +217,46 @@ EvoScientist 超越了传统的人在回路（Human-in-the-Loop）模式，采�
 
 ## 📦 安装
 
+### 快速安装
+
+**macOS、Linux、WSL2**
+
+```bash
+curl -fsSL https://evoscientist.ai/install.sh | bash
+```
+
+**Windows**（原生，PowerShell）
+
+```powershell
+irm https://evoscientist.ai/install.ps1 | iex
+```
+
+中国大陆用户可改用镜像（脚本从 jsDelivr 下载）：
+
+```bash
+curl -fsSL https://cdn.jsdelivr.net/gh/EvoScientist/EvoScientist@main/scripts/install.sh | bash -s -- --cn
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://cdn.jsdelivr.net/gh/EvoScientist/EvoScientist@main/scripts/install.ps1))) -Cn
+```
+
+> [!NOTE]
+> Windows 上原生运行 EvoScientist，不需要 WSL：CLI、TUI、WebUI 和 agent 的工具都能用，agent 的 shell 命令在 Git Bash 里执行。如果你更习惯 WSL2，上面的 macOS/Linux 命令在 WSL2 里同样适用。遇到问题请[提交 issue](https://github.com/EvoScientist/EvoScientist/issues)。
+
+安装脚本不需要机器上预先装好 uv、Python、Node.js 或 Git。它先把校验过的 uv 下载到 EvoScientist 自己的工具目录（`~/.evoscientist/tools`），再用 uv 自带的 Python 3.12 安装 EvoScientist，依赖版本与该版本发布时测试的完全一致。随后运行 `EvoSci setup`：没有 Node.js 或版本低于 20.9 时安装 Node.js；找不到可用的 `python` 时为 agent 的 shell 准备一个 Python 环境；安装 WebUI；在 Windows 上没有 Git for Windows 时安装校验过的 Git for Windows。它不会替换你系统里的 Python、Node.js 或 Git。选项、镜像、代理和卸载见[安装指南](docs/guides/install.md)。
+
+安装完成后打开一个新终端，运行 `EvoSci onboard`，然后运行 `EvoSci`。
+
+> [!NOTE]
+> 更新已安装的版本到最新（并使用该版本测试过的依赖版本），请使用 `EvoSci update`：
+> ```bash
+> EvoSci update
+> ```
+> 0.3.6 及更早的版本还没有 `EvoSci update`，请先关闭 EvoScientist，再运行一次 `uv tool upgrade EvoScientist`。
+
+### 用 uv 或 pip 安装
+
 > [!TIP]
 > 需要 **Python 3.11+**（**< 3.14**）。推荐使用 [**uv**](https://docs.astral.sh/uv/) 或 **conda** 进行依赖管理和虚拟环境管理。想完全跳过本地 Python 安装？直接跳转到 [🐳 Docker](#-docker)。
 
@@ -229,18 +269,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 </details>
 
-### 快速安装
-
 ```bash
 uv tool install EvoScientist
 ```
-
-> [!NOTE]
-> 更新已安装的版本到最新（并使用该版本测试过的依赖版本），请使用 `EvoSci update`：
-> ```bash
-> EvoSci update
-> ```
-> 0.3.6 及更早的版本还没有 `EvoSci update`，请先关闭 EvoScientist，再运行一次 `uv tool upgrade EvoScientist`。
 
 或安装到当前环境：
 
