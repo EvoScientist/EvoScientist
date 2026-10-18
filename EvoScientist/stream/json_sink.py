@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Callable
 from typing import TYPE_CHECKING, Any, TextIO
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 async def write_events_as_json(
     events: AsyncIterable[dict[str, Any]],
     out: TextIO,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Serialize an async stream of event dicts to ``out`` as JSONL.
 
@@ -35,13 +36,16 @@ async def write_events_as_json(
     to its string form instead of raising and tearing down the stream.
 
     Returns the final response text carried by the terminal ``done`` event
-    (empty string if the stream ends without one).
+    (empty string if the stream ends without one). ``on_event`` sees each
+    event after it is written.
     """
     final = ""
     async for event in events:
         out.write(json.dumps(event, default=str))
         out.write("\n")
         out.flush()
+        if on_event is not None:
+            on_event(event)
         if event.get("type") == "done":
             final = event.get("response", "") or ""
     return final
@@ -66,6 +70,7 @@ async def stream_json(
     request: RunRequest,
     *,
     out: TextIO | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Run a graph turn through the gateway and emit its event stream as JSONL.
 
@@ -74,4 +79,4 @@ async def stream_json(
     langgraph-server execution. ``out`` defaults to stdout.
     """
     sink = out if out is not None else sys.stdout
-    return await write_events_as_json(gateway.stream_events(request), sink)
+    return await write_events_as_json(gateway.stream_events(request), sink, on_event)

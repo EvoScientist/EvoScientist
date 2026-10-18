@@ -10,7 +10,7 @@ This module is intentionally separate from ``EvoScientist.cli``:
 deploy mode does NOT load an in-process CLI agent, session DB, channel
 runtime, or TUI — those are all TUI / serve concerns. Deploy only
 manages the lifecycle of the langgraph dev subprocess (and ccproxy if
-OAuth is configured).
+Anthropic OAuth is configured).
 """
 
 from __future__ import annotations

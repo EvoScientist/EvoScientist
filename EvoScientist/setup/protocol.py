@@ -14,7 +14,14 @@ Event fields:
 - ``progress``: a float in ``[0, 1]`` on ``running`` events, when known.
 - ``message``: a human-readable line.
 - ``detail``: an object on ``done`` and ``skipped`` events, e.g.
-  ``{"source": "system", ...}``.
+  ``{"source": "system", ...}``; on ``error`` events where the code has one
+  (``setup_failed``: the failed stage and its code; ``environment_busy``: the
+  processes still running, none when another update holds the lock); on
+  ``running`` events of ``EvoSci update`` while it waits for other processes
+  that run from the install (``{"waiting_for": [{"pid", "name", "path"}],
+  "cancel_file": "<path>"}``: creating that file cancels the wait). That
+  wait also ends when the program reading stdout closes the pipe, so a
+  caller reads until the terminal ``update`` line.
 - ``code``: a stable error code on ``error`` events (see :data:`ERROR_CODES`).
 """
 
@@ -44,6 +51,18 @@ ERROR_CODES = frozenset(
         "install_failed",
         # The registry has no release inside the supported WebUI range.
         "no_compatible_version",
+        # EvoSci update (stage ``update``): the index does not list the
+        # target; the target has no constraints.txt; a stage of the new
+        # EvoSci setup failed; the install is not one the command changes
+        # (the message says what to run); a server runs and was not stopped;
+        # the wait for processes running from the environment was cancelled,
+        # or another update holds the lock.
+        "unknown_version",
+        "no_constraints",
+        "setup_failed",
+        "manual_update",
+        "server_running",
+        "environment_busy",
     }
 )
 

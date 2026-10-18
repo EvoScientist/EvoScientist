@@ -293,3 +293,60 @@ class FakeSubagent:
 
     async def output(self):
         return {"messages": []}
+
+
+def model_call_start(call: str, *, namespace: Iterable[Any] = ()) -> dict[str, Any]:
+    """The boundary middleware's ``model_call`` start event for one provider call."""
+    return protocol_event(
+        "custom", {"type": "model_call", "phase": "start", "call": call}, namespace
+    )
+
+
+def model_call_end(
+    call: str, status: str = "clean", *, namespace: Iterable[Any] = ()
+) -> dict[str, Any]:
+    """The matching end event: ``clean`` / ``error`` (finish_reason) / ``failed`` (raised)."""
+    return protocol_event(
+        "custom",
+        {"type": "model_call", "phase": "end", "call": call, "status": status},
+        namespace,
+    )
+
+
+def text_delta(text: str, *, namespace: Iterable[Any] = ()) -> dict[str, Any]:
+    """A text delta as the server transport delivers it: no message metadata."""
+    return message_delta(text, {}, namespace)
+
+
+def local_text_delta(text: str, *, namespace: Iterable[Any] = ()) -> dict[str, Any]:
+    """A text delta as the local gateway delivers it: run metadata attached."""
+    return message_delta(
+        text, {"run_id": "r-local", "langgraph_node": "model"}, namespace
+    )
+
+
+def whole_message(message, *, namespace: Iterable[Any] = ()) -> dict[str, Any]:
+    """A non-streamed AIMessage as the v3 pipeline delivers it."""
+    return protocol_event("messages", (message, {}), namespace)
+
+
+def retry_event(
+    *,
+    attempt: int = 2,
+    cause: str = "exception",
+    namespace: Iterable[Any] = (),
+    agent: str = "",
+) -> dict[str, Any]:
+    return protocol_event(
+        "custom",
+        {
+            "type": "model_retry",
+            "attempt": attempt,
+            "wait_seconds": 1.0,
+            "reason": "503: starting up",
+            "budget_left_seconds": 50.0,
+            "cause": cause,
+            "agent": agent,
+        },
+        namespace,
+    )

@@ -35,6 +35,7 @@ from EvoScientist.memory.agents import (
 )
 from EvoScientist.memory.types import MemorySourceType
 from EvoScientist.paths import process_session_dirs
+from EvoScientist.proactive.graph import build_proactive_graph
 from EvoScientist.subagents._factory import build_async_subagent_graph
 from EvoScientist.subagents.expert_container_async import (
     build_expert_container_async_graph,
@@ -87,4 +88,9 @@ evomemory_observation_linker = folder_checked(
 )
 evomemory_autoskills = folder_checked(
     build_autoskills_graph(workspace=_workspace), graph_id="evomemory-autoskills"
+)
+# Proactive pushes (#263): one tick of the workspace's proactive cron. It works
+# in no folder, so it is checked against the workspace only.
+proactive = folder_checked(
+    build_proactive_graph(workspace=_workspace), graph_id="proactive"
 )

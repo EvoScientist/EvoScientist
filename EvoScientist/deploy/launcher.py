@@ -315,6 +315,19 @@ class _BackendDecision:
     warnings: list[str] = field(default_factory=list)
 
 
+def no_display() -> bool:
+    """True where ``webbrowser`` would fall back to a console browser.
+
+    Linux/BSD without a display and without ``BROWSER`` naming one to use.
+    """
+    return (
+        sys.platform not in ("darwin", "win32")
+        and not os.environ.get("BROWSER")
+        and not os.environ.get("DISPLAY")
+        and not os.environ.get("WAYLAND_DISPLAY")
+    )
+
+
 class WebUILauncher:
     """Orchestrates the backend (langgraph dev) + a pluggable front-end.
 
@@ -460,13 +473,7 @@ class WebUILauncher:
             # in the foreground; skip the open there unless BROWSER says
             # which one to use.
             opened = False
-            headless = (
-                sys.platform not in ("darwin", "win32")
-                and not os.environ.get("BROWSER")
-                and not os.environ.get("DISPLAY")
-                and not os.environ.get("WAYLAND_DISPLAY")
-            )
-            if not headless:
+            if not no_display():
                 try:
                     opened = bool(webbrowser.open(self.webui_url))
                 except Exception:  # pragma: no cover - best-effort
@@ -556,6 +563,7 @@ class WebUILauncher:
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
                 config_fingerprint=_server_config_fingerprint(self._config),
+                allowed_origins=getattr(self._config, "backend_allowed_origins", ""),
             )
         except Exception as exc:
             self._raise_if_stopped()
@@ -570,12 +578,17 @@ class WebUILauncher:
         # The UI reaches the backend from the BROWSER; give it the backend port
         # for config prefill. Secrets are scrubbed — the browser UI never needs
         # LLM provider API keys. HOSTNAME is the front-end's only bind knob.
-        return _scrubbed_env(
-            {
-                "EVOSCIENTIST_LANGGRAPH_DEV_PORT": str(self._cfg.backend_port),
-                "PORT": str(self._cfg.webui_port),
-                "HOSTNAME": self._cfg.webui_host,
-            }
+        # The data and config folders are this process's, as absolute paths.
+        from ..paths import dir_env
+
+        return dir_env(
+            _scrubbed_env(
+                {
+                    "EVOSCIENTIST_LANGGRAPH_DEV_PORT": str(self._cfg.backend_port),
+                    "PORT": str(self._cfg.webui_port),
+                    "HOSTNAME": self._cfg.webui_host,
+                }
+            )
         )
 
     def _result(self) -> LaunchResult:

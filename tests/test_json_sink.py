@@ -125,3 +125,18 @@ async def test_stream_json_propagates_gateway_errors():
     out = io.StringIO()
     with pytest.raises(RuntimeError, match="boom"):
         await stream_json(_FakeGateway(), object(), out=out)
+
+
+async def test_on_event_sees_every_event():
+    seen: list[str] = []
+    events = [
+        {"type": "rubric_evaluation", "result": "satisfied"},
+        {"type": "done", "content": "x", "response": "x"},
+    ]
+    out = io.StringIO()
+    final = await write_events_as_json(
+        _agen(events), out, on_event=lambda event: seen.append(event["type"])
+    )
+    assert seen == ["rubric_evaluation", "done"]
+    assert final == "x"
+    assert len(out.getvalue().splitlines()) == 2

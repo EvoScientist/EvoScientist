@@ -10,7 +10,7 @@
 <a href="https://pypi.org/project/EvoScientist/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-dark.svg">
-  <img alt="PyPI v0.3.6" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
+  <img alt="PyPI v0.3.7" src="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-pypi-light.svg" height="28">
 </picture></a><a href="https://EvoScientist.github.io/"><picture>
   <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-light.svg">
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/.github/assets/badge-website-dark.svg">
@@ -151,6 +151,7 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 <details>
 <summary>📦 Release Highlights — version changelog</summary>
 
+- **[17 Oct 2026]** **[v0.3.7](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.7)** — One-line install for macOS, Windows and Linux, and `EvoSci update` to move an install between releases; acceptance criteria and goals: `--rubric`, `/rubric` and `/goal` grade work against criteria you set; proactivity: `EvoSci serve` follows up in channel chats on its own (`/proactive`); sign in with ChatGPT directly; the backend answers browser requests only from trusted pages; transient model failures retry within a wait budget; new models: Claude Haiku 5.5 (Anthropic), Gemini 4 Argon, Muse Wonder and Muse Spark Open (OpenRouter), with the Claude lists trimmed to the four current models and Claude Sonnet 5.5 as the default; Windows channel attachments and `@file` mentions open in the file tools; deepagents 0.7.28.
 - **[09 Oct 2026]** **[v0.3.6](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.6)** — New model: Claude Haiku 5.5 (OpenRouter); new provider: Opper; installed skills apply from the next message without `/new`, and `/skill-name` pins a skill to a message; the WebUI installs locally and starts offline; on Windows the agent's commands run in Git Bash set up by `EvoSci setup`; sessions, memory and scheduled tasks are scoped to their project, and `/threads` shows each thread's workspace; a slow MCP server no longer stalls the server start; deepagents 0.7.23.
 - **[03 Oct 2026]** **[v0.3.5](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.5)** — New model: GPT-6.1 Sol (OpenAI + OpenRouter); a new `EvoSci setup` command as groundwork for installer distribution; profile memory over its budget truncates only the oversized file instead of dropping all of it; the observation index lists the newest observations first; deepagents 0.7.21.
 - **[29 Sep 2026]** **[v0.3.4](https://github.com/EvoScientist/EvoScientist/releases/tag/v0.3.4)** — New model: Claude Sonnet 5.5 (Anthropic + OpenRouter); desktop groundwork: the WebUI launcher becomes a shell-agnostic core with a background-job check; Windows fixes for local-server detection behind a system proxy, Ctrl+C isolation of the langgraph dev server, and the `EvoSci server stop` command; memory workers and scheduled-task grading fixed on native DeepSeek.
@@ -208,6 +209,36 @@ Moving beyond traditional human-in-the-loop systems, EvoScientist adopts a human
 
 ## 📦 Installation
 
+### Quick Install
+
+**macOS, Linux, WSL2**
+
+```bash
+curl -fsSL https://evoscientist.ai/install.sh | bash
+```
+
+**Windows** (native, PowerShell)
+
+```powershell
+irm https://evoscientist.ai/install.ps1 | iex
+```
+
+> [!NOTE]
+> Native Windows runs EvoScientist without WSL: the CLI, the TUI, the WebUI and the agent's tools all work, and the agent's shell commands run in Git Bash. If you prefer WSL2, the macOS/Linux command works there too. Found a bug? Please [open an issue](https://github.com/EvoScientist/EvoScientist/issues).
+
+The installer needs no uv, Python, Node.js or Git on the machine. It downloads a checksum-verified uv into EvoScientist's tool folder (`~/.evoscientist/tools`) and installs EvoScientist on uv's own Python 3.12, with the exact dependency versions the release was tested with. It then runs `EvoSci setup`, which adds Node.js when yours is missing or older than 20.9, a Python environment for the agent's shell when no usable `python` is found, the WebUI, and on Windows a checksum-verified Git for Windows when none is installed. It does not replace your system Python, Node.js or Git. Options, mirrors for mainland China, proxies and uninstalling are covered in the [installation guide](docs/guides/install.md).
+
+When it finishes, open a new terminal and run `EvoSci onboard`, then `EvoSci`.
+
+> [!NOTE]
+> To update an existing installation to the latest version, with the dependency versions that release was tested with, use `EvoSci update`:
+> ```bash
+> EvoSci update
+> ```
+> On 0.3.6 or older, which have no `EvoSci update`, run `uv tool upgrade EvoScientist` once, with EvoScientist closed.
+
+### Install with uv or pip
+
 > [!TIP]
 > Requires **Python 3.11+** (**< 3.14**). We recommend [**uv**](https://docs.astral.sh/uv/) or **conda** for dependency management and virtual environments. Prefer to skip a local Python install entirely? Jump to [🐳 Docker](#-docker).
 
@@ -220,17 +251,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 </details>
 
-### Quick Install
-
 ```bash
 uv tool install EvoScientist
 ```
-
-> [!NOTE]
-> To update an existing installation to the latest version, use `uv tool upgrade`:
-> ```bash
-> uv tool upgrade EvoScientist
-> ```
 
 Or install into the current environment instead:
 
@@ -353,7 +376,7 @@ docker build -t evoscientist:dev .
 
 > [!NOTE]
 > Not bundled — install on demand by deriving from the image:
-> - **`stt`** (speech-to-text via `faster-whisper`) and **`oauth`** (`ccproxy-api`)
+> - **`stt`** (speech-to-text via `faster-whisper`) and **`oauth`** (`ccproxy-api`, for Claude subscription OAuth)
 > - **TinyTeX / LaTeX** (`pdflatex`, `latexmk`) for paper-writing skills
 >
 > ```dockerfile
@@ -449,6 +472,9 @@ EvoSci --ui webui                 # browser workspace UI (needs Node.js)
 EvoSci serve                      # headless mode — channels only, no interactive prompt
 EvoSci deploy                     # standalone LangGraph server for external UIs / SDK clients
 EvoSci -p "query" --output-format stream-json --auto-mode  # JSONL event stream on stdout (for programmatic clients)
+EvoSci -p "query" --rubric @criteria.md --auto-mode  # grade the work against a checklist; exit code 3 without a satisfied verdict (docs/guides/rubric.md)
+# In the TUI / interactive CLI: /rubric set @criteria.md grades every turn of the thread, /rubric next only the next task (docs/guides/rubric.md#interactive-sessions)
+# /goal <objective> drafts acceptance criteria for you to review, then grades each turn against them (docs/guides/goal.md)
 ```
 
 `--output-format stream-json` makes a single-shot (`-p`) run emit its native events as line-delimited JSON on stdout (one object per line), with all human output on stderr — the integration surface for headless clients (e.g. an agent runtime). See [docs/guides/stream-json.md](docs/guides/stream-json.md) for the event schema.
@@ -485,6 +511,14 @@ EvoSci config set langgraph_dev_host 0.0.0.0   # persist, backend (port 6174)
 > **This is not WebUI-specific.** The langgraph dev backend is auto-started for `tui`, `cli`, `serve` and `deploy` too, so `--host` puts port 6174 on the network in every mode. The front-end port (4716) is WebUI-only but not harmless either: its API reads, writes and uploads workspace files and installs skills, so it gets the same banner and the same trusted-network rule.
 >
 > On an untrusted network, leave the backend on loopback and reach it over SSH instead: `ssh -L 6174:localhost:6174 -L 4716:localhost:4716 <host>`.
+
+**Pages from other origins.** In every mode, `EvoSci deploy` included, the backend answers browser requests only from pages on this machine (any port) and on the machine's own addresses when it listens on the network. Other pages get `403`, shown in the browser as a CORS or network error and logged by the backend; under `--tunnel` this includes pages that call the public URL. To use the backend from another page, such as LangSmith Studio, add its origin and restart the backend:
+
+```bash
+EvoSci config set backend_allowed_origins https://smith.langchain.com
+```
+
+The same applies to a WebUI opened by a DNS name, to clients that reach a Docker container through the host's address, and to other containers that use a service name such as `http://evoscientist:6174`.
 
 </details>
 

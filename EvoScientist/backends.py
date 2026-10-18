@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 from deepagents.backends.protocol import (
@@ -381,6 +381,18 @@ class ActionVerdict:
 # disarm one run without disarming the armed graph.
 HITL_SUPPRESSED_KEY = "hitl_suppressed"
 
+# Per-run ``configurable`` key carrying a session's "approve all" grant. Read
+# only by the HITL ``when`` predicate: an explicit human grant approves
+# everything, so unlike ``hitl_suppressed`` it does not arm the backend guard.
+HITL_APPROVE_ALL_KEY = "hitl_approve_all"
+
+# Per-run ``configurable`` key set by the gateways on every call of a run that
+# carries a rubric. The main agent grades only an invocation that has it, so a
+# rubric left in the thread by a run that never reached a verdict cannot grade
+# a later turn or a continuation started by another client.
+RUBRIC_RUN_KEY = "rubric_run"
+MODEL_RETRY_RUN_KEY = "model_retry"
+
 
 def is_hitl_suppressed(config=None) -> bool:
     """Whether the current run has HITL suppressed via ``configurable``.
@@ -416,6 +428,71 @@ def is_hitl_suppressed(config=None) -> bool:
     return bool(configurable[HITL_SUPPRESSED_KEY])
 
 
+def is_hitl_approve_all(config=None) -> bool:
+    """Whether the current call carries a session's "approve all" grant.
+
+    Reads :data:`HITL_APPROVE_ALL_KEY` off an explicit *config* or the ambient
+    run config. Only a literal ``True`` grants, and an absent key never does:
+    the grant belongs to the client that sent it, so there is no fallback to
+    the serving process's own settings.
+    """
+    if config is None:
+        try:
+            from langgraph.config import get_config
+
+            config = get_config()
+        except Exception:
+            return False
+    if not isinstance(config, dict):
+        return False
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return False
+    return configurable.get(HITL_APPROVE_ALL_KEY) is True
+
+
+def _keeps_grant(answer: Any) -> bool:
+    """An answer that approves every call, or a question's answer."""
+    if not isinstance(answer, dict):
+        return False
+    if "decisions" in answer:
+        decisions = answer["decisions"]
+        return (
+            isinstance(decisions, list)
+            and bool(decisions)
+            and all(
+                isinstance(decision, dict) and decision.get("type") == "approve"
+                for decision in decisions
+            )
+        )
+    return "answers" in answer or answer.get("status") in ("answered", "cancelled")
+
+
+def resume_declines(message: Any) -> bool:
+    """Whether *message* is a resume the session grant must not travel with.
+
+    With the grant a resume skips its pause and drops its decisions, so any other shape loses it.
+    """
+    resume = getattr(message, "resume", None)
+    if resume is None:
+        return False
+    if not isinstance(resume, dict):
+        return True
+    if any(key in resume for key in ("decisions", "answers", "status")):
+        return not _keeps_grant(resume)
+    return not resume or not all(_keeps_grant(answer) for answer in resume.values())
+
+
+def answer_keeps_grant(session_granted: bool, decisions: Any) -> bool:
+    """Whether an approval answer may carry the grant: the grant itself produced it."""
+    return session_granted and _keeps_grant({"decisions": decisions})
+
+
+def approve_all_configurable_extra(active: bool) -> dict[str, Any] | None:
+    """The ``configurable_extra`` part for a call that carries the session grant."""
+    return {HITL_APPROVE_ALL_KEY: True} if active else None
+
+
 def hitl_suppressed_for_run(config=None) -> bool:
     """Whether THIS run must disarm HITL and fall back to the backend guard.
 
@@ -436,6 +513,26 @@ def hitl_suppressed_for_run(config=None) -> bool:
     return bool(
         getattr(config, "auto_mode", False) or getattr(config, "auto_approve", False)
     )
+
+
+def model_retry_for_run(config=None) -> dict[str, Any]:
+    """The retry tier THIS run carries to whichever gateway runs the main agent."""
+    if config is None:
+        from .EvoScientist import _ensure_config
+
+        config = _ensure_config()
+    unattended = bool(getattr(config, "auto_mode", False))
+    budget = (
+        getattr(config, "auto_mode_retry_wait_seconds", 0)
+        if unattended
+        else getattr(config, "model_retry_wait_seconds", 0)
+    )
+    # Same rule as the mounted layer (``_model_retry_middleware``).
+    try:
+        budget = max(0, int(budget))
+    except (TypeError, ValueError, OverflowError):
+        budget = 0
+    return {"unattended": unattended, "wait_budget_seconds": budget}
 
 
 def resolve_action_decision(
@@ -489,86 +586,153 @@ def resolve_action_decision(
     return ActionVerdict(ActionDecision.PROMPT)
 
 
-# Reason recorded on tool results written when a HITL round budget closes a
-# parked interrupt without resuming the agent (issue #469). A rejecting
-# ``Command(resume=...)`` does not close the checkpoint: HumanInTheLoop
-# middleware turns it into a ToolMessage and routes straight back to the
-# model. Surfaces call ``_recover_interrupted_graph_state(close_interrupts=
-# True)`` so the clear → patch → clear → verify sequence is shared with
-# crash recovery. The constant is part of the HITL result text, alongside
-# the stock "do not retry" sentence — passing it as a reject decision's
-# ``message`` would drop that sentence.
+# A parked approval or question is closed without resuming the agent when the
+# turn ends there: a rejecting ``Command(resume=...)`` does not close the
+# checkpoint, HumanInTheLoop middleware turns it into a ToolMessage and routes
+# straight back to the model. Surfaces call ``close_parked_checkpoint`` so the
+# clear → patch → clear → verify sequence is shared with crash recovery, and
+# say why the turn ended.
+ParkedCloseReason = Literal["round_limit", "rejected", "unanswered"]
+
 HITL_ROUND_LIMIT_REJECT_MESSAGE = "approval round limit reached"
 
+_NO_RETRY = "Do not retry this tool call unless the user explicitly requests it."
+_MAY_HAVE_RUN = (
+    "Anything it had already done may have taken effect or may still be "
+    "finishing; check the current state instead of re-running it unless the "
+    "user asks."
+)
 
-def abandoned_tool_messages(messages: list) -> list:
-    """Tool results for unanswered calls on the last AI message.
+# The user was asked about the call and it did not run. The round-limit
+# sentence predates the others and is kept as it was.
+_ASKED_RESULT: dict[ParkedCloseReason, str] = {
+    "rejected": (
+        "User rejected the tool call for `{name}` with id {call_id}. The tool "
+        f"was not executed. {_NO_RETRY}"
+    ),
+    "unanswered": (
+        "The approval request for the tool call `{name}` with id {call_id} was "
+        f"left unanswered. The tool was not executed. {_NO_RETRY}"
+    ),
+    "round_limit": (
+        "User rejected the tool call for `{name}` with id {call_id} "
+        f"({HITL_ROUND_LIMIT_REJECT_MESSAGE}). The tool was not executed. "
+        f"{_NO_RETRY}"
+    ),
+}
+# How the turn ended, for a call that did not run or did not finish: no retry ban.
+_TURN_ENDED: dict[ParkedCloseReason, str] = {
+    "rejected": "the turn ended when the user rejected an approval request",
+    "unanswered": (
+        "the turn ended with an approval request or question left unanswered"
+    ),
+    "round_limit": HITL_ROUND_LIMIT_REJECT_MESSAGE,
+}
 
-    Closing a parked interrupt without these leaves dangling ``tool_calls``
-    or ``invalid_tool_calls``, and the next user turn is rejected by the
-    provider. The wording keeps the middleware's default "do not retry"
-    instruction. Crash recovery covers both lists; this does too.
+
+def _unanswered_calls(messages: list) -> list[tuple[dict, bool]] | None:
+    """``(call, is_invalid)`` for calls of the last AI message without a result.
+
+    ``None`` when the messages cannot be read, which is not the same as none
+    being unanswered. A call without an id cannot be answered and is skipped.
     """
-    from langchain_core.messages import AIMessage, ToolMessage, convert_to_messages
+    from langchain_core.messages import AIMessage, convert_to_messages
 
     try:
         converted = list(convert_to_messages(messages))
     except Exception:
-        return []
+        return None
 
-    def _calls(message: AIMessage) -> list:
+    def _calls(message: AIMessage) -> list[tuple[dict, bool]]:
         return [
-            *message.tool_calls,
-            *(getattr(message, "invalid_tool_calls", None) or ()),
+            *((call, False) for call in message.tool_calls),
+            *(
+                (call, True)
+                for call in (getattr(message, "invalid_tool_calls", None) or ())
+            ),
         ]
 
-    last_ai = None
+    last_calls: list[tuple[dict, bool]] = []
     last_index = -1
     for index, message in enumerate(converted):
         if isinstance(message, AIMessage) and _calls(message):
-            last_ai = message
+            last_calls = _calls(message)
             last_index = index
-    if last_ai is None:
-        return []
     answered = {
         message.tool_call_id
         for message in converted[last_index + 1 :]
         if getattr(message, "type", None) == "tool" and message.tool_call_id
     }
+    return [
+        (call, invalid)
+        for call, invalid in last_calls
+        if call.get("id") and call["id"] not in answered
+    ]
+
+
+def abandoned_tool_messages(
+    messages: list,
+    *,
+    reason: ParkedCloseReason,
+    parked_before_tools: bool = False,
+) -> list:
+    """Tool results for unanswered calls on the last AI message.
+
+    Closing a parked interrupt without these leaves dangling ``tool_calls``
+    or ``invalid_tool_calls``, and the next user turn is rejected by the
+    provider. Each result says what is known about its call:
+    ``parked_before_tools`` means the graph stopped before any tool of the
+    batch ran, so a gated call was the one the user was asked about and the
+    rest were simply not executed; anywhere else a valid call had started.
+    A malformed call never runs.
+    """
+    from langchain_core.messages import ToolMessage
+
+    from .EvoScientist import HITL_INTERRUPT_ON
+
     results = []
-    for call in _calls(last_ai):
-        call_id = call.get("id")
-        if not call_id or call_id in answered:
-            continue
+    for call, invalid in _unanswered_calls(messages) or ():
+        call_id = call["id"]
         name = call.get("name") or "tool"
+        if invalid or (parked_before_tools and name not in HITL_INTERRUPT_ON):
+            content = (
+                f"The tool call for `{name}` with id {call_id} was not executed: "
+                f"{_TURN_ENDED[reason]}."
+            )
+        elif parked_before_tools:
+            content = _ASKED_RESULT[reason].format(name=name, call_id=call_id)
+        else:
+            content = (
+                f"The tool call for `{name}` with id {call_id} did not finish "
+                f"({_TURN_ENDED[reason]}). {_MAY_HAVE_RUN}"
+            )
         results.append(
             ToolMessage(
-                content=(
-                    f"User rejected the tool call for `{name}` with id {call_id} "
-                    f"({HITL_ROUND_LIMIT_REJECT_MESSAGE}). The tool was not "
-                    "executed. Do not retry this tool call unless the user "
-                    "explicitly requests it."
-                ),
-                name=name,
-                tool_call_id=call_id,
-                status="error",
+                content=content, name=name, tool_call_id=call_id, status="error"
             )
         )
     return results
 
 
-async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
+async def close_parked_checkpoint(
+    gateway,
+    target,
+    thread_id: str,
+    *,
+    reason: ParkedCloseReason,
+) -> None:
     """End a parked HITL/ask_user turn without another model step.
 
     Reuses ``_recover_interrupted_graph_state(close_interrupts=True)`` through
-    ``gateway`` so HITL budget exhaustion and crash recovery share one
+    ``gateway`` so every such close and crash recovery share one
     clear → patch → clear → verify sequence. After #470,
     ``GraphTarget.local_graph`` may be None and execution is server-backed;
     the gateway is the authority for checkpoint reads and writes.
 
     Finished sibling writes (``ask_user`` beside another tool) stay in
-    history; unanswered calls get HITL reject results. A rejecting resume
-    is not used: that resumes the agent.
+    history; unanswered calls get results worded for ``reason``. A rejecting
+    resume is not used: that resumes the agent. Raises when the thread is not
+    left closed with every call answered.
     """
     from .stream.events import _GatewayCheckpointOps, _recover_interrupted_graph_state
 
@@ -576,6 +740,7 @@ async def close_parked_checkpoint(gateway, target, thread_id: str) -> None:
         _GatewayCheckpointOps(gateway, target, thread_id),
         {"configurable": {"thread_id": thread_id}},
         close_interrupts=True,
+        close_reason=reason,
     )
     if not ok:
         raise RuntimeError(
@@ -1149,7 +1314,14 @@ def _resolve_virtual_mount_path(
     outside the workspace's ``media/``: the folder as configured (how channel
     attachments are referenced) and its resolved target, both kept as they
     are.
+
+    On Windows a ``/C:/...`` file-tool alias becomes the drive path the shell
+    takes.
     """
+    host = paths.host_file_tool_path(token)
+    if not host.startswith("/"):
+        return _platform_quote(host)
+
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
         for tier in _skills_tier_paths(skills_dir):
@@ -1711,7 +1883,7 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
         # ValueError for an entry that resolves outside the folder; the
         # listing skips it.
         path.resolve().relative_to(self.cwd)
-        return (self._media_dir / path.relative_to(self.cwd)).as_posix()
+        return paths.file_tool_path(self._media_dir / path.relative_to(self.cwd))
 
 
 class CustomSandboxBackend(LocalShellBackend):
@@ -1818,9 +1990,10 @@ class CustomSandboxBackend(LocalShellBackend):
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
-        In dangerous (real-filesystem) mode, skip all rewriting and let the
-        parent resolve real absolute paths as-is.
+        In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
+        alias and let the parent resolve real absolute paths as-is.
         """
+        key = paths.host_file_tool_path(key)
         if self._dangerous:
             return super()._resolve_path(key)
 
@@ -1828,16 +2001,21 @@ class CustomSandboxBackend(LocalShellBackend):
         if media_path is not None:
             return media_path
 
-        cwd_str = str(self.cwd).rstrip("/")
+        cwd_str = self.cwd.as_posix().rstrip("/")
         ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
 
         # Prefer the full cwd match so a parent path that happens to contain
         # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
         # confuse the basename-based fallback below.
-        if key == cwd_str:
-            return super()._resolve_path("/")
-        if key.startswith(cwd_str + "/"):
-            return super()._resolve_path("/" + key[len(cwd_str) + 1 :])
+        key_path = Path(key)
+        if key_path.is_absolute():
+            try:
+                relative = key_path.relative_to(self.cwd)
+            except ValueError:
+                pass
+            else:
+                virtual = relative.as_posix()
+                return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
@@ -1864,10 +2042,8 @@ class CustomSandboxBackend(LocalShellBackend):
 
         return super()._resolve_path(key)
 
-    # On Windows the file tools never reach the media folder here: deepagents'
-    # ``validate_path`` rejects drive-letter paths (``C:\...``, ``C:/...``)
-    # for every file tool before the backend sees them. In run mode a channel
-    # attachment on Windows is reachable through the shell only.
+    # Windows attachment references use a /C:/... file-tool alias so they
+    # pass deepagents' validation before reaching this backend.
     def _media_relative(self, key: str) -> Path | None:
         """*key* relative to the media folder, if it names a path inside it.
 
@@ -1876,7 +2052,7 @@ class CustomSandboxBackend(LocalShellBackend):
         """
         if self._media_dir is None:
             return None
-        path = Path(key)
+        path = Path(paths.host_file_tool_path(key))
         if not path.is_absolute():
             return None
         for base in (self._media_dir, self._media_real):
@@ -1925,15 +2101,25 @@ class CustomSandboxBackend(LocalShellBackend):
     def _in_media(self, file_path: str) -> bool:
         return not self._dangerous and self._media_relative(file_path) is not None
 
+    def _tool_paths(self, items: list | None) -> list | None:
+        """Spell dangerous-mode result paths the way the file tools accept them."""
+        if not self._dangerous or not items:
+            return items
+        return [{**item, "path": paths.file_tool_path(item["path"])} for item in items]
+
     def ls(self, path: str) -> LsResult:
         if self._in_media(path):
             return self._media_view.ls(path)
-        return super().ls(path)
+        result = super().ls(path)
+        result.entries = self._tool_paths(result.entries)
+        return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         if path is not None and self._in_media(path):
             return self._media_view.glob(pattern, path)
-        return super().glob(pattern, path)
+        result = super().glob(pattern, path)
+        result.matches = self._tool_paths(result.matches)
+        return result
 
     def grep(
         self,
@@ -1948,9 +2134,11 @@ class CustomSandboxBackend(LocalShellBackend):
             return self._media_view.grep(
                 pattern, path, glob, max_count=max_count, context_lines=context_lines
             )
-        return super().grep(
+        result = super().grep(
             pattern, path, glob, max_count=max_count, context_lines=context_lines
         )
+        result.matches = self._tool_paths(result.matches)
+        return result
 
     def write(self, file_path: str, content: str) -> WriteResult:
         if self._in_media(file_path):

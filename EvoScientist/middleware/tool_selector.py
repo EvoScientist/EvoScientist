@@ -52,6 +52,7 @@ DEFAULT_ALWAYS_INCLUDE_TOOLS: frozenset[str] = frozenset(
         "read_memory",
         "record_observation",
         "search_observations",
+        "update_goal",
     }
 )
 

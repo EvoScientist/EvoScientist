@@ -943,12 +943,16 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert run_request_id
     assert stream.run.starts == [
         {
-            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "input": {
+                "messages": [{"role": "user", "content": "hi"}],
+                "goal_request": None,
+            },
             "config": {
                 "configurable": {
                     "model": "live-model",
                     "model_provider": "live-provider",
                     "hitl_suppressed": False,
+                    "model_retry": {"unattended": False, "wait_budget_seconds": 0},
                     "thread_id": "abc12345",
                 },
                 "recursion_limit": 4242,
@@ -1027,12 +1031,16 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
     assert run_request_id
     assert stream.run.starts == [
         {
-            "input": {"messages": [{"role": "user", "content": "hi"}]},
+            "input": {
+                "messages": [{"role": "user", "content": "hi"}],
+                "goal_request": None,
+            },
             "config": {
                 "configurable": {
                     "model": "live-model",
                     "model_provider": "live-provider",
                     "hitl_suppressed": False,
+                    "model_retry": {"unattended": False, "wait_budget_seconds": 0},
                     "active_teams": ["code-agent"],
                     "custom_key": "custom_value",
                     "thread_id": "abc12345",
@@ -1454,7 +1462,8 @@ async def test_metadata_refresh_failure_does_not_drop_turn(resume, caplog):
         assert stream.run.starts == []
     else:
         assert stream.run.starts[0]["input"] == {
-            "messages": [{"role": "user", "content": "hi"}]
+            "messages": [{"role": "user", "content": "hi"}],
+            "goal_request": None,
         }
 
 
@@ -1499,6 +1508,49 @@ async def test_server_gateway_suppresses_hitl_for_auto_mode_session():
 
     (start,) = stream.run.starts
     assert start["config"]["configurable"]["hitl_suppressed"] is True
+
+
+async def test_server_gateway_never_forwards_the_session_grant():
+    """A keyed fresh run on a thread parked at a declined approval would run the
+    declined batch on the server, so this gateway drops the key from every run."""
+    cfg = SimpleNamespace(model="m", provider="p", auto_mode=False, auto_approve=False)
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[{"thread_id": "abc12345", "metadata": {"graph_id": "EvoScientist"}}],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=cfg):
+        async for _event in gateway.stream_events(
+            RunRequest(
+                message="hi",
+                thread_id="abc12345",
+                configurable_extra={
+                    "hitl_approve_all": True,
+                    "active_teams": ["reviewer"],
+                },
+            )
+        ):
+            pass
+
+    (start,) = stream.run.starts
+    configurable = start["config"]["configurable"]
+    assert "hitl_approve_all" not in configurable
+    assert configurable["active_teams"] == ["reviewer"]
+    assert configurable["hitl_suppressed"] is False
+
+
+def test_local_run_config_carries_the_session_grant():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    run_config = resolve_per_run_config(
+        "t1", {"hitl_approve_all": True}, hitl_suppressed=False
+    )
+    assert run_config["configurable"]["hitl_approve_all"] is True
+    assert run_config["configurable"]["hitl_suppressed"] is False
 
 
 async def test_langgraph_server_gateway_warns_on_pre_run_state_fetch_failure(
@@ -1807,6 +1859,61 @@ async def test_langgraph_server_gateway_emits_state_interrupt_before_done():
         },
         {"type": "done", "content": "", "response": ""},
     ]
+
+
+@pytest.mark.parametrize(
+    ("interrupts", "paused"), [([{"id": "i1"}], True), ([], False)]
+)
+def test_the_server_tracker_says_when_a_child_only_paused(interrupts, paused):
+    """The result of the task a child run belongs to tells whether the child
+    stopped at an interrupt or finished."""
+    from EvoScientist.gateway.server import _ServerSubagentTracker
+    from EvoScientist.stream.emitter import StreamEventEmitter
+    from EvoScientist.stream.events import _SubagentRegistry
+
+    tracker = _ServerSubagentTracker(
+        emitter=StreamEventEmitter(), registry=_SubagentRegistry()
+    )
+    started = {
+        "method": "lifecycle",
+        "params": {"namespace": ["tools:task-1"], "data": {"event": "started"}},
+    }
+    result = {
+        "method": "tasks",
+        "params": {
+            "namespace": [],
+            "data": {
+                "id": "task-1",
+                "name": "tools",
+                "error": None,
+                "interrupts": interrupts,
+                "result": {},
+            },
+        },
+    }
+    events = [*tracker.process(started), *tracker.process(result)]
+    (end,) = [event for event in events if event["type"] == "subagent_end"]
+    assert bool(end.get("paused")) is paused
+    assert ("paused" in end) is paused
+
+
+def test_the_server_tracker_does_not_call_a_child_paused_when_the_stream_stops():
+    """A child that is still open when the stream ends gets an end event, and
+    nothing says that it paused."""
+    from EvoScientist.gateway.server import _ServerSubagentTracker
+    from EvoScientist.stream.emitter import StreamEventEmitter
+    from EvoScientist.stream.events import _SubagentRegistry
+
+    tracker = _ServerSubagentTracker(
+        emitter=StreamEventEmitter(), registry=_SubagentRegistry()
+    )
+    started = {
+        "method": "lifecycle",
+        "params": {"namespace": ["tools:task-1"], "data": {"event": "started"}},
+    }
+    events = [*tracker.process(started), *tracker.finish()]
+    (end,) = [event for event in events if event["type"] == "subagent_end"]
+    assert "paused" not in end
 
 
 async def test_langgraph_server_gateway_streams_subagent_protocol_events():
@@ -2597,10 +2704,42 @@ async def test_langgraph_server_gateway_cancels_only_its_run_on_consumer_abort()
         (
             [
                 {
+                    "run_id": "pending-resumed-run",
+                    "status": "pending",
+                    "kwargs": {
+                        "command": {
+                            "resume": {
+                                "interrupt-1": {"decisions": [{"type": "approve"}]}
+                            }
+                        }
+                    },
+                }
+            ],
+            ["pending-resumed-run"],
+        ),
+        (
+            [
+                {
                     "run_id": "different-resume",
                     "status": "running",
                     "kwargs": {
                         "command": {"resume": {"interrupt-2": {"decisions": []}}}
+                    },
+                }
+            ],
+            [],
+        ),
+        (
+            [
+                {
+                    "run_id": "different-response",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {
+                            "resume": {
+                                "interrupt-1": {"decisions": [{"type": "reject"}]}
+                            }
+                        }
                     },
                 }
             ],
@@ -2643,7 +2782,9 @@ async def test_langgraph_server_gateway_cancels_only_its_run_on_consumer_abort()
     ids=[
         "matching-resume-among-concurrent-runs",
         "resumed-run-finished-before-list",
+        "matching-pending-resume",
         "different-interrupt",
+        "same-interrupt-different-response",
         "ambiguous-matches-and-malformed-records",
     ],
 )
@@ -2670,13 +2811,6 @@ async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
         ],
         interrupts=[{"interrupt_id": "interrupt-1"}],
     )
-    respond = stream.run.respond
-
-    async def _respond_without_run_id(response, *, interrupt_id=None):
-        await respond(response, interrupt_id=interrupt_id)
-        return {}
-
-    stream.run.respond = _respond_without_run_id
     threads = FakeLangGraphThreadsClient(
         threads=[],
         states={"abc12345": {"values": {}}},
@@ -2687,12 +2821,10 @@ async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
 
     class _FakeRunsClient:
         async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
-            if status != "running":
-                return []
             runs = [{"run_id": "other-run", "status": "running"}]
             if stream.run.responses:
                 runs.extend(active_after_respond)
-            return runs
+            return [run for run in runs if run["status"] == status]
 
         async def cancel_many(self, *, thread_id: str, run_ids):
             cancel_calls.append((thread_id, list(run_ids)))
@@ -3132,3 +3264,227 @@ async def test_divergence_server_enqueue_serializes_concurrent_runs():
         )
     ]
     assert events[-1]["type"] == "done"
+
+
+def test_run_streaming_puts_the_rubric_on_the_run_request():
+    agent = MagicMock()
+    gateway = FakeGraphGateway(
+        events=[
+            {"type": "text", "content": "ok"},
+            {"type": "done", "response": "ok"},
+        ]
+    )
+
+    with patch("EvoScientist.stream.display.Live"):
+        display_mod._run_streaming(
+            agent=agent,
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=gateway,
+            rubric="- a",
+        )
+
+    assert [request.rubric for request in gateway.requests] == ["- a"]
+
+
+def _cmd_run_with_fake_stream(monkeypatch, *, verdict, **cmd_kwargs):
+    from types import SimpleNamespace
+
+    from EvoScientist.cli import interactive
+
+    thread_store = FakeThreadStore(generated_thread_id="generated-thread")
+    runtime_gateways = RuntimeGateways(
+        thread_store=thread_store,
+        graph_gateway=LocalGraphGateway(thread_store=thread_store),
+    )
+    seen: dict[str, Any] = {}
+
+    def _run_streaming(**kwargs):
+        seen.update(kwargs)
+        callback = kwargs.get("on_stream_event")
+        if callback is not None:
+            callback("rubric_evaluation", SimpleNamespace(rubric_result=verdict))
+        return "ok"
+
+    monkeypatch.setattr(interactive, "run_streaming", _run_streaming)
+    result = interactive.cmd_run(
+        MagicMock(),
+        "hello",
+        thread_id="generated-thread",
+        show_thinking=False,
+        dirs=SessionDirs(Workspace("/tmp/ws")),
+        model="test-model",
+        runtime_gateways=runtime_gateways,
+        **cmd_kwargs,
+    )
+    return result, seen
+
+
+def test_cmd_run_forwards_the_rubric_and_returns_the_verdict(monkeypatch):
+    result, seen = _cmd_run_with_fake_stream(
+        monkeypatch, verdict="max_iterations_reached", rubric="- a"
+    )
+    assert seen["rubric"] == "- a"
+    assert result == "max_iterations_reached"
+
+
+def test_cmd_run_without_a_rubric_tracks_nothing(monkeypatch):
+    result, seen = _cmd_run_with_fake_stream(monkeypatch, verdict="satisfied")
+    assert seen["rubric"] is None
+    assert seen["on_stream_event"] is None
+    assert result is None
+
+
+def test_resolve_per_run_config_marks_only_a_graded_run():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    marked = resolve_per_run_config("t1", None, rubric_run=True)
+    assert marked["configurable"]["rubric_run"] == {"mode": "input"}
+    assert "rubric_run" not in resolve_per_run_config("t1", None)["configurable"]
+
+
+def test_input_mode_wins_over_a_client_marker_but_keeps_its_changes():
+    from EvoScientist.gateway.types import resolve_per_run_config
+
+    change = {"session": "s", "seq": 1, "sticky": "- a"}
+    extra = {"rubric_run": {"mode": "thread", "changes": [change]}}
+    marked = resolve_per_run_config("t1", extra, rubric_run=True)
+    assert marked["configurable"]["rubric_run"] == {
+        "mode": "input",
+        "changes": [change],
+    }
+    unmarked = resolve_per_run_config("t1", extra)
+    assert unmarked["configurable"]["rubric_run"]["mode"] == "thread"
+
+
+async def test_langgraph_server_gateway_marks_a_graded_run():
+    stream = FakeLangGraphThreadStream("abc12345", events=[])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+    live_cfg = SimpleNamespace(
+        model="live-model", provider="live-provider", recursion_limit=4242
+    )
+    with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345", rubric="- a")
+        ):
+            pass
+
+    start = stream.run.starts[0]
+    assert start["input"]["rubric"] == "- a"
+    assert start["config"]["configurable"]["rubric_run"] == {"mode": "input"}
+
+
+def test_server_gateway_run_carries_the_retry_key(monkeypatch):
+    """A -p --auto-mode run on the server gateway must bring its own tier."""
+    import EvoScientist.EvoScientist as evo_mod
+    from EvoScientist.backends import MODEL_RETRY_RUN_KEY
+    from EvoScientist.config import EvoScientistConfig
+    from EvoScientist.gateway import server as server_mod
+
+    cfg = EvoScientistConfig(auto_mode=True, auto_mode_retry_wait_seconds=1800)
+    monkeypatch.setattr(evo_mod, "_ensure_config", lambda: cfg)
+    gateway = server_mod.LangGraphServerGateway.__new__(
+        server_mod.LangGraphServerGateway
+    )
+    config = gateway._resolve_run_config("t1", None)
+    assert config["configurable"][MODEL_RETRY_RUN_KEY] == {
+        "unattended": True,
+        "wait_budget_seconds": 1800,
+    }
+
+
+def _model_call(phase: str, call: str, status: str | None = None) -> dict:
+    payload: dict[str, object] = {"type": "model_call", "phase": phase, "call": call}
+    if status is not None:
+        payload["status"] = status
+    return _custom_stream_event(payload)
+
+
+async def test_langgraph_server_gateway_recovers_a_whole_message_fallback_after_a_discard():
+    """The transport drops a non-streamed message, so the values snapshot must deliver it.
+
+    The failed primary's text had switched snapshot recovery off; once that
+    text is discarded the fallback's answer has no other way to arrive.
+    """
+    events = await _collect_server_gateway_stream(
+        [
+            _model_call("start", "1"),
+            _root_text_delta("WRO"),
+            _model_call("end", "1", "failed"),
+            _model_call("start", "2"),
+            _model_call("end", "2", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    assert [event["type"] for event in events] == [
+        "text",
+        "model_output_discarded",
+        "text",
+        "done",
+    ]
+    assert events[-1]["response"] == "new"
+
+
+async def test_langgraph_server_gateway_recovery_after_a_discard_skips_streamed_messages():
+    first = {"type": "ai", "content": "first", "id": "ai-1"}
+    events = await _collect_server_gateway_stream(
+        [
+            _model_call("start", "1"),
+            _root_text_delta("first"),
+            _root_message_finish(),
+            _model_call("end", "1", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, first]),
+            _model_call("start", "2"),
+            _root_text_delta("WRO"),
+            _model_call("end", "2", "failed"),
+            _model_call("start", "3"),
+            _model_call("end", "3", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, first, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    texts = [event["content"] for event in events if event["type"] == "text"]
+    assert texts == ["first", "WRO", "new"]
+    assert events[-1]["response"] == "firstnew"
+
+
+async def test_langgraph_server_gateway_streamed_retry_after_a_discard_is_not_duplicated():
+    events = await _collect_server_gateway_stream(
+        [
+            _model_call("start", "1"),
+            _root_text_delta("WRO"),
+            _model_call("end", "1", "failed"),
+            _custom_stream_event(
+                {
+                    "type": "model_retry",
+                    "attempt": 2,
+                    "wait_seconds": 1.0,
+                    "reason": "503: starting up",
+                    "budget_left_seconds": 9.0,
+                    "cause": "exception",
+                }
+            ),
+            _model_call("start", "2"),
+            _root_text_delta("new"),
+            _root_message_finish(),
+            _model_call("end", "2", "clean"),
+            _value_snapshot([_OLD_AI, _HUMAN, _NEW_AI]),
+        ],
+        state_messages=[_OLD_AI],
+    )
+
+    texts = [event["content"] for event in events if event["type"] == "text"]
+    assert texts == ["WRO", "new"]
+    assert events[-1]["response"] == "new"

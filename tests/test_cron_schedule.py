@@ -195,8 +195,9 @@ requirements = [
 """.lstrip(),
         encoding="utf-8",
     )
-    monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-    assert registry._uv_tool_existing_requirements()["mcp-écho"] == "mcp-écho>=1.0"
+    from EvoScientist import uv_tool
+
+    assert uv_tool.read_receipt(venv).with_args() == ["--with", "mcp-écho>=1.0"]
 
     runtime = manager.LanggraphRuntimePaths.for_directory(tmp_path / "runtime")
     monkeypatch.setattr(manager, "RUNTIME", runtime)
@@ -273,3 +274,57 @@ def test_run_now_with_rubric_sends_it_in_input_and_metadata(monkeypatch, workspa
     run_kw = fake.runs.create.call_args.kwargs
     assert run_kw["input"]["rubric"] == "- output.md exists"
     assert run_kw["metadata"]["rubric"] == "- output.md exists"
+
+
+def test_create_cron_without_a_thread_passes_no_new_arguments(workspace):
+    from EvoScientist.cron.schedule import create_cron
+
+    fake = MagicMock()
+    create_cron(
+        fake,
+        workspace=workspace,
+        assistant_id="scheduler",
+        schedule="0 9 * * *",
+        input={},
+        metadata={"run_kind": "scheduled_task"},
+        timezone="UTC",
+    )
+    fake.crons.create_for_thread.assert_not_called()
+    kw = fake.crons.create.call_args.kwargs
+    assert set(kw) == {
+        "assistant_id",
+        "schedule",
+        "input",
+        "metadata",
+        "config",
+        "timezone",
+    }
+
+
+def test_create_cron_on_a_thread_keeps_the_workspace_tag_and_run_config(workspace):
+    from EvoScientist.cron.schedule import create_cron, run_config
+
+    fake = MagicMock()
+    create_cron(
+        fake,
+        workspace=workspace,
+        assistant_id="proactive",
+        schedule="*/10 * * * *",
+        input={"candidates": []},
+        metadata={"run_kind": "proactive_check"},
+        timezone="UTC",
+        thread_id="t-cron",
+        multitask_strategy="reject",
+        durability="exit",
+    )
+    fake.crons.create.assert_not_called()
+    args = fake.crons.create_for_thread.call_args
+    assert args.args == ("t-cron", "proactive")
+    assert args.kwargs["metadata"] == {
+        "run_kind": "proactive_check",
+        "workspace_dir": workspace.key,
+    }
+    assert args.kwargs["config"] == run_config(workspace)
+    assert args.kwargs["multitask_strategy"] == "reject"
+    assert args.kwargs["durability"] == "exit"
+    assert "context" not in args.kwargs

@@ -7,6 +7,11 @@ for the chat-model construction stack in :mod:`.models` (~2000 modules).
 
 from __future__ import annotations
 
+
+class UnknownModelError(ValueError):
+    """A router was given a model id it cannot address (a bare short name)."""
+
+
 _MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
 _SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
 
@@ -79,27 +84,20 @@ def _is_mandatory_thinking_kimi(model_id: str) -> bool:
 _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     # Custom Anthropic (third-party Claude-compatible endpoints, current-gen defaults)
     # Listed BEFORE native anthropic so MODELS dict defaults to native provider
-    ("claude-sonnet-4-6", "claude-sonnet-4-6", "custom-anthropic"),
-    ("claude-haiku-4-5", "claude-haiku-4-5", "custom-anthropic"),
+    ("claude-sonnet-5-5", "claude-sonnet-5-5", "custom-anthropic"),
+    ("claude-haiku-5-5", "claude-haiku-5-5", "custom-anthropic"),
     # Custom OpenAI (third-party OpenAI-compatible endpoints, 3 defaults)
     # Listed BEFORE native openai so MODELS dict defaults to native provider
-    ("gpt-5.5-pro", "gpt-5.5-pro", "custom-openai"),
-    ("gpt-5.5", "gpt-5.5", "custom-openai"),
-    ("gpt-5.4", "gpt-5.4", "custom-openai"),
-    ("gpt-5.3-codex", "gpt-5.3-codex", "custom-openai"),
-    ("gpt-5-mini", "gpt-5-mini", "custom-openai"),
+    ("gpt-6.1-sol", "gpt-6.1-sol", "custom-openai"),
+    ("gpt-6-sol", "gpt-6-sol", "custom-openai"),
+    ("gpt-6-luna", "gpt-6-luna", "custom-openai"),
     # Atlas Cloud (OpenAI-compatible)
     ("qwen3.5-27b", "qwen/qwen3.5-27b", "atlascloud"),
     # Anthropic (current generation)
     ("claude-fable-5-1", "claude-fable-5-1", "anthropic"),
-    ("claude-fable-5", "claude-fable-5", "anthropic"),
     ("claude-opus-5-5", "claude-opus-5-5", "anthropic"),
-    ("claude-opus-5", "claude-opus-5", "anthropic"),
-    ("claude-opus-4-8", "claude-opus-4-8", "anthropic"),
     ("claude-sonnet-5-5", "claude-sonnet-5-5", "anthropic"),
-    ("claude-sonnet-5", "claude-sonnet-5", "anthropic"),
-    ("claude-sonnet-4-6", "claude-sonnet-4-6", "anthropic"),
-    ("claude-haiku-4-5", "claude-haiku-4-5", "anthropic"),
+    ("claude-haiku-5-5", "claude-haiku-5-5", "anthropic"),
     # OpenAI
     ("gpt-6.1-sol", "gpt-6.1-sol", "openai"),
     ("gpt-6-sol", "gpt-6-sol", "openai"),
@@ -108,18 +106,29 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gpt-5.6-sol", "gpt-5.6-sol", "openai"),
     ("gpt-5.6-terra", "gpt-5.6-terra", "openai"),
     ("gpt-5.6-luna", "gpt-5.6-luna", "openai"),
-    ("gpt-5.5-pro", "gpt-5.5-pro", "openai"),
-    ("gpt-5.5", "gpt-5.5", "openai"),
-    ("gpt-5.4", "gpt-5.4", "openai"),
-    ("gpt-5.4-mini", "gpt-5.4-mini", "openai"),
-    ("gpt-5.4-nano", "gpt-5.4-nano", "openai"),
-    ("gpt-5.3-codex", "gpt-5.3-codex", "openai"),
-    ("gpt-5.2-codex", "gpt-5.2-codex", "openai"),
-    ("gpt-5.2", "gpt-5.2", "openai"),
-    ("gpt-5.1", "gpt-5.1", "openai"),
-    ("gpt-5", "gpt-5", "openai"),
-    ("gpt-5-mini", "gpt-5-mini", "openai"),
-    ("gpt-5-nano", "gpt-5-nano", "openai"),
+    # Requesty (aggregator — OpenAI-compatible router, provider/model IDs).
+    # Listed before the native providers and OpenRouter so that a short name
+    # shared with them never resolves here (the dict below is last-entry-wins);
+    # Requesty is selected explicitly via get_models_for_provider.
+    ("claude-sonnet-5.5", "anthropic/claude-sonnet-5-5", "requesty"),
+    ("claude-opus-5.5", "anthropic/claude-opus-5-5", "requesty"),
+    ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
+    ("grok-4.3", "xai/grok-4.3", "requesty"),
+    ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
+    # Novita (aggregator — OpenAI-compatible, Kimi/GLM/DeepSeek, etc.)
+    ("kimi-k3", "moonshotai/kimi-k3", "novita"),
+    ("glm-5.2", "zai-org/glm-5.2", "novita"),
+    ("deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731", "novita"),
+    # Opper (EU-hosted aggregator — OpenAI-compatible, bare pool-name model IDs
+    # where a pool is every provider serving that model and Opper picks the
+    # route per request). Listed before the native providers and OpenRouter so
+    # shared short names keep resolving to them (the dict below is
+    # last-entry-wins); Opper is selected explicitly via get_models_for_provider.
+    ("claude-sonnet-5.5", "claude-sonnet-5-5", "opper"),
+    ("claude-opus-5.5", "claude-opus-5-5", "opper"),
+    ("gemini-3.8-flash", "gemini-3.8-flash", "opper"),
+    ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
+    ("mistral-large-2512", "mistral-large-2512", "opper"),
     # Google GenAI
     ("gemini-3.8-flash", "gemini-3.8-flash", "google-genai"),
     ("gemini-3.7-flash", "gemini-3.7-flash", "google-genai"),
@@ -162,60 +171,17 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5", "Pro/zai-org/GLM-5", "siliconflow"),
     ("kimi-k2.5", "Pro/moonshotai/Kimi-K2.5", "siliconflow"),
     ("glm-4.7", "Pro/zai-org/GLM-4.7", "siliconflow"),
-    # Requesty (aggregator — OpenAI-compatible router, provider/model IDs).
-    # Listed before OpenRouter so that for model names shared with OpenRouter
-    # or a native provider, Requesty does not override them (the dict below is
-    # last-entry-wins); Requesty is selected explicitly via get_models_for_provider.
-    ("claude-sonnet-4.6", "anthropic/claude-sonnet-4-6", "requesty"),
-    ("claude-opus-4.8", "anthropic/claude-opus-4-8", "requesty"),
-    ("gemini-3.5-flash", "google/gemini-3.5-flash", "requesty"),
-    ("grok-4.3", "xai/grok-4.3", "requesty"),
-    ("grok-build-0.1", "xai/grok-build-0.1", "requesty"),
-    # Novita (aggregator — OpenAI-compatible, Kimi/GLM/DeepSeek, etc.)
-    ("kimi-k3", "moonshotai/kimi-k3", "novita"),
-    ("glm-5.2", "zai-org/glm-5.2", "novita"),
-    ("deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731", "novita"),
-    # Opper (EU-hosted aggregator — OpenAI-compatible, bare pool-name model IDs
-    # where a pool is every provider serving that model and Opper picks the
-    # route per request). Listed before OpenRouter so shared short names keep
-    # resolving to their existing provider (the dict below is last-entry-wins);
-    # Opper is selected explicitly via get_models_for_provider.
-    ("claude-sonnet-4.6", "claude-sonnet-4-6", "opper"),
-    ("claude-opus-5", "claude-opus-5", "opper"),
-    ("gpt-5.5", "gpt-5.5", "opper"),
-    ("gemini-3.8-flash", "gemini-3.8-flash", "opper"),
-    ("deepseek-v4-pro", "deepseek-v4-pro", "opper"),
-    ("mistral-large-2512", "mistral-large-2512", "opper"),
     # OpenRouter
     ("claude-fable-5.1", "anthropic/claude-fable-5.1", "openrouter"),
-    ("claude-fable-5", "anthropic/claude-fable-5", "openrouter"),
     ("claude-opus-5.5", "anthropic/claude-opus-5.5", "openrouter"),
-    ("claude-opus-5", "anthropic/claude-opus-5", "openrouter"),
-    ("claude-opus-5-fast", "anthropic/claude-opus-5-fast", "openrouter"),
-    ("claude-opus-4.8", "anthropic/claude-opus-4.8", "openrouter"),
-    ("claude-opus-4.8-fast", "anthropic/claude-opus-4.8-fast", "openrouter"),
     ("claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", "openrouter"),
-    ("claude-sonnet-5", "anthropic/claude-sonnet-5", "openrouter"),
-    ("claude-sonnet-4.6", "anthropic/claude-sonnet-4.6", "openrouter"),
     ("claude-haiku-5.5", "anthropic/claude-haiku-5.5", "openrouter"),
     ("gpt-6.1-sol", "openai/gpt-6.1-sol", "openrouter"),
-    ("gpt-6-sol", "openai/gpt-6-sol", "openrouter"),
     ("gpt-6-luna", "openai/gpt-6-luna", "openrouter"),
     ("gpt-6-astra", "openai/gpt-6-astra", "openrouter"),
-    ("gpt-5.6-sol", "openai/gpt-5.6-sol", "openrouter"),
-    ("gpt-5.6-terra", "openai/gpt-5.6-terra", "openrouter"),
-    ("gpt-5.6-luna", "openai/gpt-5.6-luna", "openrouter"),
-    ("gpt-5.5-pro", "openai/gpt-5.5-pro", "openrouter"),
-    ("gpt-5.5", "openai/gpt-5.5", "openrouter"),
-    ("gpt-5.4", "openai/gpt-5.4", "openrouter"),
-    ("gpt-5.3-codex", "openai/gpt-5.3-codex", "openrouter"),
+    ("gemini-4-argon", "google/gemini-4-argon", "openrouter"),
     ("gemini-3.8-flash", "google/gemini-3.8-flash", "openrouter"),
-    ("gemini-3.7-flash", "google/gemini-3.7-flash", "openrouter"),
-    ("gemini-3.6-flash", "google/gemini-3.6-flash", "openrouter"),
-    ("gemini-3.5-flash", "google/gemini-3.5-flash", "openrouter"),
     ("gemini-3.5-flash-lite", "google/gemini-3.5-flash-lite", "openrouter"),
-    ("gemini-3.1-pro", "google/gemini-3.1-pro-preview", "openrouter"),
-    ("gemini-3-flash", "google/gemini-3-flash-preview", "openrouter"),
     ("kimi-k3", "moonshotai/kimi-k3", "openrouter"),
     ("kimi-k2.6", "moonshotai/kimi-k2.6", "openrouter"),
     ("glm-5.3", "z-ai/glm-5.3", "openrouter"),
@@ -226,25 +192,17 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
     ("mimo-v2.6-pro", "xiaomi/mimo-v2.6-pro", "openrouter"),
     ("mimo-v2.6-flash", "xiaomi/mimo-v2.6-flash", "openrouter"),
-    ("mimo-v2.5-pro", "xiaomi/mimo-v2.5-pro", "openrouter"),
-    ("mimo-v2.5", "xiaomi/mimo-v2.5", "openrouter"),
     ("grok-build-0.1", "x-ai/grok-build-0.1", "openrouter"),
     ("grok-4.7", "x-ai/grok-4.7", "openrouter"),
-    ("grok-4.6", "x-ai/grok-4.6", "openrouter"),
-    ("grok-4.5", "x-ai/grok-4.5", "openrouter"),
     ("hy4-preview", "tencent/hy4-preview", "openrouter"),
     ("hy3", "tencent/hy3", "openrouter"),
-    ("qwen3.8-max", "qwen/qwen3.8-max", "openrouter"),
+    ("qwen3.8-max", "qwen/qwen3.8-max-0902", "openrouter"),
     ("qwen3.8-flash", "qwen/qwen3.8-flash", "openrouter"),
     ("qwen3.7-max", "qwen/qwen3.7-max", "openrouter"),
-    ("qwen3.7-plus", "qwen/qwen3.7-plus", "openrouter"),
-    ("qwen3.6-flash", "qwen/qwen3.6-flash", "openrouter"),
-    ("qwen3.5-122b", "qwen/qwen3.5-122b-a10b", "openrouter"),
     ("deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro-0813", "openrouter"),
-    ("deepseek-v4-pro", "deepseek/deepseek-v4-pro", "openrouter"),
     ("deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash", "openrouter"),
-    ("deepseek-v4-flash", "deepseek/deepseek-v4-flash", "openrouter"),
-    ("muse-spark-1.3", "meta/muse-spark-1.3", "openrouter"),
+    ("muse-wonder", "meta/muse-wonder", "openrouter"),
+    ("muse-spark-open", "meta/muse-spark-open", "openrouter"),
     # Volcengine Coding Plan (火山引擎代码计划 — coding-only endpoint)
     # Listed before Zhipu so simple GLM lookups keep their existing default.
     ("glm-5.2", "glm-5-2", "volcengine-code"),
@@ -332,7 +290,7 @@ MODELS: dict[str, tuple[str, str]] = {
     name: (model_id, provider) for name, model_id, provider in _MODEL_ENTRIES
 }
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MODEL = "claude-sonnet-5-5"
 
 
 def get_models_for_provider(provider: str) -> list[tuple[str, str]]:

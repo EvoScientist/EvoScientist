@@ -257,7 +257,6 @@ def test_main_activates_the_private_tools(tmp_path, monkeypatch):
     from EvoScientist.setup import node as setup_node
 
     order: list[str] = []
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setattr(setup_node, "activate_runtime", lambda: order.append("node"))
     monkeypatch.setattr(setup_git, "activate_runtime", lambda: order.append("git"))
     monkeypatch.setattr(commands, "_configure_logging", lambda: None)
@@ -276,7 +275,6 @@ def cli(tmp_path, monkeypatch):
     from EvoScientist.cli._app import app
     from EvoScientist.stream.console import console
 
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     # --json redirects the shared console for the rest of the process; undo it.
     monkeypatch.setattr(console, "_file", None)
     runner = CliRunner()

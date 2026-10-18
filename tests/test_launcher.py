@@ -250,6 +250,17 @@ def test_start_raises_on_foreign_occupant(monkeypatch):
     assert ei.value.code == "port_conflict"
 
 
+def test_start_passes_backend_allowed_origins(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    started: dict = {}
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **kw: started.update(kw) or _FakeProc()
+    )
+    config = SimpleNamespace(backend_allowed_origins="https://smith.langchain.com")
+    lm.WebUILauncher(config, _cfg(), _FakeRunner()).start()
+    assert started["allowed_origins"] == "https://smith.langchain.com"
+
+
 def test_start_failure_after_backend_start_tears_the_backend_down(monkeypatch):
     """A front-end failure after the backend was spawned must not leave that
     backend running: start()'s error path tears down what it started."""
@@ -471,6 +482,27 @@ def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
     assert env["PATH"] == "/usr/bin"
     assert env["NODE_OPTIONS"] == "--max-old-space-size=4096"
     assert env["PORT"] == "4716"
+
+
+def test_frontend_env_drops_a_config_folder_set_after_startup(monkeypatch):
+    """A workspace ``.env`` merged into os.environ must not give the WebUI
+    another config folder than this process uses."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "_XDG_CONFIG_HOME_SET", False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/from/a/dotenv")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert "XDG_CONFIG_HOME" not in env
+
+
+def test_frontend_env_has_this_process_data_folder(monkeypatch, tmp_path):
+    """The WebUI reads the same local files as this process."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "rel-data")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert env["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
 
 
 # --------------------------------------------------------------------------- #
