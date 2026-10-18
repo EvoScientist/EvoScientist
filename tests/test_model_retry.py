@@ -301,6 +301,128 @@ def test_a_run_key_budget_that_is_not_an_int_falls_back(monkeypatch, budget):
     assert h.mw._effective_tier().wait_budget_seconds == 60.0
 
 
+# --- one budget per run --------------------------------------------------------
+
+
+@pytest.fixture
+def run(monkeypatch):
+    """Model calls in one run share its ``model_retry`` marker; call to start another run."""
+    from EvoScientist.middleware import model_retry as mod
+
+    def _start():
+        marker = {"unattended": False, "wait_budget_seconds": 60}
+        config = {"configurable": {MODEL_RETRY_RUN_KEY: marker}}
+        monkeypatch.setattr(mod, "get_config", lambda: config)
+
+    _start()
+    return _start
+
+
+async def _spend_the_budget(h: _Harness) -> None:
+    with pytest.raises(ProviderStreamError):
+        await h.mw.awrap_model_call(h.request, h.handler([_transient()] * 20))
+
+
+async def test_once_a_call_used_its_budget_later_calls_in_the_run_are_tried_once(
+    run, caplog
+):
+    """A sub-agent's call waits out the budget; the main agent's next call does not wait again."""
+    sub_agent = _Harness()
+    await _spend_the_budget(sub_agent)
+    assert sum(sub_agent.sleeps) == 55.0
+    main_agent = _Harness()
+    with caplog.at_level(logging.WARNING, logger="EvoScientist.middleware.model_retry"):
+        with pytest.raises(ProviderStreamError):
+            await main_agent.mw.awrap_model_call(
+                main_agent.request, main_agent.handler([_transient(), OK])
+            )
+    assert main_agent.sleeps == []
+    assert main_agent.events == []
+    assert "another model call in this run used up its retry budget" in caplog.text
+
+
+async def test_the_next_run_gets_a_budget_of_its_own(run):
+    h = _Harness()
+    await _spend_the_budget(h)
+    run()
+    assert await h.mw.awrap_model_call(h.request, h.handler([_transient(), OK])) is OK
+
+
+async def test_a_call_that_recovers_or_fails_for_good_leaves_the_run_its_retries(run):
+    h = _Harness()
+    recovered = await h.mw.awrap_model_call(
+        h.request, h.handler([_transient(), _transient(), OK])
+    )
+    assert recovered is OK
+    auth = ProviderStreamError(
+        "openai", "openai.AuthenticationError", "bad key", status_code=401
+    )
+    with pytest.raises(ProviderStreamError):
+        await h.mw.awrap_model_call(h.request, h.handler([auth]))
+    assert await h.mw.awrap_model_call(h.request, h.handler([_transient(), OK])) is OK
+    assert h.sleeps == [1.0, 2.0, 1.0]
+
+
+async def test_a_wait_that_overran_the_budget_counts_as_using_it(run):
+    h = _Harness()
+
+    async def _suspended_sleep(seconds):
+        h.clock.now += seconds + 120.0  # the process was suspended mid-wait
+
+    h.mw._sleep = _suspended_sleep
+    with pytest.raises(ProviderStreamError):
+        await h.mw.awrap_model_call(h.request, h.handler([_transient(), OK]))
+    later = _Harness()
+    with pytest.raises(ProviderStreamError):
+        await later.mw.awrap_model_call(
+            later.request, later.handler([_transient(), OK])
+        )
+    assert later.sleeps == []
+
+
+async def test_a_call_still_retrying_stops_once_another_used_the_budget(run):
+    """Two sub-agents at once: the one still retrying does not wait again."""
+    first = _Harness()
+    second = _Harness()
+    record = second.mw._sleep
+
+    async def _while_the_other_runs_out(seconds):
+        await record(seconds)
+        if len(second.sleeps) == 1:
+            await _spend_the_budget(first)
+
+    second.mw._sleep = _while_the_other_runs_out
+    with pytest.raises(ProviderStreamError):
+        await second.mw.awrap_model_call(
+            second.request, second.handler([_transient()] * 3 + [OK])
+        )
+    assert second.sleeps == [1.0]
+
+
+async def test_a_retry_after_longer_than_the_budget_leaves_the_run_its_retries(run):
+    h = _Harness()
+    too_long = _transient(headers=httpx.Headers({"retry-after": "90"}))
+    with pytest.raises(ProviderStreamError):
+        await h.mw.awrap_model_call(h.request, h.handler([too_long, OK]))
+    assert await h.mw.awrap_model_call(h.request, h.handler([_transient(), OK])) is OK
+    assert h.sleeps == [1.0]
+
+
+async def test_a_layer_that_ignores_the_run_key_ignores_a_spent_run(run):
+    await _spend_the_budget(_Harness())
+    fixed = _Harness(unattended=True, honor_run_key=False)
+    result = await fixed.mw.awrap_model_call(
+        fixed.request, fixed.handler([_transient(), OK])
+    )
+    assert result is OK
+
+
+async def test_calls_outside_a_run_keep_a_budget_each():
+    h = _Harness()
+    await _spend_the_budget(h)
+    assert await h.mw.awrap_model_call(h.request, h.handler([_transient(), OK])) is OK
+
+
 def test_sync_path_mirrors_the_async_loop():
     sleeps: list[float] = []
     clock = _Clock()
@@ -379,6 +501,28 @@ def test_sync_path_counts_the_retried_attempts_against_the_budget():
         mw.wrap_model_call(request, handler)
     assert sleeps == [1.0, 2.0, 4.0]
     assert clock.now == 107.0
+
+
+def test_sync_path_tries_later_calls_in_a_spent_run_once(run):
+    mw, _clock, sleeps, request = _sync_harness()
+
+    def _down(_request):
+        raise _transient()
+
+    with pytest.raises(ProviderStreamError):
+        mw.wrap_model_call(request, _down)
+    assert sum(sleeps) == 55.0
+    outcomes = [_transient(), OK]
+
+    def handler(_request):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    with pytest.raises(ProviderStreamError):
+        mw.wrap_model_call(request, handler)
+    assert sum(sleeps) == 55.0
 
 
 async def test_warning_lines(caplog):
