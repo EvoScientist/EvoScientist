@@ -64,6 +64,7 @@ from .async_notifier import (
     enqueue_bg_process_completions_from_state_throttled,
     enqueue_completions_from_state,
     enqueue_completions_from_state_throttled,
+    enqueue_task_notification,
     has_pending_notifications,
     read_async_tasks_from_gateway,
 )
@@ -1292,6 +1293,10 @@ def run_textual_interactive(
             """
             target_tid = self._conversation_tid
             try:
+                if self._busy:
+                    # The poll found the app free, but input handled since then
+                    # took it. The notifications stay queued for a later poll.
+                    return
                 try:
                     await consume_notifications(
                         run_message=lambda text, notifs: self._inject_notification_tui(
@@ -1364,6 +1369,12 @@ def run_textual_interactive(
                     forwarded to ``_run_turn`` so a mid-consume ``/new`` cannot
                     misroute the notification into a different thread.
             """
+            if self._busy:
+                # Taken during the batch wait: put the batch back for a later
+                # poll instead of running a second turn next to that one.
+                for notif in notifs:
+                    enqueue_task_notification(notif)
+                return
             from EvoScientist.cli.async_notifier import format_notification_lines
 
             for line_text, line_style in format_notification_lines(notifs):
@@ -3235,11 +3246,17 @@ def run_textual_interactive(
               (streaming response)
               [channel: Replied to sender]
             """
+            if self._busy:
+                # The poll found the app free, but input handled since then
+                # took it. Back on the queue, for a poll that finds it free.
+                _message_queue.put(msg)
+                return
             prompt_widget = None
             if not _ch_mod._claim_or_complete_channel_request(msg):
                 return
             _ch_mod.remember_channel_origin(self._conversation_tid, msg)
             try:
+                # Taken in the step that checked it: nothing ran in between.
                 self._busy = True
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING
