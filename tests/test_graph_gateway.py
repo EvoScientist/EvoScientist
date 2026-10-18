@@ -308,12 +308,12 @@ async def test_local_process_status_timeout_propagates(monkeypatch):
         "EvoScientist.gateway.local.needs_langgraph_dev", lambda cfg, backend: True
     )
     client = MagicMock()
-    client.http.get = AsyncMock(side_effect=TimeoutError("timed out"))
+    client.http.get = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
     monkeypatch.setattr(
         "EvoScientist.langgraph_dev.sdk.cached_langgraph_async_client",
         lambda _: client,
     )
-    with pytest.raises(TimeoutError, match="timed out"):
+    with pytest.raises(httpx.ReadTimeout, match="timed out"):
         await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
 
 
