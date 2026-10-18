@@ -301,7 +301,7 @@ def test_a_run_key_budget_that_is_not_an_int_falls_back(monkeypatch, budget):
     assert h.mw._effective_tier().wait_budget_seconds == 60.0
 
 
-# --- one budget per run --------------------------------------------------------
+# --- a spent budget ends the run's retries -------------------------------------
 
 
 @pytest.fixture

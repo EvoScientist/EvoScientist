@@ -373,7 +373,7 @@ def _spend_run(run: dict[str, Any] | None) -> None:
 
 
 class ModelRetryMiddleware(AgentMiddleware):
-    """Retry a transient model-call failure inside a wait budget the run shares.
+    """Retry a transient model-call failure until its budget, or another call's in the run, is spent.
 
     Sits outside the fallback chain: one attempt is primary plus fallbacks.
     The budget starts at the first failure: the waits and the retried attempts
@@ -383,7 +383,9 @@ class ModelRetryMiddleware(AgentMiddleware):
     ``model_retry`` marker. A call that runs out of budget records that on
     it, and from then on no call in the run is retried: a sub-agent that
     waited the budget out does not leave the main agent a budget of its own.
-    A run without the marker keeps a budget per call.
+    A call that recovers does not mark the run, so the waits of a run's calls
+    can add up to more than one budget. A run without the marker keeps a
+    budget per call.
     """
 
     name = "model_retry"
