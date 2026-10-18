@@ -160,6 +160,8 @@ def _idle(app, runs: _Runs) -> bool:
         and not app._notification_consuming
         and not runs.running
         and _message_queue.empty()
+        and app._held_channel_msg is None
+        and not app._channel_turn_scheduled
         and not has_pending_notifications(app._conversation_tid)
     )
 
@@ -199,8 +201,8 @@ async def test_a_channel_turn_waits_for_input_typed_before_it_starts(
             await asyncio.sleep(0.3)
             assert runs.started == ["typed"]
             assert app._run_task is typed
-            # The message is back on the queue, for the poll after this turn.
-            assert not _message_queue.empty()
+            # The app holds the message, for the poll after this turn.
+            assert app._held_channel_msg.content == "from the channel"
             runs.finish("typed")
             await _poll_until(app, lambda: len(runs.started) == 2)
             assert runs.started == ["typed", "from the channel"]
@@ -351,6 +353,140 @@ async def test_notifications_go_back_when_the_app_is_taken_during_the_batch_wait
             runs.finish_all()
 
 
+async def test_a_channel_turn_that_waits_stays_ahead_of_a_later_message(
+    monkeypatch, workspace
+):
+    """The poll schedules the first message, a second one arrives, and Enter
+    takes the app before the first turn starts. The first message still runs
+    first: if it is ``/new``, the second one belongs in the new thread."""
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            _channel_message("first")
+            app._poll_channel_queue()  # schedules the turn for "first"
+            _channel_message("second")
+            await _submit(app, "typed")  # Enter, handled before that turn starts
+            await _until(lambda: runs.started)
+            await asyncio.sleep(0.3)
+            assert runs.started == ["typed"]
+            runs.finish("typed")
+            await _until(lambda: not app._busy and app._run_task is None)
+            await _poll_until(app, lambda: len(runs.started) == 2)
+            assert runs.started == ["typed", "first"]
+            runs.finish_all()
+            await _poll_until(app, lambda: _idle(app, runs))
+            assert runs.started == ["typed", "first", "second"]
+            assert runs.peak == 1
+        finally:
+            runs.finish_all()
+
+
+async def test_channel_messages_keep_their_order_while_the_app_is_busy(
+    monkeypatch, workspace
+):
+    """A poll that finds the app taken leaves the waiting messages in order."""
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            await _submit(app, "typed")
+            await _until(lambda: runs.started)
+            _channel_message("first")
+            _channel_message("second")
+            app._poll_channel_queue()  # the app is taken: nothing starts
+            await asyncio.sleep(0.1)
+            assert runs.started == ["typed"]
+            runs.finish("typed")
+            await _until(lambda: not app._busy and app._run_task is None)
+            await _poll_until(app, lambda: len(runs.started) == 2)
+            assert runs.started == ["typed", "first"]
+            runs.finish_all()
+            await _poll_until(app, lambda: _idle(app, runs))
+            assert runs.started == ["typed", "first", "second"]
+            assert runs.peak == 1
+        finally:
+            runs.finish_all()
+
+
+async def test_polls_before_a_channel_turn_starts_take_no_second_message(
+    monkeypatch, workspace
+):
+    """The poll runs off the message pump, so it can tick again before the turn
+    it scheduled starts. It takes nothing more until then, so no message is
+    overwritten or overtaken."""
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            for content in ("first", "second", "third"):
+                _channel_message(content)
+            app._poll_channel_queue()  # schedules the turn for "first"
+            app._poll_channel_queue()  # ticks again before that turn starts
+            app._poll_channel_queue()
+            await _submit(app, "typed")  # Enter, handled before that turn starts
+            await _until(lambda: runs.started)
+            await asyncio.sleep(0.3)
+            assert runs.started == ["typed"]
+            runs.finish_all()
+            await _poll_until(app, lambda: _idle(app, runs))
+            assert runs.started == ["typed", "first", "second", "third"]
+            assert runs.peak == 1
+        finally:
+            runs.finish_all()
+
+
+async def test_a_notification_batch_that_goes_back_stays_ahead_of_later_ones(
+    monkeypatch, workspace
+):
+    """A notification arrives after the notifier's last drain, and Enter takes
+    the app before the notifier turn starts. The batch goes back ahead of the
+    newer notification, so the next notifier turn lists them in order."""
+    runs = _Runs()
+    app = await _app(monkeypatch, workspace)
+    async with app.run_test(size=(100, 40)) as pilot:
+        try:
+            await pilot.pause()
+            _wire(app, workspace, runs)
+            tid = app._conversation_tid
+            read_state = app._read_async_tasks_tui
+            first_read = True
+
+            async def _read_while_more_arrive(target_thread_id):
+                nonlocal first_read
+                if first_read:
+                    # The state read follows the last drain.
+                    first_read = False
+                    _notification(app, "task-2")
+                    await _submit(app, "typed")
+                return await read_state(target_thread_id)
+
+            app._read_async_tasks_tui = _read_while_more_arrive
+            _notification(app, "task-1")
+            app._notification_consuming = True  # as the poll sets it
+            await asyncio.wait_for(app._consume_notifications_tui(), timeout=10)
+            await _until(lambda: runs.started)
+            assert runs.started == ["typed"]
+            assert has_pending_notifications(tid)
+            runs.finish("typed")
+            await _until(lambda: not app._busy and app._run_task is None)
+            await _poll_until(app, lambda: len(runs.started) == 2)
+            assert runs.started == ["typed", NOTICE]
+            notice = str(runs.gateway.requests[-1].message)
+            assert notice.index('"task-1"') < notice.index('"task-2"')
+            runs.finish_all()
+            await _poll_until(app, lambda: _idle(app, runs))
+            assert runs.peak == 1
+        finally:
+            runs.finish_all()
+
+
 # Weighted: the poll runs most often, as its 100 ms timer does.
 ACTIONS = ("poll",) * 3 + ("type", "ctrl+c", "channel", "notice") + ("finish",) * 2
 
@@ -404,10 +540,11 @@ async def test_random_input_and_queue_arrivals_never_run_two_turns(
             await _poll_until(app, lambda: _idle(app, runs), seconds=20)
             assert runs.started
             assert runs.peak == 1
-            # Nothing stops a channel turn, so every message got one.
+            # Nothing stops a channel turn, so every message got one, in the
+            # order the messages arrived.
             channel_turns = [
                 name for name in runs.started if name.startswith("channel-")
             ]
-            assert sorted(channel_turns) == sorted(sent)
+            assert channel_turns == sent
         finally:
             runs.finish_all()

@@ -60,6 +60,7 @@ from ._constants import (
 from .async_notifier import (
     AsyncTasksState,
     consume_notifications,
+    drain_notifications,
     enqueue_bg_process_completions_from_state,
     enqueue_bg_process_completions_from_state_throttled,
     enqueue_completions_from_state,
@@ -708,6 +709,11 @@ def run_textual_interactive(
             self._idle_reader_inflight: bool = (
                 False  # prevent overlapping throttled idle state reads
             )
+            # At most one channel message is off the queue and not yet started:
+            # scheduled by the poll, or held because the app was taken before
+            # its turn began. A held message goes before the queue.
+            self._channel_turn_scheduled = False
+            self._held_channel_msg: ChannelMessage | None = None
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
@@ -1245,14 +1251,22 @@ def run_textual_interactive(
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
-            try:
-                msg = _message_queue.get_nowait()
-            except queue.Empty:
-                msg = None
+            if self._channel_turn_scheduled:
+                # That turn has not started yet: nothing goes before it.
+                return
+            # A held message goes first. While the app is taken nothing comes
+            # off the queue, so the messages on it keep their order.
+            msg = self._held_channel_msg
+            if msg is None and not self._busy:
+                try:
+                    msg = _message_queue.get_nowait()
+                except queue.Empty:
+                    msg = None
             if msg is not None:
                 if self._busy:
-                    _message_queue.put(msg)
                     return
+                self._held_channel_msg = None
+                self._channel_turn_scheduled = True
                 self.call_later(
                     lambda m=msg: asyncio.ensure_future(
                         self._process_channel_message(m)
@@ -1371,8 +1385,9 @@ def run_textual_interactive(
             """
             if self._busy:
                 # Taken during the batch wait: put the batch back for a later
-                # poll instead of running a second turn next to that one.
-                for notif in notifs:
+                # poll instead of running a second turn next to that one, ahead
+                # of what arrived after the last drain, so it keeps its place.
+                for notif in [*notifs, *drain_notifications(target_thread_id)]:
                     enqueue_task_notification(notif)
                 return
             from EvoScientist.cli.async_notifier import format_notification_lines
@@ -3246,10 +3261,13 @@ def run_textual_interactive(
               (streaming response)
               [channel: Replied to sender]
             """
+            # This message is dealt with below, so the poll may take the next.
+            self._channel_turn_scheduled = False
             if self._busy:
                 # The poll found the app free, but input handled since then
-                # took it. Back on the queue, for a poll that finds it free.
-                _message_queue.put(msg)
+                # took it. Held for a poll that finds it free, ahead of any
+                # message that arrived since.
+                self._held_channel_msg = msg
                 return
             prompt_widget = None
             if not _ch_mod._claim_or_complete_channel_request(msg):
