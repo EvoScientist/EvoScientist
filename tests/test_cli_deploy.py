@@ -218,6 +218,7 @@ def _run_deploy_once(
     made_dirs: list[str] = []
     captured["made_dirs"] = made_dirs
     _run_deploy_once.made_dirs = made_dirs
+    _run_deploy_once.printed = captured["printed"]
     monkeypatch.setattr(os, "makedirs", lambda path, *a, **k: made_dirs.append(path))
     if cwd is not None:
         monkeypatch.setattr(os, "getcwd", lambda: cwd)
@@ -612,6 +613,26 @@ def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
         holder.done()
     assert exc.value.exit_code == 1
     assert checks == []
+    assert any("for over" in p for p in _run_deploy_once.printed)
+
+
+@pytest.mark.parametrize("step", ["mkdir", "acquire"])
+def test_deploy_start_lock_os_error_is_startup_failed(monkeypatch, tmp_path, step):
+    """An OSError from the start lock ends in the startup failed message, as
+    before the lock, not in a traceback."""
+    from tests.test_launcher import _break_start_lock
+
+    _break_start_lock(monkeypatch, tmp_path, step)
+    checks: list[bool] = []
+    with pytest.raises(typer.Exit) as exc:
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            on_port_check=lambda: checks.append(True),
+        )
+    assert exc.value.exit_code == 1
+    assert checks == []
+    assert any("langgraph dev startup failed" in p for p in _run_deploy_once.printed)
 
 
 def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):

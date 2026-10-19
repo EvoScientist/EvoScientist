@@ -363,12 +363,24 @@ class WebUILauncher:
         result = launcher.wait_ready(60)   # poll both, or raise LauncherError
         ...                                # caller's own main loop / window
         launcher.stop()                    # idempotent teardown
+
+    ``on_lock_wait`` is called on :meth:`start`'s thread with True when it has
+    to wait for another process that is starting a backend, then with False
+    once it holds the server start lock, so a front-end can say why it waits.
     """
 
-    def __init__(self, config: Any, cfg: LauncherConfig, runner: WebUIRunner) -> None:
+    def __init__(
+        self,
+        config: Any,
+        cfg: LauncherConfig,
+        runner: WebUIRunner,
+        *,
+        on_lock_wait: Callable[[bool], None] | None = None,
+    ) -> None:
         self._config = config
         self._cfg = cfg
         self._runner = runner
+        self._on_lock_wait = on_lock_wait
         self._backend_proc: subprocess.Popen | None = None
         self._backend_started = False
         # True from just before start_langgraph_dev() until its proc handle is
@@ -573,15 +585,27 @@ class WebUILauncher:
 
         Without it, a second starter for the same port can see a backend that
         is bound but not answering yet and kill it as stale, or overwrite its
-        ownership record. The wait checks for a ``stop()`` every 0.5 s.
+        ownership record. The wait checks for a ``stop()`` every 0.5 s and is
+        reported to ``on_lock_wait``.
         """
         from filelock import FileLock, Timeout
 
         from ..langgraph_dev.manager import _FILE_LOCK_TIMEOUT, RUNTIME
 
-        RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        def start_failed(exc: OSError) -> LauncherError:
+            # A config dir that cannot be written (read-only, full) is a
+            # failed start, not a traceback.
+            return LauncherError(
+                "backend_start_failed", f"langgraph dev startup failed: {exc}"
+            )
+
+        try:
+            RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise start_failed(exc) from exc
         lock = FileLock(str(RUNTIME.lock_file))
         deadline = time.monotonic() + _FILE_LOCK_TIMEOUT
+        waited = False
         while True:
             self._raise_if_stopped()
             try:
@@ -596,8 +620,16 @@ class WebUILauncher:
                         f"It holds {lock.lock_file}. Try again once it is done.",
                         fields={"lock_file": str(lock.lock_file)},
                     ) from None
+            except OSError as exc:
+                raise start_failed(exc) from exc
+            if not waited and self._on_lock_wait is not None:
+                self._on_lock_wait(True)
+            waited = True
         try:
-            # A stop() in the slice in which the lock was freed starts nothing.
+            if waited and self._on_lock_wait is not None:
+                self._on_lock_wait(False)
+            # A stop() in the slice in which the lock was freed, or during the
+            # callback, starts nothing.
             self._raise_if_stopped()
             yield
         finally:

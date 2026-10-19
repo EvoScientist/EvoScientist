@@ -346,28 +346,33 @@ def _start_lock() -> Iterator[None]:
 
     from ..langgraph_dev.manager import _FILE_LOCK_TIMEOUT, RUNTIME
 
-    RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
     lock = FileLock(str(RUNTIME.lock_file))
     try:
-        lock.acquire(timeout=0)
-    except Timeout:
+        RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         try:
+            lock.acquire(timeout=0)
+        except Timeout:
             with console.status(
                 "[dim]Waiting for another EvoSci process to start langgraph "
                 "dev...[/dim]",
                 spinner="dots",
             ):
                 lock.acquire(timeout=_FILE_LOCK_TIMEOUT)
-        except Timeout:
-            console.print(
-                f"[red]Another EvoSci process has been starting langgraph dev "
-                f"for over {_FILE_LOCK_TIMEOUT:.0f} s.[/red]"
-            )
-            console.print(
-                f"[dim]It holds {_shorten(str(lock.lock_file))}. Run "
-                f"[bold]EvoSci deploy[/bold] again once it is done.[/dim]"
-            )
-            raise typer.Exit(1) from None
+    except Timeout:
+        console.print(
+            f"[red]Another EvoSci process has been starting langgraph dev "
+            f"for over {_FILE_LOCK_TIMEOUT:.0f} s.[/red]"
+        )
+        console.print(
+            f"[dim]It holds {_shorten(str(lock.lock_file))}. Run "
+            f"[bold]EvoSci deploy[/bold] again once it is done.[/dim]"
+        )
+        raise typer.Exit(1) from None
+    except OSError as exc:
+        # A config dir that cannot be written (read-only, full) is a failed
+        # start, not a traceback.
+        console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
     try:
         yield
     finally:
