@@ -411,6 +411,9 @@ class _Run:
             # None: another session's ccproxy, reused and left alone.
             if self.ccproxy is not None and self.job is not None:
                 self.job.adopt(self.ccproxy)
+            # A stop during the ccproxy start: cleanup() stops only ccproxy.
+            if self.stop.is_set():
+                return
 
         self.starting = True
         try:

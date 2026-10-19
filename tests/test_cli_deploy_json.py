@@ -798,6 +798,26 @@ def test_a_start_cut_after_the_spawn_stops_the_backend(
     assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", terminal))
 
 
+def test_stdin_closed_during_the_ccproxy_start_starts_no_backend(
+    h, capsys, monkeypatch
+):
+    from EvoScientist import ccproxy_manager
+
+    def _start_ccproxy(_c):
+        h.log.append("ccproxy start")
+        h.close_stdin()
+        _wait_for_stdin_watcher()
+        return "ccproxy"
+
+    monkeypatch.setattr(ccproxy_manager, "maybe_start_ccproxy", _start_ccproxy)
+    h.config.anthropic_auth_mode = "oauth"
+    code, lines = h.run(capsys)
+    assert code == 0
+    assert _events(lines) == ["starting", "stopped"]
+    assert h.started is None
+    assert h.log.index("ccproxy stop") < h.log.index(("event", "stopped"))
+
+
 def test_stdin_closed_during_the_start_stops_without_ready(h, capsys, monkeypatch):
     """The app went away while the backend started: it is stopped as soon as
     the start returns, without the tunnel wait or ``ready``."""
