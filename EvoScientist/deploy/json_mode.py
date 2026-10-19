@@ -68,8 +68,9 @@ How a program runs the command:
   quitting. A terminal, ``/dev/null``, ``NUL`` or a file as stdin is ignored;
   the command then stops on Ctrl+C or SIGTERM.
 - When the program exits without closing stdin, the command still stops: on
-  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend
-  runs in a job object that ends it together with this command.
+  macOS and Linux its stdin reaches end-of-file; on Windows an owned backend,
+  and a ccproxy this command started, run in a job object that ends them
+  together with this command.
 """
 
 from __future__ import annotations

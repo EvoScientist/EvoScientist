@@ -6,10 +6,12 @@ before it has stopped its backend, and the backend, which runs outside that
 job, would keep running with nobody to stop it. The backend joins a job that
 only this process holds, with ``KILL_ON_JOB_CLOSE``: Windows closes the handle
 when this process ends however it ends, and that ends the backend and
-everything it started.
+everything it started. A ccproxy this command starts joins the same job; one
+reused from another session does not.
 
-The handle is closed only after ``stop_langgraph_dev()`` has returned, so the
-job never ends a backend this process still means to run or stop itself.
+The handle is closed only after ``stop_langgraph_dev()`` and ``stop_ccproxy()``
+have returned, so the job never ends a process this command still means to
+run or stop itself.
 """
 
 from __future__ import annotations
