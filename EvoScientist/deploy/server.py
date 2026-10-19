@@ -227,7 +227,6 @@ def deploy(
 
     # 7. Start langgraph dev
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
-    file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     try:
         with console.status(
             "[dim]Starting langgraph dev...[/dim]",
@@ -237,7 +236,6 @@ def deploy(
                 workspace_dir=Path(ws),
                 port=effective_port,
                 host=effective_host,
-                file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
                 tunnel=tunnel,
                 config_fingerprint=_server_config_fingerprint(config),

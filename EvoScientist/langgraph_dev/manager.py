@@ -928,7 +928,6 @@ def start_langgraph_dev(
     run_dir: Path | None = None,
     port: int = _DEFAULT_PORT,
     host: str = _DEFAULT_HOST,
-    file_persistence: bool = True,
     jobs_per_worker: int = 10,
     tunnel: bool = False,
     config_fingerprint: str | None = None,
@@ -950,10 +949,6 @@ def start_langgraph_dev(
         host: Network interface to bind. Defaults to loopback. SECURITY:
             widening this exposes an unauthenticated API whose agent can run
             shell commands — only pass ``0.0.0.0`` on trusted networks.
-        file_persistence: When True (default), langgraph dev writes its full
-            ``.langgraph_api/`` cache so async-task / Store / scheduler state
-            survives subprocess restarts. Set False to suppress periodic
-            flushes (workspace stays cleaner; state is in-memory only).
         jobs_per_worker: Concurrent runs per worker (``--n-jobs-per-worker``).
         tunnel: When True, pass ``--tunnel`` so langgraph dev exposes the
             server over a public Cloudflare quick-tunnel. The random
@@ -1091,14 +1086,6 @@ def start_langgraph_dev(
         sub_env.pop("EVOSCIENTIST_RUN_DIR", None)
     sub_env["PYTHONIOENCODING"] = "utf-8"
     sub_env["PYTHONUTF8"] = "1"
-
-    # By default, let langgraph dev write its full ``.langgraph_api/`` cache
-    # so future use cases — cross-session async tasks, Store API persistence,
-    # cron job state across CLI restarts — work without further changes. Users
-    # who want a clean workspace can opt out via:
-    #   EvoSci config set langgraph_dev_file_persistence false
-    if not file_persistence:
-        sub_env["LANGGRAPH_DISABLE_FILE_PERSISTENCE"] = "true"
 
     # ``EVOSCIENTIST_SERVER_PROCESS`` marks the process as the server:
     # ``_ASYNC_SUBAGENTS_AVAILABLE`` starts True so async sub-agents dispatch
@@ -1349,8 +1336,7 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
     # Note: ``.langgraph_api/`` is intentionally NOT removed — it holds
     # langgraph dev's persisted async-task / scheduler / Store state that
     # may be useful across CLI restarts. Users who want a clean workspace
-    # can ``rm -rf .langgraph_api/`` manually or set
-    # ``langgraph_dev_file_persistence: false`` in config to suppress writes.
+    # can ``rm -rf .langgraph_api/`` manually.
 
 
 # =============================================================================
@@ -1497,7 +1483,6 @@ def _ensure_langgraph_dev_locked(
     config_fp = _server_config_fingerprint(config)
     port = int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
     host = str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or _DEFAULT_HOST)
-    file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
 
     ws_path = Path(workspace_dir) if workspace_dir is not None else None
@@ -1618,7 +1603,6 @@ def _ensure_langgraph_dev_locked(
             run_dir=run_path,
             port=port,
             host=host,
-            file_persistence=file_persistence,
             jobs_per_worker=jobs_per_worker,
             config_fingerprint=config_fp,
             allowed_origins=getattr(config, "backend_allowed_origins", ""),

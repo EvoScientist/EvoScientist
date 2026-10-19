@@ -299,15 +299,6 @@ class EvoScientistConfig:
     # back to UTC if it can't be determined; set e.g. "Europe/London" to pin one.
     scheduler_default_timezone: str = ""
 
-    # Whether langgraph dev persists its runtime state to .langgraph_api/ next
-    # to the subprocess cwd. True (default) keeps async-task, scheduler, and
-    # Store API state across subprocess restarts — useful for future
-    # cross-session async, cron, and Store features. Set False to suppress
-    # writes (workspace stays cleaner; state is in-memory only and lost on
-    # CLI exit). EvoScientist's main thread persistence uses sessions.db
-    # regardless of this setting.
-    langgraph_dev_file_persistence: bool = True
-
     # Concurrency: how many runs each langgraph dev worker processes in parallel.
     # 10 is the langgraph dev recommended default and works well on a typical
     # dev machine. Lower it (e.g., 4) on memory-constrained or low-core
@@ -1146,7 +1137,6 @@ _ENV_MAPPINGS = {
     "code_interpreter_timeout": "EVOSCIENTIST_CODE_INTERPRETER_TIMEOUT",
     "code_interpreter_max_result_chars": "EVOSCIENTIST_CODE_INTERPRETER_MAX_RESULT_CHARS",
     "sandbox_execute_timeout": "EVOSCIENTIST_SANDBOX_EXECUTE_TIMEOUT",
-    "langgraph_dev_file_persistence": "EVOSCIENTIST_LANGGRAPH_DEV_FILE_PERSISTENCE",
     "langgraph_dev_jobs_per_worker": "EVOSCIENTIST_LANGGRAPH_DEV_JOBS_PER_WORKER",
     "langgraph_dev_keepalive": "EVOSCIENTIST_LANGGRAPH_DEV_KEEPALIVE",
     "recursion_limit": "EVOSCIENTIST_RECURSION_LIMIT",
