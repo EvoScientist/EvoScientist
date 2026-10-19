@@ -52,6 +52,8 @@ UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
 LangGraphStreamInput: TypeAlias = dict[str, object] | Command
 _ValueMessageKey: TypeAlias = tuple[str, ...]
+_INTERRUPT_CHECKPOINT_WAIT_SECONDS = 5.0
+_INTERRUPT_CHECKPOINT_POLL_SECONDS = 0.05
 _RESUME_INTERRUPT_WAIT_SECONDS = 5.0
 _RESUME_INTERRUPT_POLL_SECONDS = 0.05
 
@@ -83,6 +85,42 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
         if getattr(task, "interrupts", None):
             return True
     return False
+
+
+def _snapshot_interrupt_ids(snapshot: Any) -> set[str]:
+    """Return interrupt IDs currently persisted at the root or task level."""
+    if snapshot is None:
+        return set()
+    interrupts = list(getattr(snapshot, "interrupts", None) or ())
+    for task in getattr(snapshot, "tasks", None) or ():
+        interrupts.extend(getattr(task, "interrupts", None) or ())
+    return {
+        str(interrupt_id)
+        for interrupt in interrupts
+        if (interrupt_id := getattr(interrupt, "id", None)) is not None
+    }
+
+
+async def _wait_for_checkpointed_interrupt(
+    agent: Any, config: dict[str, Any], interrupt_id: str
+) -> None:
+    """Wait for an emitted interrupt to become visible in its checkpoint."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _INTERRUPT_CHECKPOINT_WAIT_SECONDS
+    while True:
+        try:
+            snapshot = await agent.aget_state(config)
+        except Exception:
+            # A state read can race with checkpoint teardown. The stream still
+            # owns the run, so let the caller handle the interrupt normally.
+            return
+        if str(interrupt_id) in _snapshot_interrupt_ids(snapshot):
+            return
+        if not _snapshot_needs_recovery(snapshot):
+            return
+        if loop.time() >= deadline:
+            return
+        await asyncio.sleep(_INTERRUPT_CHECKPOINT_POLL_SECONDS)
 
 
 def _snapshot_has_resume_interrupt(message: object, snapshot: Any) -> bool:
@@ -1665,6 +1703,13 @@ async def stream_agent_events(
                     task.cancel()
                 await asyncio.gather(*producers, return_exceptions=True)
                 raise item
+            if item.get("type") == "interrupt":
+                # The client may close this generator as soon as it sees the
+                # pause. Let LangGraph persist the interrupt before aborting
+                # the underlying stream in our ``finally`` block.
+                await _wait_for_checkpointed_interrupt(
+                    agent, config, item["interrupt_id"]
+                )
             yield item
     except Exception as e:
         _run_raised = True

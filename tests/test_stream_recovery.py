@@ -17,6 +17,7 @@ so they actually verify the claims the recovery rests on:
 """
 
 import asyncio
+from contextlib import aclosing
 from typing import Any, TypedDict
 
 import pytest
@@ -297,9 +298,7 @@ async def _run_turn(
     "ignore:The v3 streaming protocol on Pregel is experimental"
 )
 async def test_early_subagent_approval_waits_for_persisted_task_interrupt():
-    """A stale first snapshot must not recover a sub-agent's pending approval."""
-    from types import SimpleNamespace
-
+    """A client leaving at the pause event can resume the sub-agent approval."""
     from deepagents import create_deep_agent
     from langchain_core.language_models.fake_chat_models import (
         FakeMessagesListChatModel,
@@ -371,43 +370,21 @@ async def test_early_subagent_approval_waits_for_persisted_task_interrupt():
         checkpointer=InMemorySaver(),
     )
 
-    result = graph.invoke({"messages": [("user", "delegate the command")]}, config=cfg)
-    interrupts = result.get("__interrupt__", [])
-    assert len(interrupts) == 1
+    interrupt_id = None
+    async with aclosing(
+        stream_agent_events(graph, "delegate the command", thread_id)
+    ) as first_round:
+        async for event in first_round:
+            if event.get("type") == "interrupt":
+                interrupt_id = event["interrupt_id"]
+                break
+
+    assert interrupt_id is not None
     assert executed == []
 
-    class _StaleFirstReadAgent:
-        """Expose the pre-interrupt task view once, then the durable snapshot."""
-
-        def __init__(self, inner):
-            self.inner = inner
-            self.stale_reads = 2
-
-        def __getattr__(self, name):
-            return getattr(self.inner, name)
-
-        async def aget_state(self, config):
-            snapshot = await self.inner.aget_state(config)
-            if self.stale_reads:
-                stale_read = self.stale_reads
-                self.stale_reads -= 1
-                task_interrupts = (
-                    (SimpleNamespace(id="other-approval"),) if stale_read == 1 else ()
-                )
-                return SimpleNamespace(
-                    values=snapshot.values,
-                    next=snapshot.next,
-                    tasks=tuple(
-                        SimpleNamespace(name=task.name, interrupts=task_interrupts)
-                        for task in snapshot.tasks
-                    ),
-                    interrupts=(),
-                )
-            return snapshot
-
     resumed = await _run_turn(
-        _StaleFirstReadAgent(graph),
-        build_hitl_resume(interrupts[0].id, [{"type": "approve"}]),
+        graph,
+        build_hitl_resume(interrupt_id, [{"type": "approve"}]),
         thread_id,
     )
 
