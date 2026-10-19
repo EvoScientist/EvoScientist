@@ -52,29 +52,29 @@ class _RecordingSink:
 
 class TestResolveMiddlewareEventSink:
     def test_subagent_stacks_always_get_noop(self, monkeypatch):
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
         sink = resolve_middleware_event_sink(_RecordingSink(), for_async_subagent=True)
         assert sink is NO_OP_SINK
 
     def test_local_main_stack_keeps_caller_sink_unwrapped(self, monkeypatch):
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         caller = _RecordingSink()
         sink = resolve_middleware_event_sink(caller, for_async_subagent=False)
         assert sink is caller
 
     def test_local_main_stack_defaults_to_run_scoped(self, monkeypatch):
-        monkeypatch.delenv("EVOSCIENTIST_DEPLOY_MODE", raising=False)
+        monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         sink = resolve_middleware_event_sink(None, for_async_subagent=False)
         assert isinstance(sink, RunScopedEventSink)
 
     def test_server_subprocess_wraps_in_broadcast(self, monkeypatch):
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "stripped")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
         sink = resolve_middleware_event_sink(None, for_async_subagent=False)
         assert isinstance(sink, StreamBroadcastSink)
         assert isinstance(sink._sink, RunScopedEventSink)
 
     def test_server_subprocess_wraps_caller_sink(self, monkeypatch):
-        monkeypatch.setenv("EVOSCIENTIST_DEPLOY_MODE", "full")
+        monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
         caller = _RecordingSink()
         sink = resolve_middleware_event_sink(caller, for_async_subagent=False)
         assert isinstance(sink, StreamBroadcastSink)

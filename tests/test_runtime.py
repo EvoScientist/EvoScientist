@@ -549,6 +549,44 @@ def test_close_timeout_never_reports_success_while_executor_is_active():
     assert not runtime._thread.is_alive()
 
 
+class _LingeringStopped(threading.Event):
+    """A stop flag whose thread lingers after setting it, as it may for a
+    moment before it exits."""
+
+    def set(self) -> None:
+        super().set()
+        time.sleep(0.2)
+
+
+def test_close_waiting_for_earlier_close_joins_thread():
+    """A second close() while the first still winds down waits for the
+    thread itself, not only for the stop flag it sets just before exiting."""
+    runtime = AsyncRuntime()
+    runtime._stopped = _LingeringStopped()
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_job() -> None:
+        started.set()
+        release.wait()
+
+    runtime.spawn(lambda: asyncio.to_thread(blocking_job), name="blocked")
+    assert started.wait(2)
+    with pytest.raises(TimeoutError, match="did not settle"):
+        runtime.close(timeout=0.05)
+
+    # The runtime is sealed and its thread still alive: a close() now waits
+    # for that earlier shutdown and reports the timeout as such.
+    with pytest.raises(TimeoutError, match="timed out waiting"):
+        runtime.close(timeout=0.05)
+    assert runtime._thread is not None
+    assert runtime._thread.is_alive()
+
+    release.set()
+    runtime.close(timeout=2)
+    assert not runtime._thread.is_alive()
+
+
 def test_close_is_idempotent_and_close_before_start_seals_runtime():
     runtime = AsyncRuntime()
     runtime.close()

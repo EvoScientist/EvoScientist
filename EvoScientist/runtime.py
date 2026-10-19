@@ -499,7 +499,10 @@ class AsyncRuntime:
                         drain = None
 
         if wait_for_existing_close:
-            if not self._stopped.wait(max(0.0, deadline - time.monotonic())):
+            # Join rather than wait for _stopped: the thread sets it just
+            # before it exits.
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
                 raise TimeoutError(
                     f"timed out waiting for {self._thread_name} shutdown"
                 )

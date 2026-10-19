@@ -13,6 +13,8 @@ import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from ..paths import file_tool_path
+
 # ---------------------------------------------------------------------------
 # Patterns
 # ---------------------------------------------------------------------------
@@ -189,27 +191,29 @@ def _read_file(path: Path) -> str:
     """Return a Markdown snippet for embedding the file inline.
 
     Files larger than ``_MAX_EMBED_BYTES`` get a path-only reference with a
-    hint to use the ``read_file`` tool instead.
+    hint to use the ``read_file`` tool instead. The ``Path:`` line uses the
+    spelling the file tools accept (``/C:/...`` for a Windows drive path).
     """
+    tool_path = file_tool_path(path)
     size = path.stat().st_size
     # Binary detection: sample first bytes for null byte (covers all formats).
     with open(path, "rb") as fh:
         if b"\x00" in fh.read(_BINARY_PROBE_BYTES):
             return (
                 f"\n### {path.name}\n"
-                f"Path: `{path}`\n"
+                f"Path: `{tool_path}`\n"
                 "(binary file — use the read_file tool to view it)"
             )
     if size > _MAX_EMBED_BYTES:
         size_kb = size // 1024
         return (
             f"\n### {path.name}\n"
-            f"Path: `{path}`\n"
+            f"Path: `{tool_path}`\n"
             f"Size: {size_kb} KB (too large to embed inline — "
             "use the read_file tool to view it)"
         )
     content = path.read_text(encoding="utf-8", errors="replace")
-    return f"\n### {path.name}\nPath: `{path}`\n```\n{content}\n```"
+    return f"\n### {path.name}\nPath: `{tool_path}`\n```\n{content}\n```"
 
 
 def _resolve_path(raw: str, cwd: Path) -> Path | None:

@@ -10,6 +10,7 @@ import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import typer  # type: ignore[import-untyped]
@@ -42,6 +43,7 @@ from ..gateway import (
     RuntimeGateways,
     create_runtime_gateways_for_config,
 )
+from ..paths import SessionDirs
 from ..sessions import get_checkpointer, short_thread_id
 from ..stream.console import console
 from ..stream.display import _fix_markdown_heading_spacing
@@ -55,7 +57,11 @@ from ._constants import (
     WELCOME_SLOGANS,
     build_metadata,
 )
-from .agent import _create_session_workspace, _load_agent, _shorten_path
+from .agent import (
+    _create_run_dir,
+    _load_agent,
+    _shorten_path,
+)
 from .channel import (
     ChannelMessage,
     _auto_start_channel,
@@ -93,10 +99,6 @@ from .tui_runtime import (
     run_streaming_async,
 )
 
-_MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS = 120.0
-_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS = 0.5
-_MEMORY_WORKER_OUTPUT_GRACE_SECONDS = 3.0
-
 _channel_logger = logging.getLogger(__name__)
 
 # Keeps references to fire-and-forget coroutines so they aren't GC'd mid-flight.
@@ -113,7 +115,7 @@ class _StartupSession:
     """Resolved interactive startup session with a concrete active thread."""
 
     thread_id: str
-    workspace_dir: str | None
+    dirs: SessionDirs
     resumed: bool
 
 
@@ -230,34 +232,40 @@ _COMPLETION_STYLE = PtStyle.from_dict(
 class SlashCommandCompleter(Completer):
     """Autocomplete for slash commands and ``@file`` mentions.
 
-    ``workspace_getter`` is invoked on every keystroke so ``@file``
-    suggestions automatically follow ``/new`` / ``/resume`` workspace
-    changes without having to poke the completer from the callbacks.
+    ``dirs_getter`` is invoked on every keystroke so suggestions
+    automatically follow ``/new`` / ``/resume`` changes without having to
+    poke the completer from the callbacks.
     """
 
     def __init__(
         self,
-        workspace_getter: Callable[[], str | None] | None = None,
+        dirs_getter: Callable[[], SessionDirs | None] | None = None,
     ) -> None:
         """Initialise the completer.
 
         Args:
-            workspace_getter: Callable returning the current workspace
-                directory for ``@file`` completions.  Called on every
-                keystroke so suggestions stay in sync after ``/new``.
+            dirs_getter: Callable returning the session's folders: the
+                workspace for slash-command completions that list installed
+                skills or experts, and the work folder for ``@file``
+                completions.
         """
-        self._workspace_getter = workspace_getter or (lambda: None)
+        self._dirs_getter = dirs_getter or (lambda: None)
 
     def get_completions(self, document, complete_event):
         """Yield prompt_toolkit completions for slash commands and ``@file``."""
         text = document.text_before_cursor
-        workspace_dir = self._workspace_getter()
+        dirs = self._dirs_getter()
+        workspace_dir = str(dirs.work_dir) if dirs is not None else None
 
         # Slash command / subcommand completions take priority
         if text.startswith("/"):
             from ..commands._completion_engine import compute_completions
 
-            result = compute_completions(text, len(text))
+            result = compute_completions(
+                text,
+                len(text),
+                workspace=dirs.workspace if dirs is not None else None,
+            )
             if result.kind != "empty" and result.candidates:
                 for c in result.candidates:
                     start_pos = c.replace_start - len(text)
@@ -284,7 +292,7 @@ class SlashCommandCompleter(Completer):
 async def _resolve_startup_session(
     requested_thread_id: str | None,
     *,
-    workspace_dir: str | None,
+    dirs: SessionDirs,
     graph_gateway: GraphGateway,
     config: Any,
     backend: str | None = None,
@@ -292,10 +300,8 @@ async def _resolve_startup_session(
     """Resolve/create the initial CLI session before shared REPL state exists."""
     if not requested_thread_id:
         return _StartupSession(
-            thread_id=await graph_gateway.create_thread(
-                GraphTarget(workspace_dir=workspace_dir)
-            ),
-            workspace_dir=workspace_dir,
+            thread_id=await graph_gateway.create_thread(GraphTarget(**dirs.metadata())),
+            dirs=dirs,
             resumed=False,
         )
 
@@ -313,35 +319,64 @@ async def _resolve_startup_session(
                 f"[red]Thread '{escape(requested_thread_id)}' not found.[/red]"
             )
         return _StartupSession(
-            thread_id=await graph_gateway.create_thread(
-                GraphTarget(workspace_dir=workspace_dir)
-            ),
-            workspace_dir=workspace_dir,
+            thread_id=await graph_gateway.create_thread(GraphTarget(**dirs.metadata())),
+            dirs=dirs,
             resumed=False,
         )
 
-    resolved_thread_id = resolution.thread_id
-    metadata = await graph_gateway.get_thread_metadata(resolved_thread_id)
-    resolved_workspace = (metadata or {}).get("workspace_dir") or workspace_dir
-    if resolved_workspace:
-        from ..langgraph_dev.manager import WorkspaceMismatchError
-        from .commands import _sync_background_agent_server_workspace
-
-        try:
-            await _sync_background_agent_server_workspace(
-                config,
-                workspace_dir=resolved_workspace,
-                backend=backend,
-            )
-        except WorkspaceMismatchError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
+    from .commands import _restore_thread_dirs
 
     return _StartupSession(
-        thread_id=resolved_thread_id,
-        workspace_dir=resolved_workspace,
+        thread_id=resolution.thread_id,
+        dirs=await _restore_thread_dirs(
+            resolution.thread_id,
+            dirs=dirs,
+            served=dirs,
+            graph_gateway=graph_gateway,
+            config=config,
+            backend=backend,
+        ),
         resumed=True,
     )
+
+
+async def _new_session_dirs(
+    current: SessionDirs,
+    *,
+    config: Any,
+    backend: str | None,
+    mode: str | None,
+    run_name: str | None,
+) -> SessionDirs:
+    """The folders ``/new`` starts in, with the background agent server moved there.
+
+    ``--mode=run`` starts every session in a fresh run folder of the current
+    workspace; daemon mode works in its root. The server moves first, so the
+    new session's background work lands in its folder. Raises
+    ``WorkspaceMismatchError`` when another session holds the server: the
+    session stays as it is and the fresh run folder is removed.
+    """
+    from .commands import _move_server_or_keep_session
+
+    workspace = current.workspace
+    new_dirs = SessionDirs(
+        workspace,
+        _create_run_dir(workspace, run_name) if mode == "run" else None,
+    )
+    if not await _move_server_or_keep_session(
+        config,
+        target=new_dirs,
+        current=current,
+        backend=backend,
+        new_run_dir=True,
+        status_message="[dim]Moving background agent server to the new session...[/dim]",
+    ):
+        console.print(
+            "[yellow]Background agent server sync failed; started the new "
+            "session, but async subagents and EvoMemory workers may be "
+            "unavailable.[/yellow]"
+        )
+    return new_dirs
 
 
 # =============================================================================
@@ -393,8 +428,6 @@ async def _run_rich_cli_streaming_turn(**kwargs: Any) -> str:
 def cmd_interactive(
     show_thinking: bool = True,
     channel_send_thinking: bool = True,
-    workspace_dir: str | None = None,
-    workspace_fixed: bool = False,
     mode: str | None = None,
     model: str | None = None,
     provider: str | None = None,
@@ -403,6 +436,8 @@ def cmd_interactive(
     ui_backend: str = "cli",
     config=None,
     async_runtime: "AsyncRuntime | None" = None,
+    *,
+    dirs: SessionDirs,
 ) -> None:
     """Interactive conversation mode with streaming output.
 
@@ -412,19 +447,17 @@ def cmd_interactive(
     Args:
         show_thinking: Whether to display thinking panels
         channel_send_thinking: Whether channels should receive thinking messages
-        workspace_dir: Per-session workspace directory path
-        workspace_fixed: If True, /new keeps the same workspace directory
         mode: Workspace mode ('daemon' or 'run'), displayed in banner
         model: Model name to display in banner
         provider: LLM provider name to display in banner
         run_name: Optional run name for /new session deduplication
         thread_id: Optional thread ID to resume a previous session
         ui_backend: UI backend ('cli' or 'tui')
+        dirs: The session's workspace, and its run folder under
+            ``--mode=run`` (``/new`` then moves to a fresh run folder)
     """
     resolved_ui_backend = resolve_ui_backend(ui_backend, warn_fallback=True)
     if resolved_ui_backend == "tui":
-        from functools import partial
-
         load_agent = partial(
             _load_agent,
             config=config,
@@ -433,15 +466,14 @@ def cmd_interactive(
         run_textual_interactive(
             show_thinking=show_thinking,
             channel_send_thinking=channel_send_thinking,
-            workspace_dir=workspace_dir,
-            workspace_fixed=workspace_fixed,
+            dirs=dirs,
             mode=mode,
             model=model,
             provider=provider,
             run_name=run_name,
             thread_id=thread_id,
             load_agent=load_agent,
-            create_session_workspace=_create_session_workspace,
+            create_run_dir=_create_run_dir,
             config=config,
             async_runtime=async_runtime,
         )
@@ -474,9 +506,7 @@ def cmd_interactive(
     session = PromptSession(
         history=FileHistory(history_file),
         auto_suggest=AutoSuggestFromHistory(),
-        completer=SlashCommandCompleter(
-            workspace_getter=lambda: state["workspace_dir"],
-        ),
+        completer=SlashCommandCompleter(dirs_getter=lambda: state["dirs"]),
         complete_style=CompleteStyle.COLUMN,
         complete_while_typing=True,
         style=_COMPLETION_STYLE,
@@ -490,6 +520,11 @@ def cmd_interactive(
         console.print(Text("\u2500" * width, style="dim"))
 
     from ..commands.base import ChannelRuntime, active_teams_configurable_extra
+    from ..rubric_session import (
+        acknowledge_applied,
+        merge_configurable_extra,
+        thread_run_extra,
+    )
 
     channel_runtime = ChannelRuntime()
 
@@ -513,9 +548,23 @@ def cmd_interactive(
                 f"[red]failed:[/red] {escape(detail)}"
             )
 
+    def _on_agent_loaded(agent: Any) -> None:
+        # The start-up refresh ran without an agent: read the thread's
+        # checklists now that state can be read (the badge only; a turn may
+        # already be building the rest of the status bar).
+        try:
+            task = asyncio.get_running_loop().create_task(
+                _acknowledge_rubric(agent, state["thread_id"])
+            )
+        except RuntimeError:
+            return
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
     agent_loader = BackgroundAgentLoader(
         _load_agent,
         on_progress=_on_mcp_progress,
+        on_success=_on_agent_loaded,
     )
 
     # One frontend event sink for the whole session — injected into the agent's
@@ -536,7 +585,7 @@ def cmd_interactive(
 
     # Mutable state for async loop
     state: dict[str, Any] = {
-        "workspace_dir": workspace_dir,
+        "dirs": dirs,
         "running": True,
         "resumed": False,
         "ui_backend": resolved_ui_backend,
@@ -545,6 +594,8 @@ def cmd_interactive(
         "status_snapshot": make_empty_status_snapshot(model),
         "status_streaming_text": "",
         "status_last_input_tokens": None,
+        # Status-bar badge per thread: which acceptance checklists it holds.
+        "rubric_badges": {},
     }
 
     def _on_status_after_compact(input_tokens: int) -> None:
@@ -565,7 +616,8 @@ def cmd_interactive(
     def _start_agent_load(checkpointer) -> None:
         progress_tracker.prime()
         agent_loader.start(
-            workspace_dir=state["workspace_dir"],
+            workspace=state["dirs"].workspace,
+            work_dir=str(state["dirs"].work_dir),
             checkpointer=checkpointer,
             config=config,
             events=event_sink,
@@ -597,6 +649,32 @@ def cmd_interactive(
         state["status_snapshot"] = apply_assistant_text_to_snapshot(
             state["status_base_snapshot"],
             state["status_streaming_text"],
+        )
+
+    def _run_configurable_extra(
+        mode: str | None, thread_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Invited experts plus, on the session's own thread, the rubric marker."""
+        return merge_configurable_extra(
+            active_teams_configurable_extra(channel_runtime),
+            thread_run_extra(
+                channel_runtime.rubric,
+                runtime_gateways.graph_gateway,
+                thread_id=thread_id or state["thread_id"],
+                current_thread_id=state["thread_id"],
+                mode=mode,
+            ),
+        )
+
+    async def _acknowledge_rubric(agent: Any, thread_id: str | None) -> None:
+        """Drop operations the thread applied; refresh the status-bar badge."""
+        await acknowledge_applied(
+            channel_runtime.rubric,
+            state["rubric_badges"],
+            runtime_gateways.graph_gateway,
+            agent=agent,
+            dirs=state["dirs"],
+            thread_id=thread_id,
         )
 
     def _set_status_streaming_text(text: str | None) -> None:
@@ -644,6 +722,7 @@ def cmd_interactive(
         if reset_streaming_text:
             state["status_streaming_text"] = ""
         _rebuild_status_snapshot()
+        await _acknowledge_rubric(agent_loader.agent, state["thread_id"])
 
     def _bottom_toolbar():
         """Render the persistent bottom status bar for prompt_toolkit."""
@@ -657,6 +736,7 @@ def cmd_interactive(
             state["status_snapshot"],
             state["status_started_at"],
             width,
+            rubric_badge=state["rubric_badges"].get(state["thread_id"]),
         )
         if agent_loader.is_pending:
             # Per-server ✓/✗ lines are printed above the prompt by
@@ -683,6 +763,7 @@ def cmd_interactive(
             state["status_snapshot"],
             state["status_started_at"],
             console.size.width,
+            rubric_badge=state["rubric_badges"].get(state["thread_id"]),
         )
 
     async def _handle_stream_status_event(event_type: str, stream_state) -> None:
@@ -707,6 +788,8 @@ def cmd_interactive(
         if not messages:
             return
 
+        from ..message_meta import harness_label
+
         HISTORY_WINDOW = 50
 
         # Only human and ai messages; skip tool/system
@@ -724,6 +807,10 @@ def cmd_interactive(
             content = getattr(msg, "content", "") or ""
 
             if msg_type == "human":
+                label = harness_label(msg)
+                if label is not None:
+                    console.print(f"[dim]{escape(label)}[/dim]")
+                    continue
                 # Extract text from multimodal list
                 if isinstance(content, list):
                     parts = [
@@ -781,13 +868,13 @@ def cmd_interactive(
         async with get_checkpointer() as checkpointer:
             startup = await _resolve_startup_session(
                 requested_thread_id,
-                workspace_dir=state["workspace_dir"],
+                dirs=state["dirs"],
                 graph_gateway=graph_gateway,
                 config=config,
                 backend=gateway_backend,
             )
             state["thread_id"] = startup.thread_id
-            state["workspace_dir"] = startup.workspace_dir
+            state["dirs"] = startup.dirs
             state["resumed"] = startup.resumed
             if startup.resumed:
                 state["status_started_at"] = datetime.now()
@@ -799,21 +886,27 @@ def cmd_interactive(
             def _print_pending_skill_proposals_notice() -> None:
                 from .commands import _pending_skill_proposals_message
 
-                message = _pending_skill_proposals_message(state.get("workspace_dir"))
+                message = _pending_skill_proposals_message(state["dirs"].workspace.root)
                 if message:
                     console.print(message, style="yellow")
 
             async def _on_start_new_session() -> None:
-                """NewCommand callback — rotate workspace (if not fixed),
+                """NewCommand callback — move to a fresh run folder (run mode),
                 issue a new thread id, reset session-scoped status fields,
                 and kick off background agent reload. The dispatch block
                 refreshes the status bar post-execute (symmetric with
                 /compact)."""
+                new_dirs = await _new_session_dirs(
+                    state["dirs"],
+                    config=config,
+                    backend=gateway_backend,
+                    mode=mode,
+                    run_name=run_name,
+                )
                 _ch_mod.forget_channel_origin(state.get("thread_id"))
-                if not workspace_fixed:
-                    state["workspace_dir"] = _create_session_workspace(run_name)
+                state["dirs"] = new_dirs
                 state["thread_id"] = await graph_gateway.create_thread(
-                    GraphTarget(workspace_dir=state["workspace_dir"])
+                    GraphTarget(**state["dirs"].metadata())
                 )
                 state["resumed"] = False
                 state["status_started_at"] = datetime.now()
@@ -822,50 +915,43 @@ def cmd_interactive(
                 console.print(
                     f"[green]New session:[/green] [yellow]{state['thread_id']}[/yellow]"
                 )
-                if state["workspace_dir"]:
-                    console.print(
-                        f"[dim]Workspace:[/dim] [cyan]"
-                        f"{_shorten_path(state['workspace_dir'])}[/cyan]\n"
-                    )
+                console.print(
+                    f"[dim]Workspace:[/dim] [cyan]"
+                    f"{_shorten_path(str(state['dirs'].work_dir))}[/cyan]\n"
+                )
                 _print_pending_skill_proposals_notice()
 
             async def _on_handle_session_resume(
-                thread_id: str, workspace_dir: str | None
+                thread_id: str, dirs: SessionDirs | None
             ) -> None:
                 """ResumeCommand callback — after the command resolves
                 the thread id + restores workspace from metadata, this
                 callback mutates REPL state, reloads the agent, and
                 renders conversation history."""
-                if workspace_dir:
-                    # Sync the langgraph dev subprocess to the resumed
-                    # workspace so background workers and deployed sub-agents
-                    # don't operate on the previous workspace's files. The
-                    # manager auto-detects the change and restarts when needed.
-                    # Restart can take 10-15s — show a spinner so the user
-                    # doesn't think the CLI is frozen, and run the sync call
-                    # in a worker thread so the asyncio event loop keeps
-                    # serving channel polls / MCP heartbeats during the wait.
-                    #
-                    # State mutation happens AFTER this sync succeeds so a
-                    # WorkspaceMismatchError leaves the session's existing
-                    # workspace_dir / thread_id untouched.
-                    from ..langgraph_dev.manager import WorkspaceMismatchError
-                    from .commands import _sync_background_agent_server_workspace
+                if dirs is not None:
+                    # Move the background agent server to the resumed folders
+                    # so background workers and deployed sub-agents don't work
+                    # in the previous ones. Restart can take 10-15s behind a
+                    # spinner, in a worker thread so the event loop keeps
+                    # serving channel polls / MCP heartbeats. State changes
+                    # only after the move, so a WorkspaceMismatchError leaves
+                    # the session's folders and thread as they are, and command
+                    # UIs (including channels) report the failure.
+                    from .commands import _move_server_or_keep_session
 
-                    try:
-                        await _sync_background_agent_server_workspace(
-                            config,
-                            workspace_dir=workspace_dir,
-                            backend=gateway_backend,
+                    if not await _move_server_or_keep_session(
+                        config,
+                        target=dirs,
+                        current=state["dirs"],
+                        backend=gateway_backend,
+                    ):
+                        console.print(
+                            "[yellow]Background agent server sync failed; "
+                            "resumed the session, but async subagents and "
+                            "EvoMemory workers may be unavailable.[/yellow]"
                         )
-                    except WorkspaceMismatchError as exc:
-                        # Another EvoSci process owns the langgraph dev
-                        # server for a different workspace. Abort the
-                        # resume without mutating session state. Raise so
-                        # command UIs, including channel UI, report failure
-                        # instead of continuing with success/history output.
-                        raise RuntimeError(str(exc)) from exc
-                    state["workspace_dir"] = workspace_dir
+                    state["dirs"] = dirs
+                    _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
                 if thread_id != state.get("thread_id"):
                     # Only drop the origin on a real thread change — resuming
                     # the already-active thread must keep its live origin so a
@@ -880,11 +966,10 @@ def cmd_interactive(
                 console.print(
                     f"[green]Resumed session:[/green] [yellow]{thread_id}[/yellow]"
                 )
-                if state["workspace_dir"]:
-                    console.print(
-                        f"[dim]Workspace:[/dim] [cyan]"
-                        f"{_shorten_path(state['workspace_dir'])}[/cyan]"
-                    )
+                console.print(
+                    f"[dim]Workspace:[/dim] [cyan]"
+                    f"{_shorten_path(str(state['dirs'].work_dir))}[/cyan]"
+                )
                 console.print()
                 await _render_history(thread_id)
                 _print_pending_skill_proposals_notice()
@@ -918,7 +1003,7 @@ def cmd_interactive(
             if state["resumed"]:
                 print_banner(
                     state["thread_id"],
-                    state["workspace_dir"],
+                    str(state["dirs"].work_dir),
                     memory_dir,
                     mode,
                     model,
@@ -932,7 +1017,7 @@ def cmd_interactive(
             else:
                 print_banner(
                     state["thread_id"],
-                    state["workspace_dir"],
+                    str(state["dirs"].work_dir),
                     memory_dir,
                     mode,
                     model,
@@ -1096,7 +1181,7 @@ def cmd_interactive(
                         msg,
                         agent=agent_loader.agent,
                         thread_id=state["thread_id"],
-                        workspace_dir=state["workspace_dir"],
+                        dirs=state["dirs"],
                         checkpointer=checkpointer,
                         append_system=lambda t, s="dim": console.print(t, style=s),
                         start_new_session_cb=_on_start_new_session,
@@ -1120,7 +1205,7 @@ def cmd_interactive(
 
                     try:
                         ready_agent = await _await_agent_ready()
-                        meta = build_metadata(state["workspace_dir"], model)
+                        meta = build_metadata(state["dirs"], model)
                         await _refresh_status_snapshot(
                             msg.content, reset_streaming_text=True
                         )
@@ -1132,12 +1217,12 @@ def cmd_interactive(
                             show_thinking=show_thinking,
                             interactive=True,
                             metadata=meta,
-                            configurable_extra=active_teams_configurable_extra(
-                                channel_runtime
-                            ),
+                            configurable_extra=_run_configurable_extra("thread"),
+                            approve_all_at_start=_ch_mod.channel_session_granted(msg),
                             on_thinking=_send_thinking_to_channel,
                             on_todo=_send_todo_to_channel,
                             on_file_write=_send_media_to_channel,
+                            work_dir=str(state["dirs"].work_dir),
                             hitl_outcome_fn=_channel_hitl_outcome,
                             ask_user_prompt_fn=_channel_ask_user,
                             on_stream_event=_handle_stream_status_event,
@@ -1154,7 +1239,7 @@ def cmd_interactive(
                         # blocks the reply.
                         _channel_target = GraphTarget(
                             local_graph=ready_agent,
-                            workspace_dir=state["workspace_dir"],
+                            **state["dirs"].metadata(),
                         )
                         await async_notifier.enqueue_completions_from_state(
                             runtime_gateways.graph_gateway,
@@ -1166,6 +1251,7 @@ def cmd_interactive(
                             _channel_target,
                             state["thread_id"],
                         )
+                        await _acknowledge_rubric(ready_agent, state["thread_id"])
                     except Exception as e:
                         response = f"Error: {e}"
                         console.print(f"[red]Channel error: {e}[/red]")
@@ -1204,7 +1290,7 @@ def cmd_interactive(
 
                 for line_text, line_style in format_notification_lines(notifs):
                     console.print(line_text, style=line_style, markup=False)
-                meta = build_metadata(state["workspace_dir"], model)
+                meta = build_metadata(state["dirs"], model)
                 await _refresh_status_snapshot(text, reset_streaming_text=True)
                 ready_agent = await _await_agent_ready()
                 response = await run_streaming_async(
@@ -1220,7 +1306,9 @@ def cmd_interactive(
                     show_thinking=show_thinking,
                     interactive=True,
                     metadata=meta,
-                    configurable_extra=active_teams_configurable_extra(channel_runtime),
+                    configurable_extra=_run_configurable_extra(
+                        "followup", target_thread_id or state["thread_id"]
+                    ),
                     on_stream_event=_handle_stream_status_event,
                     status_footer_builder=_stream_status_footer,
                     gateway=runtime_gateways.graph_gateway,
@@ -1242,14 +1330,22 @@ def cmd_interactive(
                 # may have launched a chained task (e.g. analysis finished ->
                 # start writing) that would otherwise sit in state with the idle
                 # reader disarmed until the next local prompt. Best-effort.
+                _notif_target = GraphTarget(
+                    local_graph=ready_agent,
+                    **state["dirs"].metadata(),
+                )
                 await async_notifier.enqueue_completions_from_state(
                     runtime_gateways.graph_gateway,
-                    GraphTarget(
-                        local_graph=ready_agent,
-                        workspace_dir=state["workspace_dir"],
-                    ),
+                    _notif_target,
                     _notif_tid,
                 )
+                # A revision started in this turn may have launched a process.
+                await async_notifier.enqueue_bg_process_completions_from_state(
+                    runtime_gateways.graph_gateway,
+                    _notif_target,
+                    _notif_tid,
+                )
+                await _acknowledge_rubric(ready_agent, _notif_tid)
                 await _refresh_status_snapshot(reset_streaming_text=True)
                 console.print()
                 _print_separator()
@@ -1277,7 +1373,7 @@ def cmd_interactive(
                         runtime_gateways.graph_gateway,
                         GraphTarget(
                             local_graph=agent,
-                            workspace_dir=state["workspace_dir"],
+                            **state["dirs"].metadata(),
                         ),
                         target_thread_id,
                     )
@@ -1312,7 +1408,7 @@ def cmd_interactive(
                     if current_tid and _reader_agent is not None:
                         _reader_target = GraphTarget(
                             local_graph=_reader_agent,
-                            workspace_dir=state["workspace_dir"],
+                            **state["dirs"].metadata(),
                         )
                         try:
                             await (
@@ -1397,6 +1493,7 @@ def cmd_interactive(
                             agent,
                             state["thread_id"],
                             cfg,
+                            media_dir=state["dirs"].workspace.media_dir,
                             send_thinking=channel_send_thinking,
                             runtime=channel_runtime,
                         )
@@ -1422,7 +1519,7 @@ def cmd_interactive(
                         console.print(
                             Text(
                                 f"  Update available: v{latest} (current: v{current}).\n"
-                                "  Run: uv tool upgrade EvoScientist",
+                                "  Run: EvoSci update",
                                 style="yellow",
                             )
                         )
@@ -1430,6 +1527,68 @@ def cmd_interactive(
                     pass
 
             _update_executor.submit(_show_update_hint)
+
+            async def _run_prompt_turn(
+                message_to_send: str, *, goal_request: dict[str, Any] | None = None
+            ) -> None:
+                """Run one turn typed at the prompt, or one a ``/goal`` command asked for."""
+                console.print()
+                ready_agent = await _await_agent_ready()
+                meta = build_metadata(state["dirs"], model)
+                await _refresh_status_snapshot(
+                    message_to_send, reset_streaming_text=True
+                )
+                # Captured before waiting for the lock: a channel /resume
+                # that lands meanwhile must not move this turn, nor lend
+                # it the new thread's checklist operations.
+                turn_thread_id = state["thread_id"]
+                turn_extra = _run_configurable_extra("thread", turn_thread_id)
+                try:
+                    await _run_serialized_turn(
+                        turn_lock,
+                        lambda _agent=ready_agent, _message=message_to_send, _thread_id=turn_thread_id, _meta=meta, _extra=turn_extra, _goal=goal_request: (
+                            _run_rich_cli_streaming_turn(
+                                ui_backend=state["ui_backend"],
+                                agent=_agent,
+                                message=_message,
+                                thread_id=_thread_id,
+                                show_thinking=show_thinking,
+                                interactive=True,
+                                metadata=_meta,
+                                configurable_extra=_extra,
+                                goal_request=_goal,
+                                on_stream_event=_handle_stream_status_event,
+                                status_footer_builder=_stream_status_footer,
+                                gateway=runtime_gateways.graph_gateway,
+                                runtime=async_runtime,
+                            )
+                        ),
+                    )
+                finally:
+                    # On stream close — or a raised turn — read async_tasks
+                    # + bg_processes off thread state and enqueue any
+                    # completions not yet surfaced, so a task launched
+                    # mid-turn still surfaces and keeps idle polling armed.
+                    # Best-effort — never blocks the prompt on a read
+                    # failure.
+                    _close_target = GraphTarget(
+                        local_graph=ready_agent,
+                        **state["dirs"].metadata(),
+                    )
+                    await async_notifier.enqueue_completions_from_state(
+                        runtime_gateways.graph_gateway,
+                        _close_target,
+                        turn_thread_id,
+                    )
+                    await async_notifier.enqueue_bg_process_completions_from_state(
+                        runtime_gateways.graph_gateway,
+                        _close_target,
+                        turn_thread_id,
+                    )
+                    await _acknowledge_rubric(ready_agent, turn_thread_id)
+                await _refresh_status_snapshot(reset_streaming_text=True)
+                console.print()
+                _print_separator()
 
             # Slogan — after channels, right before user input
             console.print(
@@ -1475,7 +1634,7 @@ def cmd_interactive(
                                 agent=_agent_for_ctx,
                                 thread_id=state["thread_id"],
                                 ui=rich_ui,
-                                workspace_dir=state["workspace_dir"],
+                                dirs=state["dirs"],
                                 checkpointer=checkpointer,
                                 config=config,
                                 input_tokens_hint=state.get("status_last_input_tokens"),
@@ -1528,29 +1687,49 @@ def cmd_interactive(
                             # callbacks; /model swaps the agent).  /resume
                             # awaits its own refresh inline inside the
                             # async callback.
-                            if agent_swapped or _cmd.name in ("/compact", "/new"):
+                            if agent_swapped or _cmd.name in (
+                                "/compact",
+                                "/new",
+                                "/rubric",
+                            ):
                                 await _refresh_status_snapshot(
                                     reset_streaming_text=True,
+                                )
+                            if ctx.goal_request is not None:
+                                # The run carries the request and no message.
+                                await _run_prompt_turn(
+                                    "", goal_request=ctx.goal_request
                                 )
                             continue
 
                         # Unknown slash command (typo) — short-circuit so
                         # it doesn't get forwarded to the agent, which
                         # would waste tokens interpreting the nonsense.
+                        # ``/skill-name`` naming an installed skill goes on
+                        # to the agent, which pins that skill.
                         if user_input.lstrip().startswith("/"):
-                            bad_cmd = user_input.split(None, 1)[0]
-                            console.print(
-                                f"[red]Unknown command:[/red] {escape(bad_cmd)}"
+                            from ..commands.skill_slash import skill_slash_names
+                            from ..message_meta import skill_label
+
+                            pinned = skill_slash_names(
+                                user_input, state["dirs"].workspace
                             )
-                            console.print(
-                                "[dim]Type /help to see available commands.[/dim]"
-                            )
-                            console.print()
-                            continue
+                            if not pinned:
+                                bad_cmd = user_input.split(None, 1)[0]
+                                console.print(
+                                    f"[red]Unknown command:[/red] {escape(bad_cmd)}"
+                                )
+                                console.print(
+                                    "[dim]Type /help to see available commands.[/dim]"
+                                )
+                                console.print()
+                                continue
+                            for name in pinned:
+                                console.print(f"[dim]{escape(skill_label(name))}[/dim]")
 
                         # Resolve @file mentions — inject file contents inline
                         _, message_to_send, file_warnings = resolve_file_mentions(
-                            user_input, state["workspace_dir"]
+                            user_input, str(state["dirs"].work_dir)
                         )
 
                         # Stream agent response with metadata for persistence
@@ -1558,58 +1737,7 @@ def cmd_interactive(
                         # model response, not before the user input echo.
                         for w in file_warnings:
                             console.print(f"[yellow]⚠ {escape(w)}[/yellow]")
-                        console.print()
-                        ready_agent = await _await_agent_ready()
-                        meta = build_metadata(state["workspace_dir"], model)
-                        await _refresh_status_snapshot(
-                            message_to_send, reset_streaming_text=True
-                        )
-                        try:
-                            await _run_serialized_turn(
-                                turn_lock,
-                                lambda _agent=ready_agent, _message=message_to_send, _thread_id=state["thread_id"], _meta=meta: (
-                                    _run_rich_cli_streaming_turn(
-                                        ui_backend=state["ui_backend"],
-                                        agent=_agent,
-                                        message=_message,
-                                        thread_id=_thread_id,
-                                        show_thinking=show_thinking,
-                                        interactive=True,
-                                        metadata=_meta,
-                                        configurable_extra=active_teams_configurable_extra(
-                                            channel_runtime
-                                        ),
-                                        on_stream_event=_handle_stream_status_event,
-                                        status_footer_builder=_stream_status_footer,
-                                        gateway=runtime_gateways.graph_gateway,
-                                        runtime=async_runtime,
-                                    )
-                                ),
-                            )
-                        finally:
-                            # On stream close — or a raised turn — read async_tasks
-                            # + bg_processes off thread state and enqueue any
-                            # completions not yet surfaced, so a task launched
-                            # mid-turn still surfaces and keeps idle polling armed.
-                            # Best-effort — never blocks the prompt on a read
-                            # failure.
-                            _close_target = GraphTarget(
-                                local_graph=ready_agent,
-                                workspace_dir=state["workspace_dir"],
-                            )
-                            await async_notifier.enqueue_completions_from_state(
-                                runtime_gateways.graph_gateway,
-                                _close_target,
-                                state["thread_id"],
-                            )
-                            await async_notifier.enqueue_bg_process_completions_from_state(
-                                runtime_gateways.graph_gateway,
-                                _close_target,
-                                state["thread_id"],
-                            )
-                        await _refresh_status_snapshot(reset_streaming_text=True)
-                        console.print()
-                        _print_separator()
+                        await _run_prompt_turn(message_to_send)
 
                     except KeyboardInterrupt:
                         console.print()
@@ -1691,13 +1819,14 @@ def cmd_run(
     prompt: str,
     thread_id: str,
     show_thinking: bool = True,
-    workspace_dir: str | None = None,
     model: str | None = None,
     ui_backend: str = "cli",
     *,
+    dirs: SessionDirs,
     runtime_gateways: RuntimeGateways,
     async_runtime: "AsyncRuntime | None" = None,
-) -> None:
+    rubric: str | None = None,
+) -> str | None:
     """Single-shot execution with streaming display.
 
     Args:
@@ -1705,9 +1834,13 @@ def cmd_run(
         prompt: User prompt
         thread_id: Thread ID for conversation persistence.
         show_thinking: Whether to display thinking panels
-        workspace_dir: Per-session workspace directory path
+        dirs: The session's workspace and run folder
         model: Model name for checkpoint metadata
         ui_backend: UI backend ('cli' or 'tui')
+        rubric: Acceptance criteria this run is graded against.
+
+    Returns:
+        The latest grading verdict, or None when nothing was graded.
     """
     width = console.size.width
     sep = Text("\u2500" * width, style="dim")
@@ -1715,11 +1848,15 @@ def cmd_run(
     console.print(Text(f"> {prompt}"))
     console.print(sep)
     console.print(f"[dim]Thread: {short_thread_id(thread_id)}[/dim]")
-    if workspace_dir:
-        console.print(f"[dim]Workspace: {_shorten_path(workspace_dir)}[/dim]")
+    console.print(f"[dim]Workspace: {_shorten_path(str(dirs.work_dir))}[/dim]")
     console.print()
 
-    meta = build_metadata(workspace_dir, model)
+    verdict: dict[str, str | None] = {"result": None}
+
+    def _track_verdict(_event_type: str, state: Any) -> None:
+        verdict["result"] = state.rubric_result
+
+    meta = build_metadata(dirs, model)
     try:
         run_streaming(
             ui_backend=resolve_ui_backend(ui_backend, warn_fallback=True),
@@ -1731,8 +1868,13 @@ def cmd_run(
             metadata=meta,
             gateway=runtime_gateways.graph_gateway,
             runtime=async_runtime,
+            rubric=rubric,
+            on_stream_event=_track_verdict if rubric is not None else None,
         )
-        _wait_for_memory_workers_before_exit()
+        from .commands import _wait_for_memory_workers
+
+        _wait_for_memory_workers()
+        return verdict["result"]
     except Exception as e:
         error_msg = str(e)
         if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
@@ -1750,47 +1892,3 @@ def cmd_run(
             # resume hint is shown.  Convert the failure to Click's controlled
             # exit signal while preserving the cause for programmatic callers.
             raise typer.Exit(1) from e
-
-
-def _wait_for_memory_workers_before_exit(
-    *,
-    timeout_seconds: float = _MEMORY_WORKER_SHUTDOWN_WAIT_SECONDS,
-) -> None:
-    """Let one-shot CLI runs persist post-run memory before atexit cleanup."""
-    try:
-        from ..memory.worker_activity import (
-            MemoryActivityPhase,
-            MemoryWorkerStatusSnapshot,
-            wait_for_memory_pipeline_idle,
-        )
-    except Exception:
-        return
-
-    announced = False
-
-    def print_saved(observed: MemoryWorkerStatusSnapshot) -> None:
-        saved = []
-        if observed.observations_recorded:
-            saved.append(f"{observed.observations_recorded} observation(s)")
-        if observed.profile_updates:
-            saved.append(f"{observed.profile_updates} profile update(s)")
-        if saved:
-            console.print(f"[dim]EvoMemory saved {', '.join(saved)}.[/dim]")
-
-    def print_waiting(phase: MemoryActivityPhase) -> None:
-        nonlocal announced
-        if not announced:
-            console.print(f"[dim]Waiting for EvoMemory {phase}...[/dim]")
-            announced = True
-
-    def print_timeout(phase: MemoryActivityPhase) -> None:
-        console.print(f"[dim]EvoMemory {phase} is still running; shutting down.[/dim]")
-
-    wait_for_memory_pipeline_idle(
-        timeout_seconds=timeout_seconds,
-        poll_seconds=_MEMORY_WORKER_SHUTDOWN_POLL_SECONDS,
-        output_grace_seconds=_MEMORY_WORKER_OUTPUT_GRACE_SECONDS,
-        on_saved=print_saved,
-        on_waiting=print_waiting,
-        on_timeout=print_timeout,
-    )

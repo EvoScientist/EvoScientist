@@ -10,12 +10,15 @@
 | Recipe                                                     | Description                                                                     |
 |------------------------------------------------------------|---------------------------------------------------------------------------------|
 | [macOS 24/7 Deployment](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/deployment-macos-24h.md#running-evoscientist-247-on-macos-telegram-bot--stt--ccproxy)   | Run EvoScientist as an always-on service on macOS with OAuth + Telegram + STT   |
-| [Subscription OAuth (Claude + ChatGPT/Codex)](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/subscription-oauth.md#using-evoscientist-with-your-ai-subscriptions-claude--chatgptcodex-oauth)   | Use Claude and GPT models through your existing subscriptions — no API keys, including Codex-route pitfalls & fixes   |
+| [Subscription sign-in (Claude OAuth + ChatGPT)](https://github.com/EvoScientist/EvoScientist/blob/main/docs/recipes/subscription-oauth.md#using-evoscientist-with-your-ai-subscriptions-claude-oauth--chatgpt-sign-in)   | Use Claude and GPT models through your existing subscriptions — no API keys; Claude via ccproxy, ChatGPT by direct sign-in   |
 
 
 | Guide                                                      | Description                                                                     |
 |------------------------------------------------------------|---------------------------------------------------------------------------------|
 | [`stream-json` output protocol](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/stream-json.md#stream-json-output-protocol)   | Line-delimited JSON event stream (`--output-format stream-json`) for driving EvoScientist headlessly from SDK / programmatic clients |
+| [Grading a run against a rubric](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/rubric.md#grading-a-run-against-a-rubric)   | Acceptance criteria for single-shot runs (`--rubric`) and for threads in the TUI / interactive CLI (`/rubric`): what the grader checks, when grading is deferred, exit codes and limits |
+| [Working toward a goal](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/goal.md#working-toward-a-goal) | `/goal` in the TUI / interactive CLI: an objective with drafted acceptance criteria you review, graded every turn until met; amend, pause, resume and clear |
+| [Retrying transient model failures](https://github.com/EvoScientist/EvoScientist/blob/main/docs/guides/model-retry.md#retrying-transient-model-failures) | What a transient provider failure is, the per-call wait budget for interactive and unattended runs (`model_retry_wait_seconds`, `auto_mode_retry_wait_seconds`), and what each surface shows |
 
 ## Contributing a Recipe
 

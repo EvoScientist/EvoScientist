@@ -9,6 +9,7 @@ import questionary
 from rich.panel import Panel
 from rich.text import Text
 
+from ...paths import Workspace, start_workspace_path
 from ...runtime import AsyncRuntime
 from ..settings import (
     EvoScientistConfig,
@@ -18,6 +19,7 @@ from ..settings import (
 )
 from .channels import _step_channels
 from .steps import (
+    _asks_reasoning_effort,
     _step_anthropic_auth_mode,
     _step_auxiliary_enable,
     _step_base_url,
@@ -122,6 +124,7 @@ _PROVIDER_KEY_ATTR = {
     "atlascloud": "atlascloud_api_key",
     "requesty": "requesty_api_key",
     "novita": "novita_api_key",
+    "opper": "opper_api_key",
     "deepseek": "deepseek_api_key",
     "zhipu": "zhipu_api_key",
     "zhipu-code": "zhipu_api_key",
@@ -155,6 +158,15 @@ def _autosave(config: EvoScientistConfig) -> None:
         save_config(config)
     except Exception:
         pass
+
+
+def _skills_workspace(config: EvoScientistConfig) -> Workspace:
+    """The workspace whose skills onboarding checks: the folder the CLI starts in."""
+    return Workspace(
+        start_workspace_path(
+            os.environ.get("EVOSCIENTIST_WORKSPACE_DIR"), config.default_workdir
+        )
+    )
 
 
 def _configure_provider_base_url(
@@ -727,7 +739,7 @@ def run_onboard(
                         # leaves a stale ``--model`` / ``--api-key`` that would
                         # be re-applied under a different provider, producing
                         # an invalid pair (e.g. ``provider=openai`` +
-                        # ``model=claude-sonnet-4-6``).
+                        # ``model=claude-sonnet-5-5``).
                         for field_name in vars(loop_snapshot):
                             setattr(
                                 config, field_name, getattr(loop_snapshot, field_name)
@@ -759,8 +771,8 @@ def run_onboard(
                     config.model = _step_model(
                         config, provider, ollama_detected_models=ollama_detected_models
                     )
-                if provider == "openrouter" and _preset("model") is None:
-                    config.reasoning_effort = _step_reasoning_effort(config)
+                if _asks_reasoning_effort(provider) and _preset("model") is None:
+                    config.reasoning_effort = _step_reasoning_effort(config, provider)
                 _autosave(config)
 
             if "auxiliary_model" in sections_to_run:
@@ -902,7 +914,7 @@ def run_onboard(
                 _autosave(config)
 
             if "skills" in sections_to_run:
-                _step_skills()
+                _step_skills(_skills_workspace(config))
 
             if "mcp" in sections_to_run:
                 _step_mcp_servers()

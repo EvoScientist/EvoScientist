@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..paths import Workspace
 from ..tools.skills_manager import SkillInfo, _split_frontmatter_and_body
 
 _logger = logging.getLogger(__name__)
@@ -199,7 +200,7 @@ def _reserved_subagent_names() -> frozenset[str]:
 
 
 def list_dispatchable_experts(
-    *, include_system: bool = True, cfg: Any | None = None
+    *, workspace: Workspace, include_system: bool = True, cfg: Any | None = None
 ) -> list[SkillInfo]:
     """Experts the orchestrator can actually reach.
 
@@ -224,7 +225,7 @@ def list_dispatchable_experts(
 
     reserved = _reserved_subagent_names()
     dispatchable: list[SkillInfo] = []
-    for info in list_expert_skills(include_system=include_system):
+    for info in list_expert_skills(include_system=include_system, workspace=workspace):
         if not expert_prompt_body(info).strip():
             continue
         if info.name in reserved:
@@ -236,6 +237,7 @@ def list_dispatchable_experts(
 def build_expert_subagent_specs(
     tool_registry: dict[str, Any] | None = None,
     *,
+    workspace: Workspace,
     include_system: bool = True,
 ) -> list[dict[str, Any]]:
     """Build the in-turn (``task``) spec for every installed expert skill.
@@ -259,7 +261,7 @@ def build_expert_subagent_specs(
     from ..tools.skills_manager import list_expert_skills
 
     specs: list[dict[str, Any]] = []
-    for info in list_expert_skills(include_system=include_system):
+    for info in list_expert_skills(include_system=include_system, workspace=workspace):
         if not expert_prompt_body(info).strip():
             _logger.warning(
                 "Expert skill %r: %s body is empty; skipping registration.",

@@ -17,12 +17,12 @@ def overrides(monkeypatch):
     monkeypatch.setattr(research_env, "research_env_overrides", lambda: dict(_PROBE))
 
 
-def test_default_backend_gets_the_overrides(overrides):
-    backend = es_mod._get_default_backend()
+def test_default_backend_gets_the_overrides(overrides, workspace):
+    backend = es_mod._get_default_backend(workspace)
     assert backend.default._env["EVOSCI_SHELL_PROBE"] == "venv"
 
 
-def test_cli_agent_backend_gets_the_overrides(overrides, tmp_path):
+def test_cli_agent_backend_gets_the_overrides(overrides, tmp_path, workspace):
     backends = []
 
     def fake_build_kwargs(backend, *args, **kwargs):
@@ -42,15 +42,20 @@ def test_cli_agent_backend_gets_the_overrides(overrides, tmp_path):
         ),
     ):
         es_mod.create_cli_agent(
-            workspace_dir=str(tmp_path), config=cfg, chat_model=MagicMock()
+            work_dir=str(tmp_path),
+            config=cfg,
+            chat_model=MagicMock(),
+            workspace=workspace,
         )
     assert backends[0].default._env["EVOSCI_SHELL_PROBE"] == "venv"
 
 
-def test_autoskill_backend_gets_the_overrides(overrides, tmp_path):
+def test_autoskill_backend_gets_the_overrides(overrides, tmp_path, workspace):
     from EvoScientist.backends import build_autoskill_agent_backend
 
     backend = build_autoskill_agent_backend(
-        memory_dir=tmp_path / "memories", proposals_dir=tmp_path / "proposals"
+        memory_dir=tmp_path / "memories",
+        proposals_dir=tmp_path / "proposals",
+        skills_dir=workspace.skills_dir,
     )
     assert backend.default._env["EVOSCI_SHELL_PROBE"] == "venv"

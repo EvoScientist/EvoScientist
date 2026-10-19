@@ -22,11 +22,13 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import PregelTask, StateSnapshot
 
 from EvoScientist.EvoScientist import EvoScientist_agent as _agent
+from EvoScientist.sessions import AGENT_NAME
 
 # Re-exported so langgraph-api finds the ``stream_transformers`` symbol on this
 # graph's source module and opts the served graph into the ``custom`` stream
 # mode; the logic lives in the sibling module so it stays unit-testable without
 # building the agent this import triggers.
+from .folder_check import folder_checked
 from .stream_transformers import stream_transformers
 
 # The model fallback chain is seeded in _get_default_middleware (the
@@ -198,7 +200,9 @@ class _EvoFilteredGraph(CompiledStateGraph):
 # safe. Constructing a fresh ``_EvoFilteredGraph`` via ``.copy()`` would
 # require reproducing the deep-agent build pipeline; the swap avoids that.
 _agent.__class__ = _EvoFilteredGraph
-EvoScientist_agent = _agent
+# The main agent works in the session's folder: a run for another workspace or
+# run folder is refused (see ``folder_check``).
+EvoScientist_agent = folder_checked(_agent, graph_id=AGENT_NAME)
 
 
 def _apply_filter_to_all_registered_graphs() -> None:
@@ -247,6 +251,8 @@ def _apply_filter_to_all_registered_graphs() -> None:
         except ImportError:
             continue
         graph = getattr(module, attr, None)
+        # Registered graphs sit behind a folder-checking factory.
+        graph = getattr(graph, "graph", graph)
         if isinstance(graph, CompiledStateGraph) and not isinstance(
             graph, _EvoFilteredGraph
         ):

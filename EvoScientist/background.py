@@ -23,6 +23,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -211,13 +212,14 @@ def _read_tail(log_path: Path, tail_bytes: int) -> str:
     return data.decode("utf-8", "replace")
 
 
-def _watch(proc: BgProcess) -> None:
-    """Block until ``proc`` exits and record the exit promptly.
+def _watch(proc: BgProcess, on_exit: Callable[[], None] | None = None) -> None:
+    """Block until ``proc`` exits, record the exit promptly, then run ``on_exit``.
 
     Running in a daemon thread, ``popen.wait()`` lets us record ``finished_ts`` at
     (very close to) the real exit time, fixing the observation-time inflation. The
     CLI completion notification is derived from thread state (mirrored records +
-    the state reader); there is no push callback anymore.
+    the state reader), not pushed from here. ``on_exit`` only cleans up: it
+    deletes the command's script file when it ran in Git Bash.
     """
     try:
         proc.popen.wait()
@@ -225,6 +227,8 @@ def _watch(proc: BgProcess) -> None:
         pass
     with _LOCK:
         _record_exit(proc)
+    if on_exit is not None:
+        on_exit()
 
 
 def launch(
@@ -236,9 +240,11 @@ def launch(
 ) -> str:
     """Launch ``command`` detached in ``cwd``; return a short ``process_id``.
 
-    The command is run via ``shell=True`` with output redirected to a per-process log
-    file under ``<cwd>/.bg_processes/`` and ``start_new_session=True`` so the child is a
-    process-group leader (survives this call's return and can be killed as a group).
+    The command runs in the agent's shell (:mod:`~EvoScientist.agent_shell`: ``/bin/sh``,
+    or on Windows the recorded Git Bash, else ``cmd.exe``) with output redirected to a
+    per-process log file under ``<cwd>/.bg_processes/`` and ``start_new_session=True`` so
+    on POSIX the child is a process-group leader (survives this call's return and can be
+    killed as a group).
     The caller is responsible for validating ``command`` first.
 
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
@@ -247,27 +253,48 @@ def launch(
     (:func:`~EvoScientist.setup.research_env.research_env_overrides`), so a
     background ``python`` resolves the same interpreter as a foreground one.
     """
+    from . import agent_shell
     from .setup.research_env import research_env_overrides
 
+    # PWD as in the execute shell: the folder the job runs in, not a symlink
+    # this process was started in.
     overrides = research_env_overrides()
-    env = {**os.environ, **overrides} if overrides else None
+    env = {**os.environ, **(overrides or {}), "PWD": cwd}
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{process_id}.log"
 
     log_file = open(log_path, "w")
+    # Inside the try, after the log opens: a failure at any step closes the log
+    # and leaves no script file behind.
+    launch: agent_shell.ShellLaunch | None = None
+    popen: subprocess.Popen | None = None
     try:
+        launch = agent_shell.prepare(command, env)
+        platform_options: dict[str, Any] = {}
+        if launch.creationflags:
+            platform_options["creationflags"] = launch.creationflags
         popen = subprocess.Popen(
-            command,
-            shell=True,
+            launch.args,
+            shell=launch.shell,
             cwd=cwd,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
-            env=env,
+            env=launch.env,
+            **platform_options,
         )
+        launch.started(popen)
+    except BaseException:
+        if popen is not None:
+            # Started but not recorded: stop_process and list_processes could
+            # never reach it, so it must not keep running.
+            _kill_process_tree(popen, forceful=True)
+        if launch is not None:
+            launch.cleanup()
+        raise
     finally:
         # The child inherited its own dup of the fd during spawn; the parent's copy
         # is no longer needed (and must be closed so the pipe/file isn't held open).
@@ -286,8 +313,10 @@ def launch(
     )
     with _LOCK:
         _PROCESSES[process_id] = proc
-    # Daemon watcher: records the precise exit time.
-    threading.Thread(target=_watch, args=(proc,), daemon=True).start()
+    # Daemon watcher: records the precise exit time, then deletes the script.
+    threading.Thread(
+        target=_watch, args=(proc,), kwargs={"on_exit": launch.cleanup}, daemon=True
+    ).start()
     return process_id
 
 
@@ -331,8 +360,15 @@ def _kill_process_tree(popen: subprocess.Popen, *, forceful: bool) -> None:
     grandchildren).  On Windows ``TerminateProcess`` (used by
     ``Popen.terminate()`` / ``Popen.kill()``) only kills the direct
     child — it does *not* cascade to grandchildren.  We use ``psutil``
-    to walk the process tree and signal every descendant.
+    to walk the process tree and signal every descendant. A command running
+    in Git Bash is in a job object, which is stopped as a whole instead
+    (:func:`~EvoScientist.agent_shell.terminate_job`): MSYS programs whose
+    parent bash has exited are not in the tree.
     """
+    from . import agent_shell
+
+    if agent_shell.terminate_job(popen):
+        return
     if os.name == "nt":
         try:
             proc = psutil.Process(popen.pid)

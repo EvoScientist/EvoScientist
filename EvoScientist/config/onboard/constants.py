@@ -36,6 +36,7 @@ VALID_PROVIDERS: frozenset[str] = frozenset(
         "atlascloud",
         "requesty",
         "novita",
+        "opper",
         "custom-openai",
         "custom-anthropic",
     }

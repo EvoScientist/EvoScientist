@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from EvoScientist.middleware.summarization import (
@@ -87,7 +88,7 @@ class _UnhashableModel:
     def __init__(self, window):
         self.profile = {"max_input_tokens": window}
 
-    def with_retry(self):
+    def with_retry(self, **kwargs):
         return self
 
     def __hash__(self):
@@ -317,6 +318,19 @@ async def test_resolution_failure_keeps_construction_limits():
     assert mw._lc_helper._get_profile_limits() == CONSTRUCTION_WINDOW
 
 
+async def test_unknown_router_model_is_not_hidden_behind_construction_limits():
+    from EvoScientist.llm.registry import UnknownModelError
+
+    mw, construction = _make_mw()
+    handler = AsyncMock(return_value=MagicMock())
+    with (
+        _patched_config({"model": "claude-sonnet-4.6", "model_provider": "openrouter"}),
+        pytest.raises(UnknownModelError),
+    ):
+        await mw.awrap_model_call(_fake_model_request(construction), handler)
+    handler.assert_not_called()
+
+
 async def test_unsynced_shim_reports_construction_profile_not_resolved_window():
     """After an override, clearing the sync must not invent a window.
 
@@ -333,7 +347,7 @@ async def test_unsynced_shim_reports_construction_profile_not_resolved_window():
             self.profile = profile
             self.context_window = context_window
 
-        def with_retry(self):
+        def with_retry(self, **kwargs):
             return self
 
     construction = _Model(profile=None, context_window=32_768)
@@ -428,6 +442,68 @@ async def test_summary_follows_the_run_model():
     construction.with_retry.return_value.ainvoke.assert_not_called()
 
 
+def _failing_model_cls():
+    """A chat model whose every call raises a non-retryable ``ModelError``."""
+    from langchain_core.exceptions import ModelError
+    from langchain_core.language_models import FakeListChatModel
+
+    class _NonRetryable(ModelError):
+        is_retryable = False
+
+    class _Failing(FakeListChatModel):
+        calls: int = 0
+
+        async def _agenerate(self, *args, **kwargs):
+            self.calls += 1
+            raise _NonRetryable("bad request")
+
+    return _Failing, _NonRetryable
+
+
+def _sync_to(mw, run_model):
+    with (
+        _patched_config({"model": "small-model"}),
+        patch("EvoScientist.llm.get_chat_model", return_value=run_model),
+    ):
+        mw._sync_limits()
+
+
+async def test_summary_keeps_upstream_retry_policy():
+    """The run model summarizes under the retry policy upstream chose."""
+    failing, non_retryable = _failing_model_cls()
+    construction = failing(responses=["CONSTRUCTION"])
+    construction.profile = {"max_input_tokens": CONSTRUCTION_WINDOW}
+    mw = create_per_run_summarization_middleware(construction, MagicMock())
+    upstream = mw._lc_helper._summary_model
+    run_model = failing(responses=["SUMMARY"])
+    run_model.profile = {"max_input_tokens": 20_000}
+    _sync_to(mw, run_model)
+    target = mw._lc_helper._summary_model._target()
+    assert target.bound is run_model
+    for runnable in (upstream, target):
+        with pytest.raises(non_retryable):
+            await runnable.ainvoke([HumanMessage("old turn")])
+    assert run_model.calls == construction.calls
+
+
+def test_racing_shim_install_keeps_upstream_retry_policy():
+    """A second installer that passed the guard must not wrap the first shim."""
+    failing, _ = _failing_model_cls()
+    construction = failing(responses=["CONSTRUCTION"])
+    construction.profile = {"max_input_tokens": CONSTRUCTION_WINDOW}
+    mw = create_per_run_summarization_middleware(construction, MagicMock())
+    upstream = mw._lc_helper._summary_model
+    run_model = failing(responses=["SUMMARY"])
+    run_model.profile = {"max_input_tokens": 20_000}
+    _sync_to(mw, run_model)
+    mw._lc_helper.model = construction  # the state a racing thread saw
+    mw._synced_state.set(None)
+    _sync_to(mw, run_model)
+    target = mw._lc_helper._summary_model._target()
+    assert target.bound is run_model
+    assert target.retry_exception_types == upstream.retry_exception_types
+
+
 # ---------------------------------------------------------------------------
 # Registration in the default middleware list
 # ---------------------------------------------------------------------------
@@ -440,7 +516,7 @@ async def test_summary_follows_the_run_model():
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_default_middleware_registers_subclass_exactly_once(
-    mock_config, mock_model, mock_ts
+    mock_config, mock_model, mock_ts, workspace
 ):
     mock_model.return_value = MagicMock(
         profile={"max_input_tokens": CONSTRUCTION_WINDOW}
@@ -454,7 +530,7 @@ def test_default_middleware_registers_subclass_exactly_once(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware(backend=MagicMock())
+    mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
     summ = [m for m in mw if m.name == "SummarizationMiddleware"]
     assert len(summ) == 1, "expected exactly one summarization middleware"
     assert isinstance(summ[0], _PerRunLimitsSummarizationMiddleware)
@@ -462,7 +538,7 @@ def test_default_middleware_registers_subclass_exactly_once(
     # Without a backend (tests, async sub-agent factories) the stock frozen
     # built-in must be left untouched rather than replaced by a shim-backend
     # instance that would offload history to the wrong place.
-    mw_plain = _get_default_middleware()
+    mw_plain = _get_default_middleware(workspace=workspace)
     assert not [m for m in mw_plain if m.name == "SummarizationMiddleware"]
 
 
@@ -473,7 +549,7 @@ def test_default_middleware_registers_subclass_exactly_once(
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_deepagents_name_merge_replaces_stock_instance(
-    mock_config, mock_model, mock_ts
+    mock_config, mock_model, mock_ts, workspace
 ):
     """deepagents' name-based merge swaps the frozen built-in for our
     subclass in the identical core-stack slot (the fix mechanism for #466).
@@ -499,7 +575,7 @@ def test_deepagents_name_merge_replaces_stock_instance(
         def __init__(self, name: str) -> None:
             self.name = name
 
-    user_mw = _get_default_middleware(backend=MagicMock())
+    user_mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
 
     core = [
         _Named("FilesystemMiddleware"),
@@ -514,7 +590,7 @@ def test_deepagents_name_merge_replaces_stock_instance(
     assert summ[0] is not core[2]
 
 
-def test_explicit_general_purpose_spec_gets_per_run_summarization():
+def test_explicit_general_purpose_spec_gets_per_run_summarization(workspace):
     """general-purpose is an explicit spec, so it does not inherit the
     parent's middleware by name. Injection has to install the subclass
     itself (#466 review)."""
@@ -529,6 +605,7 @@ def test_explicit_general_purpose_spec_gets_per_run_summarization():
     _ensure_general_purpose_subagent(subs)
     _inject_subagent_middleware(
         subs,
+        workspace=workspace,
         cfg=_factory_cfg_mock(),
         chat_model=model,
         backend=backend,
@@ -587,6 +664,7 @@ def test_async_subagent_factory_installs_per_run_summarization(
     mock_backend,
     mock_mcp,
     mock_create,
+    workspace,
 ):
     """``build_async_subagent_graph`` must pass its backend so the per-run
     subclass replaces the frozen-window built-in (scheduler / writing-agent /
@@ -602,7 +680,7 @@ def test_async_subagent_factory_installs_per_run_summarization(
 
     from EvoScientist.subagents._factory import build_async_subagent_graph
 
-    build_async_subagent_graph("writing-agent")
+    build_async_subagent_graph("writing-agent", workspace=workspace)
 
     kwargs = mock_create.call_args.kwargs
     _assert_per_run_summarization(kwargs["middleware"], mock_backend.return_value)
@@ -635,6 +713,7 @@ def test_scheduler_summarization_uses_auxiliary_model(
     mock_backend,
     mock_mcp,
     mock_create,
+    workspace,
 ):
     """The scheduler graph is built on the auxiliary model. Summaries must
     use that model too, not the main model the middleware factory would
@@ -656,7 +735,7 @@ def test_scheduler_summarization_uses_auxiliary_model(
 
     from EvoScientist.subagents._factory import build_async_subagent_graph
 
-    build_async_subagent_graph("scheduler")
+    build_async_subagent_graph("scheduler", workspace=workspace)
 
     kwargs = mock_create.call_args.kwargs
     assert kwargs["model"] is aux
@@ -695,6 +774,7 @@ def test_expert_container_factory_installs_per_run_summarization(
     mock_config,
     mock_backend,
     mock_create,
+    workspace,
 ):
     """``build_expert_container_async_graph`` must pass its backend too —
     the expert container graph is its own deployed graph with its own frozen
@@ -709,7 +789,7 @@ def test_expert_container_factory_installs_per_run_summarization(
         build_expert_container_async_graph,
     )
 
-    build_expert_container_async_graph()
+    build_expert_container_async_graph(workspace)
 
     kwargs = mock_create.call_args.kwargs
     _assert_per_run_summarization(kwargs["middleware"], mock_backend.return_value)
@@ -798,3 +878,68 @@ async def test_stock_middleware_stays_frozen_under_same_override(tmp_path):
     # Frozen 200k trigger: the full oversized history is sent untouched.
     assert len(sent) == len(messages)
     assert not list((tmp_path / "conversation_history").glob("*.md"))
+
+
+# ---------------------------------------------------------------------------
+# Proactive shadow turns
+# ---------------------------------------------------------------------------
+
+
+async def test_a_proactive_turn_passes_through_without_summarizing():
+    """No summary call and no history offload on a proactive shadow turn."""
+    mw, construction = _make_mw(window=1_000)
+    backend = mw._backend
+    messages = [
+        HumanMessage(content="x " * 5_000, id=f"h{i}")
+        if i % 2 == 0
+        else AIMessage(content="y " * 5_000, id=f"a{i}")
+        for i in range(8)
+    ]
+    request = _fake_model_request(construction, messages)
+    handler = AsyncMock(return_value=MagicMock())
+
+    with _patched_config({"proactive_mode": True}):
+        await mw.awrap_model_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+    assert backend.mock_calls == []
+    construction.invoke.assert_not_called()
+    construction.ainvoke.assert_not_called()
+
+
+def test_a_proactive_turn_passes_through_on_the_sync_path():
+    mw, construction = _make_mw(window=1_000)
+    request = _fake_model_request(construction, [HumanMessage(content="x " * 5_000)])
+    handler = MagicMock(return_value=MagicMock())
+
+    with _patched_config({"proactive_mode": True}):
+        mw.wrap_model_call(request, handler)
+
+    handler.assert_called_once_with(request)
+
+
+def test_summary_overflow_retry_fits_the_run_window():
+    """The cut-down prompt after a summary overflow is sized for the run's model."""
+    mw, _ = _make_mw(window=1_000_000)
+    _sync_to(mw, _UnhashableModel(100_000))
+    prompt = mw._lc_helper._overflow_retry_prompt([HumanMessage("word " * 600_000)])
+    assert len(prompt) < 4 * 100_000
+
+
+def test_shim_install_publishes_the_readiness_marker_last():
+    """A thread that sees the window shim on ``model`` skips the install, so
+    the summary shims must already be in place by then."""
+    mw, _ = _make_mw(window=1_000_000)
+    helper = mw._lc_helper
+    order: list[str] = []
+
+    class _Recording(type(helper)):
+        def __setattr__(self, name, value):
+            if name in ("model", "_summary_model", "_summary_chat_model"):
+                order.append(name)
+            super().__setattr__(name, value)
+
+    helper.__class__ = _Recording
+    _sync_to(mw, _UnhashableModel(100_000))
+    assert order[-1] == "model"
+    assert set(order) == {"model", "_summary_model", "_summary_chat_model"}

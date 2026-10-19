@@ -14,6 +14,7 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel
 
 from ... import paths as _paths
+from ...paths import Workspace
 
 MEMORY_AGENT_RECURSION_LIMIT = 100
 MEMORY_MAINTENANCE_EXCLUDED_TOOLS = frozenset(
@@ -36,19 +37,16 @@ class MemoryAgentPaths:
 
 def resolve_memory_agent_paths(
     *,
+    workspace: Workspace,
     memory_dir: str | Path | None = None,
-    workspace_dir: str | Path | None = None,
 ) -> MemoryAgentPaths:
-    """Resolve the default workspace and memory roots for memory graphs."""
+    """Resolve the workspace and memory roots for a memory graph."""
     resolved_memory_dir = Path(
         _paths.MEMORIES_DIR if memory_dir is None else memory_dir
     ).expanduser()
-    resolved_workspace_dir = Path(
-        _paths.WORKSPACE_ROOT if workspace_dir is None else workspace_dir
-    ).expanduser()
     return MemoryAgentPaths(
         memory_dir=resolved_memory_dir,
-        workspace_dir=resolved_workspace_dir,
+        workspace_dir=workspace.root,
     )
 
 

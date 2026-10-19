@@ -3,6 +3,7 @@
 import importlib.util
 import sys
 from datetime import datetime
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -276,6 +277,70 @@ class TestTelegramChannel:
             message_id=789,
         )
         return SimpleNamespace(message=message)
+
+    @pytest.mark.parametrize(
+        ("file_name", "mime_type", "suffix"),
+        [
+            ("paper.pdf", "application/pdf", ".pdf"),
+            ("notes.csv", "application/octet-stream", ".csv"),
+            (None, "application/pdf", ".pdf"),
+            ("README", "text/plain", ".txt"),
+            ("PAPER.PDF", "application/octet-stream", ".PDF"),
+            ("paper.bad suffix", "application/pdf", ".pdf"),
+            (None, None, ""),
+            ("a." + "x" * 20, "application/pdf", ".pdf"),
+            (None, "application/x-unknown-evosci", ""),
+            ("../../paper.pdf", "application/pdf", ".pdf"),
+            ("C:\\uploads\\paper.pdf", "application/pdf", ".pdf"),
+            ("paper.pdf\\escape", "application/pdf", ".pdf"),
+        ],
+    )
+    async def test_document_download_keeps_a_usable_suffix(
+        self, tmp_path, monkeypatch, file_name, mime_type, suffix
+    ):
+        channel = TelegramChannel(TelegramConfig(bot_token="test"))
+        file_unique_id = "synthetic-unique-id-for-document"
+        download = AsyncMock()
+        channel._app = SimpleNamespace(
+            bot=SimpleNamespace(
+                get_file=AsyncMock(
+                    return_value=SimpleNamespace(download_to_drive=download)
+                )
+            )
+        )
+        monkeypatch.setattr(channel, "_media_path", lambda name: tmp_path / name)
+        channel._enqueue_raw = AsyncMock()
+        update = self._text_update(None)
+        for name in ("photo", "voice", "audio", "video", "sticker", "location"):
+            setattr(update.message, name, None)
+        update.message.document = SimpleNamespace(
+            file_id="synthetic-file-id",
+            file_unique_id=file_unique_id,
+            file_size=10,
+            file_name=file_name,
+            mime_type=mime_type,
+        )
+
+        await channel._on_message(update, None)
+
+        expected = tmp_path / f"{file_unique_id}{suffix}"
+        download.assert_awaited_once_with(str(expected))
+        raw = channel._enqueue_raw.await_args.args[0]
+        assert raw.media_files == [str(expected)]
+        assert Path(raw.media_files[0]).parent == tmp_path
+
+
+@pytest.mark.parametrize(
+    ("media_type", "mime_type", "expected"),
+    [
+        ("voice", "audio/ogg", ".ogg"),
+        ("image", None, ".jpg"),
+        ("video", "video/mp4", ".mp4"),
+        ("sticker", None, ".webp"),
+    ],
+)
+def test_existing_media_extensions(media_type, mime_type, expected):
+    assert TelegramChannel._get_extension(media_type, mime_type) == expected
 
 
 @pytest.mark.skipif(

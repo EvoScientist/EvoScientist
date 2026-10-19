@@ -241,13 +241,13 @@ def test_repair_is_idempotent():
 
 
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
-def test_inject_subagent_includes_tool_history_repair(mock_model):
+def test_inject_subagent_includes_tool_history_repair(mock_model, workspace):
     mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
 
     from EvoScientist.EvoScientist import _inject_subagent_middleware
 
     subs = [{"name": "test-agent"}]
-    _inject_subagent_middleware(subs)
+    _inject_subagent_middleware(subs, workspace=workspace)
 
     assert any(
         isinstance(m, ToolHistoryRepairMiddleware) for m in subs[0]["middleware"]

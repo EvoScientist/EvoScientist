@@ -25,6 +25,12 @@ class _ToolSelectionSuppressor:
         self._buffer = ""
         self._was_active = False
 
+    def snapshot(self) -> tuple[bool, str, bool]:
+        return (self._buffering, self._buffer, self._was_active)
+
+    def restore(self, snapshot: tuple[bool, str, bool]) -> None:
+        self._buffering, self._buffer, self._was_active = snapshot
+
     def observe_tool_block(self, name: str) -> bool:
         if name == "ToolSelectionResponse":
             self._was_active = True

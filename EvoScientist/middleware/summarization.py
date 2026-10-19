@@ -39,9 +39,12 @@ from deepagents.middleware.summarization import (
     compute_summarization_defaults,
 )
 from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.runnables.retry import RunnableRetry
 
 from ..llm.context_window import get_context_window, resolve_context_window
+from ..llm.registry import UnknownModelError
 from .configurable_model import _read_model_override
+from .proactive_mode import _read_proactive_mode
 
 if TYPE_CHECKING:
     from langchain.agents.middleware.types import ModelRequest
@@ -58,7 +61,7 @@ class _ProfileWindowShim:
     ``self.model._get_ls_params()``. Re-pointing ``_lc_helper.model`` at this
     shim makes the first read see the per-run context window and the second
     fall through to the run's model. Summaries use the same pairing: a
-    second shim reads the synced run model (``with_retry()``) so the model
+    second shim reads the synced run model (with upstream's retry policy) so the model
     that sees the conversation also writes the summary. When no override is
     synced, that shim falls back to the construction summary model.
 
@@ -116,7 +119,12 @@ class _SummaryModelShim:
 
     def _target(self) -> Any:
         state = self._state_var.get()
-        return state[0].with_retry() if state is not None else self._fallback
+        if state is None:
+            return self._fallback
+        if isinstance(self._fallback, RunnableRetry):
+            # Same retry policy upstream gave the construction model.
+            return self._fallback.model_copy(update={"bound": state[0]})
+        return state[0].with_retry()
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
         return self._target().invoke(*args, **kwargs)
@@ -212,6 +220,8 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             truncate_args_settings=defaults["truncate_args_settings"],
         )
         self._construction_model: Any = construction_model
+        # Captured before any shim wraps it, so racing installers never nest shims.
+        self._upstream_summary_model: Any = self._lc_helper._summary_model
         # Per-task synced state: ``(target_model, resolved_window)`` or None.
         # The default is None and __init__ never sets it — "no override synced
         # in this task" means stock delegation semantics (see
@@ -267,16 +277,20 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
         # One-time shim install (identity check): the shared write happens
         # only here, and every installer writes an equivalent immutable shim
         # that reads the same ContextVar, so a racing double install is
-        # harmless (last write wins).
+        # harmless (last write wins). ``model`` is the readiness marker other
+        # threads check, so it is written last.
         if not isinstance(self._lc_helper.model, _ProfileWindowShim):
-            self._lc_helper.model = _ProfileWindowShim(
+            window_shim = _ProfileWindowShim(
                 self._synced_state,
                 self._construction_model,
             )
             self._lc_helper._summary_model = _SummaryModelShim(
                 self._synced_state,
-                self._lc_helper._summary_model,
+                self._upstream_summary_model,
             )
+            # langchain sizes the summary call's overflow retry from this model's profile.
+            self._lc_helper._summary_chat_model = window_shim
+            self._lc_helper.model = window_shim
         self._synced_state.set((target, resolved))
 
     def _target_for_override(self, model_name: str | None, provider: str | None) -> Any:
@@ -284,6 +298,8 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             return self._construction_model
         try:
             return self._resolve_override_model(model_name, provider)
+        except UnknownModelError:
+            raise
         except Exception:
             logger.warning(
                 "SummarizationMiddleware failed to resolve model=%r "
@@ -312,7 +328,7 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
             target = await asyncio.to_thread(
                 self._resolve_override_model, model_name, provider
             )
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, UnknownModelError):
             raise
         except Exception:
             logger.warning(
@@ -326,10 +342,17 @@ class _PerRunLimitsSummarizationMiddleware(SummarizationMiddleware):
         self._publish_limits(target)
 
     def wrap_model_call(self, request: ModelRequest, handler):
+        if _read_proactive_mode():
+            return handler(request)
         self._sync_limits()
         return super().wrap_model_call(request, handler)
 
     async def awrap_model_call(self, request: ModelRequest, handler) -> Any:
+        # A proactive shadow turn writes nothing: summarizing would make another
+        # model call and offload the evicted history through the real backend.
+        # Its messages already carry the source thread's summary.
+        if _read_proactive_mode():
+            return await handler(request)
         await self._async_sync_limits()
         return await super().awrap_model_call(request, handler)
 

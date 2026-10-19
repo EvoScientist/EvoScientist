@@ -2,9 +2,18 @@
 
 from unittest.mock import patch
 
+from tests.fakes import TEST_WORKSPACE
+
+
+def _tool(name: str):
+    """The scheduling tool *name* built for ``TEST_WORKSPACE``."""
+    from EvoScientist.middleware.scheduler import make_scheduling_tools
+
+    return {t.name: t for t in make_scheduling_tools(TEST_WORKSPACE)}[name]
+
 
 def test_schedule_task_translates_and_creates():
-    from EvoScientist.middleware.scheduler import schedule_task
+    schedule_task = _tool("schedule_task")
 
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
@@ -27,7 +36,7 @@ def test_schedule_task_translates_and_creates():
 
 
 def test_schedule_task_reports_backend_down():
-    from EvoScientist.middleware.scheduler import schedule_task
+    schedule_task = _tool("schedule_task")
 
     with patch("EvoScientist.cron.schedule.is_available", return_value=False):
         out = schedule_task.invoke(
@@ -37,7 +46,7 @@ def test_schedule_task_reports_backend_down():
 
 
 def test_cancel_scheduled_task():
-    from EvoScientist.middleware.scheduler import cancel_scheduled_task
+    cancel_scheduled_task = _tool("cancel_scheduled_task")
 
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
@@ -50,7 +59,7 @@ def test_cancel_scheduled_task():
 
 
 def test_cancel_scheduled_task_prefix_match():
-    from EvoScientist.middleware.scheduler import cancel_scheduled_task
+    cancel_scheduled_task = _tool("cancel_scheduled_task")
 
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
@@ -61,12 +70,12 @@ def test_cancel_scheduled_task_prefix_match():
         patch("EvoScientist.cron.schedule.delete_schedule") as mk,
     ):
         out = cancel_scheduled_task.invoke({"cron_id": "c-7"})
-    mk.assert_called_once_with("c-7-abc")
+    mk.assert_called_once_with({"cron_id": "c-7-abc"}, workspace=TEST_WORKSPACE)
     assert "c-7-abc" in out
 
 
 def test_list_scheduled_tasks_formats_rows():
-    from EvoScientist.middleware.scheduler import list_scheduled_tasks
+    list_scheduled_tasks = _tool("list_scheduled_tasks")
 
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
@@ -94,7 +103,7 @@ def test_list_scheduled_tasks_formats_rows():
 
 def test_cancel_ambiguous_prefix_aborts_without_deleting():
     """B2: two crons sharing a prefix → returns ambiguity message, delete NOT called."""
-    from EvoScientist.middleware.scheduler import cancel_scheduled_task
+    cancel_scheduled_task = _tool("cancel_scheduled_task")
 
     rows = [{"cron_id": "abc-111"}, {"cron_id": "abc-222"}]
     with (
@@ -109,7 +118,7 @@ def test_cancel_ambiguous_prefix_aborts_without_deleting():
 
 def test_cancel_empty_cron_id_refuses_without_deleting():
     """Empty cron_id would match (and delete) the only cron — must refuse early."""
-    from EvoScientist.middleware.scheduler import cancel_scheduled_task
+    cancel_scheduled_task = _tool("cancel_scheduled_task")
 
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
@@ -130,7 +139,7 @@ def test_cancel_empty_cron_id_refuses_without_deleting():
 
 
 def test_schedule_task_forwards_rubric():
-    from EvoScientist.middleware.scheduler import schedule_task
+    schedule_task = _tool("schedule_task")
 
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
@@ -152,7 +161,7 @@ def test_schedule_task_forwards_rubric():
 
 
 def test_schedule_task_without_rubric_forwards_none():
-    from EvoScientist.middleware.scheduler import schedule_task
+    schedule_task = _tool("schedule_task")
 
     with (
         patch("EvoScientist.cron.schedule.is_available", return_value=True),
@@ -168,7 +177,7 @@ def test_schedule_task_without_rubric_forwards_none():
 
 
 def test_list_scheduled_tasks_marks_graded_rows():
-    from EvoScientist.middleware.scheduler import list_scheduled_tasks
+    list_scheduled_tasks = _tool("list_scheduled_tasks")
 
     rows = [
         {

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -21,6 +21,7 @@ from langgraph_sdk.client import LangGraphClient
 from langgraph_sdk.errors import NotFoundError
 from langgraph_sdk.schema import Thread, ThreadState
 
+from ..message_meta import is_pinned_skill, is_rubric_feedback
 from ..middleware.events import MIDDLEWARE_EVENT_TAG, MiddlewareEvent
 from ..sessions import _apply_summarization_event
 from ..stream.emitter import StreamEventEmitter
@@ -67,6 +68,7 @@ def _build_thread_metadata(
     *,
     graph_id: str,
     workspace_dir: str | None,
+    run_dir: str | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     merged = dict(metadata or {})
@@ -77,13 +79,19 @@ def _build_thread_metadata(
         merged["agent_name"] = None
     if workspace_dir is not None:
         merged["workspace_dir"] = workspace_dir
+    if run_dir is not None:
+        merged["run_dir"] = run_dir
     merged.setdefault("updated_at", datetime.now(UTC).isoformat())
     return merged
 
 
 def _thread_preview(messages: list[BaseMessage]) -> str:
     for message in reversed(messages):
-        if getattr(message, "type", None) != "human":
+        if (
+            getattr(message, "type", None) != "human"
+            or is_pinned_skill(message)
+            or is_rubric_feedback(message)
+        ):
             continue
         content = message.content
         if isinstance(content, str):
@@ -229,6 +237,7 @@ class LangGraphServerThreadStore(ThreadStore):
         *,
         metadata: Mapping[str, Any] | None = None,
         workspace_dir: str | None = None,
+        run_dir: str | None = None,
     ) -> str:
         target_graph_id = self._target_graph_id(graph_id)
         thread = await self.client.threads.create(
@@ -236,6 +245,7 @@ class LangGraphServerThreadStore(ThreadStore):
             metadata=_build_thread_metadata(
                 graph_id=target_graph_id,
                 workspace_dir=workspace_dir,
+                run_dir=run_dir,
                 metadata=metadata,
             ),
         )
@@ -248,6 +258,7 @@ class LangGraphServerThreadStore(ThreadStore):
         *,
         metadata: Mapping[str, Any] | None = None,
         workspace_dir: str | None = None,
+        run_dir: str | None = None,
     ) -> None:
         target_graph_id = self._target_graph_id(graph_id)
         await self.client.threads.create(
@@ -256,6 +267,7 @@ class LangGraphServerThreadStore(ThreadStore):
             metadata=_build_thread_metadata(
                 graph_id=target_graph_id,
                 workspace_dir=workspace_dir,
+                run_dir=run_dir,
                 metadata=metadata,
             ),
             if_exists="do_nothing",
@@ -284,6 +296,7 @@ class LangGraphServerThreadStore(ThreadStore):
                 "created_at": thread.get("created_at"),
                 "updated_at": thread.get("updated_at"),
                 "workspace_dir": metadata.get("workspace_dir"),
+                "run_dir": metadata.get("run_dir"),
                 "model": metadata.get("model"),
                 "metadata": metadata,
             }
@@ -447,7 +460,14 @@ class _ServerSubagentTracker:
                 events.extend(self._end(namespace))
         elif method == "tasks":
             if "result" in data:
-                events.extend(self._end_triggered_child(namespace, data.get("id")))
+                # A result that carries interrupts is a child that only paused.
+                events.extend(
+                    self._end_triggered_child(
+                        namespace,
+                        data.get("id"),
+                        paused=bool(data.get("interrupts")),
+                    )
+                )
             elif namespace:
                 events.extend(self._ensure_registered(namespace, tool_call_id=None))
         return events
@@ -483,24 +503,29 @@ class _ServerSubagentTracker:
             ).data
         ]
 
-    def _end(self, path: tuple[str, ...]) -> list[dict[str, Any]]:
+    def _end(
+        self, path: tuple[str, ...], *, paused: bool = False
+    ) -> list[dict[str, Any]]:
         active = self._active.pop(path, None)
         if active is None:
             return []
         name, _tool_call_id = active
-        return [self.emitter.subagent_end(name, instance_id=":".join(path)).data]
+        end = self.emitter.subagent_end(name, instance_id=":".join(path), paused=paused)
+        return [end.data]
 
     def _end_triggered_child(
         self,
         namespace: tuple[str, ...],
         result_id: object,
+        *,
+        paused: bool = False,
     ) -> list[dict[str, Any]]:
         if not result_id:
             return []
         events: list[dict[str, Any]] = []
         for path, (_name, tool_call_id) in list(self._active.items()):
             if path[:-1] == namespace and tool_call_id == result_id:
-                events.extend(self._end(path))
+                events.extend(self._end(path, paused=paused))
         return events
 
     @staticmethod
@@ -542,6 +567,7 @@ class LangGraphServerGateway:
             graph_id=self._target_graph_id(target),
             metadata=metadata,
             workspace_dir=target.workspace_dir if target is not None else None,
+            run_dir=target.run_dir if target is not None else None,
         )
 
     async def list_threads(
@@ -614,8 +640,15 @@ class LangGraphServerGateway:
         self,
         thread_id: str,
         configurable_extra: Mapping[str, Any] | None,
+        *,
+        target: GraphTarget | None = None,
+        rubric_run: bool = False,
     ) -> dict[str, Any]:
         """Assemble this run's config, reading the live session config here.
+
+        The target's folders go in last and replace any a caller put in
+        ``configurable_extra``, so the server checks the run against the
+        folders the session works in and can refuse it when it serves others.
 
         ``_ensure_config`` returns the cached, in-place-mutated session
         config — NOT a fresh disk read — so mid-session ``/model`` edits that
@@ -624,7 +657,11 @@ class LangGraphServerGateway:
         server-side by ``ConfigurableModelMiddleware``; ``recursion_limit``
         overrides the server's construction-time ``.with_config`` binding.
         """
-        from ..backends import hitl_suppressed_for_run
+        from ..backends import (
+            HITL_APPROVE_ALL_KEY,
+            hitl_suppressed_for_run,
+            model_retry_for_run,
+        )
         from ..EvoScientist import _ensure_config
 
         cfg = _ensure_config()
@@ -641,13 +678,33 @@ class LangGraphServerGateway:
             if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
             else None
         )
-        return resolve_per_run_config(
+        folders = (
+            {"workspace_dir": target.workspace_dir, "run_dir": target.run_dir}
+            if target is not None
+            else {}
+        )
+        # The session grant never reaches the server. The server turns a new
+        # message on a thread parked at an approval into a resume and keeps
+        # this run's config, so a keyed run would execute a batch nobody
+        # approved.
+        extra = {
+            key: value
+            for key, value in (configurable_extra or {}).items()
+            if key not in folders and key != HITL_APPROVE_ALL_KEY
+        }
+        config = resolve_per_run_config(
             thread_id,
-            configurable_extra,
+            extra,
             per_run_overrides=overrides,
             recursion_limit=recursion_limit,
             hitl_suppressed=hitl_suppressed_for_run(cfg),
+            rubric_run=rubric_run,
+            model_retry=model_retry_for_run(cfg),
         )
+        for key, value in folders.items():
+            if value:
+                config["configurable"][key] = value
+        return config
 
     async def _ensure_thread(self, request: RunRequest) -> None:
         await self.thread_store.ensure_thread_exists(
@@ -657,6 +714,7 @@ class LangGraphServerGateway:
             workspace_dir=(
                 request.target.workspace_dir if request.target is not None else None
             ),
+            run_dir=request.target.run_dir if request.target is not None else None,
         )
 
     async def _start_or_resume(
@@ -665,8 +723,14 @@ class LangGraphServerGateway:
         request: RunRequest,
         *,
         thread_ready: bool = False,
+        on_run_attempt: Callable[[], None],
     ) -> None:
-        config = self._resolve_run_config(request.thread_id, request.configurable_extra)
+        config = self._resolve_run_config(
+            request.thread_id,
+            request.configurable_extra,
+            target=request.target,
+            rubric_run=request.rubric is not None,
+        )
         # ``_stream_events`` already registered the thread before the pre-run
         # state read. Skip the second ``threads.create(if_exists="do_nothing")``
         # when that succeeded; retry only if it raised (the warn-and-continue
@@ -676,28 +740,44 @@ class LangGraphServerGateway:
         # Refresh metadata on every run: ensure_thread_exists is a no-op on
         # existing threads (if_exists="do_nothing"), so without this update
         # fields like updated_at and model would go stale after the first run.
-        await self.thread_store.client.threads.update(
-            request.thread_id,
-            metadata=_build_thread_metadata(
-                graph_id=self._target_graph_id(request.target),
-                workspace_dir=(
-                    request.target.workspace_dir if request.target is not None else None
-                ),
-                metadata=request.metadata,
+        # Best-effort: the graph is selected by the stream's assistant_id and
+        # the workspace by server config, so a failed refresh only leaves
+        # listing metadata stale until the next successful turn.
+        metadata = _build_thread_metadata(
+            graph_id=self._target_graph_id(request.target),
+            workspace_dir=(
+                request.target.workspace_dir if request.target is not None else None
             ),
+            run_dir=request.target.run_dir if request.target is not None else None,
+            metadata=request.metadata,
         )
+        try:
+            await self.thread_store.client.threads.update(
+                request.thread_id, metadata=metadata
+            )
+        except Exception:
+            logger.warning(
+                "Thread metadata refresh failed for %s; continuing the run",
+                request.thread_id,
+                exc_info=True,
+            )
         if isinstance(request.message, Command):
             if request.message.resume is not None:
                 # Known divergence: the resume goes through run.respond,
                 # which takes no config, so the per-run overrides above
-                # (model / recursion_limit) are NOT applied to a resumed
-                # turn - it runs with the thread's construction-time
-                # binding until the next fresh run re-applies them. The
+                # (model / recursion_limit / the rubric marker / the
+                # model_retry tier) are NOT
+                # applied to a resumed turn - it runs with the thread's
+                # construction-time binding until the next fresh run
+                # re-applies them. The
                 # primitive that would carry config on a resume is
                 # run.start with Command(resume=...); switching to it needs
                 # live-server verification first.
                 await self._respond_to_interrupt(
-                    stream, request.thread_id, request.message.resume
+                    stream,
+                    request.thread_id,
+                    request.message.resume,
+                    on_run_attempt=on_run_attempt,
                 )
                 return
             raise RuntimeError(
@@ -707,7 +787,10 @@ class LangGraphServerGateway:
         run_input = await build_agent_stream_input(
             request.message,
             media=request.media,
+            rubric=request.rubric,
+            goal_request=request.goal_request,
         )
+        on_run_attempt()
         await stream.run.start(
             input=run_input,
             config=config,
@@ -719,6 +802,8 @@ class LangGraphServerGateway:
         stream: AsyncThreadStream,
         thread_id: str,
         response: object,
+        *,
+        on_run_attempt: Callable[[], None],
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
@@ -746,6 +831,7 @@ class LangGraphServerGateway:
                     str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
                 }
                 if str(key) in ids:
+                    on_run_attempt()
                     await stream.run.respond(response[key], interrupt_id=str(key))
                     return
             raise RuntimeError(
@@ -792,6 +878,7 @@ class LangGraphServerGateway:
                 interrupt_id,
                 thread_id,
             )
+        on_run_attempt()
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
 
     async def _repair_stuck_thread_state(self, thread_id: str) -> None:
@@ -1060,11 +1147,22 @@ class LangGraphServerGateway:
         )
 
         run_started = False
+        run_attempted = False
         run_completed = False
         emitted_interrupt = False
+
+        def mark_run_attempted() -> None:
+            nonlocal run_attempted
+            run_attempted = True
+
         try:
             async with stream:
-                await self._start_or_resume(stream, request, thread_ready=thread_ready)
+                await self._start_or_resume(
+                    stream,
+                    request,
+                    thread_ready=thread_ready,
+                    on_run_attempt=mark_run_attempted,
+                )
                 run_started = True
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
@@ -1098,7 +1196,14 @@ class LangGraphServerGateway:
             # at the yield, so any repair after it never runs and the thread
             # keeps its non-empty ``next`` — the failed step would replay on
             # the next request.
-            await self._repair_stuck_thread_state(request.thread_id)
+            #
+            # Only repair once this request reached run.start / run.respond,
+            # even if that call raised. Earlier failures (thread registration,
+            # input building, resume validation) have not touched the
+            # checkpoint, and a non-empty ``next`` there may belong to another
+            # in-flight request on the same thread.
+            if run_attempted:
+                await self._repair_stuck_thread_state(request.thread_id)
             yield emitter.error(str(exc)).data
             for event in tracker.finish():
                 yield event

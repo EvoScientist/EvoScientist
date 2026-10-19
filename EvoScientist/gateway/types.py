@@ -26,6 +26,8 @@ def resolve_per_run_config(
     per_run_overrides: Mapping[str, Any] | None = None,
     recursion_limit: int | None = None,
     hitl_suppressed: bool = False,
+    rubric_run: bool = False,
+    model_retry: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the per-run LangGraph config for a gateway stream call.
 
@@ -54,14 +56,28 @@ def resolve_per_run_config(
     2. the suppression key (always written, ``True`` or ``False``),
     3. caller-supplied ``configurable_extra`` (e.g. ``active_teams``) - an
        explicit per-run injection is more specific than the session default,
-    4. ``thread_id`` - structural key, always set last.
+    3b. the retry tier this run carries (``model_retry``), when the caller
+       resolved one - the main agent follows the CLI's tier on either backend,
+    4. for a run that carries a rubric, ``rubric_run["mode"] = "input"`` on
+       top of whatever marker the caller supplied,
+    5. ``thread_id`` - structural key, always set last.
     """
     configurable: dict[str, Any] = dict(per_run_overrides or {})
-    from ..backends import HITL_SUPPRESSED_KEY
+    from ..backends import HITL_SUPPRESSED_KEY, MODEL_RETRY_RUN_KEY, RUBRIC_RUN_KEY
 
     configurable[HITL_SUPPRESSED_KEY] = bool(hitl_suppressed)
     if configurable_extra:
         configurable.update(configurable_extra)
+    if model_retry is not None:
+        configurable[MODEL_RETRY_RUN_KEY] = dict(model_retry)
+    if rubric_run:
+        # Input text is the most specific source; a client marker may still
+        # carry checklist operations to apply.
+        marker = configurable.get(RUBRIC_RUN_KEY)
+        configurable[RUBRIC_RUN_KEY] = {
+            **(marker if isinstance(marker, dict) else {}),
+            "mode": "input",
+        }
     configurable["thread_id"] = thread_id
 
     run_config: dict[str, Any] = {"configurable": configurable}
@@ -74,12 +90,15 @@ def resolve_per_run_config(
 class GraphTarget:
     """Identifies the graph/workspace a thread operation targets.
 
+    ``workspace_dir`` is the workspace root and ``run_dir`` the run folder a
+    ``--mode=run`` session works in (``SessionDirs.metadata()`` fills both).
     ``local_graph`` is the in-process execution handle required only by the
     local backend. Server backends select execution via ``graph_id``.
     """
 
     graph_id: str = DEFAULT_GRAPH_ID
     workspace_dir: str | None = None
+    run_dir: str | None = None
     local_graph: CompiledStateGraph | None = None
 
 
@@ -99,6 +118,10 @@ class RunRequest:
     ``langgraph_sdk``'s ``config.configurable`` on their own; this field is
     the local-gateway equivalent so CLI / TUI / headless serve can bias
     the run identically."""
+    rubric: str | None = None
+    """Acceptance criteria this turn is graded against; ``None`` means ungraded."""
+    goal_request: dict[str, Any] | None = None
+    """A ``/goal`` request; the run then carries no message (``message`` is ``""``)."""
 
 
 @dataclass(frozen=True, slots=True)

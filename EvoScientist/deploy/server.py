@@ -8,13 +8,12 @@ Differs from ``EvoSci`` / ``EvoSci serve``: no in-process CLI agent,
 no session DB, no channel runtime, no TUI. The terminal only shows
 startup progress, the Ready banner, and then blocks until Ctrl+C.
 
-Mode dispatch happens via the ``EVOSCIENTIST_DEPLOY_MODE`` env var
-injected by ``start_langgraph_dev``: ``full`` for the deploy subprocess
-(this command), ``stripped`` for CLI/serve subprocesses, unset for the
-parent process. The subprocess reads this at module-load time
-(``langgraph_dev/manager.py``) to flip ``_ASYNC_SUBAGENTS_AVAILABLE``,
-and the agent build code (``EvoScientist.py:_get_default_agent``)
-loads or skips MCP based on the value.
+The server is the same one ``EvoSci`` / ``EvoSci serve`` start in the
+background.
+
+``--json`` is for a program that starts the server (the desktop app): JSON
+event lines on stdout, an attach to a running server for the same workspace,
+and a stop when stdin closes. :mod:`.json_mode` documents the events.
 """
 
 from __future__ import annotations
@@ -24,7 +23,7 @@ import os
 import signal
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import typer  # type: ignore[import-untyped]
 from rich.panel import Panel
@@ -64,17 +63,32 @@ def deploy(
         "--debug",
         help="Enable debug logging",
     ),
+    json_output: Annotated[
+        bool,
+        typer.Option(
+            "--json",
+            help="Print one JSON event per line, attach to a running backend "
+            "for the same workspace, and stop when stdin closes",
+        ),
+    ] = False,
 ):
     """Deploy EvoScientist main agent as a standalone LangGraph dev server.
 
-    Starts ``langgraph dev`` in deploy mode (full MCP + async sub-agents).
+    Starts ``langgraph dev`` (MCP tools and async sub-agents in the server).
     Connect any LangChain-compatible UI or SDK client to the printed
     endpoint. Press Ctrl+C to stop.
     """
-    from ..config import apply_config_to_env, get_effective_config
+    if json_output:
+        from .json_mode import run_json
+
+        code = run_json(
+            workdir=workdir, port=port, host=host, tunnel=tunnel, debug=debug
+        )
+        if code:
+            raise typer.Exit(code)
+        return
+
     from ..langgraph_dev.manager import (
-        _DEFAULT_HOST,
-        _DEFAULT_PORT,
         RUNTIME,
         _base_url,
         _is_loopback_host,
@@ -88,55 +102,33 @@ def deploy(
         stop_langgraph_dev,
     )
 
-    # 1. Load config (no CLI overrides here — deploy is opinionated about
-    # full MCP + async; user-facing flags are workspace/port/debug only).
-    cli_overrides: dict[str, Any] = {}
-    if debug:
-        cli_overrides["log_level"] = "DEBUG"
-    config = get_effective_config(cli_overrides)
-    if debug:
-        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
-        from ..cli.commands import _configure_logging
+    # 1. Load config (deploy is opinionated about full MCP + async; the only
+    # overrides are the bind flags).
+    config = _load_config(debug, host, port)
 
-        _configure_logging()
-    apply_config_to_env(config)
+    # Before anything is created or started.
+    from ..cli.commands import _require_chatgpt_sign_in
+
+    _require_chatgpt_sign_in(config, interactive=False)
 
     # 2. Resolve workspace (CLI > config.default_workdir > cwd)
-    if workdir:
-        ws = os.path.abspath(os.path.expanduser(workdir))
-    elif config.default_workdir:
-        ws = os.path.abspath(os.path.expanduser(config.default_workdir))
-    else:
-        ws = os.getcwd()
+    from ..paths import start_workspace_path
+
+    ws = str(start_workspace_path(workdir, config.default_workdir))
     # Subprocess inherits this path via EVOSCIENTIST_WORKSPACE_DIR (set inside
     # start_langgraph_dev). Ensure the dir exists; do NOT mutate the parent
     # process's paths module state — the deploy parent has no in-process agent.
     os.makedirs(ws, exist_ok=True)
 
-    # 3. Resolve port (explicit None check — don't treat --port 0 as "unset"),
-    # then validate range so misconfigurations fail fast with a clear message
-    # instead of an opaque socket error from langgraph dev later.
-    effective_port = (
-        int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
-        if port is None
-        else port
-    )
-    if not (1 <= effective_port <= 65535):
-        console.print(
-            f"[red]Invalid port {effective_port}. Use an integer in [1, 65535].[/red]"
-        )
+    # 3. Resolve port, then validate range so misconfigurations fail fast
+    # with a clear message instead of an opaque socket error from langgraph
+    # dev later.
+    effective_port = _resolve_port(port, config)
+    if not _port_in_range(effective_port):
+        console.print(f"[red]{_invalid_port_message(effective_port)}[/red]")
         raise typer.Exit(1)
 
-    # A blank ``--host`` means "not passed" (matching serve), so it can never
-    # discard the configured bind. Both branches strip: whitespace reaching
-    # socket.bind() surfaces as an opaque gaierror, and duck-typed configs
-    # handed to this function never ran ``__post_init__`` normalization.
-    cli_host = host.strip() if host is not None else ""
-    effective_host = (
-        cli_host
-        or str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
-        or _DEFAULT_HOST
-    )
+    effective_host = _resolve_host(host, config)
 
     # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
     # holding the port. If an existing EvoSci langgraph dev is already up,
@@ -216,9 +208,9 @@ def deploy(
             "trust.[/bold red]"
         )
 
-    # 6. ccproxy lifecycle (only if any provider uses OAuth)
+    # 6. ccproxy lifecycle (Anthropic OAuth only)
     _ccproxy_proc = None
-    if config.anthropic_auth_mode == "oauth" or config.openai_auth_mode == "oauth":
+    if config.anthropic_auth_mode == "oauth":
         try:
             from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 
@@ -233,12 +225,12 @@ def deploy(
             console.print(f"[red]ccproxy startup failed:[/red] {exc}")
             raise typer.Exit(1) from exc
 
-    # 7. Start langgraph dev (deploy mode → full MCP + async)
+    # 7. Start langgraph dev
     jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
     file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
     try:
         with console.status(
-            "[dim]Starting langgraph dev (deploy mode: MCP + async)...[/dim]",
+            "[dim]Starting langgraph dev...[/dim]",
             spinner="dots",
         ):
             proc = start_langgraph_dev(
@@ -247,9 +239,9 @@ def deploy(
                 host=effective_host,
                 file_persistence=file_persistence,
                 jobs_per_worker=jobs_per_worker,
-                deploy_mode=True,
                 tunnel=tunnel,
                 config_fingerprint=_server_config_fingerprint(config),
+                allowed_origins=getattr(config, "backend_allowed_origins", ""),
             )
         atexit.register(stop_langgraph_dev, proc)
     except Exception as exc:
@@ -263,9 +255,9 @@ def deploy(
     # server log; show it here.
     from rich.markup import escape
 
-    from ..setup.research_env import missing_python_hint
+    from ..agent_shell import setup_hint
 
-    hint = missing_python_hint()
+    hint = setup_hint()
     if hint is not None:
         console.print(f"[yellow]⚠ {escape(hint)}[/yellow]")
 
@@ -336,16 +328,79 @@ def deploy(
         )
 
 
+def _load_config(debug: bool, host: str | None = None, port: int | None = None) -> Any:
+    """The effective config, applied to the environment, with ``--debug``
+    logging switched on.
+
+    ``--host`` and ``--port`` are overrides, as ``EvoSci --host`` and ``EvoSci
+    serve --host`` pass theirs, so the config fingerprint matches a server
+    started with the same bind.
+    """
+    from ..config import apply_config_to_env, get_effective_config
+
+    cli_overrides: dict[str, Any] = {}
+    if host is not None and host.strip():
+        cli_overrides["langgraph_dev_host"] = host.strip()
+    if port is not None:
+        cli_overrides["langgraph_dev_port"] = port
+    if debug:
+        cli_overrides["log_level"] = "DEBUG"
+    config = get_effective_config(cli_overrides)
+    if debug:
+        os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
+        from ..cli.commands import _configure_logging
+
+        _configure_logging()
+    apply_config_to_env(config)
+    return config
+
+
+def _resolve_port(port: int | None, config: Any) -> int:
+    """``--port``, else the configured port. An explicit None check, so
+    ``--port 0`` is not taken for "unset" and fails the range check."""
+    from ..langgraph_dev.manager import _DEFAULT_PORT
+
+    if port is not None:
+        return port
+    return int(getattr(config, "langgraph_dev_port", _DEFAULT_PORT))
+
+
+def _port_in_range(port: int) -> bool:
+    return 1 <= port <= 65535
+
+
+def _invalid_port_message(port: int) -> str:
+    return f"Invalid port {port}. Use an integer in [1, 65535]."
+
+
+def _resolve_host(host: str | None, config: Any) -> str:
+    """``--host``, else the configured host, else loopback.
+
+    A blank ``--host`` means "not passed" (matching serve), so it can never
+    discard the configured bind. Both branches strip: whitespace reaching
+    socket.bind() surfaces as an opaque gaierror, and duck-typed configs
+    handed to this function never ran ``__post_init__`` normalization.
+    """
+    from ..langgraph_dev.manager import _DEFAULT_HOST
+
+    cli_host = host.strip() if host is not None else ""
+    return (
+        cli_host
+        or str(getattr(config, "langgraph_dev_host", _DEFAULT_HOST) or "").strip()
+        or _DEFAULT_HOST
+    )
+
+
 def _describe_auth(config: Any) -> str:
     """Render a one-line auth summary for the startup banner."""
     anth = getattr(config, "anthropic_auth_mode", "api_key")
     oai = getattr(config, "openai_auth_mode", "api_key")
     if anth == "oauth" and oai == "oauth":
-        return "OAuth (Anthropic + OpenAI via ccproxy)"
+        return "OAuth (Anthropic via ccproxy) + ChatGPT sign-in (OpenAI)"
     if anth == "oauth":
         return "OAuth (Anthropic via ccproxy) + API key (OpenAI)"
     if oai == "oauth":
-        return "API key (Anthropic) + OAuth (OpenAI via ccproxy)"
+        return "API key (Anthropic) + ChatGPT sign-in (OpenAI)"
     return "API key"
 
 
