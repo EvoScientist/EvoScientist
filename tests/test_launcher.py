@@ -293,6 +293,37 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
     assert "not this one" in (ei.value.detail or "")
 
 
+@pytest.mark.parametrize(
+    ("recorded", "requested", "reused"),
+    [
+        (None, "192.168.1.5", True),  # an older record: not checked
+        ("127.0.0.1", "127.0.0.1", True),
+        ("localhost", "127.0.0.1", True),
+        ("0.0.0.0", "192.168.1.5", True),
+        ("127.0.0.1", "0.0.0.0", True),  # probed at 127.0.0.1
+        ("192.168.1.5", "127.0.0.1", False),
+        ("127.0.0.1", "192.168.1.5", False),
+        ("192.168.1.5", "0.0.0.0", False),
+    ],
+)
+def test_resolve_backend_checks_the_recorded_bind_host(
+    monkeypatch, recorded, requested, reused
+):
+    """Two servers can share a port on different interfaces: a record for the
+    one the probe did not reach is refused before its workspace is trusted."""
+    sidecar = {"workspace": "/tmp/wsA", "pid": 12345, "config_fingerprint": "fp-now"}
+    if recorded is not None:
+        sidecar["host"] = recorded
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    cfg = _cfg(workspace_dir="/tmp/wsA", backend_host=requested)
+    if reused:
+        assert lm._resolve_backend(cfg, object()).action == "reuse"
+        return
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(cfg, object())
+    assert ei.value.fields == {"reason": "record_mismatch"}
+
+
 # --------------------------------------------------------------------------- #
 # WebUILauncher.start — conflicts, teardown, concurrent stop
 # --------------------------------------------------------------------------- #

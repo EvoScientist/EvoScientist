@@ -623,6 +623,25 @@ class WebUILauncher:
         )
 
 
+def _record_serves_host(recorded: object, host: str) -> bool:
+    """Whether a server recorded as bound to ``recorded`` is the one a probe
+    of ``host`` reaches: a wildcard bind, the same probe address, or loopback
+    on both sides (``localhost`` and ``127.0.0.1``). A record without a host,
+    written by an older release, is not checked.
+    """
+    from ..langgraph_dev.manager import _WILDCARD_HOSTS, _is_loopback_host, _probe_host
+
+    if not isinstance(recorded, str):
+        return True
+    recorded = recorded.strip().lower()
+    host = host.strip().lower()
+    if recorded in _WILDCARD_HOSTS:
+        return True
+    if _is_loopback_host(recorded) and _is_loopback_host(host):
+        return True
+    return _probe_host(recorded) == _probe_host(host)
+
+
 def _resolve_backend(
     cfg: BackendTarget | LauncherConfig,
     config: Any,
@@ -681,7 +700,11 @@ def _resolve_backend(
     # launch on another port can overwrite it. Confirm its PID actually serves
     # THIS port before trusting its workspace — otherwise a stale record could
     # reuse the wrong workspace, and teardown could stop the wrong server.
-    if not _pid_serves_port(sidecar.get("pid"), cfg.backend_port):
+    # Two servers can share a port on different interfaces, so the recorded
+    # bind must also be the one the probe reached.
+    if not _pid_serves_port(
+        sidecar.get("pid"), cfg.backend_port
+    ) or not _record_serves_host(sidecar.get("host"), cfg.backend_host):
         raise LauncherError(
             "sidecar_port_mismatch",
             f"Port {cfg.backend_port} is serving a langgraph dev that EvoSci "
@@ -689,7 +712,7 @@ def _resolve_backend(
             f"Free port {cfg.backend_port} (lsof -i :{cfg.backend_port}) or "
             f"change it with 'EvoSci config set langgraph_dev_port <port>'. "
             f"'EvoSci server stop' stops EvoSci's recorded server on another "
-            f"port, not this one.",
+            f"port or interface, not this one.",
             fields={"reason": "record_mismatch"},
         )
     if Path(sidecar["workspace"]).resolve() != ws:

@@ -26,7 +26,8 @@ Events:
   - ``port_conflict``: ``reason``, always: ``foreign`` (another program holds
     the port), ``no_record`` (a langgraph dev without an ownership record, so
     its workspace is unknown) or ``record_mismatch`` (the ownership record
-    names a process that does not serve this port).
+    names a process that does not serve this port, or one bound to another
+    interface).
   - ``workspace_conflict``: ``workspace``, the running backend's, and
     ``run_dir`` when it serves a run folder of this workspace.
   - ``ccproxy_failed``: empty.
