@@ -20,11 +20,28 @@ Events:
   compare as strings: one folder can have more than one spelling (an 8.3
   short name on Windows, a symlink).
 - ``error``: ``code``, ``message``, ``detail`` (an object, possibly empty).
-  See :data:`ERROR_CODES`. A ``port_conflict`` always has ``detail.reason``:
-  ``foreign`` (another program holds the port), ``no_record`` (a langgraph
-  dev without an ownership record, so its workspace is unknown) or
-  ``record_mismatch`` (the ownership record names a process that does not
-  serve this port).
+  ``detail`` by code (see :data:`ERROR_CODES`):
+
+  - ``invalid_port``: ``port``.
+  - ``port_conflict``: ``reason``, always: ``foreign`` (another program holds
+    the port), ``no_record`` (a langgraph dev without an ownership record, so
+    its workspace is unknown) or ``record_mismatch`` (the ownership record
+    names a process that does not serve this port).
+  - ``workspace_conflict``: ``workspace``, the running backend's, and
+    ``run_dir`` when it serves a run folder of this workspace.
+  - ``ccproxy_failed``: empty.
+  - ``backend_start_failed``: ``log_file`` when the start failed, or
+    ``lock_file`` when another EvoScientist process held the start lock too
+    long.
+  - ``sign_in_required``: ``provider``, and ``problem`` when there is one.
+  - ``backend_exited``: ``exit_code`` and ``log_file`` when the owned process
+    ended; ``url`` when an owned backend stopped listening or an attached one
+    stopped answering.
+  - ``internal_error``: ``type``, the exception's class; or ``launcher_code``
+    for a backend-decision error this mode has no code for.
+
+  ``port_conflict`` and ``workspace_conflict`` also carry ``hint``, the line
+  the human mode prints.
 - ``stopped``: a clean exit. An owned backend has been stopped; an attached
   one is left running.
 
@@ -72,14 +89,8 @@ logger = logging.getLogger(__name__)
 
 ASSISTANT_ID = "EvoScientist"
 
-# ``port_conflict``: another program holds the port, a langgraph dev without
-# an ownership record, or a record for a process that does not serve the port
-# (``detail.reason``: ``foreign``, ``no_record``, ``record_mismatch``).
-# ``workspace_conflict``:
-# the backend on the port serves another workspace (``detail.workspace``) or
-# a run folder of this one (``detail.run_dir``). ``backend_exited``: see the
-# module docstring.
-# ``internal_error``: anything else, with the traceback on stderr.
+# The ``detail`` of each is in the module docstring. ``internal_error``:
+# anything else, with the traceback on stderr.
 ERROR_CODES = frozenset(
     {
         "invalid_port",
