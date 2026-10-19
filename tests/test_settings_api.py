@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 from pathlib import Path
@@ -117,6 +118,7 @@ class TestGet:
             "restart_fields",
             "revision",
             "config_error",
+            "instance",
         }
         assert body["revision"] is None
         assert "dangerous_mode" in body["read_only"]
@@ -130,6 +132,29 @@ class TestGet:
             "lists_models": True,
         }
         assert "tavily" not in body["providers"]
+
+    def test_instance_names_the_loaded_secret(self, server, secret):
+        value = secret[local_secret.HEADER]
+        expected = hashlib.sha256(
+            b"evoscientist-instance:" + value.encode("ascii")
+        ).hexdigest()[:16]
+        response = server.get("/api/settings")
+        assert response.json()["instance"] == expected
+        assert value not in response.text
+
+    def test_instance_is_none_without_a_secret(self, server, monkeypatch):
+        monkeypatch.setattr(local_secret, "_value", None)
+        assert server.get("/api/settings").json()["instance"] is None
+
+    def test_instance_differs_per_secret(self, monkeypatch):
+        monkeypatch.setattr(local_secret, "_value", "a" * 43)
+        first = local_secret.instance_id()
+        monkeypatch.setattr(local_secret, "_value", "b" * 43)
+        second = local_secret.instance_id()
+        assert first != second
+        assert len(first) == len(second) == 16
+        assert first == first.lower()
+        int(first, 16)  # hex
 
     def test_settings_are_the_file_values(self, server, config_file, monkeypatch):
         config_file.write_text("langgraph_dev_port: 7000\n", encoding="utf-8")

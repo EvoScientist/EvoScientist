@@ -25,6 +25,7 @@ from dataclasses import fields
 from typing import Any
 from urllib.parse import urlparse
 
+from EvoScientist import local_secret
 from EvoScientist.config import store
 from EvoScientist.config.provider_keys import (
     KEY_SPECS,
@@ -314,6 +315,7 @@ def read_settings() -> dict[str, Any]:
         "restart_fields": restart_fields,
         "revision": store.revision_of(raw),
         "config_error": config_error,
+        "instance": local_secret.instance_id(),
     }
 
 
