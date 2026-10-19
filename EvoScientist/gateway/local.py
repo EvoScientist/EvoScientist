@@ -252,18 +252,24 @@ class LocalGraphGateway:
 
         # Only query the dev server when the config says one should exist.
         # If it's down or was never started, return "unknown" (the notifier
-        # stops polling this id). Timeouts and 5xx propagate for retry.
+        # stops polling this id). Timeouts and HTTP errors propagate for retry.
         from ..EvoScientist import _ensure_config
+        from ..langgraph_dev.sdk import (
+            configured_langgraph_dev_url,
+            langgraph_async_client_scoped,
+        )
 
         cfg = _ensure_config()
         if not needs_langgraph_dev(cfg, backend="local"):
             return "unknown"
 
         try:
-            client = self._dev_server_client()
-            data = await client.http.get(
-                "/api/bg_process_status", params={"process_id": process_id}
-            )
+            async with langgraph_async_client_scoped(
+                configured_langgraph_dev_url()
+            ) as client:
+                data = await client.http.get(
+                    "/api/bg_process_status", params={"process_id": process_id}
+                )
         except httpx.ConnectError:
             return "unknown"
         return data["status"]
