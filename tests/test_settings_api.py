@@ -212,6 +212,18 @@ class TestPatch:
         assert response.json() == {"errors": {"provider": "unknown provider"}}
         assert config_file.read_bytes() == before
 
+    def test_channel_access_and_programs_are_read_only(self):
+        from dataclasses import fields
+
+        from EvoScientist.config.settings import EvoScientistConfig
+
+        names = {f.name for f in fields(EvoScientistConfig)}
+        senders = {n for n in names if n.endswith("_allowed_senders")}
+        assert senders  # one per channel
+        expected = senders | {"signal_cli_path", "dm_policy", "allowed_channels"}
+        assert expected <= settings_api.READ_ONLY_FIELDS
+        assert settings_api.READ_ONLY_FIELDS <= names
+
     @pytest.mark.parametrize("field", sorted(settings_api.READ_ONLY_FIELDS))
     def test_read_only_fields(self, server, secret, field):
         response = server.patch("/api/settings", json={field: "x"}, headers=secret)

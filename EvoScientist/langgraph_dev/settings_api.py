@@ -62,7 +62,20 @@ READ_ONLY_FIELDS: frozenset[str] = frozenset(
         "langgraph_dev_host",
         "webui_host",
         "backend_allowed_origins",
+        # Run by the Signal channel (``subprocess.Popen``).
+        "signal_cli_path",
+        # Who reaches the agent through a channel.
+        "dm_policy",
+        "require_mention",
+        "allowed_channels",
+        "discord_allowed_channels",
+        "slack_allowed_channels",
+        "wechat_personal_dm_policy",
+        "wechat_personal_group_policy",
+        "wechat_personal_group_allowed",
     }
+) | frozenset(
+    f.name for f in fields(EvoScientistConfig) if f.name.endswith("_allowed_senders")
 )
 
 _READ_ONLY_MESSAGE = "read-only over this API; use EvoSci config set"
