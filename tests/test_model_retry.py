@@ -408,6 +408,18 @@ async def test_a_retry_after_longer_than_the_budget_leaves_the_run_its_retries(r
     assert h.sleeps == [1.0]
 
 
+async def test_a_call_that_waited_until_no_retry_after_fits_used_the_budget(run):
+    h = _Harness()
+    limited = _transient(429, headers=httpx.Headers({"retry-after": "25"}))
+    with pytest.raises(ProviderStreamError):
+        await h.mw.awrap_model_call(h.request, h.handler([limited] * 3))
+    assert h.sleeps == [25.0, 25.0]
+    later = _Harness()
+    with pytest.raises(ProviderStreamError):
+        await later.mw.awrap_model_call(later.request, later.handler([limited, OK]))
+    assert later.sleeps == []
+
+
 async def test_a_layer_that_ignores_the_run_key_ignores_a_spent_run(run):
     await _spend_the_budget(_Harness())
     fixed = _Harness(unattended=True, honor_run_key=False)
@@ -523,6 +535,24 @@ def test_sync_path_tries_later_calls_in_a_spent_run_once(run):
     with pytest.raises(ProviderStreamError):
         mw.wrap_model_call(request, handler)
     assert sum(sleeps) == 55.0
+
+
+def test_sync_path_counts_a_wait_that_overran_as_using_the_budget(run):
+    mw, clock, sleeps, request = _sync_harness()
+
+    def _suspended_sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds + 120.0
+
+    mw._sync_sleep = _suspended_sleep
+
+    def _down(_request):
+        raise _transient()
+
+    for _ in range(2):
+        with pytest.raises(ProviderStreamError):
+            mw.wrap_model_call(request, _down)
+    assert sleeps == [1.0]
 
 
 async def test_warning_lines(caplog):

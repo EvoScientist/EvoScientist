@@ -485,9 +485,9 @@ class ModelRetryMiddleware(AgentMiddleware):
                 now - (deadline - tier.wait_budget_seconds),
                 describe_failure(failure),
             )
-            # A Retry-After longer than what is left ends this call only; the
-            # run's budget is used up once the backoff itself no longer fits.
-            if now + max(backoff, MIN_WAIT_SECONDS) > deadline:
+            # A first failure whose Retry-After does not fit ends this call only;
+            # after a wait, or once the backoff no longer fits, the run is spent.
+            if attempt > 1 or now + max(backoff, MIN_WAIT_SECONDS) > deadline:
                 _spend_run(run)
             return None
         left = deadline - now - wait
