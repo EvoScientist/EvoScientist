@@ -175,7 +175,7 @@ async def _until(condition, *, seconds: float = 10.0) -> None:
 
 
 async def _poll_until(app, condition, *, seconds: float = 10.0) -> None:
-    """Run the poll every 50 ms, as its timer does, until *condition* holds."""
+    """Run the poll in place of its timer, every 50 ms, until *condition* holds."""
     for _ in range(int(seconds / 0.05)):
         if condition():
             return
@@ -316,43 +316,6 @@ async def test_a_channel_turn_waits_for_a_notifier_turn_that_took_the_app_first(
             runs.finish_all()
 
 
-async def test_notifications_go_back_when_the_app_is_taken_during_the_batch_wait(
-    monkeypatch, workspace
-):
-    """Started off the message pump, the notifier lets Enter be handled during
-    its batch wait. The typed turn keeps the app, and the notifications get a
-    turn after it."""
-    # A wide batch wait, so a slow runner still acts inside it.
-    monkeypatch.setattr(async_notifier, "NOTIFICATION_BATCH_GRACE_SECONDS", 1.0)
-    runs = _Runs()
-    app = await _app(monkeypatch, workspace)
-    async with app.run_test(size=(100, 40)) as pilot:
-        try:
-            await pilot.pause()
-            _wire(app, workspace, runs)
-            tid = app._conversation_tid
-            _notification(app, "task-1")
-            app._notification_consuming = True  # as the poll sets it
-            consume = asyncio.ensure_future(app._consume_notifications_tui())
-            await _until(lambda: not has_pending_notifications(tid))
-            await _submit(app, "typed")  # taken during the batch wait
-            typed = app._run_task
-            await asyncio.wait_for(consume, timeout=10)
-            await asyncio.sleep(0.2)
-            assert runs.started == ["typed"]
-            assert app._run_task is typed
-            assert has_pending_notifications(tid)
-            assert not app._notification_consuming
-            runs.finish("typed")
-            await _poll_until(app, lambda: len(runs.started) == 2)
-            assert runs.started == ["typed", NOTICE]
-            runs.finish_all()
-            await _poll_until(app, lambda: _idle(app, runs))
-            assert runs.peak == 1
-        finally:
-            runs.finish_all()
-
-
 async def test_a_channel_turn_that_waits_stays_ahead_of_a_later_message(
     monkeypatch, workspace
 ):
@@ -437,51 +400,6 @@ async def test_polls_before_a_channel_turn_starts_take_no_second_message(
             runs.finish_all()
             await _poll_until(app, lambda: _idle(app, runs))
             assert runs.started == ["typed", "first", "second", "third"]
-            assert runs.peak == 1
-        finally:
-            runs.finish_all()
-
-
-async def test_a_notification_batch_that_goes_back_stays_ahead_of_later_ones(
-    monkeypatch, workspace
-):
-    """A notification arrives after the notifier's last drain, and Enter takes
-    the app before the notifier turn starts. The batch goes back ahead of the
-    newer notification, so the next notifier turn lists them in order."""
-    runs = _Runs()
-    app = await _app(monkeypatch, workspace)
-    async with app.run_test(size=(100, 40)) as pilot:
-        try:
-            await pilot.pause()
-            _wire(app, workspace, runs)
-            tid = app._conversation_tid
-            read_state = app._read_async_tasks_tui
-            first_read = True
-
-            async def _read_while_more_arrive(target_thread_id):
-                nonlocal first_read
-                if first_read:
-                    # The state read follows the last drain.
-                    first_read = False
-                    _notification(app, "task-2")
-                    await _submit(app, "typed")
-                return await read_state(target_thread_id)
-
-            app._read_async_tasks_tui = _read_while_more_arrive
-            _notification(app, "task-1")
-            app._notification_consuming = True  # as the poll sets it
-            await asyncio.wait_for(app._consume_notifications_tui(), timeout=10)
-            await _until(lambda: runs.started)
-            assert runs.started == ["typed"]
-            assert has_pending_notifications(tid)
-            runs.finish("typed")
-            await _until(lambda: not app._busy and app._run_task is None)
-            await _poll_until(app, lambda: len(runs.started) == 2)
-            assert runs.started == ["typed", NOTICE]
-            notice = str(runs.gateway.requests[-1].message)
-            assert notice.index('"task-1"') < notice.index('"task-2"')
-            runs.finish_all()
-            await _poll_until(app, lambda: _idle(app, runs))
             assert runs.peak == 1
         finally:
             runs.finish_all()

@@ -60,12 +60,10 @@ from ._constants import (
 from .async_notifier import (
     AsyncTasksState,
     consume_notifications,
-    drain_notifications,
     enqueue_bg_process_completions_from_state,
     enqueue_bg_process_completions_from_state_throttled,
     enqueue_completions_from_state,
     enqueue_completions_from_state_throttled,
-    enqueue_task_notification,
     has_pending_notifications,
     read_async_tasks_from_gateway,
 )
@@ -1383,13 +1381,6 @@ def run_textual_interactive(
                     forwarded to ``_run_turn`` so a mid-consume ``/new`` cannot
                     misroute the notification into a different thread.
             """
-            if self._busy:
-                # Taken during the batch wait: put the batch back for a later
-                # poll instead of running a second turn next to that one, ahead
-                # of what arrived after the last drain, so it keeps its place.
-                for notif in [*notifs, *drain_notifications(target_thread_id)]:
-                    enqueue_task_notification(notif)
-                return
             from EvoScientist.cli.async_notifier import format_notification_lines
 
             for line_text, line_style in format_notification_lines(notifs):
