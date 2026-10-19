@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
+import re
 from dataclasses import fields
 from typing import Any
 from urllib.parse import urlparse
@@ -226,16 +227,25 @@ def config_sources(mapping: dict[str, Any]) -> dict[str, dict[str, Any]]:
 # =============================================================================
 
 
+# Scheme, then everything up to the last ``@`` (the user and password, which
+# people write with a raw ``/``, ``?`` or ``#`` that would end ``urlparse``'s
+# netloc early), then the host. An ``@`` in a path is masked too: over-masking
+# only changes what ``GET`` shows.
+_USERINFO_URL = re.compile(
+    r"^([A-Za-z][A-Za-z0-9+.\-]*://)(.*)@([^@/?#]*)(.*)$", re.DOTALL
+)
+
+
 def _hide_userinfo(value: Any) -> Any:
     """``value`` with the user and password of a URL replaced by ``***``, so
-    a proxy such as ``http://user:pass@host:3128`` keeps its password."""
-    if not isinstance(value, str) or "@" not in value:
+    a proxy such as ``http://<user>:<password>@host:3128`` keeps its password."""
+    if not isinstance(value, str):
         return value
-    parsed = urlparse(value)
-    if not parsed.scheme or "@" not in parsed.netloc:
+    match = _USERINFO_URL.match(value)
+    if not match:
         return value
-    host = parsed.netloc.rpartition("@")[2]
-    return parsed._replace(netloc=f"***@{host}").geturl()
+    scheme, _userinfo, host, rest = match.groups()
+    return f"{scheme}***@{host}{rest}"
 
 
 def _masked(name: str, value: Any) -> Any:

@@ -79,6 +79,20 @@ class TestGet:
         assert settings["slack_proxy"] == "http://proxy.test:3128"
         assert settings["custom_openai_base_url"] == "https://***@llm.test/v1"
 
+    @pytest.mark.parametrize("password", ["pa/ss", "pa?ss", "pa#ss", "p@ss"])
+    def test_url_passwords_with_url_characters_are_hidden(
+        self, server, config_file, password
+    ):
+        config_file.write_text(
+            f"telegram_proxy: 'http://me:{password}@proxy.test:3128'\n",
+            encoding="utf-8",
+        )
+        response = server.get("/api/settings")
+        assert password not in response.text
+        assert response.json()["settings"]["telegram_proxy"] == (
+            "http://***@proxy.test:3128"
+        )
+
     def test_secrets_never_leave_the_server(self, server, config_file):
         config_file.write_text(
             "openai_api_key: sk-openai-1234567890\n"
