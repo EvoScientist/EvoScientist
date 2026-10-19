@@ -64,6 +64,20 @@ def _no_checks():
 
 
 class TestGet:
+    def test_url_passwords_are_hidden(self, server, config_file):
+        config_file.write_text(
+            "telegram_proxy: http://me:hunter2@proxy.test:3128\n"
+            "slack_proxy: http://proxy.test:3128\n"
+            "custom_openai_base_url: https://u:pw@llm.test/v1\n",
+            encoding="utf-8",
+        )
+        response = server.get("/api/settings")
+        assert "hunter2" not in response.text
+        settings = response.json()["settings"]
+        assert settings["telegram_proxy"] == "http://***@proxy.test:3128"
+        assert settings["slack_proxy"] == "http://proxy.test:3128"
+        assert settings["custom_openai_base_url"] == "https://***@llm.test/v1"
+
     def test_secrets_never_leave_the_server(self, server, config_file):
         config_file.write_text(
             "openai_api_key: sk-openai-1234567890\n"
@@ -470,6 +484,22 @@ class TestPatch:
         assert response.status_code == 200
         assert response.json()["revision"] == revision
         assert config_file.read_text(encoding="utf-8") == original
+
+    def test_echoed_hidden_url_keeps_the_stored_one(self, server, secret, config_file):
+        config_file.write_text(
+            "telegram_proxy: http://me:hunter2@proxy.test:3128\n", encoding="utf-8"
+        )
+        shown = server.get("/api/settings").json()["settings"]["telegram_proxy"]
+        response = server.patch(
+            "/api/settings",
+            json={"telegram_proxy": shown, "show_thinking": False},
+            headers=secret,
+        )
+        assert response.status_code == 200
+        assert response.json()["changed"] == ["show_thinking"]
+        assert _mapping(config_file)["telegram_proxy"] == (
+            "http://me:hunter2@proxy.test:3128"
+        )
 
     def test_nothing_to_change_still_refuses_a_stale_revision(
         self, server, secret, config_file

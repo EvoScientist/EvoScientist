@@ -225,9 +225,21 @@ def config_sources(mapping: dict[str, Any]) -> dict[str, dict[str, Any]]:
 # =============================================================================
 
 
+def _hide_userinfo(value: Any) -> Any:
+    """``value`` with the user and password of a URL replaced by ``***``, so
+    a proxy such as ``http://user:pass@host:3128`` keeps its password."""
+    if not isinstance(value, str) or "@" not in value:
+        return value
+    parsed = urlparse(value)
+    if not parsed.scheme or "@" not in parsed.netloc:
+        return value
+    host = parsed.netloc.rpartition("@")[2]
+    return parsed._replace(netloc=f"***@{host}").geturl()
+
+
 def _masked(name: str, value: Any) -> Any:
     if name not in SECRET_FIELDS:
-        return value
+        return _hide_userinfo(value)
     if not value:
         return {"set": False}
     hint = secret_hint(name, str(value))
@@ -402,6 +414,12 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
         current = store.read_config_mapping()
     except store.ConfigParseError as e:
         return 409, _unreadable(e)
+    for name in list(changes):
+        # A page that sends back what GET showed (``http://***@host``) keeps
+        # the stored URL, as ``""`` keeps a secret.
+        stored = current.get(name)
+        if body[name] != stored and body[name] == _hide_userinfo(stored):
+            del changes[name]
     if not changes:
         # Nothing to change (``{}``, or only ``""`` secrets): write nothing,
         # so the revision and the file's comments stay as they are.
