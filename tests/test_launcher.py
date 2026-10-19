@@ -481,6 +481,66 @@ def test_stop_during_backend_health_wait_reports_cancelled(monkeypatch):
     assert errors[0].code == "cancelled"
 
 
+def test_start_waits_for_another_start_before_the_backend_decision(monkeypatch):
+    """Another start holds the server start lock: the decision and the start
+    wait for it, so a backend that is bound but not answering yet is never
+    taken for a stale one."""
+    import threading
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    holder = _LockHolder()
+    checks: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "_is_port_occupied",
+        lambda *_a, **_k: checks.append(holder.release.is_set()) or False,
+    )
+    threading.Timer(0.3, holder.done).start()
+    result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert checks
+    assert all(checks)
+    assert result.backend_started is True
+
+
+def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch):
+    import threading
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    started: list = []
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **k: started.append(k) or _FakeProc()
+    )
+    holder = _LockHolder()
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
+    threading.Timer(0.3, launcher.stop).start()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            launcher.start()
+    finally:
+        holder.done()
+    assert ei.value.code == "cancelled"
+    assert started == []
+
+
+def test_start_lock_held_too_long_is_backend_start_failed(monkeypatch):
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
+    holder = _LockHolder()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    finally:
+        holder.done()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.fields == {"lock_file": str(lgm.RUNTIME.lock_file)}
+
+
 def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
     """stop() during start_langgraph_dev's run (proc handle not wired yet) tears
     down only the process THIS launcher spawned — never the on-disk recorded

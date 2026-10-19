@@ -12,6 +12,7 @@ Verifies the orchestration:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -80,6 +81,7 @@ def _run_deploy_once(
     langgraph_dev_running: bool = True,  # health-check passes after start
     tunnel: bool = False,
     tunnel_url: str | None = None,
+    on_port_check: Callable[[], None] | None = None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
     Returns a ``captured`` dict with observation points."""
@@ -111,7 +113,12 @@ def _run_deploy_once(
     # langgraph_dev.manager mocks
     from EvoScientist.langgraph_dev import manager as lgm
 
-    monkeypatch.setattr(lgm, "_is_port_occupied", lambda _p, *_a, **_kw: port_occupied)
+    def _fake_is_port_occupied(_p, *_a, **_kw):
+        if on_port_check is not None:
+            on_port_check()
+        return port_occupied
+
+    monkeypatch.setattr(lgm, "_is_port_occupied", _fake_is_port_occupied)
     monkeypatch.setattr(
         lgm,
         "is_langgraph_dev_running",
@@ -553,6 +560,47 @@ def test_deploy_refuses_when_port_occupied_by_foreign(monkeypatch, tmp_path):
             langgraph_dev_running=False,  # foreign process holds the port
         )
     assert exc.value.exit_code == 1
+
+
+def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_path):
+    """Another start holds the server start lock: the port check and the start
+    wait for it, so a backend that is bound but not answering yet is never
+    taken for a stale one."""
+    import threading
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    holder = _LockHolder()
+    checks: list[bool] = []
+    threading.Timer(0.3, holder.done).start()
+    captured = _run_deploy_once(
+        monkeypatch,
+        _make_config(default_workdir=str(tmp_path)),
+        on_port_check=lambda: checks.append(holder.release.is_set()),
+    )
+    assert checks
+    assert all(checks)
+    assert captured["langgraph_dev_started"] is True
+
+
+def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
+    from EvoScientist.langgraph_dev import manager as lgm
+    from tests.test_cli_deploy_json import _LockHolder
+
+    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
+    holder = _LockHolder()
+    checks: list[bool] = []
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            _run_deploy_once(
+                monkeypatch,
+                _make_config(default_workdir=str(tmp_path)),
+                on_port_check=lambda: checks.append(True),
+            )
+    finally:
+        holder.done()
+    assert exc.value.exit_code == 1
+    assert checks == []
 
 
 def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):

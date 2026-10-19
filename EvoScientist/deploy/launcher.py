@@ -34,7 +34,8 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -403,7 +404,9 @@ class WebUILauncher:
         Does not wait for the front-end to be *ready* (use :meth:`wait_ready`
         for that). It does block while the backend starts: on the start path
         ``start_langgraph_dev`` polls the backend's ``/ok`` until healthy (up to
-        ~60s). The front-end process is only spawned, not awaited.
+        ~60s). The front-end process is only spawned, not awaited. Before the
+        backend decision it waits for another process that is starting a
+        backend (the server start lock, up to 120 s).
 
         Tears down whatever it already spawned if a later step raises, or if
         ``stop()`` fires concurrently from another thread. Without this, a
@@ -416,16 +419,17 @@ class WebUILauncher:
         self._runner.preflight(self._cfg)
 
         try:
-            decision = _resolve_backend(self._cfg, self._config)
-            self._warnings.extend(decision.warnings)
-            # The agent is built inside the server, so its own hint lands in
-            # the server log; the launching process shows it, for the server
-            # it reuses or the one it starts.
-            hint = server_setup_hint(decision.sidecar)
-            if hint is not None:
-                self._warnings.append(hint)
-            if decision.action == "start":
-                self._start_backend()
+            with self._start_lock():
+                decision = _resolve_backend(self._cfg, self._config)
+                self._warnings.extend(decision.warnings)
+                # The agent is built inside the server, so its own hint lands
+                # in the server log; the launching process shows it, for the
+                # server it reuses or the one it starts.
+                hint = server_setup_hint(decision.sidecar)
+                if hint is not None:
+                    self._warnings.append(hint)
+                if decision.action == "start":
+                    self._start_backend()
             self._raise_if_stopped()
 
             # Front-end port: a non-fatal warning (node will surface a hard
@@ -562,6 +566,40 @@ class WebUILauncher:
                     )
 
     # -- internals -------------------------------------------------------- #
+    @contextmanager
+    def _start_lock(self) -> Iterator[None]:
+        """Hold the server start lock, the one ``ensure_langgraph_dev()`` and
+        ``deploy --json`` take, across the backend decision and the start.
+
+        Without it, a second starter for the same port can see a backend that
+        is bound but not answering yet and kill it as stale, or overwrite its
+        ownership record. The wait checks for a ``stop()`` every 0.5 s.
+        """
+        from filelock import FileLock, Timeout
+
+        from ..langgraph_dev.manager import _FILE_LOCK_TIMEOUT, RUNTIME
+
+        RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(RUNTIME.lock_file))
+        deadline = time.monotonic() + _FILE_LOCK_TIMEOUT
+        while True:
+            self._raise_if_stopped()
+            try:
+                lock.acquire(timeout=0.5)
+                break
+            except Timeout:
+                if time.monotonic() >= deadline:
+                    raise LauncherError(
+                        "backend_start_failed",
+                        f"Another EvoScientist process has been starting a "
+                        f"backend for over {_FILE_LOCK_TIMEOUT:.0f} s.",
+                        fields={"lock_file": str(lock.lock_file)},
+                    ) from None
+        try:
+            yield
+        finally:
+            lock.release()
+
     def _start_backend(self) -> None:
         from ..langgraph_dev.manager import (
             _server_config_fingerprint,
