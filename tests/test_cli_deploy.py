@@ -378,6 +378,29 @@ def test_deploy_host_is_stripped(monkeypatch, tmp_path):
     assert captured["host_passed"] == "0.0.0.0"
 
 
+@pytest.mark.parametrize(
+    ("host", "port", "overrides"),
+    [
+        (None, None, {}),
+        (
+            "  0.0.0.0  ",
+            6190,
+            {"langgraph_dev_host": "0.0.0.0", "langgraph_dev_port": 6190},
+        ),
+        ("   ", None, {}),
+    ],
+)
+def test_deploy_bind_flags_are_config_overrides(
+    monkeypatch, tmp_path, host, port, overrides
+):
+    """As ``EvoSci --host`` passes it, so the config fingerprint recorded for
+    the server matches a session started with the same bind."""
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, host=host, port=port)
+
+    assert captured["cli_overrides"] == overrides
+
+
 def test_deploy_config_host_is_stripped(monkeypatch, tmp_path):
     """Stripping must not depend on the value arriving via --host.
     ``EvoScientistConfig.__post_init__`` normalizes these fields, but deploy()

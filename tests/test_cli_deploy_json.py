@@ -542,6 +542,21 @@ def test_invalid_port(h, capsys, bad_port):
     assert lines[0]["detail"] == {"port": bad_port}
 
 
+def test_bind_flags_are_config_overrides(h, capsys, monkeypatch):
+    """The fingerprint compared with a running server's sees ``--host`` and
+    ``--port`` as ``EvoSci --host`` does."""
+    import EvoScientist.config as config_mod
+
+    seen: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        config_mod,
+        "get_effective_config",
+        lambda o=None: seen.append(dict(o or {})) or h.config,
+    )
+    h.run(capsys, host=" 0.0.0.0 ", port=6190)
+    assert seen == [{"langgraph_dev_host": "0.0.0.0", "langgraph_dev_port": 6190}]
+
+
 def test_foreign_process_is_port_conflict(h, capsys):
     h.occupied = True
     h.running = False

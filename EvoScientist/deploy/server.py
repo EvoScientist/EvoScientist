@@ -102,9 +102,9 @@ def deploy(
         stop_langgraph_dev,
     )
 
-    # 1. Load config (no CLI overrides here — deploy is opinionated about
-    # full MCP + async; user-facing flags are workspace/port/debug only).
-    config = _load_config(debug)
+    # 1. Load config (deploy is opinionated about full MCP + async; the only
+    # overrides are the bind flags).
+    config = _load_config(debug, host, port)
 
     # Before anything is created or started.
     from ..cli.commands import _require_chatgpt_sign_in
@@ -328,12 +328,21 @@ def deploy(
         )
 
 
-def _load_config(debug: bool) -> Any:
+def _load_config(debug: bool, host: str | None = None, port: int | None = None) -> Any:
     """The effective config, applied to the environment, with ``--debug``
-    logging switched on."""
+    logging switched on.
+
+    ``--host`` and ``--port`` are overrides, as ``EvoSci --host`` and ``EvoSci
+    serve --host`` pass theirs, so the config fingerprint matches a server
+    started with the same bind.
+    """
     from ..config import apply_config_to_env, get_effective_config
 
     cli_overrides: dict[str, Any] = {}
+    if host is not None and host.strip():
+        cli_overrides["langgraph_dev_host"] = host.strip()
+    if port is not None:
+        cli_overrides["langgraph_dev_port"] = port
     if debug:
         cli_overrides["log_level"] = "DEBUG"
     config = get_effective_config(cli_overrides)

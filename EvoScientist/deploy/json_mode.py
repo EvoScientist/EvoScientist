@@ -247,7 +247,7 @@ class _Run:
         from . import server
         from .launcher import BackendTarget
 
-        config = server._load_config(debug)
+        config = server._load_config(debug, host, port)
         _check_sign_in(config)
 
         ws = str(paths.start_workspace_path(workdir, config.default_workdir))
