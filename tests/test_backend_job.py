@@ -105,6 +105,7 @@ def test_no_job_api_warns(monkeypatch):
     monkeypatch.setattr(backend_job, "_job_api", _no_api)
     job = backend_job.BackendJob()
     assert job.creationflags == 0
+    job.started(FakeProcess(1234))
     assert job.warning is not None
 
 
@@ -136,3 +137,23 @@ def test_adopt_without_a_job_does_nothing(monkeypatch):
     job = backend_job.BackendJob()
     job.adopt(FakeProcess(555))
     assert ("assign", 77, 555) not in fake.calls
+
+
+def test_without_a_job_the_warning_names_what_was_started(monkeypatch):
+    fake = FakeJobApi(create_ok=False)
+    monkeypatch.setattr(backend_job, "_job_api", lambda: fake)
+    job = backend_job.BackendJob()
+    assert job.warning is None
+    job.adopt(FakeProcess(555))
+    job.started(FakeProcess(1234))
+    assert "Could not put ccproxy and the backend in" in job.warning
+    assert "ccproxy and the backend keep running" in job.warning
+
+
+def test_failed_adopt_and_assign_both_are_named(api):
+    api.assign_ok = False
+    job = backend_job.BackendJob()
+    job.adopt(FakeProcess(555))
+    job.started(FakeProcess(1234))
+    assert "ccproxy and the backend" in job.warning
+    assert "error 5" in job.warning

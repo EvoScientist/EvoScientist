@@ -27,15 +27,15 @@ class BackendJob:
     """The job for one backend: :attr:`creationflags` for ``Popen``, then
     :meth:`started` once the process exists, :meth:`close` after the stop.
 
-    Never raises. When the job cannot be created or the process cannot join
-    it, :attr:`warning` says so and the backend runs without it.
+    Never raises. When the job cannot be created or a process cannot join
+    it, :attr:`warning` names the processes that run without it.
     """
 
     def __init__(self) -> None:
         self._handle: int | None = None
         self._error: int | None = None
-        # What the failed step was for, in the warning.
-        self._what = "the backend"
+        # The processes this command started outside the job, for the warning.
+        self._missing: list[str] = []
         try:
             api = _job_api()
             job = api.create()
@@ -61,11 +61,12 @@ class BackendJob:
         """Put the suspended ``process`` in the job, then let it run. It is
         resumed whatever happens."""
         if self._handle is None:
+            self._missing.append("the backend")
             return
         api = _job_api()
         try:
             if not api.assign(self._handle, int(process._handle)):
-                self._error = api.last_error()
+                self._failed("the backend", api.last_error())
         finally:
             api.resume(int(process._handle))
 
@@ -73,20 +74,28 @@ class BackendJob:
         """Put an already running ``process`` in the job (ccproxy). It needs
         no suspended start: what matters is that it ends with the command."""
         if self._handle is None:
+            self._missing.append("ccproxy")
             return
         api = _job_api()
-        if not api.assign(self._handle, int(process._handle)) and self._error is None:
-            self._error = api.last_error()
-            self._what = "ccproxy"
+        if not api.assign(self._handle, int(process._handle)):
+            self._failed("ccproxy", api.last_error())
+
+    def _failed(self, what: str, error: int) -> None:
+        self._missing.append(what)
+        if self._error is None:
+            self._error = error
 
     @property
     def warning(self) -> str | None:
-        if self._error is None:
+        """Names every process this command started outside the job."""
+        if not self._missing:
             return None
+        what = " and ".join(self._missing)
+        keeps = "keeps" if len(self._missing) == 1 else "keep"
         return (
-            f"Could not put {self._what} in a Windows job object (error "
+            f"Could not put {what} in a Windows job object (error "
             f"{self._error}). If the app that started this command exits "
-            f"without closing its stdin, or is killed, {self._what} keeps running."
+            f"without closing its stdin, or is killed, {what} {keeps} running."
         )
 
     def close(self) -> None:
