@@ -1063,6 +1063,19 @@ class TestStepModel:
         assert default == entries[0][0]
         assert default != "__custom__"
 
+    def test_removed_model_defaults_to_the_default_model(self):
+        """A saved model the provider no longer lists preselects the default
+        model, not the provider's first (most expensive) entry."""
+        from EvoScientist.config.onboard.steps import _step_model
+        from EvoScientist.llm import DEFAULT_MODEL
+
+        config = EvoScientistConfig(model="claude-sonnet-4-6")
+        with patch("EvoScientist.config.onboard.steps.questionary") as mock_q:
+            mock_q.select.return_value.ask.return_value = DEFAULT_MODEL
+            _step_model(config, "anthropic")
+
+        assert mock_q.select.call_args.kwargs["default"] == DEFAULT_MODEL
+
     def test_custom_default_value_preselects_and_prefills(self):
         """Co-pilot re-run: a saved custom (non-registry) model preselects and
         prefills the 'Type a model name...' entry."""

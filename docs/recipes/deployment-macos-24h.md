@@ -109,7 +109,7 @@ cd ~/Dev/tools/EvoScientist
 
 EvoSci config set anthropic_base_url "http://localhost:8000/claude"
 EvoSci config set anthropic_api_key  "sk-dummy"
-EvoSci config set model              "claude-sonnet-4-6"
+EvoSci config set model              "claude-sonnet-5-5"
 
 # Telegram
 EvoSci config set telegram_bot_token      "YOUR_BOT_TOKEN"

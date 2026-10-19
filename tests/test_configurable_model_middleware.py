@@ -9,7 +9,9 @@ pass-through path or the per-instance cache.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from EvoScientist.middleware.configurable_model import (
     ConfigurableModelMiddleware,
@@ -336,6 +338,42 @@ class TestResolveFailure:
 
         assert result == "ok"
         assert called == [req]
+
+    def test_sync_raises_for_a_model_the_router_cannot_address(self):
+        """A removed router short name fails the call instead of silently
+        running on the compile-time model."""
+        from EvoScientist.llm.registry import UnknownModelError
+
+        mw = ConfigurableModelMiddleware()
+        req = _make_request()
+        handler = MagicMock(return_value="ok")
+
+        with (
+            _patched_config(
+                {"model": "claude-sonnet-4.6", "model_provider": "openrouter"}
+            ),
+            pytest.raises(UnknownModelError),
+        ):
+            mw.wrap_model_call(req, handler)
+
+        handler.assert_not_called()
+
+    async def test_async_raises_for_a_model_the_router_cannot_address(self):
+        from EvoScientist.llm.registry import UnknownModelError
+
+        mw = ConfigurableModelMiddleware()
+        req = _make_request()
+        handler = AsyncMock(return_value="ok")
+
+        with (
+            _patched_config(
+                {"model": "claude-sonnet-4.6", "model_provider": "openrouter"}
+            ),
+            pytest.raises(UnknownModelError),
+        ):
+            await mw.awrap_model_call(req, handler)
+
+        handler.assert_not_called()
 
 
 # =============================================================================

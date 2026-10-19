@@ -41,6 +41,7 @@ from .registry import (
     _THINKING_CAPABLE_PROVIDERS,
     DEFAULT_MODEL,
     MODELS,
+    UnknownModelError,
     _is_mandatory_thinking_kimi,
     get_model_info,  # noqa: F401 — re-exported for existing import sites
     get_models_for_provider,  # noqa: F401 — re-exported for existing import sites
@@ -359,8 +360,8 @@ def get_chat_model(
     """Get a chat model instance.
 
     Args:
-        model: Model name (short name like 'claude-sonnet-4-6' or full ID
-               like 'claude-sonnet-4-6-20250929'). Defaults to DEFAULT_MODEL.
+        model: Model name (short name like 'claude-sonnet-5-5' or a full model
+               ID). Defaults to DEFAULT_MODEL.
         provider: Override the provider (e.g., 'anthropic', 'openai').
                   If not specified, inferred from model name or defaults to 'anthropic'.
         **kwargs: Additional arguments passed to init_chat_model (e.g., temperature).
@@ -369,8 +370,8 @@ def get_chat_model(
         A LangChain chat model instance.
 
     Examples:
-        >>> model = get_chat_model()  # Uses default (claude-sonnet-4-6)
-        >>> model = get_chat_model("claude-opus-4-8")  # Use short name
+        >>> model = get_chat_model()  # Uses default (claude-sonnet-5-5)
+        >>> model = get_chat_model("claude-opus-5-5")  # Use short name
         >>> model = get_chat_model("gpt-4o")  # OpenAI model
         >>> model = get_chat_model("claude-3-opus-20240229", provider="anthropic")  # Full ID
     """
@@ -404,6 +405,16 @@ def get_chat_model(
                 model_id = model_id.removeprefix("ollama:")
             else:
                 provider = "anthropic"  # Default fallback
+
+    # Routers address models as ``vendor/model``; a bare id here is a short
+    # name that is no longer in the registry (or another provider's id).
+    if provider in ("openrouter", "requesty") and "/" not in model_id:
+        raise UnknownModelError(
+            f"Model {model!r} is not in EvoScientist's {provider} model list "
+            "(it may have been removed). Pick one with `/model <name> --save`, "
+            "`EvoSci config set model <name>` or `EvoSci onboard`, or set the "
+            f"full vendor/model ID as {provider} lists it."
+        )
 
     # Anthropic base_url override (e.g. ccproxy at localhost:8000/api/v1)
     _is_third_party = (

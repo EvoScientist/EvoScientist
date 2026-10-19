@@ -241,7 +241,7 @@ class EvoScientistConfig:
 
     # LLM Settings
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-sonnet-5-5"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
     # Transient model-call failures (5xx, 429, connection drops): how long one
     # model call keeps retrying after it first fails, in seconds; 0 = no retry.

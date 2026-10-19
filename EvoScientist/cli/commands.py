@@ -8,7 +8,7 @@ import queue
 import re
 import sys
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -69,6 +69,7 @@ from .channel import (
     get_channel_origin,
     publish_to_channel_origin,
     remember_channel_origin,
+    restore_channel_origin,
 )
 from .channel_sends import PendingChannelSends
 from .mcp_ui import (
@@ -220,7 +221,7 @@ def onboard(
     workspace settings, and agent parameters.
 
     Any answer can be pre-set via a flag (``--provider anthropic
-    --model claude-sonnet-4-6 ...``); prompts for unset answers stay
+    --model claude-sonnet-5-5 ...``); prompts for unset answers stay
     interactive unless ``--non-interactive`` is passed, in which case any
     missing required answer aborts the wizard.
     """
@@ -1493,15 +1494,13 @@ async def _apply_serve_resume_state(
     old_thread_id = runtime_state.thread_id
     thread_changed = thread_id != old_thread_id
     # Serve pauses the thread it leaves and ends the wait on a thread restored
-    # after a restart, in the store of the workspace it leaves them in.
-    left_thread = False
-    # Whether the thread serve leaves was armed: a refused move re-arms it.
-    left_armed = False
+    # after a restart, in the store of the workspace it leaves them in; a
+    # refused move puts back what the snapshot recorded.
+    left: Any = None
 
     async def leave_thread(proactive: Any) -> None:
-        nonlocal left_thread, left_armed
-        left_thread = True
-        left_armed = proactive.is_armed(old_thread_id)
+        nonlocal left
+        left = proactive.snapshot_leave(old_thread_id)
         for call in (
             lambda: proactive.leave(old_thread_id),
             lambda: proactive.on_turn(thread_id),
@@ -1542,10 +1541,11 @@ async def _apply_serve_resume_state(
             )
         except WorkspaceMismatchError:
             if proactive is not None and moves_workspace:
-                if left_armed:
-                    # The session stays on the thread it was leaving: arm it again.
+                if left is not None:
+                    # The session stays where it was: arm again what serve paused.
+                    snapshot = left
                     await asyncio.to_thread(
-                        _serve_proactive_call, lambda: proactive.adopt(old_thread_id)
+                        _serve_proactive_call, lambda: proactive.undo_leave(snapshot)
                     )
                 # ``stop`` deleted the cron above; bring it back for the threads
                 # that stay armed.
@@ -1570,7 +1570,7 @@ async def _apply_serve_resume_state(
         runtime_state.set_thread_id(thread_id, channel_runtime)
         proactive = getattr(channel_runtime, "proactive", None)
         if proactive is not None:
-            if not left_thread:
+            if left is None:
                 await leave_thread(proactive)
             # A thread armed or paused earlier is armed again here.
             await asyncio.to_thread(
@@ -1672,6 +1672,9 @@ def _serve_proactive_controller(
         can_deliver=lambda thread_id: get_channel_origin(thread_id) is not None,
         forget_origin=forget_channel_origin,
         origin_of=get_channel_origin,
+        remember_origin=lambda thread_id, origin: restore_channel_origin(
+            thread_id, **asdict(origin)
+        ),
     )
 
 
@@ -1682,7 +1685,6 @@ def _serve_restore_proactive(proactive: Any, async_runtime: AsyncRuntime) -> Non
     reach the chat even though serve starts on a fresh thread.
     """
     from ..sessions import latest_origin_checkpoints
-    from .channel import restore_channel_origin
 
     if not proactive.available:
         return
