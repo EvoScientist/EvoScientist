@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -233,7 +234,8 @@ class TestPatch:
         [
             ({"tavily_api_key": "tvly-new-key-123"}, "tavily_api_key"),
             ({"langgraph_dev_port": 8124}, "langgraph_dev_port"),
-            ({"default_workdir": "/"}, "default_workdir"),
+            # The root of the current drive: "/" has no drive on Windows.
+            ({"default_workdir": os.path.abspath(os.sep)}, "default_workdir"),
         ],
     )
     def test_server_fields_need_a_restart(self, server, secret, change, field):
