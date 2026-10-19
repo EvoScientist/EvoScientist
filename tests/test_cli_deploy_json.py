@@ -119,6 +119,7 @@ class Harness:
 
         def _emit_then_close(events, event, **fields):
             emit(events, event, **fields)
+            self.log.append(("event", event))
             if event == "ready":
                 self.close_stdin()
 
@@ -176,7 +177,6 @@ class Harness:
         )
         out = capsys.readouterr().out
         lines = [json.loads(line) for line in out.splitlines()]
-        self.log.extend(("event", line["event"]) for line in lines)
         return code, lines
 
 
@@ -746,6 +746,56 @@ def test_ctrl_c_stops_cleanly(h, capsys):
     assert code == 0
     assert _events(lines) == ["starting", "ready", "stopped"]
     assert ("backend stop", h.proc) in h.log
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Node's kill() sends SIGTERM on POSIX only"
+)
+def test_sigterm_stops_the_owned_backend_before_stopped(h, capsys):
+    import signal
+
+    def _fallback(signum, _frame):
+        missed.append(signum)
+        raise KeyboardInterrupt
+
+    def _terminate():
+        signal.raise_signal(signal.SIGTERM)
+        return True
+
+    missed: list[int] = []
+    previous = signal.signal(signal.SIGTERM, _fallback)
+    try:
+        h.stdin_kind = "devnull"
+        h.listening = _terminate
+        code, lines = h.run(capsys)
+        assert signal.getsignal(signal.SIGTERM) is _fallback
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert missed == []
+    assert code == 0
+    assert _events(lines) == ["starting", "ready", "stopped"]
+    assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", "stopped"))
+
+
+@pytest.mark.parametrize(
+    ("raised", "terminal"),
+    [(KeyboardInterrupt(), "stopped"), (RuntimeError("health check"), "error")],
+)
+def test_a_start_cut_after_the_spawn_stops_the_backend(
+    h, capsys, monkeypatch, raised, terminal
+):
+    """No handle came back, so the stop uses the one the manager recorded."""
+    from EvoScientist.langgraph_dev import manager as lgm
+
+    def _spawned_then_cut(**kwargs):
+        h._start(**kwargs)
+        monkeypatch.setattr(lgm, "_PROCESS", h.proc)
+        raise raised
+
+    monkeypatch.setattr(lgm, "start_langgraph_dev", _spawned_then_cut)
+    _, lines = h.run(capsys)
+    assert _events(lines) == ["starting", terminal]
+    assert h.log.index(("backend stop", h.proc)) < h.log.index(("event", terminal))
 
 
 def test_stdin_closed_during_the_start_stops_without_ready(h, capsys, monkeypatch):
