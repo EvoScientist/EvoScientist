@@ -509,6 +509,31 @@ def test_start_waits_for_another_start_before_the_backend_decision(monkeypatch):
     assert result.backend_started is True
 
 
+def _start_lock_is_held() -> bool:
+    from filelock import FileLock, Timeout
+
+    probe = FileLock(str(lgm.RUNTIME.lock_file))
+    try:
+        probe.acquire(timeout=0)
+    except Timeout:
+        return True
+    probe.release()
+    return False
+
+
+def test_the_backend_starts_under_the_start_lock(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    held: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "start_langgraph_dev",
+        lambda **_k: held.append(_start_lock_is_held()) or _FakeProc(),
+    )
+    lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert held == [True]
+    assert not _start_lock_is_held()
+
+
 @pytest.mark.parametrize("then_free", [False, True])
 def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_free):
     """A stop() during the wait starts nothing, also when the lock is freed
@@ -536,6 +561,7 @@ def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_
     try:
         with pytest.raises(lm.LauncherError) as ei:
             launcher.start()
+        assert then_free or holder.thread.is_alive()
     finally:
         holder.done()
     assert ei.value.code == "cancelled"

@@ -616,6 +616,24 @@ def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
     assert any("for over" in p for p in _run_deploy_once.printed)
 
 
+def test_deploy_starts_under_the_start_lock(monkeypatch, tmp_path):
+    from EvoScientist.langgraph_dev import manager as lgm
+    from tests.test_launcher import _start_lock_is_held
+
+    held: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "_server_config_fingerprint",
+        lambda _c: held.append(_start_lock_is_held()) or "fp",
+    )
+    captured = _run_deploy_once(
+        monkeypatch, _make_config(default_workdir=str(tmp_path))
+    )
+    assert captured["langgraph_dev_started"] is True
+    assert held == [True]
+    assert not _start_lock_is_held()
+
+
 @pytest.mark.parametrize("step", ["mkdir", "acquire"])
 def test_deploy_start_lock_os_error_is_startup_failed(monkeypatch, tmp_path, step):
     """An OSError from the start lock ends in the startup failed message, as
