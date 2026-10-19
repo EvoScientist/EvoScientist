@@ -625,9 +625,11 @@ class WebUILauncher:
 
 def _record_serves_host(recorded: object, host: str) -> bool:
     """Whether a server recorded as bound to ``recorded`` is the one a probe
-    of ``host`` reaches: a wildcard bind, the same probe address, or loopback
-    on both sides (``localhost`` and ``127.0.0.1``). A record without a host,
-    written by an older release, is not checked.
+    of ``host`` reaches: a wildcard bind, the same probe address, or
+    ``localhost`` against a loopback address (the name can resolve to either).
+    ``127.0.0.1`` and ``::1`` are distinct: two servers can hold one port on
+    them. A record without a host, written by an older release, is not
+    checked.
     """
     from ..langgraph_dev.manager import _WILDCARD_HOSTS, _is_loopback_host, _probe_host
 
@@ -637,8 +639,8 @@ def _record_serves_host(recorded: object, host: str) -> bool:
     host = host.strip().lower()
     if recorded in _WILDCARD_HOSTS:
         return True
-    if _is_loopback_host(recorded) and _is_loopback_host(host):
-        return True
+    if "localhost" in (recorded, host):
+        return _is_loopback_host(recorded) and _is_loopback_host(_probe_host(host))
     return _probe_host(recorded) == _probe_host(host)
 
 

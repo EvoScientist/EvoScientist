@@ -299,6 +299,9 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
         (None, "192.168.1.5", True),  # an older record: not checked
         ("127.0.0.1", "127.0.0.1", True),
         ("localhost", "127.0.0.1", True),
+        ("::1", "localhost", True),
+        ("127.0.0.1", "::1", False),  # two servers can hold the port on these
+        ("::1", "127.0.0.1", False),
         ("0.0.0.0", "192.168.1.5", True),
         ("127.0.0.1", "0.0.0.0", True),  # probed at 127.0.0.1
         ("192.168.1.5", "127.0.0.1", False),
