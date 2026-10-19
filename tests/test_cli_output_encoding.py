@@ -68,3 +68,33 @@ def test_which_streams_are_switched(monkeypatch, platform, tty, env, expected):
     monkeypatch.setattr(sys, "platform", platform)
     cli_pkg._write_redirected_output_as_utf8()
     assert (out.encoding, err.encoding) == (expected, expected)
+
+
+def test_each_stream_is_decided_on_its_own(monkeypatch):
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    out, err = _Stream(tty=False), _Stream(tty=True)
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setattr(sys, "platform", "linux")
+    cli_pkg._write_redirected_output_as_utf8()
+    assert (out.encoding, err.encoding) == ("utf-8", "cp1252")
+
+
+def _closed() -> _Stream:
+    stream = _Stream()
+    stream.close()
+    return stream
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [
+        pytest.param(None, id="no-stdout"),
+        pytest.param(io.StringIO(), id="no-reconfigure"),
+        pytest.param(_closed(), id="closed"),
+    ],
+)
+def test_a_stream_that_cannot_be_switched_is_left_alone(monkeypatch, stream):
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.setattr(sys, "stdout", stream)
+    cli_pkg._write_redirected_output_as_utf8()
