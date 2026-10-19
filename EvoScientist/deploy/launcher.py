@@ -359,7 +359,7 @@ class WebUILauncher:
     Lifecycle owned by the caller:
 
         launcher = WebUILauncher(config, cfg, InstalledWebUIRunner())
-        result = launcher.start()          # blocks while the backend starts (~60s max)
+        result = launcher.start()          # blocks while the backend starts
         result = launcher.wait_ready(60)   # poll both, or raise LauncherError
         ...                                # caller's own main loop / window
         launcher.stop()                    # idempotent teardown
@@ -422,9 +422,9 @@ class WebUILauncher:
             with self._start_lock():
                 decision = _resolve_backend(self._cfg, self._config)
                 self._warnings.extend(decision.warnings)
-                # The agent is built inside the server, so its own hint lands
-                # in the server log; the launching process shows it, for the
-                # server it reuses or the one it starts.
+                # The agent is built inside the server, so its own hint lands in
+                # the server log; the launching process shows it, for the server
+                # it reuses or the one it starts.
                 hint = server_setup_hint(decision.sidecar)
                 if hint is not None:
                     self._warnings.append(hint)
@@ -593,9 +593,12 @@ class WebUILauncher:
                         "backend_start_failed",
                         f"Another EvoScientist process has been starting a "
                         f"backend for over {_FILE_LOCK_TIMEOUT:.0f} s.",
+                        f"It holds {lock.lock_file}. Try again once it is done.",
                         fields={"lock_file": str(lock.lock_file)},
                     ) from None
         try:
+            # A stop() in the slice in which the lock was freed starts nothing.
+            self._raise_if_stopped()
             yield
         finally:
             lock.release()

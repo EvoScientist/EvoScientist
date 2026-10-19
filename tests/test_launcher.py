@@ -17,6 +17,11 @@ from EvoScientist.deploy import launcher as lm
 from EvoScientist.langgraph_dev import manager as lgm
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """The start lock, pid file and sidecar under tmp_path."""
+
+
 def _cfg(workspace_dir: str = "/tmp/wsA", **kw):
     base = {
         "workspace_dir": workspace_dir,
@@ -504,8 +509,13 @@ def test_start_waits_for_another_start_before_the_backend_decision(monkeypatch):
     assert result.backend_started is True
 
 
-def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch):
+@pytest.mark.parametrize("then_free", [False, True])
+def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_free):
+    """A stop() during the wait starts nothing, also when the lock is freed
+    right after it."""
     import threading
+
+    from filelock import FileLock
 
     from tests.test_cli_deploy_json import _LockHolder
 
@@ -516,7 +526,13 @@ def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch):
     )
     holder = _LockHolder()
     launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
-    threading.Timer(0.3, launcher.stop).start()
+
+    def _stop() -> None:
+        launcher.stop()
+        if then_free:
+            holder.done()
+
+    threading.Timer(0.3, _stop).start()
     try:
         with pytest.raises(lm.LauncherError) as ei:
             launcher.start()
@@ -524,6 +540,9 @@ def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch):
         holder.done()
     assert ei.value.code == "cancelled"
     assert started == []
+    lock = FileLock(str(lgm.RUNTIME.lock_file))
+    lock.acquire(timeout=0.5)
+    lock.release()
 
 
 def test_start_lock_held_too_long_is_backend_start_failed(monkeypatch):

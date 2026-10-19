@@ -353,18 +353,19 @@ def _start_lock() -> Iterator[None]:
     except Timeout:
         try:
             with console.status(
-                "[dim]Waiting for another EvoSci process to start its server...[/dim]",
+                "[dim]Waiting for another EvoSci process to start langgraph "
+                "dev...[/dim]",
                 spinner="dots",
             ):
                 lock.acquire(timeout=_FILE_LOCK_TIMEOUT)
         except Timeout:
             console.print(
-                f"[red]Another EvoScientist process has been starting a backend "
+                f"[red]Another EvoSci process has been starting langgraph dev "
                 f"for over {_FILE_LOCK_TIMEOUT:.0f} s.[/red]"
             )
             console.print(
-                f"[dim]It holds {_shorten(str(lock.lock_file))}. Run deploy "
-                f"again once it is done.[/dim]"
+                f"[dim]It holds {_shorten(str(lock.lock_file))}. Run "
+                f"[bold]EvoSci deploy[/bold] again once it is done.[/dim]"
             )
             raise typer.Exit(1) from None
     try:

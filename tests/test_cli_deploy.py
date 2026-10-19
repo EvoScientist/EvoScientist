@@ -22,6 +22,11 @@ import typer
 from EvoScientist.deploy import server as deploy_server
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """The start lock, pid file and sidecar under tmp_path."""
+
+
 def _make_config(
     *,
     default_workdir: str = "",
@@ -568,6 +573,9 @@ def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_p
     taken for a stale one."""
     import threading
 
+    from filelock import FileLock
+
+    from EvoScientist.langgraph_dev import manager as lgm
     from tests.test_cli_deploy_json import _LockHolder
 
     holder = _LockHolder()
@@ -581,6 +589,9 @@ def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_p
     assert checks
     assert all(checks)
     assert captured["langgraph_dev_started"] is True
+    lock = FileLock(str(lgm.RUNTIME.lock_file))
+    lock.acquire(timeout=0.5)
+    lock.release()
 
 
 def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
