@@ -91,6 +91,16 @@ def test_explicit_blank_key_raises(
         get_chat_model("minimax-m3", provider="minimax", api_key=explicit)
 
 
+def test_explicit_key_used_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit api_key= kwarg is used as-is even when the provider's env
+    var is unset and the vendor fallback key is present."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-vendor-fallback")
+    with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
+        mock_init.return_value = MagicMock()
+        get_chat_model("minimax-m3", provider="minimax", api_key="sk-explicit")
+    assert mock_init.call_args[1]["api_key"] == "sk-explicit"
+
+
 # ---------------------------------------------------------------------------
 # With the provider's own key: construction succeeds and the vendor key is
 # never used.
@@ -137,11 +147,23 @@ def test_novita_with_own_key_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_custom_openai_placeholder_warns_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A custom-openai endpoint with no key gets a placeholder; the warning is
+@pytest.mark.parametrize(
+    ("provider", "model", "prefix"),
+    [
+        ("custom-openai", "gpt-5.5", "CUSTOM_OPENAI"),
+        ("custom-anthropic", "claude-sonnet-4-6", "CUSTOM_ANTHROPIC"),
+    ],
+)
+def test_custom_placeholder_warns_once(
+    provider: str,
+    model: str,
+    prefix: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom-* endpoint with no key gets a placeholder; the warning is
     emitted on the first build only and not repeated on the second."""
-    monkeypatch.setenv("CUSTOM_OPENAI_BASE_URL", "https://gw.example.com/v1")
-    monkeypatch.delenv("CUSTOM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(f"{prefix}_BASE_URL", "https://gw.example.com/v1")
+    monkeypatch.delenv(f"{prefix}_API_KEY", raising=False)
     from EvoScientist.llm import models
 
     # Temporarily replace the cache for this test; monkeypatch restores the
@@ -152,13 +174,13 @@ def test_custom_openai_placeholder_warns_once(monkeypatch: pytest.MonkeyPatch) -
     with patch("EvoScientist.llm.models.init_chat_model") as mock_init:
         mock_init.return_value = MagicMock()
         # First build: warn.
-        with pytest.warns(UserWarning, match="custom_openai_api_key"):
-            get_chat_model("gpt-5.5", provider="custom-openai")
+        with pytest.warns(UserWarning, match=f"{prefix.lower()}_api_key"):
+            get_chat_model(model, provider=provider)
         assert mock_init.call_args[1]["api_key"] == "not-needed"
         # Second build: must not warn again.
         with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            get_chat_model("gpt-5.5", provider="custom-openai")
+            get_chat_model(model, provider=provider)
         assert mock_init.call_args[1]["api_key"] == "not-needed"
 
 
