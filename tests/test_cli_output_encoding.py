@@ -50,6 +50,7 @@ def test_redirected_output_is_written_as_utf8(monkeypatch):
 @pytest.mark.parametrize(
     ("platform", "tty", "env", "expected"),
     [
+        ("linux", False, None, "utf-8"),  # a pipe or a file
         ("linux", False, "", "utf-8"),  # Python ignores an empty value
         ("win32", True, None, "utf-8"),  # isatty() is true for NUL
         ("linux", True, None, "cp1252"),  # a terminal

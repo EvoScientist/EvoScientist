@@ -65,15 +65,17 @@ def __getattr__(name: str):
 
 
 def _write_redirected_output_as_utf8() -> None:
-    """Switch stdout and stderr to UTF-8 when they are not a terminal (#660).
+    """Switch redirected stdout and stderr to UTF-8 (#660).
 
     On Windows, Python writes to a pipe, a file or the NUL device in the ANSI
     code page, so the first character outside it (a check mark, a
-    box-drawing character, a path) stops the command with
-    ``UnicodeEncodeError``. ``isatty()`` is true for NUL too, so on Windows
-    every stream is switched; a console there gets UTF-8 already. A
-    ``PYTHONIOENCODING`` the user set is kept; Python ignores an empty one,
-    so empty counts as unset. Each stream keeps its error handler, which
+    box-drawing character, a letter in a path) stops the command with
+    ``UnicodeEncodeError``. On Windows both streams are switched even when
+    ``isatty()`` is true, since it is true for NUL as well and a console
+    gets UTF-8 already (unless ``PYTHONLEGACYWINDOWSSTDIO`` is set);
+    elsewhere a terminal keeps its locale encoding. A ``PYTHONIOENCODING``
+    the user set is kept; Python ignores an empty one, so empty counts as
+    unset. Each stream keeps its error handler, which
     ``reconfigure(encoding=...)`` would otherwise reset to ``strict``.
     """
     import os
