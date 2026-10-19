@@ -93,6 +93,16 @@ class TestGet:
             "http://***@proxy.test:3128"
         )
 
+    def test_url_with_leading_whitespace_is_hidden(self, server, secret, config_file):
+        # PATCH keeps a string as sent, so the space reaches the file.
+        value = "  http://me:hunter2@proxy.test:3128"
+        server.patch("/api/settings", json={"telegram_proxy": value}, headers=secret)
+        response = server.get("/api/settings")
+        assert "hunter2" not in response.text
+        assert response.json()["settings"]["telegram_proxy"] == (
+            "  http://***@proxy.test:3128"
+        )
+
     def test_secrets_never_leave_the_server(self, server, config_file):
         config_file.write_text(
             "openai_api_key: sk-openai-1234567890\n"

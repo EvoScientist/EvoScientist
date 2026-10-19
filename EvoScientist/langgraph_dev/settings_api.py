@@ -227,12 +227,13 @@ def config_sources(mapping: dict[str, Any]) -> dict[str, dict[str, Any]]:
 # =============================================================================
 
 
-# Scheme, then everything up to the last ``@`` (the user and password, which
+# Scheme (after any leading whitespace, which a saved value keeps), then
+# everything up to the last ``@`` (the user and password, which
 # people write with a raw ``/``, ``?`` or ``#`` that would end ``urlparse``'s
 # netloc early), then the host. An ``@`` in a path is masked too: over-masking
 # only changes what ``GET`` shows.
 _USERINFO_URL = re.compile(
-    r"^([A-Za-z][A-Za-z0-9+.\-]*://)(.*)@([^@/?#]*)(.*)$", re.DOTALL
+    r"^(\s*[A-Za-z][A-Za-z0-9+.\-]*://)(.*)@([^@/?#]*)(.*)$", re.DOTALL
 )
 
 
