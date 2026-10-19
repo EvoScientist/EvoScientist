@@ -629,7 +629,7 @@ def channel_setup(ctx: typer.Context):
     if updates:
         try:
             set_config_values(updates)
-        except (SettingsError, ConfigError) as e:
+        except (SettingsError, ConfigError, OSError) as e:
             console.print(
                 f"[red]Channel configuration not saved: {escape(str(e))}[/red]"
             )
@@ -2541,7 +2541,9 @@ def config_set(
         reason = e.errors.get(key, "invalid key or value")
         console.print(f"[red]Could not set {escape(key)}: {escape(reason)}[/red]")
         raise typer.Exit(1) from None
-    except ConfigError as e:
+    except (ConfigError, OSError) as e:
+        # OSError: for example a Windows replace that kept failing while
+        # another program had the file open; nothing was written.
         console.print(f"[red]Could not set {escape(key)}: {escape(str(e))}[/red]")
         raise typer.Exit(1) from None
     console.print(f"[green]Set {escape(key)}[/green]")

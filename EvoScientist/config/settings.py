@@ -1304,8 +1304,6 @@ _ENV_MAPPINGS = {
 }
 
 
-# Placeholder ``ccproxy_manager.setup_ccproxy_env`` writes for the Anthropic API
-# key when routing through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
 _ENV_FIELDS: dict[str, str] = {env: field for field, env in _ENV_MAPPINGS.items()}
 
 
@@ -1391,6 +1389,8 @@ def config_value_origin(field: str, value: Any) -> str:
     return "default" if _same_value(field, default, value) else "cli"
 
 
+# Placeholder ``ccproxy_manager.setup_ccproxy_env`` writes for the Anthropic API
+# key when routing through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
 _OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
 
 

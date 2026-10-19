@@ -4,11 +4,13 @@ Kept apart from the Starlette routes in :mod:`.http` so it can be tested
 without a server. Every function here does blocking file and network I/O;
 the routes run them in a thread.
 
-- :func:`read_settings` builds the ``GET`` body. Secret values never leave
-  the server: each reads as ``{"set": ..., "hint": ...}``.
+- :func:`read_settings` builds the ``GET`` body. Secret values are never
+  returned: each reads as ``{"set": ..., "hint": ...}``.
 - :func:`patch_settings` validates a ``PATCH`` body, checks changed API keys
-  online, and writes through :func:`~EvoScientist.config.settings.set_config_values`.
-- :func:`check_key_request` runs one key check without saving anything.
+  online (except the custom endpoints'), and writes through
+  :func:`~EvoScientist.config.settings.set_config_values`.
+- :func:`check_key_request` runs one key check without saving anything. A
+  stored key is only sent to its stored base URL.
 - :func:`capture_restart_baseline` records the file as the server read it
   when it built its graphs; :func:`pending_restart` names the fields that
   changed since then.
@@ -295,11 +297,30 @@ def read_settings() -> dict[str, Any]:
 # =============================================================================
 
 
-def _key_spec_for(field: str) -> KeySpec | None:
+def _key_spec_for(field: str, provider: str) -> KeySpec | None:
+    """The check for a key field. Some providers share one field with
+    different checks (``dashscope`` and ``dashscope-code``), so the provider
+    the configuration selects wins when it uses this field."""
+    spec = KEY_SPECS.get(provider)
+    if spec is not None and spec.key_field == field:
+        return spec
     for spec in KEY_SPECS.values():
         if spec.key_field == field:
             return spec
     return None
+
+
+def _changed_base_url(spec: KeySpec, changes: dict[str, Any], effective: Any) -> str:
+    """The base URL the saved configuration will use for ``spec``."""
+    if spec.base_url_field in changes:
+        # A new value, or ``None`` (removed): then the environment's or the
+        # provider's default, not the value about to be removed.
+        return (
+            str(changes[spec.base_url_field] or "").strip()
+            or os.environ.get(spec.base_url_env or "", "").strip()
+            or (spec.default_base_url or "")
+        )
+    return configured_base_url(spec, effective)
 
 
 def _check_changed_keys(
@@ -309,7 +330,9 @@ def _check_changed_keys(
 
     Runs before the lock is taken, so the lock is never held for a network
     call. An invalid key rejects the write; an inconclusive check (offline,
-    timeout) keeps it with a warning.
+    timeout) or none available keeps it with a warning. Keys of the custom
+    endpoints are not checked here: their check proves the endpoint, not the
+    key (``test-key`` runs it on request).
     """
     errors: dict[str, str] = {}
     warnings: dict[str, str] = {}
@@ -317,20 +340,17 @@ def _check_changed_keys(
     for name, value in changes.items():
         if name not in API_KEY_FIELDS or not value or value == current.get(name):
             continue
-        spec = _key_spec_for(name)
-        if spec is None or spec.lists_models:
-            continue
         if effective is None:
             effective = get_effective_config()
-        base_url = ""
-        if spec.base_url_field:
-            base_url = changes.get(spec.base_url_field) or configured_base_url(
-                spec, effective
-            )
+        provider = changes.get("provider") or effective.provider
+        spec = _key_spec_for(name, provider)
+        if spec is None or spec.lists_models:
+            continue
+        base_url = _changed_base_url(spec, changes, effective)
         result = run_check(spec, str(value), base_url)
         if result.status == "invalid":
             errors[name] = result.message
-        elif result.status == "inconclusive":
+        elif result.status in ("inconclusive", "unavailable"):
             warnings[name] = _scrub(result.message, str(value))
     return errors, warnings
 
@@ -369,6 +389,10 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
         current = store.read_config_mapping()
     except store.ConfigParseError as e:
         return 409, _unreadable(e)
+    if not changes:
+        # Nothing to change (``{}``, or only ``""`` secrets): write nothing,
+        # so the revision and the file's comments stay as they are.
+        return _unchanged(revision)
     key_errors, warnings = _check_changed_keys(changes, current)
     if key_errors:
         return 400, {"errors": key_errors}
@@ -390,17 +414,31 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
         # program had the file open; nothing was written.
         return 500, {"error": "config_write_failed", "detail": str(e)}
     warnings.update(setting_warnings)
+    return _patched(new_revision, sorted(changes), warnings)
 
+
+def _patched(
+    revision: str | None, changed: list[str], warnings: dict[str, str]
+) -> tuple[int, dict[str, Any]]:
     mapping = store.read_config_mapping()
     shadowed = {n for n, s in config_sources(mapping).items() if s["shadowed"]}
     restart_fields = pending_restart(mapping, shadowed)
     return 200, {
-        "revision": new_revision,
-        "changed": sorted(changes),
+        "revision": revision,
+        "changed": changed,
         "restart_required": bool(restart_fields),
         "restart_fields": restart_fields,
         "warnings": warnings,
     }
+
+
+def _unchanged(expected_revision: Any) -> tuple[int, dict[str, Any]]:
+    """The answer to a ``PATCH`` with nothing to write; a stale ``revision``
+    is still refused, as for any other ``PATCH``."""
+    current = store.revision_of(store.read_config_bytes())
+    if expected_revision is not store.UNSET and expected_revision != current:
+        return 409, {"error": "revision_mismatch", "revision": current}
+    return _patched(current, [], {})
 
 
 def _unreadable(e: store.ConfigParseError) -> dict[str, Any]:
@@ -422,12 +460,17 @@ def _is_http_url(value: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
+def _same_url(a: str, b: str) -> bool:
+    return a.strip().rstrip("/") == b.strip().rstrip("/")
+
+
 def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
     """Run one key check without saving; return ``(status, payload)``.
 
     Without ``key``, the stored effective key (``config.yaml``, the
-    environment or a ``.env``) is tested. Without ``base_url``, the stored
-    base URL or the provider's default is used.
+    environment or a ``.env``) is tested, and only against the stored base
+    URL. Without ``base_url``, the stored base URL or the provider's default
+    is used.
     """
     if not isinstance(body, dict):
         return 400, {"errors": {"body": "expected a JSON object"}}
@@ -453,6 +496,16 @@ def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
         key = (
             str(getattr(effective, spec.key_field, "") or "") if spec.key_field else ""
         )
+        if (
+            key
+            and base_url is not None
+            and not _same_url(base_url, configured_base_url(spec, effective))
+        ):
+            # The stored key goes only to the address it is configured for;
+            # a caller trying another address sends the key it means to use.
+            return 400, {
+                "errors": {"key": "required with a base_url other than the stored one"}
+            }
     if base_url is None:
         base_url = configured_base_url(spec, effective)
 

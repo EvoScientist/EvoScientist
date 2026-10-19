@@ -5,7 +5,8 @@ loading the onboarding wizard. :data:`PROVIDERS` maps each provider to its
 key field, its base URL field and its check; :func:`check_provider_key` runs
 a check and returns a :class:`KeyCheck`.
 
-Every check makes one live request with a 10 s timeout and no retries.
+Every check makes one live request with a 10 s timeout and no retries,
+except Ollama's, which keeps the 5 s of ``validate_ollama_connection``.
 """
 
 from __future__ import annotations

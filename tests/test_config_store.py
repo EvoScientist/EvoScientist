@@ -153,7 +153,8 @@ class TestUpdate:
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(30)
+            assert not t.is_alive(), "a writer is stuck"
         assert not errors
         data = _mapping(config_file)
         assert data["show_thinking"] is False
@@ -373,6 +374,23 @@ def test_config_set_explains_a_refused_value(config_file):
     assert "unknown provider" in " ".join(
         str(c.args[0]) for c in printed.call_args_list
     )
+
+
+def test_config_set_explains_a_write_that_keeps_failing(config_file):
+    from typer.testing import CliRunner
+
+    from EvoScientist.cli.commands import config_app
+
+    config_file.write_text("model: m1\n", encoding="utf-8")
+    with (
+        patch.object(store, "_replace", side_effect=PermissionError("in use")),
+        patch("EvoScientist.cli.commands.console.print") as printed,
+    ):
+        result = CliRunner().invoke(config_app, ["set", "model", "m2"])
+    assert result.exit_code == 1
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "in use" in " ".join(str(c.args[0]) for c in printed.call_args_list)
+    assert _mapping(config_file) == {"model": "m1"}
 
 
 class TestWizard:

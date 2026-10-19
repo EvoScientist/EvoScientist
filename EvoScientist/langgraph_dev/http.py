@@ -247,7 +247,7 @@ async def get_workspace(_request: Request) -> JSONResponse:
 async def get_settings(_request: Request) -> JSONResponse:
     """Return the configuration for the WebUI's wizard and settings page.
 
-    Secret values never leave the server (each reads as ``{"set", "hint"?}``),
+    Secret values are never in the body (each reads as ``{"set", "hint"?}``),
     so no local secret is needed. The body is built by
     :func:`~EvoScientist.langgraph_dev.settings_api.read_settings`.
     """

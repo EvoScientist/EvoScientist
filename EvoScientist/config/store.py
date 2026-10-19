@@ -229,7 +229,8 @@ def update_config_mapping(
     """Apply ``changes`` to the file under the lock; return the new revision.
 
     A ``None`` value removes the key, so its default applies. Keys not in
-    ``changes`` keep their bytes' values, including unknown keys. With
+    ``changes`` keep their values, including unknown keys; the file is
+    written again from the parsed mapping, so comments are not kept. With
     ``expected_revision`` (``None`` = "no file expected"), a file that changed
     since then raises :class:`RevisionMismatchError` and nothing is written.
     """

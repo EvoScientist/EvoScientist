@@ -314,13 +314,13 @@ class TestPatch:
         t = threading.Thread(target=hold)
         t.start()
         try:
-            holding.wait(5)
+            assert holding.wait(5), "the holder never took the lock"
             response = server.patch(
                 "/api/settings", json={"model": "m2"}, headers=secret
             )
         finally:
             done.set()
-            t.join()
+            t.join(10)
         assert response.status_code == 409
         assert response.json()["error"] == "config_locked"
 
@@ -388,6 +388,86 @@ class TestPatch:
                 headers=secret,
             )
         assert check.call_args.args[1:] == ("mm-key", "https://mm.test")
+
+    def test_removed_base_url_checks_the_key_against_the_default(
+        self, server, secret, config_file
+    ):
+        config_file.write_text("minimax_base_url: https://old.test\n", encoding="utf-8")
+        with _no_checks() as check:
+            server.patch(
+                "/api/settings",
+                json={"minimax_api_key": "mm-key", "minimax_base_url": None},
+                headers=secret,
+            )
+        spec = KEY_SPECS["minimax"]
+        assert check.call_args.args[1:] == ("mm-key", spec.default_base_url)
+
+    @pytest.mark.parametrize(
+        ("body", "file", "check"),
+        [
+            ({"provider": "dashscope-code"}, "", "check_dashscope_code_key"),
+            ({}, "provider: dashscope-code\n", "check_dashscope_code_key"),
+            ({}, "provider: dashscope\n", "check_dashscope_key"),
+        ],
+    )
+    def test_a_shared_key_field_uses_the_providers_check(
+        self, server, secret, config_file, body, file, check
+    ):
+        if file:
+            config_file.write_text(file, encoding="utf-8")
+        with _no_checks() as run:
+            server.patch(
+                "/api/settings",
+                json={**body, "dashscope_api_key": "sk-sp-key"},
+                headers=secret,
+            )
+        assert run.call_args.args[0].check == check
+
+    def test_key_without_a_check_is_saved_with_a_warning(
+        self, server, secret, config_file
+    ):
+        with patch.object(
+            settings_api,
+            "run_check",
+            return_value=KeyCheck("unavailable", "No check is available"),
+        ):
+            response = server.patch(
+                "/api/settings", json={"openai_api_key": "sk-x"}, headers=secret
+            )
+        assert response.status_code == 200
+        assert "openai_api_key" in response.json()["warnings"]
+        assert _mapping(config_file)["openai_api_key"] == "sk-x"
+
+    @pytest.mark.parametrize("body", [{}, {"openai_api_key": ""}])
+    def test_nothing_to_change_writes_nothing(self, server, secret, body):
+        response = server.patch("/api/settings", json=body, headers=secret)
+        assert response.status_code == 200
+        assert response.json()["revision"] is None
+        assert response.json()["changed"] == []
+        assert not get_config_path().exists()
+
+    def test_nothing_to_change_keeps_the_file(self, server, secret, config_file):
+        original = "# mine\nmodel: m1  # inline\nopenai_api_key: sk-kept-123\n"
+        config_file.write_text(original, encoding="utf-8")
+        revision = store.revision_of(config_file.read_bytes())
+        response = server.patch(
+            "/api/settings",
+            json={"openai_api_key": "", "revision": revision},
+            headers=secret,
+        )
+        assert response.status_code == 200
+        assert response.json()["revision"] == revision
+        assert config_file.read_text(encoding="utf-8") == original
+
+    def test_nothing_to_change_still_refuses_a_stale_revision(
+        self, server, secret, config_file
+    ):
+        config_file.write_text("model: m1\n", encoding="utf-8")
+        response = server.patch(
+            "/api/settings", json={"revision": "stale"}, headers=secret
+        )
+        assert response.status_code == 409
+        assert response.json()["error"] == "revision_mismatch"
 
     def test_default_workdir_warning(self, server, secret, tmp_path):
         response = server.patch(
@@ -473,6 +553,32 @@ class TestTestKey:
             headers=secret,
         )
         assert response.status_code == 400
+
+    def test_stored_key_is_never_sent_to_another_address(
+        self, server, secret, monkeypatch
+    ):
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-stored-5678")
+        with patch.object(settings_api, "run_check") as check:
+            response = server.post(
+                "/api/settings/test-key",
+                json={"provider": "minimax", "base_url": "https://elsewhere.test/v1"},
+                headers=secret,
+            )
+        assert response.status_code == 400
+        assert "key" in response.json()["errors"]
+        check.assert_not_called()
+
+    def test_stored_key_with_its_stored_address(self, server, secret, monkeypatch):
+        monkeypatch.setenv("MINIMAX_API_KEY", "mm-stored-5678")
+        url = KEY_SPECS["minimax"].default_base_url
+        with _no_checks() as check:
+            response = server.post(
+                "/api/settings/test-key",
+                json={"provider": "minimax", "base_url": url + "/"},
+                headers=secret,
+            )
+        assert response.status_code == 200
+        assert check.call_args.args[1:] == ("mm-stored-5678", url + "/")
 
     def test_ollama_lists_models(self, server, secret):
         with patch(
