@@ -402,6 +402,41 @@ async def test_early_subagent_approval_waits_for_persisted_task_interrupt():
     assert (await graph.aget_state(cfg)).next == ()
 
 
+async def test_checkpointed_interrupt_wait_retries_transient_state_read(monkeypatch):
+    """A transient state read error must not release an uncheckpointed pause."""
+    from types import SimpleNamespace
+
+    from EvoScientist.stream.events import _wait_for_checkpointed_interrupt
+
+    class _TransientStateReadAgent:
+        def __init__(self):
+            self.state_reads = 0
+
+        async def aget_state(self, _config):
+            self.state_reads += 1
+            if self.state_reads == 1:
+                raise RuntimeError("checkpoint temporarily unavailable")
+            return SimpleNamespace(
+                next=("tools",),
+                tasks=(
+                    SimpleNamespace(interrupts=(SimpleNamespace(id="approval-1"),)),
+                ),
+                interrupts=(),
+            )
+
+    monkeypatch.setattr(
+        "EvoScientist.stream.events._INTERRUPT_CHECKPOINT_WAIT_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "EvoScientist.stream.events._INTERRUPT_CHECKPOINT_POLL_SECONDS", 0.001
+    )
+    agent = _TransientStateReadAgent()
+
+    await _wait_for_checkpointed_interrupt(agent, {}, "approval-1")
+
+    assert agent.state_reads == 2
+
+
 @pytest.mark.parametrize("initial_state", ["clean", "unavailable"])
 async def test_resume_timeout_preserves_uncheckpointed_interrupt_state(
     monkeypatch, initial_state

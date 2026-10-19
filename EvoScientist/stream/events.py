@@ -111,16 +111,19 @@ async def _wait_for_checkpointed_interrupt(
         try:
             snapshot = await agent.aget_state(config)
         except Exception:
-            # A state read can race with checkpoint teardown. The stream still
-            # owns the run, so let the caller handle the interrupt normally.
-            return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(_INTERRUPT_CHECKPOINT_POLL_SECONDS, remaining))
+            continue
         if str(interrupt_id) in _snapshot_interrupt_ids(snapshot):
             return
         if not _snapshot_needs_recovery(snapshot):
             return
-        if loop.time() >= deadline:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
             return
-        await asyncio.sleep(_INTERRUPT_CHECKPOINT_POLL_SECONDS)
+        await asyncio.sleep(min(_INTERRUPT_CHECKPOINT_POLL_SECONDS, remaining))
 
 
 def _snapshot_has_resume_interrupt(message: object, snapshot: Any) -> bool:
