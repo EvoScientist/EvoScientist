@@ -40,6 +40,7 @@ from EvoScientist.config import (
 )
 from EvoScientist.config.settings import (
     ENV_ORIGINS_VAR,
+    _same_value,
     config_value_origin,
     env_origins,
 )
@@ -936,8 +937,9 @@ def _server_env_origins(workspace: str, port: str, host: str) -> dict:
         ("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "langgraph_dev_port", port),
         ("EVOSCIENTIST_LANGGRAPH_DEV_HOST", "langgraph_dev_host", host),
     ):
-        if os.environ.get(env_key) == value and env_key not in origins:
-            continue  # the user's own export, passed on unchanged
+        inherited = os.environ.get(env_key)
+        if inherited is not None and _same_value(field, inherited, value):
+            continue
         origins[env_key] = {"source": config_value_origin(field, value)}
     return origins
 

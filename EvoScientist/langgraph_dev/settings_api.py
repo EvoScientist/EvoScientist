@@ -159,14 +159,15 @@ def capture_restart_baseline() -> None:
     """Record the file as the server reads it to build its graphs.
 
     Called before the graphs are built; the first call wins. A file that
-    does not parse is recorded as the defaults the server then runs with.
+    does not parse or cannot be read is recorded as the defaults the server
+    then runs with.
     """
     global _baseline
     if _baseline is not None:
         return
     try:
         mapping = store.read_config_mapping()
-    except store.ConfigParseError:
+    except (store.ConfigParseError, OSError):
         mapping = {}
     _baseline = _file_digests(mapping)
 

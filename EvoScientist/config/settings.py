@@ -1369,7 +1369,7 @@ def env_origins() -> dict[str, dict[str, str]]:
 def _same_value(field: str, a: Any, b: Any) -> bool:
     if field == "default_workdir":
         a, b = (
-            os.path.abspath(os.path.expanduser(str(v))) if v else "" for v in (a, b)
+            os.path.realpath(os.path.expanduser(str(v))) if v else "" for v in (a, b)
         )
     return str(_plain_config_value(a)) == str(_plain_config_value(b))
 
@@ -1380,7 +1380,7 @@ def config_value_origin(field: str, value: Any) -> str:
     value can then only have come from a command-line flag."""
     try:
         mapping = store.read_config_mapping()
-    except store.ConfigError:
+    except (store.ConfigError, OSError):
         mapping = {}
     saved = mapping.get(field)
     if saved is not None and saved != "":

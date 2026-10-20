@@ -27,7 +27,10 @@ from EvoScientist.langgraph_dev import settings_api
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     for env_key in set(_ENV_MAPPINGS.values()):
-        monkeypatch.delenv(env_key, raising=False)
+        # Set first, so teardown also removes what a test's
+        # apply_config_to_env() sets.
+        monkeypatch.setenv(env_key, "")
+        monkeypatch.delenv(env_key)
     monkeypatch.setattr(settings, "_ENV_ORIGINS", {})
     monkeypatch.setattr(settings_api, "_baseline", None)
 
@@ -186,3 +189,43 @@ class TestSources:
         apply_config_to_env(get_effective_config({"auto_approve": True}))
         settings_api.capture_restart_baseline()
         assert settings_api.read_settings()["restart_required"] is False
+
+
+class TestServerRecord:
+    """What start_langgraph_dev records for the workspace, port and host."""
+
+    def test_a_dotenv_port_keeps_its_source(self, tmp_path, monkeypatch):
+        from EvoScientist.langgraph_dev.manager import _server_env_origins
+
+        dotenv = tmp_path / ".env"
+        dotenv.write_text("EVOSCIENTIST_LANGGRAPH_DEV_PORT=6297\n", encoding="utf-8")
+        monkeypatch.setattr(settings, "find_dotenv", lambda *a, **k: str(dotenv))
+        get_effective_config()
+        origins = _server_env_origins(str(tmp_path), "6297", "127.0.0.1")
+        assert origins["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == {
+            "source": "dotenv",
+            "path": str(dotenv),
+        }
+
+    def test_a_symlinked_workdir_reads_file(self, config_file, tmp_path):
+        from EvoScientist.langgraph_dev.manager import _server_env_origins
+
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are not available")
+        config_file.write_text(
+            json.dumps({"default_workdir": str(link)}), encoding="utf-8"
+        )
+        origins = _server_env_origins(str(real.resolve()), "6174", "127.0.0.1")
+        assert origins["EVOSCIENTIST_WORKSPACE_DIR"] == {"source": "file"}
+
+
+def test_an_unreadable_config_file_does_not_stop_a_start(config_file):
+    config_file.mkdir()
+    apply_config_to_env(get_effective_config())
+    settings_api.capture_restart_baseline()
+    assert settings_api._baseline is not None
