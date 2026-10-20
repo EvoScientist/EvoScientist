@@ -1,11 +1,41 @@
 """Shared fixtures for EvoScientist tests."""
 
 import os
+import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 _NONEXISTENT_DOTENV = str(Path(__file__).with_name(".pytest-dotenv-does-not-exist"))
+_test_home: Path | None = None
+
+
+def pytest_configure(config):
+    """Point the home folder at an empty one before EvoScientist is imported.
+
+    ``EvoScientist.paths`` resolves the data and config folders from it at
+    import, and the import itself migrates files there, so a fixture would
+    act too late. ``XDG_CONFIG_HOME`` and ``EVOSCIENTIST_DATA_DIR`` would
+    override it, so they go too.
+    """
+    global _test_home
+    if "EvoScientist" in sys.modules:
+        raise pytest.UsageError(
+            "EvoScientist was imported before tests/conftest.py could isolate "
+            "the home folder; import it inside fixtures or tests instead"
+        )
+    _test_home = Path(tempfile.mkdtemp(prefix="evosci-test-home-"))
+    os.environ["HOME"] = str(_test_home)
+    os.environ["USERPROFILE"] = str(_test_home)
+    for name in ("XDG_CONFIG_HOME", "EVOSCIENTIST_DATA_DIR"):
+        os.environ.pop(name, None)
+
+
+def pytest_unconfigure(config):
+    if _test_home is not None:
+        shutil.rmtree(_test_home, ignore_errors=True)
 
 
 @pytest.fixture
