@@ -14,7 +14,7 @@ import questionary
 from prompt_toolkit.formatted_text import FormattedText
 from questionary import Choice
 
-from ...llm import get_models_for_provider
+from ...llm import DEFAULT_MODEL, get_models_for_provider
 from ...llm.ollama_discovery import validate_ollama_connection
 from ...paths import Workspace
 from ..settings import EvoScientistConfig
@@ -867,7 +867,8 @@ def _step_model(
     # co-pilot model on a re-run) that isn't a registry model is a custom name:
     # preselect "Type a model name..." and prefill it. A plain ``config.model``
     # that just isn't in the current provider's list (e.g. the provider was
-    # changed) falls back to the first model, NOT the custom entry.
+    # changed, or the model was removed) falls back to the default model when
+    # the provider lists it, else the first model, NOT the custom entry.
     custom_default = (
         default_value if default_value and default_value not in provider_models else ""
     )
@@ -875,6 +876,8 @@ def _step_model(
         default = model_default
     elif custom_default:
         default = _CUSTOM_SENTINEL
+    elif DEFAULT_MODEL in provider_models:
+        default = DEFAULT_MODEL
     else:
         default = provider_models[0]
 

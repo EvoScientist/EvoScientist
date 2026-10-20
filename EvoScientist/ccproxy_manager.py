@@ -211,14 +211,20 @@ def start_ccproxy(port: int) -> subprocess.Popen:
     )
 
     deadline = time.monotonic() + _CCPROXY_HEALTH_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"ccproxy exited immediately with code {proc.returncode}"
-            )
-        if is_ccproxy_running(port):
-            return proc
-        time.sleep(0.3)
+    try:
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"ccproxy exited immediately with code {proc.returncode}"
+                )
+            if is_ccproxy_running(port):
+                return proc
+            time.sleep(0.3)
+    except BaseException:
+        # Ctrl+C or an error during the wait: the caller never gets the
+        # handle, so nobody else could stop this process.
+        stop_ccproxy(proc)
+        raise
 
     # Timed out — clean up
     proc.terminate()
@@ -275,8 +281,12 @@ def setup_ccproxy_env(port: int) -> None:
     Always overrides existing values — when this function is called,
     we've decided to use ccproxy, so env must point to it.
     """
+    from .config.settings import record_env_origin
+
     os.environ["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{port}/claude"
     os.environ["ANTHROPIC_API_KEY"] = "ccproxy-oauth"
+    record_env_origin("ANTHROPIC_BASE_URL", "ccproxy")
+    record_env_origin("ANTHROPIC_API_KEY", "ccproxy")
 
 
 # =============================================================================

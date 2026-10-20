@@ -17,8 +17,7 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Qwen 3.6 open-source variants — exceptions to the ``qwen3.6`` family.
     "qwen3.6-27b": 262_000,
     "qwen3.6-35b-a3b": 262_000,
-    # Qwen 3.8 closed-source tiers — Max flagship and Flash (1M).
-    "qwen3.8-max": 1_000_000,
+    # Qwen 3.8 Flash (1M); Max and its dated snapshots are covered by a family below.
     "qwen3.8-flash": 1_000_000,
     # Qwen 3.7 closed-source tiers — Max flagship and Plus (1M).
     "qwen3.7-max": 1_000_000,
@@ -58,6 +57,8 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("gpt-5.5", 1_050_000),
     # Google Gemini 3.x family — flash, flash-lite, pro (1.05M). Excludes 2.5.
     ("gemini-3", 1_050_000),
+    # Google Gemini 4 family — argon, future variants (1M).
+    ("gemini-4", 1_048_576),
     # Moonshot Kimi K3 — 1M context; covers bare ``kimi-k3`` (native Moonshot),
     # OpenRouter ``moonshotai/kimi-k3``, and dated slugs like ``kimi-k3-20260715``.
     ("kimi-k3", 1_048_576),
@@ -76,6 +77,10 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("mimo-v2.5", 1_050_000),
     # Meta Muse Spark family — 1.1/1.2/1.3 (OpenRouter ``meta/muse-spark-*``, 1M).
     ("muse-spark", 1_048_576),
+    # Meta Muse Wonder (OpenRouter ``meta/muse-wonder``, 1M).
+    ("muse-wonder", 1_048_576),
+    # Qwen 3.8 Max — flagship and dated snapshots such as ``-0902`` (1M).
+    ("qwen3.8-max", 1_000_000),
     # Qwen 3.6 closed-source family — flash, plus, max-preview, etc.
     # Open-source ``-<size>b`` variants are 262K — listed in the dict above.
     ("qwen3.6", 1_000_000),

@@ -633,6 +633,28 @@ def remember_channel_origin(thread_id: str | None, msg: ChannelMessage) -> None:
         )
 
 
+def restore_channel_origin(
+    thread_id: str,
+    *,
+    channel_type: str,
+    chat_id: str,
+    sender: str,
+    metadata: dict | None,
+) -> None:
+    """Record a channel origin read back after a restart (no inbound message).
+
+    Serve uses it for a conversation armed for proactive pushes, whose origin
+    it stored in checkpoint metadata. A later channel turn overwrites it.
+    """
+    with _thread_channel_origins_lock:
+        _thread_channel_origins[thread_id] = _ChannelOrigin(
+            channel_type=channel_type,
+            chat_id=chat_id,
+            sender=sender,
+            metadata=dict(metadata) if metadata else None,
+        )
+
+
 def get_channel_origin(thread_id: str | None) -> _ChannelOrigin | None:
     """Return the channel origin remembered for ``thread_id``, or ``None``."""
     if not thread_id:

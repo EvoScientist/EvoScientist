@@ -11,171 +11,30 @@ import sys
 
 import questionary
 
+from ..provider_keys import configured_base_url, provider_spec, run_check
 from ..settings import EvoScientistConfig
 from .style import QMARK, WIZARD_STYLE, console
-from .validators import (
-    validate_anthropic_key,
-    validate_atlascloud_key,
-    validate_dashscope_code_key,
-    validate_dashscope_key,
-    validate_deepseek_key,
-    validate_google_key,
-    validate_kimi_key,
-    validate_minimax_key,
-    validate_moonshot_key,
-    validate_novita_key,
-    validate_nvidia_key,
-    validate_openai_key,
-    validate_openrouter_key,
-    validate_opper_key,
-    validate_requesty_key,
-    validate_siliconflow_key,
-    validate_volcengine_key,
-    validate_xiaomi_key,
-    validate_zhipu_key,
-)
+from .validators import as_pair
 
 
 def _provider_key_info(config: EvoScientistConfig, provider: str):
-    """Return (display_name, current_value, validate_fn) for a provider."""
-    mapping = {
-        "anthropic": (
-            "Anthropic",
-            config.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY", ""),
-            validate_anthropic_key,
-        ),
-        "minimax": (
-            "MiniMax",
-            config.minimax_api_key or os.environ.get("MINIMAX_API_KEY", ""),
-            lambda key: validate_minimax_key(
-                key,
-                base_url=config.minimax_base_url.strip()
-                or os.environ.get("MINIMAX_BASE_URL", "").strip()
-                or "https://api.minimaxi.com/anthropic",
-            ),
-        ),
-        "nvidia": (
-            "NVIDIA",
-            config.nvidia_api_key or os.environ.get("NVIDIA_API_KEY", ""),
-            validate_nvidia_key,
-        ),
-        "google-genai": (
-            "Google",
-            config.google_api_key or os.environ.get("GOOGLE_API_KEY", ""),
-            validate_google_key,
-        ),
-        "siliconflow": (
-            "SiliconFlow",
-            config.siliconflow_api_key or os.environ.get("SILICONFLOW_API_KEY", ""),
-            validate_siliconflow_key,
-        ),
-        "openrouter": (
-            "OpenRouter",
-            config.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", ""),
-            validate_openrouter_key,
-        ),
-        "atlascloud": (
-            "Atlas Cloud",
-            config.atlascloud_api_key or os.environ.get("ATLASCLOUD_API_KEY", ""),
-            validate_atlascloud_key,
-        ),
-        "requesty": (
-            "Requesty",
-            config.requesty_api_key or os.environ.get("REQUESTY_API_KEY", ""),
-            validate_requesty_key,
-        ),
-        "opper": (
-            "Opper",
-            config.opper_api_key or os.environ.get("OPPER_API_KEY", ""),
-            validate_opper_key,
-        ),
-        "novita": (
-            "Novita",
-            config.novita_api_key or os.environ.get("NOVITA_API_KEY", ""),
-            validate_novita_key,
-        ),
-        "deepseek": (
-            "DeepSeek",
-            config.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", ""),
-            validate_deepseek_key,
-        ),
-        "zhipu": (
-            "ZhipuAI",
-            config.zhipu_api_key or os.environ.get("ZHIPU_API_KEY", ""),
-            validate_zhipu_key,
-        ),
-        "zhipu-code": (
-            "ZhipuAI CodePlan",
-            config.zhipu_api_key or os.environ.get("ZHIPU_API_KEY", ""),
-            validate_zhipu_key,
-        ),
-        "volcengine": (
-            "Volcengine",
-            config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
-            validate_volcengine_key,
-        ),
-        "volcengine-code": (
-            "Volcengine Coding Plan",
-            config.volcengine_api_key or os.environ.get("VOLCENGINE_API_KEY", ""),
-            validate_volcengine_key,
-        ),
-        "dashscope": (
-            "DashScope",
-            config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),
-            validate_dashscope_key,
-        ),
-        "dashscope-code": (
-            "DashScope Coding Plan",
-            config.dashscope_api_key or os.environ.get("DASHSCOPE_API_KEY", ""),
-            validate_dashscope_code_key,
-        ),
-        "moonshot": (
-            "Moonshot",
-            config.moonshot_api_key or os.environ.get("MOONSHOT_API_KEY", ""),
-            validate_moonshot_key,
-        ),
-        "kimi-coding": (
-            "Kimi Coding Plan",
-            config.kimi_api_key or os.environ.get("KIMI_API_KEY", ""),
-            validate_kimi_key,
-        ),
-        "xiaomi": (
-            "Xiaomi MiMo",
-            config.mimo_api_key or os.environ.get("MIMO_API_KEY", ""),
-            validate_xiaomi_key,
-        ),
-        "xiaomi-token-plan": (
-            "Xiaomi MiMo Token Plan",
-            config.mimo_token_plan_api_key
-            or os.environ.get("MIMO_TOKEN_PLAN_API_KEY", ""),
-            lambda key: validate_xiaomi_key(
-                key,
-                base_url=config.mimo_token_plan_base_url.strip()
-                or os.environ.get("MIMO_TOKEN_PLAN_BASE_URL", "").strip()
-                or "https://token-plan-cn.xiaomimimo.com/anthropic",
-            ),
-        ),
-        "custom-openai": (
-            "OpenAI-compatible",
-            config.custom_openai_api_key or os.environ.get("CUSTOM_OPENAI_API_KEY", ""),
-            None,
-        ),
-        "custom-anthropic": (
-            "Custom Anthropic",
-            config.custom_anthropic_api_key
-            or os.environ.get("CUSTOM_ANTHROPIC_API_KEY", ""),
-            None,
-        ),
-        "ollama": ("Ollama", "__no_key__", None),
-    }
-    return mapping.get(
-        provider,
-        (
-            "OpenAI",
-            config.openai_api_key or os.environ.get("OPENAI_API_KEY", ""),
-            validate_openai_key,
-        ),
-    )
+    """Return (display_name, current_value, validate_fn) for a provider.
+
+    ``validate_fn`` takes a key and returns ``(is_valid, message)``; it is
+    ``None`` for Ollama and the custom endpoints, which the wizard sets up
+    through their base URL. Raises ``KeyError`` for an unknown provider.
+    """
+    spec = provider_spec(provider)
+    if spec.key_field is None:
+        return spec.label, "__no_key__", None
+    current = getattr(config, spec.key_field) or os.environ.get(spec.key_env, "")
+    if spec.lists_models:
+        return spec.label, current, None
+
+    def validate_fn(key: str) -> tuple[bool, str]:
+        return as_pair(run_check(spec, key, configured_base_url(spec, config)))
+
+    return spec.label, current, validate_fn
 
 
 def _prompt_and_validate_api_key(

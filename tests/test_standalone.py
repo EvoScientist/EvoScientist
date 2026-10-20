@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from types import SimpleNamespace
 
@@ -9,6 +10,16 @@ import pytest
 
 import EvoScientist.channels.standalone as standalone
 from EvoScientist.paths import Workspace
+
+
+@pytest.fixture(autouse=True)
+def _restore_http_log_levels():
+    """Reset the process-global logger levels run_standalone sets after every test."""
+    loggers = [logging.getLogger(n) for n in ("httpx", "httpcore", "telegram")]
+    saved = [lg.level for lg in loggers]
+    yield
+    for lg, level in zip(loggers, saved, strict=False):
+        lg.setLevel(level)
 
 
 def _patch_manager(monkeypatch, *, gateway_backend, default_workdir):
@@ -381,3 +392,28 @@ def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
     standalone.run_standalone(channel=None, bus=None, use_agent=True)
 
     assert seen == ["http://127.0.0.1:8000/claude"]
+
+
+def test_run_standalone_quiets_httpx(monkeypatch):
+    """HTTP client logs must not expose channel tokens in request URLs."""
+    leaking_level = {
+        "httpx": logging.INFO,
+        "httpcore": logging.INFO,
+        "telegram": logging.DEBUG,
+    }
+    for name in leaking_level:
+        logging.getLogger(name).setLevel(logging.DEBUG)
+
+    enabled_at_start: dict[str, bool] = {}
+
+    def _run(coro):
+        # The channel's first request happens inside asyncio.run.
+        for name, level in leaking_level.items():
+            enabled_at_start[name] = logging.getLogger(name).isEnabledFor(level)
+        coro.close()
+
+    monkeypatch.setattr(standalone.asyncio, "run", _run)
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=False)
+
+    assert enabled_at_start == dict.fromkeys(leaking_level, False)

@@ -39,7 +39,7 @@ import click
 
 from . import uv_tool
 from .setup.download import _NETWORK_ERRORS
-from .setup.protocol import Emitter, StageError, make_event
+from .setup.protocol import Emitter, StageError, make_event, stdin_is_pipe
 
 logger = logging.getLogger(__name__)
 
@@ -721,14 +721,6 @@ def running_from_env() -> list[dict[str, Any]]:
     return found
 
 
-def _stdin_is_pipe() -> bool:
-    try:
-        mode = os.fstat(sys.stdin.fileno()).st_mode
-    except (OSError, ValueError, AttributeError):
-        return False
-    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
-
-
 def _reader_gone() -> bool:
     """True once the program reading stdout (a pipe or a socket) has closed
     it."""
@@ -800,7 +792,7 @@ def wait_until_free(
     stdin that is not a pipe), and changes nothing. With *skip_server*, the
     recorded server and its children are not waited for."""
     cancel = tmp / "cancel"
-    unattended = not _stdin_is_pipe() if opts.json else not sys.stdin.isatty()
+    unattended = not stdin_is_pipe() if opts.json else not sys.stdin.isatty()
     last: list[int] | None = None
     blockers: list[dict[str, Any]] = []
 

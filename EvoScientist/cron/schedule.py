@@ -201,16 +201,32 @@ def create_cron(
     input: dict[str, Any],
     metadata: dict[str, str],
     timezone: str | None,
+    thread_id: str | None = None,
+    multitask_strategy: str | None = None,
+    durability: str | None = None,
 ) -> Cron:
-    """Create a cron of *workspace*: tagged with it, and its runs work in it."""
-    return client.crons.create(
-        assistant_id=assistant_id,
-        schedule=schedule,
-        input=input,
-        metadata={**metadata, "workspace_dir": workspace.key},
-        config=run_config(workspace),
-        timezone=timezone,
-    )
+    """Create a cron of *workspace*: tagged with it, and its runs work in it.
+
+    Without *thread_id* every run gets a fresh thread, which the runtime
+    deletes after the run. With it the cron is bound to that existing thread,
+    so its runs share one state; *multitask_strategy* (``"reject"`` keeps runs
+    from overlapping) applies only then. *durability* sets how often a run
+    checkpoints (``"exit"``: once, at the end).
+    """
+    kwargs: dict[str, Any] = {
+        "schedule": schedule,
+        "input": input,
+        "metadata": {**metadata, "workspace_dir": workspace.key},
+        "config": run_config(workspace),
+        "timezone": timezone,
+    }
+    if multitask_strategy is not None:
+        kwargs["multitask_strategy"] = multitask_strategy
+    if durability is not None:
+        kwargs["durability"] = durability
+    if thread_id is not None:
+        return client.crons.create_for_thread(thread_id, assistant_id, **kwargs)
+    return client.crons.create(assistant_id=assistant_id, **kwargs)
 
 
 def _require_own(cron: Cron, workspace: Workspace) -> str:

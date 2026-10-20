@@ -206,6 +206,24 @@ def test_grader_strategy_is_tool_calling_for_openai_on_openrouter():
         assert isinstance(_grader_strategy(_openrouter(model_id)), ToolStrategy)
 
 
+def test_grader_strategy_for_muse_spark_and_qwen_on_openrouter():
+    """Muse Spark answers only through JSON mode, Qwen only through a tool call.
+
+    ``muse-wonder`` stays unmapped: its JSON mode runs away, so it fails fast instead.
+    """
+    from langchain.agents.structured_output import ProviderStrategy, ToolStrategy
+
+    from EvoScientist.middleware.rubric import _grader_strategy
+
+    assert isinstance(
+        _grader_strategy(_openrouter("meta/muse-spark-open")), ProviderStrategy
+    )
+    assert isinstance(
+        _grader_strategy(_openrouter("qwen/qwen3.8-max-0902")), ToolStrategy
+    )
+    assert _grader_strategy(_openrouter("meta/muse-wonder")) is None
+
+
 def test_grader_strategy_defers_to_langchain_elsewhere():
     from langchain_anthropic import ChatAnthropic
 
@@ -214,7 +232,7 @@ def test_grader_strategy_defers_to_langchain_elsewhere():
     assert (
         _grader_strategy(ChatAnthropic(model="claude-haiku-4-5", api_key="k")) is None
     )
-    assert _grader_strategy(_openrouter("qwen/qwen3.8-flash")) is None
+    assert _grader_strategy(_openrouter("z-ai/glm-5.3")) is None
 
 
 def test_scheduler_grader_is_built_with_the_explicit_strategy(tmp_path):

@@ -7,7 +7,9 @@ Every config field must fall into exactly one of two binding regimes:
    server serves the construction-time value until restart; drift sets the
    restart hint. New dataclass fields land here automatically: the fingerprint
    iterates all fields, so the default failure mode is a spurious restart
-   hint, never silent staleness.
+   hint, never silent staleness. The fields in ``_FINGERPRINT_FILE_FIELDS``
+   are covered through ``config.yaml``: the server reads them from the file,
+   so a change there counts and a command-line override does not.
 2. **excluded with a named channel** — the field never reaches graph
    construction in the server process because it configures a client-side
    process or is delivered per call/per run by another channel. Every
@@ -23,10 +25,11 @@ from __future__ import annotations
 
 from dataclasses import fields as dataclass_fields
 
-from EvoScientist.config.settings import EvoScientistConfig
+from EvoScientist.config.settings import EvoScientistConfig, save_config
 from EvoScientist.langgraph_dev.manager import (
     _FINGERPRINT_EXCLUDED_FIELDS,
     _FINGERPRINT_EXCLUDED_PREFIXES,
+    _FINGERPRINT_FILE_FIELDS,
     _server_config_fingerprint,
 )
 
@@ -168,6 +171,8 @@ class TestFingerprintCoverage:
         baseline = _server_config_fingerprint(EvoScientistConfig())
         offenders = []
         for field_name in _covered_field_names():
+            if field_name in _FINGERPRINT_FILE_FIELDS:
+                continue  # covered through the file, below
             cfg = EvoScientistConfig()
             setattr(cfg, field_name, _mutate(getattr(cfg, field_name)))
             if _server_config_fingerprint(cfg) == baseline:
@@ -177,6 +182,28 @@ class TestFingerprintCoverage:
             f" whose mutation leaves the fingerprint unchanged:"
             f" {sorted(offenders)}."
         )
+
+    def test_file_fields_change_fingerprint_through_the_file_only(self):
+        """A command-line override of these fields never reaches the server,
+        which reads them from config.yaml; a change in the file does."""
+        baseline = _server_config_fingerprint(EvoScientistConfig())
+        for field_name in sorted(_FINGERPRINT_FILE_FIELDS):
+            overridden = EvoScientistConfig()
+            setattr(overridden, field_name, _mutate(getattr(overridden, field_name)))
+            assert _server_config_fingerprint(overridden) == baseline, field_name
+
+            saved = EvoScientistConfig()
+            setattr(saved, field_name, _mutate(getattr(saved, field_name)))
+            save_config(saved)
+            try:
+                assert _server_config_fingerprint(EvoScientistConfig()) != baseline, (
+                    field_name
+                )
+            finally:
+                save_config(EvoScientistConfig())
+
+    def test_file_fields_are_covered_not_excluded(self):
+        assert _FINGERPRINT_FILE_FIELDS <= set(_covered_field_names())
 
     def test_excluded_fields_leave_fingerprint_unchanged(self):
         baseline = _server_config_fingerprint(EvoScientistConfig())
