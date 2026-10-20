@@ -1697,22 +1697,25 @@ class TestExecuteTimeout:
             virtual_mode=True,
             env={"EVOSCI_TEST_PYTHON": sys.executable},
         )
+        # The timeout must leave Python time to fork and detach on a busy
+        # runner; the descendant then holds the pipes past it and the grace.
+        timeout = 2.0
         code = (
             "import os,time; "
             "pid=os.fork(); "
-            "os._exit(0) if pid else (os.setsid(), time.sleep(1), os._exit(0))"
+            "os._exit(0) if pid else (os.setsid(), time.sleep(4), os._exit(0))"
         )
         # Pass the absolute executable through the environment so virtual-path
         # normalization does not reinterpret it as a workspace path.
         command = f'"$EVOSCI_TEST_PYTHON" -c {shlex.quote(code)}'
 
         started = time.monotonic()
-        response = backend.execute(command, timeout=0.05)
+        response = backend.execute(command, timeout=timeout)
         elapsed = time.monotonic() - started
 
         assert response.exit_code == 124
         assert response.truncated is True
-        assert elapsed < 0.4
+        assert elapsed < timeout + 1.0
 
 
 def test_active_shell_registry_lock_allows_signal_handler_reentry():
