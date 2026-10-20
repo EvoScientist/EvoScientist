@@ -227,6 +227,17 @@ def test_run_standalone_does_not_look_at_the_sign_in_in_api_key_mode(
     assert status_calls == []
 
 
+@pytest.fixture(autouse=True)
+def _no_health_server(monkeypatch):
+    """Keep the runner off 0.0.0.0:8080; a forced exit never stops the server."""
+    from EvoScientist.channels.channel_manager import ChannelManager
+
+    async def _noop(self):
+        return None
+
+    monkeypatch.setattr(ChannelManager, "start_health", _noop)
+
+
 class _SigintChannel(QueueFakeChannel):
     """Fake channel that schedules SIGINT once its worker is running."""
 
@@ -543,6 +554,54 @@ def test_ctrl_c_while_turns_settle_still_closes_code_interpreters(
         assert interpreter._registry.get_if_exists("slow-turn") is None
     finally:
         interpreter._registry.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sleep")
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_sigint_stops_a_shell_command_the_turn_is_running(monkeypatch, tmp_path):
+    """Ctrl+C kills the shell command an in-process turn is running."""
+    from EvoScientist.backends import CustomSandboxBackend
+
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
+    result = {}
+
+    def _tool() -> None:
+        result["resp"] = backend.execute("sleep 15")
+
+    class _ToolConsumer:
+        def __init__(self, **_kwargs) -> None:
+            self.metrics = {}
+
+        async def run(self) -> None:
+            threading.Timer(0.5, signal.raise_signal, [signal.SIGINT]).start()
+            await asyncio.create_task(asyncio.to_thread(_tool))
+
+        async def stop(self) -> None:
+            pass
+
+    async def _agent(_workspace):
+        return object()
+
+    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
+    monkeypatch.setattr(standalone, "InboundConsumer", _ToolConsumer)
+    monkeypatch.setattr(
+        "EvoScientist.gateway.create_runtime_gateways_for_config",
+        lambda *a, **k: SimpleNamespace(graph_gateway=None),
+    )
+
+    started = time.monotonic()
+    asyncio.run(
+        standalone._async_main(
+            QueueFakeChannel(), MessageBus(), True, False, workspace=Workspace(tmp_path)
+        )
+    )
+
+    assert time.monotonic() - started < 10
+    assert result["resp"].exit_code == 130
 
 
 async def test_stop_during_start_still_cleans_what_start_opened():
