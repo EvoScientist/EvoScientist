@@ -545,6 +545,42 @@ def test_ctrl_c_while_turns_settle_still_closes_code_interpreters(
         interpreter._registry.close()
 
 
+async def test_stop_during_start_still_cleans_what_start_opened():
+    """A stop() during start() still closes what start() opens afterwards."""
+    gate = asyncio.Event()
+
+    class _Channel(QueueFakeChannel):
+        stop = Channel.stop
+        receive = Channel.receive
+
+        def __init__(self):
+            super().__init__()
+            self.opened = self.closed = 0
+            self._resource = None
+
+        async def start(self):
+            await gate.wait()
+            self._resource = object()
+            self.opened += 1
+            self._running = True
+
+        async def _cleanup(self):
+            if self._resource is not None:
+                self._resource = None
+                self.closed += 1
+
+    channel = _Channel()
+    task = asyncio.create_task(channel.run())
+    await asyncio.sleep(0)
+    await channel.stop()
+    gate.set()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert (channel.opened, channel.closed) == (1, 1)
+
+
 def test_run_standalone_quiets_httpx(monkeypatch):
     """HTTP client logs must not expose channel tokens in request URLs."""
     leaking_level = {
