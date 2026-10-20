@@ -10,7 +10,8 @@ the routes run them in a thread.
   online (except the custom endpoints'), and writes through
   :func:`~EvoScientist.config.settings.set_config_values`.
 - :func:`check_key_request` runs one key check without saving anything. A
-  stored key is only sent to its stored base URL.
+  stored key is only sent to its stored base URL, and :func:`patch_settings`
+  changes a base URL only together with its stored key.
 - :func:`capture_restart_baseline` records the file as the server read it
   when it built its graphs; :func:`pending_restart` names the fields that
   changed since then.
@@ -401,6 +402,48 @@ def _check_changed_keys(
     return errors, warnings
 
 
+# Base URL field -> the key field whose key is sent to it.
+_KEYED_BASE_URLS = {
+    spec.base_url_field: spec.key_field
+    for spec in KEY_SPECS.values()
+    if spec.base_url_field and spec.key_field
+}
+
+
+def _base_url_errors(
+    changes: dict[str, Any], current: dict[str, Any]
+) -> dict[str, str]:
+    """A base URL that changes while a key is stored for it needs that key in
+    the same ``PATCH`` (a new key, or ``null`` to remove it). Otherwise a
+    later ``test-key`` without ``key`` would send the stored key to the new
+    address. A key from the environment cannot be replaced that way, so the
+    change is refused."""
+    errors: dict[str, str] = {}
+    stored = None
+    sources: dict[str, dict[str, Any]] = {}
+    for base_field, key_field in _KEYED_BASE_URLS.items():
+        if base_field not in changes or _same_url(
+            str(changes[base_field] or ""), str(current.get(base_field) or "")
+        ):
+            continue
+        if stored is None:
+            stored = _stored_config()
+            sources = config_sources(current)
+        if not getattr(stored, key_field, ""):
+            continue
+        if sources[key_field]["shadowed"]:
+            errors[base_field] = (
+                f"{key_field} comes from the environment and would be sent to "
+                f"the new address; change {base_field} with EvoSci config set"
+            )
+        elif key_field not in changes:
+            errors[base_field] = (
+                f"send {key_field} too (a new key, or null to remove it), so "
+                "the stored key is not sent to the new address"
+            )
+    return errors
+
+
 _EXPECTED = {
     bool: "expected true or false",
     int: "expected an integer",
@@ -485,6 +528,8 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
         # Nothing to change (``{}``, or only ``""`` secrets): write nothing,
         # so the revision and the file's comments stay as they are.
         return _unchanged(revision)
+    if url_errors := _base_url_errors(changes, current):
+        return 400, {"errors": url_errors}
     key_errors, warnings = _check_changed_keys(changes, current)
     if key_errors:
         return 400, {"errors": key_errors}
@@ -559,6 +604,19 @@ def _same_url(a: str, b: str) -> bool:
     return a.strip().rstrip("/") == b.strip().rstrip("/")
 
 
+def _stored_config() -> EvoScientistConfig:
+    """The configuration a check without ``key`` uses: the effective one,
+    with each variable the server copied from the file at start read from
+    the file as it is now."""
+    effective = get_effective_config()
+    saved = load_config()
+    for field, env_key in _ENV_MAPPINGS.items():
+        origin = env_origin(env_key)
+        if origin is not None and origin["source"] in ("file", "default"):
+            setattr(effective, field, getattr(saved, field))
+    return effective
+
+
 def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
     """Run one key check without saving; return ``(status, payload)``.
 
@@ -588,12 +646,7 @@ def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
         return 400, {"errors": {"key": "expected a string"}}
     effective = None
     if key is None or base_url is None:
-        effective = get_effective_config()
-        saved = load_config()
-        for field, env_key in _ENV_MAPPINGS.items():
-            origin = env_origin(env_key)
-            if origin is not None and origin["source"] in ("file", "default"):
-                setattr(effective, field, getattr(saved, field))
+        effective = _stored_config()
     if key is None:
         key = (
             str(getattr(effective, spec.key_field, "") or "") if spec.key_field else ""

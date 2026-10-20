@@ -908,3 +908,83 @@ class TestTestKeyStoredValues:
                 headers=secret,
             )
         assert check.call_args.args[1] == "sk-or-saved-2222"
+
+
+class TestBaseUrlNeedsItsKey:
+    """A stored key goes only to the address it was stored for, across
+    requests too."""
+
+    def test_new_base_url_without_the_key_writes_nothing(
+        self, server, secret, config_file
+    ):
+        config_file.write_text(
+            "minimax_api_key: sk-stored-minimax-123456\n", encoding="utf-8"
+        )
+        before = config_file.read_bytes()
+        with _no_checks() as check:
+            response = server.patch(
+                "/api/settings",
+                json={"minimax_base_url": "https://evil.test"},
+                headers=secret,
+            )
+            server.post(
+                "/api/settings/test-key", json={"provider": "minimax"}, headers=secret
+            )
+        assert response.status_code == 400
+        assert list(response.json()["errors"]) == ["minimax_base_url"]
+        assert config_file.read_bytes() == before
+        assert check.call_args.args[2] != "https://evil.test"
+
+    @pytest.mark.parametrize("key", ["sk-new-minimax-123456", None])
+    def test_new_base_url_with_a_new_key_or_null(
+        self, server, secret, config_file, key
+    ):
+        config_file.write_text(
+            "minimax_api_key: sk-stored-minimax-123456\n", encoding="utf-8"
+        )
+        with _no_checks():
+            response = server.patch(
+                "/api/settings",
+                json={"minimax_base_url": "https://other.test", "minimax_api_key": key},
+                headers=secret,
+            )
+        assert response.status_code == 200
+        data = _mapping(config_file)
+        assert data["minimax_base_url"] == "https://other.test"
+        assert data.get("minimax_api_key") == key
+
+    def test_new_base_url_without_a_stored_key(self, server, secret, config_file):
+        response = server.patch(
+            "/api/settings",
+            json={"custom_openai_base_url": "https://llm.test/v1"},
+            headers=secret,
+        )
+        assert response.status_code == 200
+
+    def test_same_base_url_sent_back(self, server, secret, config_file):
+        config_file.write_text(
+            "custom_openai_api_key: sk-custom-1234567890\n"
+            "custom_openai_base_url: https://llm.test/v1/\n",
+            encoding="utf-8",
+        )
+        response = server.patch(
+            "/api/settings",
+            json={"custom_openai_base_url": "https://llm.test/v1"},
+            headers=secret,
+        )
+        assert response.status_code == 200
+
+    def test_key_from_the_environment(self, server, secret, config_file, monkeypatch):
+        monkeypatch.setenv(_ENV_MAPPINGS["minimax_api_key"], "sk-env-minimax-123456")
+        with _no_checks():
+            response = server.patch(
+                "/api/settings",
+                json={
+                    "minimax_base_url": "https://other.test",
+                    "minimax_api_key": "sk-new-minimax-123456",
+                },
+                headers=secret,
+            )
+        assert response.status_code == 400
+        assert "environment" in response.json()["errors"]["minimax_base_url"]
+        assert not config_file.exists()
