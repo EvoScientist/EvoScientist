@@ -26,11 +26,6 @@ from EvoScientist.langgraph_dev import settings_api
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    for env_key in set(_ENV_MAPPINGS.values()):
-        # Set first, so teardown also removes what a test's
-        # apply_config_to_env() sets.
-        monkeypatch.setenv(env_key, "")
-        monkeypatch.delenv(env_key)
     monkeypatch.setattr(settings, "_ENV_ORIGINS", {})
     monkeypatch.setattr(settings_api, "_baseline", None)
 

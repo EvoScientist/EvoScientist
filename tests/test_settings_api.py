@@ -22,14 +22,9 @@ from EvoScientist.langgraph_dev.http import app
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    """No config-mapped variable from the developer's shell, a fresh baseline."""
+    """A fresh env-origin record and restart baseline."""
     from EvoScientist.config import settings
 
-    for env_key in set(_ENV_MAPPINGS.values()):
-        # Set first, so teardown also removes what a test's
-        # apply_config_to_env() sets.
-        monkeypatch.setenv(env_key, "")
-        monkeypatch.delenv(env_key)
     monkeypatch.setattr(settings, "_ENV_ORIGINS", {})
     monkeypatch.setattr(settings_api, "_baseline", None)
 

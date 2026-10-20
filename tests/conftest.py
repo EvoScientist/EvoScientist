@@ -1,7 +1,10 @@
 """Shared fixtures for EvoScientist tests."""
 
+import errno
+import ipaddress
 import os
 import shutil
+import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -36,6 +39,103 @@ def pytest_configure(config):
 def pytest_unconfigure(config):
     if _test_home is not None:
         shutil.rmtree(_test_home, ignore_errors=True)
+
+
+_CLEARED_ENV_PREFIXES = ("EVOSCIENTIST_", "LANGCHAIN_", "LANGSMITH_")
+_CLEARED_ENV_SUFFIXES = ("_API_KEY", "_BASE_URL")
+_CLEARED_ENV_NAMES = frozenset(
+    {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}
+    | {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}
+)
+
+
+def _cleared_env_name(name: str) -> bool:
+    from EvoScientist.config.settings import _ENV_MAPPINGS
+
+    return (
+        name in _CLEARED_ENV_NAMES
+        or name in _ENV_MAPPINGS.values()
+        or name.upper().startswith(_CLEARED_ENV_PREFIXES)
+        or name.upper().endswith(_CLEARED_ENV_SUFFIXES)
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_environ():
+    """Start every test without the developer's provider, EvoScientist,
+    tracing and proxy settings, and undo whatever it writes to the
+    environment. Production code (``apply_config_to_env``, the ccproxy setup)
+    assigns ``os.environ`` directly, which monkeypatch cannot undo.
+
+    Defined before the other autouse fixtures, so it restores last.
+    """
+    saved = dict(os.environ)
+    for name in [name for name in os.environ if _cleared_env_name(name)]:
+        del os.environ[name]
+    # Child processes are out of the socket guard's reach: git, uv and pip
+    # refuse the network at once instead of waiting out a timeout.
+    os.environ.update(
+        {"GIT_ALLOW_PROTOCOL": "file", "UV_OFFLINE": "1", "PIP_NO_INDEX": "1"}
+    )
+    yield
+    for name in [name for name in os.environ if name not in saved]:
+        del os.environ[name]
+    for name, value in saved.items():
+        if os.environ.get(name) != value:
+            os.environ[name] = value
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Refuse every connection a test opens to another machine, and fail the
+    test that tried; loopback stays open for the servers tests start.
+
+    Nothing answers on the langgraph dev port either, as on CI: a developer's
+    running server would otherwise serve the tests its threads and schedules.
+    A refusal raises, or returns from ``connect_ex``, as a closed port would,
+    so code that handles an offline network carries on.
+    """
+    from EvoScientist import update_check
+    from EvoScientist.langgraph_dev.sdk import DEFAULT_LANGGRAPH_DEV_PORT
+
+    attempts: list[str] = []
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _refused(sock: socket.socket, address) -> bool:
+        if sock.family not in (socket.AF_INET, socket.AF_INET6):
+            return False
+        host, port = str(address[0]), address[1]
+        if not _is_loopback(host):
+            attempts.append(f"{host}:{port}")
+            return True
+        return port == DEFAULT_LANGGRAPH_DEV_PORT
+
+    def connect(sock, address):
+        if _refused(sock, address):
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused by the tests")
+        return real_connect(sock, address)
+
+    def connect_ex(sock, address):
+        if _refused(sock, address):
+            return errno.ECONNREFUSED
+        return real_connect_ex(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    # The TUI and CLI check PyPI for a newer release at start.
+    monkeypatch.setattr(update_check, "is_update_available", lambda: (False, None))
+    yield
+    assert not attempts, f"the test tried to reach the network: {attempts}"
 
 
 @pytest.fixture
@@ -205,21 +305,6 @@ def _isolate_user_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(mcp_client, "USER_MCP_CONFIG", config_dir / "mcp.yaml")
     monkeypatch.setattr(update_check, "CACHE_DIR", config_dir)
     monkeypatch.setattr(update_check, "CACHE_FILE", config_dir / "latest_version.json")
-
-
-@pytest.fixture(autouse=True)
-def _restore_openai_auth_mode_env():
-    """Start every test without EVOSCIENTIST_OPENAI_AUTH_MODE and restore it after.
-
-    ``apply_config_to_env`` writes it with a direct ``os.environ`` assignment,
-    which monkeypatch cannot undo.
-    """
-    previous = os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
-    yield
-    if previous is None:
-        os.environ.pop("EVOSCIENTIST_OPENAI_AUTH_MODE", None)
-    else:
-        os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = previous
 
 
 @pytest.fixture(autouse=True)

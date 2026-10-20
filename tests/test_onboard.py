@@ -1880,6 +1880,14 @@ class TestStepThinking:
 
 
 class TestRunOnboard:
+    @pytest.fixture(autouse=True)
+    def _no_mcp_marketplace(self, monkeypatch):
+        """The MCP step clones the marketplace from GitHub; its own tests
+        above cover it with the clone stubbed."""
+        monkeypatch.setattr(
+            "EvoScientist.config.onboard.wizard._step_mcp_servers", lambda: None
+        )
+
     def test_returns_true_on_save(self):
         """Test that run_onboard returns True when config is saved."""
         from EvoScientist.config.onboard.wizard import run_onboard
