@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import typer
 from langchain_core.messages import AIMessage, HumanMessage
@@ -244,6 +245,106 @@ async def test_local_gateway_get_process_status_reads_registry(monkeypatch):
     status = await gateway.get_process_status(GraphTarget(), "cli-thread", "proc-9")
 
     assert status == "interrupted"
+
+
+def _query_dev_server(monkeypatch, client=None, *, enabled=True, url="http://dev"):
+    needs = MagicMock(return_value=enabled)
+    scoped = MagicMock()
+    scoped.return_value.__aenter__.return_value = client
+    monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: "unknown")
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config", lambda: SimpleNamespace()
+    )
+    monkeypatch.setattr("EvoScientist.gateway.local.needs_langgraph_dev", needs)
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.sdk.configured_langgraph_dev_url", lambda: url
+    )
+    if client is not None:
+        monkeypatch.setattr(
+            "EvoScientist.langgraph_dev.sdk.langgraph_async_client_scoped", scoped
+        )
+    return needs, scoped
+
+
+@pytest.mark.parametrize("remote_status", ["running", "success", "error", "unknown"])
+async def test_local_process_status_falls_back_to_dev_server(
+    monkeypatch, remote_status
+):
+    client = MagicMock()
+    client.http.get = AsyncMock(return_value={"status": remote_status})
+    needs, scoped = _query_dev_server(monkeypatch, client)
+    assert (
+        await LocalGraphGateway().get_process_status(
+            GraphTarget(), "thread", "remote-process"
+        )
+        == remote_status
+    )
+    assert needs.call_args.kwargs == {"backend": "local"}
+    scoped.assert_called_once_with("http://dev")
+    client.http.get.assert_awaited_once_with(
+        "/api/bg_process_status", params={"process_id": "remote-process"}
+    )
+
+
+async def test_local_process_status_no_dev_server_returns_unknown(monkeypatch):
+    _needs, scoped = _query_dev_server(monkeypatch, MagicMock(), enabled=False)
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
+    )
+    scoped.assert_not_called()
+
+
+async def test_local_process_status_connect_error_returns_unknown(monkeypatch):
+    client = MagicMock()
+    client.http.get = AsyncMock(side_effect=httpx.ConnectError("offline"))
+    _query_dev_server(monkeypatch, client)
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
+    )
+
+
+@pytest.mark.timeout(3)
+async def test_local_process_status_refused_connect_returns_unknown_at_once(
+    monkeypatch, unused_tcp_port
+):
+    _query_dev_server(monkeypatch, url=f"http://127.0.0.1:{unused_tcp_port}")
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("timed out"),
+        httpx.HTTPStatusError(
+            "server error",
+            request=httpx.Request("GET", "http://dev"),
+            response=httpx.Response(503),
+        ),
+    ],
+)
+async def test_local_process_status_other_errors_propagate(monkeypatch, error):
+    client = MagicMock()
+    client.http.get = AsyncMock(side_effect=error)
+    _query_dev_server(monkeypatch, client)
+    with pytest.raises(type(error)):
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+
+
+@pytest.mark.parametrize("status", ["running", "success", "error", "interrupted"])
+async def test_known_local_process_never_queries_server(monkeypatch, status):
+    needs, scoped = _query_dev_server(monkeypatch, MagicMock())
+    monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: status)
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == status
+    )
+    needs.assert_not_called()
+    scoped.assert_not_called()
 
 
 async def test_local_graph_gateway_updates_state_values():

@@ -147,6 +147,7 @@ def test_production_loaders_accept_utf8_content(tmp_path, monkeypatch):
     """Production config readers must handle localized UTF-8 content."""
     import os
 
+    from EvoScientist import paths
     from EvoScientist.langgraph_dev import manager
     from EvoScientist.mcp import client, registry
 
@@ -206,6 +207,8 @@ requirements = [
     assert manager._read_workspace_sidecar() == {
         "workspace": str(workspace),
         "pid": 12345,
+        "data_dir": str(paths.DATA_DIR),
+        "config_dir": str(paths.CONFIG_DIR),
     }
 
     runtime.pid_file.write_text(str(os.getpid()), encoding="utf-8")

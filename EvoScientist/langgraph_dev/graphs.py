@@ -27,6 +27,11 @@ because it follows a different mechanism (re-exporting a lazily-constructed
 attribute), not the yaml-driven factory.
 """
 
+# Records config.yaml before any graph below reads it (see main_graph.py).
+import EvoScientist.langgraph_dev.config_baseline  # noqa: F401
+
+# isort: split
+
 from EvoScientist.langgraph_dev.folder_check import folder_checked
 from EvoScientist.memory.agents import (
     build_autoskills_graph,

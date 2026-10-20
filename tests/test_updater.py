@@ -1326,7 +1326,7 @@ def waits(uv_install, monkeypatch):
         return [TUI] if state["checks"] <= state["n"] else []
 
     monkeypatch.setattr(updater, "running_from_env", blockers)
-    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: True)
+    monkeypatch.setattr(updater, "stdin_is_pipe", lambda: True)
     monkeypatch.setattr(updater, "_reader_gone", lambda: False)
     monkeypatch.setattr(updater.time, "sleep", lambda s: None)
     return state
@@ -1383,7 +1383,7 @@ def test_cancel_file_ends_the_wait_and_changes_nothing(waits, monkeypatch):
 
 def test_unattended_json_update_does_not_wait(waits, monkeypatch):
     waits["n"] = 100
-    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: False)
+    monkeypatch.setattr(updater, "stdin_is_pipe", lambda: False)
     runs = Runs()
     monkeypatch.setattr(updater.subprocess, "run", runs)
     code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True))
@@ -1573,7 +1573,7 @@ def test_reader_gone_sees_a_closed_socket(monkeypatch):
     monkeypatch.setattr(sys, "stdin", stdin)
     monkeypatch.setattr(sys, "stdout", out)
     try:
-        assert updater._stdin_is_pipe() is True
+        assert updater.stdin_is_pipe() is True
         assert updater._reader_gone() is False
         stdout_theirs.close()
         assert updater._reader_gone() is True
@@ -1593,7 +1593,7 @@ def test_unattended_yes_leaves_the_server_running_when_something_blocks(
     monkeypatch.setattr(updater, "check_server", _CHECK_SERVER)
     monkeypatch.setattr(updater, "_server_tree", lambda: {42})
     monkeypatch.setattr(updater, "running_from_env", lambda: [SERVER, TUI])
-    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: False)
+    monkeypatch.setattr(updater, "stdin_is_pipe", lambda: False)
     runs = Runs()
     monkeypatch.setattr(updater.subprocess, "run", runs)
     code, lines, _ = _run(updater.UpdateOptions(version="0.3.8", json=True, yes=True))
@@ -1613,7 +1613,7 @@ def test_the_server_is_not_waited_for_before_it_is_stopped(
     monkeypatch.setattr(
         updater, "running_from_env", lambda: [] if server["stopped"] else [SERVER]
     )
-    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: False)
+    monkeypatch.setattr(updater, "stdin_is_pipe", lambda: False)
     runs = Runs()
     monkeypatch.setattr(updater.subprocess, "run", runs)
     monkeypatch.setattr(updater.subprocess, "Popen", FakePopen([]))
@@ -1646,7 +1646,7 @@ def test_a_server_child_started_during_the_wait_is_not_waited_for(
     monkeypatch.setattr(updater, "check_server", _CHECK_SERVER)
     monkeypatch.setattr(updater, "_server_tree", tree)
     monkeypatch.setattr(updater, "running_from_env", blockers)
-    monkeypatch.setattr(updater, "_stdin_is_pipe", lambda: True)
+    monkeypatch.setattr(updater, "stdin_is_pipe", lambda: True)
     monkeypatch.setattr(updater, "_reader_gone", lambda: False)
     monkeypatch.setattr(updater.time, "sleep", sleep)
     monkeypatch.setattr(updater.subprocess, "run", Runs())

@@ -244,6 +244,51 @@ async def get_workspace(_request: Request) -> JSONResponse:
     return JSONResponse({"run_dir": None} | dirs.metadata())
 
 
+async def get_settings(_request: Request) -> JSONResponse:
+    """Return the configuration for the WebUI's wizard and settings page.
+
+    Secret values are never in the body (each reads as ``{"set", "hint"?}``),
+    so no local secret is needed. The body is built by
+    :func:`~EvoScientist.langgraph_dev.settings_api.read_settings`.
+    """
+    from EvoScientist.langgraph_dev import settings_api
+
+    return JSONResponse(await asyncio.to_thread(settings_api.read_settings))
+
+
+async def patch_settings(request: Request) -> JSONResponse:
+    """Update one or more settings; needs the local secret.
+
+    Validates every field first and writes nothing if one fails. See
+    :func:`~EvoScientist.langgraph_dev.settings_api.patch_settings`.
+    """
+    from EvoScientist.langgraph_dev import settings_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"errors": {"body": "invalid JSON"}}, status_code=400)
+    status, payload = await asyncio.to_thread(settings_api.patch_settings, body)
+    return JSONResponse(payload, status_code=status)
+
+
+async def post_settings_test_key(request: Request) -> JSONResponse:
+    """Check a key (and a base URL) without saving it; needs the local secret,
+    since a ``base_url`` makes the server call an address from the request."""
+    from EvoScientist.langgraph_dev import settings_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"errors": {"body": "invalid JSON"}}, status_code=400)
+    status, payload = await asyncio.to_thread(settings_api.check_key_request, body)
+    return JSONResponse(payload, status_code=status)
+
+
 async def verify_local_secret(request: Request) -> Response:
     """``204`` when the request carries the local secret, ``403`` otherwise, so
     a client can check the value it read."""
@@ -282,6 +327,9 @@ def _build_app() -> Starlette:
             Route("/api/policy", post_policy, methods=["POST"]),
             Route("/api/workspace", get_workspace, methods=["GET"]),
             Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
+            Route("/api/settings", get_settings, methods=["GET"]),
+            Route("/api/settings", patch_settings, methods=["PATCH"]),
+            Route("/api/settings/test-key", post_settings_test_key, methods=["POST"]),
         ],
     )
     os.environ.pop("CORS_CONFIG", None)

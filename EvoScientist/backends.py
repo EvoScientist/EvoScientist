@@ -391,6 +391,11 @@ HITL_APPROVE_ALL_KEY = "hitl_approve_all"
 # rubric left in the thread by a run that never reached a verdict cannot grade
 # a later turn or a continuation started by another client.
 RUBRIC_RUN_KEY = "rubric_run"
+
+# Per-run ``configurable`` key carrying the retry tier (``model_retry_for_run``),
+# written fresh on every gateway run. All model calls of the run, sub-agents
+# included, share the one dict, so the retry layer also marks on it that a
+# call used its whole budget: later calls in the run are then not retried.
 MODEL_RETRY_RUN_KEY = "model_retry"
 
 
