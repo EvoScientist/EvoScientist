@@ -30,14 +30,8 @@ from EvoScientist.middleware import events as mw_events
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
 from tests.fakes import StubChannel as _StubChannel
-
-
-def _interrupt_event(n: int) -> dict:
-    return {
-        "type": "interrupt",
-        "interrupt_id": f"i{n}",
-        "action_requests": [{"name": "execute", "args": {"command": f"echo step-{n}"}}],
-    }
+from tests.fakes import attended_config as _attended_config
+from tests.fakes import interrupt_event as _interrupt_event
 
 
 class TestRichCliHitlRoundBudget:
@@ -138,7 +132,9 @@ class TestRichCliHitlRoundBudget:
                 }
             ],
         )
-        agent = FakeCheckpointAgent(values={"messages": [dangling]})
+        # A main-agent approval parks before any tool of the batch runs.
+        parked_at = "HumanInTheLoopMiddleware.after_model"
+        agent = FakeCheckpointAgent(values={"messages": [dangling]}, next=(parked_at,))
         gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         state = display_mod.StreamState()
 
@@ -166,10 +162,10 @@ class TestRichCliHitlRoundBudget:
         assert "i51" not in resumes[-1].message.resume
         assert [as_node for _values, as_node in agent.updates] == [
             "__end__",
-            "tools",
+            parked_at,
             "__end__",
         ]
-        tool_update = next(update for update in agent.updates if update[1] == "tools")
+        tool_update = next(update for update in agent.updates if update[1] == parked_at)
         content = tool_update[0]["messages"][0].content
         assert HITL_ROUND_LIMIT_REJECT_MESSAGE in content
         assert "Do not retry this tool call" in content
@@ -329,7 +325,7 @@ class TestRichCliHitlRoundBudget:
         gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
         monkeypatch.setattr(display_mod.console, "print", lambda *_a, **_k: None)
 
-        with caplog.at_level(logging.WARNING, logger="EvoScientist.stream.display"):
+        with caplog.at_level(logging.WARNING, logger="EvoScientist"):
             result = display_mod._run_streaming(
                 agent=agent,
                 message="hello",
@@ -343,9 +339,13 @@ class TestRichCliHitlRoundBudget:
 
         assert result == "partial"
         assert len(gateway.requests) == 1
-        assert any(
-            "Failed to close parked HITL" in r.getMessage() for r in caplog.records
-        )
+        failures = [
+            r
+            for r in caplog.records
+            if "Could not close the parked checkpoint" in r.getMessage()
+        ]
+        assert len(failures) == 1
+        assert failures[0].exc_info is None
 
     def test_channel_session_grant_resumes_past_50_rounds(self, monkeypatch):
         from langgraph.types import Command  # type: ignore[import-untyped]
@@ -436,6 +436,768 @@ class TestRichCliHitlRoundBudget:
         assert prompted == 50
         assert stream_calls == 51
         assert result == f"Partial work so far\n\n{HITL_BUDGET_STOP_NOTICE}"
+
+
+GRANT = {"hitl_approve_all": True}
+ANSWER = {"answers": ["yes"], "status": "answered"}
+
+
+def _interrupts_then_done(interrupts: int):
+    """A stream that parks ``interrupts`` approvals, one per call, then answers."""
+    calls = 0
+
+    async def _fake_stream(_request):
+        nonlocal calls
+        calls += 1
+        if calls <= interrupts:
+            yield _interrupt_event(calls)
+            return
+        yield {"type": "text", "content": "finished"}
+        yield {"type": "done", "content": "finished"}
+
+    return _fake_stream
+
+
+class TestRichCliSessionGrantReachesTheGraph:
+    """Which calls of a turn carry ``hitl_approve_all`` (the graph then skips the pause).
+
+    The fake stream keeps parking approvals whatever it is sent, so these pin
+    the client's side only: the real graph stops interrupting once a call
+    carries the key (``tests/test_hitl_approve_all_graph.py``).
+    """
+
+    @staticmethod
+    def _run(gateway, **kwargs):
+        return display_mod._run_streaming(
+            agent=MagicMock(),
+            message="hello",
+            thread_id="t1",
+            show_thinking=False,
+            interactive=True,
+            gateway=gateway,
+            _state=display_mod.StreamState(),
+            **kwargs,
+        )
+
+    @staticmethod
+    def _extras(gateway):
+        return [request.configurable_extra for request in gateway.requests]
+
+    def test_a_turn_under_the_grant_is_keyed_from_its_first_call(self, monkeypatch):
+        monkeypatch.setattr(display_mod, "_session_auto_approve", True)
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(2))
+        assert self._run(gateway) == "finished"
+        assert self._extras(gateway) == [GRANT, GRANT, GRANT]
+
+    def test_the_granting_answer_is_sent_unkeyed(self, monkeypatch):
+        """The human's answer must be applied as given, so the key rides from
+        the call after it: the first auto-answered resume."""
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+
+        def _grant(_requests):
+            display_mod._session_auto_approve = True
+            return [{"type": "approve"}]
+
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(3))
+        assert self._run(gateway, hitl_prompt_fn=_grant) == "finished"
+        assert self._extras(gateway) == [None, None, GRANT, GRANT]
+
+    def test_an_allow_list_answer_is_not_keyed(self, monkeypatch):
+        import EvoScientist.channels.interaction as interaction_mod
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(
+            interaction_mod,
+            "config_policy_snapshot",
+            lambda reqs: ([{"type": "approve"} for _ in reqs], {}),
+        )
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(2))
+        assert self._run(gateway) == "finished"
+        assert self._extras(gateway) == [None, None, None]
+
+    @pytest.mark.parametrize("granted", [True, False])
+    def test_a_bridge_answer_is_keyed_only_when_the_chat_is_granted(
+        self, monkeypatch, granted
+    ):
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(1))
+        self._run(
+            gateway,
+            hitl_outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
+                decisions=[{"type": "approve"} for _ in reqs], session_granted=granted
+            ),
+        )
+        assert self._extras(gateway) == [None, GRANT if granted else None]
+
+    def test_a_turn_that_starts_granted_is_keyed_from_its_first_call(self, monkeypatch):
+        """A channel-origin turn: the caller knows the chat's grant and says so
+        with a flag; the loop leaves the caller's extras alone."""
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        extras = {"active_teams": ["reviewer"]}
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(0))
+        self._run(gateway, configurable_extra=extras, approve_all_at_start=True)
+        assert self._extras(gateway) == [
+            {"active_teams": ["reviewer"], "hitl_approve_all": True}
+        ]
+        assert extras == {"active_teams": ["reviewer"]}
+
+    def test_a_turn_that_starts_ungranted_is_not_keyed(self, monkeypatch):
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(0))
+        self._run(gateway, configurable_extra={"active_teams": ["reviewer"]})
+        assert self._extras(gateway) == [{"active_teams": ["reviewer"]}]
+
+    def test_a_starting_grant_is_dropped_from_a_call_that_must_not_carry_it(
+        self, monkeypatch
+    ):
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+        extras = {"active_teams": ["reviewer"]}
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(1))
+        self._run(
+            gateway,
+            configurable_extra=extras,
+            approve_all_at_start=True,
+            hitl_outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
+                decisions=[{"type": "approve"} for _ in reqs], prompted=True
+            ),
+        )
+        assert self._extras(gateway) == [
+            {"active_teams": ["reviewer"], "hitl_approve_all": True},
+            {"active_teams": ["reviewer"]},
+        ]
+        assert extras == {"active_teams": ["reviewer"]}
+
+    @pytest.mark.parametrize("granted", [True, False])
+    def test_an_ask_user_answer_is_keyed_only_under_a_grant(self, monkeypatch, granted):
+        monkeypatch.setattr(display_mod, "_session_auto_approve", granted)
+        calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield {
+                    "type": "ask_user",
+                    "interrupt_id": "ask-1",
+                    "questions": [{"question": "Continue?"}],
+                }
+                return
+            yield {"type": "text", "content": "finished"}
+            yield {"type": "done", "content": "finished"}
+
+        gateway = FakeGraphGateway(stream=_fake_stream)
+        self._run(
+            gateway,
+            ask_user_prompt_fn=lambda _p: {"answers": ["yes"], "status": "answered"},
+        )
+        expected = GRANT if granted else None
+        assert self._extras(gateway) == [expected, expected]
+
+    def test_a_grant_answer_with_a_non_approve_decision_is_not_keyed(self, monkeypatch):
+        """Belt and braces: the key is sent only when every decision approves."""
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(
+            display_mod,
+            "_resolve_hitl_approval",
+            lambda *_a, **_k: display_mod._HitlResolution(
+                [{"type": "reject", "message": "no"}],
+                human_prompted=False,
+                session_granted=True,
+            ),
+        )
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(1))
+        self._run(gateway)
+        assert self._extras(gateway) == [None, None]
+
+    @staticmethod
+    def _approval_then_question():
+        """One approval, then one question, then the answer."""
+        calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield _interrupt_event(1)
+                return
+            if calls == 2:
+                yield {
+                    "type": "ask_user",
+                    "interrupt_id": "ask-1",
+                    "questions": [{"question": "Continue?"}],
+                }
+                return
+            yield {"type": "text", "content": "finished"}
+            yield {"type": "done", "content": "finished"}
+
+        return _fake_stream
+
+    def test_a_question_after_the_granting_prompt_is_answered_keyed(self, monkeypatch):
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+
+        def _grant(_requests):
+            display_mod._session_auto_approve = True
+            return [{"type": "approve"}]
+
+        gateway = FakeGraphGateway(stream=self._approval_then_question())
+        self._run(gateway, hitl_prompt_fn=_grant, ask_user_prompt_fn=lambda _p: ANSWER)
+        assert self._extras(gateway) == [None, None, GRANT]
+
+    def test_a_question_after_a_bridge_grant_answer_is_answered_keyed(
+        self, monkeypatch
+    ):
+        """A chat grant seen during the turn holds for the rest of it."""
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+        gateway = FakeGraphGateway(stream=self._approval_then_question())
+        self._run(
+            gateway,
+            hitl_outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
+                decisions=[{"type": "approve"} for _ in reqs],
+                session_granted=True,
+                grant_in_force=True,
+            ),
+            ask_user_prompt_fn=lambda _p: ANSWER,
+        )
+        assert self._extras(gateway) == [None, GRANT, GRANT]
+
+    def test_a_grant_given_on_the_channel_keys_the_next_question_answer(
+        self, monkeypatch
+    ):
+        """The reply that grants is a human answer (unkeyed), but the chat's
+        grant is in force afterwards: the answer to a question that comes next
+        carries it, so no approval pauses after the question."""
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+        gateway = FakeGraphGateway(stream=self._approval_then_question())
+        self._run(
+            gateway,
+            hitl_outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
+                decisions=[{"type": "approve"} for _ in reqs],
+                prompted=True,
+                grant_in_force=True,
+            ),
+            ask_user_prompt_fn=lambda _p: ANSWER,
+        )
+        assert self._extras(gateway) == [None, None, GRANT]
+
+    def test_a_question_after_a_plain_approval_is_answered_unkeyed(self, monkeypatch):
+        """Approving once grants nothing: the answer to a question that follows
+        is unkeyed, so the turn's later gated calls still ask."""
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+        gateway = FakeGraphGateway(stream=self._approval_then_question())
+        self._run(
+            gateway,
+            hitl_prompt_fn=lambda reqs: [{"type": "approve"} for _ in reqs],
+            ask_user_prompt_fn=lambda _p: ANSWER,
+        )
+        assert self._extras(gateway) == [None, None, None]
+
+    @pytest.mark.parametrize("prompted", [True, False])
+    def test_a_question_after_an_ungranted_bridge_answer_is_answered_unkeyed(
+        self, monkeypatch, prompted
+    ):
+        """The same for a channel answer with no grant behind it, whether the
+        user approved once or the bridge answered on its own."""
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+        gateway = FakeGraphGateway(stream=self._approval_then_question())
+        self._run(
+            gateway,
+            hitl_outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
+                decisions=[{"type": "approve"} for _ in reqs], prompted=prompted
+            ),
+            ask_user_prompt_fn=lambda _p: ANSWER,
+        )
+        assert self._extras(gateway) == [None, None, None]
+
+    def test_a_question_after_a_config_rule_answer_is_answered_unkeyed(
+        self, monkeypatch
+    ):
+        """An allow-list answer is not a grant either."""
+        import EvoScientist.channels.interaction as interaction_mod
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(
+            interaction_mod,
+            "config_policy_snapshot",
+            lambda reqs: ([{"type": "approve"} for _ in reqs], {}),
+        )
+        gateway = FakeGraphGateway(stream=self._approval_then_question())
+        self._run(gateway, ask_user_prompt_fn=lambda _p: ANSWER)
+        assert self._extras(gateway) == [None, None, None]
+
+    def test_a_config_rule_answer_drops_a_key_the_turn_started_with(self, monkeypatch):
+        """A channel-origin turn whose chat is granted (the caller says so), yet
+        this batch is answered by the config rules before the bridge is asked:
+        not the grant's answer, so the resume goes out unkeyed."""
+        import EvoScientist.channels.interaction as interaction_mod
+
+        def _bridge_must_not_be_asked(_reqs, _exhausted):
+            raise AssertionError("the config rule answers first")
+
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        monkeypatch.setattr(
+            interaction_mod,
+            "config_policy_snapshot",
+            lambda reqs: ([{"type": "approve"} for _ in reqs], {}),
+        )
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(1))
+        self._run(
+            gateway,
+            approve_all_at_start=True,
+            hitl_outcome_fn=_bridge_must_not_be_asked,
+        )
+        assert self._extras(gateway) == [GRANT, None]
+
+    def test_a_chats_grant_does_not_key_a_local_turn(self, monkeypatch):
+        """Only a channel-origin call site passes a chat's grant in."""
+        from EvoScientist.cli import channel as channel_mod
+
+        policy = channel_mod.ApprovalPolicy()
+        policy.grant_session("telegram:c1")
+        monkeypatch.setattr(channel_mod, "_approval_policy", policy)
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(0))
+        self._run(gateway)
+        assert self._extras(gateway) == [None]
+
+    def test_a_declined_prompt_sends_nothing_more(self, monkeypatch):
+        monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+        _attended_config(monkeypatch)
+        gateway = FakeGraphGateway(stream=_interrupts_then_done(3))
+        self._run(gateway, hitl_prompt_fn=lambda _requests: None)
+        assert self._extras(gateway) == [None]
+
+    def test_channel_relays_span_the_whole_uninterrupted_stream(self, monkeypatch):
+        """Without approval pauses a granted turn is one stream: the thinking
+        relay sends the accumulated text each time it grows and only the first
+        todo list is relayed - the shape of an ``auto_approve`` turn."""
+        monkeypatch.setattr(display_mod, "_session_auto_approve", True)
+        first, second = "a" * 220, "b" * 220
+
+        async def _fake_stream(_request):
+            yield {"type": "thinking", "content": first}
+            yield {
+                "type": "tool_call",
+                "id": "t1",
+                "name": "write_todos",
+                "args": {"todos": [{"content": "step one", "status": "pending"}]},
+            }
+            yield {
+                "type": "tool_result",
+                "id": "t1",
+                "name": "write_todos",
+                "content": "ok",
+            }
+            yield {"type": "thinking", "content": second}
+            yield {
+                "type": "tool_call",
+                "id": "t2",
+                "name": "write_todos",
+                "args": {
+                    "todos": [
+                        {"content": "step one", "status": "completed"},
+                        {"content": "step two", "status": "pending"},
+                    ]
+                },
+            }
+            yield {
+                "type": "tool_result",
+                "id": "t2",
+                "name": "write_todos",
+                "content": "ok",
+            }
+            yield {"type": "text", "content": "finished"}
+            yield {"type": "done", "content": "finished"}
+
+        thinking: list[str] = []
+        todos: list[list] = []
+        gateway = FakeGraphGateway(stream=_fake_stream)
+        self._run(
+            gateway,
+            on_thinking=thinking.append,
+            on_todo=lambda items: todos.append(list(items)),
+        )
+        assert self._extras(gateway) == [GRANT]
+        assert thinking == [first, first + second]
+        assert [[item["content"] for item in batch] for batch in todos] == [
+            ["step one"]
+        ]
+
+
+class TestConsumerSessionGrantReachesTheGraph:
+    """The standalone consumer follows the same rule as the Rich loop, per chat."""
+
+    @staticmethod
+    def _consumer(stream, media_dir):
+        return TestConsumerHitlRoundBudget()._consumer(stream, media_dir)
+
+    @staticmethod
+    async def _send(bus, chat_id="c1", content="go"):
+        await bus.publish_inbound(
+            BusInbound(channel="stub", sender_id="u1", chat_id=chat_id, content=content)
+        )
+
+    @staticmethod
+    def _keyed(gateway):
+        return [
+            (request.configurable_extra or {}).get("hitl_approve_all") is True
+            for request in gateway.requests
+        ]
+
+    async def test_a_granted_chat_is_keyed_from_its_first_call(self, tmp_path):
+        consumer, bus, gateway = self._consumer(_interrupts_then_done(2), tmp_path)
+        consumer._approval_policy.grant_session("stub:c1")
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        await consumer.stop()
+        await task
+
+        assert outbound.content == "finished"
+        assert self._keyed(gateway) == [True, True, True]
+
+    async def test_the_reply_that_grants_is_sent_unkeyed(self, tmp_path, monkeypatch):
+        import EvoScientist.channels.interaction as interaction_mod
+
+        monkeypatch.setattr(
+            interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
+        )
+        consumer, bus, gateway = self._consumer(_interrupts_then_done(2), tmp_path)
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        assert "Approval Required" in prompt.content
+        await self._send(bus, content="3")  # approve all for this chat
+        outbound = None
+        for _ in range(4):
+            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+            if outbound.content == "finished":
+                break
+        await consumer.stop()
+        await task
+
+        assert outbound is not None
+        assert outbound.content == "finished"
+        # first call, the granting answer, then the auto-answered resume.
+        assert self._keyed(gateway) == [False, False, True]
+
+    async def test_another_chats_grant_does_not_key_this_chat(
+        self, tmp_path, monkeypatch
+    ):
+        import EvoScientist.channels.interaction as interaction_mod
+
+        monkeypatch.setattr(
+            interaction_mod,
+            "config_policy_snapshot",
+            lambda reqs: ([{"type": "approve"} for _ in reqs], {}),
+        )
+        consumer, bus, gateway = self._consumer(_interrupts_then_done(1), tmp_path)
+        consumer._approval_policy.grant_session("stub:other")
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        await consumer.stop()
+        await task
+
+        assert outbound.content == "finished"
+        # The config rule answered the approval: not the grant, so no key.
+        assert self._keyed(gateway) == [False, False]
+
+    async def test_a_declined_reply_sends_no_further_call(self, tmp_path, monkeypatch):
+        import EvoScientist.channels.interaction as interaction_mod
+
+        monkeypatch.setattr(
+            interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
+        )
+        consumer, bus, gateway = self._consumer(_interrupts_then_done(2), tmp_path)
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        assert "Approval Required" in prompt.content
+        await self._send(bus, content="2")  # reject
+        await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        await consumer.stop()
+        await task
+
+        assert self._keyed(gateway) == [False]
+
+    async def test_a_grant_answer_with_a_reject_is_not_keyed(
+        self, tmp_path, monkeypatch
+    ):
+        """Belt and braces: the key is sent only when every decision approves."""
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        async def _resolve(*_args, **_kwargs):
+            return ApprovalOutcome(
+                decisions=[{"type": "reject", "message": "no"}], session_granted=True
+            )
+
+        monkeypatch.setattr(consumer_mod, "resolve_approval", _resolve)
+        consumer, bus, gateway = self._consumer(_interrupts_then_done(1), tmp_path)
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        await consumer.stop()
+        await task
+
+        assert outbound.content == "finished"
+        assert self._keyed(gateway) == [False, False]
+
+    async def test_a_question_in_an_ungranted_chat_is_answered_unkeyed(
+        self, tmp_path, monkeypatch
+    ):
+        """A keyed answer here would let every later gated call of the turn run
+        with no prompt; another chat's grant must not count."""
+        calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield {
+                    "type": "ask_user",
+                    "interrupt_id": "ask-1",
+                    "questions": [{"question": "Continue?"}],
+                }
+                return
+            yield {"type": "text", "content": "finished"}
+            yield {"type": "done", "content": "finished"}
+
+        async def _answer(_questions, _io, timeout=0):
+            return dict(ANSWER)
+
+        consumer, bus, gateway = self._consumer(_fake_stream, tmp_path)
+        consumer._approval_policy.grant_session("stub:other")
+        monkeypatch.setattr(consumer_mod, "resolve_ask_user", _answer)
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        await consumer.stop()
+        await task
+
+        assert outbound.content == "finished"
+        assert self._keyed(gateway) == [False, False]
+
+    async def test_a_question_after_a_plain_approval_is_answered_unkeyed(
+        self, tmp_path, monkeypatch
+    ):
+        """Approving once grants nothing, so the question's answer is unkeyed."""
+        from EvoScientist.channels.interaction import ApprovalOutcome
+
+        calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield _interrupt_event(1)
+                return
+            if calls == 2:
+                yield {
+                    "type": "ask_user",
+                    "interrupt_id": "ask-1",
+                    "questions": [{"question": "Continue?"}],
+                }
+                return
+            yield {"type": "text", "content": "finished"}
+            yield {"type": "done", "content": "finished"}
+
+        async def _approve_once(requests, *_args, **_kwargs):
+            return ApprovalOutcome(
+                decisions=[{"type": "approve"} for _ in requests], prompted=True
+            )
+
+        async def _answer(_questions, _io, timeout=0):
+            return dict(ANSWER)
+
+        consumer, bus, gateway = self._consumer(_fake_stream, tmp_path)
+        monkeypatch.setattr(consumer_mod, "resolve_approval", _approve_once)
+        monkeypatch.setattr(consumer_mod, "resolve_ask_user", _answer)
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        await consumer.stop()
+        await task
+
+        assert outbound.content == "finished"
+        assert self._keyed(gateway) == [False, False, False]
+
+    async def test_an_approval_that_times_out_sends_no_further_call(
+        self, tmp_path, monkeypatch
+    ):
+        import EvoScientist.channels.interaction as interaction_mod
+
+        monkeypatch.setattr(
+            interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
+        )
+        monkeypatch.setattr(consumer_mod, "HITL_APPROVAL_TIMEOUT", 0.05)
+        consumer, bus, gateway = self._consumer(_interrupts_then_done(2), tmp_path)
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        assert "Approval Required" in prompt.content
+        await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)  # timeout notice
+        await consumer.stop()
+        await task
+
+        assert self._keyed(gateway) == [False]
+
+    async def test_a_refed_reply_starts_an_unkeyed_turn(self, tmp_path, monkeypatch):
+        """An unrecognized reply declines the approval and becomes a new turn."""
+        import EvoScientist.channels.interaction as interaction_mod
+
+        monkeypatch.setattr(
+            interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
+        )
+        consumer, bus, gateway = self._consumer(_interrupts_then_done(1), tmp_path)
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        prompt = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        assert "Approval Required" in prompt.content
+        await self._send(bus, content="do something else instead")
+        outbound = None
+        for _ in range(4):
+            outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+            if outbound.content == "finished":
+                break
+        await consumer.stop()
+        await task
+
+        assert outbound is not None
+        assert outbound.content == "finished"
+        assert self._keyed(gateway) == [False, False]
+
+    async def test_an_ask_user_pause_still_splits_a_granted_turn(
+        self, tmp_path, monkeypatch
+    ):
+        """Approvals no longer pause a granted turn, a question still does: the
+        reply holds the text after it and the todo list is relayed per stream."""
+
+        def _todos(call_id, *items):
+            return {
+                "type": "tool_call",
+                "id": call_id,
+                "name": "write_todos",
+                "args": {"todos": [{"content": i, "status": "pending"} for i in items]},
+            }
+
+        calls = 0
+
+        async def _fake_stream(_request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield {"type": "thinking", "content": "thinking before."}
+                yield _todos("t1", "step one")
+                yield {"type": "text", "content": "before the question."}
+                yield {
+                    "type": "ask_user",
+                    "interrupt_id": "ask-1",
+                    "questions": [{"question": "Continue?"}],
+                }
+                return
+            yield {"type": "thinking", "content": "thinking after."}
+            yield _todos("t2", "step one", "step two")
+            yield {"type": "text", "content": "after the question."}
+            yield {"type": "done", "content": "after the question."}
+
+        async def _answer(_questions, _io, timeout=0):
+            return {"answers": ["yes"], "status": "answered"}
+
+        bus = MessageBus()
+        manager = ChannelManager(bus, media_dir=tmp_path)
+        stub = _StubChannel()
+        stub.send_thinking = True
+        manager.register(stub)
+        agent = FakeCheckpointAgent()
+        gateway = FakeGraphGateway(stream=_fake_stream, checkpoint=agent)
+        consumer = InboundConsumer(
+            bus=bus,
+            manager=manager,
+            agent=agent,
+            thread_id="",
+            graph_gateway=gateway,
+            max_concurrent=2,
+            max_pending=10,
+            inference_timeout=5.0,
+            drain_timeout=1.0,
+        )
+        consumer._approval_policy.grant_session("stub:c1")
+        monkeypatch.setattr(consumer_mod, "resolve_ask_user", _answer)
+
+        await self._send(bus)
+        task = asyncio.create_task(consumer.run())
+        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
+        await consumer.stop()
+        await task
+
+        assert outbound.content == "after the question."
+        assert self._keyed(gateway) == [True, True]
+        relayed = [chunk[2] for chunk in stub._sent_chunks]
+        assert len([text for text in relayed if "tasks" in text]) == 2
+        assert [text for text in relayed if "thinking" in text] == [
+            "\U0001f9e0\nthinking before.\n\u23f3",
+            "\U0001f9e0\nthinking after.\n\u23f3",
+        ]
+
+
+def test_resolver_reports_the_grant_only_on_its_fast_path(monkeypatch):
+    import EvoScientist.channels.interaction as interaction_mod
+    from EvoScientist.channels.interaction import ApprovalOutcome
+
+    pending = _interrupt_event(1)
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config",
+        lambda: SimpleNamespace(
+            auto_approve=False, dangerous_mode=False, shell_allow_list=""
+        ),
+    )
+
+    monkeypatch.setattr(display_mod, "_session_auto_approve", True)
+    assert display_mod._resolve_hitl_approval(pending).session_granted is True
+
+    monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+
+    def _grant(_requests):
+        display_mod._session_auto_approve = True
+        return [{"type": "approve"}]
+
+    granting = display_mod._resolve_hitl_approval(pending, prompt_fn=_grant)
+    assert granting.human_prompted is True
+    assert granting.session_granted is False
+
+    monkeypatch.setattr(display_mod, "_session_auto_approve", False)
+    bridged = display_mod._resolve_hitl_approval(
+        pending,
+        outcome_fn=lambda reqs, _exhausted: ApprovalOutcome(
+            decisions=[{"type": "approve"}], session_granted=True
+        ),
+    )
+    assert bridged.session_granted is True
+
+    monkeypatch.setattr(
+        interaction_mod,
+        "config_policy_snapshot",
+        lambda reqs: ([{"type": "approve"}], {}),
+    )
+    assert display_mod._resolve_hitl_approval(pending).session_granted is False
 
 
 def test_hitl_budget_stop_ignores_human_cap_for_auto_rounds():
@@ -786,16 +1548,20 @@ class TestConsumerHitlRoundBudget:
         await bus.publish_inbound(
             BusInbound(channel="stub", sender_id="u1", chat_id="c1", content="go")
         )
-        with caplog.at_level(logging.WARNING, logger="EvoScientist.channels.consumer"):
+        with caplog.at_level(logging.WARNING, logger="EvoScientist"):
             task = asyncio.create_task(consumer.run())
             first = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
             second = await asyncio.wait_for(bus.consume_outbound(), timeout=10.0)
 
         assert first.content == "partial answer"
         assert second.content == "Approval round limit reached; stopping this turn."
-        assert any(
-            "Failed to close parked HITL" in r.getMessage() for r in caplog.records
-        )
+        failures = [
+            r
+            for r in caplog.records
+            if "Could not close the parked checkpoint" in r.getMessage()
+        ]
+        assert len(failures) == 1
+        assert failures[0].exc_info is None
 
         await consumer.stop()
         await task
@@ -949,7 +1715,8 @@ def test_abandoned_tool_messages_closes_invalid_tool_calls():
                 ],
             ),
             ToolMessage(content="done", name="execute", tool_call_id="ok-1"),
-        ]
+        ],
+        reason="round_limit",
     )
     assert [message.tool_call_id for message in patch] == ["bad-1"]
     assert HITL_ROUND_LIMIT_REJECT_MESSAGE in patch[0].content
@@ -1051,7 +1818,9 @@ async def test_close_parked_checkpoint_keeps_finished_sibling_results():
     )
 
     gateway = FakeGraphGateway(checkpoint=agent)
-    await close_parked_checkpoint(gateway, GraphTarget(), "t-sibling")
+    await close_parked_checkpoint(
+        gateway, GraphTarget(), "t-sibling", reason="round_limit"
+    )
 
     assert [as_node for _values, as_node in agent.updates] == [
         "__end__",
@@ -1083,7 +1852,9 @@ async def test_close_parked_checkpoint_trailing_end_even_without_dangling_calls(
 
     agent = FakeCheckpointAgent()
     gateway = FakeGraphGateway(checkpoint=agent)
-    await close_parked_checkpoint(gateway, GraphTarget(), "t-empty")
+    await close_parked_checkpoint(
+        gateway, GraphTarget(), "t-empty", reason="round_limit"
+    )
     assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
     assert all(values is None for values, _node in agent.updates)
     verify = await agent.aget_state({})
@@ -1101,6 +1872,7 @@ async def test_close_parked_checkpoint_raises_when_verify_still_stuck():
             FakeGraphGateway(checkpoint=_StickyCheckpointAgent()),
             GraphTarget(),
             "t-sticky",
+            reason="round_limit",
         )
 
 
@@ -1116,7 +1888,7 @@ async def test_close_parked_checkpoint_ignores_local_graph():
     )
     gateway = FakeGraphGateway(checkpoint=agent)
     await close_parked_checkpoint(
-        gateway, GraphTarget(local_graph=sentinel), "t-gateway"
+        gateway, GraphTarget(local_graph=sentinel), "t-gateway", reason="round_limit"
     )
     assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]
     assert sentinel.aget_state.await_count == 0
@@ -1133,6 +1905,9 @@ async def test_close_parked_checkpoint_via_local_gateway():
 
     agent = FakeCheckpointAgent()
     await close_parked_checkpoint(
-        LocalGraphGateway(), GraphTarget(local_graph=agent), "t-local"
+        LocalGraphGateway(),
+        GraphTarget(local_graph=agent),
+        "t-local",
+        reason="round_limit",
     )
     assert [as_node for _values, as_node in agent.updates] == ["__end__", "__end__"]

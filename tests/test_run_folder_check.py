@@ -225,8 +225,9 @@ def test_manual_autoskills_runs_forward_the_root(workspace, monkeypatch):
 
 
 def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch):
-    """Graphs that work in the session's folder refuse another run folder;
-    graphs built for the workspace root only check the workspace."""
+    """Every registered graph refuses another workspace. Graphs that work in
+    the session's folder also refuse another run folder; graphs built for the
+    workspace root only check the workspace."""
     import importlib
     import json
     import sys
@@ -258,12 +259,15 @@ def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch):
     other_run = _config(
         SessionDirs(served.workspace, served.workspace.runs_dir / "other")
     )
+    other_workspace = _config(SessionDirs(Workspace(served.workspace.root / "other")))
     running = SimpleNamespace(execution_runtime=object())
     assert FOLDER_GRAPH_IDS <= registry.keys()
 
     for graph_id, target in registry.items():
         module_path, attr = target.rsplit(":", 1)
         factory = getattr(importlib.import_module(module_path), attr)
+        with pytest.raises(RunFolderMismatchError):
+            asyncio.run(factory(other_workspace, running))
         if graph_id in FOLDER_GRAPH_IDS:
             with pytest.raises(RunFolderMismatchError):
                 asyncio.run(factory(other_run, running))

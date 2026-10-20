@@ -7,9 +7,10 @@ import asyncio
 import base64
 import inspect
 import mimetypes
+import ntpath
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, ToolMessage
@@ -20,6 +21,7 @@ from ..memory.worker_activity import clear_completed_memory_activity_counts
 from ..middleware.tool_history_repair import (
     _INTERRUPTED_RESULT as _INTERRUPTED_TOOL_RESULT,
 )
+from ..paths import file_tool_path
 from .emitter import StreamEventEmitter
 from .summarization import (
     _extract_summary_message_text,
@@ -31,8 +33,11 @@ from .tool_selection import _ToolSelectionSuppressor
 from .utils import DisplayLimits, is_success
 
 if TYPE_CHECKING:
+    from ..backends import ParkedCloseReason
     from ..middleware.events import ToolSelectionView
 from .v3_payloads import (
+    GOAL_DRAFT_LINEAGE,
+    RUBRIC_GRADER_LINEAGE,
     RawMap,
     _as_raw_map,
     _event_data,
@@ -41,13 +46,16 @@ from .v3_payloads import (
     _split_message_event_data,
     _strip_legacy_thinking_tags,
     _text_from_content,
+    _under,
     _usage_counts,
 )
 
 UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
-LangGraphStreamInput: TypeAlias = dict[str, list[dict[str, object]]] | Command
+LangGraphStreamInput: TypeAlias = dict[str, object] | Command
 _ValueMessageKey: TypeAlias = tuple[str, ...]
+_INTERRUPT_CHECKPOINT_WAIT_SECONDS = 5.0
+_INTERRUPT_CHECKPOINT_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +85,46 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
         if getattr(task, "interrupts", None):
             return True
     return False
+
+
+def _snapshot_interrupt_ids(snapshot: Any) -> set[str]:
+    """Return interrupt IDs currently persisted at the root or task level."""
+    if snapshot is None:
+        return set()
+    interrupts = list(getattr(snapshot, "interrupts", None) or ())
+    for task in getattr(snapshot, "tasks", None) or ():
+        interrupts.extend(getattr(task, "interrupts", None) or ())
+    return {
+        str(interrupt_id)
+        for interrupt in interrupts
+        if (interrupt_id := getattr(interrupt, "id", None)) is not None
+    }
+
+
+async def _wait_for_checkpointed_interrupt(
+    agent: Any, config: dict[str, Any], interrupt_id: str
+) -> None:
+    """Wait for an emitted interrupt to become visible in its checkpoint."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _INTERRUPT_CHECKPOINT_WAIT_SECONDS
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        try:
+            snapshot = await asyncio.wait_for(
+                agent.aget_state(config), timeout=remaining
+            )
+        except Exception:
+            return
+        if str(interrupt_id) in _snapshot_interrupt_ids(snapshot):
+            return
+        if snapshot is None:
+            return
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(_INTERRUPT_CHECKPOINT_POLL_SECONDS, remaining))
 
 
 def _snapshot_needs_recovery(snapshot: Any) -> bool:
@@ -124,6 +172,24 @@ class _GatewayCheckpointOps:
         )
 
 
+# Where the root graph parks while a gated call waits for approval: nothing of
+# that batch has run yet. Any other position means tools were running.
+_HITL_PARK_NODE = "HumanInTheLoopMiddleware.after_model"
+
+
+def _one_line(value: Any, limit: int = 200) -> str:
+    """*value* as one bounded log line (a server refusal embeds the run payload)."""
+    return " ".join(str(value).split())[:limit]
+
+
+def _every_call_answered(snapshot: Any) -> bool:
+    """Whether no call of the last AI message lacks a result (unreadable: no)."""
+    from ..backends import _unanswered_calls
+
+    values = getattr(snapshot, "values", None) or {}
+    return _unanswered_calls(list(values.get("messages") or [])) == []
+
+
 def _interrupted_dangling_patch(messages: list) -> list[ToolMessage]:
     """Synthetic error results for tool calls still unanswered in *messages*."""
     answered_ids = {
@@ -154,6 +220,7 @@ async def _recover_interrupted_graph_state(
     snapshot: Any | None = None,
     *,
     close_interrupts: bool = False,
+    close_reason: "ParkedCloseReason" = "round_limit",
 ) -> bool:
     """Close out a run that ended mid-step so the next turn starts fresh.
 
@@ -196,9 +263,12 @@ async def _recover_interrupted_graph_state(
     ``_snapshot_has_pending_interrupt`` distinguishes the two.
 
     Pass ``close_interrupts=True`` to close a genuine HITL/ask_user pause
-    anyway (spent round budget). Synthetic results then use the HITL reject
-    wording instead of the crash-recovery interrupted text. The checkpoint
-    is verified empty of both pending tasks and interrupts.
+    anyway (the turn ended there: declined, unanswered, or out of rounds).
+    Synthetic results are then worded for ``close_reason`` and for whether
+    the graph had stopped before any tool of the batch ran. The checkpoint
+    is verified empty of pending tasks and interrupts, and every call of the
+    last AI message must have a result: a close that stopped half-way is
+    reported, not repaired.
 
     ``agent`` is any object with ``aget_state`` / ``aupdate_state`` — the
     compiled graph on the crash-recovery path, or ``_GatewayCheckpointOps``
@@ -240,6 +310,13 @@ async def _recover_interrupted_graph_state(
         # tasks whose writes never made it into a checkpoint. A HITL close
         # also proceeds when the pause is parked even if ``next`` is empty.
         if not _snapshot_needs_recovery(snapshot) and not (close_interrupts and parked):
+            if close_interrupts and not _every_call_answered(snapshot):
+                _log.warning(
+                    "Thread %s has nothing pending but a tool call without a "
+                    "result; an earlier close did not finish",
+                    config.get("configurable", {}).get("thread_id", "?"),
+                )
+                return False
             return True
 
         stuck_at = snapshot.next or tuple(
@@ -254,7 +331,12 @@ async def _recover_interrupted_graph_state(
         if close_interrupts:
             from ..backends import abandoned_tool_messages
 
-            patch = abandoned_tool_messages(list(messages))
+            patch = abandoned_tool_messages(
+                list(messages),
+                reason=close_reason,
+                parked_before_tools=bool(stuck_at)
+                and all(node == _HITL_PARK_NODE for node in stuck_at),
+            )
         else:
             patch = _interrupted_dangling_patch(list(messages))
         if patch:
@@ -279,11 +361,19 @@ async def _recover_interrupted_graph_state(
             close_interrupts and _snapshot_has_pending_interrupt(verify)
         )
         if still_stuck:
+            stuck = getattr(verify, "next", None) or getattr(verify, "tasks", None)
             _log.warning(
                 "Interrupted graph state for thread %s is still stuck at %s "
                 "after recovery",
                 config.get("configurable", {}).get("thread_id", "?"),
-                getattr(verify, "next", None) or getattr(verify, "tasks", None),
+                _one_line(stuck) if close_interrupts else stuck,
+            )
+            return False
+        if close_interrupts and not _every_call_answered(verify):
+            _log.warning(
+                "Closed the parked checkpoint of thread %s but a tool call "
+                "still has no result",
+                config.get("configurable", {}).get("thread_id", "?"),
             )
             return False
         _log.debug(
@@ -294,13 +384,30 @@ async def _recover_interrupted_graph_state(
             len(patch),
         )
         return True
+    except asyncio.CancelledError:
+        if close_interrupts:
+            _log.warning(
+                "Closing the parked checkpoint of thread %s was cancelled "
+                "before it finished",
+                config.get("configurable", {}).get("thread_id", "?"),
+            )
+        raise
     except Exception as exc:
-        _log.warning(
-            "Could not recover interrupted graph state for thread %s: %s",
-            config.get("configurable", {}).get("thread_id", "?"),
-            exc,
-            exc_info=True,
-        )
+        thread_id = config.get("configurable", {}).get("thread_id", "?")
+        if close_interrupts:
+            _log.warning(
+                "Could not close the parked checkpoint of thread %s: %s",
+                thread_id,
+                _one_line(exc),
+            )
+            _log.debug("Parked checkpoint close failed", exc_info=True)
+        else:
+            _log.warning(
+                "Could not recover interrupted graph state for thread %s: %s",
+                thread_id,
+                exc,
+                exc_info=True,
+            )
         return False
 
 
@@ -313,6 +420,38 @@ class _SubagentInfo:
     @property
     def instance_id(self) -> str:
         return ":".join(self.path)
+
+
+@dataclass
+class _CallRecord:
+    """One provider call of a namespace, between its ``model_call`` start and end events."""
+
+    call: str
+    state: str = "open"  # open | clean | error | failed
+    text_chars: int = 0
+    thinking_chars: int = 0
+    tool_call_ids: list[str] = field(default_factory=list)
+    full_response_len: int = 0
+    selector_snapshot: tuple[bool, str, bool] | None = None
+
+    def discard_payload(self) -> dict[str, Any]:
+        return {
+            "text_chars": self.text_chars,
+            "thinking_chars": self.thinking_chars,
+            "tool_call_ids": list(self.tool_call_ids),
+        }
+
+    @property
+    def discardable(self) -> bool:
+        return self.state != "clean"
+
+    @property
+    def ended_badly(self) -> bool:
+        return self.state in ("error", "failed")
+
+    @property
+    def empty(self) -> bool:
+        return not (self.text_chars or self.thinking_chars or self.tool_call_ids)
 
 
 class _SubagentRegistry:
@@ -355,6 +494,13 @@ class _SubagentRegistry:
         return self.resolve(namespace)
 
 
+def _count(value: Any) -> int:
+    """A non-negative int from a custom stream payload field, else 0."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
+
+
 class _V3EventProcessor:
     """Translate v3 protocol channel events into EvoScientist UI events."""
 
@@ -375,8 +521,15 @@ class _V3EventProcessor:
             existing_summarization_event
         )
         self._seen_value_message_keys = self._message_keys(existing_messages)
+        # Snapshot recovery delivers messages the transport did not stream. It
+        # is suspended once root text streams and resumed when that text is
+        # discarded, since the answer that replaces it may not stream.
+        self._value_recovery = process_value_messages
         self._process_value_message_snapshots = process_value_messages
         self.full_response = ""
+        # Where the pass a graded run's last verdict applies to starts in
+        # ``full_response``; ``None`` until a verdict arrives.
+        self._last_pass_start: int | None = None
         self._summarization_in_progress = False
         self._tool_inputs: dict[
             tuple[tuple[str, ...], str], tuple[str, dict[str, Any]]
@@ -384,6 +537,8 @@ class _V3EventProcessor:
         self._emitted_tool_calls: set[tuple[tuple[str, ...], str]] = set()
         self._emitted_interrupts: set[str] = set()
         self._selector = _ToolSelectionSuppressor(emitter, events or NO_OP_SINK)
+        self._records: dict[tuple[str, ...], _CallRecord] = {}
+        self._namespace: tuple[str, ...] = ()
 
     @staticmethod
     def _tool_scope(
@@ -391,11 +546,123 @@ class _V3EventProcessor:
     ) -> tuple[str, ...]:
         return subagent.path if subagent is not None else namespace
 
+    # -- provider calls: what a retry or a fallback may discard -------------
+    # The boundary is the ``model_call`` custom event pair, never message
+    # metadata: the server transport strips run_id and node before SSE.
+    # Output is attributed by timing, so a stream that bypasses the boundary
+    # yet overlaps an open call in the same namespace is counted with it.
+
+    def _current_record(self) -> _CallRecord | None:
+        record = self._records.get(self._namespace)
+        return record if record is not None and record.state == "open" else None
+
+    def _count_text(self, chars: int) -> None:
+        record = self._current_record()
+        if record is not None:
+            record.text_chars += chars
+
+    def _count_thinking(self, chars: int) -> None:
+        record = self._current_record()
+        if record is not None:
+            record.thinking_chars += chars
+
+    def _discard(
+        self, record: _CallRecord, subagent: _SubagentInfo | None
+    ) -> dict[str, Any] | None:
+        """Roll back to the call's start; the payload the clients apply, or None if nothing was emitted."""
+        if not self._namespace:
+            # The root answer loses everything it gained since the call began;
+            # report that amount so clients trim exactly what is cut here.
+            record.text_chars = max(
+                0, len(self.full_response) - record.full_response_len
+            )
+            self.full_response = self.full_response[: record.full_response_len]
+            if record.selector_snapshot is not None:
+                self._selector.restore(record.selector_snapshot)
+            self._process_value_message_snapshots = self._value_recovery
+        scope = self._tool_scope(self._namespace, subagent)
+        for tool_call_id in record.tool_call_ids:
+            self._emitted_tool_calls.discard((scope, tool_call_id))
+            self._tool_inputs.pop((scope, tool_call_id), None)
+        self._records.pop(self._namespace, None)
+        return None if record.empty else record.discard_payload()
+
+    def _process_model_call(
+        self, payload: RawMap, subagent: _SubagentInfo | None
+    ) -> list[dict[str, Any]]:
+        """Open or close this namespace's call; a new call discards a predecessor that ended badly.
+
+        A predecessor whose end mark never arrived is left alone: dropping it
+        would cost a good answer if only the mark was lost.
+        """
+        call = str(payload.get("call") or "")
+        phase = payload.get("phase")
+        record = self._records.get(self._namespace)
+        if phase == "end":
+            if record is not None and record.state == "open" and record.call == call:
+                status = payload.get("status")
+                record.state = status if status in ("clean", "error") else "failed"
+            return []
+        if phase != "start":
+            return []
+        events: list[dict[str, Any]] = []
+        if record is not None and record.ended_badly:
+            discarded = self._discard(record, subagent)
+            if discarded is not None:
+                events.append(
+                    self.emitter.model_output_discarded(
+                        instance_id=subagent.instance_id if subagent else "",
+                        discarded=discarded,
+                    ).data
+                )
+        self._records[self._namespace] = _CallRecord(
+            call=call,
+            full_response_len=len(self.full_response),
+            selector_snapshot=self._selector.snapshot()
+            if not self._namespace
+            else None,
+        )
+        return events
+
+    def _process_model_retry(
+        self, payload: RawMap, subagent: _SubagentInfo | None
+    ) -> list[dict[str, Any]]:
+        record = self._records.get(self._namespace)
+        discarded = None
+        if record is not None and record.discardable:
+            discarded = self._discard(record, subagent)
+        name = ""
+        if subagent is not None:
+            # The event names its own agent; a namespace registered by the
+            # server tracker is only named after its graph node.
+            agent = payload.get("agent")
+            name = agent if isinstance(agent, str) and agent else subagent.name
+        return [
+            self.emitter.model_retry(
+                attempt=_count(payload.get("attempt")) or 1,
+                wait_seconds=float(payload.get("wait_seconds") or 0.0),
+                reason=str(payload.get("reason") or ""),
+                budget_left_seconds=float(payload.get("budget_left_seconds") or 0.0),
+                cause=str(payload.get("cause") or "exception"),
+                instance_id=subagent.instance_id if subagent else "",
+                subagent=name,
+                discarded=discarded
+                or {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []},
+            ).data
+        ]
+
     async def process(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         method = event.get("method")
         namespace = _event_namespace(event)
+        self._namespace = namespace
         subagent = None
+        # Waiting for the drafter's namespace to resolve would hold every
+        # later event back until the stream ends; its own output is not shown.
+        drafting = _under(namespace, GOAL_DRAFT_LINEAGE)
         if namespace and method in ("messages", "tools"):
+            # The grader's own output is not shown either.
+            if drafting or _under(namespace, RUBRIC_GRADER_LINEAGE):
+                return []
             subagent = await self.subagents.wait_resolve(namespace)
             if subagent is None:
                 return []
@@ -417,27 +684,122 @@ class _V3EventProcessor:
             interrupts = params.get("interrupts") or ()
             if interrupts:
                 events.extend(self._process_update_event({"__interrupt__": interrupts}))
-            if self._process_value_message_snapshots and not namespace:
-                events.extend(self._process_value_messages(_event_data(event)))
+            if not namespace:
+                if self._process_value_message_snapshots:
+                    events.extend(self._process_value_messages(_event_data(event)))
+                elif self._value_recovery:
+                    # Streamed messages are already delivered: remember them
+                    # so a later resume does not deliver them again.
+                    self._mark_value_messages_seen(_event_data(event))
             return events
         if method == "input.requested":
             return self._process_input_requested(event.get("params"))
         if method == "custom":
-            return self._process_custom_event(_event_data(event))
+            payload = _as_raw_map(_event_data(event))
+            # A goal event is about the thread, whichever run wrote it (the
+            # drafting line comes from a task below a hook): no sub-agent to
+            # wait for.
+            if payload is not None and payload.get("type") == "goal_state":
+                return self._process_goal_event(payload)
+            if drafting:
+                return []
+            subagent = (
+                await self.subagents.wait_resolve(namespace) if namespace else None
+            )
+            return self._process_custom_event(_event_data(event), subagent)
         return []
 
-    def _process_custom_event(self, data: object) -> list[dict[str, Any]]:
+    def _process_rubric_event(self, kind: str, payload: Any) -> list[dict[str, Any]]:
+        if kind == "rubric_evaluation_deferred":
+            return [
+                self.emitter.rubric_evaluation_deferred(
+                    tasks=_count(payload.get("tasks")),
+                    processes=_count(payload.get("processes")),
+                ).data
+            ]
+        raw_iteration = payload.get("iteration")
+        iteration = raw_iteration if isinstance(raw_iteration, int) else 0
+        if kind == "rubric_evaluation_start":
+            return [self.emitter.rubric_evaluation_start(iteration=iteration).data]
+        result = payload.get("result")
+        explanation = payload.get("explanation")
+        criteria = payload.get("criteria")
+        if self._last_pass_start is None:
+            self._last_pass_start = 0
+        if result == "needs_revision":
+            if self.full_response.strip() and not self.full_response.endswith("\n\n"):
+                # Keep the draft; the revision starts on its own paragraph.
+                self.full_response += "\n\n"
+            self._last_pass_start = len(self.full_response)
+        return [
+            self.emitter.rubric_evaluation(
+                iteration=iteration,
+                result=result if isinstance(result, str) else "",
+                explanation=explanation if isinstance(explanation, str) else "",
+                criteria=[dict(c) for c in criteria if isinstance(c, Mapping)]
+                if isinstance(criteria, list)
+                else [],
+                unverified=payload.get("unverified") is True,
+            ).data
+        ]
+
+    @property
+    def last_pass_response(self) -> str | None:
+        """The text after the last revision request; ``None`` for an ungraded run."""
+        if self._last_pass_start is None:
+            return None
+        return self.full_response[self._last_pass_start :]
+
+    def _process_goal_event(self, payload: Any) -> list[dict[str, Any]]:
+        change = payload.get("change")
+        if not isinstance(change, str) or not change:
+            return []
+
+        def _text(key: str) -> str:
+            value = payload.get(key)
+            return value if isinstance(value, str) else ""
+
+        return [
+            self.emitter.goal_state(
+                change=change,
+                status=_text("status"),
+                note=_text("note"),
+                objective=_text("objective"),
+                criteria=_text("criteria"),
+                message=_text("message"),
+                unreviewed=payload.get("unreviewed") is True,
+            ).data
+        ]
+
+    def _process_custom_event(
+        self, data: object, subagent: _SubagentInfo | None = None
+    ) -> list[dict[str, Any]]:
         """Translate a ``custom`` stream payload into UI events.
 
         Currently handles the ``subagent`` lifecycle emitted by
         ``langchain_quickjs`` for in-eval ``task()`` fan-out: ``start`` /
         ``complete`` / ``error`` become ``panel_dispatch_start`` /
         ``panel_dispatch_complete`` / ``panel_dispatch_error`` UI events.
-        Unrecognised event types are ignored so future producers can extend
-        the custom channel without breaking existing consumers.
+        Also handles the acceptance grader's ``rubric_evaluation_start`` /
+        ``rubric_evaluation_end`` / ``rubric_evaluation_deferred``. Unrecognised event types are ignored so
+        future producers can extend the custom channel without breaking
+        existing consumers.
         """
         payload = _as_raw_map(data)
-        if payload is None or payload.get("type") != "subagent":
+        if payload is None:
+            return []
+        kind = payload.get("type")
+        if kind == "model_call":
+            return self._process_model_call(payload, subagent)
+        if kind == "model_retry":
+            return self._process_model_retry(payload, subagent)
+        if kind in (
+            "rubric_evaluation_start",
+            "rubric_evaluation_end",
+            "rubric_evaluation_deferred",
+        ):
+            return self._process_rubric_event(kind, payload)
+        if kind != "subagent":
             return []
         phase = payload.get("phase")
         eval_id = payload.get("eval_id")
@@ -513,6 +875,11 @@ class _V3EventProcessor:
         else:
             key = ("body", str(raw_role), repr(content))
         return _AssistantValueMessage(key=key, content=content)
+
+    def _mark_value_messages_seen(self, data: object) -> None:
+        data_map = _as_raw_map(data)
+        messages = data_map.get("messages") if data_map is not None else None
+        self._seen_value_message_keys |= self._message_keys(messages)
 
     def _process_value_messages(self, data: object) -> list[dict[str, Any]]:
         data_map = _as_raw_map(data)
@@ -608,6 +975,7 @@ class _V3EventProcessor:
                 else:
                     self.full_response += pending
                     events.append(self.emitter.text(pending).data)
+                self._count_text(len(pending))
             if subagent is None:
                 usage = _as_raw_map(payload.get("usage"))
                 inp, out = _usage_counts(usage) if usage is not None else (0, 0)
@@ -676,6 +1044,9 @@ class _V3EventProcessor:
         if key in self._emitted_tool_calls:
             return []
         self._emitted_tool_calls.add(key)
+        record = self._current_record()
+        if record is not None:
+            record.tool_call_ids.append(tool_call_id)
         if subagent is not None:
             return [
                 self.emitter.subagent_tool_call(
@@ -925,6 +1296,7 @@ class _V3EventProcessor:
             return events
         if not emit_text or emit_text.isspace():
             return events
+        self._count_text(len(emit_text))
         if subagent is not None:
             events.append(
                 self.emitter.subagent_text(
@@ -944,6 +1316,7 @@ class _V3EventProcessor:
         suppressed, events = self._selector.process_thinking(text)
         if suppressed:
             return events
+        self._count_thinking(len(text))
         events.append(self.emitter.thinking(text).data)
         return events
 
@@ -972,10 +1345,19 @@ async def build_agent_stream_input(
     message: GraphRunInput,
     *,
     media: list[str] | None = None,
+    rubric: str | None = None,
+    goal_request: dict[str, Any] | None = None,
 ) -> LangGraphStreamInput:
-    """Build the LangGraph run input shared by local and server gateways."""
+    """Build the LangGraph run input shared by local and server gateways.
+
+    Every new input writes ``goal_request``: a ``/goal`` request travels
+    without a message, and a message clears a request whose own run never
+    finished, so it cannot take over this turn.
+    """
     if not isinstance(message, str):
         return message
+    if goal_request is not None:
+        return {"messages": [], "goal_request": dict(goal_request)}
 
     user_content: UserMessageContent = message
     if media:
@@ -1013,13 +1395,30 @@ async def build_agent_stream_input(
             else:
                 file_refs.append(path)
         if file_refs:
-            ref_text = "\n".join(
-                f"[attached file: {os.path.basename(p)}] path: {p}" for p in file_refs
-            )
+            references = []
+            for path in file_refs:
+                tool_path = file_tool_path(path)
+                if tool_path != path:
+                    shell_path = path.replace("\\", "/")
+                    references.append(
+                        f"[attached file: {ntpath.basename(path)}] "
+                        f"file tools path: {tool_path}; shell path: {shell_path}"
+                    )
+                else:
+                    references.append(
+                        f"[attached file: {os.path.basename(path)}] path: {path}"
+                    )
+            ref_text = "\n".join(references)
             content_blocks.append({"type": "text", "text": ref_text})
         if content_blocks:
             user_content = content_blocks
-    return {"messages": [{"role": "user", "content": user_content}]}
+    run_input: dict[str, object] = {
+        "messages": [{"role": "user", "content": user_content}],
+        "goal_request": None,
+    }
+    if rubric is not None:
+        run_input["rubric"] = rubric
+    return run_input
 
 
 async def stream_agent_events(
@@ -1030,6 +1429,8 @@ async def stream_agent_events(
     media: list[str] | None = None,
     events: "ToolSelectionView | None" = None,
     configurable_extra: dict[str, Any] | None = None,
+    rubric: str | None = None,
+    goal_request: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream events from a DeepAgents/LangGraph v3 run.
 
@@ -1065,14 +1466,32 @@ async def stream_agent_events(
     # rebuilt on model switches and binds recursion_limit at construction
     # from the same live config. The HITL suppression flag is the exception -
     # a per-run signal both backends need (the graph is always armed).
-    from ..backends import hitl_suppressed_for_run
+    from ..backends import (
+        HITL_APPROVE_ALL_KEY,
+        hitl_suppressed_for_run,
+        model_retry_for_run,
+        resume_declines,
+    )
     from ..gateway.types import resolve_per_run_config
 
     config = resolve_per_run_config(
         thread_id,
         configurable_extra,
         hitl_suppressed=hitl_suppressed_for_run(),
+        rubric_run=rubric is not None,
+        model_retry=model_retry_for_run(),
     )
+    # The callers already keep the grant off a declining answer. Every local
+    # run passes here, so one that slips still cannot run a declined call.
+    if resume_declines(message) and config["configurable"].pop(
+        HITL_APPROVE_ALL_KEY, None
+    ):
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "dropped %s from a resume that does not keep the grant",
+            HITL_APPROVE_ALL_KEY,
+        )
     if metadata:
         config["metadata"] = metadata
     emitter = StreamEventEmitter()
@@ -1096,7 +1515,9 @@ async def stream_agent_events(
         await _recover_interrupted_graph_state(agent, config, snapshot=snapshot)
 
     clear_completed_memory_activity_counts()
-    astream_input = await build_agent_stream_input(message, media=media)
+    astream_input = await build_agent_stream_input(
+        message, media=media, rubric=rubric, goal_request=goal_request
+    )
 
     stream: Any | None = None
     producers: list[asyncio.Task[Any]] = []
@@ -1157,8 +1578,12 @@ async def stream_agent_events(
                 if inspect.isawaitable(result):
                     await result
             finally:
+                # A nested run that stopped at a pause goes on with the turn.
+                paused = getattr(subagent, "status", None) == "interrupted"
                 await queue.put(
-                    emitter.subagent_end(name, instance_id=instance_id).data
+                    emitter.subagent_end(
+                        name, instance_id=instance_id, paused=paused
+                    ).data
                 )
 
         subagent_iter: AsyncIterator[Any] = aiter(stream.subagents)
@@ -1178,6 +1603,11 @@ async def stream_agent_events(
                     if cause and cause["type"] == "toolCall":
                         trigger_call_id = cause["tool_call_id"]
                     instance_id = ":".join(path)
+                    if _under(path, RUBRIC_GRADER_LINEAGE):
+                        # Registered so its custom events (call marks, retry
+                        # notice) resolve at once and carry its name.
+                        subagents.register(path, name, description)
+                        continue
                     await queue.put(
                         emitter.subagent_start(
                             name,
@@ -1221,6 +1651,13 @@ async def stream_agent_events(
                     task.cancel()
                 await asyncio.gather(*producers, return_exceptions=True)
                 raise item
+            if item.get("type") == "interrupt":
+                # The client may close this generator as soon as it sees the
+                # pause. Let LangGraph persist the interrupt before aborting
+                # the underlying stream in our ``finally`` block.
+                await _wait_for_checkpointed_interrupt(
+                    agent, config, item["interrupt_id"]
+                )
             yield item
     except Exception as e:
         _run_raised = True
@@ -1248,4 +1685,6 @@ async def stream_agent_events(
         if _run_raised:
             await _recover_interrupted_graph_state(agent, config)
 
-    yield emitter.done(processor.full_response).data
+    yield emitter.done(
+        processor.full_response, last_pass_response=processor.last_pass_response
+    ).data

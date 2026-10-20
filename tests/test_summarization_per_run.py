@@ -318,6 +318,19 @@ async def test_resolution_failure_keeps_construction_limits():
     assert mw._lc_helper._get_profile_limits() == CONSTRUCTION_WINDOW
 
 
+async def test_unknown_router_model_is_not_hidden_behind_construction_limits():
+    from EvoScientist.llm.registry import UnknownModelError
+
+    mw, construction = _make_mw()
+    handler = AsyncMock(return_value=MagicMock())
+    with (
+        _patched_config({"model": "claude-sonnet-4.6", "model_provider": "openrouter"}),
+        pytest.raises(UnknownModelError),
+    ):
+        await mw.awrap_model_call(_fake_model_request(construction), handler)
+    handler.assert_not_called()
+
+
 async def test_unsynced_shim_reports_construction_profile_not_resolved_window():
     """After an override, clearing the sync must not invent a window.
 
@@ -517,7 +530,7 @@ def test_default_middleware_registers_subclass_exactly_once(
 
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    mw = _get_default_middleware(workspace=workspace, backend=MagicMock())
+    mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
     summ = [m for m in mw if m.name == "SummarizationMiddleware"]
     assert len(summ) == 1, "expected exactly one summarization middleware"
     assert isinstance(summ[0], _PerRunLimitsSummarizationMiddleware)
@@ -562,7 +575,7 @@ def test_deepagents_name_merge_replaces_stock_instance(
         def __init__(self, name: str) -> None:
             self.name = name
 
-    user_mw = _get_default_middleware(workspace=workspace, backend=MagicMock())
+    user_mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
 
     core = [
         _Named("FilesystemMiddleware"),
@@ -865,3 +878,68 @@ async def test_stock_middleware_stays_frozen_under_same_override(tmp_path):
     # Frozen 200k trigger: the full oversized history is sent untouched.
     assert len(sent) == len(messages)
     assert not list((tmp_path / "conversation_history").glob("*.md"))
+
+
+# ---------------------------------------------------------------------------
+# Proactive shadow turns
+# ---------------------------------------------------------------------------
+
+
+async def test_a_proactive_turn_passes_through_without_summarizing():
+    """No summary call and no history offload on a proactive shadow turn."""
+    mw, construction = _make_mw(window=1_000)
+    backend = mw._backend
+    messages = [
+        HumanMessage(content="x " * 5_000, id=f"h{i}")
+        if i % 2 == 0
+        else AIMessage(content="y " * 5_000, id=f"a{i}")
+        for i in range(8)
+    ]
+    request = _fake_model_request(construction, messages)
+    handler = AsyncMock(return_value=MagicMock())
+
+    with _patched_config({"proactive_mode": True}):
+        await mw.awrap_model_call(request, handler)
+
+    handler.assert_awaited_once_with(request)
+    assert backend.mock_calls == []
+    construction.invoke.assert_not_called()
+    construction.ainvoke.assert_not_called()
+
+
+def test_a_proactive_turn_passes_through_on_the_sync_path():
+    mw, construction = _make_mw(window=1_000)
+    request = _fake_model_request(construction, [HumanMessage(content="x " * 5_000)])
+    handler = MagicMock(return_value=MagicMock())
+
+    with _patched_config({"proactive_mode": True}):
+        mw.wrap_model_call(request, handler)
+
+    handler.assert_called_once_with(request)
+
+
+def test_summary_overflow_retry_fits_the_run_window():
+    """The cut-down prompt after a summary overflow is sized for the run's model."""
+    mw, _ = _make_mw(window=1_000_000)
+    _sync_to(mw, _UnhashableModel(100_000))
+    prompt = mw._lc_helper._overflow_retry_prompt([HumanMessage("word " * 600_000)])
+    assert len(prompt) < 4 * 100_000
+
+
+def test_shim_install_publishes_the_readiness_marker_last():
+    """A thread that sees the window shim on ``model`` skips the install, so
+    the summary shims must already be in place by then."""
+    mw, _ = _make_mw(window=1_000_000)
+    helper = mw._lc_helper
+    order: list[str] = []
+
+    class _Recording(type(helper)):
+        def __setattr__(self, name, value):
+            if name in ("model", "_summary_model", "_summary_chat_model"):
+                order.append(name)
+            super().__setattr__(name, value)
+
+    helper.__class__ = _Recording
+    _sync_to(mw, _UnhashableModel(100_000))
+    assert order[-1] == "model"
+    assert set(order) == {"model", "_summary_model", "_summary_chat_model"}

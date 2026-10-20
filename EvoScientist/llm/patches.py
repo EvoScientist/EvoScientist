@@ -6,19 +6,19 @@ fix upstream bugs, applied at import time or on first use.
 Patches:
     - _patch_anthropic_proxy_compat: ccproxy dict→Pydantic model mismatch
     - _patch_openai_compat_content: list content→string for strict APIs
-    - _patch_ccproxy_codex_compat: ccproxy model fixes + langchain None guard
-    - _patch_ccproxy_system_to_developer: system→developer role for ccproxy
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
+    - _patch_openai_responses_whole_tool_args: keep tool-call arguments the
+      ChatGPT Codex backend sends only in ``function_call_arguments.done``
+      (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
 
 Utilities:
-    - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
     - _flatten_message_content: convert content blocks to plain string
 """
 
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import os
 import sys
 from collections.abc import (
     AsyncIterator,
@@ -80,131 +79,6 @@ def _patch_anthropic_proxy_compat() -> None:
 
 
 _patch_anthropic_proxy_compat()
-
-
-# ---------------------------------------------------------------------------
-# Patch: ccproxy-api 0.2.7 Codex compatibility.
-#
-# 1) ResponseObject.output is required but upstream may omit it → 502.
-#    Fix: make output default to [].
-# 2) CodexMessage.role only allows "user"/"assistant" → 400 on system msgs.
-#    Fix: widen to also accept "system" and "developer".
-# 3) langchain-openai iterates response.output which can be None after the
-#    proxy strips it.  Fix: guard in _construct_lc_result_from_responses_api.
-# ---------------------------------------------------------------------------
-def _patch_ccproxy_codex_compat() -> None:
-    """Patch ccproxy-api models for Responses API compatibility."""
-    # 1) Make ResponseObject.output optional (default=[])
-    try:
-        import ccproxy.llms.models.openai as _oai_mod
-
-        _OrigResponse = _oai_mod.ResponseObject
-
-        from pydantic import Field as _PydanticField
-
-        class _PatchedResponseObject(_OrigResponse):  # type: ignore[misc]
-            output: list = _PydanticField(default_factory=list)  # type: ignore[assignment]
-
-            model_config = _OrigResponse.model_config.copy()
-
-        _PatchedResponseObject.__name__ = "ResponseObject"
-        _PatchedResponseObject.__qualname__ = "ResponseObject"
-        _oai_mod.ResponseObject = _PatchedResponseObject  # type: ignore[misc]
-
-        # Also patch modules that import ResponseObject directly
-        for _mod_path in (
-            "ccproxy.llms.formatters.openai_to_openai.responses",
-            "ccproxy.llms.formatters.anthropic_to_openai.responses",
-        ):
-            try:
-                import importlib
-
-                _mod = importlib.import_module(_mod_path)
-                if hasattr(_mod, "ResponseObject"):
-                    _mod.ResponseObject = _PatchedResponseObject  # type: ignore[attr-defined]
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 2) Widen CodexMessage.role to accept system/developer
-    try:
-        from typing import Annotated, Literal
-
-        import ccproxy.plugins.codex.models as _codex_mod
-
-        _OrigMessage = _codex_mod.CodexMessage
-
-        from pydantic import Field as _Field
-
-        class _PatchedCodexMessage(_OrigMessage):  # type: ignore[misc]
-            role: Annotated[  # type: ignore[assignment]
-                Literal["user", "assistant", "system", "developer"],
-                _Field(description="Message role"),
-            ]
-
-        _PatchedCodexMessage.__name__ = "CodexMessage"
-        _PatchedCodexMessage.__qualname__ = "CodexMessage"
-        _codex_mod.CodexMessage = _PatchedCodexMessage  # type: ignore[misc]
-    except Exception:
-        pass
-
-    # 3) Fix StreamingBufferService returning response.completed event
-    #    whose output is None/empty, instead of using accumulated outputs.
-    try:
-        from ccproxy.llms.streaming.accumulators import ResponsesAccumulator
-
-        _orig_get = ResponsesAccumulator.get_completed_response
-
-        def _patched_get(self: Any) -> dict | None:
-            result = _orig_get(self)
-            if result is not None:
-                output = result.get("output")
-                if output is None:
-                    # output field lost — force rebuild from accumulated items
-                    return None
-            return result
-
-        ResponsesAccumulator.get_completed_response = _patched_get  # type: ignore[assignment]
-    except Exception:
-        pass
-
-    # 4) Guard langchain-openai against None output (final safety net)
-    try:
-        import langchain_openai.chat_models.base as _base
-
-        _orig_construct = _base._construct_lc_result_from_responses_api
-
-        def _safe(response: Any, *args: Any, **kwargs: Any) -> Any:
-            if response.output is None:
-                response.output = []
-            return _orig_construct(response, *args, **kwargs)
-
-        _base._construct_lc_result_from_responses_api = _safe
-    except Exception:
-        pass
-
-
-_patch_ccproxy_codex_compat()
-
-
-# ---------------------------------------------------------------------------
-# Utility: detect ccproxy's Codex adapter (as opposed to generic localhost).
-# ---------------------------------------------------------------------------
-def _is_ccproxy_codex() -> bool:
-    """Return True if the OpenAI endpoint is ccproxy's Codex adapter.
-
-    Checks for the ccproxy-specific markers set by ``setup_codex_env()``
-    in ``ccproxy_manager.py``: the sentinel API key and the ``/codex/v1``
-    path.  Plain localhost endpoints (vLLM, Ollama, etc.) are not affected.
-    """
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    return (
-        ("127.0.0.1" in base_url or "localhost" in base_url)
-        and api_key == "ccproxy-oauth"
-        and "/codex/" in base_url
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -640,89 +514,6 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
             messages: list[BaseMessage], *args: Any, **kwargs: Any
         ) -> Any:
             async for chunk in compat.astream(orig_astream, messages, *args, **kwargs):
-                yield chunk
-
-        model._astream = _patched_astream
-
-
-# ---------------------------------------------------------------------------
-# Patch: ccproxy Codex Responses API rejects "system" role messages.
-# Convert SystemMessage to use "developer" role via langchain-openai's
-# __openai_role__ mechanism.
-# ---------------------------------------------------------------------------
-def _patch_ccproxy_system_to_developer(model: Any) -> None:
-    """Convert SystemMessage role from 'system' to 'developer' for ccproxy.
-
-    ccproxy's Responses API endpoint rejects system role messages with
-    400 "System messages are not allowed".  LangChain's ``langchain_openai``
-    checks ``additional_kwargs["__openai_role__"]`` and uses that value as
-    the message role when serializing to the API.
-
-    Args:
-        model: A LangChain chat model instance to patch in-place.
-    """
-    import copy
-    import functools
-
-    from langchain_core.messages import SystemMessage
-
-    def _system_to_developer(messages: list[BaseMessage]) -> list[BaseMessage]:
-        out: list[BaseMessage] = []
-        for msg in messages:
-            if isinstance(msg, SystemMessage):
-                if msg.additional_kwargs.get("__openai_role__") != "developer":
-                    msg = copy.copy(msg)
-                    msg.additional_kwargs = {
-                        **msg.additional_kwargs,
-                        "__openai_role__": "developer",
-                    }
-            out.append(msg)
-        return out
-
-    orig_generate = getattr(model, "_generate", None)
-    if orig_generate is None:
-        return
-
-    @functools.wraps(orig_generate)
-    def _patched_generate(
-        messages: list[BaseMessage], *args: Any, **kwargs: Any
-    ) -> Any:
-        return orig_generate(_system_to_developer(messages), *args, **kwargs)
-
-    model._generate = _patched_generate
-
-    orig_agenerate = getattr(model, "_agenerate", None)
-    if orig_agenerate is not None:
-
-        @functools.wraps(orig_agenerate)
-        async def _patched_agenerate(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            return await orig_agenerate(_system_to_developer(messages), *args, **kwargs)
-
-        model._agenerate = _patched_agenerate
-
-    orig_stream = getattr(model, "_stream", None)
-    if orig_stream is not None:
-
-        @functools.wraps(orig_stream)
-        def _patched_stream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            return orig_stream(_system_to_developer(messages), *args, **kwargs)
-
-        model._stream = _patched_stream
-
-    orig_astream = getattr(model, "_astream", None)
-    if orig_astream is not None:
-
-        @functools.wraps(orig_astream)
-        async def _patched_astream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            async for chunk in orig_astream(
-                _system_to_developer(messages), *args, **kwargs
-            ):
                 yield chunk
 
         model._astream = _patched_astream
@@ -1441,3 +1232,80 @@ def _patch_langgraph_goto_none_crash() -> None:
 
 
 _patch_langgraph_goto_none_crash()
+
+
+# ---------------------------------------------------------------------------
+# Patch: the ChatGPT Codex backend usually sends parallel tool calls whole
+# (only ``response.function_call_arguments.done``), while langchain-openai
+# builds tool-call arguments from ``.delta`` events alone, leaving them empty.
+# Hand the full arguments through as a single delta when none was streamed.
+# ---------------------------------------------------------------------------
+# Calls whose delivered arguments are remembered at once (across all streams).
+_WHOLE_TOOL_ARGS_RECORD = 256
+
+
+def _patch_openai_responses_whole_tool_args() -> None:
+    """Keep tool-call arguments that arrive only in the ``done`` event.
+
+    Process-wide: every ``ChatOpenAI`` Responses stream passes through it, so it
+    changes nothing unless a call's arguments would otherwise be lost.
+    """
+    try:
+        import langchain_openai.chat_models.base as _base
+        from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
+
+        _orig = _base._convert_responses_chunk_to_generation_chunk
+    except (ImportError, AttributeError):
+        return
+    if hasattr(_orig, "_evosci_whole_tool_args"):
+        return
+    # Arguments delivered so far per call; insertion-ordered so a stream cut
+    # before ``done`` cannot grow it forever. A call pushed out is left to upstream;
+    # only with more than twice the record's calls open at once is one forgotten.
+    delivered: dict[str, str] = {}
+    dropped: dict[str, None] = {}
+
+    def _add(item_id: str, text: str) -> None:
+        if item_id in dropped:
+            return
+        delivered[item_id] = delivered.get(item_id, "") + text
+        if len(delivered) > _WHOLE_TOOL_ARGS_RECORD:
+            oldest = next(iter(delivered))
+            del delivered[oldest]
+            dropped[oldest] = None
+            if len(dropped) > _WHOLE_TOOL_ARGS_RECORD:
+                del dropped[next(iter(dropped))]
+
+    @functools.wraps(_orig)
+    def _convert(chunk: Any, *args: Any, **kwargs: Any) -> Any:
+        kind = getattr(chunk, "type", None)
+        if kind == "response.output_item.added":
+            item = getattr(chunk, "item", None)
+            # Some servers open the call with (part of) its arguments filled in.
+            if getattr(item, "type", None) == "function_call":
+                # A new call: whatever an earlier, cut stream left under this id is stale.
+                delivered.pop(item.id, None)
+                dropped.pop(item.id, None)
+                if item.arguments:
+                    _add(item.id, item.arguments)
+        elif kind == "response.function_call_arguments.delta":
+            _add(chunk.item_id, chunk.delta)
+        elif kind == "response.function_call_arguments.done":
+            sent = delivered.pop(chunk.item_id, "")
+            full = chunk.arguments or ""
+            missing = full[len(sent) :] if full.startswith(sent) else ""
+            if chunk.item_id in dropped:
+                del dropped[chunk.item_id]
+                missing = ""
+            if missing:
+                chunk = ResponseFunctionCallArgumentsDeltaEvent.construct(
+                    type="response.function_call_arguments.delta",
+                    delta=missing,
+                    item_id=chunk.item_id,
+                    output_index=chunk.output_index,
+                    sequence_number=chunk.sequence_number,
+                )
+        return _orig(chunk, *args, **kwargs)
+
+    _convert._evosci_whole_tool_args = True  # type: ignore[attr-defined]
+    _base._convert_responses_chunk_to_generation_chunk = _convert

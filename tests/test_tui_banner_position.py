@@ -16,106 +16,11 @@ pilot so they exercise the actual production code path.
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
-
 import pytest
 
 pytest.importorskip("textual")
 
-
-# ---------------------------------------------------------------------------
-# Module access
-#
-# ``EvoTextualInteractiveApp`` is defined inside ``run_textual_interactive``,
-# so it is not reachable as ``tui_interactive.EvoTextualInteractiveApp``.  We
-# grab it by invoking the factory once with a patched ``App.run_async`` that
-# captures the freshly-built instance. The synchronous factory owns its
-# top-level event loop, so each test boots it via :func:`_capture_app`.
-# ---------------------------------------------------------------------------
-
-
-async def _capture_app(monkeypatch, workspace) -> object:
-    """Build an ``EvoTextualInteractiveApp`` without entering its main loop."""
-    from pathlib import Path
-
-    from textual.app import App
-
-    from EvoScientist.cli import tui_interactive as tui_mod
-    from EvoScientist.paths import SessionDirs, Workspace
-
-    captured: dict = {}
-
-    async def _no_run(self, *args, **kwargs):
-        captured["app"] = self
-
-    monkeypatch.setattr(App, "run_async", _no_run)
-
-    fake_load_agent = AsyncMock(return_value=None)
-
-    @asynccontextmanager
-    async def _fake_checkpointer(*_a, **_k):
-        yield None
-
-    monkeypatch.setattr(
-        "EvoScientist.cli.tui_interactive.get_checkpointer",
-        _fake_checkpointer,
-        raising=False,
-    )
-
-    class _FakeSuggester:
-        def __init__(self, *_a, **_k):
-            pass
-
-    monkeypatch.setattr(
-        "EvoScientist.cli.history_suggester.HistorySuggester", _FakeSuggester
-    )
-
-    monkeypatch.setattr(
-        "EvoScientist.cli.tui_interactive._auto_start_channel",
-        lambda *_a, **_k: None,
-        raising=False,
-    )
-
-    monkeypatch.setattr("EvoScientist.cli.tui_interactive.mode", "dev", raising=False)
-    # Note: ``create_run_dir`` and ``load_agent`` are passed
-    # as parameters to ``run_textual_interactive`` (the factory), so the
-    # closure inside ``EvoTextualInteractiveApp`` uses the fakes directly
-    # and the module-level ``_create_run_dir`` / ``load_agent``
-    # symbols never get a chance to run.
-
-    # The factory is synchronous at the outer level and owns its top-level
-    # loop via ``asyncio.run``.
-    try:
-        await asyncio.to_thread(
-            tui_mod.run_textual_interactive,
-            show_thinking=False,
-            channel_send_thinking=False,
-            # The banner shows this folder: keep it short, so it fits one line on
-            # the 80-column screen whatever the temp folder is called (it wraps on
-            # Windows and pushes the banner out of view).
-            dirs=SessionDirs(Workspace(Path.cwd())),
-            mode="dev",
-            model=None,
-            provider=None,
-            run_name="test-run",
-            thread_id=None,
-            load_agent=fake_load_agent,
-            create_run_dir=lambda ws, _name: ws.root,
-            config=None,
-        )
-    except SystemExit:
-        pass
-
-    app = captured.get("app")
-    if app is None:
-        raise RuntimeError(
-            "EvoTextualInteractiveApp was not captured — _no_run was never "
-            "called, meaning the factory crashed before constructing the app."
-        )
-    return app
-
+from tests.tui_fakes import capture_app as _capture_app
 
 # ---------------------------------------------------------------------------
 # Tests

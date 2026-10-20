@@ -6,19 +6,29 @@ import copy
 import os
 
 import questionary
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
 from ...paths import Workspace, start_workspace_path
 from ...runtime import AsyncRuntime
+from ..provider_keys import PROVIDERS
 from ..settings import (
     EvoScientistConfig,
     get_config_path,
     load_config,
     save_config,
 )
+from ..store import (
+    ConfigError,
+    config_lock,
+    read_config_mapping,
+    remove_config_file,
+    write_config_bytes,
+)
 from .channels import _step_channels
 from .steps import (
+    _asks_reasoning_effort,
     _step_anthropic_auth_mode,
     _step_auxiliary_enable,
     _step_base_url,
@@ -114,29 +124,7 @@ def render_progress(current_step: int, completed: set[int]) -> Panel:
 
 
 _PROVIDER_KEY_ATTR = {
-    "anthropic": "anthropic_api_key",
-    "minimax": "minimax_api_key",
-    "nvidia": "nvidia_api_key",
-    "google-genai": "google_api_key",
-    "siliconflow": "siliconflow_api_key",
-    "openrouter": "openrouter_api_key",
-    "atlascloud": "atlascloud_api_key",
-    "requesty": "requesty_api_key",
-    "novita": "novita_api_key",
-    "opper": "opper_api_key",
-    "deepseek": "deepseek_api_key",
-    "zhipu": "zhipu_api_key",
-    "zhipu-code": "zhipu_api_key",
-    "volcengine": "volcengine_api_key",
-    "volcengine-code": "volcengine_api_key",
-    "dashscope": "dashscope_api_key",
-    "dashscope-code": "dashscope_api_key",
-    "moonshot": "moonshot_api_key",
-    "kimi-coding": "kimi_api_key",
-    "xiaomi": "mimo_api_key",
-    "xiaomi-token-plan": "mimo_token_plan_api_key",
-    "custom-openai": "custom_openai_api_key",
-    "custom-anthropic": "custom_anthropic_api_key",
+    name: spec.key_field for name, spec in PROVIDERS.items() if spec.key_field
 }
 
 _MINIMAX_GLOBAL_BASE_URL = "https://api.minimax.io/anthropic"
@@ -150,13 +138,15 @@ _CUSTOM_PROVIDER_BASE_URL = {
 def _autosave(config: EvoScientistConfig) -> None:
     """Persist current config to disk between phases.
 
-    Silently swallows IO errors so a transient disk issue doesn't abort the
-    wizard — the final save at the end will surface anything broken.
+    A failure does not abort the wizard (the final save tries again), but it
+    is shown, so a refused write never vanishes silently.
     """
     try:
         save_config(config)
-    except Exception:
-        pass
+    except Exception as exc:
+        console.print(
+            f"[yellow]Could not autosave the configuration: {escape(str(exc))}[/yellow]"
+        )
 
 
 def _skills_workspace(config: EvoScientistConfig) -> Workspace:
@@ -512,6 +502,36 @@ def run_onboard(
     only_sections: set[str] | frozenset[str] | None = None,
     runtime: AsyncRuntime | None = None,
 ) -> bool:
+    """Run the onboarding wizard while holding the config lock.
+
+    The lock is held from start to end, so no other writer (the settings
+    API, ``EvoSci config set``, the TUI) changes the file under the wizard;
+    they are refused with a message that names ``EvoSci onboard``. A file
+    that does not parse is refused before anything is asked, since the
+    wizard would otherwise start from defaults and autosave them over it.
+    A refusal, or a write that keeps failing, raises
+    :class:`~EvoScientist.config.store.ConfigError`. See :func:`_run_onboard`
+    for the arguments.
+    """
+    try:
+        with config_lock():
+            read_config_mapping()
+            return _run_onboard(
+                skip_validation=skip_validation,
+                prompter=prompter,
+                only_sections=only_sections,
+                runtime=runtime,
+            )
+    except OSError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _run_onboard(
+    skip_validation: bool = False,
+    prompter=None,
+    only_sections: set[str] | frozenset[str] | None = None,
+    runtime: AsyncRuntime | None = None,
+) -> bool:
     """Run the interactive onboarding wizard.
 
     Args:
@@ -738,7 +758,7 @@ def run_onboard(
                         # leaves a stale ``--model`` / ``--api-key`` that would
                         # be re-applied under a different provider, producing
                         # an invalid pair (e.g. ``provider=openai`` +
-                        # ``model=claude-sonnet-4-6``).
+                        # ``model=claude-sonnet-5-5``).
                         for field_name in vars(loop_snapshot):
                             setattr(
                                 config, field_name, getattr(loop_snapshot, field_name)
@@ -770,8 +790,8 @@ def run_onboard(
                     config.model = _step_model(
                         config, provider, ollama_detected_models=ollama_detected_models
                     )
-                if provider == "openrouter" and _preset("model") is None:
-                    config.reasoning_effort = _step_reasoning_effort(config)
+                if _asks_reasoning_effort(provider) and _preset("model") is None:
+                    config.reasoning_effort = _step_reasoning_effort(config, provider)
                 _autosave(config)
 
             if "auxiliary_model" in sections_to_run:
@@ -962,10 +982,9 @@ def run_onboard(
                 #      leaving the mid-wizard state in place.
                 try:
                     if not original_file_existed:
-                        if config_path.exists():
-                            config_path.unlink()
+                        remove_config_file()
                     elif original_file_bytes is not None:
-                        config_path.write_bytes(original_file_bytes)
+                        write_config_bytes(original_file_bytes)
                     else:
                         save_config(snapshot)
                 except OSError as exc:

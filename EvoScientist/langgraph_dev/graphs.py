@@ -27,6 +27,11 @@ because it follows a different mechanism (re-exporting a lazily-constructed
 attribute), not the yaml-driven factory.
 """
 
+# Records config.yaml before any graph below reads it (see main_graph.py).
+import EvoScientist.langgraph_dev.config_baseline  # noqa: F401
+
+# isort: split
+
 from EvoScientist.langgraph_dev.folder_check import folder_checked
 from EvoScientist.memory.agents import (
     build_autoskills_graph,
@@ -35,6 +40,7 @@ from EvoScientist.memory.agents import (
 )
 from EvoScientist.memory.types import MemorySourceType
 from EvoScientist.paths import process_session_dirs
+from EvoScientist.proactive.graph import build_proactive_graph
 from EvoScientist.subagents._factory import build_async_subagent_graph
 from EvoScientist.subagents.expert_container_async import (
     build_expert_container_async_graph,
@@ -87,4 +93,9 @@ evomemory_observation_linker = folder_checked(
 )
 evomemory_autoskills = folder_checked(
     build_autoskills_graph(workspace=_workspace), graph_id="evomemory-autoskills"
+)
+# Proactive pushes (#263): one tick of the workspace's proactive cron. It works
+# in no folder, so it is checked against the workspace only.
+proactive = folder_checked(
+    build_proactive_graph(workspace=_workspace), graph_id="proactive"
 )

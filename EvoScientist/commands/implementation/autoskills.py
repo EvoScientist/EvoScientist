@@ -307,7 +307,14 @@ class AutoSkillsCommand(Command):
                 style="yellow",
             )
             return
-        if not await asyncio.to_thread(set_config_value, key, value):
+        from ...config.store import ConfigError
+
+        try:
+            saved = await asyncio.to_thread(set_config_value, key, value)
+        except ConfigError as e:
+            ctx.ui.append_system(f"Could not save to config: {e}", style="red")
+            return
+        if not saved:
             valid = self._config_values(key)
             suffix = f" Valid values: {valid}." if valid else ""
             ctx.ui.append_system(

@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, filter_
 from langchain_core.messages.tool import ToolCall
 from langgraph.runtime import Runtime
 
-from ..message_meta import is_pinned_skill, message_source, pinned_skill_name
+from ..message_meta import is_pinned_skill, pinned_skill_name, this_run_messages
 from .types import MemorySourceType
 
 
@@ -124,11 +124,7 @@ def _compact_messages(
 
 def _latest_user_turn_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     """Return messages from the latest user turn onward."""
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        if message.type == "human" and message_source(message) is None:
-            return list(messages[index:])
-    return list(messages)
+    return this_run_messages(list(messages))
 
 
 def _compact_turn_messages(

@@ -633,6 +633,28 @@ def remember_channel_origin(thread_id: str | None, msg: ChannelMessage) -> None:
         )
 
 
+def restore_channel_origin(
+    thread_id: str,
+    *,
+    channel_type: str,
+    chat_id: str,
+    sender: str,
+    metadata: dict | None,
+) -> None:
+    """Record a channel origin read back after a restart (no inbound message).
+
+    Serve uses it for a conversation armed for proactive pushes, whose origin
+    it stored in checkpoint metadata. A later channel turn overwrites it.
+    """
+    with _thread_channel_origins_lock:
+        _thread_channel_origins[thread_id] = _ChannelOrigin(
+            channel_type=channel_type,
+            chat_id=chat_id,
+            sender=sender,
+            metadata=dict(metadata) if metadata else None,
+        )
+
+
 def get_channel_origin(thread_id: str | None) -> _ChannelOrigin | None:
     """Return the channel origin remembered for ``thread_id``, or ``None``."""
     if not thread_id:
@@ -791,6 +813,11 @@ def channel_ask_user_prompt(
     )
 
 
+def channel_session_granted(msg: ChannelMessage) -> bool:
+    """Whether this message's chat has an "approve all" grant in force."""
+    return _approval_policy.is_session_granted(_channel_message_session_key(msg))
+
+
 def channel_hitl_prompt(
     action_requests: list,
     msg: ChannelMessage,
@@ -811,9 +838,14 @@ def channel_hitl_prompt(
     and whether the budget skipped the prompt.
     """
     session_key = _channel_message_session_key(msg)
+    in_force = _approval_policy.is_session_granted(session_key)
     decisions = _approval_policy.auto_decision(session_key, action_requests)
     if decisions is not None:
-        return ApprovalOutcome(decisions=decisions)
+        return ApprovalOutcome(
+            decisions=decisions,
+            session_granted=bool(action_requests) and in_force,
+            grant_in_force=in_force,
+        )
     if human_budget_exhausted:
         return ApprovalOutcome(budget_exhausted=True)
 
@@ -844,7 +876,7 @@ def channel_hitl_prompt(
             # explicit notice. Only the serve-mode consumer refeeds the
             # text as a new turn.
             await io.send(UNRECOGNIZED_FEEDBACK)
-            return ApprovalOutcome(prompted=True)
+            return ApprovalOutcome(prompted=True, rejected=True)
         return outcome
 
     return _run_engine_on_bus(

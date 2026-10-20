@@ -96,3 +96,50 @@ def test_empty_live_config_leaves_kwargs_unchanged(monkeypatch):
 )
 def test_extract_caller_config(config, expected):
     assert patches._extract_caller_configurable(config) == expected
+
+
+def test_child_runs_do_not_inherit_the_approval_keys():
+    """A background sub-agent's run gets the caller's model only: neither the
+    suppression flag nor a session grant travels to the dev server with it."""
+    config = {
+        "configurable": {
+            "model": "m",
+            "model_provider": "p",
+            "hitl_approve_all": True,
+            "hitl_suppressed": True,
+        }
+    }
+    assert patches._extract_caller_configurable(config) == {
+        "model": "m",
+        "model_provider": "p",
+    }
+
+
+def test_a_child_run_created_from_a_granted_call_has_no_approval_key(monkeypatch):
+    """On the wire: `runs.create` for a background sub-agent started by a call
+    that carries the grant gets the caller's model and nothing else."""
+    monkeypatch.setattr(patches, "_read_cfg_configurable", dict)
+    create = MagicMock()
+    real = SimpleNamespace(
+        runs=SimpleNamespace(create=create, get=MagicMock(), cancel=MagicMock()),
+        threads=object(),
+    )
+    cache = MagicMock()
+    cache.get_sync.return_value = real
+    client = patches._ClientCacheProxy(cache).get_sync("agent")
+    caller = {
+        "configurable": {
+            "thread_id": "parent",
+            "model": "m",
+            "hitl_approve_all": True,
+            "hitl_suppressed": False,
+        }
+    }
+    token = patches._caller_configurable.set(
+        patches._extract_caller_configurable(caller)
+    )
+    try:
+        client.runs.create(thread_id="child", assistant_id="agent")
+    finally:
+        patches._caller_configurable.reset(token)
+    assert create.call_args.kwargs["config"] == {"configurable": {"model": "m"}}

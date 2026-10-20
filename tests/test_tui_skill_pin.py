@@ -122,7 +122,7 @@ async def test_skill_slash_runs_a_turn_with_one_label(monkeypatch, workspace):
         _prepare(app, workspace, gateway)
         commands: list[str] = []
 
-        async def _record(text):
+        async def _record(text, _token):
             commands.append(text)
 
         app._handle_command = _record
@@ -150,16 +150,18 @@ async def test_commands_typos_and_case_go_to_the_command_handler(
         _prepare(app, workspace, gateway)
         commands: list[str] = []
 
-        async def _record(text):
+        async def _record(text, _token):
             commands.append(text)
+            # The real handler owns the app while it runs and releases it.
+            app._busy = False
 
         app._handle_command = _record
 
         sent = ["/model", "/model gpt", "/typo hi", "/new", "/Alpha go"]
         for text in sent:
             await _submit(app, text)
-        if app._background_tasks:
-            await asyncio.gather(*list(app._background_tasks))
+            if app._background_tasks:
+                await asyncio.gather(*list(app._background_tasks))
         await pilot.pause()
 
         assert sorted(commands) == sorted(sent)
@@ -246,3 +248,31 @@ async def test_typing_slash_with_a_non_string_description_does_not_crash(
 
         assert app.is_running
         assert prompt.value == "/new"
+
+
+async def test_history_shows_grader_feedback_as_a_label(monkeypatch, workspace):
+    feedback = HumanMessage(
+        "A grader reviewed your work and asked for revisions.",
+        additional_kwargs={"lc_source": "rubric_grader"},
+    )
+    gateway = _gateway(
+        messages=[
+            HumanMessage("write the report"),
+            AIMessage("Draft."),
+            feedback,
+            AIMessage("Revised."),
+        ]
+    )
+
+    app = await _capture_app(monkeypatch, workspace)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        _prepare(app, workspace, gateway)
+
+        await app._render_history("tid")
+        await pilot.pause()
+
+        assert "rubric: revision requested" in _system_lines(app)
+        assert _user_lines(app) == ["> write the report"]
+        rendered = _system_lines(app) + _user_lines(app)
+        assert not any("A grader reviewed" in text for text in rendered)

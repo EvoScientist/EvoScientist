@@ -8,7 +8,9 @@ asymmetrically with respect to workspace ``.env`` handling.
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
@@ -18,6 +20,9 @@ from typing import Any, Literal, get_args, get_origin, get_type_hints
 
 import yaml
 from dotenv import dotenv_values, find_dotenv
+
+from .. import paths
+from . import store
 
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
@@ -84,6 +89,8 @@ DEFAULT_MEMORY_OBSERVATION_WRITER = MemoryObservationWriter.ALL
 DEFAULT_MEMORY_SKILL_SYNTHESIS_MODE = MemorySkillSynthesisMode.REVIEW
 DEFAULT_MEMORY_SKILL_SYNTHESIS_CADENCE = MemorySkillSynthesisCadence.WEEKLY
 DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME = "03:00"
+DEFAULT_PROACTIVE_IDLE_MINUTES = 120
+DEFAULT_PROACTIVE_QUIET_HOURS = "22:00-08:00"
 
 
 def _normalize_hhmm(value: Any) -> str | None:
@@ -103,6 +110,38 @@ def _normalize_hhmm(value: Any) -> str | None:
     return f"{hour_int:02d}:{minute_int:02d}"
 
 
+def _normalize_quiet_hours(value: str) -> str | None:
+    """Normalise an ``HH:MM-HH:MM`` window, or ``None`` when it is not one.
+
+    An empty or blank value is ``""`` (no quiet hours).
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    parts = text.split("-")
+    if len(parts) != 2:
+        return None
+    start, end = _normalize_hhmm(parts[0]), _normalize_hhmm(parts[1])
+    if start is None or end is None:
+        return None
+    return f"{start}-{end}"
+
+
+def _valid_timezone(value: str) -> str | None:
+    """The IANA zone name in *value*, ``""`` when blank, ``None`` when unknown."""
+    name = value.strip()
+    if not name:
+        return ""
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(name)
+    except (ValueError, OSError, KeyError):
+        # ZoneInfoNotFoundError is a KeyError; malformed keys raise ValueError.
+        return None
+    return name
+
+
 # =============================================================================
 # Configuration paths
 # =============================================================================
@@ -111,12 +150,10 @@ def _normalize_hhmm(value: Any) -> str | None:
 def get_config_dir() -> Path:
     """Get the configuration directory path.
 
-    Uses XDG_CONFIG_HOME if set, otherwise ~/.config/evoscientist/
+    ``$XDG_CONFIG_HOME/evoscientist`` when that is set, otherwise
+    ``~/.config/evoscientist``, read once at startup (``paths.CONFIG_DIR``).
     """
-    xdg_config = os.environ.get("XDG_CONFIG_HOME")
-    if xdg_config:
-        return Path(xdg_config) / "evoscientist"
-    return Path.home() / ".config" / "evoscientist"
+    return paths.CONFIG_DIR
 
 
 def get_config_path() -> Path:
@@ -207,8 +244,12 @@ class EvoScientistConfig:
 
     # LLM Settings
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-sonnet-5-5"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
+    # Transient model-call failures (5xx, 429, connection drops): how long one
+    # model call keeps retrying after it first fails, in seconds; 0 = no retry.
+    model_retry_wait_seconds: int = 60
+    auto_mode_retry_wait_seconds: int = 1800  # unattended runs: auto_mode, scheduler
     # Optional auxiliary model for background/helper LLM calls (memory workers +
     # tool selector). Empty = fall back to the main model/provider.
     auxiliary_provider: str = ""  # empty = use main provider
@@ -316,6 +357,19 @@ class EvoScientistConfig:
     gateway_backend_standalone: Literal["inherit", "local", "langgraph_server"] = (
         "inherit"
     )
+
+    # Proactive pushes (#263): a conversation armed for proactive pushes in
+    # ``EvoSci serve`` may get one unprompted message once it has gone quiet.
+    # These settings tune when; arming is per conversation, so there is no
+    # global on/off switch.
+    # Minutes since the conversation's last activity before a push is considered.
+    proactive_idle_minutes: int = DEFAULT_PROACTIVE_IDLE_MINUTES
+    # Window "HH:MM-HH:MM" (may wrap midnight) in which no push is generated.
+    # An empty string, or equal start and end, means no quiet hours.
+    proactive_quiet_hours: str = DEFAULT_PROACTIVE_QUIET_HOURS
+    # IANA timezone the quiet-hours window is evaluated in. Empty string means
+    # the host's local zone.
+    proactive_timezone: str = ""
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -507,6 +561,10 @@ class EvoScientistConfig:
     auto_approve: bool = False  # Auto-approve all tool executions without prompting
     auto_mode: bool = False  # Run unattended: imply auto_approve and disable ask_user
     shell_allow_list: str = ""  # Comma-separated shell command prefixes to auto-approve
+    # Comma-separated origins (``https://host[:port]``) whose pages may use the
+    # backend besides this machine's own. Read from config.yaml only: no
+    # environment variable sets it, so a workspace ``.env`` cannot widen it.
+    backend_allowed_origins: str = ""
 
     # Dangerous mode: real-filesystem access (no workspace confinement). The agent
     # operates on real absolute paths anywhere on disk; the privileged-command
@@ -567,6 +625,17 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
+        # A retry budget that is not a whole number of seconds (a hand-edited
+        # ``60s``) goes back to its default; ``0`` or less switches the retry off.
+        for name in ("model_retry_wait_seconds", "auto_mode_retry_wait_seconds"):
+            budget = getattr(self, name)
+            if not isinstance(budget, int) or isinstance(budget, bool):
+                default = type(self).__dataclass_fields__[name].default
+                logging.getLogger(__name__).warning(
+                    "Invalid %s %r; falling back to %d.", name, budget, default
+                )
+                setattr(self, name, default)
+
         # A non-positive cache cap would evict every file entry immediately,
         # defeating the cache entirely.
         cap = self.memory_observation_cache_max_files
@@ -583,6 +652,10 @@ class EvoScientistConfig:
         # the source rather than guarding every consumer.
         if isinstance(self.shell_allow_list, list | tuple):
             self.shell_allow_list = ",".join(str(s) for s in self.shell_allow_list)
+        if isinstance(self.backend_allowed_origins, list | tuple):
+            self.backend_allowed_origins = ",".join(
+                str(s) for s in self.backend_allowed_origins
+            )
 
         # auto_mode and dangerous_mode both imply auto_approve regardless of
         # source (CLI, env, config file, direct construction) — done here so the
@@ -615,6 +688,51 @@ class EvoScientistConfig:
             self.memory_skill_synthesis_time = DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME
         else:
             self.memory_skill_synthesis_time = synthesis_time
+
+        self._validate_proactive_settings()
+
+    def _validate_proactive_settings(self) -> None:
+        """Replace an invalid proactive setting by its default, with a warning.
+
+        A typo must neither crash startup nor open the quiet hours: a bad
+        window falls back to the default window, not to "no quiet hours".
+        """
+        log = logging.getLogger(__name__)
+
+        idle = self.proactive_idle_minutes
+        if not isinstance(idle, int) or isinstance(idle, bool) or idle < 0:
+            log.warning(
+                "Invalid proactive_idle_minutes %r; falling back to %d.",
+                idle,
+                DEFAULT_PROACTIVE_IDLE_MINUTES,
+            )
+            self.proactive_idle_minutes = DEFAULT_PROACTIVE_IDLE_MINUTES
+
+        quiet_hours = self.proactive_quiet_hours
+        window = (
+            _normalize_quiet_hours(quiet_hours)
+            if isinstance(quiet_hours, str)
+            else None
+        )
+        if window is None:
+            log.warning(
+                "Invalid proactive_quiet_hours %r (expected 'HH:MM-HH:MM'); "
+                "falling back to %s.",
+                quiet_hours,
+                DEFAULT_PROACTIVE_QUIET_HOURS,
+            )
+            window = DEFAULT_PROACTIVE_QUIET_HOURS
+        self.proactive_quiet_hours = window
+
+        timezone = self.proactive_timezone
+        zone = _valid_timezone(timezone) if isinstance(timezone, str) else None
+        if zone is None:
+            log.warning(
+                "Invalid proactive_timezone %r; falling back to the host's zone.",
+                timezone,
+            )
+            zone = ""
+        self.proactive_timezone = zone
 
 
 @dataclass(frozen=True)
@@ -674,60 +792,126 @@ def load_config() -> EvoScientistConfig:
     try:
         with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-
-        # Filter to only valid fields; a blank ``key:`` loads as None, which no
-        # field accepts, so it falls back to the default.
-        valid_fields = {f.name for f in fields(EvoScientistConfig)}
-        filtered_data = {
-            k: v for k, v in data.items() if k in valid_fields and v is not None
-        }
-
-        return EvoScientistConfig(**filtered_data)
+        return config_from_mapping(data)
     except Exception:
         # On any error, return defaults
         return EvoScientistConfig()
 
 
+def config_from_mapping(data: dict[str, Any]) -> EvoScientistConfig:
+    """Build a config from the file's mapping, defaults for what it lacks."""
+    # Filter to only valid fields; a blank ``key:`` loads as None, which no
+    # field accepts, so it falls back to the default.
+    valid_fields = {f.name for f in fields(EvoScientistConfig)}
+    filtered_data = {
+        k: v for k, v in data.items() if k in valid_fields and v is not None
+    }
+    return EvoScientistConfig(**filtered_data)
+
+
 def save_config(config: EvoScientistConfig) -> None:
-    """Save configuration to file.
+    """Save the whole configuration to file, atomically and under the lock.
+
+    Raises :class:`~EvoScientist.config.store.ConfigParseError` when the
+    existing file does not parse: ``config`` then most likely holds the
+    defaults :func:`load_config` fell back to, and writing it would replace
+    the user's configuration. Raises
+    :class:`~EvoScientist.config.store.ConfigLockedError` while another
+    process (``EvoSci onboard``) holds the lock.
 
     Args:
         config: EvoScientistConfig instance to save.
     """
-    config_path = get_config_path()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        config_path.parent.chmod(0o700)
-    except OSError:
-        pass
-
-    data = _config_to_dict(config)
-
     # Save all fields including empty API keys (users can set them via env vars instead)
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(
-            data,
-            f,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
-    try:
-        config_path.chmod(0o600)
-    except OSError:
-        pass
+    data = store.dump_config_mapping(_config_to_dict(config))
+    with store.config_lock():
+        store.read_config_mapping()
+        store.write_config_bytes(data)
 
 
 def reset_config() -> None:
     """Reset configuration to defaults by deleting the config file."""
-    config_path = get_config_path()
-    if config_path.exists():
-        config_path.unlink()
+    with store.config_lock():
+        store.remove_config_file()
 
 
 def _config_to_dict(config: EvoScientistConfig) -> dict[str, Any]:
     """Return a plain serializable config dict."""
     return {key: _plain_config_value(value) for key, value in asdict(config).items()}
+
+
+# Secret fields, listed by name rather than matched on it: a name rule would
+# miss ``feishu_encrypt_key`` and catch ``mimo_token_plan_base_url``.
+API_KEY_FIELDS: frozenset[str] = frozenset(
+    {
+        "anthropic_api_key",
+        "openai_api_key",
+        "nvidia_api_key",
+        "google_api_key",
+        "minimax_api_key",
+        "siliconflow_api_key",
+        "openrouter_api_key",
+        "atlascloud_api_key",
+        "requesty_api_key",
+        "novita_api_key",
+        "mimo_api_key",
+        "mimo_token_plan_api_key",
+        "opper_api_key",
+        "deepseek_api_key",
+        "zhipu_api_key",
+        "volcengine_api_key",
+        "dashscope_api_key",
+        "moonshot_api_key",
+        "kimi_api_key",
+        "custom_openai_api_key",
+        "custom_anthropic_api_key",
+        "tavily_api_key",
+    }
+)
+CHANNEL_SECRET_FIELDS: frozenset[str] = frozenset(
+    {
+        "telegram_bot_token",
+        "discord_bot_token",
+        "slack_bot_token",
+        "slack_app_token",
+        "feishu_app_secret",
+        "feishu_verification_token",
+        "feishu_encrypt_key",
+        "wechat_wecom_secret",
+        "wechat_wecom_token",
+        "wechat_wecom_encoding_aes_key",
+        "wechat_mp_app_secret",
+        "wechat_mp_token",
+        "wechat_mp_encoding_aes_key",
+        "wechat_personal_token",
+        "dingtalk_client_secret",
+        "email_imap_password",
+        "email_smtp_password",
+        "qq_app_secret",
+    }
+)
+SECRET_FIELDS: frozenset[str] = API_KEY_FIELDS | CHANNEL_SECRET_FIELDS
+
+
+def secret_hint(key: str, value: str) -> str | None:
+    """The last four characters of an API key longer than eight, else ``None``.
+
+    Passwords, tokens and channel secrets get no hint: it would show a large
+    part of a short password.
+    """
+    if key in API_KEY_FIELDS and len(value) > 8:
+        return "…" + value[-4:]
+    return None
+
+
+def display_config_value(key: str, value: Any) -> str:
+    """A value for printing: secrets masked, an empty value as ``(not set)``."""
+    if value == "" or value is None:
+        return "(not set)"
+    if key in SECRET_FIELDS:
+        hint = secret_hint(key, str(value))
+        return "***" + hint[1:] if hint else "***"
+    return str(value)
 
 
 # =============================================================================
@@ -892,6 +1076,115 @@ def get_config_value(key: str) -> Any:
     return _plain_config_value(value)
 
 
+class SettingsError(ValueError):
+    """One or more settings failed validation; ``errors`` maps field to reason."""
+
+    def __init__(self, errors: dict[str, str]) -> None:
+        self.errors = errors
+        super().__init__(
+            "; ".join(f"{key}: {reason}" for key, reason in errors.items())
+        )
+
+
+def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
+    """Validate and coerce one setting; return ``(value, warning)``.
+
+    The one rule set for ``EvoSci config set``, the TUI's writers and the
+    settings API. Raises ``ValueError`` with the reason when the value is not
+    accepted. The returned value is the plain form written to the file.
+    """
+    field_info = next((f for f in fields(EvoScientistConfig) if f.name == key), None)
+    if field_info is None:
+        raise ValueError("unknown setting")
+    field_type = _config_field_type(key, field_info.type)
+
+    # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
+    # (_coerce_value(True, int) would turn it into 1 and slip past).
+    if key in ("sandbox_execute_timeout", "proactive_idle_minutes") and isinstance(
+        value, bool
+    ):
+        raise ValueError("expected a number")
+
+    try:
+        value = _coerce_value(value, field_type)
+    except (ValueError, TypeError) as e:
+        if get_origin(field_type) is Literal or _is_str_enum_type(field_type):
+            raise ValueError(str(e)) from None
+        raise ValueError(
+            f"expected {getattr(field_type, '__name__', field_type)}"
+        ) from None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("must be a finite number")
+
+    warning = None
+    if key == "sandbox_execute_timeout" and value <= 0:
+        raise ValueError("must be greater than 0")
+    if key == "memory_skill_synthesis_time":
+        value = _normalize_hhmm(value)
+        if value is None:
+            raise ValueError("expected a time as HH:MM")
+    if key == "proactive_idle_minutes" and value < 0:
+        raise ValueError("must be 0 or more")
+    if key == "proactive_quiet_hours":
+        value = _normalize_quiet_hours(value)
+        if value is None:
+            raise ValueError("expected a time range as HH:MM-HH:MM")
+    if key == "proactive_timezone":
+        value = _valid_timezone(value)
+        if value is None:
+            raise ValueError("unknown time zone")
+    if key in ("provider", "auxiliary_provider") and (value or key == "provider"):
+        from .provider_keys import PROVIDERS
+
+        if value not in PROVIDERS:
+            raise ValueError("unknown provider")
+    if key == "default_workdir" and value:
+        path = Path(os.path.expanduser(value))
+        if not path.is_absolute():
+            raise ValueError("must be an absolute path")
+        if path.exists() and not path.is_dir():
+            raise ValueError("is a file, not a folder")
+        if not path.exists():
+            warning = "the folder does not exist yet; it is created at start"
+    return _plain_config_value(value), warning
+
+
+def set_config_values(
+    changes: dict[str, Any], *, expected_revision: Any = store.UNSET
+) -> tuple[str | None, dict[str, str]]:
+    """Validate ``changes`` and write them to the file in one locked step.
+
+    A ``None`` value removes the setting from the file, so its default
+    applies. Nothing is written when any value fails: :class:`SettingsError`
+    names every failing field. Returns ``(new_revision, warnings)``.
+
+    Raises :class:`~EvoScientist.config.store.ConfigError` subclasses when
+    the file does not parse, is locked, or changed since
+    ``expected_revision`` (``None`` = "no file expected"; omitted = no check).
+    """
+    coerced: dict[str, Any] = {}
+    warnings: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    for key, value in changes.items():
+        if value is None:
+            if key in {f.name for f in fields(EvoScientistConfig)}:
+                coerced[key] = None
+            else:
+                errors[key] = "unknown setting"
+            continue
+        try:
+            coerced[key], warning = validate_setting(key, value)
+        except ValueError as e:
+            errors[key] = str(e)
+            continue
+        if warning:
+            warnings[key] = warning
+    if errors:
+        raise SettingsError(errors)
+    revision = store.update_config_mapping(coerced, expected_revision=expected_revision)
+    return revision, warnings
+
+
 def set_config_value(key: str, value: Any) -> bool:
     """Set a single configuration value.
 
@@ -900,37 +1193,16 @@ def set_config_value(key: str, value: Any) -> bool:
         value: New value.
 
     Returns:
-        True if successful, False if key is invalid.
+        True if successful, False if the key or value is invalid.
+
+    Raises:
+        ConfigError: the file does not parse or another process holds the
+            lock (see :mod:`EvoScientist.config.store`).
     """
-    valid_fields = {f.name for f in fields(EvoScientistConfig)}
-    if key not in valid_fields:
-        return False
-
-    config = load_config()
-
-    # Type coercion based on field type
-    field_info = next(f for f in fields(EvoScientistConfig) if f.name == key)
-    field_type = _config_field_type(key, field_info.type)
-
-    # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
-    # (_coerce_value(True, int) would turn it into 1 and slip past).
-    if key == "sandbox_execute_timeout" and isinstance(value, bool):
-        return False
-
     try:
-        value = _coerce_value(value, field_type)
-    except (ValueError, TypeError):
+        set_config_values({key: value})
+    except SettingsError:
         return False
-
-    if key == "sandbox_execute_timeout" and value <= 0:
-        return False
-    if key == "memory_skill_synthesis_time":
-        value = _normalize_hhmm(value)
-        if value is None:
-            return False
-
-    setattr(config, key, value)
-    save_config(config)
     return True
 
 
@@ -989,7 +1261,12 @@ _ENV_MAPPINGS = {
     "gateway_backend_interactive": "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
     "gateway_backend_tui": "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
     "gateway_backend_standalone": "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
+    "proactive_idle_minutes": "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+    "proactive_quiet_hours": "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+    "proactive_timezone": "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
+    "model_retry_wait_seconds": "EVOSCIENTIST_MODEL_RETRY_WAIT_SECONDS",
+    "auto_mode_retry_wait_seconds": "EVOSCIENTIST_AUTO_MODE_RETRY_WAIT_SECONDS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
@@ -1030,8 +1307,104 @@ _ENV_MAPPINGS = {
 }
 
 
-# Placeholder ``ccproxy_manager.setup_*_env`` writes for a provider's API key
-# when routing it through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
+_ENV_FIELDS: dict[str, str] = {env: field for field, env in _ENV_MAPPINGS.items()}
+
+
+# =============================================================================
+# Where environment values came from
+# =============================================================================
+
+# The process environment cannot tell the user's own exports from values our
+# code put there: apply_config_to_env() copies saved keys, get_effective_config()
+# merges a ``.env``, flags and ccproxy write variables too. Each such write is
+# recorded here, by variable name: ``{"source": "file" | "default" | "cli" |
+# "ccproxy" | "dotenv", "path"?: <.env path>}``. A variable with no record is
+# the user's (``env``). The settings API reports it as ``sources``.
+#
+# The launcher passes its record to the langgraph dev server in
+# ENV_ORIGINS_VAR (server environment only); this module reads and removes it
+# at import, so nothing the server starts inherits it.
+ENV_ORIGINS_VAR = "EVOSCIENTIST_CONFIG_ORIGINS"
+_ENV_ORIGINS: dict[str, dict[str, str]] = {}
+
+
+def _load_env_origins() -> None:
+    raw = os.environ.pop(ENV_ORIGINS_VAR, None)
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return
+    if isinstance(data, dict):
+        _ENV_ORIGINS.update(
+            {
+                str(k): {str(a): str(b) for a, b in v.items()}
+                for k, v in data.items()
+                if isinstance(v, dict)
+            }
+        )
+
+
+_load_env_origins()
+
+
+def record_env_origin(env_key: str, source: str, path: str | None = None) -> None:
+    """Record that our code set ``env_key``, and from where."""
+    origin = {"source": source}
+    if path:
+        origin["path"] = path
+    _ENV_ORIGINS[env_key] = origin
+
+
+def env_origin(env_key: str) -> dict[str, str] | None:
+    """Where ``env_key`` came from, or ``None`` when our code did not set it."""
+    return _ENV_ORIGINS.get(env_key)
+
+
+def env_origins() -> dict[str, dict[str, str]]:
+    return {key: dict(value) for key, value in _ENV_ORIGINS.items()}
+
+
+def _same_value(field: str, a: Any, b: Any) -> bool:
+    if field == "default_workdir":
+        a, b = (
+            os.path.realpath(os.path.expanduser(str(v))) if v else "" for v in (a, b)
+        )
+    return str(_plain_config_value(a)) == str(_plain_config_value(b))
+
+
+def _saved_mapping() -> dict[str, Any]:
+    """The file's mapping, or ``{}`` when it does not parse or cannot be read."""
+    try:
+        return store.read_config_mapping()
+    except (store.ConfigError, OSError):
+        return {}
+
+
+def config_value_origin(
+    field: str, value: Any, mapping: dict[str, Any] | None = None
+) -> str:
+    """``file`` when the file holds ``value`` for ``field``, ``default`` when
+    the file lacks the field and ``value`` is its default, else ``cli``: the
+    value can then only have come from a command-line flag.
+
+    ``mapping`` is the file's mapping when the caller has already read it.
+    """
+    if mapping is None:
+        mapping = _saved_mapping()
+    saved = mapping.get(field)
+    if saved is not None and saved != "":
+        return "file" if _same_value(field, saved, value) else "cli"
+    default = next(f.default for f in fields(EvoScientistConfig) if f.name == field)
+    if field == "default_workdir":
+        # An empty default_workdir means "the current folder".
+        return "default" if _same_value(field, os.getcwd(), value) else "cli"
+    return "default" if _same_value(field, default, value) else "cli"
+
+
+# Placeholder ``ccproxy_manager.setup_ccproxy_env`` writes for the Anthropic API
+# key when routing through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
 _OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
 
 
@@ -1111,10 +1484,12 @@ def get_effective_config(
         if env_key.startswith("EVOSCIENTIST_"):
             if not os.environ.get(env_key):
                 os.environ[env_key] = env_value
+                record_env_origin(env_key, "dotenv", dotenv_path)
         elif _oauth_routed(env_key):
             continue  # ccproxy OAuth routing must survive later re-merges
         else:
             os.environ[env_key] = env_value
+            record_env_origin(env_key, "dotenv", dotenv_path)
 
     # Start with file config (includes defaults for missing values)
     config = load_config()
@@ -1148,11 +1523,29 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
     """Apply config API keys to environment variables if not already set.
 
     This allows the config file to provide API keys that downstream
-    libraries (like langchain-anthropic) can pick up.
+    libraries (like langchain-anthropic) can pick up. Every variable it
+    sets is recorded as coming from the file, the defaults or a flag (see
+    :func:`record_env_origin`).
 
     Args:
         config: Configuration to apply.
     """
+    before = dict(os.environ)
+    _apply_config_to_env(config)
+    mapping = None  # read once, when the first variable needs it
+    for env_key, field in _ENV_FIELDS.items():
+        value = os.environ.get(env_key)
+        if value is None:
+            _ENV_ORIGINS.pop(env_key, None)
+        elif value != before.get(env_key):
+            if mapping is None:
+                mapping = _saved_mapping()
+            record_env_origin(
+                env_key, config_value_origin(field, getattr(config, field), mapping)
+            )
+
+
+def _apply_config_to_env(config: EvoScientistConfig) -> None:
     if config.anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
         os.environ["ANTHROPIC_API_KEY"] = config.anthropic_api_key
     if config.anthropic_base_url and not os.environ.get("ANTHROPIC_BASE_URL"):
@@ -1237,6 +1630,9 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):
         os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "false"
+    # Written for both values: get_chat_model reads it, and the langgraph dev
+    # subprocess re-resolves config without the CLI's --auth-mode override.
+    os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = config.openai_auth_mode
     # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
     # (warning banner, run_in_background) and is inherited by the langgraph dev
     # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)

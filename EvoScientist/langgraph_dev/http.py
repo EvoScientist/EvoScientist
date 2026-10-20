@@ -6,13 +6,17 @@ process as the graph. We use it to surface the registry the WebUI's
 ``/model`` picker needs.
 
 Why this lives here and not as a separate sidecar: the WebUI talks to
-``EvoSci deploy``'s langgraph endpoint anyway, so one origin keeps the
-WebUI's fetch logic simple — no CORS dance, no extra port to configure.
+``EvoSci deploy``'s langgraph endpoint anyway, so one server keeps the
+WebUI's fetch logic simple — no extra port to configure.
+
+The app's middleware, :class:`~EvoScientist.langgraph_dev.boundary.BrowserBoundary`,
+wraps every route of the server, langgraph-api's included: langgraph-api runs a
+custom app's middleware outside its own.
 
 Why Starlette and not FastAPI: ``langgraph_api`` already depends on
 Starlette; adding FastAPI would pull in pydantic v1-vs-v2 reconciliation
-the deploy doesn't need. The one route here has no input model, just a
-JSON body, so the lower-level surface is sufficient.
+the deploy doesn't need. The routes here have no input models, just JSON
+bodies, so the lower-level surface is sufficient.
 
 Lightweight by design — module-level imports stick to ``config``,
 ``llm.models`` (registry only; no chat-model construction), and
@@ -23,14 +27,19 @@ memory.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from EvoScientist.config import get_effective_config
+from EvoScientist.langgraph_dev.boundary import BOUNDARY_ENV, BrowserBoundary, Trust
 from EvoScientist.llm.models import list_model_picker_entries
+from EvoScientist.local_secret import load_local_secret, require_local_secret
 
 
 async def get_models(_request: Request) -> JSONResponse:
@@ -216,12 +225,116 @@ async def post_policy(request: Request) -> JSONResponse:
     return JSONResponse({"decisions": decisions})
 
 
-app = Starlette(
-    routes=[
-        Route("/api/models", get_models, methods=["GET"]),
-        Route("/api/teams", get_teams, methods=["GET"]),
-        Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
-        Route("/api/bg_processes/running", get_bg_processes_running, methods=["GET"]),
-        Route("/api/policy", post_policy, methods=["POST"]),
-    ]
-)
+async def get_workspace(_request: Request) -> JSONResponse:
+    """Return the folder this server serves as ``{workspace_dir, run_dir}``.
+
+    ``workspace_dir`` is the project root in the form thread and checkpoint
+    metadata use (:attr:`~EvoScientist.paths.Workspace.key`), so a client
+    can compare it with them and derive the folder's assistant IDs without
+    resolving paths itself. ``run_dir`` is the run folder of a ``--mode=run``
+    session that holds the server, else ``null``.
+
+    Offloaded to a thread because resolving the folders touches the
+    filesystem, which blockbuster refuses on the event loop.
+    """
+    from EvoScientist.paths import process_session_dirs
+
+    dirs = await asyncio.to_thread(process_session_dirs)
+    # The same serialisation as thread and checkpoint stamps.
+    return JSONResponse({"run_dir": None} | dirs.metadata())
+
+
+async def get_settings(_request: Request) -> JSONResponse:
+    """Return the configuration for the WebUI's wizard and settings page.
+
+    Secret values are never in the body (each reads as ``{"set", "hint"?}``),
+    so no local secret is needed. The body is built by
+    :func:`~EvoScientist.langgraph_dev.settings_api.read_settings`.
+    """
+    from EvoScientist.langgraph_dev import settings_api
+
+    return JSONResponse(await asyncio.to_thread(settings_api.read_settings))
+
+
+async def patch_settings(request: Request) -> JSONResponse:
+    """Update one or more settings; needs the local secret.
+
+    Validates every field first and writes nothing if one fails. See
+    :func:`~EvoScientist.langgraph_dev.settings_api.patch_settings`.
+    """
+    from EvoScientist.langgraph_dev import settings_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"errors": {"body": "invalid JSON"}}, status_code=400)
+    status, payload = await asyncio.to_thread(settings_api.patch_settings, body)
+    return JSONResponse(payload, status_code=status)
+
+
+async def post_settings_test_key(request: Request) -> JSONResponse:
+    """Check a key (and a base URL) without saving it; needs the local secret,
+    since a ``base_url`` makes the server call an address from the request."""
+    from EvoScientist.langgraph_dev import settings_api
+
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"errors": {"body": "invalid JSON"}}, status_code=400)
+    status, payload = await asyncio.to_thread(settings_api.check_key_request, body)
+    return JSONResponse(payload, status_code=status)
+
+
+async def verify_local_secret(request: Request) -> Response:
+    """``204`` when the request carries the local secret, ``403`` otherwise, so
+    a client can check the value it read."""
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+    return Response(status_code=204)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: Starlette):
+    # langgraph-api runs this inside its own lifespan; the file I/O goes to a
+    # thread because blockbuster refuses it on the event loop.
+    await asyncio.to_thread(load_local_secret)
+    yield
+
+
+def _build_app() -> Starlette:
+    """The custom app, then the boundary's variables removed from the environment.
+
+    Both are read by then (langgraph-api imports its config before this app,
+    and the guard keeps its ``Trust``); the agent's commands, such as a
+    ``langgraph dev`` of the user's own project, must not inherit them.
+    """
+    app = Starlette(
+        lifespan=_lifespan,
+        # Read when langgraph-api imports this app: LANGGRAPH_API_URL is set by
+        # then, and a workspace ``.env`` merged later cannot change it.
+        middleware=[Middleware(BrowserBoundary, trust=Trust.from_env())],
+        routes=[
+            Route("/api/models", get_models, methods=["GET"]),
+            Route("/api/teams", get_teams, methods=["GET"]),
+            Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
+            Route(
+                "/api/bg_processes/running", get_bg_processes_running, methods=["GET"]
+            ),
+            Route("/api/policy", post_policy, methods=["POST"]),
+            Route("/api/workspace", get_workspace, methods=["GET"]),
+            Route("/api/local-secret/verify", verify_local_secret, methods=["GET"]),
+            Route("/api/settings", get_settings, methods=["GET"]),
+            Route("/api/settings", patch_settings, methods=["PATCH"]),
+            Route("/api/settings/test-key", post_settings_test_key, methods=["POST"]),
+        ],
+    )
+    os.environ.pop("CORS_CONFIG", None)
+    os.environ.pop(BOUNDARY_ENV, None)
+    return app
+
+
+app = _build_app()

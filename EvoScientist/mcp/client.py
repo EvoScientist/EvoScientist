@@ -21,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from .. import paths
 from ..runtime import AsyncRuntime, AsyncRuntimeError
 
 logger = logging.getLogger(__name__)
@@ -438,16 +439,8 @@ _STDIO_FORWARDED_ENV_VARS = (
 )
 
 
-def _get_mcp_config_dir() -> Path:
-    """Get the MCP configuration directory, respecting XDG_CONFIG_HOME."""
-    xdg_config = os.environ.get("XDG_CONFIG_HOME")
-    if xdg_config:
-        return Path(xdg_config) / "evoscientist"
-    return Path.home() / ".config" / "evoscientist"
-
-
 # User-level config path
-USER_CONFIG_DIR = _get_mcp_config_dir()
+USER_CONFIG_DIR = paths.CONFIG_DIR
 USER_MCP_CONFIG = USER_CONFIG_DIR / "mcp.yaml"
 
 

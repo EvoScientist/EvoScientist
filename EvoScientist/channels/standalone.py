@@ -242,6 +242,17 @@ def run_standalone(
     """
     from ..paths import process_workspace
 
+    # HTTP request URLs can embed channel credentials (e.g. Telegram's Bot
+    # API puts the bot token in the URL path), and httpx logs every request
+    # URL at INFO. A standalone channel started with DEBUG logging (each
+    # serve.py) would therefore write secrets to stdout and any redirected
+    # file. Elevate httpx above INFO here — the same effect `EvoSci serve`
+    # has. Keep this in run_standalone (shared by every channel), not in a
+    # single channel's serve.py.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.INFO)
+
     config = None
     backend = None
     if use_agent:
@@ -253,6 +264,16 @@ def run_standalone(
         from ..paths import reload_env_dirs, start_workspace_path
 
         config = get_effective_config()
+        if getattr(config, "openai_auth_mode", "api_key") == "oauth":
+            # Nobody is at a terminal here, so there is no sign-in to offer.
+            from ..llm import chatgpt_oauth
+
+            state = chatgpt_oauth.status()
+            if not state.signed_in:
+                if state.problem:
+                    logger.error("ChatGPT: %s", state.problem)
+                logger.error("%s", chatgpt_oauth.SIGN_IN_HINT)
+                raise SystemExit(1)
         reload_env_dirs()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
         # The agent serves ``default_workdir``, else the current directory.

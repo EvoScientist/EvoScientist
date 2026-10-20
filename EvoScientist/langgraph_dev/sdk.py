@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from typing import Any
 
 DEFAULT_LANGGRAPH_DEV_PORT = 6174
 # Mirrors ``config.langgraph_dev_host`` / ``manager._DEFAULT_HOST``. The value
@@ -55,11 +57,22 @@ def langgraph_dev_headers(headers: Mapping[str, str] | None = None) -> dict[str,
     return dict(LANGGRAPH_DEV_AUTH_HEADERS if headers is None else headers)
 
 
-def get_langgraph_sync_client(*, url: str, headers: Mapping[str, str] | None = None):
-    """Build a sync LangGraph SDK client with EvoScientist's default headers."""
+def get_langgraph_sync_client(
+    *,
+    url: str,
+    headers: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+):
+    """Build a sync LangGraph SDK client with EvoScientist's default headers.
+
+    ``timeout`` (seconds) caps the underlying ``httpx.Client``; ``None``
+    leaves the SDK default (``read=300s``) in place.
+    """
     from langgraph_sdk import get_sync_client
 
-    return get_sync_client(url=url, headers=langgraph_dev_headers(headers))
+    return get_sync_client(
+        url=url, headers=langgraph_dev_headers(headers), timeout=timeout
+    )
 
 
 def get_langgraph_async_client(
@@ -113,6 +126,35 @@ def cached_langgraph_async_client(
         )
         _ASYNC_CLIENT_CACHE[key] = client
     return client
+
+
+@asynccontextmanager
+async def langgraph_async_client_scoped(
+    url: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+    timeout: float = _READ_CLIENT_TIMEOUT_SECONDS,
+) -> AsyncIterator[Any]:
+    """An async SDK client for one read, closed on exit.
+
+    Built here instead of through ``get_client`` so the transport makes no
+    retries: the shared client is bound to the first loop that used it, and
+    a read from another loop (the graph's own loop in the Rich CLI) must not
+    spend 7.5 s retrying a connection the caller already knows is down.
+    """
+    import httpx
+    from langgraph_sdk.client import LangGraphClient
+
+    http = httpx.AsyncClient(
+        base_url=url,
+        transport=httpx.AsyncHTTPTransport(retries=0),
+        timeout=httpx.Timeout(timeout),
+        headers=langgraph_dev_headers(headers),
+    )
+    try:
+        yield LangGraphClient(http)
+    finally:
+        await http.aclose()
 
 
 def default_scheduler_timezone(config: object | None = None) -> str | None:

@@ -12,6 +12,25 @@ from ..stream.console import console
 from ._app import server_app
 
 
+def manual_stop_command(port: int) -> str:
+    """The shell command that stops whatever listens on *port*, for a server
+    EvoSci has no ownership record for."""
+    if sys.platform == "win32":
+        # Feed the PID to Stop-Process via a subexpression, not a $_
+        # pipeline: when the user pastes this at a PowerShell prompt, the
+        # outer shell expands $_ (empty there) before the child powershell
+        # runs, so a $_-based command would stop nothing. (...) is literal
+        # inside the double-quoted argument, so it reaches the child intact.
+        # -State Listen + -Unique avoids stray/duplicate PIDs from
+        # established connections on the same port.
+        return (
+            f'powershell "Stop-Process -Id (Get-NetTCPConnection '
+            f"-LocalPort {port} -State Listen | Select-Object "
+            f'-ExpandProperty OwningProcess -Unique) -Force"'
+        )
+    return f"kill $(lsof -ti :{port})"
+
+
 @server_app.command("status")
 def server_status() -> None:
     """Show the background langgraph dev server's state."""
@@ -84,23 +103,9 @@ def server_stop() -> None:
             f"EvoSci has no ownership record for it, so it was not "
             f"touched.[/yellow]"
         )
-        if sys.platform == "win32":
-            # Feed the PID to Stop-Process via a subexpression, not a $_
-            # pipeline: when the user pastes this at a PowerShell prompt, the
-            # outer shell expands $_ (empty there) before the child powershell
-            # runs, so a $_-based command would stop nothing. (...) is literal
-            # inside the double-quoted argument, so it reaches the child intact.
-            # -State Listen + -Unique avoids stray/duplicate PIDs from
-            # established connections on the same port.
-            manual = (
-                f'powershell "Stop-Process -Id (Get-NetTCPConnection '
-                f"-LocalPort {port} -State Listen | Select-Object "
-                f'-ExpandProperty OwningProcess -Unique) -Force"'
-            )
-        else:
-            manual = f"kill $(lsof -ti :{port})"
         console.print(
-            f"[dim]If it is yours, stop it manually: [bold]{manual}[/bold][/dim]"
+            f"[dim]If it is yours, stop it manually: "
+            f"[bold]{manual_stop_command(port)}[/bold][/dim]"
         )
     else:
         console.print(
