@@ -224,9 +224,18 @@ def test_run_standalone_quiets_httpx(monkeypatch):
     for name in ("httpx", "httpcore"):
         logging.getLogger(name).setLevel(logging.DEBUG)
 
-    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+    info_enabled_at_start: dict[str, bool] = {}
+
+    def _run(coro):
+        # The channel's first request happens inside asyncio.run.
+        for name in ("httpx", "httpcore"):
+            info_enabled_at_start[name] = logging.getLogger(name).isEnabledFor(
+                logging.INFO
+            )
+        coro.close()
+
+    monkeypatch.setattr(standalone.asyncio, "run", _run)
 
     standalone.run_standalone(channel=None, bus=None, use_agent=False)
 
-    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
-    assert not logging.getLogger("httpcore").isEnabledFor(logging.INFO)
+    assert info_enabled_at_start == {"httpx": False, "httpcore": False}
