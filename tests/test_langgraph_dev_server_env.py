@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -397,3 +398,40 @@ def test_start_records_the_bind_host(monkeypatch, tmp_path, runtime_paths):
     with pytest.raises(_PopenAbort):
         manager.start_langgraph_dev(workspace_dir=tmp_path, port=16180, host="0.0.0.0")
     assert recorded["host"] == "0.0.0.0"
+
+
+def test_start_passes_env_origins_to_the_server_only(
+    monkeypatch, tmp_path, runtime_paths
+):
+    """The record of where config variables came from reaches the server's
+    environment, never this process's (so no other child inherits it)."""
+    from EvoScientist.config import settings
+
+    monkeypatch.setattr(
+        settings, "_ENV_ORIGINS", {"OPENAI_API_KEY": {"source": "file"}}
+    )
+    monkeypatch.delenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", raising=False)
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16190)
+
+    origins = json.loads(captured["env"][settings.ENV_ORIGINS_VAR])
+    assert origins["OPENAI_API_KEY"] == {"source": "file"}
+    # Not in the file, not the default port: a --port flag.
+    assert origins["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == {"source": "cli"}
+    assert settings.ENV_ORIGINS_VAR not in os.environ
+
+
+def test_env_origins_leave_the_users_own_export_alone(
+    monkeypatch, tmp_path, runtime_paths
+):
+    from EvoScientist.config import settings
+
+    monkeypatch.setattr(settings, "_ENV_ORIGINS", {})
+    monkeypatch.setenv("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "16191")
+    captured = _patch_start_prereqs(monkeypatch, tmp_path, runtime_paths)
+    with pytest.raises(_PopenAbort):
+        manager.start_langgraph_dev(workspace_dir=tmp_path, port=16191)
+
+    origins = json.loads(captured["env"][settings.ENV_ORIGINS_VAR])
+    assert "EVOSCIENTIST_LANGGRAPH_DEV_PORT" not in origins

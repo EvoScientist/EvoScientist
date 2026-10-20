@@ -6,6 +6,7 @@ add, remove, list, clear, save, and display help for fallback models.
 
 from __future__ import annotations
 
+import asyncio
 from typing import ClassVar
 
 from ..base import Argument, Command, CommandContext, SubCommand
@@ -96,7 +97,7 @@ class ModelFallbackCommand(Command):
                 return
 
             if save:
-                self._save_to_config(serialize_fallback_chain())
+                await self._save_to_config(ctx, serialize_fallback_chain())
 
         elif action == "remove":
             chain = get_fallback_chain()
@@ -146,18 +147,18 @@ class ModelFallbackCommand(Command):
             )
 
             if save:
-                self._save_to_config(serialize_fallback_chain())
+                await self._save_to_config(ctx, serialize_fallback_chain())
 
         elif action == "clear":
             clear_fallbacks()
             ctx.ui.append_system("Cleared all fallback models", style="green")
 
             if save:
-                self._save_to_config("")
+                await self._save_to_config(ctx, "")
 
         elif action == "save":
-            self._save_to_config(serialize_fallback_chain())
-            ctx.ui.append_system("Fallback chain saved to config", style="green")
+            if await self._save_to_config(ctx, serialize_fallback_chain()):
+                ctx.ui.append_system("Fallback chain saved to config", style="green")
 
         elif action == "help":
             self._show_help(ctx)
@@ -295,15 +296,25 @@ class ModelFallbackCommand(Command):
             text.append(f" ({provider})\n", style="dim")
         ctx.ui.mount_renderable(text)
 
-    def _save_to_config(self, value: str) -> None:
+    async def _save_to_config(self, ctx: CommandContext, value: str) -> bool:
         """Persist the fallback chain string to the config file.
 
+        Runs in a thread because the write may wait for the config lock;
+        reports a failure in the UI and returns ``False``.
+
         Args:
+            ctx: Command context, for reporting a failure.
             value: Serialized chain (``"model:provider,..."``).
         """
-        from ...config.settings import set_config_value
+        from ...config.settings import SettingsError, set_config_values
+        from ...config.store import ConfigError
 
-        set_config_value("model_fallbacks", value)
+        try:
+            await asyncio.to_thread(set_config_values, {"model_fallbacks": value})
+        except (SettingsError, ConfigError) as e:
+            ctx.ui.append_system(f"Could not save to config: {e}", style="red")
+            return False
+        return True
 
 
 manager.register(ModelFallbackCommand())
