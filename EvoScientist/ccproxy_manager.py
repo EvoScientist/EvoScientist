@@ -211,14 +211,20 @@ def start_ccproxy(port: int) -> subprocess.Popen:
     )
 
     deadline = time.monotonic() + _CCPROXY_HEALTH_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"ccproxy exited immediately with code {proc.returncode}"
-            )
-        if is_ccproxy_running(port):
-            return proc
-        time.sleep(0.3)
+    try:
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"ccproxy exited immediately with code {proc.returncode}"
+                )
+            if is_ccproxy_running(port):
+                return proc
+            time.sleep(0.3)
+    except BaseException:
+        # Ctrl+C or an error during the wait: the caller never gets the
+        # handle, so nobody else could stop this process.
+        stop_ccproxy(proc)
+        raise
 
     # Timed out — clean up
     proc.terminate()

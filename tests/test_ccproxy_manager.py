@@ -152,6 +152,19 @@ class TestStartCcproxy:
         with pytest.raises(RuntimeError, match="did not become healthy"):
             start_ccproxy(8000)
 
+    @pytest.mark.parametrize("raised", [KeyboardInterrupt, OSError])
+    @patch("EvoScientist.ccproxy_manager.is_ccproxy_running")
+    @patch("subprocess.Popen")
+    def test_interrupted_wait_stops_the_process(self, mock_popen, mock_running, raised):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+        mock_running.side_effect = raised
+
+        with pytest.raises(raised):
+            start_ccproxy(8000)
+        proc.terminate.assert_called_once()
+
     @patch("subprocess.Popen", side_effect=FileNotFoundError)
     def test_missing_binary(self, mock_popen):
         with pytest.raises(FileNotFoundError):

@@ -320,6 +320,52 @@ def test_a_crashed_webui_points_at_webui_log(monkeypatch):
     assert "webui.log" in panel
 
 
+def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
+    import typer
+
+    from tests.test_launcher import _break_start_lock
+
+    _break_start_lock(monkeypatch, tmp_path, "mkdir")
+    with pytest.raises(typer.Exit):
+        _run_webui_once(monkeypatch, _make_config())
+    panel = webui_mod.console._sink[-1]
+    assert "WebUI failed" in panel
+    assert "langgraph dev startup failed" in panel
+
+
+def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
+    """While another process holds the server start lock the spinner says so,
+    as EvoSci deploy does, then goes back to starting langgraph dev."""
+    from tests.test_cli_deploy_json import _LockHolder
+
+    holder = _LockHolder()
+
+    class _ReleasingLauncher(webui_mod.WebUILauncher):
+        """Frees the other start's lock once the wait has been reported."""
+
+        def __init__(self, *a, on_lock_wait, **k):
+            def _wait(waiting: bool) -> None:
+                on_lock_wait(waiting)
+                if waiting:
+                    holder.release.set()
+
+            super().__init__(*a, on_lock_wait=_wait, **k)
+
+    monkeypatch.setattr(webui_mod, "WebUILauncher", _ReleasingLauncher)
+    try:
+        captured = _run_webui_once(monkeypatch, _make_config())
+    finally:
+        holder.done()
+    statuses = [p for p in captured["printed"] if p.startswith("status: ")]
+    waiting = (
+        "status: [dim]Waiting for another EvoSci process to start langgraph "
+        "dev...[/dim]"
+    )
+    assert waiting in statuses
+    after = statuses[statuses.index(waiting) + 1 :]
+    assert after[:1] == ["status: [dim]Starting langgraph dev...[/dim]"]
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_blank_webui_host_falls_back_to_loopback(monkeypatch, blank):
     config = _make_config(webui_host=blank)
