@@ -421,6 +421,41 @@ async def test_checkpointed_interrupt_wait_stops_on_state_read_error():
     assert agent.state_reads == 1
 
 
+async def test_checkpointed_interrupt_wait_continues_after_clean_snapshot(monkeypatch):
+    """A clean read must not release an interrupt before its ID is saved."""
+    from types import SimpleNamespace
+
+    from EvoScientist.stream.events import _wait_for_checkpointed_interrupt
+
+    class _DelayedCheckpointAgent:
+        def __init__(self):
+            self.state_reads = 0
+
+        async def aget_state(self, _config):
+            self.state_reads += 1
+            if self.state_reads == 1:
+                return SimpleNamespace(next=(), tasks=(), interrupts=())
+            return SimpleNamespace(
+                next=("tools",),
+                tasks=(
+                    SimpleNamespace(interrupts=(SimpleNamespace(id="approval-1"),)),
+                ),
+                interrupts=(),
+            )
+
+    monkeypatch.setattr(
+        "EvoScientist.stream.events._INTERRUPT_CHECKPOINT_WAIT_SECONDS", 0.1
+    )
+    monkeypatch.setattr(
+        "EvoScientist.stream.events._INTERRUPT_CHECKPOINT_POLL_SECONDS", 0.001
+    )
+    agent = _DelayedCheckpointAgent()
+
+    await _wait_for_checkpointed_interrupt(agent, {}, "approval-1")
+
+    assert agent.state_reads == 2
+
+
 async def test_checkpointed_interrupt_wait_bounds_blocking_state_read(monkeypatch):
     """A blocked checkpoint read must not exceed the approval wait deadline."""
     from EvoScientist.stream.events import _wait_for_checkpointed_interrupt

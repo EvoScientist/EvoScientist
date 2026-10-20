@@ -117,7 +117,7 @@ async def _wait_for_checkpointed_interrupt(
             return
         if str(interrupt_id) in _snapshot_interrupt_ids(snapshot):
             return
-        if not _snapshot_needs_recovery(snapshot):
+        if snapshot is None:
             return
         remaining = deadline - loop.time()
         if remaining <= 0:
