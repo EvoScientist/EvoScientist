@@ -60,14 +60,15 @@ def _cleared_env_name(name: str) -> bool:
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolated_environ():
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item, nextitem):
     """Start every test without the developer's provider, EvoScientist,
     tracing and proxy settings, and undo whatever it writes to the
     environment. Production code (``apply_config_to_env``, the ccproxy setup)
     assigns ``os.environ`` directly, which monkeypatch cannot undo.
 
-    Defined before the other autouse fixtures, so it restores last.
+    A hook, not a fixture: it restores after every fixture, monkeypatch
+    included, has been torn down.
     """
     saved = dict(os.environ)
     for name in [name for name in os.environ if _cleared_env_name(name)]:
@@ -77,12 +78,14 @@ def _isolated_environ():
     os.environ.update(
         {"GIT_ALLOW_PROTOCOL": "file", "UV_OFFLINE": "1", "PIP_NO_INDEX": "1"}
     )
-    yield
-    for name in [name for name in os.environ if name not in saved]:
-        del os.environ[name]
-    for name, value in saved.items():
-        if os.environ.get(name) != value:
-            os.environ[name] = value
+    try:
+        return (yield)
+    finally:
+        for name in [name for name in os.environ if name not in saved]:
+            del os.environ[name]
+        for name, value in saved.items():
+            if os.environ.get(name) != value:
+                os.environ[name] = value
 
 
 def _is_loopback(host: str) -> bool:
