@@ -251,6 +251,7 @@ def run_standalone(
     # single channel's serve.py.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.INFO)
 
     config = None
     backend = None
