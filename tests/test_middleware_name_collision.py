@@ -10,6 +10,7 @@ The per-run subclass is appended only when a backend is supplied, and that
 one deliberate overlap is asserted separately (#466).
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 DEEPAGENTS_BASE_STACK_NAMES = {
@@ -23,13 +24,16 @@ DEEPAGENTS_BASE_STACK_NAMES = {
 }
 
 
-def test_no_name_collision_with_deepagents_base_stack():
+def test_no_name_collision_with_deepagents_base_stack(workspace):
     from EvoScientist.EvoScientist import _get_default_middleware
 
-    ours = {m.name for m in _get_default_middleware()}
+    ours = {m.name for m in _get_default_middleware(workspace=workspace)}
     assert not ours & DEEPAGENTS_BASE_STACK_NAMES
 
-    ours_async = {m.name for m in _get_default_middleware(for_async_subagent=True)}
+    ours_async = {
+        m.name
+        for m in _get_default_middleware(workspace=workspace, for_async_subagent=True)
+    }
     assert not ours_async & DEEPAGENTS_BASE_STACK_NAMES
 
 
@@ -40,7 +44,7 @@ def test_no_name_collision_with_deepagents_base_stack():
 @patch("EvoScientist.EvoScientist._ensure_chat_model")
 @patch("EvoScientist.EvoScientist._ensure_config")
 def test_backend_summarization_is_the_only_deliberate_collision(
-    mock_config, mock_model, mock_ts
+    mock_config, mock_model, mock_ts, workspace
 ):
     from EvoScientist.EvoScientist import _get_default_middleware
     from EvoScientist.middleware.summarization import (
@@ -55,7 +59,7 @@ def test_backend_summarization_is_the_only_deliberate_collision(
     cfg.auxiliary_provider = ""
     mock_config.return_value = cfg
 
-    mw = _get_default_middleware(backend=MagicMock())
+    mw = _get_default_middleware(workspace=workspace, backend=SimpleNamespace())
     overlap = [m for m in mw if m.name in DEEPAGENTS_BASE_STACK_NAMES]
     assert [m.name for m in overlap] == ["SummarizationMiddleware"]
     assert isinstance(overlap[0], _PerRunLimitsSummarizationMiddleware)

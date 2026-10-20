@@ -17,6 +17,11 @@ from EvoScientist.deploy import launcher as lm
 from EvoScientist.langgraph_dev import manager as lgm
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """The start lock, pid file and sidecar under tmp_path."""
+
+
 def _cfg(workspace_dir: str = "/tmp/wsA", **kw):
     base = {
         "workspace_dir": workspace_dir,
@@ -60,6 +65,7 @@ def test_resolve_backend_foreign_occupant_is_port_conflict(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(), object())
     assert ei.value.code == "port_conflict"
+    assert ei.value.fields == {"reason": "foreign"}
 
 
 def test_resolve_backend_other_workspace_is_mismatch(monkeypatch):
@@ -67,23 +73,44 @@ def test_resolve_backend_other_workspace_is_mismatch(monkeypatch):
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsB", "deploy_mode": True},
+        sidecar={"workspace": "/tmp/wsB"},
     )
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert ei.value.code == "workspace_mismatch"
 
 
-def test_resolve_backend_stripped_server_is_refused(monkeypatch):
+def test_resolve_backend_run_folder_server_is_mismatch(monkeypatch):
+    """The WebUI works in the root; a server pinned to a run folder is refused."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsA", "deploy_mode": False},
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "run_dir": "/tmp/wsA/runs/20260930_120000",
+        },
     )
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
-    assert ei.value.code == "stripped_backend"
+    assert ei.value.code == "workspace_mismatch"
+    assert "runs/20260930_120000" in ei.value.message
+    assert "server stop" not in ei.value.detail
+
+
+def test_resolve_backend_run_folder_hint_covers_kept_alive_server(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={
+            "workspace": "/tmp/wsA",
+            "run_dir": "/tmp/wsA/runs/20260930_120000",
+        },
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA", keepalive=True), object())
+    assert "EvoSci server stop" in ei.value.detail
 
 
 def test_resolve_backend_same_workspace_reuses(monkeypatch):
@@ -93,7 +120,6 @@ def test_resolve_backend_same_workspace_reuses(monkeypatch):
         running=True,
         sidecar={
             "workspace": "/tmp/wsA",
-            "deploy_mode": True,
             "config_fingerprint": "fp-now",
         },
     )
@@ -102,21 +128,109 @@ def test_resolve_backend_same_workspace_reuses(monkeypatch):
     assert decision.warnings == []
 
 
-def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch):
+@pytest.mark.parametrize(
+    "legacy",
+    [{}, {"deploy_mode": False}],
+    ids=["current", "stripped_from_older_version"],
+)
+def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch, legacy):
+    """A server from another version is reused with the drift warning, also
+    one an older version started without MCP (``deploy_mode: false``)."""
     _patch_backend_probes(
         monkeypatch,
         occupied=True,
         running=True,
         sidecar={
             "workspace": "/tmp/wsA",
-            "deploy_mode": True,
             "config_fingerprint": "fp-old",
+            **legacy,
         },
         fingerprint="fp-now",
     )
     decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert decision.action == "reuse"
-    assert any("Config changed" in w for w in decision.warnings)
+    assert any("EvoSci server stop" in w for w in decision.warnings)
+
+
+def test_resolve_backend_reuse_returns_the_record_it_read(monkeypatch):
+    sidecar = {"workspace": "/tmp/wsA", "config_fingerprint": "fp-now"}
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert decision.sidecar is sidecar
+
+
+def test_resolve_backend_record_less_server_reuses_by_default(monkeypatch):
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    decision = lm._resolve_backend(_cfg(), object())
+    assert decision.action == "reuse"
+    assert decision.sidecar is None
+
+
+def test_resolve_backend_record_less_server_is_port_conflict_when_required(
+    monkeypatch,
+):
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(), object(), require_record=True)
+    assert ei.value.code == "port_conflict"
+    assert "no ownership record" in ei.value.message
+    assert ei.value.fields == {"reason": "no_record"}
+
+
+def test_resolve_backend_takes_a_backend_target(monkeypatch):
+    """A caller without a front-end passes only the backend fields."""
+    _patch_backend_probes(
+        monkeypatch, occupied=True, running=True, sidecar={"workspace": "/tmp/wsB"}
+    )
+    target = lm.BackendTarget(
+        workspace_dir="/tmp/wsA", backend_host="127.0.0.1", backend_port=6174
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(target, object())
+    assert ei.value.code == "workspace_mismatch"
+
+
+def test_workspace_mismatch_carries_the_workspace(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch, occupied=True, running=True, sidecar={"workspace": "/tmp/wsB"}
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.fields == {"workspace": "/tmp/wsB"}
+
+
+def test_run_folder_mismatch_carries_the_run_folder(monkeypatch):
+    sidecar = {"workspace": "/tmp/wsA", "run_dir": "/tmp/wsA/runs/20260930_120000"}
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.fields == sidecar
+
+
+def test_launcher_error_fields_default_to_empty():
+    assert lm.LauncherError("port_conflict", "m").fields == {}
+
+
+def test_resolve_backend_no_drift_for_a_session_started_with_auto_flags(monkeypatch):
+    """``EvoSci --auto-approve`` / ``--auto-mode`` override fields the server
+    reads from config.yaml; a second launcher with the file's values must not
+    report drift (and advise ``EvoSci server stop``)."""
+    from EvoScientist.config.settings import EvoScientistConfig
+
+    fingerprint = lgm._server_config_fingerprint
+    recorded = fingerprint(
+        EvoScientistConfig(auto_approve=True, auto_mode=True, enable_ask_user=False)
+    )
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsA", "config_fingerprint": recorded},
+    )
+    monkeypatch.setattr(lgm, "_server_config_fingerprint", fingerprint)
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), EvoScientistConfig())
+    assert decision.action == "reuse"
+    assert decision.warnings == []
 
 
 def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
@@ -128,7 +242,6 @@ def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
         running=True,
         sidecar={
             "workspace": "/tmp/wsA",
-            "deploy_mode": True,
             "config_fingerprint": "fp-now",
             "agent_python": "/conda/bin/python",
         },
@@ -151,7 +264,7 @@ def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
 def test_start_hint_follows_the_reused_server(monkeypatch, recorded, own, hinted):
     from EvoScientist.setup import research_env
 
-    sidecar = {"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 1}
+    sidecar = {"workspace": "/tmp/wsA", "pid": 1}
     _patch_for_evosci_occupant(monkeypatch, {**sidecar, "agent_python": recorded})
     monkeypatch.setattr(research_env, "agent_python", lambda: own)
     result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
@@ -173,15 +286,52 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
         monkeypatch,
         occupied=True,
         running=True,
-        sidecar={"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 12345},
+        sidecar={"workspace": "/tmp/wsA", "pid": 12345},
         pid_serves=False,
     )
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert ei.value.code == "sidecar_port_mismatch"
+    assert ei.value.fields == {"reason": "record_mismatch"}
     # The remedy must not misdirect to `EvoSci server stop` (which stops the
     # recorded server on another port, not the one occupying this one).
     assert "not this one" in (ei.value.detail or "")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "requested", "reused"),
+    [
+        (None, "192.168.1.5", True),  # an older record: not checked
+        ("127.0.0.1", "127.0.0.1", True),
+        ("localhost", "127.0.0.1", True),
+        ("::1", "localhost", True),
+        ("127.0.0.1", "::1", False),  # two servers can hold the port on these
+        ("::1", "127.0.0.1", False),
+        ("0.0.0.0", "192.168.1.5", True),
+        ("0.0.0.0", "::1", False),  # an IPv4 wildcard is not on ::1
+        ("::", "::1", True),
+        ("127.0.0.1", "0.0.0.0", True),  # probed at 127.0.0.1
+        ("192.168.1.5", "127.0.0.1", False),
+        ("127.0.0.1", "192.168.1.5", False),
+        ("192.168.1.5", "0.0.0.0", False),
+    ],
+)
+def test_resolve_backend_checks_the_recorded_bind_host(
+    monkeypatch, recorded, requested, reused
+):
+    """Two servers can share a port on different interfaces: a record for the
+    one the probe did not reach is refused before its workspace is trusted."""
+    sidecar = {"workspace": "/tmp/wsA", "pid": 12345, "config_fingerprint": "fp-now"}
+    if recorded is not None:
+        sidecar["host"] = recorded
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    cfg = _cfg(workspace_dir="/tmp/wsA", backend_host=requested)
+    if reused:
+        assert lm._resolve_backend(cfg, object()).action == "reuse"
+        return
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(cfg, object())
+    assert ei.value.fields == {"reason": "record_mismatch"}
 
 
 # --------------------------------------------------------------------------- #
@@ -222,6 +372,17 @@ def test_start_raises_on_foreign_occupant(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         launcher.start()
     assert ei.value.code == "port_conflict"
+
+
+def test_start_passes_backend_allowed_origins(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    started: dict = {}
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **kw: started.update(kw) or _FakeProc()
+    )
+    config = SimpleNamespace(backend_allowed_origins="https://smith.langchain.com")
+    lm.WebUILauncher(config, _cfg(), _FakeRunner()).start()
+    assert started["allowed_origins"] == "https://smith.langchain.com"
 
 
 def test_start_failure_after_backend_start_tears_the_backend_down(monkeypatch):
@@ -325,6 +486,179 @@ def test_stop_during_backend_health_wait_reports_cancelled(monkeypatch):
     assert errors[0].code == "cancelled"
 
 
+def test_start_waits_for_another_start_before_the_backend_decision(monkeypatch):
+    """Another start holds the server start lock: the decision and the start
+    wait for it, so a backend that is bound but not answering yet is never
+    taken for a stale one."""
+    import threading
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    holder = _LockHolder()
+    checks: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "_is_port_occupied",
+        lambda *_a, **_k: checks.append(holder.release.is_set()) or False,
+    )
+    threading.Timer(0.3, holder.done).start()
+    result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert checks
+    assert all(checks)
+    assert result.backend_started is True
+
+
+def _start_lock_is_held() -> bool:
+    from filelock import FileLock, Timeout
+
+    probe = FileLock(str(lgm.RUNTIME.lock_file))
+    try:
+        probe.acquire(timeout=0)
+    except Timeout:
+        return True
+    probe.release()
+    return False
+
+
+def test_the_backend_starts_under_the_start_lock(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    held: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "start_langgraph_dev",
+        lambda **_k: held.append(_start_lock_is_held()) or _FakeProc(),
+    )
+    lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert held == [True]
+    assert not _start_lock_is_held()
+
+
+@pytest.mark.parametrize("then_free", [False, True])
+def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_free):
+    """A stop() during the wait starts nothing, also when the lock is freed
+    right after it."""
+    import threading
+
+    from filelock import FileLock
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    started: list = []
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **k: started.append(k) or _FakeProc()
+    )
+    holder = _LockHolder()
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
+
+    def _stop() -> None:
+        launcher.stop()
+        if then_free:
+            holder.done()
+
+    threading.Timer(0.3, _stop).start()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            launcher.start()
+        assert then_free or holder.thread.is_alive()
+    finally:
+        holder.done()
+    assert ei.value.code == "cancelled"
+    assert started == []
+    lock = FileLock(str(lgm.RUNTIME.lock_file))
+    lock.acquire(timeout=0.5)
+    lock.release()
+
+
+def test_start_lock_held_too_long_is_backend_start_failed(monkeypatch):
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
+    holder = _LockHolder()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    finally:
+        holder.done()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.fields == {"lock_file": str(lgm.RUNTIME.lock_file)}
+
+
+def _break_start_lock(monkeypatch, tmp_path, step: str) -> None:
+    """Make the server start lock fail with an OSError, as a read-only or
+    full config dir does: at the mkdir of its folder, or at the acquire."""
+    import filelock
+
+    if step == "mkdir":
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        monkeypatch.setattr(
+            lgm, "RUNTIME", lgm.LanggraphRuntimePaths.for_directory(blocker / "rt")
+        )
+    else:
+
+        def _denied(self, *_a, **_k):
+            raise PermissionError(13, "Permission denied", str(self.lock_file))
+
+        monkeypatch.setattr(filelock.FileLock, "acquire", _denied)
+
+
+@pytest.mark.parametrize("step", ["mkdir", "acquire"])
+def test_start_lock_os_error_is_backend_start_failed(monkeypatch, tmp_path, step):
+    """An OSError from the start lock is backend_start_failed, as before the
+    lock, so run_webui shows its panel instead of a traceback."""
+    _patch_for_start(monkeypatch, set())
+    started: list = []
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **k: started.append(k) or _FakeProc()
+    )
+    _break_start_lock(monkeypatch, tmp_path, step)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.message.startswith("langgraph dev startup failed: ")
+    assert isinstance(ei.value.__cause__, OSError)
+    assert started == []
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_start_tells_the_caller_it_waits_for_another_start(monkeypatch, held):
+    """on_lock_wait hears True while another start holds the lock and False
+    once this start has it, before the backend decision; nothing when the
+    lock is free."""
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    events: list = []
+    monkeypatch.setattr(
+        lgm,
+        "_is_port_occupied",
+        lambda *_a, **_k: events.append("port check") or False,
+    )
+    holder = _LockHolder() if held else None
+
+    def _on_lock_wait(waiting: bool) -> None:
+        events.append(waiting)
+        if waiting and holder is not None:
+            holder.release.set()
+
+    try:
+        launcher = lm.WebUILauncher(
+            object(), _cfg(), _FakeRunner(), on_lock_wait=_on_lock_wait
+        )
+        launcher.start()
+    finally:
+        if holder is not None:
+            holder.done()
+    if held:
+        assert events[:2] == [True, False]
+        events = events[2:]
+    assert events
+    assert set(events) == {"port check"}
+
+
 def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
     """stop() during start_langgraph_dev's run (proc handle not wired yet) tears
     down only the process THIS launcher spawned — never the on-disk recorded
@@ -353,9 +687,7 @@ def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
 
 
 def test_stop_after_reuse_leaves_backend_running(monkeypatch):
-    _patch_for_evosci_occupant(
-        monkeypatch, sidecar={"workspace": "/tmp/wsA", "deploy_mode": True, "pid": 1}
-    )
+    _patch_for_evosci_occupant(monkeypatch, sidecar={"workspace": "/tmp/wsA", "pid": 1})
     calls: list = []
     monkeypatch.setattr(lgm, "stop_langgraph_dev", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(lgm, "stop_inflight_owned_server", lambda: calls.append(0))
@@ -373,16 +705,14 @@ def _patch_for_evosci_occupant(monkeypatch, sidecar, occupied=(6174,)):
     monkeypatch.setattr(lgm, "_read_workspace_sidecar", lambda: sidecar)
     monkeypatch.setattr(lgm, "_server_config_fingerprint", lambda _c: "fp")
     # The sidecar genuinely describes the server on this port; these tests
-    # exercise the workspace/deploy-mode checks past the PID-serves-port guard.
+    # exercise the workspace checks past the PID-serves-port guard.
     monkeypatch.setattr(lgm, "_pid_serves_port", lambda *a, **k: True)
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: _FakeProc())
 
 
 def test_start_raises_on_workspace_mismatch(monkeypatch):
     """A server for a different workspace is refused; no second backend starts."""
-    _patch_for_evosci_occupant(
-        monkeypatch, sidecar={"workspace": "/tmp/wsB", "deploy_mode": True}
-    )
+    _patch_for_evosci_occupant(monkeypatch, sidecar={"workspace": "/tmp/wsB"})
     started: list = []
     monkeypatch.setattr(lgm, "start_langgraph_dev", lambda **k: started.append(k))
     launcher = lm.WebUILauncher(object(), _cfg(workspace_dir="/tmp/wsA"), _FakeRunner())
@@ -451,108 +781,169 @@ def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
     assert env["PORT"] == "4716"
 
 
+def test_frontend_env_drops_a_config_folder_set_after_startup(monkeypatch):
+    """A workspace ``.env`` merged into os.environ must not give the WebUI
+    another config folder than this process uses."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "_XDG_CONFIG_HOME_SET", False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/from/a/dotenv")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert "XDG_CONFIG_HOME" not in env
+
+
+def test_frontend_env_has_this_process_data_folder(monkeypatch, tmp_path):
+    """The WebUI reads the same local files as this process."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "rel-data")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert env["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
+
+
 # --------------------------------------------------------------------------- #
 # Runner preflight
 # --------------------------------------------------------------------------- #
-def test_npx_runner_preflight_reports_node_missing(monkeypatch):
+def _installed_env(monkeypatch, tmp_path, *, node_error=None, webui_error=None):
+    """Stub Node / WebUI provisioning for :class:`InstalledWebUIRunner`."""
     from EvoScientist.setup import node as setup_node
+    from EvoScientist.setup import webui as setup_webui
+
+    node = _bundled_runner_files(tmp_path)
+    calls: dict = {"marked": [], "cleanups": 0, "progress": []}
+
+    def ensure_node(**kw):
+        calls["node_progress"] = kw.get("progress")
+        if node_error is not None:
+            raise node_error
+        return setup_node.NodeInfo("private", "24.21.0", node)
+
+    def ensure_webui(node_exe, **kw):
+        calls["webui_node"] = node_exe
+        if webui_error is not None:
+            raise webui_error
+        return setup_webui.WebUIInfo("0.3.1", tmp_path)
+
+    def mark_in_use(info):
+        calls["marked"].append(info)
+        return tmp_path / "marker"
+
+    def cleanup():
+        calls["cleanups"] += 1
+        return []
+
+    monkeypatch.setattr(setup_node, "ensure_node", ensure_node)
+    monkeypatch.setattr(
+        setup_node, "activate_runtime", lambda: calls.setdefault("activated", True)
+    )
+    monkeypatch.setattr(setup_webui, "ensure_webui", ensure_webui)
+    monkeypatch.setattr(setup_webui, "mark_in_use", mark_in_use)
+    monkeypatch.setattr(setup_webui, "cleanup_old_versions", cleanup)
+    monkeypatch.setattr(
+        setup_webui, "release_in_use", lambda m: calls.setdefault("released", m)
+    )
+    return node, calls
+
+
+def test_installed_runner_provides_node_and_webui_then_runs_them(monkeypatch, tmp_path):
+    node, calls = _installed_env(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_popen(argv, **kw):
+        captured["argv"] = argv
+        return _DoneProc()
+
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    progress: list = []
+    runner = lm.InstalledWebUIRunner(progress=lambda f, m: progress.append((f, m)))
+    runner.preflight(_cfg())
+    assert calls["webui_node"] == node
+    assert callable(calls["node_progress"])  # an on-demand Node install reports
+    assert calls["activated"]  # the backend and the agent's shell find it too
+    assert progress[-1] == (1.0, "WebUI 0.3.1")  # the caller's spinner moves on
+    assert [i.version for i in calls["marked"]] == ["0.3.1"]
+    assert calls["cleanups"] == 1
+    proc = runner.start(_cfg(), {"PORT": "4716"})
+    assert captured["argv"] == [str(node), str(tmp_path / "dist" / "server.js")]
+    runner.stop(proc)
+    assert calls["released"] == tmp_path / "marker"
+
+
+@pytest.mark.parametrize(
+    ("which", "code"),
+    [("node", "node_missing"), ("webui", "download_failed")],
+)
+def test_installed_runner_preflight_reports_setup_failures(
+    monkeypatch, tmp_path, which, code
+):
     from EvoScientist.setup.protocol import StageError
 
-    def offline(*_a, **_k):
-        raise StageError("download_failed", "offline")
-
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: None)
-    monkeypatch.setattr(setup_node, "ensure_node", offline)
+    error = StageError("download_failed", "offline")
+    _installed_env(
+        monkeypatch,
+        tmp_path,
+        node_error=error if which == "node" else None,
+        webui_error=error if which == "webui" else None,
+    )
     with pytest.raises(lm.LauncherError) as ei:
-        lm.NpxWebUIRunner().preflight(_cfg())
-    assert ei.value.code == "node_missing"
+        lm.InstalledWebUIRunner().preflight(_cfg())
+    assert ei.value.code == code
     assert "offline" in ei.value.message
     assert "EvoSci setup" in ei.value.detail
 
 
-def test_npx_runner_preflight_installs_node_on_demand(monkeypatch):
-    """No npx on PATH: preflight installs the private Node and activates it."""
-    from EvoScientist.setup import node as setup_node
+def test_failed_install_starts_no_backend(monkeypatch, tmp_path):
+    """preflight runs before the backend, so a failed install leaves nothing."""
+    from EvoScientist.setup.protocol import StageError
 
-    state = {"installed": False, "active": False}
-    monkeypatch.setattr(
-        lm.shutil, "which", lambda _n: "/p/npx" if state["active"] else None
+    _installed_env(
+        monkeypatch, tmp_path, webui_error=StageError("download_failed", "offline")
     )
-
-    def ensure(*_a, **kw):
-        # The install must report progress; a silent download looks frozen.
-        assert callable(kw.get("progress"))
-        state.update(installed=True)
-
-    monkeypatch.setattr(setup_node, "ensure_node", ensure)
-    monkeypatch.setattr(
-        setup_node, "activate_runtime", lambda: state.update(active=True)
-    )
-    lm.NpxWebUIRunner().preflight(_cfg())
-    assert state == {"installed": True, "active": True}
+    started = []
+    monkeypatch.setattr(lm, "_resolve_backend", lambda *a: started.append(a))
+    launcher = lm.WebUILauncher(object(), _cfg(), lm.InstalledWebUIRunner())
+    with pytest.raises(lm.LauncherError):
+        launcher.start()
+    assert started == []
 
 
-def test_npx_runner_preflight_with_npx_does_not_install(monkeypatch):
-    from EvoScientist.setup import node as setup_node
+def test_installed_runner_update_check_runs_in_a_daemon_thread(monkeypatch, tmp_path):
+    from EvoScientist.setup import webui as setup_webui
 
-    def boom(*_a, **_k):
-        raise AssertionError("ensure_node must not run when npx is on PATH")
-
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/usr/bin/npx")
-    monkeypatch.setattr(setup_node, "ensure_node", boom)
-    lm.NpxWebUIRunner().preflight(_cfg())
+    node, _calls = _installed_env(monkeypatch, tmp_path)
+    seen = []
+    monkeypatch.setattr(setup_webui, "stage_update", lambda exe: seen.append(exe))
+    runner = lm.InstalledWebUIRunner()
+    assert runner.start_update_check() is None  # nothing to check before preflight
+    runner.preflight(_cfg())
+    thread = runner.start_update_check()
+    thread.join(5)
+    assert thread.daemon
+    assert seen == [node]
 
 
 @pytest.mark.parametrize("private", [True, False])
-def test_npx_runner_start_cleans_env_only_for_private_node(monkeypatch, private):
-    from EvoScientist.setup import node as setup_node
-
-    captured = {}
-
-    def fake_popen(argv, env, **_kw):
-        captured["env"] = env
-        return object()
-
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
-    monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
-    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "default")
-    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
-    env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
-    lm.NpxWebUIRunner().start(_cfg(), env)
-    if private:
-        assert captured["env"] == {"PATH": "p"}
-    else:
-        assert captured["env"] == env
-
-
-@pytest.mark.parametrize(
-    ("private", "user_registry", "expected"),
-    [
-        (True, "r", "https://registry.npmmirror.com"),  # user's npm_config_* stripped
-        (False, None, "https://registry.npmmirror.com"),
-        (False, "r", "r"),  # a registry the user set in the environment wins
-    ],
-)
-def test_npx_runner_start_uses_npmmirror_under_the_cn_mirror(
-    monkeypatch, private, user_registry, expected
+def test_bundled_runner_cleans_env_only_for_private_node(
+    monkeypatch, tmp_path, private
 ):
     from EvoScientist.setup import node as setup_node
 
+    node = _bundled_runner_files(tmp_path)
     captured = {}
 
     def fake_popen(argv, env, **_kw):
         captured["env"] = env
-        return object()
+        return _DoneProc()
 
-    monkeypatch.setattr(lm.shutil, "which", lambda _n: "/p/npx")
     monkeypatch.setattr(setup_node, "is_private", lambda _exe: private)
-    monkeypatch.setattr(setup_node, "configured_mirror", lambda: "cn")
     monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
-    env = {"PATH": "p"}
-    if user_registry:
-        env["npm_config_registry"] = user_registry
-    lm.NpxWebUIRunner().start(_cfg(), env)
-    assert captured["env"]["npm_config_registry"] == expected
+    env = {"PATH": "p", "npm_config_registry": "r", "NODE_OPTIONS": "--x"}
+    lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
+    if private:
+        assert captured["env"] == {"PATH": "p", "NODE_ENV": "production"}
+    else:
+        assert captured["env"] == {**env, "NODE_ENV": "production"}
 
 
 def test_bundled_runner_preflight_missing_node(tmp_path):
@@ -570,6 +961,7 @@ def test_bundled_runner_preflight_missing_server(tmp_path):
         runner.preflight(_cfg())
     assert ei.value.code == "node_missing"
     assert "server" in ei.value.message.lower()
+    assert "EvoSci setup" in ei.value.detail
 
 
 def test_bundled_runner_preflight_ok(tmp_path):
@@ -724,7 +1116,7 @@ def test_poll_ready_fails_fast_when_webui_proc_exits(monkeypatch):
 
 def test_wait_ready_times_out_when_backend_never_up(monkeypatch):
     monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: False)
-    launcher = lm.WebUILauncher(object(), _cfg(), lm.NpxWebUIRunner())
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
     with pytest.raises(lm.LauncherError) as ei:
         launcher.wait_ready(timeout=0.05)
     assert ei.value.code == "not_ready"
@@ -770,7 +1162,7 @@ def test_build_launcher_config_resolves_ports_and_workspace(monkeypatch, tmp_pat
     assert cfg.webui_port == 4000
     assert cfg.webui_host == "0.0.0.0"
     assert cfg.keepalive is True
-    assert cfg.open_browser is False
+    assert cfg.open_browser is True
 
 
 def test_build_launcher_config_blank_host_falls_back_to_loopback(monkeypatch):
@@ -778,3 +1170,47 @@ def test_build_launcher_config_blank_host_falls_back_to_loopback(monkeypatch):
     config = SimpleNamespace(default_workdir="/tmp/x", webui_host="   ")
     cfg = lm.build_launcher_config(config, workspace_dir=None)
     assert cfg.webui_host == "127.0.0.1"
+
+
+def test_backend_failure_releases_the_in_use_marker(monkeypatch, tmp_path):
+    _node, calls = _installed_env(monkeypatch, tmp_path)
+
+    def broken_backend(*_a):
+        raise lm.LauncherError("backend_start_failed", "boom")
+
+    monkeypatch.setattr(lm, "_resolve_backend", broken_backend)
+    launcher = lm.WebUILauncher(object(), _cfg(), lm.InstalledWebUIRunner())
+    with pytest.raises(lm.LauncherError):
+        launcher.start()
+    assert calls["released"] == tmp_path / "marker"
+
+
+def test_failed_bundled_preflight_releases_the_in_use_marker(monkeypatch, tmp_path):
+    _node, calls = _installed_env(monkeypatch, tmp_path)
+    (tmp_path / "dist" / "server.js").unlink()
+    with pytest.raises(lm.LauncherError):
+        lm.InstalledWebUIRunner().preflight(_cfg())
+    assert calls["released"] == tmp_path / "marker"
+
+
+@pytest.mark.parametrize("opened", [True, False])
+def test_wait_ready_reports_whether_the_browser_opened(monkeypatch, opened):
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: True)
+    monkeypatch.setattr(lm, "_poll_ready", lambda *a, **k: None)
+    monkeypatch.setattr(lm.webbrowser, "open", lambda _url: opened)
+    launcher = lm.WebUILauncher(object(), _cfg(open_browser=True), _FakeRunner())
+    assert launcher.wait_ready(timeout=1).browser_opened is opened
+
+
+def test_wait_ready_opens_no_console_browser_without_a_display(monkeypatch):
+    for name in ("DISPLAY", "WAYLAND_DISPLAY", "BROWSER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(lm.sys, "platform", "linux")
+    monkeypatch.setattr(lgm, "is_langgraph_dev_running", lambda **_k: True)
+    monkeypatch.setattr(lm, "_poll_ready", lambda *a, **k: None)
+    opened = []
+    monkeypatch.setattr(lm.webbrowser, "open", opened.append)
+    launcher = lm.WebUILauncher(object(), _cfg(open_browser=True), _FakeRunner())
+    assert launcher.wait_ready(timeout=1).browser_opened is False
+    assert opened == []

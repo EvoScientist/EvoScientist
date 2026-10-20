@@ -87,6 +87,34 @@ def test_run_streaming_falls_back_to_cli_on_runtime_error(monkeypatch):
     assert result == "fallback-ok"
 
 
+@pytest.mark.parametrize("broken_first", [False, True], ids=["direct", "fallback"])
+def test_run_streaming_passes_the_starting_grant_to_the_loop(monkeypatch, broken_first):
+    """Both ways into the Rich loop hand it ``approve_all_at_start``."""
+    seen = {}
+
+    def _loop(**kwargs):
+        seen.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr("EvoScientist.cli.tui_backends._run_streaming", _loop)
+    if broken_first:
+        monkeypatch.setattr(
+            "EvoScientist.cli.tui_runtime.get_backend", lambda *a, **k: _BrokenBackend()
+        )
+    result = run_streaming(
+        ui_backend="tui" if broken_first else "cli",
+        agent=object(),
+        message="hello",
+        thread_id="t1",
+        show_thinking=False,
+        interactive=True,
+        gateway=FakeGraphGateway(),
+        approve_all_at_start=True,
+    )
+    assert result == "ok"
+    assert seen["approve_all_at_start"] is True
+
+
 def test_run_streaming_does_not_retry_on_owned_runtime_error(monkeypatch):
     attempts = 0
 

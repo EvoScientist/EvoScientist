@@ -2,6 +2,9 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+from EvoScientist.paths import SessionDirs
+from tests.fakes import TEST_WORKSPACE
+
 
 class TestNewCommand:
     async def test_execute_calls_start_new_session(self):
@@ -11,10 +14,10 @@ class TestNewCommand:
         ui = MagicMock()
         ui.start_new_session = AsyncMock()
         ctx = CommandContext(
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="old-tid",
             ui=ui,
-            workspace_dir="/old/ws",
         )
         await NewCommand().execute(ctx, [])
         ui.start_new_session.assert_awaited_once()
@@ -31,7 +34,9 @@ class TestNewCommand:
 
         ui = MagicMock()
         ui.start_new_session = AsyncMock()
-        ctx = CommandContext(agent=None, thread_id="tid", ui=ui)
+        ctx = CommandContext(
+            dirs=SessionDirs(TEST_WORKSPACE), agent=None, thread_id="tid", ui=ui
+        )
         # No AttributeError even though ctx.agent is None
         await NewCommand().execute(ctx, [])
 
@@ -45,6 +50,7 @@ class TestNewCommand:
         runtime = ChannelRuntime()
         runtime.active_teams = ["idea-brainstorm"]
         ctx = CommandContext(
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="tid",
             ui=ui,
@@ -67,6 +73,7 @@ class TestNewCommand:
         ui.start_new_session = AsyncMock()
         runtime = ChannelRuntime()
         ctx = CommandContext(
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="tid",
             ui=ui,
@@ -82,7 +89,13 @@ class TestNewCommand:
 
         ui = MagicMock()
         ui.start_new_session = AsyncMock()
-        ctx = CommandContext(agent=None, thread_id="tid", ui=ui, channel_runtime=None)
+        ctx = CommandContext(
+            dirs=SessionDirs(TEST_WORKSPACE),
+            agent=None,
+            thread_id="tid",
+            ui=ui,
+            channel_runtime=None,
+        )
         await NewCommand().execute(ctx, [])
         ui.append_system.assert_not_called()
 
@@ -98,6 +111,7 @@ class TestNewCommand:
         runtime = ChannelRuntime()
         runtime.active_teams = ["idea-brainstorm"]
         ctx = CommandContext(
+            dirs=SessionDirs(TEST_WORKSPACE),
             agent=None,
             thread_id="tid",
             ui=ui,

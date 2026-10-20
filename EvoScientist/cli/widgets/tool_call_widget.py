@@ -167,6 +167,15 @@ class ToolCallWidget(Vertical):
             self._render_status()
             self._render_output()
 
+    def set_running(self) -> None:
+        """Back to running: the call was cut short and its turn went on."""
+        self._status = "running"
+        if self._timer_handle is None:
+            self._timer_handle = self.set_interval(0.1, self._tick)
+        with self.app.batch_update():
+            self._render_header()
+            self._render_status()
+
     def set_interrupted(self) -> None:
         """Mark tool call as interrupted/cancelled."""
         self._status = "interrupted"

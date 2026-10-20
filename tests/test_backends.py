@@ -152,6 +152,17 @@ class TestValidateCommandDangerous:
     def test_rm_rf_root_still_blocked(self):
         assert validate_command("rm -rf /", dangerous=True) is not None
 
+    @pytest.mark.parametrize(
+        "command",
+        ["rm -rf C:/", "rm -rf c:\\", "rm -rf 'C:/Users/you'", 'rm -rf "D:\\data"'],
+    )
+    def test_rm_rf_windows_drive_still_blocked(self, command):
+        """Git Bash's rm takes Windows drive paths; refuse them like `/`."""
+        assert validate_command(command, dangerous=True) is not None
+
+    def test_rm_rf_relative_still_allowed(self):
+        assert validate_command("rm -rf build", dangerous=True) is None
+
 
 # === convert_virtual_paths_in_command ===
 
@@ -284,7 +295,6 @@ class TestConvertVirtualPaths:
         memories_dir = tmp_path / "memories"
         for d in (user_dir, global_dir, builtin_dir, memories_dir):
             d.mkdir()
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
@@ -292,12 +302,38 @@ class TestConvertVirtualPaths:
         (builtin_dir / "find skills" / "tool.py").write_text("print('ok')")
 
         result = convert_virtual_paths_in_command(
-            'python "/skills/find skills/tool.py"'
+            'python "/skills/find skills/tool.py"', skills_dir=user_dir
         )
 
         tokens = shlex.split(result)
         assert tokens[0] == "python"
         assert tokens[1] == str(builtin_dir / "find skills" / "tool.py")
+
+    def test_skills_path_with_whitespace_is_quoted_for_git_bash(
+        self, monkeypatch, tmp_path
+    ):
+        """On Windows with Git Bash the resolved path is one POSIX-quoted
+        token with forward slashes, for bash rather than cmd.exe."""
+        from EvoScientist import agent_shell
+
+        builtin_dir = tmp_path / "builtin_skills"
+        for name in ("ws_skills", "global_skills", "builtin_skills", "memories"):
+            (tmp_path / name).mkdir()
+        monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
+        monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
+        monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
+        (builtin_dir / "find skills").mkdir()
+        (builtin_dir / "find skills" / "tool.py").write_text("print('ok')")
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+
+        result = convert_virtual_paths_in_command(
+            'python "/skills/find skills/tool.py"', skills_dir=tmp_path / "ws_skills"
+        )
+
+        expected = str(builtin_dir / "find skills" / "tool.py").replace("\\", "/")
+        assert shlex.split(result) == ["python", expected]
+        assert result == f"python '{expected}'"
 
     def test_quoted_system_path_with_workspace_and_whitespace_corrected(self):
         """A quoted system path that references the workspace dir name
@@ -354,14 +390,14 @@ class TestConvertVirtualPaths:
             tmp_path / "memories",
         ):
             d.mkdir()
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", tmp_path / "ws_skills")
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "global_skills")
         monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
         monkeypatch.setattr(
             backends, "_BUILTIN_SKILLS_DIR", tmp_path / "builtin_skills"
         )
         result = convert_virtual_paths_in_command(
-            'python "/skills/never-installed/foo.py"'
+            'python "/skills/never-installed/foo.py"',
+            skills_dir=tmp_path / "ws_skills",
         )
         assert result == "python ./skills/never-installed/foo.py"
 
@@ -383,8 +419,9 @@ class TestVirtualMountResolution:
 
     def _setup_tiers(self, monkeypatch, tmp_path):
         """Create three skills tiers + a memories dir under tmp_path and
-        monkeypatch the path constants to point at them. Returns the tier
-        directories so tests can populate them.
+        monkeypatch the global/builtin/memories constants to point at them.
+        Returns the tier directories so tests can populate them; the
+        workspace tier (``user_dir``) is passed explicitly as ``skills_dir``.
         """
         user_dir = tmp_path / "ws_skills"
         global_dir = tmp_path / "global_skills"
@@ -392,7 +429,6 @@ class TestVirtualMountResolution:
         memories_dir = tmp_path / "memories"
         for d in (user_dir, global_dir, builtin_dir, memories_dir):
             d.mkdir()
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
@@ -406,7 +442,9 @@ class TestVirtualMountResolution:
         (user_dir / "hello" / "main.py").write_text("print('ws')")
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
-        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/hello/main.py", skills_dir=user_dir
+        )
         # ``_split_cmd`` round-trip is cross-platform: on POSIX it parses
         # shlex.quote-style output; on Windows it preserves the backslashes
         # in bare paths (POSIX shlex would treat ``\`` as an escape char
@@ -416,19 +454,23 @@ class TestVirtualMountResolution:
     def test_skills_path_resolves_to_global_tier_when_workspace_missing(
         self, monkeypatch, tmp_path
     ):
-        _, global_dir, _, _ = self._setup_tiers(monkeypatch, tmp_path)
+        user_dir, global_dir, _, _ = self._setup_tiers(monkeypatch, tmp_path)
         (global_dir / "hello").mkdir()
         (global_dir / "hello" / "main.py").write_text("print('global')")
-        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/hello/main.py", skills_dir=user_dir
+        )
         assert _split_cmd(result) == ["python", str(global_dir / "hello" / "main.py")]
 
     def test_skills_path_resolves_to_builtin_tier_when_higher_missing(
         self, monkeypatch, tmp_path
     ):
-        _, _, builtin_dir, _ = self._setup_tiers(monkeypatch, tmp_path)
+        user_dir, _, builtin_dir, _ = self._setup_tiers(monkeypatch, tmp_path)
         (builtin_dir / "find-skills").mkdir()
         (builtin_dir / "find-skills" / "tool.py").write_text("print('builtin')")
-        result = convert_virtual_paths_in_command("python /skills/find-skills/tool.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/find-skills/tool.py", skills_dir=user_dir
+        )
         assert _split_cmd(result) == [
             "python",
             str(builtin_dir / "find-skills" / "tool.py"),
@@ -442,9 +484,9 @@ class TestVirtualMountResolution:
         should reference a location it recognises (the workspace tier is also
         where MergedSkillsBackend.write would land a new skill).
         """
-        self._setup_tiers(monkeypatch, tmp_path)
+        user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
         result = convert_virtual_paths_in_command(
-            "python /skills/never-installed/foo.py"
+            "python /skills/never-installed/foo.py", skills_dir=user_dir
         )
         assert result == "python ./skills/never-installed/foo.py"
 
@@ -456,18 +498,16 @@ class TestVirtualMountResolution:
         assert _split_cmd(result) == ["cat", str(memories_dir / "note.md")]
 
     def test_skills_bare_root_resolves_to_user_skills_dir(self, monkeypatch, tmp_path):
-        """Bare /skills and /skills/ (no subpath) resolve to USER_SKILLS_DIR;
-        mirrors the existing `/` → `.` rule but for the mount root.
+        """Bare /skills and /skills/ (no subpath) resolve to the workspace
+        skills dir; mirrors the existing `/` → `.` rule but for the mount root.
         """
         user_dir, _, _, _ = self._setup_tiers(monkeypatch, tmp_path)
-        assert _split_cmd(convert_virtual_paths_in_command("ls /skills")) == [
-            "ls",
-            str(user_dir),
-        ]
-        assert _split_cmd(convert_virtual_paths_in_command("ls /skills/")) == [
-            "ls",
-            str(user_dir),
-        ]
+        assert _split_cmd(
+            convert_virtual_paths_in_command("ls /skills", skills_dir=user_dir)
+        ) == ["ls", str(user_dir)]
+        assert _split_cmd(
+            convert_virtual_paths_in_command("ls /skills/", skills_dir=user_dir)
+        ) == ["ls", str(user_dir)]
 
     def test_skills_prefix_not_overmatched(self, monkeypatch, tmp_path):
         """Paths starting with /skills but not /skills/ (e.g. /skillset/foo)
@@ -611,14 +651,15 @@ class TestVirtualMountResolution:
         (user_dir / "hello").mkdir()
         (user_dir / "hello" / "main.py").write_text("print('ok')")
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", spacey_root / "global_skills")
         monkeypatch.setattr(paths, "MEMORIES_DIR", spacey_root / "memories")
         monkeypatch.setattr(
             backends, "_BUILTIN_SKILLS_DIR", spacey_root / "builtin_skills"
         )
 
-        result = convert_virtual_paths_in_command("python /skills/hello/main.py")
+        result = convert_virtual_paths_in_command(
+            "python /skills/hello/main.py", skills_dir=user_dir
+        )
 
         tokens = _split_cmd(result)
         assert tokens[0] == "python"
@@ -663,7 +704,7 @@ class TestVirtualMountResolution:
         # Build MergedSkillsBackend wired via _skills_tier_paths positions —
         # the test FAILS if helper return order doesn't align with the
         # constructor's tier-arg semantics.
-        user, global_, builtin = backends._skills_tier_paths()
+        user, global_, builtin = backends._skills_tier_paths(user_dir)
         mb = MergedSkillsBackend(
             primary_dir=str(user),
             secondary_dir=str(builtin),
@@ -680,7 +721,9 @@ class TestVirtualMountResolution:
         assert "USER" in text
 
         # Resolver also returns the USER tier path (the highest-priority hit).
-        resolved = backends._resolve_virtual_mount_path("/skills/probe/main.txt")
+        resolved = backends._resolve_virtual_mount_path(
+            "/skills/probe/main.txt", user_dir
+        )
         assert str(user_dir / "probe" / "main.txt") in resolved
 
         # Remove USER tier file; both should fall through to GLOBAL together.
@@ -692,18 +735,23 @@ class TestVirtualMountResolution:
             else getattr(backend_content, "content", str(backend_content))
         )
         assert "GLOBAL" in text
-        resolved = backends._resolve_virtual_mount_path("/skills/probe/main.txt")
+        resolved = backends._resolve_virtual_mount_path(
+            "/skills/probe/main.txt", user_dir
+        )
         assert str(global_dir / "probe" / "main.txt") in resolved
 
-    def test_skills_tier_paths_helper_returns_canonical_order(self):
+    def test_skills_tier_paths_helper_returns_canonical_order(self, tmp_path):
         """Pin the helper's slot order so calling code (constructor wiring,
         tests like the alignment one above) can rely on it.
         """
-        result = backends._skills_tier_paths()
+        skills_dir = tmp_path / "skills"
+        result = backends._skills_tier_paths(skills_dir)
         assert len(result) == 3
-        assert result[0] == paths.USER_SKILLS_DIR
+        assert result[0] == skills_dir
         assert result[1] == paths.GLOBAL_SKILLS_DIR
         assert result[2] == backends._BUILTIN_SKILLS_DIR
+        # Without a workspace skills dir there is no workspace tier.
+        assert backends._skills_tier_paths(None)[0] is None
 
     def test_merged_skills_read_only_primary_blocks_uploads(self, tmp_path):
         user_dir = tmp_path / "user"
@@ -727,8 +775,8 @@ class TestVirtualMountResolution:
         assert not (user_dir / "new-skill" / "SKILL.md").exists()
 
     def test_execute_e2e_workspace_tier_skill(self, monkeypatch, tmp_path):
-        """End-to-end: a skill in the workspace tier (USER_SKILLS_DIR) must
-        execute successfully. Regression guard: USER_SKILLS_DIR must be in
+        """End-to-end: a skill in the workspace tier (``skills_dir``) must
+        execute successfully. Regression guard: ``skills_dir`` must be in
         execute()'s allow_prefixes — the workspace-literal replace at the
         top of execute() runs BEFORE convert_virtual_paths_in_command, so
         any absolute path the resolver subsequently injects reaches
@@ -751,12 +799,13 @@ class TestVirtualMountResolution:
             "print('workspace-tier-fix-works')"
         )
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
-        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(workspace), virtual_mode=True, skills_dir=user_dir
+        )
         resp = backend.execute("python /skills/hello-ws/main.py")
         assert resp.exit_code == 0, resp.output
         assert "workspace-tier-fix-works" in resp.output
@@ -787,12 +836,13 @@ class TestVirtualMountResolution:
         (global_dir / "shadow-test").mkdir()
         (global_dir / "shadow-test" / "main.py").write_text("print('GLOBAL_TIER_LOST')")
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
-        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(workspace), virtual_mode=True, skills_dir=user_dir
+        )
         resp = backend.execute("python /skills/shadow-test/main.py")
         assert resp.exit_code == 0, resp.output
         assert "WORKSPACE_TIER_WINS" in resp.output
@@ -819,12 +869,13 @@ class TestVirtualMountResolution:
             "print('global-tier-fix-works')"
         )
 
-        monkeypatch.setattr(paths, "USER_SKILLS_DIR", user_dir)
         monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", global_dir)
         monkeypatch.setattr(paths, "MEMORIES_DIR", memories_dir)
         monkeypatch.setattr(backends, "_BUILTIN_SKILLS_DIR", builtin_dir)
 
-        backend = CustomSandboxBackend(root_dir=str(workspace), virtual_mode=True)
+        backend = CustomSandboxBackend(
+            root_dir=str(workspace), virtual_mode=True, skills_dir=user_dir
+        )
         resp = backend.execute("python /skills/hello-e2e/main.py")
         assert resp.exit_code == 0, resp.output
         assert "global-tier-fix-works" in resp.output
@@ -1189,6 +1240,22 @@ class TestExecuteValidation:
 
 
 class TestExecuteCwdSanitization:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pwd and symlinks")
+    def test_pwd_prints_resolved_folder_behind_symlink(self, tmp_path, monkeypatch):
+        """``pwd`` agrees with the folder file paths resolve against, even when
+        the parent process started in a symlink to it."""
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        monkeypatch.setenv("PWD", str(link))
+
+        backend = CustomSandboxBackend(
+            root_dir=str(link), virtual_mode=True, inherit_env=True
+        )
+
+        assert backend.execute("pwd").output.strip() == str(real.resolve())
+
     def test_literal_workspace_path_replaced(self, tmp_workspace, monkeypatch):
         """``prepare_sandbox_command`` must rewrite a literal workspace-root
         absolute path to ``./`` before the command reaches the shell backend.
@@ -1957,6 +2024,23 @@ class TestPlatformQuote:
         # the token rather than terminating the quoted region.
         assert backends._platform_quote(r'C:\path\a"b') == r'"C:\path\a\"b"'
 
+    def test_windows_with_git_bash_uses_posix_quotes_and_forward_slashes(
+        self, monkeypatch
+    ):
+        from EvoScientist import agent_shell
+
+        monkeypatch.setattr(backends, "_is_windows", lambda: True)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+        # bash and native programs both accept C:/...; a backslash would be an
+        # escape character for bash.
+        assert (
+            backends._platform_quote(r"C:\Users\John Smith\file.py")
+            == "'C:/Users/John Smith/file.py'"
+        )
+        assert (
+            backends._platform_quote(r"C:\Users\foo\file.py") == "C:/Users/foo/file.py"
+        )
+
     def test_windows_percent_sign_treated_as_regular_char(self, monkeypatch):
         monkeypatch.setattr(backends, "_is_windows", lambda: True)
         # %VAR% expansion is not neutralised — %% escaping only works in
@@ -1996,7 +2080,9 @@ def test_autoskill_proposals_route_delete_is_not_backend_blocked(tmp_path):
     (proposals_dir / "some-skill" / "SKILL.md").write_text("x", encoding="utf-8")
 
     backend = build_autoskill_agent_backend(
-        memory_dir=memory_dir, proposals_dir=proposals_dir
+        memory_dir=memory_dir,
+        proposals_dir=proposals_dir,
+        skills_dir=tmp_path / "skills",
     )
     result = backend.delete("/autoskill-proposals/some-skill")
 
@@ -2135,6 +2221,159 @@ class TestIsHitlSuppressed:
         assert is_hitl_suppressed() is True
 
 
+_APPROVE_DECISION = {"type": "approve"}
+
+
+class TestResumeDeclines:
+    """Which answers must never travel with a session grant."""
+
+    @pytest.mark.parametrize(
+        "decision",
+        [
+            {"type": "reject"},
+            {"type": "edit", "edited_action": {"name": "execute", "args": {}}},
+            {"type": "respond", "message": "use another tool"},
+            {"type": "something new"},
+            {},
+            "approve",
+        ],
+    )
+    def test_any_decision_other_than_approve_declines(self, decision):
+        from langgraph.types import Command
+
+        from EvoScientist.backends import build_hitl_resume, resume_declines
+
+        assert resume_declines(build_hitl_resume("i1", [_APPROVE_DECISION, decision]))
+        assert resume_declines(Command(resume={"decisions": [decision]}))
+
+    def test_one_declined_interrupt_among_several_declines(self):
+        from langgraph.types import Command
+
+        from EvoScientist.backends import resume_declines
+
+        resume = {
+            "i1": {"decisions": [_APPROVE_DECISION]},
+            "i2": {"decisions": [_APPROVE_DECISION, {"type": "reject"}]},
+        }
+        assert resume_declines(Command(resume=resume))
+
+    def test_approvals_questions_and_messages_do_not_decline(self):
+        from langgraph.types import Command
+
+        from EvoScientist.backends import build_hitl_resume, resume_declines
+
+        assert not resume_declines(build_hitl_resume("i1", [_APPROVE_DECISION] * 2))
+        assert not resume_declines(Command(resume={"decisions": [_APPROVE_DECISION]}))
+        answered = {"answers": ["yes"], "status": "answered"}
+        assert not resume_declines(Command(resume={"i1": answered}))
+        assert not resume_declines(Command(resume=answered))
+        assert not resume_declines(Command(resume={"status": "cancelled"}))
+        mixed = {"i1": answered, "i2": {"decisions": [_APPROVE_DECISION]}}
+        assert not resume_declines(Command(resume=mixed))
+        assert not resume_declines(Command(update={"messages": []}))
+        assert not resume_declines("a typed message")
+        assert not resume_declines(None)
+
+    def test_only_an_all_approve_answer_the_grant_produced_keeps_it(self):
+        from EvoScientist.backends import answer_keeps_grant
+
+        assert answer_keeps_grant(True, [_APPROVE_DECISION] * 2)
+        assert not answer_keeps_grant(False, [_APPROVE_DECISION])
+        assert not answer_keeps_grant(True, [_APPROVE_DECISION, {"type": "reject"}])
+        assert not answer_keeps_grant(True, [])
+
+    @pytest.mark.parametrize(
+        "resume",
+        [
+            [{"type": "reject"}, {"type": "reject"}],
+            {"i1": [{"type": "reject"}]},
+            {"i1": {"decision": {"type": "approve"}}},
+            {"i1": {"decisions": []}},
+            {"decisions": "approve"},
+            {},
+            "continue",
+        ],
+        ids=[
+            "a list",
+            "a list under an id",
+            "a misspelt key",
+            "no decision",
+            "decisions that are not a list",
+            "an empty mapping",
+            "a string",
+        ],
+    )
+    def test_a_resume_it_cannot_read_declines(self, resume):
+        """The grant travels only with answers it can read as approvals or a
+        question's answer; anything else drops it."""
+        from langgraph.types import Command
+
+        from EvoScientist.backends import resume_declines
+
+        assert resume_declines(Command(resume=resume))
+
+
+class TestIsHitlApproveAll:
+    """The session's "approve all" grant read off configurable.hitl_approve_all."""
+
+    def test_explicit_true(self):
+        from EvoScientist.backends import HITL_APPROVE_ALL_KEY, is_hitl_approve_all
+
+        assert HITL_APPROVE_ALL_KEY == "hitl_approve_all"
+        assert is_hitl_approve_all({"configurable": {"hitl_approve_all": True}}) is True
+
+    def test_absent_key_is_not_a_grant(self, monkeypatch):
+        """No fallback to the serving process: only a client that sent the key grants."""
+        from types import SimpleNamespace
+
+        import EvoScientist.EvoScientist as evo_mod
+        from EvoScientist.backends import is_hitl_approve_all
+
+        monkeypatch.setattr(
+            evo_mod,
+            "_ensure_config",
+            lambda config=None: SimpleNamespace(auto_approve=True),
+        )
+        assert is_hitl_approve_all({"configurable": {}}) is False
+        assert is_hitl_approve_all({}) is False
+
+    def test_only_a_literal_true_grants(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        for value in ("true", 1, [True], {"on": True}, None, False):
+            config = {"configurable": {"hitl_approve_all": value}}
+            assert is_hitl_approve_all(config) is False, value
+
+    def test_malformed_configurable_is_false(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        assert is_hitl_approve_all({"configurable": "nope"}) is False
+        assert is_hitl_approve_all("not-a-dict") is False
+
+    def test_no_ambient_config_is_false(self):
+        from EvoScientist.backends import is_hitl_approve_all
+
+        assert is_hitl_approve_all() is False
+
+    def test_reads_ambient_config_when_none_passed(self, monkeypatch):
+        import langgraph.config as lg_config
+
+        from EvoScientist.backends import is_hitl_approve_all
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {"configurable": {"hitl_approve_all": True}},
+        )
+        assert is_hitl_approve_all() is True
+
+    def test_configurable_extra_helper(self):
+        from EvoScientist.backends import approve_all_configurable_extra
+
+        assert approve_all_configurable_extra(True) == {"hitl_approve_all": True}
+        assert approve_all_configurable_extra(False) is None
+
+
 class TestHitlSuppressedForRun:
     """Pre-run derivation of the suppression flag from config.auto_mode."""
 
@@ -2210,6 +2449,20 @@ class TestEffectiveGuardDangerous:
         import EvoScientist.backends as backends_mod
 
         monkeypatch.setattr(backends_mod, "is_hitl_suppressed", lambda: False)
+        be = self._backend(tmp_path, guard_dangerous=False)
+        assert be._effective_guard_dangerous() is False
+
+    def test_session_grant_alone_does_not_guard(self, tmp_path, monkeypatch):
+        """A human "approve all" approves everything: the grant key must not arm the guard."""
+        import langgraph.config as lg_config
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {
+                "configurable": {"hitl_suppressed": False, "hitl_approve_all": True}
+            },
+        )
         be = self._backend(tmp_path, guard_dangerous=False)
         assert be._effective_guard_dangerous() is False
 

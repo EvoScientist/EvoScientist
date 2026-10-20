@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, filter_
 from langchain_core.messages.tool import ToolCall
 from langgraph.runtime import Runtime
 
+from ..message_meta import is_pinned_skill, pinned_skill_name, this_run_messages
 from .types import MemorySourceType
 
 
@@ -81,6 +82,9 @@ def _compact_message(
     """Convert one LangChain message to the worker trajectory format."""
     role = message.type
     content = str(message.text)
+    if is_pinned_skill(message):
+        # The skill body is reference text, not something the user said.
+        content = f"[pinned skill: {pinned_skill_name(message) or 'unknown'}]"
     item: CompactMessage = {"role": role, "content": content}
     if message.name:
         item["name"] = message.name
@@ -120,10 +124,7 @@ def _compact_messages(
 
 def _latest_user_turn_messages(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
     """Return messages from the latest user turn onward."""
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].type == "human":
-            return list(messages[index:])
-    return list(messages)
+    return this_run_messages(list(messages))
 
 
 def _compact_turn_messages(

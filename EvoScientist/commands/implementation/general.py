@@ -45,11 +45,15 @@ class CurrentCommand(Command):
         from ... import paths
 
         ctx.ui.append_system(f"Thread: {ctx.thread_id}", style="dim")
-        if ctx.workspace_dir:
-            from ...cli.agent import _shorten_path
+        from ...cli.agent import _shorten_path
 
+        ctx.ui.append_system(
+            f"Workspace: {_shorten_path(str(ctx.workspace.root))}",
+            style="dim",
+        )
+        if ctx.run_dir is not None:
             ctx.ui.append_system(
-                f"Workspace: {_shorten_path(ctx.workspace_dir)}",
+                f"Run folder: {_shorten_path(str(ctx.run_dir))}",
                 style="dim",
             )
         memory_path = paths.MEMORIES_DIR

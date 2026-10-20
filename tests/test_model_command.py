@@ -1,5 +1,6 @@
 """Tests for the /model command and extract_model_and_provider helper."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,8 +15,8 @@ class TestExtractModelAndProvider:
             extract_model_and_provider,
         )
 
-        name, prov = extract_model_and_provider(["claude-sonnet-4-6"])
-        assert name == "claude-sonnet-4-6"
+        name, prov = extract_model_and_provider(["claude-sonnet-5-5"])
+        assert name == "claude-sonnet-5-5"
         assert prov == "anthropic"
 
     def test_known_model_with_provider_override(self):
@@ -23,8 +24,8 @@ class TestExtractModelAndProvider:
             extract_model_and_provider,
         )
 
-        name, prov = extract_model_and_provider(["claude-sonnet-4-6", "openrouter"])
-        assert name == "claude-sonnet-4-6"
+        name, prov = extract_model_and_provider(["claude-sonnet-5-5", "openrouter"])
+        assert name == "claude-sonnet-5-5"
         assert prov == "openrouter"
 
     def test_short_name_stays_on_current_provider(self):
@@ -70,8 +71,8 @@ class TestExtractModelAndProvider:
         )
 
         # Known model with explicit provider override uses the override
-        name, prov = extract_model_and_provider(["claude-sonnet-4-6", "openrouter"])
-        assert name == "claude-sonnet-4-6"
+        name, prov = extract_model_and_provider(["claude-sonnet-5-5", "openrouter"])
+        assert name == "claude-sonnet-5-5"
         assert prov == "openrouter"
 
     def test_ollama_provider_accepts_arbitrary_name(self):
@@ -104,7 +105,7 @@ class TestModelCommandUnknownModel:
         cmd = ModelCommand()
         ui = MagicMock()
         ui.supports_interactive = True
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = ui
@@ -131,7 +132,7 @@ class TestModelCommandPickerCancelled:
         ui = MagicMock()
         ui.supports_interactive = True
         ui.wait_for_model_pick = AsyncMock(return_value=None)
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = ui
@@ -155,12 +156,12 @@ class TestModelCommandSwitch:
         cmd = ModelCommand()
         ui = MagicMock()
         ui.supports_interactive = True
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
         new_agent = MagicMock()
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -176,13 +177,13 @@ class TestModelCommandSwitch:
                 return_value=new_agent,
             ),
         ):
-            await cmd.execute(ctx, ["claude-opus-4-8"])
+            await cmd.execute(ctx, ["claude-opus-5-5"])
 
         # The switch is committed via set_active_config(temp_cfg), not by
         # mutating the original cfg object in place.
         set_cfg.assert_called_once()
         committed = set_cfg.call_args[0][0]
-        assert committed.model == "claude-opus-4-8"
+        assert committed.model == "claude-opus-5-5"
         assert committed.provider == "anthropic"
 
         # Agent should be replaced on context
@@ -191,7 +192,7 @@ class TestModelCommandSwitch:
         # Success message shown
         ui.append_system.assert_called_once()
         msg = ui.append_system.call_args[0][0]
-        assert "claude-opus-4-8" in msg
+        assert "claude-opus-5-5" in msg
         assert "anthropic" in msg
 
     async def test_switch_with_save_flag(self):
@@ -200,11 +201,11 @@ class TestModelCommandSwitch:
         cmd = ModelCommand()
         ui = MagicMock()
         ui.supports_interactive = True
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -221,10 +222,10 @@ class TestModelCommandSwitch:
             ),
             patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
-            await cmd.execute(ctx, ["claude-opus-4-8", "--save"])
+            await cmd.execute(ctx, ["claude-opus-5-5", "--save"])
 
         # Config file should be updated
-        mock_save.assert_any_call("model", "claude-opus-4-8")
+        mock_save.assert_any_call("model", "claude-opus-5-5")
         mock_save.assert_any_call("provider", "anthropic")
 
         # Success message should mention save
@@ -237,11 +238,11 @@ class TestModelCommandSwitch:
         cmd = ModelCommand()
         ui = MagicMock()
         ui.supports_interactive = True
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -258,7 +259,7 @@ class TestModelCommandSwitch:
             ),
             patch("EvoScientist.config.settings.set_config_value") as mock_save,
         ):
-            await cmd.execute(ctx, ["claude-opus-4-8"])
+            await cmd.execute(ctx, ["claude-opus-5-5"])
 
         # Config file should NOT be updated
         mock_save.assert_not_called()
@@ -274,11 +275,11 @@ class TestModelCommandSwitch:
         cmd = ModelCommand()
         ui = MagicMock()
         ui.supports_interactive = True
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
         ctx.graph_gateway = graph_gateway
 
@@ -289,7 +290,7 @@ class TestModelCommandSwitch:
             patch("EvoScientist.EvoScientist.set_chat_model_instance"),
             patch("EvoScientist.cli.agent._load_agent") as load_agent,
         ):
-            await cmd.execute(ctx, ["claude-opus-4-8"])
+            await cmd.execute(ctx, ["claude-opus-5-5"])
 
         return ui, set_cfg, load_agent
 
@@ -311,7 +312,7 @@ class TestModelCommandSwitch:
 
         load_agent.assert_not_called()
         set_cfg.assert_called_once()
-        assert set_cfg.call_args[0][0].model == "claude-opus-4-8"
+        assert set_cfg.call_args[0][0].model == "claude-opus-5-5"
         assert "next run" in ui.append_system.call_args[0][0]
 
     async def test_switch_on_plain_server_backend_skips_rebuild(self):
@@ -334,11 +335,11 @@ class TestModelCommandFailure:
         cmd = ModelCommand()
         ui = MagicMock()
         ui.supports_interactive = True
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -351,7 +352,7 @@ class TestModelCommandFailure:
                 side_effect=RuntimeError("API key missing"),
             ) as mock_build,
         ):
-            await cmd.execute(ctx, ["claude-opus-4-8"])
+            await cmd.execute(ctx, ["claude-opus-5-5"])
 
         mock_build.assert_called_once()
         ui.append_system.assert_called_once()
@@ -405,7 +406,7 @@ class TestEnsureChatModelCacheInvalidation:
         """After cfg.model changes, _ensure_chat_model must return a new instance."""
         mod = evo_module_state
 
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
         m1 = MagicMock(name="model-1")
         m2 = MagicMock(name="model-2")
 
@@ -439,7 +440,7 @@ class TestEnsureChatModelCacheInvalidation:
         """Same model name, different provider (openrouter vs anthropic) must rebuild."""
         mod = evo_module_state
 
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
         m1 = MagicMock(name="anthropic-model")
         m2 = MagicMock(name="openrouter-model")
 
@@ -459,7 +460,7 @@ class TestEnsureChatModelCacheInvalidation:
         an extra rebuild on the very next _ensure_chat_model() call."""
         mod = evo_module_state
 
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
         m_set = MagicMock(name="explicit-set-model")
 
         mod._chat_model = None
@@ -538,11 +539,12 @@ class TestApplyModelIntegration:
             return sentinels[key]
 
         def _fake_load_agent(
-            workspace_dir=None,
+            work_dir=None,
             checkpointer=None,
             config=None,
             chat_model=None,
             *,
+            workspace=None,
             on_mcp_progress=None,
             events=None,
         ):
@@ -552,18 +554,18 @@ class TestApplyModelIntegration:
             agent._bound_model = chat_model
             return agent
 
-        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = EvoScientistConfig(model="claude-sonnet-5-5", provider="anthropic")
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test_integration"
+        ctx.work_dir = Path("/tmp/test_integration")
         ctx.checkpointer = None
 
         # Prime: _chat_model already holds the OLD (default) model —
         # this is the state that caused the off-by-one in production.
         mod._config = cfg
-        mod._chat_model = _fake_get_chat_model("claude-sonnet-4-6", "anthropic")
-        mod._chat_model_key = ("claude-sonnet-4-6", "anthropic")
+        mod._chat_model = _fake_get_chat_model("claude-sonnet-5-5", "anthropic")
+        mod._chat_model_key = ("claude-sonnet-5-5", "anthropic")
         mod._EvoScientist_agent = None
         old_model = mod._chat_model
 
@@ -626,12 +628,12 @@ class TestApplyModelServerBackend:
         from EvoScientist.config.settings import EvoScientistConfig
 
         cmd = ModelCommand()
-        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = EvoScientistConfig(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = None
         ctx.graph_gateway = self._server_gateway()
 
@@ -661,7 +663,7 @@ class TestApplyModelServerBackend:
         from EvoScientist.config.settings import EvoScientistConfig
 
         cmd = ModelCommand()
-        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = EvoScientistConfig(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = MagicMock()
@@ -679,7 +681,7 @@ class TestApplyModelServerBackend:
         ):
             await cmd._apply_model(ctx, "broken-model", "openrouter")
 
-        assert cfg.model == "claude-sonnet-4-6"
+        assert cfg.model == "claude-sonnet-5-5"
         set_cfg.assert_not_called()
         load_agent.assert_not_called()
         assert "Failed to switch model" in ctx.ui.append_system.call_args[0][0]
@@ -712,17 +714,18 @@ class TestApplyModelPreservesConfigByReference:
             return m
 
         def _fake_load_agent(
-            workspace_dir=None,
+            work_dir=None,
             checkpointer=None,
             config=None,
             chat_model=None,
             *,
+            workspace=None,
             on_mcp_progress=None,
             events=None,
         ):
             return MagicMock(name="fake-agent")
 
-        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = EvoScientistConfig(model="claude-sonnet-5-5", provider="anthropic")
         mod._config = cfg
         mod._chat_model = None
         mod._chat_model_key = None
@@ -735,7 +738,7 @@ class TestApplyModelPreservesConfigByReference:
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test_byref"
+        ctx.work_dir = Path("/tmp/test_byref")
         ctx.checkpointer = None
 
         cmd = ModelCommand()
@@ -750,9 +753,9 @@ class TestApplyModelPreservesConfigByReference:
             ),
         ):
             for model, provider in [
-                ("claude-opus-4-8", "anthropic"),
+                ("claude-opus-5-5", "anthropic"),
                 ("minimax-m2.7", "openrouter"),
-                ("claude-sonnet-4-6", "anthropic"),
+                ("claude-sonnet-5-5", "anthropic"),
             ]:
                 await cmd._apply_model(ctx, model, provider)
                 # The held reference must reflect the LATEST switch on every
@@ -778,11 +781,11 @@ class TestModelCommandLoadAgentFailure:
         cmd = ModelCommand()
         ui = MagicMock()
         ui.supports_interactive = True
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
 
         ctx = MagicMock()
         ctx.ui = ui
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
 
         with (
@@ -808,7 +811,7 @@ class TestModelCommandLoadAgentFailure:
             # Pass ``--save`` to strengthen the assertion: if the ordering
             # ever regresses, ``set_config_value`` would be called with
             # stale data.
-            await cmd.execute(ctx, ["claude-opus-4-8", "--save"])
+            await cmd.execute(ctx, ["claude-opus-5-5", "--save"])
 
         # _load_agent was attempted (transactional first step).
         mock_load.assert_called_once()
@@ -817,7 +820,7 @@ class TestModelCommandLoadAgentFailure:
         mock_set_model.assert_not_called()
         mock_save.assert_not_called()
         # Config must be untouched.
-        assert cfg.model == "claude-sonnet-4-6"
+        assert cfg.model == "claude-sonnet-5-5"
         assert cfg.provider == "anthropic"
         # User sees a red error message.
         ui.append_system.assert_called_once()
@@ -846,11 +849,12 @@ class TestApplyModelLoadAgentFailureTransactional:
         mod = evo_module_state
 
         def _fake_load_agent(
-            workspace_dir=None,
+            work_dir=None,
             checkpointer=None,
             config=None,
             chat_model=None,
             *,
+            workspace=None,
             on_mcp_progress=None,
             events=None,
         ):
@@ -858,19 +862,19 @@ class TestApplyModelLoadAgentFailureTransactional:
             # agent wiring (middleware build, deepagents, MCP reconnect, ...).
             raise RuntimeError("middleware build failed")
 
-        cfg = EvoScientistConfig(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = EvoScientistConfig(model="claude-sonnet-5-5", provider="anthropic")
         old_model = MagicMock(name="old-model")
         old_agent = MagicMock(name="old-default-agent")
 
         mod._config = cfg
         mod._chat_model = old_model
-        mod._chat_model_key = ("claude-sonnet-4-6", "anthropic")
+        mod._chat_model_key = ("claude-sonnet-5-5", "anthropic")
         mod._EvoScientist_agent = old_agent
 
         ctx = MagicMock()
         ctx.ui = MagicMock()
         ctx.ui.supports_interactive = True
-        ctx.workspace_dir = "/tmp/test_rollback"
+        ctx.work_dir = Path("/tmp/test_rollback")
         ctx.checkpointer = None
 
         with (
@@ -889,10 +893,10 @@ class TestApplyModelLoadAgentFailureTransactional:
         # All four globals are unchanged — nothing was committed.
         assert mod._config is cfg
         assert mod._chat_model is old_model
-        assert mod._chat_model_key == ("claude-sonnet-4-6", "anthropic")
+        assert mod._chat_model_key == ("claude-sonnet-5-5", "anthropic")
         assert mod._EvoScientist_agent is old_agent
         # The ``cfg`` object itself was not mutated.
-        assert cfg.model == "claude-sonnet-4-6"
+        assert cfg.model == "claude-sonnet-5-5"
         assert cfg.provider == "anthropic"
         # User sees an error message.
         msg = ctx.ui.append_system.call_args[0][0]
@@ -905,7 +909,7 @@ class TestModelCommandOllamaPicker:
 
     def _make_ctx_and_cfg(self, *, ollama_base_url: str | None):
         cfg = SimpleNamespace(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5-5",
             provider="anthropic",
             ollama_base_url=ollama_base_url,
         )
@@ -1008,7 +1012,7 @@ class TestModelCommandOllamaPicker:
         from EvoScientist.commands.implementation.model import ModelCommand
 
         # Deliberately omit ollama_base_url from the namespace.
-        cfg = SimpleNamespace(model="claude-sonnet-4-6", provider="anthropic")
+        cfg = SimpleNamespace(model="claude-sonnet-5-5", provider="anthropic")
         ui = MagicMock()
         ui.supports_interactive = True
         ui.wait_for_model_pick = AsyncMock(return_value=None)
@@ -1059,7 +1063,7 @@ class TestModelCommandOllamaPicker:
             await ModelCommand().execute(ctx, [])
 
         load_agent.assert_not_called()
-        assert cfg.model == "claude-sonnet-4-6"  # unchanged
+        assert cfg.model == "claude-sonnet-5-5"  # unchanged
 
     async def test_picker_applies_detected_ollama_model(self):
         """User picks a live-detected Ollama model → _apply_model is invoked
@@ -1067,7 +1071,7 @@ class TestModelCommandOllamaPicker:
         from EvoScientist.commands.implementation.model import ModelCommand
 
         ctx, cfg, ui = self._make_ctx_and_cfg(ollama_base_url="http://localhost:11434")
-        ctx.workspace_dir = "/tmp/test"
+        ctx.work_dir = Path("/tmp/test")
         ctx.checkpointer = MagicMock()
         ui.wait_for_model_pick = AsyncMock(return_value=("llama3.3", "ollama"))
 

@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.sessions import (
     AGENT_NAME,
     _format_relative_time,
@@ -1002,6 +1003,52 @@ class TestPruningCheckpointer(unittest.IsolatedAsyncioTestCase):
 
         assert await _check_other()
 
+    async def test_prune_keeps_only_the_latest_proactive_cron_rows(self):
+        """The proactive cron thread checkpoints every tick and carries no
+        ``agent_name``; it is pruned by ``graph_id``, without the snapshot
+        walk (its state has no ``messages``)."""
+        tid = "tproactive1"
+        meta = {"graph_id": "proactive", "step": 0, "writes": {}, "parents": {}}
+
+        async def _body(saver):
+            parent = None
+            for i in range(6):
+                config = self._config(tid)
+                # Chain each tick to the previous one, as real runs do; a
+                # snapshot walk would then keep every ancestor.
+                config["configurable"]["checkpoint_id"] = parent
+                parent = f"cq_{i:04d}"
+                await saver.aput(config, self._checkpoint(parent, step=i), meta, {})
+
+        await self._run_with_wrapper(keep=2, body=_body)
+        assert await self._row_count(tid) == 2
+
+    async def test_proactive_cron_rows_are_capped_below_the_conversation_keep(self):
+        tid = "tproactive2"
+        meta = {"graph_id": "proactive", "step": 0, "writes": {}, "parents": {}}
+
+        async def _body(saver):
+            for i in range(8):
+                await saver.aput(
+                    self._config(tid), self._checkpoint(f"cr_{i:04d}", step=i), meta, {}
+                )
+
+        await self._run_with_wrapper(keep=1000, body=_body)
+        assert await self._row_count(tid) == 2
+
+    async def test_prune_ignores_other_graphs_without_agent_name(self):
+        tid = "tscheduler1"
+        meta = {"graph_id": "scheduler", "step": 0, "writes": {}, "parents": {}}
+
+        async def _body(saver):
+            for i in range(4):
+                await saver.aput(
+                    self._config(tid), self._checkpoint(f"cs_{i:04d}", step=i), meta, {}
+                )
+
+        await self._run_with_wrapper(keep=2, body=_body)
+        assert await self._row_count(tid) == 4
+
     async def test_keep_one_boundary(self):
         """``keep_per_ns=1`` keeps only the latest row, deletes the rest."""
         tid = "tk1_001"
@@ -1614,8 +1661,8 @@ class TestMigrationSweep(unittest.IsolatedAsyncioTestCase):
     async def test_get_checkpointer_blocks_on_sweep_then_idempotent(self):
         """End-to-end: ``get_checkpointer()`` must run the sweep BEFORE
         yielding the saver so a concurrent ``aput()`` can't race the
-        DELETEs. After the first call sets ``user_version=1``, subsequent
-        calls must skip the sweep entirely.
+        DELETEs. After the first call sets the sweep bit of
+        ``user_version``, subsequent calls must skip the sweep entirely.
         """
         from EvoScientist import sessions as sessions_module
         from EvoScientist.sessions import (
@@ -1635,7 +1682,7 @@ class TestMigrationSweep(unittest.IsolatedAsyncioTestCase):
                     return saver is not None
 
             assert await _first()
-            assert await self._user_version() == _MIGRATION_VERSION
+            assert await self._user_version() & _MIGRATION_VERSION
 
             # Second entry: sweep must be skipped — patch _run_migration_sweep
             # to raise so any accidental re-invocation fails the test loudly.
@@ -2223,10 +2270,10 @@ class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
             main = rows["11111111-1111-1111-1111-111111111111"]
             worker = rows["22222222-2222-2222-2222-222222222222"]
             assert main.get("agent_name") == AGENT_NAME
-            assert main.get("workspace_dir") == "/tmp/test-workspace"
+            assert main.get("workspace_dir") == Workspace("/tmp/test-workspace").key
             assert main.get("updated_at"), "updated_at drives /threads ordering"
             assert "agent_name" not in worker
-            assert worker.get("workspace_dir") == "/tmp/test-workspace"
+            assert worker.get("workspace_dir") == Workspace("/tmp/test-workspace").key
             assert worker.get("updated_at")
 
         with tempfile.TemporaryDirectory() as td:
@@ -2241,8 +2288,8 @@ class TestCreateCheckpointerForLanggraphApi(unittest.IsolatedAsyncioTestCase):
                     {"EVOSCIENTIST_WORKSPACE_DIR": "/tmp/test-workspace"},
                 ),
                 patch(
-                    "EvoScientist.sessions._api_workspace_dir",
-                    return_value="/tmp/test-workspace",
+                    "EvoScientist.sessions._api_session_dirs",
+                    return_value=SessionDirs(Workspace("/tmp/test-workspace")),
                 ),
             ):
                 await _run_inner(db)
@@ -2302,7 +2349,10 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
     def _patch_workspace(self):
         from unittest.mock import patch
 
-        return patch("EvoScientist.sessions._api_workspace_dir", return_value=self._WS)
+        return patch(
+            "EvoScientist.sessions._api_session_dirs",
+            return_value=SessionDirs(Workspace(self._WS)),
+        )
 
     async def test_restores_uuid_threads_into_global_store(self):
         """UUID-format thread IDs from SQLite are injected into GlobalStore."""
@@ -2363,7 +2413,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert added[0]["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(added[0]["metadata"].get("assistant_id"), str)
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
-        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert added[0]["metadata"].get("model") == "test-model"
         # created_at / updated_at must be datetime objects, not ISO strings.
         # Threads.search() sorts by these fields using sorted(); mixing
@@ -2433,7 +2483,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert t["metadata"].get("assistant_id") == asst_uuid_id
         assert isinstance(t["metadata"].get("assistant_id"), str)
         assert t["metadata"].get("graph_id") == "EvoScientist"
-        assert t["metadata"].get("workspace_dir") == self._WS
+        assert t["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert t["metadata"].get("model") == "test-model"
 
     async def test_restore_includes_current_workspace_graph_threads_only(self):
@@ -2496,14 +2546,14 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
             "EvoScientist"
         )
         assert restored[_uuid_mod.UUID(mine)]["metadata"].get("workspace_dir") == (
-            self._WS
+            Workspace(self._WS).key
         )
         assert restored[_uuid_mod.UUID(mine)]["metadata"].get("model") == ("test-model")
         assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("graph_id") == (
             "writing-agent"
         )
         assert restored[_uuid_mod.UUID(subagent)]["metadata"].get("workspace_dir") == (
-            self._WS
+            Workspace(self._WS).key
         )
 
     async def test_purge_removes_only_evomemory_rows(self):
@@ -2620,7 +2670,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert added[0]["thread_id"] == _uuid_mod.UUID(cli_thread)
         # graph_id backfilled so Threads.State.get works on the CLI stub.
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
-        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert added[0]["metadata"].get("model") == "test-model"
 
     async def test_mixed_cli_webui_rows_keep_assistant_and_graph_id(self):
@@ -2672,7 +2722,7 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert added[0]["thread_id"] == _uuid_mod.UUID(tid)
         assert added[0]["metadata"].get("assistant_id") == asst
         assert added[0]["metadata"].get("graph_id") == "EvoScientist"
-        assert added[0]["metadata"].get("workspace_dir") == self._WS
+        assert added[0]["metadata"].get("workspace_dir") == Workspace(self._WS).key
         assert added[0]["metadata"].get("model") == "test-model"
 
     async def test_restored_stub_gets_title_from_first_human_message(self):
@@ -2731,8 +2781,8 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
                     sys.modules, {"langgraph_runtime_inmem.database": fake_module}
                 ),
                 patch(
-                    "EvoScientist.sessions._api_workspace_dir",
-                    return_value=self._WS,
+                    "EvoScientist.sessions._api_session_dirs",
+                    return_value=SessionDirs(Workspace(self._WS)),
                 ),
             ):
                 await _write_then_restore()

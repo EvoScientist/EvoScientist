@@ -64,6 +64,36 @@ def __getattr__(name: str):
     return value
 
 
+def _write_redirected_output_as_utf8() -> None:
+    """Switch redirected stdout and stderr to UTF-8 (#660).
+
+    On Windows, Python writes to a pipe, a file or the NUL device in the ANSI
+    code page, so the first character outside it (a check mark, a
+    box-drawing character, a letter in a path) stops the command with
+    ``UnicodeEncodeError``. On Windows both streams are switched even when
+    ``isatty()`` is true, since it is true for NUL as well and a console
+    gets UTF-8 already (unless ``PYTHONLEGACYWINDOWSSTDIO`` is set);
+    elsewhere a terminal keeps its locale encoding. A ``PYTHONIOENCODING``
+    the user set is kept; Python ignores an empty one, so empty counts as
+    unset. Each stream keeps its error handler, which
+    ``reconfigure(encoding=...)`` would otherwise reset to ``strict``.
+    """
+    import os
+    import sys
+
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            if sys.platform == "win32" or not stream.isatty():
+                reconfigure(encoding="utf-8", errors=stream.errors)
+        except (OSError, ValueError):
+            pass
+
+
 def main():
     """CLI entry point."""
     import os
@@ -74,6 +104,8 @@ def main():
     from .._winloop import ensure_proactor_event_loop_policy
 
     ensure_proactor_event_loop_policy()
+    # Before anything is printed.
+    _write_redirected_output_as_utf8()
 
     warnings.filterwarnings("ignore", message=".*not known to support tools.*")
     warnings.filterwarnings(
@@ -90,9 +122,12 @@ def main():
     # Priority: env var > config file > default (WARNING)
     config = load_config()
     _log_level = os.environ.get("EVOSCIENTIST_LOG_LEVEL", "") or config.log_level
-    # Before any child process starts, so they all find the private Node.
-    from ..setup.node import activate_runtime
+    # Before any child process starts, so they all find the private Node and,
+    # on Windows, the private Git.
+    from ..setup import git as setup_git
+    from ..setup import node as setup_node
 
-    activate_runtime()
+    setup_node.activate_runtime()
+    setup_git.activate_runtime()
     _configure_logging()
     app()

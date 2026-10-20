@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..paths import new_run_dir
+from ..paths import RUN_NAME_FORMAT, Workspace
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -31,45 +31,59 @@ def _shorten_path(path: str) -> str:
         return path
 
 
-def _deduplicate_run_name(name: str, runs_dir: Path | None = None) -> str:
-    """Return *name* if available, otherwise *name_1*, *name_2*, etc."""
-    if runs_dir is None:
-        from ..paths import RUNS_DIR
+def _deduplicate_run_name(name: str, runs_dir: Path) -> str:
+    """Return *name* if available, otherwise *name_1*, *name_2*, etc.
 
-        runs_dir = RUNS_DIR
-    if not (runs_dir / name).exists():
+    Any entry counts as taken, a dangling symlink included: ``mkdir`` fails
+    on those too.
+    """
+    if not os.path.lexists(runs_dir / name):
         return name
     i = 1
-    while (runs_dir / f"{name}_{i}").exists():
+    while os.path.lexists(runs_dir / f"{name}_{i}"):
         i += 1
     return f"{name}_{i}"
 
 
-def _create_session_workspace(name: str | None = None) -> str:
-    """Create a per-session workspace directory and return its path.
+def _create_run_dir(workspace: Workspace, name: str | None = None) -> Path:
+    """Create a ``--mode=run`` session folder under ``workspace.runs_dir``.
 
     Args:
+        workspace: The workspace the run folder belongs to.
         name: Optional human-friendly run name.  Duplicates are resolved
               by appending ``_1``, ``_2``, etc.  Falls back to a timestamp
               if *name* is None.
     """
-    if name:
-        from ..paths import RUNS_DIR
+    base = name or datetime.now().strftime(RUN_NAME_FORMAT)
+    workspace.runs_dir.mkdir(parents=True, exist_ok=True)
+    # Never hand out a folder that exists: another session may work there
+    # (two sessions started in the same second share a timestamp).
+    while True:
+        run_dir = workspace.runs_dir / _deduplicate_run_name(base, workspace.runs_dir)
+        try:
+            run_dir.mkdir()
+        except FileExistsError:
+            continue
+        return run_dir
 
-        session_id = _deduplicate_run_name(name, RUNS_DIR)
-    else:
-        session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    workspace_dir = str(new_run_dir(session_id))
-    os.makedirs(workspace_dir, exist_ok=True)
-    return workspace_dir
+
+def _remove_unused_run_dir(run_dir: Path | None) -> None:
+    """Remove a run folder created for a session that did not start."""
+    if run_dir is None:
+        return
+    try:
+        run_dir.rmdir()
+    except OSError:
+        pass
 
 
 def _load_agent(
-    workspace_dir: str | None = None,
+    work_dir: str | None = None,
     checkpointer=None,
     config=None,
     chat_model=None,
     *,
+    workspace: Workspace,
     on_mcp_progress=None,
     events=None,
     runtime: "AsyncRuntime | None" = None,
@@ -77,7 +91,9 @@ def _load_agent(
     """Load the CLI agent with optional persistent checkpointer.
 
     Args:
-        workspace_dir: Optional per-session workspace directory.
+        work_dir: The folder the agent works in (defaults to the
+            workspace root).
+        workspace: The session's workspace.
         checkpointer: Optional LangGraph checkpointer (e.g. ``AsyncSqliteSaver``).
             Falls back to ``InMemorySaver`` when ``None``.
         config: Optional pre-loaded ``EvoScientistConfig``.  Forwarded to
@@ -92,7 +108,8 @@ def _load_agent(
     from ..EvoScientist import create_cli_agent
 
     return create_cli_agent(
-        workspace_dir=workspace_dir,
+        work_dir=work_dir,
+        workspace=workspace,
         checkpointer=checkpointer,
         config=config,
         chat_model=chat_model,

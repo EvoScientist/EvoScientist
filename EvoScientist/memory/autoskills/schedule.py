@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from ...config import EvoScientistConfig
+from ...cron.schedule import (
+    asearch_all,
+    create_cron,
+    delete_cron,
+    owned,
+    run_config,
+    search_all,
+    workspace_key,
+)
 from ...langgraph_dev.sdk import (
     default_scheduler_timezone,
     get_langgraph_async_client,
@@ -13,10 +23,10 @@ from ...langgraph_dev.sdk import (
     langgraph_dev_url,
     messages_input,
 )
+from ...paths import SessionDirs, Workspace
 
 AUTOSKILL_GRAPH_ID = "evomemory-autoskills"
 AUTOSKILL_RUN_KIND = "evomemory_autoskills"
-AUTOSKILL_SCHEDULE_SEARCH_LIMIT = 100
 
 
 def autoskill_cron(cadence: str, time_hhmm: str) -> str:
@@ -42,16 +52,10 @@ def _autoskill_input() -> dict[str, Any]:
     )
 
 
-def _autoskill_metadata(
-    *,
-    config: EvoScientistConfig,
-    workspace_dir: str | Path,
-    schedule: str,
-) -> dict[str, str]:
+def _autoskill_metadata(*, config: EvoScientistConfig, schedule: str) -> dict[str, str]:
     return {
         "run_kind": AUTOSKILL_RUN_KIND,
         "name": "EvoMemory AutoSkills",
-        "workspace_dir": str(Path(workspace_dir).expanduser().resolve()),
         "mode": config.memory_skill_synthesis_mode.value,
         "cadence": config.memory_skill_synthesis_cadence.value,
         "time": config.memory_skill_synthesis_time,
@@ -59,31 +63,43 @@ def _autoskill_metadata(
     }
 
 
+def _owned_by(
+    rows: list[dict[str, Any]], workspace_dir: str | Path
+) -> list[dict[str, Any]]:
+    return owned(rows, Workspace(workspace_dir))
+
+
 def list_autoskill_schedules(
     config: EvoScientistConfig,
     *,
-    limit: int = AUTOSKILL_SCHEDULE_SEARCH_LIMIT,
+    workspace_dir: str | Path,
 ) -> list[dict[str, Any]]:
-    """Return internal AutoSkills cron records."""
-    return list(
-        get_langgraph_sync_client(url=langgraph_dev_url(config)).crons.search(
-            metadata={"run_kind": AUTOSKILL_RUN_KIND},
-            limit=limit,
-        )
+    """Return the workspace's internal AutoSkills cron records."""
+    rows = search_all(
+        get_langgraph_sync_client(url=langgraph_dev_url(config)),
+        metadata={"run_kind": AUTOSKILL_RUN_KIND},
     )
+    return _owned_by(rows, workspace_dir)
 
 
 async def alist_autoskill_schedules(
     config: EvoScientistConfig,
     *,
-    limit: int = AUTOSKILL_SCHEDULE_SEARCH_LIMIT,
+    workspace_dir: str | Path,
 ) -> list[dict[str, Any]]:
     """Async variant of :func:`list_autoskill_schedules`."""
-    rows = await get_langgraph_async_client(url=langgraph_dev_url(config)).crons.search(
+    rows = await asearch_all(
+        get_langgraph_async_client(url=langgraph_dev_url(config)),
         metadata={"run_kind": AUTOSKILL_RUN_KIND},
-        limit=limit,
     )
-    return list(rows)
+    return await asyncio.to_thread(_owned_by, rows, workspace_dir)
+
+
+def _forwarded_workspace(cron: dict[str, Any]) -> str | None:
+    """The workspace a cron's runs forward (its run config), in stored form."""
+    payload = cron.get("payload") or {}
+    configurable = (payload.get("config") or {}).get("configurable") or {}
+    return workspace_key(configurable.get("workspace_dir"))
 
 
 def reconcile_autoskill_schedule(
@@ -91,46 +107,46 @@ def reconcile_autoskill_schedule(
     *,
     workspace_dir: str | Path,
 ) -> dict[str, Any]:
-    """Ensure the hidden AutoSkills cron matches config."""
+    """Ensure the workspace's hidden AutoSkills cron matches config.
+
+    Only this workspace's AutoSkills crons are listed, replaced or deleted.
+    """
     from ...langgraph_dev.manager import is_langgraph_dev_running
 
     if not is_langgraph_dev_running(base_url=langgraph_dev_url(config)):
         return {"status": "unavailable"}
 
+    workspace = Workspace(workspace_dir)
     client = get_langgraph_sync_client(url=langgraph_dev_url(config))
-    existing = list_autoskill_schedules(
-        config,
-        limit=AUTOSKILL_SCHEDULE_SEARCH_LIMIT,
-    )
+    existing = list_autoskill_schedules(config, workspace_dir=workspace_dir)
     if not config.memory_skill_synthesis_enabled:
         for row in existing:
-            client.crons.delete(str(row["cron_id"]))
+            delete_cron(client, row, workspace=workspace)
         return {"status": "disabled", "deleted": len(existing)}
 
     schedule = autoskill_cron(
         config.memory_skill_synthesis_cadence,
         config.memory_skill_synthesis_time,
     )
-    metadata = _autoskill_metadata(
-        config=config,
-        workspace_dir=workspace_dir,
-        schedule=schedule,
-    )
+    metadata = _autoskill_metadata(config=config, schedule=schedule)
+    # A cron created before its runs forwarded the workspace is replaced, so
+    # its runs carry ``configurable.workspace_dir`` too.
     matching = [
         row
         for row in existing
         if row.get("schedule") == schedule
         and bool(row.get("enabled", True))
-        and (row.get("metadata") or {}).get("workspace_dir")
-        == metadata["workspace_dir"]
         and (row.get("metadata") or {}).get("mode") == metadata["mode"]
+        and _forwarded_workspace(row) == workspace.key
     ]
     if len(matching) == 1 and len(existing) == 1:
         return {"status": "unchanged", "cron_id": matching[0].get("cron_id")}
 
     for row in existing:
-        client.crons.delete(str(row["cron_id"]))
-    created = client.crons.create(
+        delete_cron(client, row, workspace=workspace)
+    created = create_cron(
+        client,
+        workspace=workspace,
         assistant_id=AUTOSKILL_GRAPH_ID,
         schedule=schedule,
         input=_autoskill_input(),
@@ -151,23 +167,18 @@ def run_autoskill_now(
 ) -> dict[str, Any]:
     """Launch a one-off AutoSkills run immediately."""
     client = get_langgraph_sync_client(url=langgraph_dev_url(config))
+    workspace = Workspace(workspace_dir)
+    folders = SessionDirs(workspace).metadata()
     thread = client.threads.create(
         graph_id=AUTOSKILL_GRAPH_ID,
-        metadata={
-            "run_kind": AUTOSKILL_RUN_KIND,
-            "workspace_dir": str(Path(workspace_dir).expanduser().resolve()),
-        },
+        metadata={"run_kind": AUTOSKILL_RUN_KIND, **folders},
     )
     run = client.runs.create(
         thread_id=str(thread["thread_id"]),
         assistant_id=AUTOSKILL_GRAPH_ID,
         input=_autoskill_input(),
-        metadata=_autoskill_metadata(
-            config=config,
-            workspace_dir=workspace_dir,
-            schedule="manual",
-        ),
-        config={"configurable": {"thread_id": str(thread["thread_id"])}},
+        metadata={**_autoskill_metadata(config=config, schedule="manual"), **folders},
+        config=run_config(workspace, thread_id=str(thread["thread_id"])),
     )
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}
 
@@ -179,22 +190,17 @@ async def arun_autoskill_now(
 ) -> dict[str, Any]:
     """Async variant of :func:`run_autoskill_now`."""
     client = get_langgraph_async_client(url=langgraph_dev_url(config))
+    workspace = Workspace(workspace_dir)
+    folders = SessionDirs(workspace).metadata()
     thread = await client.threads.create(
         graph_id=AUTOSKILL_GRAPH_ID,
-        metadata={
-            "run_kind": AUTOSKILL_RUN_KIND,
-            "workspace_dir": str(Path(workspace_dir).expanduser().resolve()),
-        },
+        metadata={"run_kind": AUTOSKILL_RUN_KIND, **folders},
     )
     run = await client.runs.create(
         thread_id=str(thread["thread_id"]),
         assistant_id=AUTOSKILL_GRAPH_ID,
         input=_autoskill_input(),
-        metadata=_autoskill_metadata(
-            config=config,
-            workspace_dir=workspace_dir,
-            schedule="manual",
-        ),
-        config={"configurable": {"thread_id": str(thread["thread_id"])}},
+        metadata={**_autoskill_metadata(config=config, schedule="manual"), **folders},
+        config=run_config(workspace, thread_id=str(thread["thread_id"])),
     )
     return {"thread_id": thread["thread_id"], "run_id": run["run_id"]}

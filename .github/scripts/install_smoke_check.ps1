@@ -1,0 +1,274 @@
+# Checks for the installer smoke workflow (install-smoke.yml), run after
+# scripts/install.ps1 on a clean Windows runner. Same checks as
+# install_smoke_check.sh:
+#
+#   online    the version, where the package was imported from, the installed
+#             versions against constraints.txt, a second setup that downloads
+#             nothing, and the WebUI launch with the oldest and the newest
+#             WebUI release in the core's range
+#   block     adds outbound firewall rules for the installed Python and Node
+#             executables, then checks that they cannot reach https://pypi.org
+#   offline   EvoSci setup and the WebUI launch; run after block
+#   update    EvoSci update to a release (install_smoke_update.py)
+#
+# EXPECTED_VERSION (else the newest release on INDEX_URL) and
+# EVOSCI_INSTALL_CONSTRAINTS (else constraints.txt at the release tag) are
+# optional.
+param([Parameter(Mandatory = $true)][ValidateSet('online', 'block', 'offline', 'update')][string]$Mode)
+
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+# EvoSci's output goes to pipes and files here; with the ANSI code page Python
+# fails on its progress symbols, as in install.ps1.
+$env:PYTHONIOENCODING = 'utf-8'
+# ... and their output (and uv's) is UTF-8: decode it as such, not in the
+# console code page (paths with non-ASCII characters).
+try { [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false } catch { }
+
+$IndexUrl = if ($env:INDEX_URL) { $env:INDEX_URL } else { 'https://pypi.org/simple' }
+# The home folder as Python finds it (USERPROFILE first), as install.ps1 does.
+$UserHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+$DataDir = if ($env:EVOSCIENTIST_DATA_DIR) { $env:EVOSCIENTIST_DATA_DIR } else { Join-Path $UserHome '.evoscientist' }
+$BackendPort = if ($env:EVOSCIENTIST_LANGGRAPH_DEV_PORT) { $env:EVOSCIENTIST_LANGGRAPH_DEV_PORT } else { '6174' }
+$WebuiPort = if ($env:EVOSCIENTIST_WEBUI_PORT) { $env:EVOSCIENTIST_WEBUI_PORT } else { '4716' }
+$BackendUrl = "http://127.0.0.1:$BackendPort/ok"
+$WebuiUrl = "http://127.0.0.1:$WebuiPort/"
+
+function Fail([string]$Text) {
+    Write-Host "::error::$Text"
+    exit 1
+}
+
+# Runs a native command and returns its stdout as text (stderr goes to the
+# log); native stderr must not become a terminating error.
+function Invoke-Native([string]$Exe, [string[]]$Arguments, [switch]$WithStderr) {
+    $ErrorActionPreference = 'Continue'
+    if ($WithStderr) {
+        $out = & $Exe @Arguments 2>&1 | ForEach-Object { "$_" }
+    } else {
+        $out = & $Exe @Arguments | ForEach-Object { "$_" }
+    }
+    $script:NativeExitCode = $LASTEXITCODE
+    return ($out -join "`n")
+}
+
+# The tool records are UTF-8; Windows PowerShell 5.1 would read them in the
+# ANSI code page and garble a path with non-ASCII characters.
+$Uv = (Get-Content -Raw -Encoding UTF8 (Join-Path $DataDir 'tools\uv.json') | ConvertFrom-Json).path
+if (-not (Test-Path $Uv)) { Fail "No uv recorded in $DataDir\tools\uv.json" }
+$BinDir = (Invoke-Native $Uv @('tool', 'dir', '--bin')).Trim()
+$ToolDir = (Invoke-Native $Uv @('tool', 'dir')).Trim()
+$EvoSci = Join-Path $BinDir 'EvoSci.exe'
+$Python = Join-Path $ToolDir 'evoscientist\Scripts\python.exe'
+
+# Any answer below *Below*; the backend's /ok must be a success (300).
+function Test-Answers([string]$Url, [int]$Below = 500) {
+    try {
+        $request = [Net.WebRequest]::Create($Url)
+        $request.Proxy = $null
+        $request.Timeout = 5000
+        $response = $request.GetResponse()
+        $code = [int]$response.StatusCode
+        $response.Close()
+    } catch [Net.WebException] {
+        if (-not $_.Exception.Response) { return $false }
+        $code = [int]$_.Exception.Response.StatusCode
+    }
+    return ($code -ge 200 -and $code -lt $Below)
+}
+
+function Show-Logs([string]$Log) {
+    Write-Host '--- EvoSci output'
+    Get-Content -Encoding UTF8 -ErrorAction SilentlyContinue $Log, "$Log.err" | Write-Host
+    foreach ($file in @("$UserHome\.config\evoscientist\langgraph_dev.log", "$UserHome\.config\evoscientist\webui.log")) {
+        Write-Host "--- $file"
+        Get-Content -Encoding UTF8 -Tail 80 -ErrorAction SilentlyContinue $file | Write-Host
+    }
+}
+
+# Starts the WebUI, waits until the backend's /ok and the WebUI answer, then
+# stops the whole process tree and checks that both ports close.
+function Test-Launch {
+    $work = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $work | Out-Null
+    $log = "$work.log"
+    $proc = Start-Process -FilePath $EvoSci -ArgumentList @('--ui', 'webui', '--workdir', "`"$work`"") -PassThru `
+        -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden
+    $up = $false
+    for ($i = 0; $i -lt 240; $i++) {
+        if ((Test-Answers $BackendUrl 300) -and (Test-Answers $WebuiUrl)) { $up = $true; break }
+        if ($proc.HasExited) { break }
+        Start-Sleep -Seconds 1
+    }
+    # Windows has no signal that runs EvoSci's own cleanup: stop the tree,
+    # then the recorded backend.
+    & taskkill.exe /PID $proc.Id /T /F | Out-Null
+    Invoke-Native $EvoSci @('server', 'stop') | Out-Null
+    if (-not $up) {
+        Show-Logs $log
+        Fail "The backend ($BackendUrl) and the WebUI ($WebuiUrl) did not both answer within $i s"
+    }
+    Start-Sleep -Seconds 3
+    if ((Test-Answers $BackendUrl) -or (Test-Answers $WebuiUrl)) {
+        Show-Logs $log
+        Fail 'The backend or the WebUI still answers after EvoSci was stopped'
+    }
+    Write-Host 'WebUI launch ok'
+}
+
+function Get-ExpectedVersion {
+    if ($env:EXPECTED_VERSION) { return $env:EXPECTED_VERSION }
+    $listing = Invoke-RestMethod -UseBasicParsing -Uri "$IndexUrl/evoscientist/" -Headers @{ Accept = 'application/vnd.pypi.simple.v1+json' }
+    return @($listing.versions | Where-Object { $_ -match '^\d+(\.\d+){1,3}$' } | Sort-Object { [version]$_ }) | Select-Object -Last 1
+}
+
+function Test-Online {
+    $expected = Get-ExpectedVersion
+    $actual = (Invoke-Native $EvoSci @('--version', '--json') | ConvertFrom-Json).version
+    if ($actual -ne $expected) { Fail "EvoSci --version --json reports $actual, expected $expected" }
+    Write-Host "version ok: $actual"
+
+    $file = Invoke-Native $Python @('-c', 'import EvoScientist; print(EvoScientist.__file__)')
+    if (-not $file.StartsWith($ToolDir + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        Fail "EvoScientist is imported from $file, outside $ToolDir"
+    }
+    Write-Host "imported from the tool environment: $file"
+
+    $constraints = $env:EVOSCI_INSTALL_CONSTRAINTS
+    if (-not $constraints) {
+        $constraints = Join-Path ([IO.Path]::GetTempPath()) 'evosci-constraints.txt'
+        Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/EvoScientist/EvoScientist/v$actual/constraints.txt" -OutFile $constraints
+    }
+    # Re-resolving the installed set under the constraints changes nothing only
+    # when every installed version is the one constraints.txt pins.
+    $frozen = Join-Path ([IO.Path]::GetTempPath()) 'evosci-frozen.txt'
+    [IO.File]::WriteAllText($frozen, (Invoke-Native $Uv @('pip', 'freeze', '--python', $Python)))
+    # uv reports "Would make no changes" on stderr.
+    # By name from its folder: uv splits a -c path at spaces (astral-sh/uv#12639).
+    Push-Location -LiteralPath (Split-Path -Parent $constraints)
+    try {
+        $out = Invoke-Native $Uv @('pip', 'install', '--python', $Python, '--dry-run', '-r', $frozen, '-c', (Split-Path -Leaf $constraints)) -WithStderr
+    } finally {
+        Pop-Location
+    }
+    if ($NativeExitCode -ne 0 -or $out -notmatch 'Would make no changes') {
+        Fail "The installed versions differ from constraints.txt: $out"
+    }
+    Write-Host 'installed versions match constraints.txt'
+
+    $out = Invoke-Native $EvoSci @('setup', '--json')
+    if ($NativeExitCode -ne 0) { Fail "The second EvoSci setup failed: $out" }
+    if ($out -match '"(Downloading |Installing |Creating the virtual)') { Fail "The second EvoSci setup downloaded or installed something: $out" }
+    Write-Host 'second setup downloaded nothing'
+
+    # The oldest and the newest WebUI release in the core's range, through the
+    # test-only override of the range; the newest stays installed.
+    $code = @'
+from packaging.version import Version
+from EvoScientist.config import load_config
+from EvoScientist.setup.node import DEFAULT_NPM_REGISTRY, NPM_REGISTRIES
+from EvoScientist.setup.webui import WEBUI_COMPAT, fetch_metadata, in_range
+registry = NPM_REGISTRIES.get(load_config().mirror, DEFAULT_NPM_REGISTRY).rstrip("/")
+found = sorted((v for v in fetch_metadata(registry)["versions"] if in_range(v, WEBUI_COMPAT)), key=Version)
+print(found[0], found[-1])
+'@
+    $script = Join-Path ([IO.Path]::GetTempPath()) 'evosci-webui-range.py'
+    [IO.File]::WriteAllText($script, $code)
+    $oldest, $newest = (Invoke-Native $Python @($script)).Trim().Split(' ')
+    foreach ($version in @($oldest, $newest) | Select-Object -Unique) {
+        Write-Host "WebUI $version"
+        $env:EVOSCIENTIST_WEBUI_COMPAT = "==$version"
+        try {
+            $out = Invoke-Native $EvoSci @('setup', '--stage', 'webui', '--json')
+            if ($NativeExitCode -ne 0) { Fail "EvoSci setup --stage webui failed for WebUI ${version}: $out" }
+            if ($out -notmatch [regex]::Escape("`"Using WebUI $version ")) { Fail "WebUI $version was not installed: $out" }
+            Test-Launch
+        } finally {
+            Remove-Item Env:\EVOSCIENTIST_WEBUI_COMPAT
+        }
+    }
+}
+
+# Blocks outbound traffic of every Python and Node executable that the
+# install uses; loopback traffic is not filtered by Windows Firewall.
+function Block-Network {
+    # uv's base Python, by the path the environment uses and by its real one:
+    # uv reaches it through a minor-version link (cpython-3.12-...), and a
+    # firewall rule on the link path does not match the running process.
+    $bases = @((Invoke-Native $Python @('-c', 'import os, sys; print(sys._base_executable); print(os.path.realpath(sys._base_executable))')) -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    $programs = @($bases) + @($Python)
+    $programs += @(Get-ChildItem (Join-Path $ToolDir 'evoscientist\Scripts') -Filter *.exe | ForEach-Object { $_.FullName })
+    $programs += @(Get-ChildItem $BinDir -Filter *.exe | ForEach-Object { $_.FullName })
+    $node = Get-Content -Raw -Encoding UTF8 -ErrorAction SilentlyContinue (Join-Path $DataDir 'tools\node.json') | ConvertFrom-Json
+    if ($node) { $programs += Join-Path $node.path 'node.exe' }
+    $envPython = Join-Path $DataDir 'envs\default\Scripts\python.exe'
+    if (Test-Path $envPython) { $programs += $envPython }
+    $i = 0
+    foreach ($program in $programs | Select-Object -Unique) {
+        $i++
+        New-NetFirewallRule -DisplayName "evosci-smoke-block-$i" -Direction Outbound -Program $program -Action Block | Out-Null
+        Write-Host "blocked: $program"
+    }
+    # Single quotes inside: Windows PowerShell 5.1 drops double quotes from
+    # arguments to native programs. Exit code 3 only when the request itself
+    # fails, so a probe that breaks for another reason never counts as blocked.
+    $probe = "import sys, urllib.request`ntry: urllib.request.urlopen('https://pypi.org/simple/', timeout=15)`nexcept OSError: sys.exit(3)"
+    foreach ($exe in @($bases) + @($Python)) {
+        Invoke-Native $exe @('-c', $probe) | Out-Null
+        if ($NativeExitCode -ne 3) { Fail "$exe can still reach https://pypi.org, or the probe failed (exit $NativeExitCode): the network is not proven blocked" }
+    }
+    if ($node) {
+        Invoke-Native (Join-Path $node.path 'node.exe') @('-e', "fetch('https://registry.npmjs.org/').then(() => process.exit(0), () => process.exit(3))") | Out-Null
+        if ($NativeExitCode -ne 3) { Fail "node can still reach https://registry.npmjs.org, or the probe failed (exit $NativeExitCode): the network is not proven blocked" }
+    }
+    Write-Host 'network blocked'
+}
+
+function Test-Offline {
+    $out = Invoke-Native $EvoSci @('setup', '--json')
+    if ($NativeExitCode -ne 0) { Fail "EvoSci setup failed offline: $out" }
+    if ($out -notmatch '"stage": *"webui", *"status": *"done"') { Fail "The webui stage did not end with done offline: $out" }
+    Write-Host 'offline setup ok'
+    Test-Launch
+}
+
+# EvoSci update to a release through this code's updater and its helper; see
+# update() in install_smoke_check.sh. The block step's firewall rules go
+# first: the update needs the network.
+function Test-Update {
+    Get-NetFirewallRule -DisplayName 'evosci-smoke-block-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    $key = 'version'
+    if ($env:EVOSCI_INSTALL_SOURCE) {
+        $constraints = $env:EVOSCI_INSTALL_CONSTRAINTS
+        # uv splits a -c path at spaces (astral-sh/uv#12639): by name, from its folder.
+        Push-Location -LiteralPath (Split-Path -Parent $constraints)
+        try {
+            Invoke-Native $Uv @('pip', 'install', '-q', '--python', $Python, '--reinstall-package', 'evoscientist', '-c', (Split-Path -Leaf $constraints), $env:EVOSCI_INSTALL_SOURCE) -WithStderr | Write-Host
+        } finally {
+            Pop-Location
+        }
+        if ($NativeExitCode -ne 0) { Fail "uv pip install of $env:EVOSCI_INSTALL_SOURCE failed" }
+        $key = 'latest'
+    } else {
+        Invoke-Native $EvoSci @('update', '--help') | Out-Null
+        if ($NativeExitCode -ne 0) {
+            Write-Host 'This release has no EvoSci update yet; nothing to check.'
+            return
+        }
+    }
+    $check = (Invoke-Native $EvoSci @('update', '--check', '--json')) -split "`n" | Select-Object -Last 1 | ConvertFrom-Json
+    $target = $check.detail.$key
+    # Not the environment's Python: it would block the update it waits for.
+    $base = (Invoke-Native $Python @('-c', 'import sys; print(sys._base_executable)')).Trim()
+    Invoke-Native $base @((Join-Path $PSScriptRoot 'install_smoke_update.py'), $EvoSci, $target) -WithStderr | Write-Host
+    if ($NativeExitCode -ne 0) { Fail "EvoSci update to $target failed (see above)" }
+}
+
+switch ($Mode) {
+    'online' { Test-Online }
+    'block' { Block-Network }
+    'offline' { Test-Offline }
+    'update' { Test-Update }
+}
+# The last native command's exit code must not become the script's.
+exit 0

@@ -98,6 +98,9 @@ class TestCanBindPort:
             def __init__(self, family, type_):
                 self.family = family
 
+            def setsockopt(self, *args):
+                pass
+
             def bind(self, addr):
                 bound.append((self.family, addr))
 
@@ -118,6 +121,9 @@ class TestCanBindPort:
             def __init__(self, family, type_):
                 self.family = family
 
+            def setsockopt(self, *args):
+                pass
+
             def bind(self, addr):
                 bound.append((self.family, addr))
 
@@ -128,6 +134,77 @@ class TestCanBindPort:
 
         assert manager._can_bind_port(6174, "::1") is True
         assert bound == [(_socket.AF_INET6, ("::1", 6174))]
+
+    @pytest.mark.parametrize(("os_name", "reuses"), [("posix", True), ("nt", False)])
+    def test_reuseaddr_only_on_posix(self, monkeypatch, os_name, reuses):
+        """uvicorn binds with ``SO_REUSEADDR``, so the probe must too, or
+        TIME_WAIT connections block a bind the server could make (#589). On
+        Windows the option also allows binding over a live listener."""
+        import socket as _socket
+
+        calls: list[tuple] = []
+
+        class _FakeSocket:
+            def __init__(self, family, type_):
+                pass
+
+            def setsockopt(self, level, option, value):
+                calls.append(("setsockopt", level, option, value))
+
+            def bind(self, addr):
+                calls.append(("bind", addr))
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _FakeSocket)
+        monkeypatch.setattr(manager.os, "name", os_name)
+
+        assert manager._can_bind_port(6174) is True
+        reuse = ("setsockopt", _socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        bind = ("bind", ("127.0.0.1", 6174))
+        assert calls == ([reuse, bind] if reuses else [bind])
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX TIME_WAIT rules")
+    def test_time_wait_connections_do_not_block_the_probe(self):
+        """End to end: the old server closed an accepted connection first, so
+        that connection sits in TIME_WAIT on the port after the server is
+        gone. A plain bind fails then, but the server's own bind would not."""
+        import socket as _socket
+
+        listener = _socket.socket()
+        listener.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        client = _socket.create_connection(("127.0.0.1", port))
+        accepted, _ = listener.accept()
+        accepted.close()  # The server side closes first and keeps TIME_WAIT.
+        client.close()
+        listener.close()
+
+        plain = _socket.socket()
+        try:
+            plain.bind(("127.0.0.1", port))
+        except OSError:
+            pass
+        else:
+            pytest.skip("this kernel left no TIME_WAIT entry to test against")
+        finally:
+            plain.close()
+
+        assert manager._can_bind_port(port) is True
+
+    def test_live_listener_still_blocks_the_probe(self):
+        import socket as _socket
+
+        listener = _socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        try:
+            assert manager._can_bind_port(listener.getsockname()[1]) is False
+        finally:
+            listener.close()
 
 
 # =============================================================================

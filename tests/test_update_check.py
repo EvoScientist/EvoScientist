@@ -4,37 +4,71 @@ import json
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from EvoScientist.update_check import (
     CACHE_TTL,
-    _parse_version,
+    CN_SIMPLE,
+    fetch_versions,
     get_latest_version,
     is_update_available,
+    newest_release,
 )
 
 
-class TestParseVersion:
-    """Tests for _parse_version."""
+def _response(payload):
+    resp = MagicMock()
+    resp.read.return_value = json.dumps(payload).encode()
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    return resp
 
-    def test_basic(self):
-        assert _parse_version("1.2.3") == (1, 2, 3)
 
-    def test_single_digit(self):
-        assert _parse_version("5") == (5,)
+class TestNewestRelease:
+    def test_numeric_order_not_string_order(self):
+        assert newest_release(["0.3.9", "0.3.10", "0.3.2"]) == "0.3.10"
 
-    def test_whitespace(self):
-        assert _parse_version("  0.0.2  ") == (0, 0, 2)
+    def test_skips_prereleases_and_garbage(self):
+        assert newest_release(["0.3.6", "0.4.0rc1", "0.4.0.dev1", "x"]) == "0.3.6"
 
-    def test_comparison(self):
-        assert _parse_version("0.0.3") > _parse_version("0.0.2")
-        assert _parse_version("0.1.0") > _parse_version("0.0.9")
-        assert _parse_version("1.0.0") > _parse_version("0.9.9")
+    def test_none_without_releases(self):
+        assert newest_release(["1.0a1"]) is None
 
-    def test_equal(self):
-        assert _parse_version("0.0.2") == _parse_version("0.0.2")
+
+class TestFetchVersions:
+    def test_reads_the_json_simple_api(self):
+        resp = _response({"meta": {}, "versions": ["0.3.5", "0.3.6"]})
+        with patch("urllib.request.urlopen", return_value=resp) as urlopen:
+            assert fetch_versions(CN_SIMPLE, 5) == ["0.3.5", "0.3.6"]
+        request = urlopen.call_args.args[0]
+        assert request.full_url == f"{CN_SIMPLE}/evoscientist/"
+        assert request.get_header("Accept") == "application/vnd.pypi.simple.v1+json"
 
 
 class TestGetLatestVersion:
     """Tests for get_latest_version."""
+
+    @pytest.fixture(autouse=True)
+    def _default_mirror(self, monkeypatch):
+        class Config:
+            mirror = "default"
+
+        monkeypatch.setattr("EvoScientist.config.load_config", lambda: Config())
+
+    def test_cn_mirror_reads_tsinghua(self, tmp_path, monkeypatch):
+        class Config:
+            mirror = "cn"
+
+        monkeypatch.setattr("EvoScientist.config.load_config", lambda: Config())
+        cache_file = tmp_path / "latest_version.json"
+        resp = _response({"versions": ["0.3.10", "0.3.9", "0.4.0rc1"]})
+        with (
+            patch("EvoScientist.update_check.CACHE_FILE", cache_file),
+            patch("EvoScientist.update_check.CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=resp) as urlopen,
+        ):
+            assert get_latest_version() == "0.3.10"
+        assert urlopen.call_args.args[0].full_url.startswith(CN_SIMPLE)
 
     def test_fresh_cache_hit(self, tmp_path):
         cache_file = tmp_path / "latest_version.json"
@@ -155,3 +189,12 @@ class TestIsUpdateAvailable:
         ):
             available, _latest = is_update_available()
             assert available is False
+
+    def test_prerelease_installed_sees_final_release(self):
+        with (
+            patch("EvoScientist.update_check.get_latest_version", return_value="0.4.0"),
+            patch(
+                "EvoScientist.update_check._installed_version", return_value="0.4.0rc1"
+            ),
+        ):
+            assert is_update_available() == (True, "0.4.0")

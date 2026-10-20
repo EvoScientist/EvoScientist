@@ -27,6 +27,7 @@ from .validators import (
     validate_nvidia_key,
     validate_openai_key,
     validate_openrouter_key,
+    validate_opper_key,
     validate_requesty_key,
     validate_siliconflow_key,
     validate_volcengine_key,
@@ -82,6 +83,11 @@ def _provider_key_info(config: EvoScientistConfig, provider: str):
             "Requesty",
             config.requesty_api_key or os.environ.get("REQUESTY_API_KEY", ""),
             validate_requesty_key,
+        ),
+        "opper": (
+            "Opper",
+            config.opper_api_key or os.environ.get("OPPER_API_KEY", ""),
+            validate_opper_key,
         ),
         "novita": (
             "Novita",
@@ -291,6 +297,42 @@ def _run_ccproxy_login(provider: str, label: str) -> None:
         console.print(f"  [red]Login error: {exc}[/red]")
 
 
+def _chatgpt_status_text(state) -> str:
+    """One-line sign-in status, with the plan when the token names it."""
+    return f"ChatGPT: signed in ({state.plan})" if state.plan else "ChatGPT: signed in"
+
+
+def _open_browser_here() -> bool:
+    """Whether a browser on this machine would be in front of the user."""
+    from ...deploy.launcher import no_display
+
+    return not (
+        no_display() or os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_TTY")
+    )
+
+
+def _run_chatgpt_login() -> bool:
+    """Run the ChatGPT browser sign-in and print the outcome."""
+    import httpx
+    from rich.markup import escape
+
+    from ...llm import chatgpt_oauth
+
+    try:
+        state = chatgpt_oauth.login(open_browser=_open_browser_here())
+    except KeyboardInterrupt:
+        console.print("  [red]Login cancelled.[/red]")
+        return False
+    except (RuntimeError, OSError, ValueError, httpx.HTTPError) as exc:
+        console.print(f"  [red]Login failed: {escape(str(exc))}[/red]")
+        return False
+    if not state.signed_in:
+        console.print("  [red]Login failed: no token was stored.[/red]")
+        return False
+    console.print(f"  [green]✓ {_chatgpt_status_text(state)}[/green]")
+    return True
+
+
 def _check_npx() -> bool:
     """Check if npx is available on the system.
 
@@ -332,7 +374,8 @@ def _ensure_npx(reason: str) -> bool:
 
     from rich.markup import escape
 
-    from ...setup.node import NODE_VERSION, activate_runtime, ensure_node, tools_dir
+    from ...setup._install import tools_dir
+    from ...setup.node import NODE_VERSION, activate_runtime, ensure_node
     from ...setup.protocol import ConsoleEmitter, StageError, make_event
 
     console.print(f"  [yellow]✗ npx not found — {reason}[/yellow]")

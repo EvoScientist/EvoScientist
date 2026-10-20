@@ -71,6 +71,22 @@ def test_launch_applies_research_env_overrides(tmp_path, monkeypatch):
     assert "venv kept" in log
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX pwd and symlinks")
+def test_launch_pwd_prints_the_folder_it_runs_in(tmp_path, monkeypatch):
+    """``pwd`` prints the launch folder even when the parent process started
+    in a symlink to it, like the execute shell."""
+    real = (tmp_path / "real").resolve()
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("PWD", str(link))
+
+    pid = bg.launch("pwd", str(real))
+    assert _wait_until(lambda: "EXITED" in bg.status(pid))
+    log = (real / ".bg_processes" / f"{pid}.log").read_text()
+    assert log.strip() == str(real)
+
+
 def test_status_running_then_exited(tmp_path):
     pid = bg.launch(_sleep_cmd(1), str(tmp_path))
     assert "RUNNING" in bg.status(pid)

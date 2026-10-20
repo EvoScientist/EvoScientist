@@ -14,11 +14,13 @@ import questionary
 from prompt_toolkit.formatted_text import FormattedText
 from questionary import Choice
 
-from ...llm import get_models_for_provider
+from ...llm import DEFAULT_MODEL, get_models_for_provider
 from ...llm.ollama_discovery import validate_ollama_connection
+from ...paths import Workspace
 from ..settings import EvoScientistConfig
 from .helpers import (
     _auto_install_latexmk,
+    _chatgpt_status_text,
     _check_latex_components,
     _detect_tinytex_install_method,
     _ensure_npx,
@@ -29,6 +31,7 @@ from .helpers import (
     _prompt_ccproxy_port,
     _provider_key_info,
     _run_ccproxy_login,
+    _run_chatgpt_login,
 )
 from .style import (
     CONFIRM_STYLE,
@@ -335,6 +338,10 @@ def _step_provider(
             value="novita",
         ),
         Choice(
+            title="Opper (EU-hosted aggregator — OpenAI, Anthropic, Gemini, Mistral, etc.)",
+            value="opper",
+        ),
+        Choice(
             title="OpenAI-compatible (third-party OpenAI endpoint)",
             value="custom-openai",
         ),
@@ -459,7 +466,7 @@ def _step_oauth_auth_mode(
     status_label: str | None = None,
     question_label: str | None = None,
 ) -> str:
-    """Select API-key vs ccproxy OAuth authentication for a provider.
+    """Select API-key vs ccproxy OAuth authentication (Anthropic).
 
     Args:
         config: Current configuration.
@@ -599,7 +606,7 @@ def _step_anthropic_auth_mode(config: EvoScientistConfig) -> str:
 
 
 def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
-    """Step 2b: Select OpenAI authentication mode (API key vs Codex OAuth).
+    """Step 2b: Select OpenAI authentication mode (API key vs ChatGPT sign-in).
 
     Args:
         config: Current configuration.
@@ -607,16 +614,57 @@ def _step_openai_auth_mode(config: EvoScientistConfig) -> str:
     Returns:
         Selected auth mode: "api_key" or "oauth".
     """
-    return _step_oauth_auth_mode(
-        config,
-        provider_label="OpenAI",
-        ccproxy_provider="codex",
-        config_attr="openai_auth_mode",
-        prompt_login_label="Codex",
-        oauth_choice_label="Codex OAuth",
-        status_label="Codex OAuth",
-        question_label="OpenAI authentication mode",
+    from .prompter import BACK_SENTINEL, GoBack, install_navigation_keys
+
+    choices = [
+        Choice(title="API Key (direct OpenAI access)", value="api_key"),
+        Choice(title="ChatGPT sign-in (no API key needed)", value="oauth"),
+        questionary.Separator(),
+        Choice(title="← Back (re-pick provider)", value=BACK_SENTINEL),
+    ]
+    current = config.openai_auth_mode
+    if current not in ("api_key", "oauth"):
+        current = "api_key"
+
+    question = questionary.select(
+        "OpenAI authentication mode  [Esc/← to go back]:",
+        choices=choices,
+        default=current,
+        style=WIZARD_STYLE,
+        qmark=QMARK,
+        use_indicator=True,
     )
+    install_navigation_keys(question, with_back=True)
+    auth_mode = question.ask()
+
+    if auth_mode is None:
+        raise KeyboardInterrupt()
+    if auth_mode == BACK_SENTINEL:
+        raise GoBack()
+    if auth_mode != "oauth":
+        return auth_mode
+
+    from ...llm import chatgpt_oauth
+
+    console.print(
+        "  [dim]Uses your ChatGPT plan through OpenAI's Codex sign-in. "
+        "Unofficial; OpenAI's terms apply.[/dim]"
+    )
+    state = chatgpt_oauth.status()
+    if state.signed_in:
+        console.print(f"  [green]✓ {_chatgpt_status_text(state)}[/green]")
+        question_text, default = "Re-authenticate to refresh credentials?", False
+    else:
+        console.print("  [yellow]ChatGPT: not signed in[/yellow]")
+        question_text, default = "Log in to ChatGPT now?", True
+    answer = questionary.confirm(
+        question_text, default=default, style=CONFIRM_STYLE, qmark=QMARK
+    ).ask()
+    if answer is None:
+        raise KeyboardInterrupt()
+    if answer:
+        _run_chatgpt_login()
+    return auth_mode
 
 
 def _step_provider_api_key(
@@ -819,7 +867,8 @@ def _step_model(
     # co-pilot model on a re-run) that isn't a registry model is a custom name:
     # preselect "Type a model name..." and prefill it. A plain ``config.model``
     # that just isn't in the current provider's list (e.g. the provider was
-    # changed) falls back to the first model, NOT the custom entry.
+    # changed, or the model was removed) falls back to the default model when
+    # the provider lists it, else the first model, NOT the custom entry.
     custom_default = (
         default_value if default_value and default_value not in provider_models else ""
     )
@@ -827,6 +876,8 @@ def _step_model(
         default = model_default
     elif custom_default:
         default = _CUSTOM_SENTINEL
+    elif DEFAULT_MODEL in provider_models:
+        default = DEFAULT_MODEL
     else:
         default = provider_models[0]
 
@@ -895,28 +946,53 @@ def _step_auxiliary_enable(config: EvoScientistConfig) -> bool:
     return choice == "assemble"
 
 
-def _step_reasoning_effort(config: EvoScientistConfig) -> str:
-    """Step 3.5: Configure OpenRouter reasoning effort level.
+# Levels offered per provider; each one is sent unchanged on every route of
+# that provider (see ``llm.models._ROUTE_REASONING_LEVELS``). "" stores nothing,
+# so each model keeps its own default.
+_REASONING_EFFORT_CHOICES: dict[str, list[tuple[str, str]]] = {
+    # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+    "openrouter": [
+        ("xhigh", "xhigh  — ~95% of max_tokens for reasoning"),
+        ("high", "high   — ~80% of max_tokens (recommended)"),
+        ("medium", "medium — ~50% of max_tokens"),
+        ("low", "low    — ~20% of max_tokens"),
+        ("minimal", "minimal — ~10% of max_tokens"),
+        ("none", "none   — disable reasoning entirely"),
+    ],
+    "openai": [
+        ("", "default — EvoScientist's level for each model (recommended)"),
+        ("low", "low    — fast responses with lighter reasoning"),
+        ("medium", "medium — balances speed and reasoning depth"),
+        ("high", "high   — greater reasoning depth"),
+        ("xhigh", "xhigh  — extra high reasoning depth"),
+        ("max", "max    — deepest reasoning; uses your quota fastest"),
+    ],
+}
 
-    Only shown when the selected provider is OpenRouter. See:
-    https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+
+def _asks_reasoning_effort(provider: str) -> bool:
+    """Whether onboarding offers a reasoning level for ``provider``."""
+    return provider in _REASONING_EFFORT_CHOICES
+
+
+def _step_reasoning_effort(config: EvoScientistConfig, provider: str) -> str:
+    """Step 3.5: Pick the reasoning effort level for OpenRouter or OpenAI.
 
     Args:
         config: Current configuration.
+        provider: The selected provider; it decides which levels are offered.
 
     Returns:
-        Selected reasoning effort level, or empty string to use default.
+        Selected reasoning effort level.
     """
-    effort_choices = [
-        Choice(title="xhigh  — ~95% of max_tokens for reasoning", value="xhigh"),
-        Choice(title="high   — ~80% of max_tokens (recommended)", value="high"),
-        Choice(title="medium — ~50% of max_tokens", value="medium"),
-        Choice(title="low    — ~20% of max_tokens", value="low"),
-        Choice(title="minimal — ~10% of max_tokens", value="minimal"),
-        Choice(title="none   — disable reasoning entirely", value="none"),
-    ]
+    levels = _REASONING_EFFORT_CHOICES[provider]
+    effort_choices = [Choice(title=title, value=value) for value, title in levels]
 
-    current = config.reasoning_effort or "high"
+    # A stored level (kept from another provider, or set by hand) may not be offered here.
+    current = config.reasoning_effort
+    offered = {value for value, _ in levels}
+    if current not in offered:
+        current = "" if "" in offered else "high"
     effort = questionary.select(
         "Select reasoning effort level:",
         choices=effort_choices,
@@ -1152,7 +1228,7 @@ def _step_tinytex() -> None:
         _print_step_result("LaTeX", "installation failed", success=False)
 
 
-def _step_skills() -> list[str]:
+def _step_skills(workspace: Workspace) -> list[str]:
     """Step 7: Optionally install recommended skills.
 
     Shows checkbox first. Already-installed skills are shown as disabled
@@ -1165,7 +1241,7 @@ def _step_skills() -> list[str]:
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from ...paths import GLOBAL_SKILLS_DIR, USER_SKILLS_DIR
+    from ...paths import GLOBAL_SKILLS_DIR
     from ...tools.skills_manager import installed_provenance, resolve_remote_head
 
     # Collect installed-skill dir names across both tiers. The dir-name match
@@ -1173,10 +1249,10 @@ def _step_skills() -> list[str]:
     # provenance map below is the authoritative signal (handles packs that
     # explode into many child directories with unrelated names).
     installed_names: set[str] = set()
-    for skills_dir in (Path(USER_SKILLS_DIR), Path(GLOBAL_SKILLS_DIR)):
+    for skills_dir in (workspace.skills_dir, Path(GLOBAL_SKILLS_DIR)):
         if skills_dir.exists():
             installed_names.update(e.name for e in skills_dir.iterdir() if e.is_dir())
-    provenance = installed_provenance()
+    provenance = installed_provenance(workspace=workspace)
     installed_src = set(provenance)
 
     def _hint_name(source: str) -> str:
@@ -1284,7 +1360,7 @@ def _step_skills() -> list[str]:
     for source in selected:
         label = next(s["label"] for s in _RECOMMENDED_SKILLS if s["source"] == source)
         try:
-            result = install_skill(source)
+            result = install_skill(source, workspace=workspace)
             if result.get("success"):
                 _print_step_result("Skill", label)
                 installed.append(source)
@@ -1316,9 +1392,16 @@ def _step_mcp_servers() -> list[str]:
     try:
         all_servers = fetch_marketplace_index()
     except Exception as exc:
+        from rich.markup import escape
+
+        # The message carries git's stderr; unescaped, `[...]` in it would be
+        # read as Rich markup.
         console.print(
-            "  [yellow]\u26a0 Could not fetch MCP marketplace index "
-            f"({type(exc).__name__}). Skipping MCP setup \u2014 "
+            "  [yellow]\u26a0 Could not fetch MCP marketplace index: "
+            f"{escape(str(exc))}[/yellow]"
+        )
+        console.print(
+            "  [yellow]Skipping MCP setup \u2014 "
             "you can re-run with [bold]EvoSci configure mcp[/bold] later.[/yellow]"
         )
         return []

@@ -344,7 +344,7 @@ class StreamBroadcastSink:
 
     Delivery is single-rendered per backend by construction, with no
     suppression flag: the local CLI process never sets
-    ``EVOSCIENTIST_DEPLOY_MODE``, so local stacks never broadcast and render
+    ``EVOSCIENTIST_SERVER_PROCESS``, so local stacks never broadcast and render
     once via the injected frontend sink; server stacks broadcast, and their
     silent wrapped sink renders nothing.
 
@@ -412,7 +412,7 @@ def resolve_middleware_event_sink(
       main-agent frontend widgets, and their results reach the client via
       thread state, not live custom events;
     * main stacks without an explicit sink use :class:`RunScopedEventSink`;
-    * main stacks inside a langgraph dev subprocess (``EVOSCIENTIST_DEPLOY_MODE``
+    * main stacks inside a langgraph dev subprocess (``EVOSCIENTIST_SERVER_PROCESS``
       set — i.e. the process serves graphs over HTTP, where no frontend sink
       can exist) are additionally wrapped in :class:`StreamBroadcastSink` so
       middleware events reach the client over the ``custom`` channel. The
@@ -422,6 +422,6 @@ def resolve_middleware_event_sink(
     if for_async_subagent:
         return NO_OP_SINK
     sink = events if events is not None else RunScopedEventSink()
-    if os.environ.get("EVOSCIENTIST_DEPLOY_MODE"):
+    if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return StreamBroadcastSink(sink)
     return sink

@@ -1,6 +1,12 @@
 """Shared constants and utilities for CLI and TUI modules."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..paths import SessionDirs
 
 
 def _agent_name() -> str:
@@ -45,11 +51,15 @@ LOGO_LINES = (
 LOGO_GRADIENT = ["#1a237e", "#1565c0", "#1e88e5", "#42a5f5", "#64b5f6", "#90caf9"]
 
 
-def build_metadata(workspace_dir: str | None, model: str | None) -> dict:
-    """Build metadata dict for LangGraph checkpoint persistence."""
+def build_metadata(dirs: SessionDirs, model: str | None) -> dict:
+    """Build metadata dict for LangGraph checkpoint persistence.
+
+    ``workspace_dir`` is the workspace root; ``run_dir`` is added only for a
+    ``--mode=run`` session.
+    """
     return {
         "agent_name": _agent_name(),
         "updated_at": datetime.now(UTC).isoformat(),
-        "workspace_dir": workspace_dir or "",
+        **dirs.metadata(),
         "model": model or "",
     }

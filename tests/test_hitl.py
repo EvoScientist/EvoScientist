@@ -800,13 +800,64 @@ class TestInterruptOnWiring:
     def test_hitl_interrupt_on_helper_arms_every_shell_tool(self):
         """The graph is always armed — no ``auto_approve`` gate at construction.
         Each entry is an ``InterruptOnConfig`` carrying a ``when`` predicate."""
-        from EvoScientist.EvoScientist import _build_hitl_interrupt_on, _hitl_when
+        from EvoScientist.EvoScientist import (
+            _build_hitl_interrupt_on,
+            _hitl_when,
+            _hitl_when_served,
+        )
 
-        cfg = _build_hitl_interrupt_on()
-        assert set(cfg) == {"execute", "run_in_background", "schedule_task", "delete"}
-        for entry in cfg.values():
-            assert entry["when"] is _hitl_when
-            assert "approve" in entry["allowed_decisions"]
+        for honor, predicate in ((True, _hitl_when), (False, _hitl_when_served)):
+            cfg = _build_hitl_interrupt_on(honor_approve_all=honor)
+            assert set(cfg) == {
+                "execute",
+                "run_in_background",
+                "schedule_task",
+                "delete",
+            }
+            for entry in cfg.values():
+                assert entry["when"] is predicate
+                assert "approve" in entry["allowed_decisions"]
+
+    def test_the_served_predicate_ignores_a_session_grant(self):
+        """The graph a server serves has no use for the grant: only an
+        unattended run's own flag skips its pause."""
+        from types import SimpleNamespace
+
+        from EvoScientist.EvoScientist import _hitl_when_served
+
+        def _req(**configurable):
+            runtime = SimpleNamespace(config={"configurable": configurable})
+            return SimpleNamespace(runtime=runtime)
+
+        assert _hitl_when_served(_req(hitl_approve_all=True)) is True
+        assert _hitl_when_served(_req(hitl_suppressed=False, hitl_approve_all=True))
+        assert _hitl_when_served(_req(hitl_suppressed=True)) is False
+        assert _hitl_when_served(None) is True
+
+    def test_the_default_agent_is_built_without_the_grant(self, monkeypatch):
+        import EvoScientist.EvoScientist as es_mod
+
+        captured = {}
+
+        def fake_create_deep_agent(**kwargs):
+            captured["interrupt_on"] = kwargs["interrupt_on"]
+            agent = MagicMock()
+            agent.with_config.return_value = agent
+            return agent
+
+        monkeypatch.setattr(es_mod, "_EvoScientist_agent", None)
+        monkeypatch.setattr(es_mod, "_ensure_config", lambda: MagicMock())
+        monkeypatch.setattr(es_mod, "process_session_dirs", lambda: MagicMock())
+        monkeypatch.setattr(es_mod, "_get_default_backend", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(es_mod, "_get_default_middleware", lambda **k: [])
+        monkeypatch.setattr(
+            es_mod, "load_mcp_and_build_kwargs", lambda *a, **k: {"name": "x"}
+        )
+        with patch("deepagents.create_deep_agent", side_effect=fake_create_deep_agent):
+            es_mod._get_default_agent()
+        assert captured["interrupt_on"] == es_mod._build_hitl_interrupt_on(
+            honor_approve_all=False
+        )
 
     def test_hitl_when_arms_by_default_outside_a_run(self):
         """No ambient run config → interrupt (armed). This would fail with the
@@ -849,7 +900,39 @@ class TestInterruptOnWiring:
         assert _hitl_when(suppressed_req) is False
         assert _hitl_when(armed_req) is True
 
-    def test_hitl_interrupt_on_reaches_create_deep_agent(self):
+    def test_hitl_when_disarms_under_a_session_grant(self):
+        """configurable.hitl_approve_all=True -> no interrupt, with or without suppression."""
+        from types import SimpleNamespace
+
+        from EvoScientist.EvoScientist import _hitl_when
+
+        def _req(**configurable):
+            return SimpleNamespace(
+                runtime=SimpleNamespace(config={"configurable": configurable})
+            )
+
+        assert _hitl_when(_req(hitl_suppressed=False, hitl_approve_all=True)) is False
+        assert _hitl_when(_req(hitl_suppressed=True, hitl_approve_all=True)) is False
+        assert _hitl_when(_req(hitl_suppressed=False, hitl_approve_all=False)) is True
+        assert _hitl_when(_req(hitl_suppressed=False)) is True
+        # Only a literal True is a grant.
+        assert _hitl_when(_req(hitl_suppressed=False, hitl_approve_all="true")) is True
+
+    def test_hitl_when_reads_the_grant_from_the_ambient_config(self, monkeypatch):
+        import langgraph.config as lg_config
+
+        from EvoScientist.EvoScientist import _hitl_when
+
+        monkeypatch.setattr(
+            lg_config,
+            "get_config",
+            lambda: {
+                "configurable": {"hitl_suppressed": False, "hitl_approve_all": True}
+            },
+        )
+        assert _hitl_when(None) is False
+
+    def test_hitl_interrupt_on_reaches_create_deep_agent(self, workspace):
         """The kwarg must actually reach ``create_deep_agent`` — not just the
         pure helper — so a future edit that drops it or re-adds a bare
         ``HumanInTheLoopMiddleware`` append gets caught. Now armed regardless
@@ -885,13 +968,13 @@ class TestInterruptOnWiring:
                             return_value={"name": "x"},
                         ):
                             es_mod.create_cli_agent(
-                                workspace_dir="/tmp/test-interrupt-on-wiring",
+                                workspace=workspace,
                                 config=cfg,
                                 chat_model=MagicMock(),
                             )
 
         # Always armed — auto_approve no longer disarms at construction.
-        expected = _build_hitl_interrupt_on()
+        expected = _build_hitl_interrupt_on(honor_approve_all=True)
         assert captured == [expected, expected]
 
 
@@ -1073,18 +1156,23 @@ class TestAsyncSubagentGuard:
     backend guard — they ingest untrusted content and have no approval path.
     Internal machinery (scheduler, evomemory, autoskills) runs unguarded."""
 
-    def test_get_default_backend_applies_forced_guard(self):
+    def test_get_default_backend_applies_forced_guard(self, workspace):
         from EvoScientist.EvoScientist import _get_default_backend
 
         assert (
-            _get_default_backend(guard_dangerous=True).default._guard_dangerous is True
+            _get_default_backend(
+                workspace, guard_dangerous=True
+            ).default._guard_dangerous
+            is True
         )
         assert (
-            _get_default_backend(guard_dangerous=False).default._guard_dangerous
+            _get_default_backend(
+                workspace, guard_dangerous=False
+            ).default._guard_dangerous
             is False
         )
 
-    def test_get_default_backend_guard_defaults_false(self):
+    def test_get_default_backend_guard_defaults_false(self, workspace):
         """The construction-time guard default is always False (was cfg.auto_approve):
         the graph is always armed and the guard derives per call from the run's
         HITL-suppression state (see CustomSandboxBackend._effective_guard_dangerous),
@@ -1092,10 +1180,10 @@ class TestAsyncSubagentGuard:
         backend. Independent of the machine's config value."""
         from EvoScientist.EvoScientist import _get_default_backend
 
-        assert _get_default_backend().default._guard_dangerous is False
+        assert _get_default_backend(workspace).default._guard_dangerous is False
 
     @staticmethod
-    def _factory_kwargs_for(name: str) -> dict:
+    def _factory_kwargs_for(name: str, workspace) -> dict:
         """Run the async factory for ``name`` and capture the backend kwargs."""
         from unittest.mock import MagicMock, NonCallableMagicMock, patch
 
@@ -1104,7 +1192,7 @@ class TestAsyncSubagentGuard:
 
         captured: dict = {}
 
-        def _spy_backend(**kwargs):
+        def _spy_backend(_workspace, **kwargs):
             captured.update(kwargs)
             # Non-callable: deepagents rejects callable backends as removed factories.
             return NonCallableMagicMock()
@@ -1127,21 +1215,21 @@ class TestAsyncSubagentGuard:
             patch.object(ev, "_ensure_auxiliary_chat_model", return_value=MagicMock()),
             patch("deepagents.create_deep_agent", return_value=MagicMock()),
         ):
-            _factory.build_async_subagent_graph(name)
+            _factory.build_async_subagent_graph(name, workspace=workspace)
 
         return captured
 
-    def test_async_factory_guards_research_agents(self):
+    def test_async_factory_guards_research_agents(self, workspace):
         # Research async agents keep both the dangerous-command guard AND the
         # delete refusal on (no interactive approval path → relay to orchestrator).
         for name in ("writing-agent", "data-analysis-agent"):
-            kw = self._factory_kwargs_for(name)
+            kw = self._factory_kwargs_for(name, workspace)
             assert kw.get("guard_dangerous") is True
             assert kw.get("refuse_delete") is True
 
-    def test_async_factory_does_not_guard_internal_agents(self):
+    def test_async_factory_does_not_guard_internal_agents(self, workspace):
         # Scheduler and any other internal async graph run unguarded in any mode.
-        kw = self._factory_kwargs_for("scheduler")
+        kw = self._factory_kwargs_for("scheduler", workspace)
         assert kw.get("guard_dangerous") is False
         assert kw.get("refuse_delete") is False
 
@@ -1243,3 +1331,72 @@ class TestHitlResumeKeying:
                 build_hitl_resume(ints[0].id, [{"type": "approve"}]), config=cfg
             )
         assert not res.get("__interrupt__", [])  # drained, no crash
+
+    def test_a_keyed_resume_releases_the_other_parked_approval(self):
+        """Two sub-agents each park an approval. Under a session grant the
+        client answers one id; the call carries the grant, so the other is not
+        parked again - what the client's next auto-answer would have done."""
+        import uuid
+
+        from deepagents import create_deep_agent
+        from langchain_core.language_models.fake_chat_models import (
+            FakeMessagesListChatModel,
+        )
+        from langchain_core.messages import AIMessage, ToolCall
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from EvoScientist.backends import build_hitl_resume
+        from EvoScientist.EvoScientist import _build_hitl_interrupt_on
+
+        class _SM(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        def _sub_model():
+            call = ToolCall(name="execute", args={"command": "echo hi"}, id="e1")
+            done = AIMessage(content="sub done")
+            return _SM(responses=[AIMessage(content="", tool_calls=[call]), done, done])
+
+        top = AIMessage(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    name="task",
+                    args={"description": "A", "subagent_type": "agent-a"},
+                    id="t1",
+                ),
+                ToolCall(
+                    name="task",
+                    args={"description": "B", "subagent_type": "agent-b"},
+                    id="t2",
+                ),
+            ],
+        )
+        agent = create_deep_agent(
+            model=_SM(responses=[top] + [AIMessage(content="done")] * 6),
+            subagents=[
+                {
+                    "name": name,
+                    "description": name,
+                    "system_prompt": name,
+                    "model": _sub_model(),
+                }
+                for name in ("agent-a", "agent-b")
+            ],
+            interrupt_on=_build_hitl_interrupt_on(honor_approve_all=True),
+            checkpointer=InMemorySaver(),
+        )
+        thread = {"thread_id": str(uuid.uuid4()), "hitl_suppressed": False}
+        res = agent.invoke(
+            {"messages": [("user", "go")]}, config={"configurable": thread}
+        )
+        parked = res.get("__interrupt__", [])
+        assert len(parked) == 2
+
+        res = agent.invoke(
+            build_hitl_resume(parked[0].id, [{"type": "approve"}]),
+            config={"configurable": {**thread, "hitl_approve_all": True}},
+        )
+        assert not res.get("__interrupt__", [])
+        task_results = [m.content for m in res["messages"] if m.type == "tool"]
+        assert task_results == ["sub done", "sub done"]
