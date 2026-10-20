@@ -237,7 +237,6 @@ def _ensure_ccproxy(config: Any) -> None:
         raise SystemExit(1) from exc
     if proc:
         atexit.register(stop_ccproxy, proc)
-        logger.info("ccproxy started for standalone channel")
 
 
 def run_standalone(
