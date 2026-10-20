@@ -2131,6 +2131,58 @@ async def _sweep_orphaned_runs_in_global_store() -> None:
         _logger.warning("Orphaned-run sweep failed (non-fatal).", exc_info=True)
 
 
+# What a cron's first fire stores of its run user in the cron's payload. The
+# server runs without custom auth, so they carry nothing a fire can't rebuild.
+_CRON_USER_KEYS = (
+    "langgraph_auth_user",
+    "langgraph_auth_user_id",
+    "langgraph_auth_permissions",
+)
+
+
+def _clear_stored_cron_users(store: MutableMapping[str, Any]) -> int:
+    """Drop the stored run user from every cron's payload (issue #665).
+
+    A cron's first fire writes its run user, a ``SimpleUser``, into the cron's
+    stored payload. ``SimpleUser`` does not survive pickling: each load of the
+    saved store, i.e. each restart, wraps its identity in one more ``DotDict``,
+    and a fire after the restart then fails writing its checkpoint metadata
+    (``user_id`` is not JSON serializable). Without the stored user, a fire
+    builds a new one from the cron's ``user_id``. Must run before the cron
+    scheduler's first tick, which fires missed crons at once. Mutates the store
+    in place; returns how many crons changed.
+    """
+    changed = 0
+    for cron in store.get("crons") or []:
+        payload = cron.get("payload")
+        config = payload.get("config") if isinstance(payload, dict) else None
+        configurable = config.get("configurable") if isinstance(config, dict) else None
+        if not isinstance(configurable, dict):
+            continue
+        stored = [key for key in _CRON_USER_KEYS if key in configurable]
+        for key in stored:
+            del configurable[key]
+        changed += bool(stored)
+    return changed
+
+
+async def _clear_stored_cron_users_in_global_store() -> None:
+    """Best-effort :func:`_clear_stored_cron_users` on the live LangGraph registry."""
+    try:
+        from langgraph_runtime_inmem.database import GLOBAL_STORE
+    except ImportError:
+        # langgraph_runtime_inmem not available (unit tests, plain CLI mode).
+        return
+    try:
+        changed = _clear_stored_cron_users(GLOBAL_STORE)
+        if changed:
+            _logger.info(
+                "Cleared the stored run user of %d scheduled task(s).", changed
+            )
+    except Exception:
+        _logger.warning("Clearing stored cron users failed (non-fatal).", exc_info=True)
+
+
 @asynccontextmanager
 async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckpointer]:
     """SQLite-backed checkpointer for the ``langgraph dev`` subprocess.
@@ -2165,4 +2217,5 @@ async def create_checkpointer_for_langgraph_api() -> AsyncIterator[PruningCheckp
         await _purge_internal_worker_threads()
         if await _restore_webui_threads_to_global_store():
             await _sweep_orphaned_runs_in_global_store()
+        await _clear_stored_cron_users_in_global_store()
         yield saver

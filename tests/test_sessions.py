@@ -2929,6 +2929,118 @@ class TestRestoreWebuiThreadsToGlobalStore(unittest.IsolatedAsyncioTestCase):
         assert restore_called, "_restore_webui_threads_to_global_store must be called"
 
 
+def _run_config(user: object) -> dict:
+    """A cron's run config after its first fire, as the saved store brings it back."""
+    return {
+        "configurable": {
+            "cron_id": "c1",
+            "workspace_dir": "/proj",
+            "langgraph_auth_user": user,
+            "langgraph_auth_user_id": "",
+            "langgraph_auth_permissions": [],
+        }
+    }
+
+
+def _restored_simple_user():
+    """A fire's run user after a save and load of the store, which pickles it
+    and wraps its identity in a ``DotDict``."""
+    import pickle
+
+    from langgraph_api.auth.custom import SimpleUser
+
+    return pickle.loads(pickle.dumps(SimpleUser("")))
+
+
+@pytest.fixture
+def langgraph_api_env(monkeypatch):
+    """Read when langgraph-api's config is first imported, as in the server."""
+    for name, value in {
+        "LANGGRAPH_RUNTIME_EDITION": "inmem",
+        "REDIS_URI": "fake",
+        "DATABASE_URI": ":memory:",
+        "MIGRATIONS_PATH": "__inmem",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+
+class TestStoredCronUsers:
+    """A scheduled task keeps running after the server restarts (issue #665)."""
+
+    @pytest.mark.usefixtures("langgraph_api_env")
+    async def test_clear_cron_users_gives_restored_crons_string_user_id(self):
+        """langgraph-api's own fire setup, on a cron as a restart restores it."""
+        from langgraph_api.utils import get_auth_ctx, get_user_id
+
+        try:
+            from langgraph_api.worker_runtime import set_auth_ctx_for_run
+        except ImportError:  # langgraph-api before 0.15
+            from langgraph_api.worker import set_auth_ctx_for_run
+
+        from EvoScientist.sessions import _clear_stored_cron_users
+
+        cron = {
+            "cron_id": uuid.uuid4(),
+            "user_id": "",
+            "payload": {"config": _run_config(_restored_simple_user())},
+        }
+        _clear_stored_cron_users({"crons": [cron]})
+
+        async with set_auth_ctx_for_run(cron["payload"], user_id=cron["user_id"]):
+            assert isinstance(get_user_id(get_auth_ctx().user), str)
+
+    def test_clear_cron_users_keeps_other_configurable_keys(self):
+        from EvoScientist.sessions import _clear_stored_cron_users
+
+        store = {
+            "crons": [
+                {"payload": {"config": _run_config(object())}},
+                {"cron_id": "no-payload"},
+                {"payload": "stored as a string"},
+            ]
+        }
+
+        assert _clear_stored_cron_users(store) == 1
+        assert store["crons"][0]["payload"]["config"]["configurable"] == {
+            "cron_id": "c1",
+            "workspace_dir": "/proj",
+        }
+        assert store["crons"][1:] == [
+            {"cron_id": "no-payload"},
+            {"payload": "stored as a string"},
+        ]
+
+    def test_clear_cron_users_empty_store_is_noop(self):
+        from EvoScientist.sessions import _clear_stored_cron_users
+
+        assert _clear_stored_cron_users({}) == 0
+
+    async def test_create_checkpointer_clears_stored_cron_users(self):
+        """Before the cron scheduler starts, whether or not the restore ran."""
+        from unittest.mock import AsyncMock, patch
+
+        from EvoScientist.sessions import create_checkpointer_for_langgraph_api
+
+        cleared = AsyncMock()
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch(
+                    "EvoScientist.sessions.get_db_path",
+                    return_value=_mock_path(os.path.join(td, "sessions.db")),
+                ),
+                patch(
+                    "EvoScientist.sessions._restore_webui_threads_to_global_store",
+                    AsyncMock(return_value=False),
+                ),
+                patch(
+                    "EvoScientist.sessions._clear_stored_cron_users_in_global_store",
+                    cleared,
+                ),
+            ):
+                async with create_checkpointer_for_langgraph_api():
+                    cleared.assert_awaited_once()
+
+
 class TestOrphanedRunSweep:
     """Startup sweep for runs whose thread no longer exists (issue #358)."""
 
