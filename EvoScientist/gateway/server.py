@@ -741,6 +741,7 @@ class LangGraphServerGateway:
         *,
         thread_ready: bool = False,
         on_run_attempt: Callable[[], None],
+        on_resume_attempt: Callable[[str, object], None],
         run_metadata: Mapping[str, object] | None = None,
     ) -> str | None:
         config = self._resolve_run_config(
@@ -791,36 +792,13 @@ class LangGraphServerGateway:
                 # primitive that would carry config on a resume is
                 # run.start with Command(resume=...); switching to it needs
                 # live-server verification first.
-                before = await self._list_active_runs(request.thread_id)
-                interrupt_id, resolved_response = await self._respond_to_interrupt(
+                await self._respond_to_interrupt(
                     stream,
                     request.thread_id,
                     request.message.resume,
-                    on_run_attempt=on_run_attempt,
+                    on_resume_attempt=on_resume_attempt,
                 )
-                after = await self._list_active_runs(request.thread_id)
-                if before is None or after is None:
-                    return None
-                before_ids = {
-                    str(run_id) for run in before if (run_id := run.get("run_id"))
-                }
-                started_ids = {
-                    str(run_id)
-                    for run in after
-                    if (run_id := run.get("run_id"))
-                    and str(run_id) not in before_ids
-                    and _run_matches_resume(run, interrupt_id, resolved_response)
-                }
-                if len(started_ids) != 1:
-                    logger.warning(
-                        "Could not identify resumed run on thread %s: "
-                        "expected one new active run for interrupt %s, found %d",
-                        request.thread_id,
-                        interrupt_id,
-                        len(started_ids),
-                    )
-                    return None
-                return started_ids.pop()
+                return None
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
             )
@@ -846,8 +824,8 @@ class LangGraphServerGateway:
         thread_id: str,
         response: object,
         *,
-        on_run_attempt: Callable[[], None],
-    ) -> tuple[str, object]:
+        on_resume_attempt: Callable[[str, object], None],
+    ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
         while not stream.interrupts and loop.time() < deadline:
@@ -874,9 +852,9 @@ class LangGraphServerGateway:
                     str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
                 }
                 if str(key) in ids:
-                    on_run_attempt()
+                    on_resume_attempt(str(key), response[key])
                     await stream.run.respond(response[key], interrupt_id=str(key))
-                    return str(key), response[key]
+                    return
             raise RuntimeError(
                 f"Thread {thread_id} has {len(interrupts)} pending interrupts; "
                 "resume requires an id-keyed payload matching one of them"
@@ -921,9 +899,10 @@ class LangGraphServerGateway:
                 interrupt_id,
                 thread_id,
             )
-        on_run_attempt()
+        # Record the resume identity before respond: it may be accepted by the server
+        # even when this await raises or the consumer cancels the request.
+        on_resume_attempt(interrupt_id, resolved)
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
-        return interrupt_id, resolved
 
     async def _list_active_runs(self, thread_id: str) -> list[Mapping[str, Any]] | None:
         """Return active runs on the thread, or ``None`` when listing fails."""
@@ -972,12 +951,18 @@ class LangGraphServerGateway:
         thread_id: str,
         run_id: str | None,
         request_id: str | None,
+        *,
+        resume_identity: tuple[str, object] | None = None,
     ) -> str | None:
-        """Cancel only the run owned by this request, never its neighbours."""
+        """Cancel an identified run, recovering a lost response conservatively."""
         resolved_run_id = run_id
         if resolved_run_id is None and request_id is not None:
             resolved_run_id = await self._find_active_run_for_request(
                 thread_id, request_id
+            )
+        if resolved_run_id is None and resume_identity is not None:
+            resolved_run_id = await self._find_active_run_for_resume(
+                thread_id, *resume_identity
             )
         if resolved_run_id is None:
             return None
@@ -995,6 +980,34 @@ class LangGraphServerGateway:
             )
             return None
         return resolved_run_id
+
+    async def _find_active_run_for_resume(
+        self, thread_id: str, interrupt_id: str, response: object
+    ) -> str | None:
+        """Find a unique active run matching this interrupt response for cleanup.
+
+        Multiple matching IDs are ambiguous. Identical duplicate submissions
+        cannot be distinguished by this persisted resume identity alone.
+        """
+        runs = await self._list_active_runs(thread_id)
+        if runs is None:
+            return None
+        matching_ids = {
+            str(run_id)
+            for run in runs
+            if (run_id := run.get("run_id"))
+            and _run_matches_resume(run, interrupt_id, response)
+        }
+        if len(matching_ids) != 1:
+            logger.warning(
+                "Could not identify resumed run on thread %s: "
+                "expected one active run for interrupt %s, found %d",
+                thread_id,
+                interrupt_id,
+                len(matching_ids),
+            )
+            return None
+        return matching_ids.pop()
 
     async def _has_other_active_runs(self, thread_id: str, run_id: str) -> bool:
         """Conservatively protect another request before repairing thread state."""
@@ -1277,6 +1290,7 @@ class LangGraphServerGateway:
             run_metadata[_RUN_REQUEST_ID_METADATA_KEY] = request_id
         run_attempted = False
         run_id: str | None = None
+        resume_identity: tuple[str, object] | None = None
         run_completed = False
         emitted_interrupt = False
         run_cleaned_up = False
@@ -1285,6 +1299,11 @@ class LangGraphServerGateway:
             nonlocal run_attempted
             run_attempted = True
 
+        def mark_resume_attempted(interrupt_id: str, response: object) -> None:
+            nonlocal resume_identity
+            resume_identity = interrupt_id, response
+            mark_run_attempted()
+
         try:
             async with stream:
                 run_id = await self._start_or_resume(
@@ -1292,6 +1311,7 @@ class LangGraphServerGateway:
                     request,
                     thread_ready=thread_ready,
                     on_run_attempt=mark_run_attempted,
+                    on_resume_attempt=mark_resume_attempted,
                     run_metadata=run_metadata,
                 )
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
@@ -1321,8 +1341,9 @@ class LangGraphServerGateway:
             for event in tracker.finish():
                 yield event
         except Exception as exc:
-            # Repair before the first yield: a consumer that stops iterating
-            # after the error event (aclose / abandon) triggers GeneratorExit
+            # Cancel this request's run, then repair, both before the first yield:
+            # a consumer that stops iterating after the error event (aclose /
+            # abandon) triggers GeneratorExit
             # at the yield, so any repair after it never runs and the thread
             # keeps its non-empty ``next`` — the failed step would replay on
             # the next request.
@@ -1331,6 +1352,7 @@ class LangGraphServerGateway:
                 request.thread_id,
                 run_id,
                 request_id if run_attempted else None,
+                resume_identity=resume_identity,
             )
             run_cleaned_up = True
             can_repair = (
@@ -1361,5 +1383,6 @@ class LangGraphServerGateway:
                     request.thread_id,
                     run_id,
                     request_id,
+                    resume_identity=resume_identity,
                 )
         yield emitter.done(processor.full_response).data
