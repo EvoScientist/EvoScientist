@@ -1,9 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 from typing import ClassVar
 
 from ..base import Argument, Command, CommandContext
 from ..manager import manager
+
+
+async def _save_model(ctx: CommandContext, model_name: str, provider: str) -> bool:
+    """Save model and provider to the config file in one write.
+
+    Runs in a thread because the write may wait for the config lock. Reports
+    a failure in the UI and returns ``False``.
+    """
+    from ...config.settings import SettingsError, set_config_values
+    from ...config.store import ConfigError
+
+    try:
+        await asyncio.to_thread(
+            set_config_values, {"model": model_name, "provider": provider}
+        )
+    except (SettingsError, ConfigError) as e:
+        ctx.ui.append_system(f"Could not save to config: {e}", style="red")
+        return False
+    return True
 
 
 def extract_model_and_provider(
@@ -184,10 +204,7 @@ class ModelCommand(Command):
             # in-process graph use (e.g. background extraction) then matches.
             set_chat_model_instance(new_chat_model, (model_name, provider))
             if save:
-                from ...config.settings import set_config_value
-
-                set_config_value("model", model_name)
-                set_config_value("provider", provider)
+                save = await _save_model(ctx, model_name, provider)
             update_model_fn = getattr(ctx.ui, "update_status_after_model_change", None)
             if callable(update_model_fn):
                 update_model_fn(model_name, provider)
@@ -251,10 +268,7 @@ class ModelCommand(Command):
 
         # Persist to config file if --save was given
         if save:
-            from ...config.settings import set_config_value
-
-            set_config_value("model", model_name)
-            set_config_value("provider", provider)
+            save = await _save_model(ctx, model_name, provider)
 
         # Propagate to the channel runtime if channels are running so the
         # bus picks up the new agent on the next inbound message.

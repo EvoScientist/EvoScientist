@@ -28,6 +28,8 @@ Event fields:
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 import time
 from collections.abc import Callable
@@ -135,6 +137,22 @@ class JsonEmitter:
         stream = self._stream or sys.stdout
         stream.write(json.dumps(event) + "\n")
         stream.flush()
+
+
+def stdin_is_pipe() -> bool:
+    """True when stdin is a pipe or a socket, the stdin a program that reads
+    the JSON lines gives us.
+
+    Node (the desktop app) gives a child UNIX socketpairs on macOS and Linux,
+    and a named pipe on Windows. A terminal, ``/dev/null``, ``NUL`` or a file
+    is not one; decided by the file type, since ``isatty()`` is True for
+    ``NUL`` on Windows.
+    """
+    try:
+        mode = os.fstat(sys.stdin.fileno()).st_mode
+    except (OSError, ValueError, AttributeError):
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
 
 
 # How often a silent step repeats its last ``running`` event, so a reader

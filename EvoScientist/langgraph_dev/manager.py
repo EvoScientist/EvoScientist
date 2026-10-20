@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 import psutil
@@ -37,7 +38,16 @@ from EvoScientist.config import (
     MemoryControls,
     MemoryObservationTarget,
 )
+from EvoScientist.config.settings import (
+    ENV_ORIGINS_VAR,
+    _same_value,
+    config_value_origin,
+    env_origins,
+)
 from EvoScientist.langgraph_dev import boundary
+
+if TYPE_CHECKING:
+    from EvoScientist.deploy.backend_job import BackendJob
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +289,7 @@ def _write_workspace_sidecar(
     agent_python: str | object | None = _NOT_RECORDED,
     agent_bash: str | object | None = _NOT_RECORDED,
     run_dir: Path | None = None,
+    host: str | None = None,
 ) -> None:
     """Record the workspace + pid of the langgraph dev we just started.
 
@@ -291,7 +302,11 @@ def _write_workspace_sidecar(
     None when they have none; reuse compares it to warn about a session whose
     PATH resolves another one. ``agent_bash`` (optional) is the Git Bash
     their commands run in, None for cmd.exe or a POSIX shell; compared the
-    same way.
+    same way. ``data_dir`` and ``config_dir`` are this process's data and
+    config folders, which the server inherits (``paths.dir_env``), so a
+    client attaching from another environment reads the server's own.
+    ``host`` is the interface the server binds, so such a client can tell
+    whether the server is reachable from other machines.
 
     Atomic write via temp-file + ``os.replace``: without this, a concurrent
     reader could observe a partially-written file, fail JSON parse, and
@@ -307,9 +322,16 @@ def _write_workspace_sidecar(
     try:
         RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
         tmp = RUNTIME.workspace_sidecar.with_suffix(".json.tmp")
-        payload: dict = {"workspace": str(workspace_dir), "pid": pid}
+        payload: dict = {
+            "workspace": str(workspace_dir),
+            "pid": pid,
+            "data_dir": str(paths.DATA_DIR),
+            "config_dir": str(paths.CONFIG_DIR),
+        }
         if run_dir is not None:
             payload["run_dir"] = str(run_dir)
+        if host is not None:
+            payload["host"] = host
         if config_fingerprint is not None:
             payload["config_fingerprint"] = config_fingerprint
         if agent_python is not _NOT_RECORDED:
@@ -711,6 +733,12 @@ _FINGERPRINT_EXCLUDED_FIELDS = frozenset(
         "mirror",
     }
 )
+# Fields the server reads from config.yaml itself: no environment variable
+# carries them, so a command-line override (--auto-approve, --auto-mode, the
+# ask_user switch) never reaches it. The fingerprint takes them from the file
+# too, so a server started with such a flag is not drift, while a change in
+# the file still is.
+_FINGERPRINT_FILE_FIELDS = frozenset({"auto_approve", "auto_mode", "enable_ask_user"})
 
 
 def _server_config_fingerprint(config: EvoScientistConfig) -> str:
@@ -727,7 +755,12 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
     only feed a truncated one-way digest; nothing recoverable is stored.
     getattr with defaults: deploy/WebUI (and their tests) routinely hand
     this module duck-typed config objects missing dataclass fields.
+    :data:`_FINGERPRINT_FILE_FIELDS` come from ``config.yaml``, not from
+    ``config``, so every caller hashes what the server reads.
     """
+    from EvoScientist.config.settings import load_config
+
+    file_config = load_config()
     parts = []
     for field in dataclass_fields(EvoScientistConfig):
         name = field.name
@@ -735,7 +768,8 @@ def _server_config_fingerprint(config: EvoScientistConfig) -> str:
             _FINGERPRINT_EXCLUDED_PREFIXES
         ):
             continue
-        parts.append((name, str(getattr(config, name, None))))
+        source = file_config if name in _FINGERPRINT_FILE_FIELDS else config
+        parts.append((name, str(getattr(source, name, None))))
     try:
         parts.append(("version", importlib.metadata.version("EvoScientist")))
     except importlib.metadata.PackageNotFoundError:
@@ -894,6 +928,26 @@ def _packaged_langgraph_config() -> Path:
 # =============================================================================
 
 
+def _server_env_origins(workspace: str, port: str, host: str) -> dict:
+    """This process's record of environment origins, plus the workspace, port
+    and host :func:`start_langgraph_dev` always sets for the server.
+
+    A variable passed on unchanged keeps what is recorded for it: a ``.env``
+    source with its path, or no record for the user's own export.
+    """
+    origins = env_origins()
+    for env_key, field, value in (
+        ("EVOSCIENTIST_WORKSPACE_DIR", "default_workdir", workspace),
+        ("EVOSCIENTIST_LANGGRAPH_DEV_PORT", "langgraph_dev_port", port),
+        ("EVOSCIENTIST_LANGGRAPH_DEV_HOST", "langgraph_dev_host", host),
+    ):
+        inherited = os.environ.get(env_key)
+        if inherited is not None and _same_value(field, inherited, value):
+            continue
+        origins[env_key] = {"source": config_value_origin(field, value)}
+    return origins
+
+
 def start_langgraph_dev(
     workspace_dir: Path | None = None,
     *,
@@ -905,6 +959,7 @@ def start_langgraph_dev(
     tunnel: bool = False,
     config_fingerprint: str | None = None,
     allowed_origins: str = "",
+    job: BackendJob | None = None,
 ) -> subprocess.Popen:
     """Start langgraph dev as a background subprocess.
 
@@ -931,6 +986,8 @@ def start_langgraph_dev(
             ``*.trycloudflare.com`` URL is written to the log; read it back
             with :func:`read_tunnel_url`. SECURITY: the tunnel has no auth and
             the deployed agent can run shell — only enable for trusted use.
+        job: A Windows job object the server joins before it runs (started
+            suspended, then resumed), so it ends with the caller's process.
 
     Returns:
         The Popen handle for the langgraph dev process.
@@ -1102,6 +1159,11 @@ def start_langgraph_dev(
     sub_env.update(boundary.server_env(host, allowed_origins))
     sub_env.pop("CORS_ALLOW_ORIGINS", None)
     sub_env.pop("TUNNEL_HTTP_HOST_HEADER", None)
+    # Where the server's config-mapped variables came from, for the settings
+    # API's ``sources``: this process's record plus the three values set above.
+    sub_env[ENV_ORIGINS_VAR] = json.dumps(
+        _server_env_origins(str(workspace_dir), str(port), host)
+    )
 
     # POSIX: own session so the child can be group-signalled on cleanup.
     # Windows: own process group, so Ctrl+C in the terminal does not reach the
@@ -1115,6 +1177,10 @@ def start_langgraph_dev(
         }
     else:
         _spawn_kwargs = {"start_new_session": True}
+    if job is not None:
+        _spawn_kwargs["creationflags"] = (
+            _spawn_kwargs.get("creationflags", 0) | job.creationflags
+        )
 
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
@@ -1147,6 +1213,14 @@ def start_langgraph_dev(
             log_handle.close()
         except Exception:
             pass
+    # Recorded before anything else can fail or be interrupted, so every
+    # later failure path, and a caller's stop_langgraph_dev(), reaches it.
+    global _PROCESS_WORKSPACE, _PROCESS_RUN_DIR
+    _PROCESS = proc
+    _PROCESS_WORKSPACE = workspace_dir
+    _PROCESS_RUN_DIR = run_dir
+    if job is not None:
+        job.started(proc)
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
     from EvoScientist.agent_shell import sidecar_bash
     from EvoScientist.setup.research_env import agent_python
@@ -1160,11 +1234,8 @@ def start_langgraph_dev(
         agent_python=agent_python(),
         agent_bash=sidecar_bash(),
         run_dir=run_dir,
+        host=host,
     )
-    global _PROCESS_WORKSPACE, _PROCESS_RUN_DIR
-    _PROCESS = proc
-    _PROCESS_WORKSPACE = workspace_dir
-    _PROCESS_RUN_DIR = run_dir
 
     # langgraph dev cold-starts in ~10-15s normally; first-time npx-based MCP
     # servers can push this to 30-60s while npm fetches packages, so the budget
