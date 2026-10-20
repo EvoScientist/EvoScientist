@@ -52,7 +52,9 @@ async def capture_app(monkeypatch, workspace) -> object:
         lambda: SimpleNamespace(model_name="test-model"),
     )
 
-    fake_load_agent = AsyncMock(return_value=None)
+    # ``load_agent`` is synchronous: the loader runs it in a worker thread, and
+    # what it returns stands in for the agent.
+    fake_load_agent = MagicMock(return_value=object())
 
     @asynccontextmanager
     async def _fake_checkpointer(*_a, **_k):

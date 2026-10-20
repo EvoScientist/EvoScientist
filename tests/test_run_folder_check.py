@@ -224,7 +224,7 @@ def test_manual_autoskills_runs_forward_the_root(workspace, monkeypatch):
     assert configurable["workspace_dir"] == workspace.key
 
 
-def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch):
+def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch, request):
     """Every registered graph refuses another workspace. Graphs that work in
     the session's folder also refuse another run folder; graphs built for the
     workspace root only check the workspace."""
@@ -252,6 +252,8 @@ def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch):
         "EvoScientist.langgraph_dev.main_graph",
     ):
         monkeypatch.delitem(sys.modules, name, raising=False)
+        # Built below from stubbed graphs: later imports must build their own.
+        request.addfinalizer(lambda name=name: sys.modules.pop(name, None))
 
     registry = json.loads(
         (Path(evo.__file__).parent / "langgraph_dev" / "langgraph.json").read_text()

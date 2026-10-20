@@ -134,6 +134,8 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     "ignore::UserWarning:langchain_nvidia_ai_endpoints",
+    # The CLI uses the v3 streaming protocol on purpose and filters this too.
+    "ignore:.*v3 streaming protocol on Pregel is experimental.*",
 ]
 
 [tool.ruff]

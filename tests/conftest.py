@@ -216,6 +216,55 @@ def tmp_workspace(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_langgraph_dev_state(monkeypatch):
+    """Start every test with no server handle and no drift recorded.
+
+    ``langgraph_dev.manager`` keeps the server it started and what it found
+    in module globals; a test that leaves one set (a fake ``Popen`` among
+    them) changes what the next test's ``ensure_langgraph_dev`` does.
+    """
+    from EvoScientist.langgraph_dev import manager
+
+    for name, value in {
+        "_PROCESS": None,
+        "_PROCESS_WORKSPACE": None,
+        "_PROCESS_RUN_DIR": None,
+        "SERVED_WORKSPACE": None,
+        "CONFIG_DRIFT_SINCE_LAUNCH": False,
+        "AGENT_SHELL_DRIFT": None,
+        "_ASYNC_SUBAGENTS_AVAILABLE": False,
+        "_LOG_OFFSET_AT_START": 0,
+    }.items():
+        monkeypatch.setattr(manager, name, value)
+
+
+@pytest.fixture(autouse=True)
+def _quickjs_snapshots_without_diffs(monkeypatch):
+    """Store every QuickJS snapshot whole, as ``encode_snapshot`` itself does
+    when a diff would not pay off. Diffing it against the previous turn's
+    costs seconds per turn of a real graph, and no test reads the diff."""
+    from langchain_quickjs import _snapshot, middleware
+
+    monkeypatch.setattr(
+        middleware,
+        "encode_snapshot",
+        lambda payload, prior: (_snapshot.SNAP, payload),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_health_server(monkeypatch):
+    """Channel runners start no health server unless a test asks for a port.
+
+    The default binds ``0.0.0.0:8080``: open to the LAN while tests run, and
+    shared by every test that starts a runner at the same time.
+    """
+    from EvoScientist.channels.channel_manager import ChannelManager
+
+    monkeypatch.setitem(ChannelManager.__init__.__kwdefaults__, "health_port", 0)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_process_workspace():
     """``process_workspace()`` is read once per process; tests change env/cwd."""
     from EvoScientist.paths import process_session_dirs, process_workspace
