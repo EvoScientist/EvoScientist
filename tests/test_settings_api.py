@@ -26,7 +26,10 @@ def _clean(monkeypatch):
     from EvoScientist.config import settings
 
     for env_key in set(_ENV_MAPPINGS.values()):
-        monkeypatch.delenv(env_key, raising=False)
+        # Set first, so teardown also removes what a test's
+        # apply_config_to_env() sets.
+        monkeypatch.setenv(env_key, "")
+        monkeypatch.delenv(env_key)
     monkeypatch.setattr(settings, "_ENV_ORIGINS", {})
     monkeypatch.setattr(settings_api, "_baseline", None)
 
@@ -775,3 +778,52 @@ class TestPatchValues:
         assert _mapping(config_file)["telegram_proxy"] == (
             "http://me:hunter2@proxy.test:3129"
         )
+
+
+class TestTestKeyStoredValues:
+    @pytest.mark.parametrize("provider", ["custom-openai", "custom-anthropic"])
+    def test_custom_endpoint_without_a_key_is_empty(
+        self, server, secret, config_file, provider
+    ):
+        field = KEY_SPECS[provider].base_url_field
+        config_file.write_text(f"{field}: https://llm.test/v1\n", encoding="utf-8")
+        body = server.post(
+            "/api/settings/test-key", json={"provider": provider}, headers=secret
+        ).json()
+        assert body["status"] == "empty"
+        assert body["ok"] is None
+
+    def test_base_url_that_does_not_parse(self, server, secret):
+        response = server.post(
+            "/api/settings/test-key",
+            json={"provider": "ollama", "base_url": "http://["},
+            headers=secret,
+        )
+        assert response.status_code == 400
+        assert list(response.json()["errors"]) == ["base_url"]
+
+    def test_stored_key_is_the_saved_one_after_a_patch(
+        self, server, secret, config_file
+    ):
+        from EvoScientist.config.settings import (
+            apply_config_to_env,
+            get_effective_config,
+        )
+
+        config_file.write_text(
+            "openrouter_api_key: sk-or-started-1111\n", encoding="utf-8"
+        )
+        apply_config_to_env(get_effective_config())
+        with _no_checks():
+            server.patch(
+                "/api/settings",
+                json={"openrouter_api_key": "sk-or-saved-2222"},
+                headers=secret,
+            )
+        with _no_checks() as check:
+            server.post(
+                "/api/settings/test-key",
+                json={"provider": "openrouter"},
+                headers=secret,
+            )
+        assert check.call_args.args[1] == "sk-or-saved-2222"

@@ -48,6 +48,7 @@ from EvoScientist.config.settings import (
     env_origin,
     get_config_dir,
     get_effective_config,
+    load_config,
     secret_hint,
     set_config_values,
     validate_setting,
@@ -535,7 +536,10 @@ def _scrub(message: str, key: str) -> str:
 
 
 def _is_http_url(value: str) -> bool:
-    parsed = urlparse(value)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
     return parsed.scheme in ("http", "https") and bool(parsed.netloc)
 
 
@@ -571,6 +575,11 @@ def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
     effective = None
     if key is None or base_url is None:
         effective = get_effective_config()
+        saved = load_config()
+        for field, env_key in _ENV_MAPPINGS.items():
+            origin = env_origin(env_key)
+            if origin is not None and origin["source"] in ("file", "default"):
+                setattr(effective, field, getattr(saved, field))
     if key is None:
         key = (
             str(getattr(effective, spec.key_field, "") or "") if spec.key_field else ""

@@ -170,10 +170,11 @@ class TestCustomOpenAI:
         assert result.status == expected
         assert result.models == ()
 
-    def test_never_sends_the_openai_key_from_the_environment(self, monkeypatch):
+    def test_no_key_is_empty_and_sends_nothing(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "real-openai-key")
-        _, seen = self._run(200, {"data": []}, key="")
-        assert "real-openai-key" not in seen[0].headers["authorization"]
+        result, seen = self._run(200, {"data": [{"id": "m1"}]}, key="")
+        assert result.status == "empty"
+        assert seen == []
 
     def test_no_base_url_is_unavailable(self):
         assert check_custom_openai("k", "").status == "unavailable"
@@ -274,3 +275,7 @@ def test_import_loads_no_ui_library():
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def test_custom_anthropic_without_a_key_is_empty():
+    assert check_custom_anthropic("", "https://proxy.test").status == "empty"

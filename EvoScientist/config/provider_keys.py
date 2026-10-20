@@ -583,9 +583,11 @@ def check_custom_openai(api_key: str, base_url: str) -> KeyCheck:
     """List models on an OpenAI-compatible endpoint (``{base_url}/models``).
 
     ``base_url`` includes the ``/v1`` part, as the runtime expects. The key is
-    passed explicitly even when empty, so the SDK never falls back to
-    ``OPENAI_API_KEY`` and sends the user's OpenAI key to another server.
+    passed explicitly, so the SDK never falls back to ``OPENAI_API_KEY`` and
+    sends the user's OpenAI key to another server.
     """
+    if not api_key:
+        return _SKIPPED
     if not base_url:
         return KeyCheck("unavailable", "No base URL to check")
 
@@ -593,7 +595,7 @@ def check_custom_openai(api_key: str, base_url: str) -> KeyCheck:
         import openai
 
         client = openai.OpenAI(
-            api_key=api_key or "none",
+            api_key=api_key,
             base_url=base_url.rstrip("/"),
             timeout=_TIMEOUT,
             max_retries=0,
@@ -621,6 +623,8 @@ def check_custom_anthropic(api_key: str, base_url: str) -> KeyCheck:
 
     Reads only the first page of the list.
     """
+    if not api_key:
+        return _SKIPPED
     if not base_url:
         return KeyCheck("unavailable", "No base URL to check")
 
@@ -628,7 +632,7 @@ def check_custom_anthropic(api_key: str, base_url: str) -> KeyCheck:
         import anthropic
 
         client = anthropic.Anthropic(
-            api_key=api_key or "none",
+            api_key=api_key,
             base_url=base_url.rstrip("/"),
             timeout=_TIMEOUT,
             max_retries=0,
