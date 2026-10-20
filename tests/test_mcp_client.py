@@ -2444,7 +2444,12 @@ class TestLoadToolsProgressCallback:
         monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
         if server_process:
             monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
-        expected = 20 if transport != "stdio" else 40 if server_process else None
+        if transport != "stdio":
+            expected = mcp_client._NETWORK_GET_TOOLS_TIMEOUT_SECONDS
+        elif server_process:
+            expected = mcp_client._SERVER_GET_TOOLS_TIMEOUT_SECONDS
+        else:
+            expected = None
         assert mcp_client._get_tools_timeout(transport) == expected
 
     async def test_loaders_delegate_default_deadlines_per_connection(self, monkeypatch):
@@ -2600,9 +2605,7 @@ class TestNetworkDiscoveryDeadline:
                     await asyncio.Event().wait()
 
         monkeypatch.setattr(mcp_client, "_NETWORK_GET_TOOLS_TIMEOUT_SECONDS", 0.02)
-        monkeypatch.setattr(
-            mcp_client, "_GET_TOOLS_CLEANUP_GRACE_SECONDS", 0.05
-        )
+        monkeypatch.setattr(mcp_client, "_GET_TOOLS_CLEANUP_GRACE_SECONDS", 0.05)
         monkeypatch.setattr(
             "langchain_mcp_adapters.client.MultiServerMCPClient", Client
         )
