@@ -167,12 +167,11 @@ async def _async_main(
         """Graceful shutdown: drain consumer, flush outbound, stop channel."""
         logger.info("Graceful shutdown initiated...")
         turn_cancel.set()
-        if consumer is not None:
-            from ..backends import cancel_active_shell_processes
-
-            cancel_active_shell_processes(turn_cancel)
         try:
             if consumer is not None:
+                from ..backends import cancel_active_shell_processes
+
+                cancel_active_shell_processes(turn_cancel)
                 await consumer.stop()
             # Drain outbound queue before stopping the channel
             drained = 0
