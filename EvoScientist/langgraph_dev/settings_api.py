@@ -427,7 +427,13 @@ def _json_type_error(name: str, value: Any) -> str | None:
 
 
 def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
-    """Apply a ``PATCH /api/settings`` body; return ``(status, payload)``."""
+    """Apply a ``PATCH /api/settings`` body; return ``(status, payload)``.
+
+    ``""`` or GET's ``{"set": ...}`` for a secret keeps the stored one, and a
+    URL sent back with ``***@`` keeps the stored user and password. A JSON
+    value other than text must fit the field's type; text is coerced as
+    ``EvoSci config set`` coerces it.
+    """
     if not isinstance(body, dict):
         return 400, {"errors": {"body": "expected a JSON object"}}
     body = dict(body)
@@ -558,8 +564,10 @@ def check_key_request(body: Any) -> tuple[int, dict[str, Any]]:
 
     Without ``key``, the stored effective key (``config.yaml``, the
     environment or a ``.env``) is tested, and only against the stored base
-    URL. Without ``base_url``, the stored base URL or the provider's default
-    is used.
+    URL. A variable the server copied from the file at start reads as the
+    file's current value, so a key saved since then is the one tested.
+    Without ``base_url``, the stored base URL or the provider's default is
+    used.
     """
     if not isinstance(body, dict):
         return 400, {"errors": {"body": "expected a JSON object"}}

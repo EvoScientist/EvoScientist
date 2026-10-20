@@ -490,8 +490,10 @@ def _run_onboard_cli(**kwargs: Any) -> None:
 
     The wizard raises ``RuntimeError`` for *expected* non-interactive
     failures: rejected ``--api-key`` / ``--tavily-key`` presets, missing
-    required flags under ``--non-interactive``, or a missing base URL.
-    Those are user-input problems, not bugs — surface them like any other
+    required flags under ``--non-interactive``, or a missing base URL. A
+    refused config file (one that does not parse, or the lock held
+    elsewhere) or a write that keeps failing raises ``ConfigError``, a
+    ``RuntimeError`` too. Those are user-input problems, not bugs — surface them like any other
     CLI validation error rather than dumping a stack trace.
     """
     from ..config import run_onboard

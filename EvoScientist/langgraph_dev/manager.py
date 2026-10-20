@@ -930,7 +930,11 @@ def _packaged_langgraph_config() -> Path:
 
 def _server_env_origins(workspace: str, port: str, host: str) -> dict:
     """This process's record of environment origins, plus the workspace, port
-    and host :func:`start_langgraph_dev` always sets for the server."""
+    and host :func:`start_langgraph_dev` always sets for the server.
+
+    A variable passed on unchanged keeps what is recorded for it: a ``.env``
+    source with its path, or no record for the user's own export.
+    """
     origins = env_origins()
     for env_key, field, value in (
         ("EVOSCIENTIST_WORKSPACE_DIR", "default_workdir", workspace),
