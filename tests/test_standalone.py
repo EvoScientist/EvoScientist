@@ -517,14 +517,17 @@ def test_ctrl_c_while_turns_settle_still_closes_code_interpreters(
 
         async def run(self) -> None:
             self._turn = asyncio.create_task(self._slow_to_cancel_turn())
-            for delay in (0.2, 0.5, 1.2):
-                threading.Timer(delay, signal.raise_signal, [signal.SIGINT]).start()
+            await asyncio.sleep(0.1)
+            signal.raise_signal(signal.SIGINT)
+            await asyncio.sleep(0.1)
+            signal.raise_signal(signal.SIGINT)
             await asyncio.Future()
 
         async def _slow_to_cancel_turn(self) -> None:
             try:
                 await asyncio.Future()
             except asyncio.CancelledError:
+                signal.raise_signal(signal.SIGINT)
                 await asyncio.sleep(2)
                 raise
 
