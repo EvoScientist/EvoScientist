@@ -135,7 +135,10 @@ class TestUpdate:
         with pytest.raises(store.RevisionMismatchError):
             set_config_values({"model": "m3"}, expected_revision=None)
 
-    def test_concurrent_writers_of_different_fields_both_apply(self, config_file):
+    def test_concurrent_writers_of_different_fields_both_apply(
+        self, config_file, monkeypatch
+    ):
+        monkeypatch.setattr(store, "_LOCK_TIMEOUT", 30)
         config_file.write_text("model: m1\n", encoding="utf-8")
         errors = []
 
@@ -399,7 +402,8 @@ class TestWizard:
 
         config_file.write_bytes(BROKEN)
         with patch("EvoScientist.config.onboard.wizard._run_onboard") as inner:
-            assert run_onboard() is False
+            with pytest.raises(store.ConfigParseError):
+                run_onboard()
         inner.assert_not_called()
         assert config_file.read_bytes() == BROKEN
 
@@ -435,3 +439,49 @@ class TestWizard:
 def test_number_must_be_finite(value):
     with pytest.raises(ValueError, match="finite"):
         validate_setting("code_interpreter_timeout", value)
+
+
+def test_onboard_exits_1_when_refused(config_file):
+    from typer.testing import CliRunner
+
+    import EvoScientist.cli.commands  # noqa: F401  registers the commands
+    from EvoScientist.cli._app import app
+
+    config_file.write_bytes(BROKEN)
+    with patch("EvoScientist.cli.commands.console.print"):
+        result = CliRunner().invoke(app, ["onboard", "--non-interactive"])
+    assert result.exit_code == 1
+    assert config_file.read_bytes() == BROKEN
+
+
+def test_channel_setup_holds_the_lock_while_it_asks(config_file, monkeypatch):
+    from typer.testing import CliRunner
+
+    import EvoScientist.cli.commands  # noqa: F401  registers the commands
+    from EvoScientist.cli._app import app
+
+    monkeypatch.setattr(store, "_LOCK_TIMEOUT", 0.2)
+    seen = {}
+
+    def step(config, runtime=None):
+        def other():
+            try:
+                set_config_value("model", "from-elsewhere")
+            except store.ConfigLockedError:
+                seen["locked"] = True
+
+        t = threading.Thread(target=other)
+        t.start()
+        t.join()
+        return {"channel_enabled": "telegram"}
+
+    with (
+        patch("EvoScientist.config.onboard.channels._step_channels", side_effect=step),
+        patch("EvoScientist.cli.commands.console.print"),
+    ):
+        result = CliRunner().invoke(app, ["channel", "setup"])
+    assert result.exit_code == 0, result.output
+    assert seen == {"locked": True}
+    data = _mapping(config_file)
+    assert data["channel_enabled"] == "telegram"
+    assert "model" not in data

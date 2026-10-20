@@ -95,8 +95,9 @@ def _ensure_config_dir(path: Path) -> None:
 
 
 @contextmanager
-def config_lock(timeout: float = _LOCK_TIMEOUT) -> Iterator[None]:
-    """Hold the config lock; :class:`ConfigLockedError` after ``timeout`` s.
+def config_lock(timeout: float | None = None) -> Iterator[None]:
+    """Hold the config lock; :class:`ConfigLockedError` after ``timeout`` s
+    (default :data:`_LOCK_TIMEOUT`).
 
     One shared lock object per path (``is_singleton``): a second ``FileLock``
     on the same path in the same thread would raise filelock's deadlock
@@ -106,7 +107,7 @@ def config_lock(timeout: float = _LOCK_TIMEOUT) -> Iterator[None]:
     _ensure_config_dir(path)
     lock = FileLock(str(path.with_name(path.name + ".lock")), is_singleton=True)
     try:
-        lock.acquire(timeout=timeout)
+        lock.acquire(timeout=_LOCK_TIMEOUT if timeout is None else timeout)
     except Timeout:
         raise ConfigLockedError() from None
     try:

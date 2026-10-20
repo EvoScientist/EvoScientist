@@ -509,7 +509,9 @@ def run_onboard(
     they are refused with a message that names ``EvoSci onboard``. A file
     that does not parse is refused before anything is asked, since the
     wizard would otherwise start from defaults and autosave them over it.
-    See :func:`_run_onboard` for the arguments.
+    A refusal, or a write that keeps failing, raises
+    :class:`~EvoScientist.config.store.ConfigError`. See :func:`_run_onboard`
+    for the arguments.
     """
     try:
         with config_lock():
@@ -520,9 +522,8 @@ def run_onboard(
                 only_sections=only_sections,
                 runtime=runtime,
             )
-    except ConfigError as exc:
-        console.print(f"[red]✗ {escape(str(exc))}[/red]")
-        return False
+    except OSError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _run_onboard(

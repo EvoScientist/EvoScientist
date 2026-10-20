@@ -615,25 +615,19 @@ def channel_setup(ctx: typer.Context):
     from ..config import load_config
     from ..config.onboard.channels import _step_channels
     from ..config.settings import SettingsError, set_config_values
-    from ..config.store import ConfigError, read_config_mapping
+    from ..config.store import ConfigError, config_lock, read_config_mapping
 
     try:
-        # Refuse up front when the file does not parse: load_config() would
-        # hand the wizard defaults to edit.
-        read_config_mapping()
-    except ConfigError as e:
-        console.print(f"[red]{escape(str(e))}[/red]")
+        with config_lock():
+            read_config_mapping()
+            config = load_config()
+            updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
+            if updates:
+                set_config_values(updates)
+    except (SettingsError, ConfigError, OSError) as e:
+        console.print(f"[red]Channel configuration not saved: {escape(str(e))}[/red]")
         raise typer.Exit(1) from None
-    config = load_config()
-    updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
     if updates:
-        try:
-            set_config_values(updates)
-        except (SettingsError, ConfigError, OSError) as e:
-            console.print(
-                f"[red]Channel configuration not saved: {escape(str(e))}[/red]"
-            )
-            raise typer.Exit(1) from None
         console.print("[green]Channel configuration saved.[/green]")
     else:
         console.print("[dim]No changes made.[/dim]")
