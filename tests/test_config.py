@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from EvoScientist import paths
 from EvoScientist.config import (
     EvoScientistConfig,
     GatewaySurface,
@@ -54,7 +55,7 @@ def _restore_dangerous_env():
 def temp_config_dir(tmp_path, monkeypatch):
     """Use a temporary directory for config during tests."""
     config_dir = tmp_path / "evoscientist"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(paths, "CONFIG_DIR", config_dir)
     # Also clear any API keys from environment
     for key in [
         "ANTHROPIC_API_KEY",
@@ -86,6 +87,9 @@ def temp_config_dir(tmp_path, monkeypatch):
         "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
         "EVOSCIENTIST_MAX_CACHED_FILES",
+        "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+        "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+        "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     ]:
         monkeypatch.delenv(key, raising=False)
     return config_dir
@@ -124,6 +128,9 @@ def clean_env(monkeypatch):
         "EVOSCIENTIST_OPENROUTER_APP_CATEGORIES",
         "EVOSCIENTIST_DANGEROUS_MODE",
         "EVOSCIENTIST_MAX_CACHED_FILES",
+        "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+        "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+        "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -142,7 +149,7 @@ class TestEvoScientistConfig:
         assert config.openai_api_key == ""
         assert config.tavily_api_key == ""
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-6"
+        assert config.model == "claude-sonnet-5-5"
         assert config.default_mode == "daemon"
         assert config.default_workdir == ""
         assert config.show_thinking is True
@@ -360,17 +367,12 @@ class TestEvoScientistConfig:
 
 
 class TestConfigPaths:
-    def test_get_config_dir_with_xdg(self, monkeypatch, tmp_path):
-        """Test config dir uses XDG_CONFIG_HOME when set."""
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-        config_dir = get_config_dir()
-        assert config_dir == tmp_path / "evoscientist"
-
-    def test_get_config_dir_default(self, monkeypatch):
-        """Test config dir defaults to ~/.config/evoscientist."""
-        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-        config_dir = get_config_dir()
-        assert config_dir == Path.home() / ".config" / "evoscientist"
+    def test_get_config_dir_ignores_a_later_xdg_change(self, monkeypatch, tmp_path):
+        """Read once at startup: a workspace ``.env`` loaded later, which can
+        set ``XDG_CONFIG_HOME``, does not move the config folder mid-run."""
+        before = get_config_dir()
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+        assert get_config_dir() == before
 
     def test_get_config_path(self, temp_config_dir):
         """Test config file path."""
@@ -408,7 +410,7 @@ class TestLoadSaveReset:
         """Test that load returns defaults when config file doesn't exist."""
         config = load_config()
         assert config.provider == "anthropic"
-        assert config.model == "claude-sonnet-4-6"
+        assert config.model == "claude-sonnet-5-5"
 
     def test_save_creates_file(self, temp_config_dir, clean_env):
         """Test that save creates the config file."""
@@ -845,6 +847,12 @@ class TestPriorityChain:
             == 300
         )
 
+    def test_backend_allowed_origins_yaml_list_normalized_to_csv(self):
+        config = EvoScientistConfig(
+            backend_allowed_origins=["https://a.example", "https://b.example"]
+        )
+        assert config.backend_allowed_origins == "https://a.example,https://b.example"
+
     def test_shell_allow_list_yaml_list_normalized_to_csv(self):
         """A YAML list spelling survives ``__post_init__`` as a list; normalize
         to CSV so the policy resolver's ``.split`` never raises AttributeError."""
@@ -1234,7 +1242,6 @@ class TestDotenvIsolation:
         then poisons ``os.environ.get(key, default)`` lookups for every
         test that runs afterwards in the same process.
         """
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         repro_dir = tmp_path / "repro"
         repro_dir.mkdir()
         (repro_dir / ".env").write_text("MINIMAX_BASE_URL=\n")
@@ -1448,3 +1455,111 @@ class TestDotenvIsolation:
 
         assert config.langgraph_dev_port == 6606
         assert os.environ["EVOSCIENTIST_LANGGRAPH_DEV_PORT"] == "6606"
+
+
+def test_backend_allowed_origins_ignores_the_environment(temp_config_dir, monkeypatch):
+    """A workspace ``.env`` must not widen the backend's browser boundary."""
+    monkeypatch.setenv("EVOSCIENTIST_BACKEND_ALLOWED_ORIGINS", "https://evil.example")
+    monkeypatch.setenv("BACKEND_ALLOWED_ORIGINS", "https://evil.example")
+    assert get_effective_config().backend_allowed_origins == ""
+
+
+class TestProactiveSettings:
+    """``__post_init__`` keeps the proactive settings valid (#263)."""
+
+    def test_defaults(self):
+        config = EvoScientistConfig()
+        assert config.proactive_idle_minutes == 120
+        assert config.proactive_quiet_hours == "22:00-08:00"
+        assert config.proactive_timezone == ""
+        assert not hasattr(config, "proactive_enabled")
+
+    @pytest.mark.parametrize("value", [-1, True, "soon", 1.5])
+    def test_invalid_idle_minutes_falls_back_with_warning(self, value, caplog):
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="EvoScientist.config.settings"):
+            config = EvoScientistConfig(proactive_idle_minutes=value)
+        assert config.proactive_idle_minutes == 120
+        assert "Invalid proactive_idle_minutes" in caplog.text
+
+    def test_zero_idle_minutes_is_kept(self):
+        assert EvoScientistConfig(proactive_idle_minutes=0).proactive_idle_minutes == 0
+
+    @pytest.mark.parametrize(
+        "value", ["2200-0800", "22:00-24:00", "22:00", "22:00-08:00-09:00", 2200, None]
+    )
+    def test_invalid_quiet_hours_falls_back_to_default_window(self, value, caplog):
+        """A typo keeps the default window instead of opening quiet hours, and a
+        non-string value (a YAML number) does not crash startup."""
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="EvoScientist.config.settings"):
+            config = EvoScientistConfig(proactive_quiet_hours=value)
+        assert config.proactive_quiet_hours == "22:00-08:00"
+        assert "Invalid proactive_quiet_hours" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("22:00-08:00", "22:00-08:00"),
+            (" 9:00-7:30 ", "09:00-07:30"),
+            ("", ""),
+            ("   ", ""),
+        ],
+    )
+    def test_valid_quiet_hours_are_normalised(self, value, expected):
+        assert EvoScientistConfig(
+            proactive_quiet_hours=value
+        ).proactive_quiet_hours == (expected)
+
+    @pytest.mark.parametrize("value", ["Not/AZone", "../etc", 5])
+    def test_invalid_timezone_falls_back_to_host_zone(self, value, caplog):
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="EvoScientist.config.settings"):
+            config = EvoScientistConfig(proactive_timezone=value)
+        assert config.proactive_timezone == ""
+        assert "Invalid proactive_timezone" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("value", "expected"), [("UTC", "UTC"), (" Europe/Warsaw ", "Europe/Warsaw")]
+    )
+    def test_valid_timezone_is_kept(self, value, expected):
+        assert (
+            EvoScientistConfig(proactive_timezone=value).proactive_timezone == expected
+        )
+
+    def test_environment_overrides(self, temp_config_dir, clean_env, monkeypatch):
+        monkeypatch.setenv("EVOSCIENTIST_PROACTIVE_IDLE_MINUTES", "45")
+        monkeypatch.setenv("EVOSCIENTIST_PROACTIVE_QUIET_HOURS", "23:30-06:00")
+        monkeypatch.setenv("EVOSCIENTIST_PROACTIVE_TIMEZONE", "Europe/Warsaw")
+
+        config = get_effective_config()
+
+        assert config.proactive_idle_minutes == 45
+        assert config.proactive_quiet_hours == "23:30-06:00"
+        assert config.proactive_timezone == "Europe/Warsaw"
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "stored"),
+    [
+        ("proactive_quiet_hours", "2200-0800", None),
+        ("proactive_quiet_hours", " 9:00-7:30 ", "09:00-07:30"),
+        ("proactive_quiet_hours", "", ""),
+        ("proactive_idle_minutes", "-5", None),
+        ("proactive_idle_minutes", True, None),
+        ("proactive_idle_minutes", "45", 45),
+        ("proactive_timezone", "Not/AZone", None),
+        ("proactive_timezone", "Europe/Warsaw", "Europe/Warsaw"),
+    ],
+)
+def test_config_set_validates_the_proactive_settings(
+    temp_config_dir, clean_env, key, value, stored
+):
+    from EvoScientist.config.settings import load_config, set_config_value
+
+    assert set_config_value(key, value) is (stored is not None)
+    if stored is not None:
+        assert getattr(load_config(), key) == stored

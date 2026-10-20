@@ -163,7 +163,6 @@ def _single_shot(monkeypatch, tmp_path, *, load_agent, verdict=None):
     from EvoScientist.config import EvoScientistConfig
     from EvoScientist.langgraph_dev.manager import _server_config_fingerprint
 
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     config = EvoScientistConfig(ui_backend="cli")
     seen: dict[str, object] = {"plain": _server_config_fingerprint(config)}
 

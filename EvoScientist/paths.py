@@ -28,6 +28,31 @@ def normalize_path(path: str | Path) -> Path:
     return Path(path).expanduser().resolve()
 
 
+def file_tool_path(path: str | Path) -> str:
+    """Spell a host path so deepagents' virtual-path validator accepts it.
+
+    Windows drive paths need a leading slash (``/C:/project/file``). The
+    sandbox decodes that alias; shell commands still use ``C:/project/file``.
+    POSIX paths and paths that are already virtual are unchanged.
+    """
+    value = str(path)
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return "/" + value.replace("\\", "/")
+    return value
+
+
+def host_file_tool_path(path: str) -> str:
+    """On Windows, use forward slashes for every path and decode `/C:/...` aliases.
+
+    Other platforms get *path* back unchanged.
+    """
+    if os.name == "nt":
+        if re.match(r"^/[A-Za-z]:(/|$)", path):
+            path = f"{path[1:3]}/{path[4:]}"
+        return path.replace("\\", "/")
+    return path
+
+
 @dataclass(frozen=True)
 class Workspace:
     """A project folder: the unit that owns skills, runs, media and memory.
@@ -197,29 +222,76 @@ def resolve_virtual_path(work_dir: str | Path, virtual_path: str) -> Path:
     return (Path(work_dir) / vpath.lstrip("/")).resolve()
 
 
-def _expand(path: str) -> Path:
-    return Path(path).expanduser()
-
-
 def _env_path(key: str) -> Path | None:
-    value = os.getenv(key)
-    if not value:
+    value = os.environ.get(key)
+    if value is None or not value.strip():
         return None
-    return _expand(value)
+    return Path(value).expanduser()
 
 
-def _global_data_dir() -> Path:
-    """Global application data directory (~/.evoscientist/ by default).
+def _shared_dir_from_env(key: str) -> Path | None:
+    """Read a folder that other programs locate too from *key*, as an absolute path.
+
+    The data and config folders are also found by the WebUI and the desktop
+    app, so they follow one path rule: an unset, empty or whitespace-only
+    value counts as unset; a leading ``~``, alone or followed by a path
+    separator, is the home folder, and nothing else is expanded (no ``~user``,
+    no environment variables); a relative path is resolved against the
+    current folder.
+    """
+    value = os.environ.get(key)
+    if value is None or not value.strip():
+        return None
+    if value == "~" or value.startswith(("~/", "~" + os.sep)):
+        value = str(Path.home()) + value[1:]
+    return Path(os.path.abspath(value))
+
+
+def _data_dir() -> Path:
+    """Data folder: ``$EVOSCIENTIST_DATA_DIR``, by default ``~/.evoscientist``.
 
     This is the base for sessions.db, skills/, memories/, history — things
     that are NOT configuration but application state. Config files (config.yaml,
-    mcp.yaml) continue to live in XDG_CONFIG_HOME.
+    mcp.yaml) live in CONFIG_DIR.
     """
-    return Path.home() / ".evoscientist"
+    return (
+        _shared_dir_from_env("EVOSCIENTIST_DATA_DIR") or Path.home() / ".evoscientist"
+    )
 
 
-# Global data dir: ~/.evoscientist/ by default, overridable via env var.
-DATA_DIR: Path = _env_path("EVOSCIENTIST_DATA_DIR") or _global_data_dir()
+def _config_dir() -> Path:
+    """Configuration folder: ``$XDG_CONFIG_HOME/evoscientist``, by default
+    ``~/.config/evoscientist`` (config.yaml, mcp.yaml)."""
+    return (
+        _shared_dir_from_env("XDG_CONFIG_HOME") or Path.home() / ".config"
+    ) / "evoscientist"
+
+
+# Both folders are read once, when this module is imported: a workspace ``.env``
+# loaded later does not move them, and processes this one starts get them as
+# absolute paths (see ``dir_env``).
+DATA_DIR: Path = _data_dir()
+CONFIG_DIR: Path = _config_dir()
+# Whether XDG_CONFIG_HOME was set when this process started (see ``dir_env``).
+_XDG_CONFIG_HOME_SET: bool = _shared_dir_from_env("XDG_CONFIG_HOME") is not None
+
+
+def dir_env(env: dict[str, str]) -> dict[str, str]:
+    """Return *env* with this process's data and config folders, as absolute paths.
+
+    For processes this one starts (the langgraph dev server, the WebUI): they
+    run in other folders and load their own ``.env``, so they get the folders
+    this process uses rather than resolving the variables again.
+    ``XDG_CONFIG_HOME`` is passed only if this process started with it: unset
+    gives the same folder, and other programs the child runs (the agent's
+    shell, MCP servers) may treat a set value differently from an unset one.
+    """
+    env = {**env, "EVOSCIENTIST_DATA_DIR": str(DATA_DIR)}
+    if _XDG_CONFIG_HOME_SET:
+        env["XDG_CONFIG_HOME"] = str(CONFIG_DIR.parent)
+    else:
+        env.pop("XDG_CONFIG_HOME", None)
+    return env
 
 
 def _global_skills_dir() -> Path:
@@ -235,6 +307,10 @@ GLOBAL_SKILLS_DIR: Path = _global_skills_dir()
 
 # Global memories: shared across all workspaces (~/.evoscientist/memories/)
 GLOBAL_MEMORIES_DIR: Path = _global_memories_dir()
+
+# Server home: files that belong to the langgraph dev server rather than to a
+# workspace, such as the local secret (~/.evoscientist/server/).
+SERVER_HOME: Path = DATA_DIR / "server"
 
 
 # Memories dir: global by default, overridable via env var.
@@ -283,14 +359,7 @@ def migrate_legacy_sessions_db() -> None:
         logger.debug("Could not create %s; skipping legacy migration.", DATA_DIR)
         return
 
-    # Resolve legacy source via XDG_CONFIG_HOME (matches config.settings.get_config_dir).
-    # Inlined here to avoid importing config.settings at paths load time.
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    legacy = (
-        (Path(xdg) / "evoscientist")
-        if xdg
-        else (Path.home() / ".config" / "evoscientist")
-    )
+    legacy = CONFIG_DIR
     if not legacy.exists():
         marker.touch()
         return

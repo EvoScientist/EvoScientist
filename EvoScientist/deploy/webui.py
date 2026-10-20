@@ -134,8 +134,21 @@ def run_webui(config: Any, workspace_dir: str | None = None) -> None:
         else:
             status.update(f"[dim]{escape(message)} ({int(fraction * 100)}%)...[/dim]")
 
+    def _lock_wait(waiting: bool) -> None:
+        # Another process holds the server start lock; say so, as deploy does.
+        status = status_box.get("status")
+        if status is None:
+            return
+        if waiting:
+            status.update(
+                "[dim]Waiting for another EvoSci process to start langgraph "
+                "dev...[/dim]"
+            )
+        else:
+            status.update(starting)
+
     runner = InstalledWebUIRunner(progress=_install_progress, log_path=webui_log)
-    launcher = WebUILauncher(config, cfg, runner)
+    launcher = WebUILauncher(config, cfg, runner, on_lock_wait=_lock_wait)
     try:
         with console.status(starting, spinner="dots") as status:
             status_box["status"] = status

@@ -12,6 +12,7 @@ Verifies the orchestration:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,6 +20,11 @@ import pytest
 import typer
 
 from EvoScientist.deploy import server as deploy_server
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """The start lock, pid file and sidecar under tmp_path."""
 
 
 def _make_config(
@@ -80,6 +86,7 @@ def _run_deploy_once(
     langgraph_dev_running: bool = True,  # health-check passes after start
     tunnel: bool = False,
     tunnel_url: str | None = None,
+    on_port_check: Callable[[], None] | None = None,
 ):
     """Run ``deploy()`` end-to-end with all external dependencies mocked.
     Returns a ``captured`` dict with observation points."""
@@ -111,7 +118,12 @@ def _run_deploy_once(
     # langgraph_dev.manager mocks
     from EvoScientist.langgraph_dev import manager as lgm
 
-    monkeypatch.setattr(lgm, "_is_port_occupied", lambda _p, *_a, **_kw: port_occupied)
+    def _fake_is_port_occupied(_p, *_a, **_kw):
+        if on_port_check is not None:
+            on_port_check()
+        return port_occupied
+
+    monkeypatch.setattr(lgm, "_is_port_occupied", _fake_is_port_occupied)
     monkeypatch.setattr(
         lgm,
         "is_langgraph_dev_running",
@@ -127,8 +139,10 @@ def _run_deploy_once(
         jobs_per_worker=10,
         tunnel=False,
         config_fingerprint=None,
+        allowed_origins="",
     ):
         captured["langgraph_dev_started"] = True
+        captured["allowed_origins_passed"] = allowed_origins
         captured["workspace_passed"] = str(workspace_dir) if workspace_dir else None
         captured["port_passed"] = port
         captured["host_passed"] = host
@@ -204,6 +218,7 @@ def _run_deploy_once(
     made_dirs: list[str] = []
     captured["made_dirs"] = made_dirs
     _run_deploy_once.made_dirs = made_dirs
+    _run_deploy_once.printed = captured["printed"]
     monkeypatch.setattr(os, "makedirs", lambda path, *a, **k: made_dirs.append(path))
     if cwd is not None:
         monkeypatch.setattr(os, "getcwd", lambda: cwd)
@@ -322,6 +337,14 @@ def test_deploy_host_defaults_to_config(monkeypatch, tmp_path):
     assert captured["host_passed"] == "192.168.1.5"
 
 
+def test_deploy_passes_backend_allowed_origins(monkeypatch, tmp_path):
+    config = _make_config(default_workdir=str(tmp_path))
+    config.backend_allowed_origins = "https://smith.langchain.com"
+    captured = _run_deploy_once(monkeypatch, config)
+
+    assert captured["allowed_origins_passed"] == "https://smith.langchain.com"
+
+
 def test_deploy_host_falls_back_when_config_lacks_field(monkeypatch, tmp_path):
     """A config object missing the field entirely still resolves to the
     module default rather than passing None down to socket.bind()."""
@@ -366,6 +389,29 @@ def test_deploy_host_is_stripped(monkeypatch, tmp_path):
     captured = _run_deploy_once(monkeypatch, config, host="  0.0.0.0  ")
 
     assert captured["host_passed"] == "0.0.0.0"
+
+
+@pytest.mark.parametrize(
+    ("host", "port", "overrides"),
+    [
+        (None, None, {}),
+        (
+            "  0.0.0.0  ",
+            6190,
+            {"langgraph_dev_host": "0.0.0.0", "langgraph_dev_port": 6190},
+        ),
+        ("   ", None, {}),
+    ],
+)
+def test_deploy_bind_flags_are_config_overrides(
+    monkeypatch, tmp_path, host, port, overrides
+):
+    """As ``EvoSci --host`` passes it, so the config fingerprint recorded for
+    the server matches a session started with the same bind."""
+    config = _make_config(default_workdir=str(tmp_path))
+    captured = _run_deploy_once(monkeypatch, config, host=host, port=port)
+
+    assert captured["cli_overrides"] == overrides
 
 
 def test_deploy_config_host_is_stripped(monkeypatch, tmp_path):
@@ -520,6 +566,91 @@ def test_deploy_refuses_when_port_occupied_by_foreign(monkeypatch, tmp_path):
             langgraph_dev_running=False,  # foreign process holds the port
         )
     assert exc.value.exit_code == 1
+
+
+def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_path):
+    """Another start holds the server start lock: the port check and the start
+    wait for it, so a backend that is bound but not answering yet is never
+    taken for a stale one."""
+    import threading
+
+    from filelock import FileLock
+
+    from EvoScientist.langgraph_dev import manager as lgm
+    from tests.test_cli_deploy_json import _LockHolder
+
+    holder = _LockHolder()
+    checks: list[bool] = []
+    threading.Timer(0.3, holder.done).start()
+    captured = _run_deploy_once(
+        monkeypatch,
+        _make_config(default_workdir=str(tmp_path)),
+        on_port_check=lambda: checks.append(holder.release.is_set()),
+    )
+    assert checks
+    assert all(checks)
+    assert captured["langgraph_dev_started"] is True
+    lock = FileLock(str(lgm.RUNTIME.lock_file))
+    lock.acquire(timeout=0.5)
+    lock.release()
+
+
+def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
+    from EvoScientist.langgraph_dev import manager as lgm
+    from tests.test_cli_deploy_json import _LockHolder
+
+    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
+    holder = _LockHolder()
+    checks: list[bool] = []
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            _run_deploy_once(
+                monkeypatch,
+                _make_config(default_workdir=str(tmp_path)),
+                on_port_check=lambda: checks.append(True),
+            )
+    finally:
+        holder.done()
+    assert exc.value.exit_code == 1
+    assert checks == []
+    assert any("for over" in p for p in _run_deploy_once.printed)
+
+
+def test_deploy_starts_under_the_start_lock(monkeypatch, tmp_path):
+    from EvoScientist.langgraph_dev import manager as lgm
+    from tests.test_launcher import _start_lock_is_held
+
+    held: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "_server_config_fingerprint",
+        lambda _c: held.append(_start_lock_is_held()) or "fp",
+    )
+    captured = _run_deploy_once(
+        monkeypatch, _make_config(default_workdir=str(tmp_path))
+    )
+    assert captured["langgraph_dev_started"] is True
+    assert held == [True]
+    assert not _start_lock_is_held()
+
+
+@pytest.mark.parametrize("step", ["mkdir", "acquire"])
+def test_deploy_start_lock_os_error_is_startup_failed(monkeypatch, tmp_path, step):
+    """An OSError from the start lock ends in the startup failed message, as
+    before the lock, not in a traceback."""
+    from tests.test_launcher import _break_start_lock
+
+    _break_start_lock(monkeypatch, tmp_path, step)
+    checks: list[bool] = []
+    with pytest.raises(typer.Exit) as exc:
+        _run_deploy_once(
+            monkeypatch,
+            _make_config(default_workdir=str(tmp_path)),
+            on_port_check=lambda: checks.append(True),
+        )
+    assert exc.value.exit_code == 1
+    assert checks == []
+    assert any("langgraph dev startup failed" in p for p in _run_deploy_once.printed)
 
 
 def test_deploy_registers_cleanup_for_langgraph_dev(monkeypatch, tmp_path):

@@ -1,0 +1,367 @@
+name: Installer smoke test
+
+# Runs scripts/install.sh and scripts/install.ps1 on clean runners, then checks
+# that EvoScientist works online and with the network blocked, and that
+# EvoSci update moves it to a release (.github/scripts/install_smoke_*).
+#
+# Pull requests: the scripts from the pull request first install the newest
+# release, then over it a wheel built from the pull request, with a
+# constraints.txt exported from its uv.lock (the committed file is refreshed
+# only at release), through the test-only EVOSCI_INSTALL_SOURCE and
+# EVOSCI_INSTALL_CONSTRAINTS.
+# After a release, weekly and on demand: the public one-line commands,
+# unchanged, so a changed download URL or mirror shows up early. After a
+# release each job first waits until the index its installer reads lists it,
+# and the checks expect it.
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "EvoScientist/setup/**"
+      # The checks also run EvoSci --version, the WebUI and server stop, and
+      # rely on the data dir rule.
+      - "EvoScientist/cli/**"
+      - "EvoScientist/langgraph_dev/**"
+      - "EvoScientist/paths.py"
+      # EvoSci update, the last check.
+      - "EvoScientist/updater.py"
+      - "EvoScientist/update_helper.py"
+      - "EvoScientist/uv_tool.py"
+      - "constraints.txt"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/install-smoke.yml"
+      - ".github/scripts/install_smoke_*"
+  workflow_run:
+    workflows: ["Publish to PyPI"]
+    types: [completed]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-smoke-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck
+        run: shellcheck scripts/install.sh .github/scripts/install_smoke_check.sh
+      - name: PowerShell parse check
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in 'scripts/install.ps1', '.github/scripts/install_smoke_check.ps1') {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors) | Out-Null
+            foreach ($e in $errors) { Write-Host "::error file=$file::$e"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.wheel.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v9.0.0
+      - name: Build the wheel and export the constraints
+        id: wheel
+        run: |
+          uv build --wheel -o dist
+          # Same arguments as EXPORT_ARGS in .github/scripts/release_guard.sh.
+          uv export --frozen --no-hashes --no-dev --no-emit-project --all-extras --no-header --no-annotate --quiet -o dist/constraints.txt
+          wheel=$(ls dist/*.whl)
+          version=$(basename "$wheel" | sed -E 's/^evoscientist-([^-]+)-.*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  smoke:
+    needs: [lint, build]
+    if: >-
+      !cancelled() && needs.lint.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: ubuntu-latest
+            cn: true
+          - os: macos-latest
+          # Intel Macs are best-effort.
+          - os: macos-15-intel
+            best-effort: true
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.best-effort == true }}
+    timeout-minutes: 60
+    env:
+      MODE: ${{ github.event_name == 'pull_request' && 'pr' || 'release' }}
+      EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+      INDEX_URL: ${{ matrix.cn && 'https://pypi.tuna.tsinghua.edu.cn/simple' || 'https://pypi.org/simple' }}
+      CN_FLAG: ${{ matrix.cn && '--cn' || '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        if: env.MODE == 'pr'
+        with:
+          name: dist
+          path: ${{ runner.temp }}/dist
+
+      # macOS and Linux: every command runs through $RUNNER_TEMP/clean, which
+      # starts it with an empty environment (no UV_*, PIP_*, PYTHONPATH), a
+      # fresh HOME and a PATH without the runner's Node, uv and tool caches,
+      # from a directory outside the checkout.
+      - name: Prepare a clean environment
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/work"
+          lang=C.UTF-8
+          if [ "$RUNNER_OS" = macOS ]; then lang=en_US.UTF-8; fi
+          cat > "$RUNNER_TEMP/clean" <<EOF
+          #!/bin/bash
+          cd "$RUNNER_TEMP/work"
+          exec env -i HOME="$RUNNER_TEMP/home" PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$RUNNER_TEMP/tmp" LANG=$lang SHELL=/bin/bash USER="$USER" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/clean"
+          cat "$RUNNER_TEMP/clean"
+          if "$RUNNER_TEMP/clean" sh -c 'command -v node || command -v npx || command -v uv'; then
+            echo "::error::The clean environment still finds Node or uv"
+            exit 1
+          fi
+          if [ "$MODE" = pr ]; then
+            echo "EVOSCI_INSTALL_SOURCE=$(ls "$RUNNER_TEMP"/dist/*.whl)" >> "$GITHUB_ENV"
+            echo "EVOSCI_INSTALL_CONSTRAINTS=$RUNNER_TEMP/dist/constraints.txt" >> "$GITHUB_ENV"
+          fi
+
+      # The release lookup and the constraints download by tag, which the
+      # wheel install skips; the wheel install then runs over an existing
+      # install. The clean environment drops the test-only variables.
+      - name: Install the newest release (pull request scripts)
+        if: runner.os != 'Windows' && env.MODE == 'pr'
+        run: |
+          "$RUNNER_TEMP/clean" bash "$GITHUB_WORKSPACE/scripts/install.sh" $CN_FLAG --no-setup --no-modify-path
+
+      - name: Install (pull request scripts and wheel)
+        if: runner.os != 'Windows' && env.MODE == 'pr'
+        run: |
+          "$RUNNER_TEMP/clean" EVOSCI_INSTALL_SOURCE="$EVOSCI_INSTALL_SOURCE" EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS" \
+            bash "$GITHUB_WORKSPACE/scripts/install.sh" $CN_FLAG
+
+      # After a release, the run can start before the index lists the release,
+      # and the installer and the version check could then each see a
+      # different newest release. Right before it installs, each job waits
+      # until the index its installer reads (the mirror for --cn) lists the
+      # version of the release tag, with the installer's request, and has the
+      # checks expect that version. Each job waits on its own: one runner can
+      # still read the old listing after another has read the new one.
+      - name: Wait for the release on the index
+        if: runner.os != 'Windows' && github.event_name == 'workflow_run'
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          version=${RELEASE_TAG#v}
+          if ! [[ $version =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "::error::The triggering run is not for a release tag such as v0.3.7: $RELEASE_TAG"
+            exit 1
+          fi
+          # The versions the index lists, read as scripts/install.sh reads them.
+          listed() {
+            curl -fsSL --retry 3 --max-time 30 -H 'Accept: application/vnd.pypi.simple.v1+json' "$INDEX_URL/evoscientist/" | tr -d '\n' |
+              sed -nE 's/.*"versions"[[:space:]]*:[[:space:]]*\[([^]]*)\].*/\1/p' |
+              tr ',' '\n' | tr -d ' "'
+          }
+          echo "Waiting up to 10 minutes for $INDEX_URL to list EvoScientist $version"
+          deadline=$((SECONDS + 600))
+          until listed | grep -Fx "$version" >/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::$INDEX_URL did not list EvoScientist $version within 10 minutes"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "$INDEX_URL lists EvoScientist $version"
+          echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Wait for the release on the index (Windows)
+        if: runner.os == 'Windows' && github.event_name == 'workflow_run'
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          $version = $env:RELEASE_TAG -creplace '^v', ''
+          if ($version -notmatch '^[0-9]+(\.[0-9]+)*$') {
+            Write-Host "::error::The triggering run is not for a release tag such as v0.3.7: $env:RELEASE_TAG"
+            exit 1
+          }
+          Write-Host "Waiting up to 10 minutes for $env:INDEX_URL to list EvoScientist $version"
+          $deadline = (Get-Date).AddMinutes(10)
+          while ($true) {
+            try {
+              # The versions the index lists, read as scripts/install.ps1 reads them.
+              $listing = Invoke-RestMethod -UseBasicParsing -TimeoutSec 30 -Uri "$env:INDEX_URL/evoscientist/" -Headers @{ Accept = 'application/vnd.pypi.simple.v1+json' }
+              if ($listing.versions -contains $version) { break }
+            } catch {
+              Write-Host "Cannot read $env:INDEX_URL/evoscientist/: $($_.Exception.Message)"
+            }
+            if ((Get-Date) -ge $deadline) {
+              Write-Host "::error::$env:INDEX_URL did not list EvoScientist $version within 10 minutes"
+              exit 1
+            }
+            Start-Sleep -Seconds 10
+          }
+          Write-Host "$env:INDEX_URL lists EvoScientist $version"
+          "EXPECTED_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install (public command)
+        if: runner.os != 'Windows' && env.MODE == 'release'
+        run: |
+          if [ -n "$CN_FLAG" ]; then
+            "$RUNNER_TEMP/clean" bash -c 'curl -fsSL https://cdn.jsdelivr.net/gh/EvoScientist/EvoScientist@main/scripts/install.sh | bash -s -- --cn'
+          else
+            "$RUNNER_TEMP/clean" bash -c 'curl -fsSL https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/scripts/install.sh | bash'
+          fi
+
+      - name: Online checks
+        if: runner.os != 'Windows'
+        run: |
+          "$RUNNER_TEMP/clean" EXPECTED_VERSION="$EXPECTED_VERSION" INDEX_URL="$INDEX_URL" \
+            ${EVOSCI_INSTALL_CONSTRAINTS:+EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS"} \
+            bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" online
+
+      # A network namespace with only loopback. Creating it needs root;
+      # setpriv hands the command back to the runner user, and sudo's reset
+      # environment is replaced by the clean one.
+      - name: Offline checks (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          offline() {
+            sudo unshare --net -- sh -c 'ip link set lo up && exec setpriv --reuid="$1" --regid="$2" --init-groups -- "$3" bash "$4" "$5"' \
+              sh "$(id -u)" "$(id -g)" "$RUNNER_TEMP/clean" "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$1"
+          }
+          offline blocked
+          offline offline
+
+      - name: Offline checks (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          profile='(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))'
+          for mode in blocked offline; do
+            sandbox-exec -p "$profile" "$RUNNER_TEMP/clean" bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" "$mode"
+          done
+
+      # Windows (Windows PowerShell 5.1): each step starts from a PATH with
+      # only the Windows directories, so the runner's Node, Python, Git and uv
+      # are hidden, and without UV_* or PIP_* settings.
+      - name: Install (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          foreach ($tool in 'node', 'npx', 'git', 'python', 'uv') {
+            if (Get-Command $tool -ErrorAction SilentlyContinue) { Write-Host "::error::The clean PATH still finds $tool"; exit 1 }
+          }
+          Set-Location $env:RUNNER_TEMP
+          if ($env:MODE -eq 'pr') {
+            # The newest release first, as on macOS and Linux.
+            & ([scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\scripts\install.ps1"))) -NoSetup -NoModifyPath
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            $env:EVOSCI_INSTALL_SOURCE = (Get-ChildItem "$env:RUNNER_TEMP\dist\*.whl").FullName
+            $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt"
+            & ([scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\scripts\install.ps1")))
+          } else {
+            irm https://raw.githubusercontent.com/EvoScientist/EvoScientist/main/scripts/install.ps1 | iex
+          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Online checks (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          if ($env:MODE -eq 'pr') { $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt" }
+          Set-Location $env:RUNNER_TEMP
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode online
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # Outbound firewall rules for the installed Python and Node executables;
+      # Windows Firewall does not filter loopback traffic.
+      - name: Offline checks (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          Set-Location $env:RUNNER_TEMP
+          # `exit` in a script called with & only sets $LASTEXITCODE: stop on
+          # a failed block check before the offline run overwrites it.
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode block
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode offline
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # EvoSci update through this code (on Windows its helper), last: it
+      # replaces the install. A pull request installs the newest release
+      # again first, since the wheel install's receipt names a file, which
+      # EvoSci update does not reinstall; the check puts the wheel's code
+      # over it and updates to the newest release. After a release it
+      # reinstalls the installed one.
+      - name: EvoSci update
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$MODE" = pr ]; then
+            "$RUNNER_TEMP/clean" bash "$GITHUB_WORKSPACE/scripts/install.sh" $CN_FLAG --no-setup --no-modify-path
+          fi
+          "$RUNNER_TEMP/clean" ${EVOSCI_INSTALL_SOURCE:+EVOSCI_INSTALL_SOURCE="$EVOSCI_INSTALL_SOURCE"} \
+            ${EVOSCI_INSTALL_CONSTRAINTS:+EVOSCI_INSTALL_CONSTRAINTS="$EVOSCI_INSTALL_CONSTRAINTS"} \
+            bash "$GITHUB_WORKSPACE/.github/scripts/install_smoke_check.sh" update
+
+      - name: EvoSci update (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0\;$env:SystemRoot\System32\Wbem"
+          Get-ChildItem Env: | Where-Object Name -match '^(UV_|PIP_|PYTHONPATH$)' | ForEach-Object { Remove-Item "Env:\$($_.Name)" }
+          Set-Location $env:RUNNER_TEMP
+          Get-NetFirewallRule -DisplayName 'evosci-smoke-block-*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+          if ($env:MODE -eq 'pr') {
+            & ([scriptblock]::Create((Get-Content -Raw "$env:GITHUB_WORKSPACE\scripts\install.ps1"))) -NoSetup -NoModifyPath
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            $env:EVOSCI_INSTALL_SOURCE = (Get-ChildItem "$env:RUNNER_TEMP\dist\*.whl").FullName
+            $env:EVOSCI_INSTALL_CONSTRAINTS = "$env:RUNNER_TEMP\dist\constraints.txt"
+          }
+          & "$env:GITHUB_WORKSPACE\.github\scripts\install_smoke_check.ps1" -Mode update
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # One path per OS: upload-artifact refuses files without a common root.
+      - name: Upload the EvoScientist logs
+        if: failure() && runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.os }}${{ matrix.cn && '-cn' || '' }}
+          path: ${{ runner.temp }}/home/.config/evoscientist/*.log
+          if-no-files-found: ignore
+
+      - name: Upload the EvoScientist logs (Windows)
+        if: failure() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.os }}
+          path: ~/.config/evoscientist/*.log
+          if-no-files-found: ignore

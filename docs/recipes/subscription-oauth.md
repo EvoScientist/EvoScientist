@@ -67,7 +67,7 @@ ccproxy auth status claude_api   # shows email, subscription tier, status
 ```bash
 EvoSci config set anthropic_auth_mode oauth
 EvoSci config set provider          anthropic
-EvoSci config set model             claude-sonnet-4-6
+EvoSci config set model             claude-sonnet-5-5
 ```
 
 Any Anthropic model ID your subscription serves works here — including IDs
@@ -157,7 +157,7 @@ End-to-end Claude probe:
 ANTHROPIC_BASE_URL=http://127.0.0.1:8000/claude ANTHROPIC_API_KEY=ccproxy-oauth \
 python -c "
 from EvoScientist.llm import get_chat_model
-print(get_chat_model('claude-sonnet-4-6', provider='anthropic').invoke('Reply with exactly: OK').content)
+print(get_chat_model('claude-sonnet-5-5', provider='anthropic').invoke('Reply with exactly: OK').content)
 "
 ```
 

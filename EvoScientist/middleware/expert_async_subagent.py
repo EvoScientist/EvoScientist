@@ -79,6 +79,7 @@ from deepagents.middleware.async_subagents import (
     _ClientCache,
     _validate_agent_type,
 )
+from langchain.agents.middleware.types import AgentMiddleware
 from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
@@ -483,6 +484,15 @@ class EvoAsyncSubAgentMiddleware(AsyncSubAgentMiddleware):
     ``scheduler``) work unchanged — they are declared without ``is_expert``
     and reach ``runs.create`` with the upstream single-key shape.
     """
+
+    # cli/async_notifier reports finished tasks; upstream's in-run status pull
+    # would report them a second time, as a user-role message.
+    before_agent = AgentMiddleware.before_agent
+    abefore_agent = AgentMiddleware.abefore_agent
+    before_model = AgentMiddleware.before_model
+    abefore_model = AgentMiddleware.abefore_model
+    after_model = AgentMiddleware.after_model
+    aafter_model = AgentMiddleware.aafter_model
 
     def __init__(
         self,
