@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import EvoScientist.channels.standalone as standalone
+from EvoScientist.channels.base import Channel
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.paths import Workspace
 from tests.fakes import QueueFakeChannel
@@ -271,3 +272,39 @@ def test_second_sigint_forces_shutdown():
     # Forced exit: the hanging stop() never completed.
     assert time.monotonic() - started < 20
     assert not channel._stopped
+
+
+class _HangingCleanupChannel(QueueFakeChannel):
+    """Keeps Channel.run() and Channel.stop(); its cleanup never finishes."""
+
+    stop = Channel.stop
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanups = 0
+
+    async def receive(self):
+        threading.Timer(0.1, signal.raise_signal, [signal.SIGINT]).start()
+        threading.Timer(0.5, signal.raise_signal, [signal.SIGINT]).start()
+        await asyncio.Future()
+        yield  # pragma: no cover
+
+    async def _cleanup(self) -> None:
+        self.cleanups += 1
+        await asyncio.Event().wait()
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_second_sigint_exits_when_channel_cleanup_hangs():
+    """Cancelling the channel's worker must not start the hung cleanup again."""
+    channel = _HangingCleanupChannel()
+
+    started = time.monotonic()
+    standalone.run_standalone(channel, MessageBus(), use_agent=False)
+
+    assert time.monotonic() - started < 20
+    assert channel.cleanups == 1

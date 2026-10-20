@@ -303,6 +303,10 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             maxsize=queue_maxsize
         )
         self._running = False
+        # Set by the first stop() of a run and kept until the next run
+        # iteration: a forced shutdown cancels that stop(), and run()'s
+        # ``finally`` must not start the same cleanup again.
+        self._stopping = False
         self._startup_event = threading.Event()
         self._startup_error: str | None = None
 
@@ -449,6 +453,9 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
     async def stop(self) -> None:
         """Stop the channel and flush pending debounce buffers."""
         self._running = False
+        if self._stopping:
+            return
+        self._stopping = True
 
         # Cancel pending debounce timers, then flush buffered messages so they
         # are not lost when stopping within the debounce window.
@@ -1299,6 +1306,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         self._startup_error = None
         self._running = True
         while self._running:
+            self._stopping = False
             try:
                 await self.start()
                 self._startup_error = None
