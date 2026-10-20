@@ -780,6 +780,87 @@ class TestPatchValues:
         )
 
 
+class TestRestartRules:
+    def test_field_the_environment_overrides_is_not_pending(
+        self, server, secret, monkeypatch
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-the-shell")
+        server.get("/api/settings")
+        with _no_checks():
+            response = server.patch(
+                "/api/settings",
+                json={
+                    "openai_api_key": "sk-saved-123456",
+                    "tavily_api_key": "tvly-saved-123456",
+                },
+                headers=secret,
+            )
+        assert response.json()["restart_fields"] == ["tavily_api_key"]
+
+    def test_mcp_specs_and_version_need_a_restart(self, server, monkeypatch, tmp_path):
+        import importlib.metadata
+
+        from EvoScientist.config.settings import get_config_dir
+
+        server.get("/api/settings")
+        get_config_dir().mkdir(parents=True, exist_ok=True)
+        (get_config_dir() / "mcp.yaml").write_text("servers: {}\n", encoding="utf-8")
+        (tmp_path / "research.yaml").write_text("name: research\n", encoding="utf-8")
+        monkeypatch.setattr(settings_api, "_SUBAGENTS_DIR", str(tmp_path))
+        monkeypatch.setattr(importlib.metadata, "version", lambda _name: "999.0")
+        body = server.get("/api/settings").json()
+        assert body["restart_fields"] == ["mcp.yaml", "subagents", "version"]
+
+    @pytest.mark.parametrize("module", ["main_graph", "graphs"])
+    def test_graph_modules_take_the_baseline_first(self, module):
+        import ast
+
+        source = Path(settings_api.__file__).with_name(f"{module}.py")
+        imports = [
+            node
+            for node in ast.parse(source.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.Import | ast.ImportFrom)
+            and getattr(node, "module", None) != "__future__"
+        ]
+        assert imports[0].names[0].name == "EvoScientist.langgraph_dev.config_baseline"
+
+    def test_importing_the_baseline_module_takes_the_baseline(self, tmp_path):
+        """A key saved after the graphs were imported is pending, although the
+        first GET comes later."""
+        import subprocess
+        import sys
+
+        config_dir = tmp_path / "xdg" / "evoscientist"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_text(
+            "tavily_api_key: tvly-started\n", encoding="utf-8"
+        )
+        code = (
+            "import EvoScientist.langgraph_dev.config_baseline\n"
+            "from EvoScientist.config.settings import set_config_values\n"
+            "from EvoScientist.langgraph_dev import settings_api\n"
+            "set_config_values({'tavily_api_key': 'tvly-saved'})\n"
+            "print(settings_api.read_settings()['restart_fields'])\n"
+        )
+        mapped = set(_ENV_MAPPINGS.values())
+        env = {k: v for k, v in os.environ.items() if k not in mapped}
+        env.update(
+            HOME=str(tmp_path),
+            XDG_CONFIG_HOME=str(tmp_path / "xdg"),
+            EVOSCIENTIST_DATA_DIR=str(tmp_path / "data"),
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        ).stdout
+        assert out.strip().splitlines()[-1] == "['tavily_api_key']"
+
+
 class TestTestKeyStoredValues:
     @pytest.mark.parametrize("provider", ["custom-openai", "custom-anthropic"])
     def test_custom_endpoint_without_a_key_is_empty(

@@ -279,3 +279,53 @@ def test_import_loads_no_ui_library():
 
 def test_custom_anthropic_without_a_key_is_empty():
     assert check_custom_anthropic("", "https://proxy.test").status == "empty"
+
+
+@pytest.mark.parametrize(
+    ("check", "client", "args"),
+    [
+        ("check_openai_key", "openai.OpenAI", ("k",)),
+        ("check_minimax_key", "anthropic.Anthropic", ("k",)),
+        ("check_deepseek_key", "openai.OpenAI", ("k",)),
+        ("check_dashscope_code_key", "openai.OpenAI", ("k",)),
+        ("check_kimi_key", "anthropic.Anthropic", ("k",)),
+        ("check_custom_openai", "openai.OpenAI", ("k", "https://llm.test/v1")),
+        ("check_custom_anthropic", "anthropic.Anthropic", ("k", "https://llm.test")),
+    ],
+)
+def test_every_sdk_client_gets_timeout_and_no_retries(check, client, args):
+    with patch(client) as client_cls:
+        getattr(provider_keys, check)(*args)
+    assert client_cls.call_args.kwargs["timeout"] == 10
+    assert client_cls.call_args.kwargs["max_retries"] == 0
+
+
+def test_each_provider_uses_its_check():
+    assert {name: spec.check for name, spec in provider_keys.KEY_SPECS.items()} == {
+        "anthropic": "check_anthropic_key",
+        "openai": "check_openai_key",
+        "google-genai": "check_google_key",
+        "minimax": "check_minimax_key",
+        "nvidia": "check_nvidia_key",
+        "siliconflow": "check_siliconflow_key",
+        "openrouter": "check_openrouter_key",
+        "atlascloud": "check_atlascloud_key",
+        "requesty": "check_requesty_key",
+        "opper": "check_opper_key",
+        "novita": "check_novita_key",
+        "deepseek": "check_deepseek_key",
+        "zhipu": "check_zhipu_key",
+        "zhipu-code": "check_zhipu_key",
+        "volcengine": "check_volcengine_key",
+        "volcengine-code": "check_volcengine_key",
+        "dashscope": "check_dashscope_key",
+        "dashscope-code": "check_dashscope_code_key",
+        "moonshot": "check_moonshot_key",
+        "kimi-coding": "check_kimi_key",
+        "xiaomi": "check_xiaomi_key",
+        "xiaomi-token-plan": "check_xiaomi_key",
+        "custom-openai": "check_custom_openai",
+        "custom-anthropic": "check_custom_anthropic",
+        "ollama": "check_ollama",
+        "tavily": "check_tavily_key",
+    }

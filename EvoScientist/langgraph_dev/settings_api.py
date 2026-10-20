@@ -295,7 +295,12 @@ def _provider_view(spec: KeySpec) -> dict[str, Any]:
 
 
 def read_settings() -> dict[str, Any]:
-    """The ``GET /api/settings`` body."""
+    """The ``GET /api/settings`` body.
+
+    Besides setting names, ``restart_fields`` can name three things that are
+    not settings: ``mcp.yaml`` (the MCP server file), ``subagents`` (the
+    bundled sub-agent definitions) and ``version`` (the installed package).
+    """
     # First: it merges a workspace ``.env`` into the environment, as the
     # graphs' own config reads do, so ``sources`` sees what they see.
     effective = get_effective_config()
