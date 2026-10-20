@@ -315,6 +315,32 @@ def test_second_sigint_forces_shutdown():
     assert not channel._stopped
 
 
+class _SameTickChannel(QueueFakeChannel):
+    """Both signals land while a sync step holds the loop."""
+
+    async def run(self) -> None:
+        def _fire() -> None:
+            signal.raise_signal(signal.SIGINT)
+            signal.raise_signal(signal.SIGINT)
+
+        threading.Timer(0.1, _fire).start()
+        time.sleep(0.3)
+        await asyncio.Future()
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_two_signals_in_one_loop_pass_still_exit():
+    """The second signal must not cancel the shutdown before it has started."""
+    started = time.monotonic()
+    standalone.run_standalone(_SameTickChannel(), MessageBus(), use_agent=False)
+
+    assert time.monotonic() - started < 20
+
+
 class _HangingCleanupChannel(QueueFakeChannel):
     """Keeps Channel.run() and Channel.stop(); its cleanup never finishes."""
 

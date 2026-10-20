@@ -208,9 +208,10 @@ async def _async_main(
             shutdown_task = asyncio.create_task(_graceful_shutdown())
             return
         # Second signal forces the exit: cancel the graceful path, whose
-        # `finally` then cancels the workers.
+        # `finally` then cancels the workers. Deferred one step so a task
+        # created by a signal handled in the same loop pass enters its `try`.
         logger.warning("Second signal received, forcing shutdown")
-        shutdown_task.cancel()
+        loop.call_soon(shutdown_task.cancel)
 
     # Windows event loops have no add_signal_handler. A plain handler runs on
     # the main thread between bytecodes and hands the request to the loop; it
