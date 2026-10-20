@@ -22,6 +22,8 @@ import atexit
 import os
 import signal
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -130,123 +132,125 @@ def deploy(
 
     effective_host = _resolve_host(host, config)
 
-    # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
-    # holding the port. If an existing EvoSci langgraph dev is already up,
-    # also refuse (deploy is the "primary server" — running multiple on the
-    # same port is a configuration error).
-    if _is_port_occupied(effective_port, effective_host):
-        if is_langgraph_dev_running(port=effective_port, host=effective_host):
-            console.print(
-                f"[red]Port {effective_port} is already serving a langgraph dev "
-                f"instance.[/red]"
-            )
-            sidecar = _read_workspace_sidecar()
-            if sidecar is not None and _pid_serves_port(
-                sidecar.get("pid"), effective_port
-            ):
-                # Surface what we know about the occupant — with keepalive it
-                # may be an ownerless leftover rather than a live session.
-                # Only when the recorded pid verifiably serves THIS port, so a
-                # stale or other-port record is never blamed.
+    # Steps 4 to 7 hold the server start lock (see _start_lock).
+    with _start_lock():
+        # 4. Pre-flight port check — refuse to start if a non-EvoSci process is
+        # holding the port. If an existing EvoSci langgraph dev is already up,
+        # also refuse (deploy is the "primary server" — running multiple on the
+        # same port is a configuration error).
+        if _is_port_occupied(effective_port, effective_host):
+            if is_langgraph_dev_running(port=effective_port, host=effective_host):
                 console.print(
-                    f"[dim]It serves workspace {sidecar.get('workspace')} "
-                    f"(pid {sidecar.get('pid')}). Stop it with "
-                    f"[bold]EvoSci server stop[/bold], or use "
-                    f"[bold]--port[/bold] to deploy on a different port.[/dim]"
+                    f"[red]Port {effective_port} is already serving a langgraph dev "
+                    f"instance.[/red]"
                 )
+                sidecar = _read_workspace_sidecar()
+                if sidecar is not None and _pid_serves_port(
+                    sidecar.get("pid"), effective_port
+                ):
+                    # Surface what we know about the occupant — with keepalive it
+                    # may be an ownerless leftover rather than a live session.
+                    # Only when the recorded pid verifiably serves THIS port, so a
+                    # stale or other-port record is never blamed.
+                    console.print(
+                        f"[dim]It serves workspace {sidecar.get('workspace')} "
+                        f"(pid {sidecar.get('pid')}). Stop it with "
+                        f"[bold]EvoSci server stop[/bold], or use "
+                        f"[bold]--port[/bold] to deploy on a different port.[/dim]"
+                    )
+                else:
+                    console.print(
+                        "[dim]Stop the existing EvoSci/serve session first, or use "
+                        "[bold]--port[/bold] to deploy on a different port.[/dim]"
+                    )
             else:
                 console.print(
-                    "[dim]Stop the existing EvoSci/serve session first, or use "
-                    "[bold]--port[/bold] to deploy on a different port.[/dim]"
+                    f"[red]Port {effective_port} is occupied by another process.[/red]"
                 )
-        else:
-            console.print(
-                f"[red]Port {effective_port} is occupied by another process.[/red]"
+                console.print(
+                    f"[dim]Run [bold]lsof -i :{effective_port}[/bold] to inspect, "
+                    f"or use [bold]--port[/bold] to pick a different port.[/dim]"
+                )
+            raise typer.Exit(1)
+
+        # 5. Startup banner
+        _auth_label = _describe_auth(config)
+        console.print(
+            Panel(
+                Text.from_markup(
+                    f"[bold]Workspace:[/bold] {_shorten(ws)}\n"
+                    f"[bold]Host:[/bold]      {effective_host}\n"
+                    f"[bold]Port:[/bold]      {effective_port}\n"
+                    f"[bold]Auth:[/bold]      {_auth_label}"
+                ),
+                title="[bold cyan]EvoScientist Deploy[/bold cyan]",
+                border_style="cyan",
             )
-            console.print(
-                f"[dim]Run [bold]lsof -i :{effective_port}[/bold] to inspect, "
-                f"or use [bold]--port[/bold] to pick a different port.[/dim]"
+        )
+        if config.dangerous_mode:
+            from ..cli._constants import (
+                DANGEROUS_BANNER_LABEL,
+                DANGEROUS_BANNER_MESSAGE,
             )
-        raise typer.Exit(1)
 
-    # 5. Startup banner
-    _auth_label = _describe_auth(config)
-    console.print(
-        Panel(
-            Text.from_markup(
-                f"[bold]Workspace:[/bold] {_shorten(ws)}\n"
-                f"[bold]Host:[/bold]      {effective_host}\n"
-                f"[bold]Port:[/bold]      {effective_port}\n"
-                f"[bold]Auth:[/bold]      {_auth_label}"
-            ),
-            title="[bold cyan]EvoScientist Deploy[/bold cyan]",
-            border_style="cyan",
-        )
-    )
-    if config.dangerous_mode:
-        from ..cli._constants import (
-            DANGEROUS_BANNER_LABEL,
-            DANGEROUS_BANNER_MESSAGE,
-        )
+            console.print(
+                f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
+                f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
+            )
 
-        console.print(
-            f"[bold white on red] ⚠ {DANGEROUS_BANNER_LABEL} [/bold white on red] "
-            f"[bold red]{DANGEROUS_BANNER_MESSAGE}[/bold red]"
-        )
+        if not _is_loopback_host(effective_host):
+            console.print(
+                "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
+                f"[bold red]Listening on {effective_host} — no auth, and the agent "
+                f"can run shell. Trusted networks only.[/bold red]"
+            )
 
-    if not _is_loopback_host(effective_host):
-        console.print(
-            "[bold white on red] ⚠ PUBLIC BIND [/bold white on red] "
-            f"[bold red]Listening on {effective_host} — no auth, and the agent "
-            f"can run shell. Trusted networks only.[/bold red]"
-        )
+        if tunnel:
+            console.print(
+                "[bold white on red] ⚠ PUBLIC TUNNEL [/bold white on red] "
+                "[bold red]Public URL, no auth — share only with people you "
+                "trust.[/bold red]"
+            )
 
-    if tunnel:
-        console.print(
-            "[bold white on red] ⚠ PUBLIC TUNNEL [/bold white on red] "
-            "[bold red]Public URL, no auth — share only with people you "
-            "trust.[/bold red]"
-        )
+        # 6. ccproxy lifecycle (Anthropic OAuth only)
+        _ccproxy_proc = None
+        if config.anthropic_auth_mode == "oauth":
+            try:
+                from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
 
-    # 6. ccproxy lifecycle (Anthropic OAuth only)
-    _ccproxy_proc = None
-    if config.anthropic_auth_mode == "oauth":
+                with console.status(
+                    "[dim]Starting ccproxy (OAuth proxy)...[/dim]", spinner="dots"
+                ):
+                    _ccproxy_proc = maybe_start_ccproxy(config)
+                if _ccproxy_proc:
+                    atexit.register(stop_ccproxy, _ccproxy_proc)
+                    console.print("[green]✓[/green] ccproxy started")
+            except RuntimeError as exc:
+                console.print(f"[red]ccproxy startup failed:[/red] {exc}")
+                raise typer.Exit(1) from exc
+
+        # 7. Start langgraph dev
+        jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
+        file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
         try:
-            from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
-
             with console.status(
-                "[dim]Starting ccproxy (OAuth proxy)...[/dim]", spinner="dots"
+                "[dim]Starting langgraph dev...[/dim]",
+                spinner="dots",
             ):
-                _ccproxy_proc = maybe_start_ccproxy(config)
-            if _ccproxy_proc:
-                atexit.register(stop_ccproxy, _ccproxy_proc)
-                console.print("[green]✓[/green] ccproxy started")
-        except RuntimeError as exc:
-            console.print(f"[red]ccproxy startup failed:[/red] {exc}")
+                proc = start_langgraph_dev(
+                    workspace_dir=Path(ws),
+                    port=effective_port,
+                    host=effective_host,
+                    file_persistence=file_persistence,
+                    jobs_per_worker=jobs_per_worker,
+                    tunnel=tunnel,
+                    config_fingerprint=_server_config_fingerprint(config),
+                    allowed_origins=getattr(config, "backend_allowed_origins", ""),
+                )
+            atexit.register(stop_langgraph_dev, proc)
+        except Exception as exc:
+            console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
             raise typer.Exit(1) from exc
-
-    # 7. Start langgraph dev
-    jobs_per_worker = int(getattr(config, "langgraph_dev_jobs_per_worker", 10))
-    file_persistence = bool(getattr(config, "langgraph_dev_file_persistence", True))
-    try:
-        with console.status(
-            "[dim]Starting langgraph dev...[/dim]",
-            spinner="dots",
-        ):
-            proc = start_langgraph_dev(
-                workspace_dir=Path(ws),
-                port=effective_port,
-                host=effective_host,
-                file_persistence=file_persistence,
-                jobs_per_worker=jobs_per_worker,
-                tunnel=tunnel,
-                config_fingerprint=_server_config_fingerprint(config),
-                allowed_origins=getattr(config, "backend_allowed_origins", ""),
-            )
-        atexit.register(stop_langgraph_dev, proc)
-    except Exception as exc:
-        console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
-        raise typer.Exit(1) from exc
 
     # start_langgraph_dev already health-polled before returning; if we got
     # here, the subprocess is up.
@@ -326,6 +330,53 @@ def deploy(
         console.print(
             "\n[dim]Shutting down (background cleanup may take a few seconds)...[/dim]"
         )
+
+
+@contextmanager
+def _start_lock() -> Iterator[None]:
+    """Hold the server start lock, the one ``ensure_langgraph_dev()`` and
+    ``deploy --json`` take, across the port check and the start.
+
+    Without it, a second starter for the same port can see a backend that is
+    bound but not answering yet and kill it as stale, or overwrite its
+    ownership record. With it, ``deploy`` waits for that backend and then
+    refuses it as a running server.
+    """
+    from filelock import FileLock, Timeout
+
+    from ..langgraph_dev.manager import _FILE_LOCK_TIMEOUT, RUNTIME
+
+    lock = FileLock(str(RUNTIME.lock_file))
+    try:
+        RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            with console.status(
+                "[dim]Waiting for another EvoSci process to start langgraph "
+                "dev...[/dim]",
+                spinner="dots",
+            ):
+                lock.acquire(timeout=_FILE_LOCK_TIMEOUT)
+    except Timeout:
+        console.print(
+            f"[red]Another EvoSci process has been starting langgraph dev "
+            f"for over {_FILE_LOCK_TIMEOUT:.0f} s.[/red]"
+        )
+        console.print(
+            f"[dim]It holds {_shorten(str(lock.lock_file))}. Run "
+            f"[bold]EvoSci deploy[/bold] again once it is done.[/dim]"
+        )
+        raise typer.Exit(1) from None
+    except OSError as exc:
+        # A config dir that cannot be written (read-only, full) is a failed
+        # start, not a traceback.
+        console.print(f"[red]langgraph dev startup failed:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _load_config(debug: bool, host: str | None = None, port: int | None = None) -> Any:

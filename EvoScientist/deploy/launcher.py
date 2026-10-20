@@ -34,7 +34,8 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -358,16 +359,28 @@ class WebUILauncher:
     Lifecycle owned by the caller:
 
         launcher = WebUILauncher(config, cfg, InstalledWebUIRunner())
-        result = launcher.start()          # blocks while the backend starts (~60s max)
+        result = launcher.start()          # blocks while the backend starts
         result = launcher.wait_ready(60)   # poll both, or raise LauncherError
         ...                                # caller's own main loop / window
         launcher.stop()                    # idempotent teardown
+
+    ``on_lock_wait`` is called on :meth:`start`'s thread with True when it has
+    to wait for another process that is starting a backend, then with False
+    once it holds the server start lock, so a front-end can say why it waits.
     """
 
-    def __init__(self, config: Any, cfg: LauncherConfig, runner: WebUIRunner) -> None:
+    def __init__(
+        self,
+        config: Any,
+        cfg: LauncherConfig,
+        runner: WebUIRunner,
+        *,
+        on_lock_wait: Callable[[bool], None] | None = None,
+    ) -> None:
         self._config = config
         self._cfg = cfg
         self._runner = runner
+        self._on_lock_wait = on_lock_wait
         self._backend_proc: subprocess.Popen | None = None
         self._backend_started = False
         # True from just before start_langgraph_dev() until its proc handle is
@@ -403,7 +416,9 @@ class WebUILauncher:
         Does not wait for the front-end to be *ready* (use :meth:`wait_ready`
         for that). It does block while the backend starts: on the start path
         ``start_langgraph_dev`` polls the backend's ``/ok`` until healthy (up to
-        ~60s). The front-end process is only spawned, not awaited.
+        ~60s). The front-end process is only spawned, not awaited. Before the
+        backend decision it waits for another process that is starting a
+        backend (the server start lock, up to 120 s).
 
         Tears down whatever it already spawned if a later step raises, or if
         ``stop()`` fires concurrently from another thread. Without this, a
@@ -416,16 +431,17 @@ class WebUILauncher:
         self._runner.preflight(self._cfg)
 
         try:
-            decision = _resolve_backend(self._cfg, self._config)
-            self._warnings.extend(decision.warnings)
-            # The agent is built inside the server, so its own hint lands in
-            # the server log; the launching process shows it, for the server
-            # it reuses or the one it starts.
-            hint = server_setup_hint(decision.sidecar)
-            if hint is not None:
-                self._warnings.append(hint)
-            if decision.action == "start":
-                self._start_backend()
+            with self._start_lock():
+                decision = _resolve_backend(self._cfg, self._config)
+                self._warnings.extend(decision.warnings)
+                # The agent is built inside the server, so its own hint lands in
+                # the server log; the launching process shows it, for the server
+                # it reuses or the one it starts.
+                hint = server_setup_hint(decision.sidecar)
+                if hint is not None:
+                    self._warnings.append(hint)
+                if decision.action == "start":
+                    self._start_backend()
             self._raise_if_stopped()
 
             # Front-end port: a non-fatal warning (node will surface a hard
@@ -562,6 +578,63 @@ class WebUILauncher:
                     )
 
     # -- internals -------------------------------------------------------- #
+    @contextmanager
+    def _start_lock(self) -> Iterator[None]:
+        """Hold the server start lock, the one ``ensure_langgraph_dev()`` and
+        ``deploy --json`` take, across the backend decision and the start.
+
+        Without it, a second starter for the same port can see a backend that
+        is bound but not answering yet and kill it as stale, or overwrite its
+        ownership record. The wait checks for a ``stop()`` every 0.5 s and is
+        reported to ``on_lock_wait``.
+        """
+        from filelock import FileLock, Timeout
+
+        from ..langgraph_dev.manager import _FILE_LOCK_TIMEOUT, RUNTIME
+
+        def start_failed(exc: OSError) -> LauncherError:
+            # A config dir that cannot be written (read-only, full) is a
+            # failed start, not a traceback.
+            return LauncherError(
+                "backend_start_failed", f"langgraph dev startup failed: {exc}"
+            )
+
+        try:
+            RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise start_failed(exc) from exc
+        lock = FileLock(str(RUNTIME.lock_file))
+        deadline = time.monotonic() + _FILE_LOCK_TIMEOUT
+        waited = False
+        while True:
+            self._raise_if_stopped()
+            try:
+                lock.acquire(timeout=0.5)
+                break
+            except Timeout:
+                if time.monotonic() >= deadline:
+                    raise LauncherError(
+                        "backend_start_failed",
+                        f"Another EvoScientist process has been starting a "
+                        f"backend for over {_FILE_LOCK_TIMEOUT:.0f} s.",
+                        f"It holds {lock.lock_file}. Try again once it is done.",
+                        fields={"lock_file": str(lock.lock_file)},
+                    ) from None
+            except OSError as exc:
+                raise start_failed(exc) from exc
+            if not waited and self._on_lock_wait is not None:
+                self._on_lock_wait(True)
+            waited = True
+        try:
+            if waited and self._on_lock_wait is not None:
+                self._on_lock_wait(False)
+            # A stop() in the slice in which the lock was freed, or during the
+            # callback, starts nothing.
+            self._raise_if_stopped()
+            yield
+        finally:
+            lock.release()
+
     def _start_backend(self) -> None:
         from ..langgraph_dev.manager import (
             _server_config_fingerprint,

@@ -17,6 +17,11 @@ from EvoScientist.deploy import launcher as lm
 from EvoScientist.langgraph_dev import manager as lgm
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """The start lock, pid file and sidecar under tmp_path."""
+
+
 def _cfg(workspace_dir: str = "/tmp/wsA", **kw):
     base = {
         "workspace_dir": workspace_dir,
@@ -479,6 +484,179 @@ def test_stop_during_backend_health_wait_reports_cancelled(monkeypatch):
     t.join(5)
     assert not t.is_alive()
     assert errors[0].code == "cancelled"
+
+
+def test_start_waits_for_another_start_before_the_backend_decision(monkeypatch):
+    """Another start holds the server start lock: the decision and the start
+    wait for it, so a backend that is bound but not answering yet is never
+    taken for a stale one."""
+    import threading
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    holder = _LockHolder()
+    checks: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "_is_port_occupied",
+        lambda *_a, **_k: checks.append(holder.release.is_set()) or False,
+    )
+    threading.Timer(0.3, holder.done).start()
+    result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert checks
+    assert all(checks)
+    assert result.backend_started is True
+
+
+def _start_lock_is_held() -> bool:
+    from filelock import FileLock, Timeout
+
+    probe = FileLock(str(lgm.RUNTIME.lock_file))
+    try:
+        probe.acquire(timeout=0)
+    except Timeout:
+        return True
+    probe.release()
+    return False
+
+
+def test_the_backend_starts_under_the_start_lock(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    held: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "start_langgraph_dev",
+        lambda **_k: held.append(_start_lock_is_held()) or _FakeProc(),
+    )
+    lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert held == [True]
+    assert not _start_lock_is_held()
+
+
+@pytest.mark.parametrize("then_free", [False, True])
+def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_free):
+    """A stop() during the wait starts nothing, also when the lock is freed
+    right after it."""
+    import threading
+
+    from filelock import FileLock
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    started: list = []
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **k: started.append(k) or _FakeProc()
+    )
+    holder = _LockHolder()
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
+
+    def _stop() -> None:
+        launcher.stop()
+        if then_free:
+            holder.done()
+
+    threading.Timer(0.3, _stop).start()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            launcher.start()
+        assert then_free or holder.thread.is_alive()
+    finally:
+        holder.done()
+    assert ei.value.code == "cancelled"
+    assert started == []
+    lock = FileLock(str(lgm.RUNTIME.lock_file))
+    lock.acquire(timeout=0.5)
+    lock.release()
+
+
+def test_start_lock_held_too_long_is_backend_start_failed(monkeypatch):
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
+    holder = _LockHolder()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    finally:
+        holder.done()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.fields == {"lock_file": str(lgm.RUNTIME.lock_file)}
+
+
+def _break_start_lock(monkeypatch, tmp_path, step: str) -> None:
+    """Make the server start lock fail with an OSError, as a read-only or
+    full config dir does: at the mkdir of its folder, or at the acquire."""
+    import filelock
+
+    if step == "mkdir":
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        monkeypatch.setattr(
+            lgm, "RUNTIME", lgm.LanggraphRuntimePaths.for_directory(blocker / "rt")
+        )
+    else:
+
+        def _denied(self, *_a, **_k):
+            raise PermissionError(13, "Permission denied", str(self.lock_file))
+
+        monkeypatch.setattr(filelock.FileLock, "acquire", _denied)
+
+
+@pytest.mark.parametrize("step", ["mkdir", "acquire"])
+def test_start_lock_os_error_is_backend_start_failed(monkeypatch, tmp_path, step):
+    """An OSError from the start lock is backend_start_failed, as before the
+    lock, so run_webui shows its panel instead of a traceback."""
+    _patch_for_start(monkeypatch, set())
+    started: list = []
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **k: started.append(k) or _FakeProc()
+    )
+    _break_start_lock(monkeypatch, tmp_path, step)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.message.startswith("langgraph dev startup failed: ")
+    assert isinstance(ei.value.__cause__, OSError)
+    assert started == []
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_start_tells_the_caller_it_waits_for_another_start(monkeypatch, held):
+    """on_lock_wait hears True while another start holds the lock and False
+    once this start has it, before the backend decision; nothing when the
+    lock is free."""
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    events: list = []
+    monkeypatch.setattr(
+        lgm,
+        "_is_port_occupied",
+        lambda *_a, **_k: events.append("port check") or False,
+    )
+    holder = _LockHolder() if held else None
+
+    def _on_lock_wait(waiting: bool) -> None:
+        events.append(waiting)
+        if waiting and holder is not None:
+            holder.release.set()
+
+    try:
+        launcher = lm.WebUILauncher(
+            object(), _cfg(), _FakeRunner(), on_lock_wait=_on_lock_wait
+        )
+        launcher.start()
+    finally:
+        if holder is not None:
+            holder.done()
+    if held:
+        assert events[:2] == [True, False]
+        events = events[2:]
+    assert events
+    assert set(events) == {"port check"}
 
 
 def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
