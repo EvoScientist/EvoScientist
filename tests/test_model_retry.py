@@ -298,7 +298,7 @@ def test_a_run_key_budget_that_is_not_an_int_falls_back(monkeypatch, budget):
         },
     )
     h = _Harness(budget=60.0)
-    assert h.mw._effective_tier().wait_budget_seconds == 60.0
+    assert h.mw._effective_tier(h.mw._run_marker()).wait_budget_seconds == 60.0
 
 
 # --- a spent budget ends the run's retries -------------------------------------

@@ -421,8 +421,7 @@ class ModelRetryMiddleware(AgentMiddleware):
             return None
         return marker if isinstance(marker, dict) else None
 
-    def _effective_tier(self) -> RetryTier:
-        marker = self._run_marker()
+    def _effective_tier(self, marker: dict[str, Any] | None) -> RetryTier:
         if marker is None:
             return self._tier
         budget = marker.get("wait_budget_seconds")
@@ -536,10 +535,10 @@ class ModelRetryMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        tier = self._effective_tier()
+        run = self._run_marker()
+        tier = self._effective_tier(run)
         if tier.wait_budget_seconds <= 0:
             return self._check_response(await handler(request))
-        run = self._run_marker()
         deadline: float | None = None
         attempt = 1
         while True:
@@ -563,10 +562,10 @@ class ModelRetryMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        tier = self._effective_tier()
+        run = self._run_marker()
+        tier = self._effective_tier(run)
         if tier.wait_budget_seconds <= 0:
             return self._check_response(handler(request))
-        run = self._run_marker()
         deadline: float | None = None
         attempt = 1
         while True:
