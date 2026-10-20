@@ -68,7 +68,8 @@ def pytest_runtest_protocol(item, nextitem):
     assigns ``os.environ`` directly, which monkeypatch cannot undo.
 
     A hook, not a fixture: it restores after every fixture, monkeypatch
-    included, has been torn down.
+    included, has been torn down. Scoped fixtures must not set environment
+    variables; the restore after each test removes them.
     """
     saved = dict(os.environ)
     for name in [name for name in os.environ if _cleared_env_name(name)]:
