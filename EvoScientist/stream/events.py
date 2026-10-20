@@ -106,8 +106,13 @@ async def _wait_for_checkpointed_interrupt(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _INTERRUPT_CHECKPOINT_WAIT_SECONDS
     while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
         try:
-            snapshot = await agent.aget_state(config)
+            snapshot = await asyncio.wait_for(
+                agent.aget_state(config), timeout=remaining
+            )
         except Exception:
             return
         if str(interrupt_id) in _snapshot_interrupt_ids(snapshot):

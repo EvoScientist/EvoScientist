@@ -421,6 +421,34 @@ async def test_checkpointed_interrupt_wait_stops_on_state_read_error():
     assert agent.state_reads == 1
 
 
+async def test_checkpointed_interrupt_wait_bounds_blocking_state_read(monkeypatch):
+    """A blocked checkpoint read must not exceed the approval wait deadline."""
+    from EvoScientist.stream.events import _wait_for_checkpointed_interrupt
+
+    class _BlockingStateReadAgent:
+        def __init__(self):
+            self.read_cancelled = False
+
+        async def aget_state(self, _config):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.read_cancelled = True
+                raise
+
+    monkeypatch.setattr(
+        "EvoScientist.stream.events._INTERRUPT_CHECKPOINT_WAIT_SECONDS", 0.01
+    )
+    agent = _BlockingStateReadAgent()
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    await _wait_for_checkpointed_interrupt(agent, {}, "approval-1")
+
+    assert loop.time() - started < 0.25
+    assert agent.read_cancelled
+
+
 @pytest.mark.parametrize("initial_state", ["clean", "unavailable"])
 async def test_uncheckpointed_resume_uses_stream_error_path(initial_state):
     """Resume errors are emitted by streaming even without saved state."""
