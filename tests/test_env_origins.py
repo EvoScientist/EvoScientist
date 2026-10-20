@@ -229,3 +229,21 @@ def test_an_unreadable_config_file_does_not_stop_a_start(config_file):
     apply_config_to_env(get_effective_config())
     settings_api.capture_restart_baseline()
     assert settings_api._baseline is not None
+
+
+def test_apply_config_to_env_reads_the_file_once(config_file, monkeypatch):
+    from EvoScientist.config import store
+
+    config_file.write_text(
+        "openai_api_key: sk-file-1\ntavily_api_key: tvly-file-2\n"
+        "minimax_api_key: sk-file-3\n",
+        encoding="utf-8",
+    )
+    config = get_effective_config()
+    reads = []
+    real = store.read_config_mapping
+    monkeypatch.setattr(store, "read_config_mapping", lambda: reads.append(1) or real())
+    apply_config_to_env(config)
+    assert len(reads) == 1
+    for field in ("openai_api_key", "tavily_api_key", "minimax_api_key"):
+        assert env_origin(_ENV_MAPPINGS[field]) == {"source": "file"}

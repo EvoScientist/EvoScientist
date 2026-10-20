@@ -1374,14 +1374,25 @@ def _same_value(field: str, a: Any, b: Any) -> bool:
     return str(_plain_config_value(a)) == str(_plain_config_value(b))
 
 
-def config_value_origin(field: str, value: Any) -> str:
+def _saved_mapping() -> dict[str, Any]:
+    """The file's mapping, or ``{}`` when it does not parse or cannot be read."""
+    try:
+        return store.read_config_mapping()
+    except (store.ConfigError, OSError):
+        return {}
+
+
+def config_value_origin(
+    field: str, value: Any, mapping: dict[str, Any] | None = None
+) -> str:
     """``file`` when the file holds ``value`` for ``field``, ``default`` when
     the file lacks the field and ``value`` is its default, else ``cli``: the
-    value can then only have come from a command-line flag."""
-    try:
-        mapping = store.read_config_mapping()
-    except (store.ConfigError, OSError):
-        mapping = {}
+    value can then only have come from a command-line flag.
+
+    ``mapping`` is the file's mapping when the caller has already read it.
+    """
+    if mapping is None:
+        mapping = _saved_mapping()
     saved = mapping.get(field)
     if saved is not None and saved != "":
         return "file" if _same_value(field, saved, value) else "cli"
@@ -1521,13 +1532,16 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
     """
     before = dict(os.environ)
     _apply_config_to_env(config)
+    mapping = None  # read once, when the first variable needs it
     for env_key, field in _ENV_FIELDS.items():
         value = os.environ.get(env_key)
         if value is None:
             _ENV_ORIGINS.pop(env_key, None)
         elif value != before.get(env_key):
+            if mapping is None:
+                mapping = _saved_mapping()
             record_env_origin(
-                env_key, config_value_origin(field, getattr(config, field))
+                env_key, config_value_origin(field, getattr(config, field), mapping)
             )
 
 
