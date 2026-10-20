@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.table import Table
 
 from ..base import Command, CommandContext, SubCommand
 from ..manager import manager
+
+if TYPE_CHECKING:
+    from ...paths import Workspace
 
 
 class MCPCommand(Command):
@@ -38,9 +41,11 @@ class MCPCommand(Command):
     def _invalidate_server_cache(self) -> None:
         self._server_names_cache = None
 
-    def get_completions(self, tokens: list[str]) -> list[tuple[str, str]]:
+    def get_completions(
+        self, tokens: list[str], *, workspace: Workspace | None = None
+    ) -> list[tuple[str, str]]:
         if len(tokens) <= 1:
-            return super().get_completions(tokens)
+            return super().get_completions(tokens, workspace=workspace)
         subcmd = tokens[0].lower()
         if subcmd in ("config", "remove", "edit") and len(tokens) == 2:
             prefix = tokens[1].lower()
@@ -49,7 +54,7 @@ class MCPCommand(Command):
                 for name in self._get_server_names()
                 if name.lower().startswith(prefix)
             ]
-        return super().get_completions(tokens)
+        return super().get_completions(tokens, workspace=workspace)
 
     async def execute(self, ctx: CommandContext, args: list[str]) -> None:
         """Dispatch to the appropriate MCP subcommand."""

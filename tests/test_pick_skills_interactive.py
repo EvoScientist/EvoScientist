@@ -6,6 +6,8 @@ can distinguish "picker handled the no-op case" from "user cancelled".
 
 from unittest.mock import MagicMock, patch
 
+from EvoScientist.paths import SessionDirs
+
 _INDEX = [
     {
         "name": "paper-writing",
@@ -79,7 +81,7 @@ class TestPickSkillsInteractive:
 class TestInstallSkillsHandlesEmpty:
     """InstallSkills.execute must distinguish None vs [] from the picker."""
 
-    async def test_empty_list_suppresses_cancel_message(self):
+    async def test_empty_list_suppresses_cancel_message(self, workspace):
         """When picker returns [], user should NOT see "Browse cancelled"
         (the picker already printed its own message)."""
         from unittest.mock import AsyncMock
@@ -90,7 +92,9 @@ class TestInstallSkillsHandlesEmpty:
         ui = MagicMock()
         ui.supports_interactive = True
         ui.wait_for_skill_browse = AsyncMock(return_value=[])
-        ctx = CommandContext(agent=None, thread_id="tid", ui=ui)
+        ctx = CommandContext(
+            agent=None, thread_id="tid", ui=ui, dirs=SessionDirs(workspace)
+        )
 
         with patch(
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index",
@@ -101,7 +105,7 @@ class TestInstallSkillsHandlesEmpty:
         msgs = [c.args[0] for c in ui.append_system.call_args_list]
         assert not any("Browse cancelled" in m for m in msgs)
 
-    async def test_none_shows_cancel_message(self):
+    async def test_none_shows_cancel_message(self, workspace):
         """When picker returns None (actual cancel), user sees the message."""
         from unittest.mock import AsyncMock
 
@@ -111,7 +115,9 @@ class TestInstallSkillsHandlesEmpty:
         ui = MagicMock()
         ui.supports_interactive = True
         ui.wait_for_skill_browse = AsyncMock(return_value=None)
-        ctx = CommandContext(agent=None, thread_id="tid", ui=ui)
+        ctx = CommandContext(
+            agent=None, thread_id="tid", ui=ui, dirs=SessionDirs(workspace)
+        )
 
         with patch(
             "EvoScientist.tools.skills_manager.fetch_remote_skill_index",

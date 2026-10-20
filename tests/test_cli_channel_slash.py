@@ -16,7 +16,8 @@ from EvoScientist.cli.channel import (
 from EvoScientist.cli.channel import (
     dispatch_channel_slash_command as _dispatch_channel_slash_command,
 )
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from EvoScientist.paths import SessionDirs, Workspace
+from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _thread_store() -> FakeThreadStore:
@@ -25,6 +26,7 @@ def _thread_store() -> FakeThreadStore:
 
 def dispatch_channel_slash_command(*args, **kwargs):
     kwargs.setdefault("graph_gateway", FakeGraphGateway())
+    kwargs.setdefault("dirs", SessionDirs(TEST_WORKSPACE))
     return _dispatch_channel_slash_command(*args, **kwargs)
 
 
@@ -52,7 +54,6 @@ async def test_non_slash_returns_false():
         msg,
         agent=None,
         thread_id="t1",
-        workspace_dir=None,
         checkpointer=None,
         append_system=append,
     )
@@ -73,7 +74,6 @@ async def test_unresolved_slash_returns_unknown_command_response():
                 msg,
                 agent=None,
                 thread_id="t1",
-                workspace_dir=None,
                 checkpointer=None,
                 append_system=append,
             )
@@ -106,7 +106,7 @@ async def test_successful_slash_execution_sets_response_and_breadcrumb():
             msg,
             agent="fake-agent",
             thread_id="t1",
-            workspace_dir="/tmp",
+            dirs=SessionDirs(Workspace("/tmp")),
             checkpointer=None,
             append_system=append,
         )
@@ -147,7 +147,7 @@ async def test_slash_with_flushed_output_suppresses_executed_ack():
             msg,
             agent="fake-agent",
             thread_id="t1",
-            workspace_dir="/tmp",
+            dirs=SessionDirs(Workspace("/tmp")),
             checkpointer=None,
             append_system=MagicMock(),
         )
@@ -172,7 +172,6 @@ async def test_real_help_command_publishes_help_once():
             msg,
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=MagicMock(),
         )
@@ -215,7 +214,7 @@ async def test_slash_dispatch_passes_graph_gateway_to_command_context():
             msg,
             agent="fake-agent",
             thread_id="t1",
-            workspace_dir="/tmp",
+            dirs=SessionDirs(Workspace("/tmp")),
             checkpointer=None,
             append_system=append,
             graph_gateway=graph_gateway,
@@ -253,7 +252,6 @@ async def test_needs_agent_awaits_loader_and_passes_result():
             msg,
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=append,
             await_agent_ready=_await_ready,
@@ -286,7 +284,6 @@ async def test_await_agent_ready_failure_sets_error_response():
             msg,
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=append,
             await_agent_ready=_await_ready,
@@ -320,7 +317,6 @@ async def test_cmd_manager_raises_returns_true_with_error():
             msg,
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=append,
         )
@@ -367,7 +363,6 @@ async def test_on_cmd_completed_awaited_with_ctx_original_agent_and_cmd():
             msg,
             agent="original-agent",
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=append,
             on_cmd_completed=_on_completed,
@@ -406,7 +401,6 @@ async def test_on_cmd_completed_receives_cmd_for_new_and_compact():
                 _make_msg(content=cmd_name),
                 agent="same-agent",
                 thread_id="t1",
-                workspace_dir=None,
                 checkpointer=None,
                 append_system=MagicMock(),
                 on_cmd_completed=_on_completed,
@@ -430,7 +424,6 @@ async def test_on_cmd_completed_skipped_on_fall_through_and_error():
             _make_msg(content="hi"),
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=MagicMock(),
             on_cmd_completed=_noop,
@@ -447,7 +440,6 @@ async def test_on_cmd_completed_skipped_on_fall_through_and_error():
             _make_msg(content="/nope"),
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=MagicMock(),
             on_cmd_completed=_noop,
@@ -468,7 +460,6 @@ async def test_on_cmd_completed_skipped_on_fall_through_and_error():
             _make_msg(),
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=MagicMock(),
             on_cmd_completed=_noop,
@@ -505,7 +496,7 @@ async def test_command_error_skips_completion_hook_and_reports_error():
             msg,
             agent=None,
             thread_id="old-thread",
-            workspace_dir="/old-workspace",
+            dirs=SessionDirs(Workspace("/old-workspace")),
             checkpointer=None,
             append_system=MagicMock(),
             on_cmd_completed=completed,
@@ -544,7 +535,7 @@ async def test_command_error_with_flushed_output_suppresses_second_error():
             msg,
             agent=None,
             thread_id="old-thread",
-            workspace_dir="/old-workspace",
+            dirs=SessionDirs(Workspace("/old-workspace")),
             checkpointer=None,
             append_system=MagicMock(),
         )
@@ -579,7 +570,7 @@ async def test_empty_command_error_still_reports_error():
             msg,
             agent=None,
             thread_id="old-thread",
-            workspace_dir="/old-workspace",
+            dirs=SessionDirs(Workspace("/old-workspace")),
             checkpointer=None,
             append_system=MagicMock(),
             on_cmd_completed=completed,
@@ -614,7 +605,6 @@ async def test_on_cmd_completed_exception_is_absorbed():
             msg,
             agent="orig",
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=MagicMock(),
             on_cmd_completed=_boom,
@@ -643,7 +633,6 @@ async def test_top_level_exception_is_absorbed():
             msg,
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=MagicMock(),
         )
@@ -676,9 +665,31 @@ async def test_cmd_execute_returning_false_falls_through():
             msg,
             agent=None,
             thread_id="t1",
-            workspace_dir=None,
             checkpointer=None,
             append_system=append,
         )
     assert handled is False
     mock_set_resp.assert_not_called()
+
+
+async def test_skill_slash_falls_through_to_the_agent():
+    """``/skill-name`` over a channel goes to the agent, not 'Unknown command'."""
+    msg = _make_msg(content="/paper-writing draft the intro")
+    append = MagicMock()
+    with (
+        patch("EvoScientist.commands.manager.manager.resolve", return_value=None),
+        patch(
+            "EvoScientist.commands.skill_slash.skill_slash_names",
+            return_value=["paper-writing"],
+        ),
+        patch("EvoScientist.cli.channel._set_channel_response") as mock_response,
+    ):
+        handled = await dispatch_channel_slash_command(
+            msg,
+            agent=None,
+            thread_id="t1",
+            checkpointer=None,
+            append_system=append,
+        )
+    assert handled is False
+    mock_response.assert_not_called()

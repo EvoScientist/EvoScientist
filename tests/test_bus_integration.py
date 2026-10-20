@@ -56,7 +56,7 @@ def clean_channel_state():
 class TestBusInboundConsumer:
     """Test the _bus_inbound_consumer queue bridge."""
 
-    async def test_processes_inbound_and_publishes_outbound(self):
+    async def test_processes_inbound_and_publishes_outbound(self, tmp_path):
         """InboundMessage -> queue -> response -> OutboundMessage flow."""
         from EvoScientist.cli.channel import (
             _bus_inbound_consumer,
@@ -67,7 +67,7 @@ class TestBusInboundConsumer:
         _drain_queue(_message_queue)
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -110,7 +110,7 @@ class TestBusInboundConsumer:
         except asyncio.CancelledError:
             pass
 
-    async def test_already_sent_sentinel_suppresses_reply(self):
+    async def test_already_sent_sentinel_suppresses_reply(self, tmp_path):
         """A command whose output already reached the channel must not get a
         second "Command executed" style reply from the consumer."""
         from EvoScientist.cli.channel import (
@@ -123,7 +123,7 @@ class TestBusInboundConsumer:
         _drain_queue(_message_queue)
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -157,7 +157,7 @@ class TestBusInboundConsumer:
         except asyncio.CancelledError:
             pass
 
-    async def test_no_response_fallback(self):
+    async def test_no_response_fallback(self, tmp_path):
         """Empty response is replaced with 'No response' fallback."""
         from EvoScientist.cli.channel import (
             _bus_inbound_consumer,
@@ -168,7 +168,7 @@ class TestBusInboundConsumer:
         _drain_queue(_message_queue)
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -204,7 +204,9 @@ class TestBusInboundConsumer:
         except asyncio.CancelledError:
             pass
 
-    async def test_late_response_after_timeout_still_publishes(self, monkeypatch):
+    async def test_late_response_after_timeout_still_publishes(
+        self, monkeypatch, tmp_path
+    ):
         """A response that arrives after the bridge timeout is still forwarded."""
         from EvoScientist.cli import channel as channel_mod
         from EvoScientist.cli.channel import (
@@ -219,7 +221,7 @@ class TestBusInboundConsumer:
         _drain_queue(_message_queue)
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -264,7 +266,9 @@ class TestBusInboundConsumer:
         except asyncio.CancelledError:
             pass
 
-    async def test_late_timeout_keeps_active_request_cancellable(self, monkeypatch):
+    async def test_late_timeout_keeps_active_request_cancellable(
+        self, monkeypatch, tmp_path
+    ):
         """Late timeout must not discard an active request's cancel scope."""
         from EvoScientist.cli import channel as channel_mod
         from EvoScientist.cli.channel import (
@@ -280,7 +284,7 @@ class TestBusInboundConsumer:
         monkeypatch.setattr(channel_mod, "_LATE_RESPONSE_TIMEOUT", 0.05)
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -335,13 +339,13 @@ class TestBusInboundConsumer:
         assert ack.reply_to == "msg-stop-active"
         assert display_mod.is_stream_cancel_requested(cancel_scope)
 
-    async def test_cancelled_wait_cleans_pending_response(self):
+    async def test_cancelled_wait_cleans_pending_response(self, tmp_path):
         """Cancelling a pending bus message should not leak its response slot."""
         from EvoScientist.cli import channel as channel_mod
         from EvoScientist.cli.channel import _handle_bus_message, _message_queue
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -374,13 +378,13 @@ class TestBusInboundConsumer:
         with channel_mod._response_lock:
             assert queued.msg_id not in channel_mod._pending_responses
 
-    async def test_consumer_shutdown_cleans_pending_response(self):
+    async def test_consumer_shutdown_cleans_pending_response(self, tmp_path):
         """Stopping the consumer should cancel late waits and clear state."""
         from EvoScientist.cli import channel as channel_mod
         from EvoScientist.cli.channel import _bus_inbound_consumer, _message_queue
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -410,7 +414,7 @@ class TestBusInboundConsumer:
         with channel_mod._response_lock:
             assert queued.msg_id not in channel_mod._pending_responses
 
-    async def test_stop_during_hitl_wait_releases_wait_and_acks(self):
+    async def test_stop_during_hitl_wait_releases_wait_and_acks(self, tmp_path):
         """`/stop` should wake a pending interaction wait and publish an ack.
 
         The bus consumer delivers ``/stop`` into the reply registry (so the
@@ -422,7 +426,7 @@ class TestBusInboundConsumer:
         from EvoScientist.cli.channel import _bus_inbound_consumer, _message_queue
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -459,7 +463,9 @@ class TestBusInboundConsumer:
         except asyncio.CancelledError:
             pass
 
-    async def test_stop_cancels_queued_request_before_main_thread_processes_it(self):
+    async def test_stop_cancels_queued_request_before_main_thread_processes_it(
+        self, tmp_path
+    ):
         """`/stop` should cancel a queued request instead of only acking."""
         from EvoScientist.cli import channel as channel_mod
         from EvoScientist.cli.channel import (
@@ -469,7 +475,7 @@ class TestBusInboundConsumer:
         )
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -576,7 +582,7 @@ class TestBusInboundConsumer:
         assert _pop_channel_response(msg.msg_id) == "final answer"
         _complete_channel_request(msg.msg_id)
 
-    async def test_message_counting(self):
+    async def test_message_counting(self, tmp_path):
         """Messages are counted via record_message."""
         from EvoScientist.cli.channel import (
             _bus_inbound_consumer,
@@ -587,7 +593,7 @@ class TestBusInboundConsumer:
         _drain_queue(_message_queue)
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 
@@ -621,7 +627,7 @@ class TestBusInboundConsumer:
         except asyncio.CancelledError:
             pass
 
-    async def test_channel_message_carries_metadata(self):
+    async def test_channel_message_carries_metadata(self, tmp_path):
         """ChannelMessage carries metadata, chat_id, and message_id."""
         from EvoScientist.cli.channel import (
             _bus_inbound_consumer,
@@ -632,7 +638,7 @@ class TestBusInboundConsumer:
         _drain_queue(_message_queue)
 
         bus = MessageBus()
-        manager = ChannelManager(bus)
+        manager = ChannelManager(bus, media_dir=tmp_path)
         ch = FakeChannel()
         manager.register(ch)
 

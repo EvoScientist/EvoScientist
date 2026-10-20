@@ -119,7 +119,7 @@ def check_ccproxy_auth(provider: str = "claude_api") -> tuple[bool, str]:
     """Check if ccproxy has valid OAuth credentials.
 
     Args:
-        provider: ccproxy provider name ("claude_api" or "codex").
+        provider: ccproxy provider name.
 
     Returns:
         (is_valid, message) tuple.
@@ -183,22 +183,6 @@ def is_ccproxy_running(port: int) -> bool:
         return False
 
 
-# Codex plugin defaults overridden through ccproxy's env layer (``__`` nests
-# keys), which sits on top of whatever config file ccproxy discovers itself:
-#
-# - ``model_mappings``: rewrites any ``gpt-*``/``o1-*``/``o3-*``/``claude-*``
-#   model to ``gpt-5.3-codex`` before forwarding — silently overriding the
-#   model the user configured (and failing outright on accounts where
-#   ``gpt-5.3-codex`` is not served).
-# - ``inject_detection_payload``: prepends the Codex CLI system prompt to
-#   every request, which tells the model to edit files with an
-#   ``apply_patch`` tool EvoScientist does not provide.
-_CCPROXY_CODEX_ENV_OVERRIDES = {
-    "PLUGINS__CODEX__MODEL_MAPPINGS": "[]",
-    "PLUGINS__CODEX__INJECT_DETECTION_PAYLOAD": "false",
-}
-
-
 def start_ccproxy(port: int) -> subprocess.Popen:
     """Start ccproxy serve as a background process.
 
@@ -215,7 +199,6 @@ def start_ccproxy(port: int) -> subprocess.Popen:
     """
     exe = _ccproxy_exe() or "ccproxy"
     cmd = [exe, "serve", "--port", str(port)]
-    env = {**os.environ, **_CCPROXY_CODEX_ENV_OVERRIDES}
     logger.warning(
         "Starting ccproxy on port %d; first startup may take up to %d seconds",
         port,
@@ -223,20 +206,25 @@ def start_ccproxy(port: int) -> subprocess.Popen:
     )
     proc = subprocess.Popen(
         cmd,
-        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
     deadline = time.monotonic() + _CCPROXY_HEALTH_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"ccproxy exited immediately with code {proc.returncode}"
-            )
-        if is_ccproxy_running(port):
-            return proc
-        time.sleep(0.3)
+    try:
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"ccproxy exited immediately with code {proc.returncode}"
+                )
+            if is_ccproxy_running(port):
+                return proc
+            time.sleep(0.3)
+    except BaseException:
+        # Ctrl+C or an error during the wait: the caller never gets the
+        # handle, so nobody else could stop this process.
+        stop_ccproxy(proc)
+        raise
 
     # Timed out — clean up
     proc.terminate()
@@ -297,35 +285,15 @@ def setup_ccproxy_env(port: int) -> None:
     os.environ["ANTHROPIC_API_KEY"] = "ccproxy-oauth"
 
 
-def setup_codex_env(port: int) -> None:
-    """Set environment variables for OpenAI/Codex ccproxy routing.
-
-    Force-sets ``OPENAI_BASE_URL`` and ``OPENAI_API_KEY`` so that
-    downstream LangChain/OpenAI clients route through ccproxy's Codex
-    endpoint.
-
-    Always overrides existing values — when this function is called,
-    we've decided to use ccproxy, so env must point to it.
-    """
-    os.environ["OPENAI_BASE_URL"] = f"http://127.0.0.1:{port}/codex/v1"
-    os.environ["OPENAI_API_KEY"] = "ccproxy-oauth"
-
-
 # =============================================================================
 # High-level orchestration
 # =============================================================================
 
 
 def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
-    """High-level: conditionally start ccproxy based on config.
+    """Start ccproxy when Anthropic uses OAuth.
 
-    Checks ``config.anthropic_auth_mode`` and ``config.openai_auth_mode``:
-    - ``oauth``: ccproxy must work — raises on failure.
-    - ``api_key``: no-op for that provider.
-
-    When either provider uses OAuth, ccproxy is started (single process
-    serves both providers). Environment variables are set for each
-    provider that uses OAuth.
+    OpenAI's OAuth mode signs in to ChatGPT directly and needs no proxy.
 
     Args:
         config: An ``EvoScientistConfig`` instance.
@@ -333,10 +301,7 @@ def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
     Returns:
         Popen handle if we started ccproxy, None otherwise.
     """
-    anthropic_oauth = getattr(config, "anthropic_auth_mode", "api_key") == "oauth"
-    openai_oauth = getattr(config, "openai_auth_mode", "api_key") == "oauth"
-
-    if not anthropic_oauth and not openai_oauth:
+    if getattr(config, "anthropic_auth_mode", "api_key") != "oauth":
         return None
 
     if not is_ccproxy_available():
@@ -345,35 +310,19 @@ def maybe_start_ccproxy(config: EvoScientistConfig) -> subprocess.Popen | None:
             f"Install it with: {_oauth_install_hint()}"
         )
 
-    # Check auth for each provider that uses OAuth
-    if anthropic_oauth:
-        authed, msg = check_ccproxy_auth("claude_api")
-        if not authed:
-            raise RuntimeError(
-                f"ccproxy Anthropic OAuth not authenticated: {msg}\n"
-                "Run: ccproxy auth login claude_api"
-            )
-
-    if openai_oauth:
-        authed, msg = check_ccproxy_auth("codex")
-        if not authed:
-            raise RuntimeError(
-                f"ccproxy Codex OAuth not authenticated: {msg}\n"
-                "Run: ccproxy auth login codex"
-            )
+    authed, msg = check_ccproxy_auth("claude_api")
+    if not authed:
+        raise RuntimeError(
+            f"ccproxy Anthropic OAuth not authenticated: {msg}\n"
+            "Run: ccproxy auth login claude_api"
+        )
 
     port = config.ccproxy_port
     if not (1 <= port <= 65535):
         raise ValueError(f"Invalid ccproxy port: {port}. Must be between 1 and 65535.")
 
-    # Start ccproxy (single process serves both providers)
     proc = ensure_ccproxy(port)
-
-    # Set environment for each OAuth provider
-    if anthropic_oauth:
-        setup_ccproxy_env(port)
-    if openai_oauth:
-        setup_codex_env(port)
+    setup_ccproxy_env(port)
 
     if proc:
         logger.info("Started ccproxy on port %d", port)

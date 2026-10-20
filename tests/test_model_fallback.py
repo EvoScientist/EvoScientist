@@ -234,6 +234,145 @@ class TestTryFallbacks:
 
         assert exc_info.value is last_error
 
+    async def test_an_exhausted_chain_lists_every_models_failure(self):
+        """The error that ends the chain carries each model's failure, primary first."""
+        from EvoScientist.middleware.model_fallback import chain_failures
+
+        add_fallback("fb-a", "prov-a")
+        add_fallback("fb-b", "prov-b")
+        primary, first, last = (Exception(f"50{i} boom") for i in range(3))
+        errors = iter([first, last])
+
+        async def _invoke(r):
+            raise next(errors)
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            with pytest.raises(Exception, match="502 boom") as exc_info:
+                await _try_fallbacks(_fake_request(), _invoke, primary, _SINK)
+
+        assert chain_failures(exc_info.value) == (primary, first, last)
+        assert chain_failures(primary) == ()
+
+    @pytest.mark.parametrize("built_before", [0, 1])
+    async def test_an_entry_that_cannot_be_built_is_a_failure_of_its_own(
+        self, built_before
+    ):
+        """A fallback entry whose model cannot be constructed (a missing base
+        URL, say) fails as itself: not as an unbound name, and not as the
+        model of the entry before it."""
+        from EvoScientist.middleware.model_fallback import chain_failures
+
+        for index in range(built_before):
+            add_fallback(f"fb-{index}", "prov")
+        add_fallback("fb-broken", "prov")
+        primary = Exception("503 primary")
+        broken = ValueError("custom-openai needs a base URL")
+        earlier = Exception("502 earlier fallback")
+        built = [MagicMock(name=f"model-{index}") for index in range(built_before)]
+        requests = []
+
+        def _build(model, provider):
+            if model == "fb-broken":
+                raise broken
+            return built[int(model.removeprefix("fb-"))]
+
+        req = MagicMock()
+        req.model = MagicMock(name="primary-model")
+
+        def _override(model):
+            made = MagicMock()
+            made.model = model
+            requests.append(made)
+            return made
+
+        req.override = _override
+
+        async def _invoke(r):
+            raise earlier
+
+        normalized = []
+
+        def _normalize(request, exc):
+            normalized.append((getattr(request, "model", None), exc))
+            return None
+
+        with (
+            patch("EvoScientist.llm.models.get_chat_model", side_effect=_build),
+            patch(
+                "EvoScientist.middleware.error_normalization._normalize",
+                side_effect=_normalize,
+            ),
+            pytest.raises(ValueError, match="base URL") as exc_info,
+        ):
+            await _try_fallbacks(req, _invoke, primary, _SINK)
+
+        assert exc_info.value is broken
+        failures = chain_failures(exc_info.value)
+        assert failures[0] is primary
+        assert failures[-1] is broken
+        assert len(failures) == built_before + 2
+        # The broken entry has no model: it is never attributed to another one.
+        assert [model for model, exc in normalized if exc is broken] == [None, None]
+
+    @pytest.mark.parametrize(
+        ("stopping", "listed"),
+        [("400: invalid_request_error", True), ("400: context_length_exceeded", False)],
+        ids=["a rejected request", "a context overflow"],
+    )
+    async def test_an_aborted_chain_lists_the_failures_so_far(self, stopping, listed):
+        """A fallback that stops the chain ends it, and the primary's failure
+        still travels with it; an overflow goes out alone, to be compacted."""
+        from EvoScientist.middleware.model_fallback import chain_failures
+
+        add_fallback("fb-a", "prov-a")
+        add_fallback("fb-b", "prov-b")
+        primary = Exception("503 primary")
+        stopped = Exception(stopping)
+
+        async def _invoke(r):
+            raise stopped
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            with pytest.raises(Exception, match="400") as exc_info:
+                await _try_fallbacks(_fake_request(), _invoke, primary, _SINK)
+
+        assert chain_failures(exc_info.value) == ((primary, stopped) if listed else ())
+
+    def test_the_list_is_read_through_explicit_wrappers_only(self):
+        """An outer layer that re-raises ``from`` the chain's error keeps the
+        list; an error merely raised while handling it has none."""
+        from EvoScientist.middleware.model_fallback import chain_failures
+
+        listed = RuntimeError("chain exhausted")
+        listed.chain_failures = (RuntimeError("primary"), RuntimeError("fallback"))
+
+        def _wrapped(times):
+            exc = listed
+            for _ in range(times):
+                try:
+                    raise ValueError("wrapper") from exc
+                except ValueError as wrapper:
+                    exc = wrapper
+            return exc
+
+        assert chain_failures(_wrapped(1)) == listed.chain_failures
+        assert chain_failures(_wrapped(2)) == listed.chain_failures
+
+        def _raised_while_handling():
+            try:
+                try:
+                    raise listed
+                except RuntimeError:
+                    raise KeyError("unrelated")  # noqa: B904 - the implicit context is the point
+            except KeyError as unrelated:
+                return unrelated
+
+        unrelated = _raised_while_handling()
+        assert unrelated.__context__ is listed
+        assert chain_failures(unrelated) == ()
+
     async def test_non_fallbackable_in_chain_aborts_immediately(self):
         """A non-fallbackable error from a fallback model aborts the chain."""
         add_fallback("fb-a", "prov-a")
@@ -449,6 +588,82 @@ class TestSynchronousFallback:
             result = _try_fallbacks_sync(req, invoke, Exception("503 boom"), _SINK)
 
         assert result is AI_RESPONSE
+        invoke.assert_called_once()
+
+    def test_an_exhausted_chain_lists_every_models_failure(self):
+        from EvoScientist.middleware.model_fallback import chain_failures
+
+        add_fallback("fb", "prov")
+        primary, last = Exception("503 boom"), Exception("401 no")
+        invoke = MagicMock(side_effect=last)
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            with pytest.raises(Exception, match="401 no") as exc_info:
+                _try_fallbacks_sync(_fake_request(), invoke, primary, _SINK)
+
+        assert chain_failures(exc_info.value) == (primary, last)
+
+    @pytest.mark.parametrize("built_before", [0, 1])
+    def test_an_entry_that_cannot_be_built_is_a_failure_of_its_own(self, built_before):
+        from EvoScientist.middleware.model_fallback import chain_failures
+
+        for index in range(built_before):
+            add_fallback(f"fb-{index}", "prov")
+        add_fallback("fb-broken", "prov")
+        primary = Exception("503 primary")
+        broken = ValueError("custom-openai needs a base URL")
+        invoke = MagicMock(side_effect=Exception("502 earlier fallback"))
+        normalized = []
+
+        def _build(model, provider):
+            if model == "fb-broken":
+                raise broken
+            return MagicMock(name=model)
+
+        def _normalize(request, exc):
+            normalized.append((request, exc))
+            return None
+
+        with (
+            patch("EvoScientist.llm.models.get_chat_model", side_effect=_build),
+            patch(
+                "EvoScientist.middleware.error_normalization._normalize",
+                side_effect=_normalize,
+            ),
+            pytest.raises(ValueError, match="base URL") as exc_info,
+        ):
+            _try_fallbacks_sync(_fake_request(), invoke, primary, _SINK)
+
+        assert exc_info.value is broken
+        failures = chain_failures(exc_info.value)
+        assert failures[0] is primary
+        assert failures[-1] is broken
+        assert len(failures) == built_before + 2
+        assert invoke.call_count == built_before
+        # No request at all: not the one of the fallback that was built before it.
+        assert [request for request, exc in normalized if exc is broken] == [None, None]
+
+    @pytest.mark.parametrize(
+        ("stopping", "listed"),
+        [("400: invalid_request_error", True), ("400: context_length_exceeded", False)],
+        ids=["a rejected request", "a context overflow"],
+    )
+    def test_an_aborted_chain_lists_the_failures_so_far(self, stopping, listed):
+        from EvoScientist.middleware.model_fallback import chain_failures
+
+        add_fallback("fb-a", "prov-a")
+        add_fallback("fb-b", "prov-b")
+        primary = Exception("503 primary")
+        stopped = Exception(stopping)
+        invoke = MagicMock(side_effect=stopped)
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.return_value = MagicMock()
+            with pytest.raises(Exception, match="400") as exc_info:
+                _try_fallbacks_sync(_fake_request(), invoke, primary, _SINK)
+
+        assert chain_failures(exc_info.value) == ((primary, stopped) if listed else ())
         invoke.assert_called_once()
 
     def test_guard_rejects_non_fallbackable_error_before_handler(self):
@@ -853,7 +1068,7 @@ class TestExplicitSeeding:
             seed_fallback_chain(cfg)
         assert get_fallback_chain() == [("cfg-a", "prov-a")]
 
-    def test_pure_path_agent_construction_seeds_from_caller_config(self, tmp_path):
+    def test_pure_path_agent_construction_seeds_from_caller_config(self, workspace):
         """create_cli_agent(config=..., chat_model=...) - the pure path -
         seeds the chain from the caller's config via the middleware factory,
         never from disk."""
@@ -900,13 +1115,13 @@ class TestExplicitSeeding:
                         ):
                             _reset_chain_initialization()
                             es_mod.create_cli_agent(
-                                workspace_dir=str(tmp_path),
+                                workspace=workspace,
                                 config=cfg,
                                 chat_model=MagicMock(),
                             )
         assert get_fallback_chain() == [("cfg-a", "prov-a")]
 
-    def test_factory_seeds_chain_from_its_cfg(self):
+    def test_factory_seeds_chain_from_its_cfg(self, workspace):
         """_get_default_middleware seeds the chain from its resolved cfg —
         the single seeding site that covers every graph load path (main,
         sync/async subagents) regardless of how the graph is loaded."""
@@ -924,14 +1139,14 @@ class TestExplicitSeeding:
                 "EvoScientist.EvoScientist._ensure_chat_model",
                 return_value=MagicMock(profile={"max_input_tokens": 200_000}),
             ):
-                _get_default_middleware(cfg=cfg)
+                _get_default_middleware(workspace=workspace, cfg=cfg)
             never_disk.assert_not_called()
         assert get_fallback_chain() == [
             ("factory-a", "prov-a"),
             ("factory-b", "prov-b"),
         ]
 
-    def test_second_factory_call_does_not_reseed(self):
+    def test_second_factory_call_does_not_reseed(self, workspace):
         """A later graph build through the factory (different cfg) must not
         re-seed: first-touch only, so /model-fallback session edits survive
         every rebuild."""
@@ -954,11 +1169,11 @@ class TestExplicitSeeding:
             "EvoScientist.EvoScientist._ensure_chat_model",
             return_value=MagicMock(profile={"max_input_tokens": 200_000}),
         ):
-            _get_default_middleware(cfg=cfg_v1)
+            _get_default_middleware(workspace=workspace, cfg=cfg_v1)
             # Session edit between builds.
             assert add_fallback("session", "prov-s") is True
             # Rebuild with a different config: first-touch guard must hold.
-            _get_default_middleware(cfg=cfg_v2)
+            _get_default_middleware(workspace=workspace, cfg=cfg_v2)
         assert get_fallback_chain() == [
             ("cfg-a", "prov-a"),
             ("session", "prov-s"),

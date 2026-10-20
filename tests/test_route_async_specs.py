@@ -41,16 +41,16 @@ def _skill(name: str) -> SkillInfo:
 
 
 class TestBuildExpertAsyncSubagentSpecs:
-    def test_empty_when_async_disabled(self):
+    def test_empty_when_async_disabled(self, workspace):
         cfg = SimpleNamespace(enable_async_subagents=False)
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[_skill("literature-review")],
         ):
-            specs = build_expert_async_subagent_specs(cfg=cfg)
+            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         assert specs == []
 
-    def test_empty_when_langgraph_dev_unreachable(self):
+    def test_empty_when_langgraph_dev_unreachable(self, workspace):
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         with (
             patch(
@@ -62,10 +62,10 @@ class TestBuildExpertAsyncSubagentSpecs:
                 return_value=False,
             ),
         ):
-            specs = build_expert_async_subagent_specs(cfg=cfg)
+            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         assert specs == []
 
-    def test_every_expert_gets_a_background_reach(self):
+    def test_every_expert_gets_a_background_reach(self, workspace):
         """No classification: every installed expert becomes an AsyncSubAgent spec."""
         cfg = SimpleNamespace(enable_async_subagents=True, langgraph_dev_port=6174)
         skills = [
@@ -83,7 +83,7 @@ class TestBuildExpertAsyncSubagentSpecs:
                 return_value=True,
             ),
         ):
-            specs = build_expert_async_subagent_specs(cfg=cfg)
+            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         assert {s["name"] for s in specs} == {
             "idea-brainstorm",
             "literature-review",
@@ -94,7 +94,7 @@ class TestBuildExpertAsyncSubagentSpecs:
             assert spec["is_expert"] is True
             assert "http://localhost:6174" in spec["url"]
 
-    def test_empty_body_experts_skipped(self):
+    def test_empty_body_experts_skipped(self, workspace):
         """Empty-body async experts are filtered out at spec-build time so
         ``start_async_task``'s tool schema never advertises a broken skill.
         Mirrors the sync fold-in in
@@ -117,10 +117,10 @@ class TestBuildExpertAsyncSubagentSpecs:
                 return_value=True,
             ),
         ):
-            specs = build_expert_async_subagent_specs(cfg=cfg)
+            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         assert [s["name"] for s in specs] == ["literature-review"]
 
-    def test_expert_md_expert_registered_and_gated_on_its_own_file(self):
+    def test_expert_md_expert_registered_and_gated_on_its_own_file(self, workspace):
         """EXPERT.md experts reach async dispatch, and their gate is EXPERT.md.
 
         The empty-persona gate has to follow the skill's contract: a healthy
@@ -143,10 +143,10 @@ class TestBuildExpertAsyncSubagentSpecs:
                 return_value=True,
             ),
         ):
-            specs = build_expert_async_subagent_specs(cfg=cfg)
+            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         assert [s["name"] for s in specs] == ["paper-review"]
 
-    def test_reserved_name_collision_skipped(self, caplog):
+    def test_reserved_name_collision_skipped(self, caplog, workspace):
         """A skill named after a yaml async sub-agent (or ``general-purpose``)
         must skip async-dispatch registration with a warning, not raise. Without
         this guard ``AsyncSubAgentMiddleware.__init__`` would ``ValueError:
@@ -177,14 +177,14 @@ class TestBuildExpertAsyncSubagentSpecs:
                 logger="EvoScientist.subagents.expert_container_async",
             ),
         ):
-            specs = build_expert_async_subagent_specs(cfg=cfg)
+            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         assert [s["name"] for s in specs] == ["literature-review"]
         assert any(
             "writing-agent" in r.message and "collides" in r.message
             for r in caplog.records
         )
 
-    def test_workspace_duplicate_name_skipped(self, caplog):
+    def test_workspace_duplicate_name_skipped(self, caplog, workspace):
         """Two workspace-tier expert skills sharing a frontmatter ``name`` must
         register only the first — the workspace listing uses
         ``check_seen=False`` so both survive to this point. Without a local
@@ -215,7 +215,7 @@ class TestBuildExpertAsyncSubagentSpecs:
                 logger="EvoScientist.subagents.expert_container_async",
             ),
         ):
-            specs = build_expert_async_subagent_specs(cfg=cfg)
+            specs = build_expert_async_subagent_specs(cfg=cfg, workspace=workspace)
         # Only the first `literature-review` survives.
         assert [s["name"] for s in specs] == ["literature-review"]
         assert any(
@@ -238,7 +238,7 @@ class TestBuildExpertSubagentSpecsCoversEveryExpert:
     the async list alone, so one expert holding both reaches never collides.
     """
 
-    def test_every_expert_gets_an_in_turn_reach(self):
+    def test_every_expert_gets_an_in_turn_reach(self, workspace):
         skills = [
             _skill("idea-brainstorm"),
             _skill("literature-review"),
@@ -248,7 +248,7 @@ class TestBuildExpertSubagentSpecsCoversEveryExpert:
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=skills,
         ):
-            specs = build_expert_subagent_specs(tool_registry={})
+            specs = build_expert_subagent_specs(tool_registry={}, workspace=workspace)
         assert {s["name"] for s in specs} == {
             "idea-brainstorm",
             "literature-review",
@@ -277,7 +277,7 @@ class TestRouteAsyncSpecs:
             enable_async_subagents=enable_async, langgraph_dev_port=port
         )
 
-    def test_sync_subagents_pass_through(self):
+    def test_sync_subagents_pass_through(self, workspace):
         from EvoScientist.EvoScientist import _route_async_specs_through_evo_middleware
 
         subs = [{"name": "sync-a", "system_prompt": ""}]
@@ -288,12 +288,12 @@ class TestRouteAsyncSpecs:
             return_value=False,
         ):
             result = _route_async_specs_through_evo_middleware(
-                subs, middleware, cfg=self._cfg(enable_async=False)
+                subs, middleware, workspace=workspace, cfg=self._cfg(enable_async=False)
             )
         assert result == [{"name": "sync-a", "system_prompt": ""}]
         assert middleware == []  # no async → no middleware added
 
-    def test_async_specs_moved_to_middleware(self):
+    def test_async_specs_moved_to_middleware(self, workspace):
         from EvoScientist.EvoScientist import _route_async_specs_through_evo_middleware
         from EvoScientist.middleware.expert_async_subagent import (
             EvoAsyncSubAgentMiddleware,
@@ -315,7 +315,7 @@ class TestRouteAsyncSpecs:
             return_value=False,
         ):
             result = _route_async_specs_through_evo_middleware(
-                subs, middleware, cfg=self._cfg(enable_async=False)
+                subs, middleware, workspace=workspace, cfg=self._cfg(enable_async=False)
             )
         # `writing-agent` stripped from subs (it has graph_id).
         assert [s["name"] for s in result] == ["sync-a"]
@@ -323,7 +323,7 @@ class TestRouteAsyncSpecs:
         assert len(middleware) == 1
         assert isinstance(middleware[0], EvoAsyncSubAgentMiddleware)
 
-    def test_expert_async_specs_merged_in(self):
+    def test_expert_async_specs_merged_in(self, workspace):
         from EvoScientist.EvoScientist import _route_async_specs_through_evo_middleware
         from EvoScientist.middleware.expert_async_subagent import (
             EvoAsyncSubAgentMiddleware,
@@ -344,7 +344,7 @@ class TestRouteAsyncSpecs:
             ),
         ):
             result = _route_async_specs_through_evo_middleware(
-                subs, middleware, cfg=cfg
+                subs, middleware, workspace=workspace, cfg=cfg
             )
         # sync-a stays; the expert spec is routed into EvoAsyncSubAgentMiddleware.
         # Expert completions are detected from thread state by the reader, so no

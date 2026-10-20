@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
 import re
@@ -76,6 +77,20 @@ Profile update scope:
   command output, or temporary run context, leave profile files unchanged.
 """
 
+# Variant for model calls that carry no tools: the paths stay, the read and
+# edit guidance goes (a model told to edit a file it cannot reach acts the
+# edit out as text).
+PROFILE_MEMORY_INSTRUCTIONS_NO_TOOLS = """
+These profile notes live under `/memories/profile/`:
+- `/memories/profile/SOUL.md`: how this copy should usually behave; voice and boundaries.
+- `/memories/profile/USER_PROFILE.md`: facts and preferences about the user.
+- `/memories/profile/RESEARCH_TASTE.md`: research interests, standards, methods that fit, and things to avoid.
+- `/memories/profile/projects/{project_id}/PROJECT_PROFILE.md`: conventions, commands, and pitfalls for this workspace.
+
+No file tools are available on this turn; use the profile context below as it is,
+and do not try to read a part marked as omitted.
+"""
+
 OBSERVATION_MEMORY_READ_INSTRUCTIONS = """
 Observation memory lives under `/memories/observations/`:
 - `/memories/observations/global/`: cross-project observations.
@@ -97,6 +112,18 @@ Required memory preflight:
   the actual workspace work as appropriate.
 - Mention the result briefly before continuing: observation IDs used, or that
   no relevant observation was found. Keep this preflight short.
+"""
+
+# Variant for model calls that carry no tools (e.g. a proactive shadow turn):
+# the preflight above would tell the model to call tools it does not have, which
+# it then acts out as text instead of answering.
+OBSERVATION_MEMORY_READ_INSTRUCTIONS_NO_TOOLS = """
+Observation memory lives under `/memories/observations/`:
+- `/memories/observations/global/`: cross-project observations.
+- `/memories/observations/projects/{project_id}/`: observations for this workspace.
+
+No memory tools are available on this turn. The inlined observation index below
+is the memory in context for this reply; use it directly.
 """
 
 OBSERVATION_MEMORY_WRITE_INSTRUCTIONS = """
@@ -315,6 +342,17 @@ def _apply_bootstrap_view(
     return merged
 
 
+def _request_has_tools(request: ModelRequest) -> bool:
+    """True when the model request carries at least one tool.
+
+    A request with no tools (a proactive shadow turn strips them all) must not
+    receive tool-usage directives: a model told to run a memory preflight with
+    no tools acts it out as text instead of answering. ``ModelRequest`` always
+    holds a list here.
+    """
+    return bool(request.tools)
+
+
 def _current_thread_id() -> str | None:
     """Thread id of the running graph, or None outside a runnable context."""
     try:
@@ -507,7 +545,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self,
         *,
         memory_dir: str | Path,
-        workspace_dir: str | Path | None = None,
+        workspace_dir: str | Path,
         max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
         source_type: MemorySourceType = MemorySourceType.TURN,
         source_agent: str = "EvoScientist",
@@ -518,7 +556,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_profile_bootstrap: bool = False,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
-        workspace = Path(workspace_dir or _paths.WORKSPACE_ROOT).expanduser()
+        workspace = Path(workspace_dir).expanduser()
         self._workspace_dir = workspace
         self._project_id = resolve_project_id(workspace)
         self._enable_profile_memory = enable_profile_memory
@@ -820,7 +858,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return PROFILE_BOOTSTRAP_RETRY
         return ""
 
-    def _refresh_observation_index_context(self) -> str:
+    def _refresh_observation_index_context(
+        self, *, include_search_hints: bool = True
+    ) -> str:
         """Refresh the prompt observation index from current memory files."""
         if not self._enable_observation_memory:
             return ""
@@ -829,6 +869,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             context = build_observation_index_context(
                 memory_dir=self._memory_dir,
                 project_id=self._project_id,
+                include_search_hints=include_search_hints,
             )
         except OSError as e:
             logger.warning("Failed to refresh observation memory index: %s", e)
@@ -839,9 +880,14 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._observation_index_context = context
         return context
 
-    def _observation_memory_instructions(self) -> str:
+    def _observation_memory_instructions(self, *, tools_available: bool = True) -> str:
         if not self._enable_observation_memory:
             return ""
+        if not tools_available:
+            # No tool directives (preflight / record) on a tool-less call.
+            return OBSERVATION_MEMORY_READ_INSTRUCTIONS_NO_TOOLS.format(
+                project_id=self._project_id
+            )
 
         instructions = OBSERVATION_MEMORY_READ_INSTRUCTIONS.format(
             project_id=self._project_id
@@ -850,14 +896,21 @@ class EvoMemoryMiddleware(AgentMiddleware):
             return instructions
         return instructions + OBSERVATION_MEMORY_WRITE_INSTRUCTIONS
 
-    def _memory_instructions_context(self) -> str:
+    def _memory_instructions_context(self, *, tools_available: bool = True) -> str:
         """Return static memory instructions for enabled memory features."""
         instructions = []
         if self._enable_profile_memory:
-            instructions.append(
-                PROFILE_MEMORY_INSTRUCTIONS.format(project_id=self._project_id)
+            profile_instructions = (
+                PROFILE_MEMORY_INSTRUCTIONS
+                if tools_available
+                else PROFILE_MEMORY_INSTRUCTIONS_NO_TOOLS
             )
-        if observation_instructions := self._observation_memory_instructions():
+            instructions.append(
+                profile_instructions.format(project_id=self._project_id)
+            )
+        if observation_instructions := self._observation_memory_instructions(
+            tools_available=tools_available
+        ):
             instructions.append(observation_instructions)
         if not instructions:
             return ""
@@ -887,12 +940,13 @@ class EvoMemoryMiddleware(AgentMiddleware):
         observation_index_context: str,
         profile_content: str,
         bootstrap_context: str = "",
+        tools_available: bool = True,
     ) -> str:
         """Build request memory context ordered from static to dynamic."""
         return "\n\n".join(
             part
             for part in (
-                self._memory_instructions_context(),
+                self._memory_instructions_context(tools_available=tools_available),
                 observation_index_context,
                 self._profile_memory_context(profile_content),
                 bootstrap_context.strip(),
@@ -916,6 +970,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
             observation_index_context=observation_index_context,
             profile_content=profile_content,
             bootstrap_context=bootstrap_context,
+            tools_available=_request_has_tools(request),
         )
         new_system = append_to_system_message(request.system_message, injection)
         return request.override(system_message=new_system)
@@ -930,7 +985,9 @@ class EvoMemoryMiddleware(AgentMiddleware):
         profile_content = self._profile_context_for_request()
         return self._inject_memory_context(
             request,
-            observation_index_context=self._refresh_observation_index_context(),
+            observation_index_context=self._refresh_observation_index_context(
+                include_search_hints=_request_has_tools(request)
+            ),
             profile_content=profile_content,
             bootstrap_context=self._bootstrap_context(
                 thread_id=_current_thread_id(),
@@ -946,16 +1003,18 @@ class EvoMemoryMiddleware(AgentMiddleware):
         # Resolved on the event-loop thread: get_config() reads a contextvar.
         thread_id = _current_thread_id()
         human_messages = _count_human_messages(request.state)
+        refresh_index = functools.partial(
+            self._refresh_observation_index_context,
+            include_search_hints=_request_has_tools(request),
+        )
 
         if self._enable_observation_memory and self._enable_profile_memory:
             observation_index_context, profile_context = await asyncio.gather(
-                asyncio.to_thread(self._refresh_observation_index_context),
+                asyncio.to_thread(refresh_index),
                 asyncio.to_thread(self._read_profile_memory),
             )
         elif self._enable_observation_memory:
-            observation_index_context = await asyncio.to_thread(
-                self._refresh_observation_index_context
-            )
+            observation_index_context = await asyncio.to_thread(refresh_index)
         elif self._enable_profile_memory:
             profile_context = await asyncio.to_thread(self._read_profile_memory)
 
@@ -993,7 +1052,8 @@ class EvoMemoryMiddleware(AgentMiddleware):
 
 def create_memory_middleware(
     memory_dir: str | None = None,
-    workspace_dir: str | Path | None = None,
+    *,
+    workspace_dir: str | Path,
     max_inline_profile_chars: int = DEFAULT_MAX_INLINE_PROFILE_CHARS,
     source_type: MemorySourceType = MemorySourceType.TURN,
     source_agent: str = "EvoScientist",

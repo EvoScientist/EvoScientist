@@ -6,8 +6,13 @@ import asyncio
 import logging
 from functools import cache
 from pathlib import Path
+from typing import Annotated, NotRequired
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    PrivateStateAttr,
+)
 from langgraph.runtime import Runtime
 
 from .. import paths as _paths
@@ -28,25 +33,40 @@ def default_memory_scheduler() -> MemoryScheduler:
     return MemoryScheduler(launch_linker=launch_observation_linker)
 
 
+class _LifecycleState(AgentState):
+    # Id of the thread's last message when a run last reached this hook.
+    # Private: sub-agents carry this middleware too.
+    _memory_last_exit: NotRequired[Annotated[str | None, PrivateStateAttr]]
+
+
+def _last_message_id(state: AgentState[object]) -> str | None:
+    messages = state.get("messages") or []
+    message_id = getattr(messages[-1], "id", None) if messages else None
+    return message_id if isinstance(message_id, str) and message_id else None
+
+
 class EvoMemoryLifecycleMiddleware(AgentMiddleware):
-    """Schedule post-turn and post-subagent memory workers."""
+    """Schedule post-turn and post-subagent memory workers.
+
+    A run that added nothing to the conversation (it ended in a start hook)
+    launches no worker: its context would be the previous turn again.
+    """
 
     name = "evomemory_lifecycle"
+    state_schema = _LifecycleState
 
     def __init__(
         self,
         *,
         memory_dir: str | Path,
-        workspace_dir: str | Path | None = None,
+        workspace_dir: str | Path,
         project_id: str,
         source_type: MemorySourceType,
         source_agent: str,
         memory_scheduler: MemoryScheduler | None = None,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
-        self._workspace_dir = Path(
-            _paths.WORKSPACE_ROOT if workspace_dir is None else workspace_dir
-        ).expanduser()
+        self._workspace_dir = Path(workspace_dir).expanduser()
         self._project_id = project_id
         self._source_type = source_type
         self._source_agent = source_agent
@@ -61,6 +81,10 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
+        last_id = _last_message_id(state)
+        if last_id is not None and state.get("_memory_last_exit") == last_id:
+            self._memory_scheduler.flush_ready()
+            return None
         context = build_memory_source_context(
             state=state,
             runtime=runtime,
@@ -84,13 +108,17 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
                 self._memory_scheduler.flush_ready()
         else:
             self._memory_scheduler.flush_ready()
-        return None
+        return {"_memory_last_exit": last_id} if last_id is not None else None
 
     async def aafter_agent(
         self,
         state: AgentState[object],
         runtime: Runtime,
     ) -> dict[str, object] | None:
+        last_id = _last_message_id(state)
+        if last_id is not None and state.get("_memory_last_exit") == last_id:
+            await asyncio.to_thread(self._memory_scheduler.flush_ready)
+            return None
         context = build_memory_source_context(
             state=state,
             runtime=runtime,
@@ -114,13 +142,13 @@ class EvoMemoryLifecycleMiddleware(AgentMiddleware):
                 await asyncio.to_thread(self._memory_scheduler.flush_ready)
         else:
             await asyncio.to_thread(self._memory_scheduler.flush_ready)
-        return None
+        return {"_memory_last_exit": last_id} if last_id is not None else None
 
 
 def create_memory_lifecycle_middleware(
     memory_dir: str | None = None,
     *,
-    workspace_dir: str | Path | None = None,
+    workspace_dir: str | Path,
     project_id: str,
     source_type: MemorySourceType,
     source_agent: str,

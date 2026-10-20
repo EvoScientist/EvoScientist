@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ..gateway import GraphGateway
@@ -29,6 +30,7 @@ class StreamingTUIBackend(Protocol):
         on_thinking: Callable[[str], None] | None = None,
         on_todo: Callable[[list[dict]], None] | None = None,
         on_file_write: Callable[[str], None] | None = None,
+        work_dir: str | Path | None = None,
         on_stream_event: Callable[[str, Any], Any] | None = None,
         status_footer_builder: Callable[[], Any] | None = None,
         metadata: dict | None = None,
@@ -39,6 +41,9 @@ class StreamingTUIBackend(Protocol):
         cancel_scope: str | None = None,
         gateway: GraphGateway,
         runtime: AsyncRuntime | None = None,
+        rubric: str | None = None,
+        approve_all_at_start: bool = False,
+        goal_request: dict[str, Any] | None = None,
     ) -> str:
         """Run streaming and return final response text."""
 
@@ -60,6 +65,7 @@ class RichStreamingBackend:
         on_thinking: Callable[[str], None] | None = None,
         on_todo: Callable[[list[dict]], None] | None = None,
         on_file_write: Callable[[str], None] | None = None,
+        work_dir: str | Path | None = None,
         on_stream_event: Callable[[str, Any], Any] | None = None,
         status_footer_builder: Callable[[], Any] | None = None,
         metadata: dict | None = None,
@@ -70,6 +76,9 @@ class RichStreamingBackend:
         cancel_scope: str | None = None,
         gateway: GraphGateway,
         runtime: AsyncRuntime | None = None,
+        rubric: str | None = None,
+        approve_all_at_start: bool = False,
+        goal_request: dict[str, Any] | None = None,
     ) -> str:
         return _run_streaming(
             agent=agent,
@@ -80,6 +89,7 @@ class RichStreamingBackend:
             on_thinking=on_thinking,
             on_todo=on_todo,
             on_file_write=on_file_write,
+            work_dir=work_dir,
             on_stream_event=on_stream_event,
             status_footer_builder=status_footer_builder,
             metadata=metadata,
@@ -90,4 +100,7 @@ class RichStreamingBackend:
             cancel_scope=cancel_scope,
             gateway=gateway,
             runtime=runtime,
+            rubric=rubric,
+            approve_all_at_start=approve_all_at_start,
+            goal_request=goal_request,
         )

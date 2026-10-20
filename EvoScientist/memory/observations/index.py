@@ -16,13 +16,19 @@ def build_observation_index_context(
     memory_dir: str | Path,
     project_id: str,
     max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
+    include_search_hints: bool = True,
 ) -> str:
-    """Build a compact observation-memory index for prompts."""
+    """Build a compact observation-memory index for prompts.
+
+    ``include_search_hints=False`` omits the tool-usage footer, for model calls
+    that carry no memory tools (the index is then the whole memory in context).
+    """
     return _format_observation_index_context(
         _observation_documents(memory_dir=memory_dir, project_id=project_id),
         include_counts=True,
         include_paths=True,
-        include_search_hints=True,
+        include_search_hints=include_search_hints,
+        can_search=include_search_hints,
         empty_context=True,
         intro="Indexed observations:",
         max_inline_chars=max_inline_chars,
@@ -46,6 +52,8 @@ def build_observation_linker_index_context(
         include_counts=False,
         include_paths=False,
         include_search_hints=False,
+        # The linker agent carries search_observations / read_memory.
+        can_search=True,
         empty_context=False,
         intro=(
             "Stored observation snapshot excluding the current batch "
@@ -85,11 +93,16 @@ def _format_observation_index_context(
     include_counts: bool = True,
     include_paths: bool = True,
     include_search_hints: bool = True,
+    can_search: bool = True,
     empty_context: bool = True,
     intro: str = "Indexed observations:",
     max_inline_chars: int = DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
 ) -> str:
-    """Format parsed observation documents as a prompt index."""
+    """Format parsed observation documents as a prompt index.
+
+    ``can_search`` says whether the reader has a search tool; it decides
+    whether an index too large to inline tells the reader to search.
+    """
     if not documents and not empty_context:
         return ""
 
@@ -122,6 +135,7 @@ def _format_observation_index_context(
         intro=intro,
         lines=lines,
         footer=footer,
+        can_search=can_search,
         max_inline_chars=max_inline_chars,
     )
 
@@ -132,6 +146,7 @@ def _truncated_observation_index_context(
     intro: str,
     lines: Sequence[str],
     footer: Sequence[str],
+    can_search: bool,
     max_inline_chars: int,
 ) -> str:
     prefix = [
@@ -148,10 +163,13 @@ def _truncated_observation_index_context(
     if selected:
         return "\n".join([*prefix, *selected, *suffix])
 
+    # A reader without a search tool (a tool-less model call) is not told to
+    # search.
+    too_large = "Observation summaries are too large to inline"
     return "\n".join(
         [
             *header,
-            "Observation summaries are too large to inline; search on demand.",
+            f"{too_large}; search on demand." if can_search else f"{too_large}.",
             *footer,
             "</observation_memory>",
         ]

@@ -362,14 +362,17 @@ def test_emit_debug_event_warns_on_level_mismatch(caplog):
     dbg._warned_debug_level_mismatch = False
 
 
-async def test_standalone_agent_construction_runs_off_channel_loop(monkeypatch):
+async def test_standalone_agent_construction_runs_off_channel_loop(
+    monkeypatch, workspace
+):
     import EvoScientist.EvoScientist as agent_module
     from EvoScientist.channels.standalone import _create_standalone_agent
 
     channel_thread = threading.current_thread()
     sentinel = object()
 
-    def fake_create_cli_agent():
+    def fake_create_cli_agent(**kwargs):
+        assert kwargs == {"workspace": workspace}
         assert threading.current_thread() is not channel_thread
         try:
             asyncio.get_running_loop()
@@ -381,4 +384,4 @@ async def test_standalone_agent_construction_runs_off_channel_loop(monkeypatch):
 
     monkeypatch.setattr(agent_module, "create_cli_agent", fake_create_cli_agent)
 
-    assert await _create_standalone_agent() is sentinel
+    assert await _create_standalone_agent(workspace) is sentinel

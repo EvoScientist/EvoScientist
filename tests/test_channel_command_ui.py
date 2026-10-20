@@ -164,3 +164,69 @@ class TestSentToChannelFlag:
         assert ui.sent_to_channel is True
         outbound = bus.publish_outbound.await_args.args[0]
         assert outbound.failure_notice == "Command output could not be delivered."
+
+
+async def test_resume_history_shows_a_pinned_skill_as_a_label():
+    bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
+    messages = [
+        SimpleNamespace(type="human", content="/alpha draft it"),
+        SimpleNamespace(
+            type="human",
+            content="<skill name='alpha'>SKILL BODY</skill>",
+            additional_kwargs={
+                "lc_source": "pinned_skill",
+                "skill": {"name": "alpha"},
+            },
+        ),
+        SimpleNamespace(type="ai", content="Drafted."),
+    ]
+    ui, _ = _make_ui(thread_store=FakeThreadStore(messages=messages), bus_ref=bus_ref)
+
+    await _run_resume(ui, "thread-7", "/workspace")
+
+    text = _sent_text(bus_ref)
+    assert "User: /alpha draft it" in text
+    assert "skill: alpha" in text
+    assert "SKILL BODY" not in text
+
+
+async def test_resume_history_labels_a_pinned_skill_without_a_name_as_unknown():
+    bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
+    messages = [
+        SimpleNamespace(type="human", content="/alpha draft it"),
+        SimpleNamespace(
+            type="human",
+            content="<skill name='alpha'>SKILL BODY</skill>",
+            additional_kwargs={"lc_source": "pinned_skill"},
+        ),
+        SimpleNamespace(type="ai", content="Drafted."),
+    ]
+    ui, _ = _make_ui(thread_store=FakeThreadStore(messages=messages), bus_ref=bus_ref)
+
+    await _run_resume(ui, "thread-7", "/workspace")
+
+    text = _sent_text(bus_ref)
+    assert "skill: unknown" in text
+    assert "SKILL BODY" not in text
+
+
+async def test_resume_history_shows_grader_feedback_as_a_label():
+    bus_ref = SimpleNamespace(publish_outbound=AsyncMock())
+    messages = [
+        SimpleNamespace(type="human", content="write the report"),
+        SimpleNamespace(type="ai", content="Draft."),
+        SimpleNamespace(
+            type="human",
+            content="A grader reviewed your work and asked for revisions.",
+            additional_kwargs={"lc_source": "rubric_grader"},
+        ),
+        SimpleNamespace(type="ai", content="Revised."),
+    ]
+    ui, _ = _make_ui(thread_store=FakeThreadStore(messages=messages), bus_ref=bus_ref)
+
+    await _run_resume(ui, "thread-7", "/workspace")
+
+    text = _sent_text(bus_ref)
+    assert "User: write the report" in text
+    assert "rubric: revision requested" in text
+    assert "A grader reviewed" not in text

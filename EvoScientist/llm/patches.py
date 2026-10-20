@@ -6,19 +6,19 @@ fix upstream bugs, applied at import time or on first use.
 Patches:
     - _patch_anthropic_proxy_compat: ccproxy dict→Pydantic model mismatch
     - _patch_openai_compat_content: list content→string for strict APIs
-    - _patch_ccproxy_codex_compat: ccproxy model fixes + langchain None guard
-    - _patch_ccproxy_system_to_developer: system→developer role for ccproxy
     - _patch_openai_capture_reasoning_content: capture provider
       reasoning_content into AIMessage.additional_kwargs (module-level,
       applied at import)
     - _patch_openrouter_strip_responses_reasoning: drop OpenAI-Responses
       encrypted reasoning items (rs_* id) from outgoing OpenRouter messages
       (store=false → "Item with id rs_... not found")
+    - _patch_openai_responses_whole_tool_args: keep tool-call arguments the
+      ChatGPT Codex backend sends only in ``function_call_arguments.done``
+      (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
 
 Utilities:
-    - _is_ccproxy_codex: detect ccproxy Codex OAuth adapter
     - _flatten_message_content: convert content blocks to plain string
 """
 
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import os
 import sys
 from collections.abc import (
     AsyncIterator,
@@ -80,131 +79,6 @@ def _patch_anthropic_proxy_compat() -> None:
 
 
 _patch_anthropic_proxy_compat()
-
-
-# ---------------------------------------------------------------------------
-# Patch: ccproxy-api 0.2.7 Codex compatibility.
-#
-# 1) ResponseObject.output is required but upstream may omit it → 502.
-#    Fix: make output default to [].
-# 2) CodexMessage.role only allows "user"/"assistant" → 400 on system msgs.
-#    Fix: widen to also accept "system" and "developer".
-# 3) langchain-openai iterates response.output which can be None after the
-#    proxy strips it.  Fix: guard in _construct_lc_result_from_responses_api.
-# ---------------------------------------------------------------------------
-def _patch_ccproxy_codex_compat() -> None:
-    """Patch ccproxy-api models for Responses API compatibility."""
-    # 1) Make ResponseObject.output optional (default=[])
-    try:
-        import ccproxy.llms.models.openai as _oai_mod
-
-        _OrigResponse = _oai_mod.ResponseObject
-
-        from pydantic import Field as _PydanticField
-
-        class _PatchedResponseObject(_OrigResponse):  # type: ignore[misc]
-            output: list = _PydanticField(default_factory=list)  # type: ignore[assignment]
-
-            model_config = _OrigResponse.model_config.copy()
-
-        _PatchedResponseObject.__name__ = "ResponseObject"
-        _PatchedResponseObject.__qualname__ = "ResponseObject"
-        _oai_mod.ResponseObject = _PatchedResponseObject  # type: ignore[misc]
-
-        # Also patch modules that import ResponseObject directly
-        for _mod_path in (
-            "ccproxy.llms.formatters.openai_to_openai.responses",
-            "ccproxy.llms.formatters.anthropic_to_openai.responses",
-        ):
-            try:
-                import importlib
-
-                _mod = importlib.import_module(_mod_path)
-                if hasattr(_mod, "ResponseObject"):
-                    _mod.ResponseObject = _PatchedResponseObject  # type: ignore[attr-defined]
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 2) Widen CodexMessage.role to accept system/developer
-    try:
-        from typing import Annotated, Literal
-
-        import ccproxy.plugins.codex.models as _codex_mod
-
-        _OrigMessage = _codex_mod.CodexMessage
-
-        from pydantic import Field as _Field
-
-        class _PatchedCodexMessage(_OrigMessage):  # type: ignore[misc]
-            role: Annotated[  # type: ignore[assignment]
-                Literal["user", "assistant", "system", "developer"],
-                _Field(description="Message role"),
-            ]
-
-        _PatchedCodexMessage.__name__ = "CodexMessage"
-        _PatchedCodexMessage.__qualname__ = "CodexMessage"
-        _codex_mod.CodexMessage = _PatchedCodexMessage  # type: ignore[misc]
-    except Exception:
-        pass
-
-    # 3) Fix StreamingBufferService returning response.completed event
-    #    whose output is None/empty, instead of using accumulated outputs.
-    try:
-        from ccproxy.llms.streaming.accumulators import ResponsesAccumulator
-
-        _orig_get = ResponsesAccumulator.get_completed_response
-
-        def _patched_get(self: Any) -> dict | None:
-            result = _orig_get(self)
-            if result is not None:
-                output = result.get("output")
-                if output is None:
-                    # output field lost — force rebuild from accumulated items
-                    return None
-            return result
-
-        ResponsesAccumulator.get_completed_response = _patched_get  # type: ignore[assignment]
-    except Exception:
-        pass
-
-    # 4) Guard langchain-openai against None output (final safety net)
-    try:
-        import langchain_openai.chat_models.base as _base
-
-        _orig_construct = _base._construct_lc_result_from_responses_api
-
-        def _safe(response: Any, *args: Any, **kwargs: Any) -> Any:
-            if response.output is None:
-                response.output = []
-            return _orig_construct(response, *args, **kwargs)
-
-        _base._construct_lc_result_from_responses_api = _safe
-    except Exception:
-        pass
-
-
-_patch_ccproxy_codex_compat()
-
-
-# ---------------------------------------------------------------------------
-# Utility: detect ccproxy's Codex adapter (as opposed to generic localhost).
-# ---------------------------------------------------------------------------
-def _is_ccproxy_codex() -> bool:
-    """Return True if the OpenAI endpoint is ccproxy's Codex adapter.
-
-    Checks for the ccproxy-specific markers set by ``setup_codex_env()``
-    in ``ccproxy_manager.py``: the sentinel API key and the ``/codex/v1``
-    path.  Plain localhost endpoints (vLLM, Ollama, etc.) are not affected.
-    """
-    base_url = os.environ.get("OPENAI_BASE_URL", "")
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    return (
-        ("127.0.0.1" in base_url or "localhost" in base_url)
-        and api_key == "ccproxy-oauth"
-        and "/codex/" in base_url
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -646,89 +520,6 @@ def _patch_openai_compat_content(model: Any, hoist_tool_media: bool = True) -> N
 
 
 # ---------------------------------------------------------------------------
-# Patch: ccproxy Codex Responses API rejects "system" role messages.
-# Convert SystemMessage to use "developer" role via langchain-openai's
-# __openai_role__ mechanism.
-# ---------------------------------------------------------------------------
-def _patch_ccproxy_system_to_developer(model: Any) -> None:
-    """Convert SystemMessage role from 'system' to 'developer' for ccproxy.
-
-    ccproxy's Responses API endpoint rejects system role messages with
-    400 "System messages are not allowed".  LangChain's ``langchain_openai``
-    checks ``additional_kwargs["__openai_role__"]`` and uses that value as
-    the message role when serializing to the API.
-
-    Args:
-        model: A LangChain chat model instance to patch in-place.
-    """
-    import copy
-    import functools
-
-    from langchain_core.messages import SystemMessage
-
-    def _system_to_developer(messages: list[BaseMessage]) -> list[BaseMessage]:
-        out: list[BaseMessage] = []
-        for msg in messages:
-            if isinstance(msg, SystemMessage):
-                if msg.additional_kwargs.get("__openai_role__") != "developer":
-                    msg = copy.copy(msg)
-                    msg.additional_kwargs = {
-                        **msg.additional_kwargs,
-                        "__openai_role__": "developer",
-                    }
-            out.append(msg)
-        return out
-
-    orig_generate = getattr(model, "_generate", None)
-    if orig_generate is None:
-        return
-
-    @functools.wraps(orig_generate)
-    def _patched_generate(
-        messages: list[BaseMessage], *args: Any, **kwargs: Any
-    ) -> Any:
-        return orig_generate(_system_to_developer(messages), *args, **kwargs)
-
-    model._generate = _patched_generate
-
-    orig_agenerate = getattr(model, "_agenerate", None)
-    if orig_agenerate is not None:
-
-        @functools.wraps(orig_agenerate)
-        async def _patched_agenerate(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            return await orig_agenerate(_system_to_developer(messages), *args, **kwargs)
-
-        model._agenerate = _patched_agenerate
-
-    orig_stream = getattr(model, "_stream", None)
-    if orig_stream is not None:
-
-        @functools.wraps(orig_stream)
-        def _patched_stream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            return orig_stream(_system_to_developer(messages), *args, **kwargs)
-
-        model._stream = _patched_stream
-
-    orig_astream = getattr(model, "_astream", None)
-    if orig_astream is not None:
-
-        @functools.wraps(orig_astream)
-        async def _patched_astream(
-            messages: list[BaseMessage], *args: Any, **kwargs: Any
-        ) -> Any:
-            async for chunk in orig_astream(
-                _system_to_developer(messages), *args, **kwargs
-            ):
-                yield chunk
-
-        model._astream = _patched_astream
-
-
-# ---------------------------------------------------------------------------
 # Patch (module-level): langchain-openai's _convert_dict_to_message and
 # _convert_delta_to_message_chunk discard provider-specific fields like
 # `reasoning_content`. We monkey-patch them to capture reasoning_content
@@ -1070,32 +861,13 @@ def _patch_anthropic_structured_output() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Patch: forward CLI's live (model, model_provider) into deepagents'
-# start_async_task / update_async_task tool calls so the deployed graph
-# (running in a separate ``langgraph dev`` subprocess) re-resolves the
-# chat model per run.
+# Explicit client composition for EvoAsyncSubAgentMiddleware and memory runs.
+# Inject the live model into runs.create without mutating upstream factories.
 #
-# Without this, async sub-agents stay on the model their graph was compiled
-# with at langgraph dev boot — `/model` switches in the CLI never reach
-# them because they live in another process.
-#
-# Mechanism: wrap deepagents' ``_build_start_tool`` and ``_build_update_tool``
-# factories. Each wrapped factory calls the original with a proxied client
-# cache that intercepts ``runs.create(...)`` calls only and injects
-# ``config={"configurable": {"model": <cfg.model>, "model_provider": <cfg.provider>}}``.
-# All other client methods (``threads.create``, ``runs.get``, ``runs.cancel``,
-# ``runs.join_stream``) pass through unchanged. The deployed graph picks up
-# ``configurable.model`` via ``ConfigurableModelMiddleware``.
-#
-# Reads ``_ensure_config()`` at tool-call time (not patch time) so a
-# ``/model`` switch in the CLI is reflected on the very next async tool
-# call without an agent rebuild.
-#
-# Upstream PR opportunity: passing ``config`` through ``client.runs.create``
-# is generic functionality; worth contributing back to ``langchain-ai/deepagents``
-# so this patch can be retired.
+# The failed-run reason (``_RunErrors``) retires once deepagents' check tool
+# reads the thread's error: it reads ``run["error"]``, which langgraph-api
+# never fills.
 # ---------------------------------------------------------------------------
-_model_passthrough_patched = False
 
 # The launching run's per-run (model, provider), set by the async-task tools
 # from ``runtime.config`` for the duration of a single ``runs.create`` call.
@@ -1106,8 +878,7 @@ _model_passthrough_patched = False
 # ``update_async_task``), but only the tool functions can see the caller's
 # per-run model (via ``runtime.config``, the config langgraph's ToolNode
 # injects into tool calls). Threading it through a ContextVar
-# lets the single merge point below inject it, so ``update_async_task`` (whose
-# body we delegate to upstream unchanged) is covered without reimplementing it.
+# lets start and update share a single merge point.
 _caller_configurable: ContextVar[dict[str, str] | None] = ContextVar(
     "_evo_caller_configurable", default=None
 )
@@ -1138,7 +909,7 @@ def _read_cfg_configurable() -> dict[str, str]:
 
     Returns a dict suitable for inserting under
     ``RunnableConfig.configurable``. Empty dict on any failure (so the
-    patch degrades to a no-op rather than breaking async tool calls).
+    proxy degrades to a no-op rather than breaking async tool calls).
     """
     try:
         from EvoScientist.EvoScientist import _ensure_config
@@ -1157,8 +928,14 @@ def _read_cfg_configurable() -> dict[str, str]:
     return out
 
 
-def _merge_runs_config_kwargs(kwargs: dict) -> dict:
+def _merge_runs_config_kwargs(
+    kwargs: dict, folders: dict[str, str] | None = None
+) -> dict:
     """Merge the live model override into ``kwargs`` for ``runs.create``.
+
+    ``folders`` are the launching graph's ``workspace_dir`` / ``run_dir``;
+    they replace any the caller passed, so the server can refuse a run meant
+    for other folders.
 
     Model source, in increasing precedence:
 
@@ -1174,7 +951,11 @@ def _merge_runs_config_kwargs(kwargs: dict) -> dict:
 
     Any unrelated caller-supplied ``config.configurable`` keys are preserved.
     """
-    overrides = {**_read_cfg_configurable(), **(_caller_configurable.get() or {})}
+    overrides = {
+        **(folders or {}),
+        **_read_cfg_configurable(),
+        **(_caller_configurable.get() or {}),
+    }
     if not overrides:
         return kwargs
     existing = kwargs.get("config")
@@ -1183,36 +964,130 @@ def _merge_runs_config_kwargs(kwargs: dict) -> dict:
     existing_configurable = existing.get("configurable")
     if not isinstance(existing_configurable, dict):
         existing_configurable = {}
+    if folders:
+        # The launching graph's folders are authoritative; in daemon mode they
+        # carry no run_dir, so a caller's stale one must not survive.
+        existing_configurable = {
+            key: value
+            for key, value in existing_configurable.items()
+            if key not in ("workspace_dir", "run_dir")
+        }
     merged_configurable = {**existing_configurable, **overrides}
     kwargs = dict(kwargs)
     kwargs["config"] = {**existing, "configurable": merged_configurable}
     return kwargs
 
 
-class _SyncRunsProxy:
-    """Wraps a sync ``RunsClient`` and injects config into ``create`` only."""
+def _thread_error_message(thread: Any) -> str | None:
+    """The error message langgraph-api records on a thread whose run failed."""
+    error = thread.get("error") if isinstance(thread, dict) else None
+    if isinstance(error, dict):
+        # langgraph-api stores {"error": <type>, "message": <text>}; for most
+        # exception types the text is a placeholder, so keep the type.
+        kind, message = error.get("error"), error.get("message")
+        error = f"{kind}: {message}" if kind and message else (message or kind)
+    return str(error) if error else None
 
-    def __init__(self, real: Any) -> None:
+
+class _RunErrors:
+    """Why failed runs failed, looked up once from their thread.
+
+    langgraph-api records a failed run's error on its thread, not on the run,
+    so the async-task check would otherwise report no reason. A failed run's
+    error never changes, so each is looked up once.
+    """
+
+    def __init__(self) -> None:
+        self._by_run: dict[str, str] = {}
+
+    @staticmethod
+    def _missing(run: Any) -> bool:
+        return (
+            isinstance(run, dict)
+            and run.get("status") == "error"
+            and not run.get("error")
+        )
+
+    def needs_lookup(self, run: Any) -> bool:
+        return self._missing(run) and run.get("run_id") not in self._by_run
+
+    def attach(self, run: Any, thread: Any = None) -> Any:
+        run_id = run.get("run_id") if self._missing(run) else None
+        if run_id is None:
+            return run
+        message = _thread_error_message(thread)
+        if message:
+            self._by_run[run_id] = message
+        message = self._by_run.get(run_id)
+        return {**run, "error": message} if message else run
+
+
+class _SyncRunsProxy:
+    """Wraps a sync ``RunsClient``: injects config into ``create`` and adds
+    the failure reason to failed runs returned by ``get``."""
+
+    def __init__(
+        self,
+        real: Any,
+        folders: dict[str, str] | None = None,
+        threads: Any = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_folders", folders)
+        object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     def create(self, **kwargs: Any) -> Any:
-        return self._real.create(**_merge_runs_config_kwargs(kwargs))
+        return self._real.create(**_merge_runs_config_kwargs(kwargs, self._folders))
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:
+        run = self._real.get(*args, **kwargs)
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
+            try:
+                thread = self._threads.get(run["thread_id"])
+            except Exception:
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _AsyncRunsProxy:
-    """Wraps an async ``RunsClient`` and injects config into ``create`` only."""
+    """Wraps an async ``RunsClient``: injects config into ``create`` and adds
+    the failure reason to failed runs returned by ``get``."""
 
-    def __init__(self, real: Any) -> None:
+    def __init__(
+        self,
+        real: Any,
+        folders: dict[str, str] | None = None,
+        threads: Any = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_folders", folders)
+        object.__setattr__(self, "_threads", threads)
+        object.__setattr__(self, "_errors", errors or _RunErrors())
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._real, name)
 
     async def create(self, **kwargs: Any) -> Any:
-        return await self._real.create(**_merge_runs_config_kwargs(kwargs))
+        return await self._real.create(
+            **_merge_runs_config_kwargs(kwargs, self._folders)
+        )
+
+    async def get(self, *args: Any, **kwargs: Any) -> Any:
+        run = await self._real.get(*args, **kwargs)
+        thread = None
+        if self._threads is not None and self._errors.needs_lookup(run):
+            try:
+                thread = await self._threads.get(run["thread_id"])
+            except Exception:
+                thread = None
+        return self._errors.attach(run, thread)
 
 
 class _ClientProxy:
@@ -1234,10 +1109,21 @@ class _ClientProxy:
     sync/async and instantiating a new ``_RunsProxy`` per attribute access.
     """
 
-    def __init__(self, real: Any, *, is_async: bool) -> None:
+    def __init__(
+        self,
+        real: Any,
+        *,
+        is_async: bool,
+        folders: dict[str, str] | None = None,
+        errors: _RunErrors | None = None,
+    ) -> None:
         runs_proxy_cls = _AsyncRunsProxy if is_async else _SyncRunsProxy
         object.__setattr__(self, "_real", real)
-        object.__setattr__(self, "_runs_proxy", runs_proxy_cls(real.runs))
+        object.__setattr__(
+            self,
+            "_runs_proxy",
+            runs_proxy_cls(real.runs, folders, real.threads, errors),
+        )
 
     def __getattr__(self, name: str) -> Any:
         if name == "runs":
@@ -1246,55 +1132,32 @@ class _ClientProxy:
 
 
 class _ClientCacheProxy:
-    """Proxy a ``_ClientCache`` so callers receive config-injecting clients."""
+    """Proxy a ``_ClientCache`` so callers receive config-injecting clients.
 
-    def __init__(self, real: Any) -> None:
+    ``folders`` (``SessionDirs.metadata()`` of the launching graph) go into the
+    ``configurable`` of every run these clients create.
+    """
+
+    def __init__(self, real: Any, folders: dict[str, str] | None = None) -> None:
         self._real = real
+        self._folders = folders
+        self._errors = _RunErrors()
 
     def get_sync(self, name: str) -> Any:
-        return _ClientProxy(self._real.get_sync(name), is_async=False)
+        return _ClientProxy(
+            self._real.get_sync(name),
+            is_async=False,
+            folders=self._folders,
+            errors=self._errors,
+        )
 
     def get_async(self, name: str) -> Any:
-        return _ClientProxy(self._real.get_async(name), is_async=True)
-
-
-def _patch_deepagents_model_passthrough() -> None:
-    """Wrap deepagents' async-launch tool factories to inject CLI model.
-
-    Idempotent: re-invocation is a no-op once the patch is active. Safe to
-    call from ``_maybe_swap_async_subagents`` on every CLI startup; both
-    that hook and this patch turn on together when async sub-agents are
-    enabled.
-    """
-    global _model_passthrough_patched
-    if _model_passthrough_patched:
-        return
-
-    try:
-        from deepagents.middleware import async_subagents as ds_mod
-    except ImportError:
-        return
-
-    # Defensive ``getattr`` lookups mirror the rest of this file (lines 254,
-    # 266, 279, 290, 339, 351, 362, 373, 473): a deepagents update that
-    # renames or removes either private helper degrades to a no-op instead
-    # of raising ``AttributeError`` at CLI startup.
-    orig_build_start = getattr(ds_mod, "_build_start_tool", None)
-    orig_build_update = getattr(ds_mod, "_build_update_tool", None)
-    if orig_build_start is None or orig_build_update is None:
-        return
-
-    def _patched_build_start(
-        agent_map: Any, clients: Any, tool_description: str
-    ) -> Any:
-        return orig_build_start(agent_map, _ClientCacheProxy(clients), tool_description)
-
-    def _patched_build_update(agent_map: Any, clients: Any) -> Any:
-        return orig_build_update(agent_map, _ClientCacheProxy(clients))
-
-    ds_mod._build_start_tool = _patched_build_start
-    ds_mod._build_update_tool = _patched_build_update
-    _model_passthrough_patched = True
+        return _ClientProxy(
+            self._real.get_async(name),
+            is_async=True,
+            folders=self._folders,
+            errors=self._errors,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1369,3 +1232,80 @@ def _patch_langgraph_goto_none_crash() -> None:
 
 
 _patch_langgraph_goto_none_crash()
+
+
+# ---------------------------------------------------------------------------
+# Patch: the ChatGPT Codex backend usually sends parallel tool calls whole
+# (only ``response.function_call_arguments.done``), while langchain-openai
+# builds tool-call arguments from ``.delta`` events alone, leaving them empty.
+# Hand the full arguments through as a single delta when none was streamed.
+# ---------------------------------------------------------------------------
+# Calls whose delivered arguments are remembered at once (across all streams).
+_WHOLE_TOOL_ARGS_RECORD = 256
+
+
+def _patch_openai_responses_whole_tool_args() -> None:
+    """Keep tool-call arguments that arrive only in the ``done`` event.
+
+    Process-wide: every ``ChatOpenAI`` Responses stream passes through it, so it
+    changes nothing unless a call's arguments would otherwise be lost.
+    """
+    try:
+        import langchain_openai.chat_models.base as _base
+        from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent
+
+        _orig = _base._convert_responses_chunk_to_generation_chunk
+    except (ImportError, AttributeError):
+        return
+    if hasattr(_orig, "_evosci_whole_tool_args"):
+        return
+    # Arguments delivered so far per call; insertion-ordered so a stream cut
+    # before ``done`` cannot grow it forever. A call pushed out is left to upstream;
+    # only with more than twice the record's calls open at once is one forgotten.
+    delivered: dict[str, str] = {}
+    dropped: dict[str, None] = {}
+
+    def _add(item_id: str, text: str) -> None:
+        if item_id in dropped:
+            return
+        delivered[item_id] = delivered.get(item_id, "") + text
+        if len(delivered) > _WHOLE_TOOL_ARGS_RECORD:
+            oldest = next(iter(delivered))
+            del delivered[oldest]
+            dropped[oldest] = None
+            if len(dropped) > _WHOLE_TOOL_ARGS_RECORD:
+                del dropped[next(iter(dropped))]
+
+    @functools.wraps(_orig)
+    def _convert(chunk: Any, *args: Any, **kwargs: Any) -> Any:
+        kind = getattr(chunk, "type", None)
+        if kind == "response.output_item.added":
+            item = getattr(chunk, "item", None)
+            # Some servers open the call with (part of) its arguments filled in.
+            if getattr(item, "type", None) == "function_call":
+                # A new call: whatever an earlier, cut stream left under this id is stale.
+                delivered.pop(item.id, None)
+                dropped.pop(item.id, None)
+                if item.arguments:
+                    _add(item.id, item.arguments)
+        elif kind == "response.function_call_arguments.delta":
+            _add(chunk.item_id, chunk.delta)
+        elif kind == "response.function_call_arguments.done":
+            sent = delivered.pop(chunk.item_id, "")
+            full = chunk.arguments or ""
+            missing = full[len(sent) :] if full.startswith(sent) else ""
+            if chunk.item_id in dropped:
+                del dropped[chunk.item_id]
+                missing = ""
+            if missing:
+                chunk = ResponseFunctionCallArgumentsDeltaEvent.construct(
+                    type="response.function_call_arguments.delta",
+                    delta=missing,
+                    item_id=chunk.item_id,
+                    output_index=chunk.output_index,
+                    sequence_number=chunk.sequence_number,
+                )
+        return _orig(chunk, *args, **kwargs)
+
+    _convert._evosci_whole_tool_args = True  # type: ignore[attr-defined]
+    _base._convert_responses_chunk_to_generation_chunk = _convert

@@ -19,6 +19,8 @@ from typing import Any, Literal, get_args, get_origin, get_type_hints
 import yaml
 from dotenv import dotenv_values, find_dotenv
 
+from .. import paths
+
 # Tools that run shell commands and need manual HITL approval (subject to
 # shell_allow_list). Single source of truth for every interrupt consumer
 # (stream/display.py, channels/interaction.py) — keep aligned with the agent's
@@ -84,6 +86,8 @@ DEFAULT_MEMORY_OBSERVATION_WRITER = MemoryObservationWriter.ALL
 DEFAULT_MEMORY_SKILL_SYNTHESIS_MODE = MemorySkillSynthesisMode.REVIEW
 DEFAULT_MEMORY_SKILL_SYNTHESIS_CADENCE = MemorySkillSynthesisCadence.WEEKLY
 DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME = "03:00"
+DEFAULT_PROACTIVE_IDLE_MINUTES = 120
+DEFAULT_PROACTIVE_QUIET_HOURS = "22:00-08:00"
 
 
 def _normalize_hhmm(value: Any) -> str | None:
@@ -103,6 +107,38 @@ def _normalize_hhmm(value: Any) -> str | None:
     return f"{hour_int:02d}:{minute_int:02d}"
 
 
+def _normalize_quiet_hours(value: str) -> str | None:
+    """Normalise an ``HH:MM-HH:MM`` window, or ``None`` when it is not one.
+
+    An empty or blank value is ``""`` (no quiet hours).
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    parts = text.split("-")
+    if len(parts) != 2:
+        return None
+    start, end = _normalize_hhmm(parts[0]), _normalize_hhmm(parts[1])
+    if start is None or end is None:
+        return None
+    return f"{start}-{end}"
+
+
+def _valid_timezone(value: str) -> str | None:
+    """The IANA zone name in *value*, ``""`` when blank, ``None`` when unknown."""
+    name = value.strip()
+    if not name:
+        return ""
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(name)
+    except (ValueError, OSError, KeyError):
+        # ZoneInfoNotFoundError is a KeyError; malformed keys raise ValueError.
+        return None
+    return name
+
+
 # =============================================================================
 # Configuration paths
 # =============================================================================
@@ -111,12 +147,10 @@ def _normalize_hhmm(value: Any) -> str | None:
 def get_config_dir() -> Path:
     """Get the configuration directory path.
 
-    Uses XDG_CONFIG_HOME if set, otherwise ~/.config/evoscientist/
+    ``$XDG_CONFIG_HOME/evoscientist`` when that is set, otherwise
+    ``~/.config/evoscientist``, read once at startup (``paths.CONFIG_DIR``).
     """
-    xdg_config = os.environ.get("XDG_CONFIG_HOME")
-    if xdg_config:
-        return Path(xdg_config) / "evoscientist"
-    return Path.home() / ".config" / "evoscientist"
+    return paths.CONFIG_DIR
 
 
 def get_config_path() -> Path:
@@ -191,6 +225,7 @@ class EvoScientistConfig:
     mimo_api_key: str = ""
     mimo_token_plan_api_key: str = ""
     mimo_token_plan_base_url: str = ""
+    opper_api_key: str = ""
     deepseek_api_key: str = ""
     zhipu_api_key: str = ""
     volcengine_api_key: str = ""
@@ -206,8 +241,12 @@ class EvoScientistConfig:
 
     # LLM Settings
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-sonnet-5-5"
     model_fallbacks: str = ""  # "model:provider,model:provider" fallback chain
+    # Transient model-call failures (5xx, 429, connection drops): how long one
+    # model call keeps retrying after it first fails, in seconds; 0 = no retry.
+    model_retry_wait_seconds: int = 60
+    auto_mode_retry_wait_seconds: int = 1800  # unattended runs: auto_mode, scheduler
     # Optional auxiliary model for background/helper LLM calls (memory workers +
     # tool selector). Empty = fall back to the main model/provider.
     auxiliary_provider: str = ""  # empty = use main provider
@@ -288,13 +327,10 @@ class EvoScientistConfig:
     # Which backend serves the CLI/TUI's graph runs: the in-process local
     # gateway (default) or the langgraph dev server via LangGraphServerGateway.
     # Server-gateway-migration rollback flag: flipping back to "local" restores
-    # the in-process path without code changes. While "langgraph_server" is
-    # set, the auto-started langgraph dev spawns in full deploy mode (MCP +
-    # async sub-agents loaded server-side); reusing a stripped-mode leftover
-    # is refused rather than silently degraded. This flag routes spawn mode
-    # only: the CLI keeps building its in-process agent (and its MCP
-    # sessions) until a surface actually cuts over to the server gateway -
-    # skipping that init lands with the surface cutover, not here.
+    # the in-process path without code changes. The CLI keeps building its
+    # in-process agent (and its MCP sessions) until a surface actually cuts
+    # over to the server gateway - skipping that init lands with the surface
+    # cutover, not here.
     gateway_backend: Literal["local", "langgraph_server"] = "local"
 
     # Per-surface overrides of ``gateway_backend``. Each production surface can
@@ -318,6 +354,19 @@ class EvoScientistConfig:
     gateway_backend_standalone: Literal["inherit", "local", "langgraph_server"] = (
         "inherit"
     )
+
+    # Proactive pushes (#263): a conversation armed for proactive pushes in
+    # ``EvoSci serve`` may get one unprompted message once it has gone quiet.
+    # These settings tune when; arming is per conversation, so there is no
+    # global on/off switch.
+    # Minutes since the conversation's last activity before a push is considered.
+    proactive_idle_minutes: int = DEFAULT_PROACTIVE_IDLE_MINUTES
+    # Window "HH:MM-HH:MM" (may wrap midnight) in which no push is generated.
+    # An empty string, or equal start and end, means no quiet hours.
+    proactive_quiet_hours: str = DEFAULT_PROACTIVE_QUIET_HOURS
+    # IANA timezone the quiet-hours window is evaluated in. Empty string means
+    # the host's local zone.
+    proactive_timezone: str = ""
 
     # Max LangGraph super-steps (LLM call / tool call / sub-agent delegation
     # each count as 1) before raising GraphRecursionError. Resets on every
@@ -374,7 +423,8 @@ class EvoScientistConfig:
 
     # UI Settings
     show_thinking: bool = True
-    # "webui" launches the browser front-end (@evoscientist/webui via npx) +
+    # "webui" launches the browser front-end (@evoscientist/webui, installed
+    # locally by `EvoSci setup` or on the first launch) +
     # a deploy-style langgraph server instead of the in-terminal CLI/TUI.
     ui_backend: Literal["cli", "tui", "webui"] = "tui"
     # Download source for `EvoSci setup` and on-demand installs (Node.js).
@@ -508,6 +558,10 @@ class EvoScientistConfig:
     auto_approve: bool = False  # Auto-approve all tool executions without prompting
     auto_mode: bool = False  # Run unattended: imply auto_approve and disable ask_user
     shell_allow_list: str = ""  # Comma-separated shell command prefixes to auto-approve
+    # Comma-separated origins (``https://host[:port]``) whose pages may use the
+    # backend besides this machine's own. Read from config.yaml only: no
+    # environment variable sets it, so a workspace ``.env`` cannot widen it.
+    backend_allowed_origins: str = ""
 
     # Dangerous mode: real-filesystem access (no workspace confinement). The agent
     # operates on real absolute paths anywhere on disk; the privileged-command
@@ -568,6 +622,17 @@ class EvoScientistConfig:
             )
             self.sandbox_execute_timeout = 300
 
+        # A retry budget that is not a whole number of seconds (a hand-edited
+        # ``60s``) goes back to its default; ``0`` or less switches the retry off.
+        for name in ("model_retry_wait_seconds", "auto_mode_retry_wait_seconds"):
+            budget = getattr(self, name)
+            if not isinstance(budget, int) or isinstance(budget, bool):
+                default = type(self).__dataclass_fields__[name].default
+                logging.getLogger(__name__).warning(
+                    "Invalid %s %r; falling back to %d.", name, budget, default
+                )
+                setattr(self, name, default)
+
         # A non-positive cache cap would evict every file entry immediately,
         # defeating the cache entirely.
         cap = self.memory_observation_cache_max_files
@@ -584,6 +649,10 @@ class EvoScientistConfig:
         # the source rather than guarding every consumer.
         if isinstance(self.shell_allow_list, list | tuple):
             self.shell_allow_list = ",".join(str(s) for s in self.shell_allow_list)
+        if isinstance(self.backend_allowed_origins, list | tuple):
+            self.backend_allowed_origins = ",".join(
+                str(s) for s in self.backend_allowed_origins
+            )
 
         # auto_mode and dangerous_mode both imply auto_approve regardless of
         # source (CLI, env, config file, direct construction) — done here so the
@@ -616,6 +685,51 @@ class EvoScientistConfig:
             self.memory_skill_synthesis_time = DEFAULT_MEMORY_SKILL_SYNTHESIS_TIME
         else:
             self.memory_skill_synthesis_time = synthesis_time
+
+        self._validate_proactive_settings()
+
+    def _validate_proactive_settings(self) -> None:
+        """Replace an invalid proactive setting by its default, with a warning.
+
+        A typo must neither crash startup nor open the quiet hours: a bad
+        window falls back to the default window, not to "no quiet hours".
+        """
+        log = logging.getLogger(__name__)
+
+        idle = self.proactive_idle_minutes
+        if not isinstance(idle, int) or isinstance(idle, bool) or idle < 0:
+            log.warning(
+                "Invalid proactive_idle_minutes %r; falling back to %d.",
+                idle,
+                DEFAULT_PROACTIVE_IDLE_MINUTES,
+            )
+            self.proactive_idle_minutes = DEFAULT_PROACTIVE_IDLE_MINUTES
+
+        quiet_hours = self.proactive_quiet_hours
+        window = (
+            _normalize_quiet_hours(quiet_hours)
+            if isinstance(quiet_hours, str)
+            else None
+        )
+        if window is None:
+            log.warning(
+                "Invalid proactive_quiet_hours %r (expected 'HH:MM-HH:MM'); "
+                "falling back to %s.",
+                quiet_hours,
+                DEFAULT_PROACTIVE_QUIET_HOURS,
+            )
+            window = DEFAULT_PROACTIVE_QUIET_HOURS
+        self.proactive_quiet_hours = window
+
+        timezone = self.proactive_timezone
+        zone = _valid_timezone(timezone) if isinstance(timezone, str) else None
+        if zone is None:
+            log.warning(
+                "Invalid proactive_timezone %r; falling back to the host's zone.",
+                timezone,
+            )
+            zone = ""
+        self.proactive_timezone = zone
 
 
 @dataclass(frozen=True)
@@ -915,7 +1029,9 @@ def set_config_value(key: str, value: Any) -> bool:
 
     # __post_init__ only clamps on load, so validate here too. Reject bool before coercion
     # (_coerce_value(True, int) would turn it into 1 and slip past).
-    if key == "sandbox_execute_timeout" and isinstance(value, bool):
+    if key in ("sandbox_execute_timeout", "proactive_idle_minutes") and isinstance(
+        value, bool
+    ):
         return False
 
     try:
@@ -927,6 +1043,16 @@ def set_config_value(key: str, value: Any) -> bool:
         return False
     if key == "memory_skill_synthesis_time":
         value = _normalize_hhmm(value)
+        if value is None:
+            return False
+    if key == "proactive_idle_minutes" and value < 0:
+        return False
+    if key == "proactive_quiet_hours":
+        value = _normalize_quiet_hours(value)
+        if value is None:
+            return False
+    if key == "proactive_timezone":
+        value = _valid_timezone(value)
         if value is None:
             return False
 
@@ -967,6 +1093,7 @@ _ENV_MAPPINGS = {
     "mimo_api_key": "MIMO_API_KEY",
     "mimo_token_plan_api_key": "MIMO_TOKEN_PLAN_API_KEY",
     "mimo_token_plan_base_url": "MIMO_TOKEN_PLAN_BASE_URL",
+    "opper_api_key": "OPPER_API_KEY",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
     "zhipu_api_key": "ZHIPU_API_KEY",
     "volcengine_api_key": "VOLCENGINE_API_KEY",
@@ -989,7 +1116,12 @@ _ENV_MAPPINGS = {
     "gateway_backend_interactive": "EVOSCIENTIST_GATEWAY_BACKEND_INTERACTIVE",
     "gateway_backend_tui": "EVOSCIENTIST_GATEWAY_BACKEND_TUI",
     "gateway_backend_standalone": "EVOSCIENTIST_GATEWAY_BACKEND_STANDALONE",
+    "proactive_idle_minutes": "EVOSCIENTIST_PROACTIVE_IDLE_MINUTES",
+    "proactive_quiet_hours": "EVOSCIENTIST_PROACTIVE_QUIET_HOURS",
+    "proactive_timezone": "EVOSCIENTIST_PROACTIVE_TIMEZONE",
     "model_fallbacks": "EVOSCIENTIST_MODEL_FALLBACKS",
+    "model_retry_wait_seconds": "EVOSCIENTIST_MODEL_RETRY_WAIT_SECONDS",
+    "auto_mode_retry_wait_seconds": "EVOSCIENTIST_AUTO_MODE_RETRY_WAIT_SECONDS",
     "auxiliary_provider": "EVOSCIENTIST_AUXILIARY_PROVIDER",
     "auxiliary_model": "EVOSCIENTIST_AUXILIARY_MODEL",
     "reasoning_effort": "EVOSCIENTIST_REASONING_EFFORT",
@@ -1030,8 +1162,8 @@ _ENV_MAPPINGS = {
 }
 
 
-# Placeholder ``ccproxy_manager.setup_*_env`` writes for a provider's API key
-# when routing it through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
+# Placeholder ``ccproxy_manager.setup_ccproxy_env`` writes for the Anthropic API
+# key when routing through ccproxy OAuth; the matching ``*_BASE_URL`` rides along.
 _OAUTH_PLACEHOLDER_KEY = "ccproxy-oauth"
 
 
@@ -1185,6 +1317,8 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         "MIMO_TOKEN_PLAN_BASE_URL"
     ):
         os.environ["MIMO_TOKEN_PLAN_BASE_URL"] = config.mimo_token_plan_base_url
+    if config.opper_api_key and not os.environ.get("OPPER_API_KEY"):
+        os.environ["OPPER_API_KEY"] = config.opper_api_key
     if config.deepseek_api_key and not os.environ.get("DEEPSEEK_API_KEY"):
         os.environ["DEEPSEEK_API_KEY"] = config.deepseek_api_key
     if config.zhipu_api_key and not os.environ.get("ZHIPU_API_KEY"):
@@ -1235,6 +1369,9 @@ def apply_config_to_env(config: EvoScientistConfig) -> None:
         "EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"
     ):
         os.environ["EVOSCIENTIST_OPENROUTER_ANTHROPIC_PROMPT_CACHE"] = "false"
+    # Written for both values: get_chat_model reads it, and the langgraph dev
+    # subprocess re-resolves config without the CLI's --auth-mode override.
+    os.environ["EVOSCIENTIST_OPENAI_AUTH_MODE"] = config.openai_auth_mode
     # Round-trip dangerous_mode to env so it survives a fresh get_effective_config()
     # (warning banner, run_in_background) and is inherited by the langgraph dev
     # subprocess — otherwise a --dangerous CLI flag (not persisted to file/env)

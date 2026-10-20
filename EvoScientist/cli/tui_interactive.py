@@ -12,9 +12,10 @@ import queue
 import random
 import sys
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from rich.console import Group
@@ -39,7 +40,12 @@ from ..gateway import (
     RuntimeGateways,
     create_runtime_gateways_for_config,
 )
-from ..paths import DATA_DIR
+from ..paths import DATA_DIR, SessionDirs, Workspace
+from ..rubric_session import (
+    acknowledge_applied,
+    merge_configurable_extra,
+    thread_run_extra,
+)
 from ..sessions import get_checkpointer
 from ..stream.state import ResearchPhase, StreamState
 from ._agent_loader import BackgroundAgentLoader, MCPProgressTracker
@@ -92,9 +98,14 @@ from .status_bar import (
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
+    from ..backends import ParkedCloseReason
     from ..runtime import AsyncRuntime
 
 _channel_logger = logging.getLogger(__name__)
+
+# How long an approval widget waits for the user before the approval counts
+# as unanswered.
+_APPROVAL_WIDGET_TIMEOUT = 300.0
 
 
 def _shorten_path(path: str) -> str:
@@ -106,16 +117,16 @@ def _shorten_path(path: str) -> str:
     return _sp(path)
 
 
-def _agent_python_notices() -> list[str]:
-    """The missing-python hint and the server-python warning, when they apply.
+def _agent_shell_notices() -> list[str]:
+    """The agent shell's setup hint and the server drift warning, when they apply.
 
     Both also go to the terminal or the log, which Textual hides while the
     app runs, so the TUI shows them as notifications.
     """
+    from ..agent_shell import setup_hint
     from ..langgraph_dev import manager as lg_manager
-    from ..setup.research_env import missing_python_hint
 
-    notices = [missing_python_hint(), lg_manager.AGENT_PYTHON_DRIFT]
+    notices = [setup_hint(), lg_manager.AGENT_SHELL_DRIFT]
     return [n for n in notices if n is not None]
 
 
@@ -124,6 +135,7 @@ async def _auto_start_channel_in_worker(
     thread_id: str,
     config: Any,
     *,
+    media_dir: Path,
     send_thinking: bool,
     runtime: Any,
     stop_requested: threading.Event,
@@ -136,6 +148,7 @@ async def _auto_start_channel_in_worker(
                 agent,
                 thread_id,
                 config,
+                media_dir=media_dir,
                 send_thinking=send_thinking,
                 runtime=runtime,
             )
@@ -505,19 +518,23 @@ def run_textual_interactive(
     *,
     show_thinking: bool,
     channel_send_thinking: bool = True,
-    workspace_dir: str | None,
-    workspace_fixed: bool,
+    dirs: SessionDirs,
     mode: str | None,
     model: str | None,
     provider: str | None,
     run_name: str | None,
     thread_id: str | None,
     load_agent: Callable[..., Any],
-    create_session_workspace: Callable[[str | None], str],
+    create_run_dir: Callable[[Workspace, str | None], Path],
     config: Any | None = None,
     async_runtime: AsyncRuntime | None = None,
 ) -> None:
-    """Run full-screen Textual interactive chat loop."""
+    """Run full-screen Textual interactive chat loop.
+
+    ``dirs`` holds the session's workspace (skills, experts, memory) and, in
+    ``--mode=run``, the run folder the agent works in; ``/new`` then moves
+    to a fresh run folder from ``create_run_dir``.
+    """
     if config is None:
         from ..config import get_effective_config
 
@@ -545,6 +562,7 @@ def run_textual_interactive(
         from textual.app import App, ComposeResult
         from textual.binding import Binding
         from textual.containers import Container, Horizontal, VerticalScroll
+        from textual.css.query import NoMatches
         from textual.events import MouseUp
         from textual.widget import Widget
         from textual.widgets import Static
@@ -656,7 +674,7 @@ def run_textual_interactive(
             self,
             *,
             thread_id_value: str,
-            workspace: str | None,
+            dirs: SessionDirs,
             checkpointer: Any,
             runtime_gateways: RuntimeGateways,
             channel_send_thinking_value: bool = True,
@@ -673,7 +691,7 @@ def run_textual_interactive(
             )
             self._mcp_loader_widget: Any = None
             self._conversation_tid = thread_id_value
-            self._workspace_dir = workspace
+            self._dirs = dirs
             self._checkpointer = checkpointer
             self._runtime_gateways = runtime_gateways
             self._channel_send_thinking = channel_send_thinking_value
@@ -689,16 +707,24 @@ def run_textual_interactive(
             self._idle_reader_inflight: bool = (
                 False  # prevent overlapping throttled idle state reads
             )
+            # At most one channel message is off the queue and not yet started:
+            # scheduled by the poll, or held because the app was taken before
+            # its turn began. A held message goes before the queue.
+            self._channel_turn_scheduled = False
+            self._held_channel_msg: ChannelMessage | None = None
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
             ] = []  # queued messages to send after current turn
+            # Status-bar badge per thread: which acceptance checklists it holds.
+            self._rubric_badges: dict[str, str | None] = {}
             self._comp_items: list = []
             self._comp_index: int = -1
             self._comp_last_height: int = 0
             self._comp_base: str = ""
             self._hitl_auto_approve: bool = False
             self._approval_future: asyncio.Future | None = None
+            self._approval_timed_out = False
             self._ask_user_future: asyncio.Future | None = None
             self._picker_future: asyncio.Future | None = None
             self._browser_future: asyncio.Future | None = None
@@ -708,6 +734,11 @@ def run_textual_interactive(
             self._history_index: int = -1  # -1 = not browsing history
             self._history_saved_input: str = ""  # saved current input before browsing
             self._background_tasks: set[asyncio.Task] = set()
+            # Token of the slash command that owns the app; Ctrl+C clears
+            # it, and a command that lost it starts nothing when it ends.
+            self._active_command: object | None = None
+            # The token of a command that is waiting for the agent to load.
+            self._command_awaiting_agent: object | None = None
             from ..commands.base import ChannelRuntime
 
             self._channel_runtime = ChannelRuntime()
@@ -753,16 +784,23 @@ def run_textual_interactive(
                 self._channel_runtime.bind(agent, self._conversation_tid)
             self._finish_loader_widget()
             self._render_status()
+            # The start-up refresh ran without an agent: read the thread's
+            # checklists now that state can be read (the badge only; a turn
+            # may already be building the rest of the status bar).
+            task = asyncio.ensure_future(self._refresh_rubric_badge())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
         def _on_agent_load_failure(self, exc: BaseException) -> None:
             self._append_system(f"Agent failed to load: {exc}", style="red")
             self._finish_loader_widget()
 
-        def _start_background_agent_load(self, workspace: str | None) -> None:
+        def _start_background_agent_load(self, dirs: SessionDirs) -> None:
             self._progress_tracker.prime()
             self._mount_mcp_loader_widget()
             self._agent_loader.start(
-                workspace_dir=workspace,
+                workspace=dirs.workspace,
+                work_dir=str(dirs.work_dir),
                 checkpointer=self._checkpointer,
                 events=self._runtime_gateways.graph_gateway.events,
             )
@@ -805,7 +843,7 @@ def run_textual_interactive(
         async def _await_agent_ready(self) -> CompiledStateGraph:
             """Await the agent load, auto-retrying on cold-start or failure."""
             if self._agent_loader.needs_restart:
-                self._start_background_agent_load(self._workspace_dir)
+                self._start_background_agent_load(self._dirs)
             return await self._agent_loader.await_ready()
 
         def _graph_gateway(self) -> GraphGateway:
@@ -915,20 +953,73 @@ def run_textual_interactive(
         def request_quit(self) -> None:
             self.action_request_quit()
 
+        async def _sync_server_to(
+            self, dirs: SessionDirs, *, message: str, new_run_dir: bool = False
+        ) -> bool:
+            """Move the background agent server to *dirs* before switching.
+
+            Runs ``_move_server_or_keep_session`` behind a live timer widget
+            (like /compact) showing *message*, so the Textual event loop keeps
+            refreshing the UI during the up-to-60s wait.
+
+            Raises ``WorkspaceMismatchError`` when another EvoSci process owns
+            the server for other folders, so the caller leaves the session as
+            it is and command UIs (including channels) report the failure.
+            Returns False when the sync failed otherwise: the session can
+            continue locally, but background work may be unavailable.
+            """
+            from .commands import _move_server_or_keep_session
+            from .widgets.workspace_sync_widget import WorkspaceSyncWidget
+
+            if dirs == self._dirs:
+                return True
+            sync_widget = WorkspaceSyncWidget(message)
+            container = self.query_one("#chat", VerticalScroll)
+            await container.mount(sync_widget)
+            container.scroll_end(animate=False)
+            try:
+                return await _move_server_or_keep_session(
+                    config,
+                    target=dirs,
+                    current=self._dirs,
+                    backend=gateway_backend,
+                    new_run_dir=new_run_dir,
+                )
+            finally:
+                await sync_widget.cleanup()
+
         async def start_new_session(self) -> None:
+            # ``--mode=run`` starts every session in a fresh run folder of the
+            # current workspace; daemon mode works in its root.
+            ws = self._dirs.workspace
+            new_dirs = SessionDirs(
+                ws, create_run_dir(ws, run_name) if mode == "run" else None
+            )
+            synced = await self._sync_server_to(
+                new_dirs,
+                message="Moving background agent server to the new session",
+                new_run_dir=True,
+            )
+
             # Clear all widgets except #welcome
             self.clear_chat()
+            if not synced:
+                self.append_system(
+                    "Background agent server sync failed; started the new "
+                    "session, but async subagents and EvoMemory workers may "
+                    "be unavailable.",
+                    style="yellow",
+                )
 
             _ch_mod.forget_channel_origin(self._conversation_tid)
-            if not workspace_fixed:
-                self._workspace_dir = create_session_workspace(run_name)
+            self._dirs = new_dirs
             self._conversation_tid = (
                 await self._runtime_gateways.graph_gateway.create_thread(
-                    GraphTarget(workspace_dir=self._workspace_dir)
+                    GraphTarget(**self._dirs.metadata())
                 )
             )
             # Background reload: next user message awaits it.
-            self._start_background_agent_load(self._workspace_dir)
+            self._start_background_agent_load(self._dirs)
             self._status_started_at = datetime.now()
             self._status_base_snapshot = make_empty_status_snapshot(self._current_model)
             self._status_snapshot = self._status_base_snapshot
@@ -943,61 +1034,22 @@ def run_textual_interactive(
             self._append_pending_skill_proposals_notice()
 
         async def handle_session_resume(
-            self, thread_id: str, workspace_dir: str | None = None
+            self, thread_id: str, dirs: SessionDirs | None = None
         ) -> None:
-            if workspace_dir:
-                # Mirror the Rich CLI fix: when a /resume restores a thread
-                # whose workspace differs from the one the langgraph dev
-                # subprocess was launched with, background workers and
-                # deployed sub-agents would otherwise keep operating on the
-                # previous workspace. Sync the subprocess to the new workspace;
-                # the manager auto-detects the change and restarts when needed.
-                # Run in a worker thread so the Textual event loop keeps
-                # refreshing the UI during the up-to-60s wait, and show a live
-                # timer widget (like /compact) so the user sees progress
-                # instead of a frozen static line.
-                #
-                # ``self._workspace_dir`` is mutated AFTER mismatch checks so
-                # WorkspaceMismatchError leaves the session pointing at the
-                # existing workspace. Other sync failures resume locally in
-                # the TUI while background workers may be unavailable.
-                from ..langgraph_dev.manager import WorkspaceMismatchError
-                from .commands import _sync_background_agent_server_workspace
-                from .widgets.workspace_sync_widget import WorkspaceSyncWidget
-
-                sync_widget = WorkspaceSyncWidget()
-                container = self.query_one("#chat", VerticalScroll)
-                await container.mount(sync_widget)
-                container.scroll_end(animate=False)
-                try:
-                    await _sync_background_agent_server_workspace(
-                        config,
-                        workspace_dir=workspace_dir,
-                        backend=gateway_backend,
-                    )
-                except WorkspaceMismatchError as exc:
-                    # Another EvoSci process owns the langgraph dev for a
-                    # different workspace. Abort the resume without mutating
-                    # session state. Raise so command UIs, including channel
-                    # UI, report failure instead of continuing with
-                    # success/history output.
-                    raise RuntimeError(str(exc)) from exc
-                except Exception:
-                    _channel_logger.warning(
-                        "Failed to sync background agent server for resumed "
-                        "workspace %s; continuing resume in degraded mode",
-                        workspace_dir,
-                        exc_info=True,
-                    )
+            if dirs is not None:
+                # ``self._dirs`` changes only after the sync succeeds, so a
+                # refused sync leaves the session in its current folders.
+                if not await self._sync_server_to(
+                    dirs, message="Syncing background agent server to resumed workspace"
+                ):
                     self.append_system(
                         "Background agent server sync failed; resumed local "
                         "session, but async subagents and EvoMemory workers "
                         "may be unavailable.",
                         style="yellow",
                     )
-                finally:
-                    await sync_widget.cleanup()
-                self._workspace_dir = workspace_dir
+                self._dirs = dirs
+                _ch_mod._set_channels_media_dir(dirs.workspace.media_dir)
 
             if thread_id != self._conversation_tid:
                 # Only drop the origin on a real thread change — resuming the
@@ -1006,7 +1058,7 @@ def run_textual_interactive(
                 _ch_mod.forget_channel_origin(self._conversation_tid)
             self._conversation_tid = thread_id
             # Background reload: history renders immediately; next turn awaits.
-            self._start_background_agent_load(self._workspace_dir)
+            self._start_background_agent_load(self._dirs)
             self._status_started_at = datetime.now()
             self._status_base_snapshot = make_empty_status_snapshot(self._current_model)
             self._status_snapshot = self._status_base_snapshot
@@ -1058,7 +1110,7 @@ def run_textual_interactive(
             # Kick off agent construction in the background so the TUI
             # appears instantly; MCP progress shows up in the status bar.
             if self._agent_loader.agent is None and self._agent_loader.task is None:
-                self._start_background_agent_load(self._workspace_dir)
+                self._start_background_agent_load(self._dirs)
             refresh_task = asyncio.create_task(self._refresh_status_snapshot())
             self._background_tasks.add(refresh_task)
             refresh_task.add_done_callback(self._background_tasks.discard)
@@ -1092,7 +1144,7 @@ def run_textual_interactive(
                 self._check_for_updates, exclusive=True, group="update-check"
             )
             self.run_worker(
-                self._check_agent_python, exclusive=True, group="agent-python"
+                self._check_agent_shell, exclusive=True, group="agent-shell"
             )
 
             # Auto-start channels — needs the agent, so defer to after load
@@ -1134,22 +1186,22 @@ def run_textual_interactive(
                     current = _installed_version()
                     self.notify(
                         f"Update available: v{latest} (current: v{current}).\n"
-                        "Run: uv tool upgrade EvoScientist",
+                        "Run: EvoSci update",
                         severity="information",
                         timeout=15,
                     )
             except Exception:
                 _channel_logger.debug("Background update check failed", exc_info=True)
 
-        async def _check_agent_python(self) -> None:
-            """Notify the notices from :func:`_agent_python_notices`."""
+        async def _check_agent_shell(self) -> None:
+            """Notify the notices from :func:`_agent_shell_notices`."""
             try:
-                notices = await asyncio.to_thread(_agent_python_notices)
+                notices = await asyncio.to_thread(_agent_shell_notices)
                 for message in notices:
                     # Paths may contain "[", which markup would eat.
                     self.notify(message, severity="warning", timeout=20, markup=False)
             except Exception:
-                _channel_logger.debug("Agent python check failed", exc_info=True)
+                _channel_logger.debug("Agent shell check failed", exc_info=True)
 
         # ── Channel integration ────────────────────────────────
 
@@ -1164,6 +1216,7 @@ def run_textual_interactive(
                         self._agent_loader.agent,
                         self._conversation_tid,
                         cfg,
+                        media_dir=self._dirs.workspace.media_dir,
                         send_thinking=self._channel_send_thinking,
                         runtime=self._channel_runtime,
                         stop_requested=self._channel_start_stop,
@@ -1196,14 +1249,22 @@ def run_textual_interactive(
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
-            try:
-                msg = _message_queue.get_nowait()
-            except queue.Empty:
-                msg = None
+            if self._channel_turn_scheduled:
+                # That turn has not started yet: nothing goes before it.
+                return
+            # A held message goes first. While the app is taken nothing comes
+            # off the queue, so the messages on it keep their order.
+            msg = self._held_channel_msg
+            if msg is None and not self._busy:
+                try:
+                    msg = _message_queue.get_nowait()
+                except queue.Empty:
+                    msg = None
             if msg is not None:
                 if self._busy:
-                    _message_queue.put(msg)
                     return
+                self._held_channel_msg = None
+                self._channel_turn_scheduled = True
                 self.call_later(
                     lambda m=msg: asyncio.ensure_future(
                         self._process_channel_message(m)
@@ -1244,6 +1305,10 @@ def run_textual_interactive(
             """
             target_tid = self._conversation_tid
             try:
+                if self._busy:
+                    # The poll found the app free, but input handled since then
+                    # took it. The notifications stay queued for a later poll.
+                    return
                 try:
                     await consume_notifications(
                         run_message=lambda text, notifs: self._inject_notification_tui(
@@ -1278,7 +1343,7 @@ def run_textual_interactive(
                 if agent is not None and tid:
                     target = GraphTarget(
                         local_graph=agent,
-                        workspace_dir=self._workspace_dir,
+                        **self._dirs.metadata(),
                     )
                     await enqueue_completions_from_state_throttled(
                         self._graph_gateway(), target, tid
@@ -1324,8 +1389,6 @@ def run_textual_interactive(
             # keyboard input path (line ~2113). Queue-triggered turns that
             # `await _run_turn` from inside a nested call_later chain don't
             # get viewport-follow during streaming (only after completion).
-            # Mark busy synchronously so the next poll tick doesn't re-enter.
-            self._busy = True
             effective_tid = target_thread_id or self._conversation_tid
 
             async def _run_and_publish() -> None:
@@ -1334,6 +1397,8 @@ def run_textual_interactive(
                     skip_user_message=True,
                     resolve_mentions=False,
                     thread_id_override=target_thread_id,
+                    # A notifier turn only finishes a grading the thread deferred.
+                    rubric_mode="followup",
                 )
                 if _ch_mod.publish_to_channel_origin(effective_tid, response or ""):
                     # Mirror a normal channel turn's closing "Replied to" line
@@ -1346,7 +1411,8 @@ def run_textual_interactive(
                             style="dim",
                         )
 
-            self._run_task = asyncio.ensure_future(_run_and_publish())
+            # Taken in this step, so the next poll tick does not re-enter.
+            self._own_app(_run_and_publish())
 
         async def _read_async_tasks_tui(self, target_thread_id: str) -> AsyncTasksState:
             """Read async_tasks from agent state for dedup, against a frozen tid.
@@ -1363,7 +1429,7 @@ def run_textual_interactive(
                     self._graph_gateway(),
                     GraphTarget(
                         local_graph=agent,
-                        workspace_dir=self._workspace_dir,
+                        **self._dirs.metadata(),
                     ),
                     target_thread_id,
                 )
@@ -1458,13 +1524,19 @@ def run_textual_interactive(
         async def _wait_for_approval(self, approval_widget) -> Any:
             """Wait for user to interact with an ApprovalWidget.
 
-            Returns the ``ApprovalWidget.Decided`` message, or ``None`` on
-            timeout / cancellation.
+            Returns the ``ApprovalWidget.Decided`` message, or ``None`` when
+            the wait ran out or Ctrl+C answered it (``action_request_quit``).
+            ``_approval_timed_out`` tells the two apart: Ctrl+C on the widget
+            is a refusal, a timeout is not.
             """
             self._approval_future = asyncio.get_running_loop().create_future()
+            self._approval_timed_out = False
             try:
-                return await asyncio.wait_for(self._approval_future, timeout=300)
-            except (TimeoutError, asyncio.CancelledError):
+                return await asyncio.wait_for(
+                    self._approval_future, timeout=_APPROVAL_WIDGET_TIMEOUT
+                )
+            except TimeoutError:
+                self._approval_timed_out = True
                 return None
             finally:
                 self._approval_future = None
@@ -1629,6 +1701,9 @@ def run_textual_interactive(
             channel_ask_user_fn: Callable[[dict], dict] | None = None,
             cancel_scope: str | None = None,
             thread_id_override: str | None = None,
+            rubric_mode: str | None = "thread",
+            approve_all_at_start: bool = False,
+            goal_request: dict[str, Any] | None = None,
         ) -> str:
             """Stream agent events and mount widgets.  Returns response text.
 
@@ -1643,6 +1718,8 @@ def run_textual_interactive(
                     the agent.
                 skip_user_message: If True, don't mount UserMessage (caller
                     already mounted it — e.g. channel messages with labels).
+                approve_all_at_start: The channel this turn came from already
+                    has an "approve all" grant in force.
                 channel_hitl_fn: Optional channel-based HITL approval function.
                     When provided (channel messages), this is called instead
                     of mounting the ApprovalWidget. It receives
@@ -1663,7 +1740,16 @@ def run_textual_interactive(
 
             # 1. Mount user message + loading spinner
             if not skip_user_message:
-                await container.mount(UserMessage(display_text or user_text))
+                shown = display_text or user_text
+                await container.mount(UserMessage(shown))
+                if shown.lstrip().startswith("/"):
+                    from ..commands.skill_slash import skill_slash_names
+                    from ..message_meta import skill_label
+
+                    for name in skill_slash_names(shown, self._dirs.workspace):
+                        await container.mount(
+                            SystemMessage(skill_label(name), msg_style="dim")
+                        )
             # Mount file warnings after user message so they appear in the
             # correct position (between user input and model response).
             for w in file_warnings or []:
@@ -1688,11 +1774,17 @@ def run_textual_interactive(
                 narration: AssistantMessage | None = None
                 assistant_start: int = 0
                 narrated_end: int = 0
+                # Finished narration widgets with the response offset each
+                # ends at, so a discarded attempt's narration can be removed.
+                narration_log: list[tuple[int, AssistantMessage]] = field(
+                    default_factory=list
+                )
 
             response_display = _ResponseDisplayState()
 
             # Transient indicator widgets (auto-removed on state transitions)
             processing_w: Static | None = None  # "Analyzing results..."
+            drafting_w: SystemMessage | None = None  # goal criteria being drafted
 
             # Tool collapsing (matches CLI MAX_VISIBLE_TOOLS)
             _MAX_VISIBLE_TOOLS = 4
@@ -1704,7 +1796,7 @@ def run_textual_interactive(
             _media_sent: set[str] = set()
             _MIN_THINKING_LEN = 200
 
-            metadata = build_metadata(self._workspace_dir, self._current_model)
+            metadata = build_metadata(self._dirs, self._current_model)
             response = ""
             agent = await self._await_agent_ready()
 
@@ -1715,6 +1807,14 @@ def run_textual_interactive(
                         await w.remove()
                     except Exception:
                         pass
+
+            async def _restart_loading() -> None:
+                """A fresh spinner at the end of the chat: work goes on.
+                The caller has removed the previous one."""
+                nonlocal loading, loading_removed
+                loading = LoadingWidget()
+                loading_removed = False
+                await container.mount(loading)
 
             async def _mount_or_update_narration(text: str) -> None:
                 """Show the current between-tool text segment inline."""
@@ -1742,6 +1842,9 @@ def run_textual_interactive(
                         )
                     except Exception:
                         await container.mount(narration)
+                    response_display.narration_log.append(
+                        (response_display.assistant_start + len(content), narration)
+                    )
                     response_display.narrated_end = max(
                         response_display.narrated_end,
                         response_display.assistant_start + len(content),
@@ -1758,6 +1861,9 @@ def run_textual_interactive(
                 """Finalize inline narration without removing it from the transcript."""
                 if response_display.narration is not None:
                     await response_display.narration.stop_stream()
+                    response_display.narration_log.append(
+                        (response_display.narrated_end, response_display.narration)
+                    )
                     response_display.narration = None
 
             async def _mark_cancelled_response() -> str:
@@ -1868,6 +1974,38 @@ def run_textual_interactive(
             _stream_input: Any = user_text  # str or Command for HITL resume
             graph_gateway = self._graph_gateway()
 
+            async def _close_ended_pause(reason: ParkedCloseReason) -> None:
+                """Close the pause the turn ends at; mark what still runs rejected."""
+                from ..backends import close_parked_checkpoint
+
+                _tid = thread_id_override or self._conversation_tid
+                try:
+                    await close_parked_checkpoint(
+                        graph_gateway,
+                        GraphTarget(local_graph=agent, **self._dirs.metadata()),
+                        _tid,
+                        reason=reason,
+                    )
+                except Exception:
+                    # The close has logged why; the turn ends either way.
+                    _channel_logger.debug(
+                        "Parked HITL checkpoint close failed on thread %s",
+                        _tid,
+                        exc_info=True,
+                    )
+                finally:
+                    # Also when a second Ctrl+C cancels the close itself.
+                    state.pending_interrupt = None
+                    state.pending_ask_user = None
+                    for tw in tool_widgets.values():
+                        if tw._status == "running":
+                            tw.set_rejected()
+
+            # Set when Ctrl+C cancels the turn task itself.
+            _turn_cancelled = False
+            # Sub-agents at a pause in this round of the stream.
+            _paused_boxes: set[str] = set()
+
             _hitl_round = 0
             _human_rounds = 0
             # Set when the round budget is spent before the next prompt or
@@ -1877,6 +2015,17 @@ def run_textual_interactive(
             # A pause was stored but no resume was built. Close it without
             # the budget-stop notice (that notice is only for a spent cap).
             _hitl_unresolved = False
+            # Why the turn ends at a pause: "rejected" or "unanswered" once
+            # an approval was declined. From then on later pauses of the same
+            # stream are not handled; work that is still running finishes,
+            # then the parked checkpoint is closed with this reason.
+            _hitl_declined: ParkedCloseReason | None = None
+            # Which calls carry the session grant: see ``_hitl_when``. Decided
+            # where each answer is built, never from the flag at a round's top.
+            from ..backends import approve_all_configurable_extra
+
+            _turn_granted = approve_all_at_start
+            _approve_all_carry = _turn_granted or self._hitl_auto_approve
             while True:
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
@@ -1894,18 +2043,25 @@ def run_textual_interactive(
                 state.pending_ask_user = None
                 _hitl_resuming = False
                 _hitl_unresolved = False
+                # A resumed stream says again which sub-agents are at a pause.
+                _paused_boxes.clear()
                 # Reset per-round widgets so resumed streams get fresh ones
                 if _hitl_round > 0:
                     thinking_w = None
                     summarization_w = None
                 _hitl_round += 1
+                events = None
                 try:
                     _anchor_engaged = False
                     _active_teams = list(self._channel_runtime.active_teams)
-                    _configurable_extra = (
-                        {"active_teams": _active_teams} if _active_teams else None
+                    _configurable_extra = merge_configurable_extra(
+                        {"active_teams": _active_teams} if _active_teams else None,
+                        self._rubric_configurable_extra(
+                            thread_id_override or self._conversation_tid, rubric_mode
+                        ),
+                        approve_all_configurable_extra(_approve_all_carry),
                     )
-                    async for event in iter_with_stream_cancel(
+                    events = iter_with_stream_cancel(
                         graph_gateway.stream_events(
                             RunRequest(
                                 message=_stream_input,
@@ -1915,13 +2071,17 @@ def run_textual_interactive(
                                 metadata=metadata,
                                 target=GraphTarget(
                                     local_graph=agent,
-                                    workspace_dir=self._workspace_dir,
+                                    **self._dirs.metadata(),
                                 ),
                                 configurable_extra=_configurable_extra,
+                                # Read only with the turn's first input; a
+                                # resume ignores it.
+                                goal_request=goal_request,
                             )
                         ),
                         cancel_scope,
-                    ):
+                    )
+                    async for event in events:
                         if is_stream_cancel_requested(cancel_scope):
                             response = await _mark_cancelled_response()
                             break
@@ -2001,6 +2161,7 @@ def run_textual_interactive(
                                     tool_name,
                                     _media_sent,
                                     on_media_cb,
+                                    str(self._dirs.work_dir),
                                 )
 
                         # -- Remove loading spinner on first content event --
@@ -2182,6 +2343,10 @@ def run_textual_interactive(
                                 sa_w = SubAgentWidget(sa_name, sa_desc)
                                 await container.mount(sa_w)
                                 subagent_widgets[instance_id] = sa_w
+                            else:
+                                # A resumed round announces the sub-agents
+                                # that go on after the pause.
+                                existing.reopen()
 
                         elif event_type == "subagent_tool_call":
                             instance_id = event["instance_id"]
@@ -2212,8 +2377,146 @@ def run_textual_interactive(
                         elif event_type == "subagent_end":
                             instance_id = event["instance_id"]
                             sa_w = _get_sa_widget(instance_id, event.get("name", ""))
-                            if sa_w is not None:
-                                sa_w.finalize()
+                            # A sub-agent that stopped at a pause has not
+                            # ended; the end of the round settles its box.
+                            if event.get("paused"):
+                                _paused_boxes.add(instance_id)
+                            if sa_w is not None and not event.get("paused"):
+                                # After a decline an end with open calls is
+                                # a pause the stream could not mark as one.
+                                sa_w.finalize(rejected=_hitl_declined is not None)
+
+                        elif event_type == "goal_state":
+                            from ..stream.display import goal_event_lines
+
+                            change = event.get("change")
+                            await _remove_w(drafting_w)
+                            drafting_w = None
+                            if not loading_removed:
+                                await loading.cleanup()
+                                loading_removed = True
+                            lines = goal_event_lines(event)
+                            if change == "drafting":
+                                # Replaced by whatever ends the draft.
+                                drafting_w = SystemMessage(
+                                    lines[0][0], msg_style=lines[0][1]
+                                )
+                                await container.mount(drafting_w)
+                            else:
+                                for line_text, line_style in lines:
+                                    await container.mount(
+                                        SystemMessage(line_text, msg_style=line_style)
+                                    )
+                            # The graph added this message to the thread; show
+                            # it once, as the user's, above the work it starts.
+                            added = str(event.get("message") or "")
+                            if added:
+                                await container.mount(UserMessage(added))
+                            # Below the lines; the next content or the end of
+                            # the stream takes it away.
+                            await _restart_loading()
+
+                        elif event_type == "rubric_evaluation_start":
+                            passes = int(event.get("iteration") or 0) + 1
+                            if not loading_removed:
+                                await loading.cleanup()
+                                loading_removed = True
+                            await container.mount(
+                                SystemMessage(
+                                    f"rubric: checking acceptance criteria (pass {passes})",
+                                    msg_style="dim",
+                                )
+                            )
+                            # The grader's own work is not shown; the verdict
+                            # or the end of the stream takes the spinner away.
+                            await _restart_loading()
+
+                        elif event_type == "rubric_evaluation":
+                            from ..stream.display import rubric_result_lines
+
+                            if not loading_removed:
+                                await loading.cleanup()
+                                loading_removed = True
+                            if event.get("result") == "needs_revision":
+                                # The revision must land below its verdict, and
+                                # the draft must not come back as narration.
+                                await _convert_assistant_to_narration()
+                                state.latest_text = ""
+                            for line_text, line_style in rubric_result_lines(event):
+                                await container.mount(
+                                    SystemMessage(line_text, msg_style=line_style)
+                                )
+
+                        elif event_type in ("model_retry", "model_output_discarded"):
+                            # state already rolled back; mirror it in the widgets.
+                            discarded = event.get("discarded") or {}
+                            instance_id = event.get("instance_id") or ""
+                            ids = [str(i) for i in discarded.get("tool_call_ids") or []]
+                            sa_w = None
+                            if instance_id:
+                                sa_w = _get_sa_widget(instance_id, "")
+                                if sa_w is not None and ids:
+                                    await sa_w.discard_tool_calls(ids)
+                            else:
+                                if int(discarded.get("text_chars") or 0):
+                                    if response_display.assistant is not None:
+                                        await _remove_w(response_display.assistant)
+                                        response_display.assistant = None
+                                    if response_display.narration is not None:
+                                        if state.latest_text.strip():
+                                            await _mount_or_update_narration(
+                                                state.latest_text
+                                            )
+                                        else:
+                                            await _remove_w(response_display.narration)
+                                            response_display.narration = None
+                                    kept_len = len(state.response_text)
+                                    for end, widget in list(
+                                        response_display.narration_log
+                                    ):
+                                        if end > kept_len:
+                                            await _remove_w(widget)
+                                            response_display.narration_log.remove(
+                                                (end, widget)
+                                            )
+                                    response_display.narrated_end = min(
+                                        response_display.narrated_end, kept_len
+                                    )
+                                    response_display.assistant_start = min(
+                                        response_display.assistant_start, kept_len
+                                    )
+                                    self._set_status_streaming_text(state.latest_text)
+                                if thinking_w is not None:
+                                    thinking_w.truncate(
+                                        int(discarded.get("thinking_chars") or 0)
+                                    )
+                                for tool_id in ids:
+                                    tw = tool_widgets.pop(tool_id, None)
+                                    if tw is not None:
+                                        await _remove_w(tw)
+                            if event_type == "model_retry":
+                                from ..stream.display import model_retry_text
+
+                                notice = SystemMessage(
+                                    model_retry_text(event), msg_style="yellow"
+                                )
+                                await container.mount(notice)
+                                # A spinner that is up stays the last line. Asked
+                                # of the widget: a paused round removes it unflagged.
+                                if loading.parent is container:
+                                    container.move_child(loading, after=notice)
+                        elif event_type == "rubric_evaluation_deferred":
+                            from ..stream.display import rubric_deferred_text
+
+                            await container.mount(
+                                SystemMessage(
+                                    rubric_deferred_text(
+                                        int(event.get("tasks") or 0),
+                                        int(event.get("processes") or 0),
+                                    ),
+                                    msg_style="yellow",
+                                )
+                            )
 
                         elif event_type == "panel_dispatch_start":
                             eval_id = event.get("eval_id", "") or "_unbatched"
@@ -2250,6 +2553,8 @@ def run_textual_interactive(
                                 )
 
                         elif event_type == "ask_user":
+                            if _hitl_declined is not None:
+                                continue
                             questions = event.get("questions", [])
                             if questions:
                                 # Budget refusal must precede the prompt:
@@ -2283,9 +2588,19 @@ def run_textual_interactive(
 
                                     _prompt = self.query_one("#prompt", ChatTextArea)
                                     _prompt.disabled = True
+                                    await _remove_w(drafting_w)
+                                    drafting_w = None
+                                    if not loading_removed:
+                                        await loading.cleanup()
+                                        loading_removed = True
                                     ask_w = AskUserWidget(questions)
                                     await container.mount(ask_w)
                                     self.call_after_refresh(ask_w.focus_active)
+                                    # The question can be a turn's first
+                                    # content, when nothing follows the chat yet.
+                                    self.call_after_refresh(
+                                        container.scroll_end, animate=False
+                                    )
                                     result = await self._wait_for_ask_user(ask_w)
                                     try:
                                         await ask_w.remove()
@@ -2297,12 +2612,28 @@ def run_textual_interactive(
                                 )
 
                                 _stream_input = Command(resume=result)
+                                _approve_all_carry = (
+                                    _turn_granted or self._hitl_auto_approve
+                                )
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop
 
                         elif event_type == "interrupt":
                             action_reqs = event.get("action_requests", [])
+                            # The sub-agent that asks is at a pause; its paused
+                            # end usually comes after the approval.
+                            _paused_boxes.update(
+                                box_id
+                                for box_id, sa_w in subagent_widgets.items()
+                                if sa_w.asks(action_reqs)
+                            )
+                            # Before the budget checks and the automatic
+                            # answers: after a decline nothing restarts the turn.
+                            if _hitl_declined is not None:
+                                continue
                             interrupt_id = event.get("interrupt_id")
+                            # Only an answer produced by the grant sets it below.
+                            _approve_all_carry = False
 
                             # HITL: session "approve all" blanket-approves.
                             # The human budget does not apply; the total cap
@@ -2322,6 +2653,7 @@ def run_textual_interactive(
                                 _stream_input = build_hitl_resume(
                                     interrupt_id, decisions
                                 )
+                                _approve_all_carry = True
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop
 
@@ -2350,24 +2682,40 @@ def run_textual_interactive(
                                     _human_rounds += 1
                                 decisions = outcome.decisions
                                 if is_stream_cancel_requested(cancel_scope):
+                                    # A stop while the approval was open is a
+                                    # refusal, whatever came back with it.
+                                    _hitl_declined = "rejected"
                                     state.pending_interrupt = None
                                     response = await _mark_cancelled_response()
                                     break
                                 if decisions is not None:
-                                    from ..backends import build_hitl_resume
+                                    from ..backends import (
+                                        answer_keeps_grant,
+                                        build_hitl_resume,
+                                    )
 
                                     _stream_input = build_hitl_resume(
                                         interrupt_id, decisions
                                     )
+                                    _turn_granted = (
+                                        _turn_granted or outcome.grant_in_force
+                                    )
+                                    _approve_all_carry = answer_keeps_grant(
+                                        outcome.session_granted, decisions
+                                    )
                                     _hitl_resuming = True
                                     break  # re-enter outer HITL loop
                                 else:
+                                    # Tools still running may be siblings that
+                                    # finish; they are marked when the stream ends.
+                                    _hitl_declined = (
+                                        "rejected" if outcome.rejected else "unanswered"
+                                    )
                                     state.pending_interrupt = None
-                                    for tw in tool_widgets.values():
-                                        if tw._status == "running":
-                                            tw.set_rejected()
                                     self._append_system(
-                                        "Tool execution rejected by channel user.",
+                                        "Tool execution rejected by channel user."
+                                        if outcome.rejected
+                                        else "Channel approval left unanswered.",
                                         style="yellow",
                                     )
                                 continue
@@ -2433,12 +2781,38 @@ def run_textual_interactive(
                             from .widgets.approval_widget import ApprovalWidget
 
                             approval_w = ApprovalWidget(action_reqs)
-                            await container.mount(approval_w)
-                            decided_event = await self._wait_for_approval(approval_w)
-                            await approval_w.remove()
-                            _prompt.disabled = False
-                            if decided_event and decided_event.decisions is not None:
-                                if decided_event.auto_approve_session:
+                            try:
+                                await container.mount(approval_w)
+                                decided_event = await self._wait_for_approval(
+                                    approval_w
+                                )
+                                _approved = bool(
+                                    decided_event
+                                    and decided_event.decisions is not None
+                                )
+                                if not _approved:
+                                    # On record before the next await. Only a wait
+                                    # that ran out is "unanswered"; Ctrl+C refuses.
+                                    _hitl_declined = (
+                                        "unanswered"
+                                        if decided_event is None
+                                        and self._approval_timed_out
+                                        else "rejected"
+                                    )
+                                await approval_w.remove()
+                            finally:
+                                # Also when Ctrl+C cuts the mount or the
+                                # removal: no widget is left, the input is back.
+                                if approval_w.is_attached:
+                                    approval_w.remove()
+                                _prompt.disabled = False
+                            if _approved:
+                                # A stop that came with the choice refuses
+                                # the approval, so it grants nothing either.
+                                if (
+                                    decided_event.auto_approve_session
+                                    and not is_stream_cancel_requested(cancel_scope)
+                                ):
                                     self._hitl_auto_approve = True
                                 from ..backends import build_hitl_resume
                                 from ..channels.interaction import (
@@ -2455,14 +2829,19 @@ def run_textual_interactive(
                                 _hitl_resuming = True
                                 break  # re-enter outer HITL loop with resume
                             else:
+                                # Tools still running may be siblings that
+                                # finish; they are marked when the stream ends.
                                 state.pending_interrupt = None
-                                for tw in tool_widgets.values():
-                                    if tw._status == "running":
-                                        tw.set_rejected()
                                 self._append_system(
-                                    "Tool execution rejected.",
+                                    "Tool execution rejected."
+                                    if _hitl_declined == "rejected"
+                                    else "Approval left unanswered.",
                                     style="yellow",
                                 )
+                                # Ctrl+C on the widget also stops the turn.
+                                if is_stream_cancel_requested(cancel_scope):
+                                    response = await _mark_cancelled_response()
+                                    break
 
                         elif event_type == "done":
                             # Clean up transient indicators
@@ -2518,6 +2897,7 @@ def run_textual_interactive(
                 except asyncio.CancelledError:
                     # Ctrl+C cancellation: preserve streamed text before the outer
                     # turn handler appends its interruption notice.
+                    _turn_cancelled = True
                     await _mark_cancelled_response()
                     raise
                 except Exception as exc:
@@ -2538,90 +2918,159 @@ def run_textual_interactive(
                         self._append_system(f"Error: {exc}", style="red")
                     response = f"Error: {exc}"
                 finally:
-                    # Clean up loading widget if it wasn't removed yet
-                    if not loading_removed:
+                    # Three steps, so that a Ctrl+C or an error in one of the
+                    # waits still leaves every row settled and a decline closed.
+                    _cleaned_up = False
+                    try:
                         try:
-                            await loading.cleanup()
-                        except Exception:
-                            pass
-                    # Clean up transient indicators. Inline narration is transcript
-                    # content, so finalize it without removing the widget.
-                    await _preserve_active_narration()
-                    await _remove_w(processing_w)
-                    # A pause with no resume is closed after the loop. Mark it
-                    # here, before widgets, so they stay "running" for the
-                    # rejected mark instead of "interrupted".
-                    if (
-                        not is_stream_cancel_requested(cancel_scope)
-                        and not _hitl_resuming
-                        and not _hitl_budget_exhausted
-                        and hitl_pause_unresolved(
-                            resuming=False,
-                            pending=(
-                                state.pending_interrupt is not None
-                                or state.pending_ask_user is not None
-                            ),
-                        )
-                    ):
-                        _hitl_unresolved = True
-                    # Mark any still-running tool widgets as interrupted
-                    # (skip if HITL approved — tools will continue next round)
-                    if (
-                        not _hitl_resuming
-                        and not _hitl_budget_exhausted
-                        and not _hitl_unresolved
-                    ):
-                        _expand_completed_tools()
-                        for tw in tool_widgets.values():
-                            if tw._status == "running":
+                            # A HITL or ask_user event leaves the loop early.
+                            # Close the iterator here, in the turn task and its
+                            # ContextVar context, instead of leaving cleanup to
+                            # the event loop's async-generator finalizer
+                            # (issue #595).
+                            if events is not None:
+                                await events.aclose()
+                            # Clean up loading widget if it wasn't removed yet
+                            if not loading_removed:
                                 try:
-                                    tw.set_interrupted()
+                                    await loading.cleanup()
                                 except Exception:
                                     pass
-                    # Finalize any still-active sub-agents
-                    for sa_w in subagent_widgets.values():
-                        if sa_w._is_active:
-                            try:
-                                sa_w.finalize()
-                            except Exception:
-                                pass
-                    # Finalize any still-running panel dispatches so their
-                    # per-row spinner timers stop instead of ticking forever.
-                    for panel_w in panel_widgets.values():
+                            # Clean up transient indicators. Inline narration is
+                            # transcript content, so finalize it without removing
+                            # the widget.
+                            await _preserve_active_narration()
+                            await _remove_w(processing_w)
+                            await _remove_w(drafting_w)
+                            drafting_w = None
+                        except asyncio.CancelledError:
+                            _turn_cancelled = True
+                            raise
+                        finally:
+                            # A stop that leaves an approval open is a refusal;
+                            # a question keeps its pause.
+                            _stopped = _turn_cancelled or is_stream_cancel_requested(
+                                cancel_scope
+                            )
+                            if (
+                                _stopped
+                                and state.pending_interrupt is not None
+                                and _hitl_declined is None
+                            ):
+                                _hitl_declined = "rejected"
+                            # A pause with no resume is closed after the loop.
+                            # Mark it here, before widgets, so they stay
+                            # "running" for the rejected mark instead of
+                            # "interrupted".
+                            if (
+                                not is_stream_cancel_requested(cancel_scope)
+                                and not _hitl_resuming
+                                and not _hitl_budget_exhausted
+                                and hitl_pause_unresolved(
+                                    resuming=False,
+                                    pending=(
+                                        state.pending_interrupt is not None
+                                        or state.pending_ask_user is not None
+                                    ),
+                                )
+                            ):
+                                _hitl_unresolved = True
+                            _ends_at_pause = (
+                                _hitl_budget_exhausted
+                                or _hitl_unresolved
+                                or _hitl_declined is not None
+                            )
+                            # A stop cut what ran beside a sub-agent's pause:
+                            # other boxes and our own calls read interrupted.
+                            _cut_beside = (
+                                _ends_at_pause and _stopped and bool(_paused_boxes)
+                            )
+                            # Mark any still-running tool widgets as interrupted
+                            # (skip if HITL approved — tools will continue next
+                            # round; at a pause they wait for the rejected mark
+                            # of the close)
+                            if _cut_beside or not (_hitl_resuming or _ends_at_pause):
+                                _expand_completed_tools()
+                                for tw in tool_widgets.values():
+                                    if tw._status == "running":
+                                        try:
+                                            tw.set_interrupted()
+                                        except Exception:
+                                            pass
+                            # Finalize any still-active sub-agents; a resumed
+                            # round re-opens the ones that go on. Calls left
+                            # without a result read as the main agent's: rejected
+                            # at a pause.
+                            for _box_id, sa_w in subagent_widgets.items():
+                                if sa_w._is_active:
+                                    try:
+                                        sa_w.finalize(
+                                            rejected=_ends_at_pause
+                                            and (
+                                                not _cut_beside
+                                                or _box_id in _paused_boxes
+                                            )
+                                        )
+                                    except Exception:
+                                        pass
+                            # Finalize any still-running panel dispatches so
+                            # their per-row spinner timers stop instead of ticking
+                            # forever.
+                            for panel_w in panel_widgets.values():
+                                try:
+                                    panel_w.finalize_running()
+                                except Exception:
+                                    pass
+                            # Finalize thinking widget
+                            if thinking_w is not None and thinking_w._is_active:
+                                try:
+                                    thinking_w.finalize()
+                                except Exception:
+                                    pass
                         try:
-                            panel_w.finalize_running()
-                        except Exception:
-                            pass
-                    # Finalize thinking widget
-                    if thinking_w is not None and thinking_w._is_active:
-                        try:
-                            thinking_w.finalize()
-                        except Exception:
-                            pass
-                    # Finalize assistant message stream
-                    if response_display.assistant is not None:
-                        await response_display.assistant.stop_stream()
-                    # Flush remaining thinking callback
-                    if (
-                        on_thinking_cb
-                        and not _thinking_sent
-                        and state.thinking_text
-                        and len(state.thinking_text) >= _MIN_THINKING_LEN
-                    ):
-                        on_thinking_cb(state.thinking_text.rstrip())
-                    # Re-anchor so final content is visible, but only
-                    # if the user hasn't scrolled away.
-                    if self._chat_following:
-                        self._anchor_chat(container)
-                    self._new_content_below = False
+                            # Finalize assistant message stream
+                            if response_display.assistant is not None:
+                                await response_display.assistant.stop_stream()
+                        except asyncio.CancelledError:
+                            _turn_cancelled = True
+                            raise
+                        # Flush remaining thinking callback
+                        if (
+                            on_thinking_cb
+                            and not _thinking_sent
+                            and state.thinking_text
+                            and len(state.thinking_text) >= _MIN_THINKING_LEN
+                        ):
+                            on_thinking_cb(state.thinking_text.rstrip())
+                        # Re-anchor so final content is visible, but only
+                        # if the user hasn't scrolled away.
+                        if self._chat_following:
+                            self._anchor_chat(container)
+                        self._new_content_below = False
+                        _cleaned_up = True
+                    finally:
+                        # A cancelled turn, or one whose cleanup failed, closes its
+                        # decline here; a stop that left an approval open is one.
+                        if _turn_cancelled or not _cleaned_up:
+                            if (
+                                (
+                                    _turn_cancelled
+                                    or is_stream_cancel_requested(cancel_scope)
+                                )
+                                and state.pending_interrupt is not None
+                                and _hitl_declined is None
+                            ):
+                                _hitl_declined = "rejected"
+                            if _hitl_declined is not None:
+                                await _close_ended_pause(_hitl_declined)
 
                 # HITL / ask_user: if interrupt was handled, loop back to resume stream
                 if is_stream_cancel_requested(cancel_scope):
                     response = await _mark_cancelled_response()
                     break
-                if _hitl_budget_exhausted:
+                if _hitl_budget_exhausted or _hitl_declined is not None:
                     # A pending was refused before a prompt or resume was
-                    # built. Leave it parked so the close below can end the
+                    # built, or the user declined. The close below ends the
                     # checkpoint without another model step.
                     break
                 if state.pending_interrupt is None and state.pending_ask_user is None:
@@ -2638,38 +3087,30 @@ def run_textual_interactive(
                 # Otherwise _stream_input was set to Command(resume=...)
                 # by the interrupt handler above; loop continues.
 
-            _close_target = GraphTarget(
-                local_graph=agent, workspace_dir=self._workspace_dir
-            )
+            _close_target = GraphTarget(local_graph=agent, **self._dirs.metadata())
             _close_tid = thread_id_override or self._conversation_tid
 
-            # Round budget exhausted. Close the parked checkpoint without
-            # resuming the agent. The finally above skipped the
-            # "interrupted" mark when ``_hitl_budget_exhausted`` so the
-            # widgets here can show rejected instead.
-            if not is_stream_cancel_requested(cancel_scope) and (
+            # The turn ends at a pause nobody will answer: the round budget
+            # is spent, the user declined, or the pause could not be resolved.
+            # Close the parked checkpoint without resuming the agent. The
+            # finally above left the widgets "running" so they show rejected
+            # here. A stopped turn keeps its pause, unless the user had
+            # already declined: the decline is what gets recorded.
+            _pause_left = (
                 state.pending_interrupt is not None
                 or state.pending_ask_user is not None
+            )
+            if _hitl_declined is not None or (
+                _pause_left and not is_stream_cancel_requested(cancel_scope)
             ):
-                from ..backends import close_parked_checkpoint
-
-                try:
-                    await close_parked_checkpoint(
-                        graph_gateway, _close_target, _close_tid
-                    )
-                except Exception:
-                    _channel_logger.warning(
-                        "Failed to close parked HITL checkpoint on thread %s",
-                        _close_tid,
-                        exc_info=True,
-                    )
-                state.pending_interrupt = None
-                state.pending_ask_user = None
-                for tw in tool_widgets.values():
-                    if tw._status == "running":
-                        tw.set_rejected()
-                # Unresolved pauses (empty ask_user, swallowed error) are
-                # closed the same way, but they are not a spent budget.
+                await _close_ended_pause(
+                    "round_limit"
+                    if _hitl_budget_exhausted
+                    else (_hitl_declined or "unanswered")
+                )
+                if _hitl_declined is not None:
+                    _expand_completed_tools()
+                # Only a spent budget gets the notice.
                 if _hitl_budget_exhausted:
                     self._append_system(
                         HITL_BUDGET_STOP_NOTICE,
@@ -2691,6 +3132,7 @@ def run_textual_interactive(
             await enqueue_bg_process_completions_from_state(
                 graph_gateway, _close_target, _close_tid
             )
+            await self._acknowledge_rubric(_close_tid)
             return response
 
         async def _run_turn(
@@ -2700,6 +3142,8 @@ def run_textual_interactive(
             skip_user_message: bool = False,
             resolve_mentions: bool = True,
             thread_id_override: str | None = None,
+            rubric_mode: str | None = "thread",
+            goal_request: dict[str, Any] | None = None,
         ) -> str:
             """Handle a user turn: stream agent response with widgets.
 
@@ -2722,9 +3166,11 @@ def run_textual_interactive(
                     notifier path so a mid-consume ``/new`` cannot redirect a
                     notification meant for thread A into thread B. Falls back
                     to the live tid when ``None``.
+                goal_request: A ``/goal`` request; the run then carries it
+                    and no message (*user_text* is empty).
             """
-            cancelled = False
             response = ""
+            load_failed = False
             try:
                 # Foreground turns share the legacy default scope. Reset it at
                 # the turn boundary; scoped channel stop requests remain armed.
@@ -2737,11 +3183,11 @@ def run_textual_interactive(
                 self._render_status()
 
                 # Resolve @file mentions — inject file contents before sending to agent.
-                # Use self._workspace_dir (current session) not the startup-captured
-                # workspace_dir closure, which becomes stale after /new or /resume.
+                # Use self._dirs (current session) not a startup-captured
+                # folder, which becomes stale after /new or /resume.
                 if resolve_mentions:
                     _, message_to_send, file_warnings = await asyncio.to_thread(
-                        resolve_file_mentions, user_text, self._workspace_dir
+                        resolve_file_mentions, user_text, str(self._dirs.work_dir)
                     )
                 else:
                     message_to_send = user_text
@@ -2754,6 +3200,7 @@ def run_textual_interactive(
                 try:
                     await self._await_agent_ready()
                 except Exception:
+                    load_failed = True
                     return ""
 
                 response = await self._stream_with_widgets(
@@ -2762,9 +3209,10 @@ def run_textual_interactive(
                     file_warnings=file_warnings,
                     skip_user_message=skip_user_message,
                     thread_id_override=thread_id_override,
+                    rubric_mode=rubric_mode,
+                    goal_request=goal_request,
                 )
             except asyncio.CancelledError:
-                cancelled = True
                 try:
                     from ..middleware.code_interpreter import (
                         aclose_code_interpreters,
@@ -2778,18 +3226,20 @@ def run_textual_interactive(
                     )
                 self._append_system("\nInterrupted by user", style="dim italic #ffe082")
             finally:
-                self._busy = False
                 self._status_phase = ResearchPhase.IDLE
-                self._run_task = None
-                await self._refresh_status_snapshot(reset_streaming_text=True)
+                try:
+                    await self._refresh_status_snapshot(reset_streaming_text=True)
+                finally:
+                    # Kept until here: Ctrl+C must still find this turn, and
+                    # nothing else may take the app before its queue is sent.
+                    self._run_task = None
+                    self._busy = False
+                    # Ctrl+C empties the queue, so after a stop this sends what
+                    # was entered since; a failed load would be retried per entry.
+                    if not load_failed:
+                        self._drain_queue()
                 self._render_status()
                 self.query_one("#prompt", ChatTextArea).focus()
-
-            # Process next queued message (FIFO) — skip if interrupted
-            if not cancelled and self._queued_messages:
-                next_msg = self._queued_messages.pop(0)
-                self._render_queue_indicator()
-                self._run_task = asyncio.ensure_future(self._run_turn(next_msg))
 
             return response
 
@@ -2802,11 +3252,20 @@ def run_textual_interactive(
               (streaming response)
               [channel: Replied to sender]
             """
+            # This message is dealt with below, so the poll may take the next.
+            self._channel_turn_scheduled = False
+            if self._busy:
+                # The poll found the app free, but input handled since then
+                # took it. Held for a poll that finds it free, ahead of any
+                # message that arrived since.
+                self._held_channel_msg = msg
+                return
             prompt_widget = None
             if not _ch_mod._claim_or_complete_channel_request(msg):
                 return
             _ch_mod.remember_channel_origin(self._conversation_tid, msg)
             try:
+                # Taken in the step that checked it: nothing ran in between.
                 self._busy = True
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING
@@ -2900,7 +3359,7 @@ def run_textual_interactive(
                     msg,
                     agent=None,  # resolved via await_agent_ready on demand
                     thread_id=self._conversation_tid,
-                    workspace_dir=self._workspace_dir,
+                    dirs=self._dirs,
                     checkpointer=self._checkpointer,
                     append_system=self._append_system,
                     start_new_session_cb=self.start_new_session,
@@ -2939,6 +3398,7 @@ def run_textual_interactive(
                         channel_hitl_fn=_channel_hitl_prompt,
                         channel_ask_user_fn=_channel_ask_user,
                         cancel_scope=_ch_mod._channel_message_cancel_scope(msg),
+                        approve_all_at_start=_ch_mod.channel_session_granted(msg),
                     )
                 except Exception as exc:
                     response = f"Error: {exc}"
@@ -2987,18 +3447,55 @@ def run_textual_interactive(
                 self._render_queue_indicator()
                 return
 
-            if text.startswith("/"):
+            self._dispatch_input(text)
+
+        def _dispatch_input(self, text: str) -> None:
+            """Start the command or the turn for *text*: what Enter does, and
+            what queued input goes through once the app is free again."""
+            if text.startswith("/") and not self._names_skill(text):
                 self._hide_completions()
+                # Taken in this step, before the task runs: the queue poll
+                # starts a turn whenever the app is free, and Ctrl+C looks here.
+                self._busy = True
+                token = object()
+                self._active_command = token
                 # Launch as independent task to free the message pump.
                 # Commands like /resume mount interactive widgets that need
                 # the pump to process key events and message bubbling.
-                _task = asyncio.create_task(self._handle_command(text))
+                _task = asyncio.create_task(self._handle_command(text, token))
                 self._background_tasks.add(_task)
                 _task.add_done_callback(self._background_tasks.discard)
                 return
 
             self._history_suggester.append_entry(text)
-            self._run_task = asyncio.ensure_future(self._run_turn(text))
+            self._start_turn(text)
+
+        def _start_turn(self, text: str, **kwargs: Any) -> None:
+            """Schedule a turn that owns the app from this step on."""
+            self._own_app(self._run_turn(text, **kwargs))
+
+        def _own_app(self, turn: Coroutine[Any, Any, Any]) -> None:
+            """Hand the app to *turn*, a coroutine that runs ``_run_turn``."""
+            self._busy = True
+            task = asyncio.ensure_future(turn)
+            self._run_task = task
+            task.add_done_callback(self._release_unstarted_turn)
+
+        def _release_unstarted_turn(self, task: asyncio.Future) -> None:
+            # A turn cancelled before its first step never reaches its own
+            # cleanup; one that ran has already let go of the handle.
+            if self._run_task is task:
+                self._run_task = None
+                self._busy = False
+                self._drain_queue()
+
+        def _drain_queue(self) -> None:
+            """Send the next queued input (FIFO) through the submit path."""
+            if not self._queued_messages or self._exiting:
+                return
+            next_msg = self._queued_messages.pop(0)
+            self._render_queue_indicator()
+            self._dispatch_input(next_msg)
 
         def _build_file_candidates(self, text: str) -> list:
             """Build CompletionCandidate list for @file mentions."""
@@ -3006,7 +3503,7 @@ def run_textual_interactive(
 
             from ..commands._completion_engine import CompletionCandidate
 
-            candidates = complete_file_mention(text, self._workspace_dir)
+            candidates = complete_file_mention(text, str(self._dirs.work_dir))
             if not candidates:
                 return []
             m = _re.search(r'@"[^"\n]*$|@[^\s"\']*$', text)
@@ -3030,7 +3527,9 @@ def run_textual_interactive(
             if text.startswith("/"):
                 from ..commands._completion_engine import compute_completions
 
-                result = compute_completions(text, len(text))
+                result = compute_completions(
+                    text, len(text), workspace=self._dirs.workspace
+                )
                 if result.kind == "empty" or not result.candidates:
                     self._hide_completions()
                     return
@@ -3299,7 +3798,9 @@ def run_textual_interactive(
                 if text.startswith("/"):
                     from ..commands._completion_engine import compute_completions
 
-                    result = compute_completions(text, len(text))
+                    result = compute_completions(
+                        text, len(text), workspace=self._dirs.workspace
+                    )
                     if result.kind != "empty" and result.candidates:
                         self._comp_items = result.candidates
                         self._comp_index = -1
@@ -3418,7 +3919,17 @@ def run_textual_interactive(
 
         # ── Slash commands ─────────────────────────────────────
 
-        async def _handle_command(self, command: str) -> None:
+        def _names_skill(self, text: str) -> bool:
+            """True for ``/skill-name`` input that should reach the agent."""
+            from ..commands.skill_slash import skill_slash_names
+
+            return bool(skill_slash_names(text, self._dirs.workspace))
+
+        async def _handle_command(self, command: str, token: object) -> None:
+            """Run one slash command; *token* is the ownership its dispatcher took."""
+            if self._active_command is not token:
+                # Ctrl+C released the app before this command took a step.
+                return
             # Echo the command so the user sees what they ran
             self._append_system(command.strip(), style="cyan")
 
@@ -3428,6 +3939,8 @@ def run_textual_interactive(
             self._busy = True
             prompt_widget.disabled = True
             self._render_status()
+            goal_request: dict[str, Any] | None = None
+            load_failed = False
 
             try:
                 # Only gate on agent readiness for commands that need it —
@@ -3436,20 +3949,30 @@ def run_textual_interactive(
                 parsed = cmd_manager.resolve(command)
                 cmd = None
                 cmd_args: list[str] = []
-                agent = None
+                # An already-loaded agent is handed over without waiting; only
+                # commands that need one block on the load.
+                agent = self._agent_loader.agent
                 if parsed is not None:
                     cmd, cmd_args = parsed
                 if cmd is not None and cmd.needs_agent(cmd_args):
+                    self._command_awaiting_agent = token
                     try:
                         agent = await self._await_agent_ready()
                     except Exception:
                         # ``_on_agent_load_failure`` already surfaced the error.
+                        load_failed = True
+                        return
+                    finally:
+                        if self._command_awaiting_agent is token:
+                            self._command_awaiting_agent = None
+                    if self._active_command is not token:
+                        # Ctrl+C released the app while the agent loaded.
                         return
                 ctx = CommandContext(
                     agent=agent,
                     thread_id=self._conversation_tid,
                     ui=self,
-                    workspace_dir=self._workspace_dir,
+                    dirs=self._dirs,
                     checkpointer=self._checkpointer,
                     input_tokens_hint=self._status_last_input_tokens,
                     channel_runtime=self._channel_runtime,
@@ -3460,21 +3983,43 @@ def run_textual_interactive(
                 if await cmd_manager.execute(command, ctx):
                     if cmd is None:
                         return
-                    await _sync_tui_command_completion(
-                        self,
-                        ctx,
-                        self._agent_loader.agent,
-                        cmd,
-                    )
+                    # Compared with the agent the command was handed: /new and
+                    # /resume restart the load, which empties the loader.
+                    await _sync_tui_command_completion(self, ctx, agent, cmd)
+                    goal_request = ctx.goal_request
                     return
 
                 self._append_system(f"Unknown command: {command}", style="yellow")
                 self._render_status()
             finally:
-                self._busy = False
-                if not self._exiting:
+                owner = self._active_command is token
+                turn = self._run_task is not None and not self._run_task.done()
+                asking = (
+                    self._ask_user_future is not None
+                    or self._approval_future is not None
+                )
+                # A command that lost its token gives the input back unless a
+                # channel turn, a command or an open question holds it off.
+                if not self._exiting and (
+                    owner or ((not self._busy or turn) and not asking)
+                ):
                     prompt_widget.disabled = False
                     prompt_widget.focus()
+                if owner:
+                    self._active_command = None
+                    if goal_request is not None and not self._exiting:
+                        # Scheduled in this same step: the app stays taken.
+                        self._start_turn(
+                            "",
+                            skip_user_message=True,
+                            resolve_mentions=False,
+                            goal_request=goal_request,
+                        )
+                    else:
+                        self._busy = False
+                        # A failed load would be retried per entry, as in _run_turn.
+                        if not load_failed:
+                            self._drain_queue()
 
         async def _render_history(self, thread_id_value: str) -> None:
             """Render conversation history from a saved thread.
@@ -3489,6 +4034,8 @@ def run_textual_interactive(
             )
             if not messages:
                 return
+
+            from ..message_meta import harness_label
 
             HISTORY_WINDOW = 50
             container = self.query_one("#chat", VerticalScroll)
@@ -3516,6 +4063,10 @@ def run_textual_interactive(
                 content = getattr(message, "content", "") or ""
 
                 if msg_type == "human":
+                    label = harness_label(message)
+                    if label is not None:
+                        await container.mount(SystemMessage(label, msg_style="dim"))
+                        continue
                     if isinstance(content, list):
                         parts = [
                             block.get("text", "")
@@ -3604,11 +4155,30 @@ def run_textual_interactive(
                     from ..stream.display import request_stream_cancel
 
                     request_stream_cancel()
-                    self._run_task.cancel()
+                    approval = self._approval_future
+                    if approval is None:
+                        self._run_task.cancel()
+                    elif not approval.done():
+                        # Ctrl+C on an open approval refuses it. The turn then
+                        # ends on the stop flag, in a task nobody cancelled;
+                        # so does one that finds the approval answered.
+                        approval.set_result(None)
                 else:
-                    # Edge case: busy but no task — force reset
+                    # Busy without a live turn: a slash command loses the
+                    # app (it starts no run), and so does a finished handle.
+                    loading = (
+                        self._active_command is not None
+                        and self._command_awaiting_agent is self._active_command
+                    )
+                    self._run_task = None
+                    self._active_command = None
                     self._busy = False
-                    self.query_one("#prompt", ChatTextArea).focus()
+                    prompt = self.query_one("#prompt", ChatTextArea)
+                    if loading:
+                        # A command's agent load may never end; past it, the
+                        # command's own widget may still need the input off.
+                        prompt.disabled = False
+                    prompt.focus()
                     self._render_status()
                     self._append_system(
                         "\nInterrupted by user", style="dim italic #ffe082"
@@ -3660,6 +4230,34 @@ def run_textual_interactive(
             if reset_streaming_text:
                 self._status_streaming_text = ""
             self._rebuild_status_snapshot()
+            await self._acknowledge_rubric(self._conversation_tid)
+
+        def _rubric_configurable_extra(
+            self, thread_id: str | None, mode: str | None
+        ) -> dict[str, Any] | None:
+            """The run marker and pending ``/rubric`` operations for *thread_id*."""
+            return thread_run_extra(
+                self._channel_runtime.rubric,
+                self._runtime_gateways.graph_gateway,
+                thread_id=thread_id,
+                current_thread_id=self._conversation_tid,
+                mode=mode,
+            )
+
+        async def _refresh_rubric_badge(self) -> None:
+            await self._acknowledge_rubric(self._conversation_tid)
+            self._render_status()
+
+        async def _acknowledge_rubric(self, thread_id: str | None) -> None:
+            """Drop operations the thread applied; refresh its status-bar badge."""
+            await acknowledge_applied(
+                self._channel_runtime.rubric,
+                self._rubric_badges,
+                self._runtime_gateways.graph_gateway,
+                agent=self._agent_loader.agent,
+                dirs=self._dirs,
+                thread_id=thread_id,
+            )
 
         def _set_status_usage_baseline(self, input_tokens: int) -> None:
             """Promote the latest real prompt usage into the status-bar base."""
@@ -3741,7 +4339,7 @@ def run_textual_interactive(
             welcome.update(
                 _build_welcome_banner(
                     thread_id=self._conversation_tid,
-                    workspace_dir=self._workspace_dir,
+                    workspace_dir=str(self._dirs.work_dir),
                     mode=mode,
                     model=self._current_model,
                     provider=self._current_provider,
@@ -3757,12 +4355,16 @@ def run_textual_interactive(
         def _append_pending_skill_proposals_notice(self) -> None:
             from .commands import _pending_skill_proposals_message
 
-            message = _pending_skill_proposals_message(self._workspace_dir)
+            message = _pending_skill_proposals_message(self._dirs.workspace.root)
             if message:
                 self._append_system(message, style="yellow")
 
         def _render_status(self) -> None:
-            status = self.query_one("#status", Static)
+            try:
+                status = self.query_one("#status", Static)
+            except NoMatches:
+                # The 1 s refresh can fire while the app is being torn down.
+                return
             width = (
                 getattr(status.size, "width", 0)
                 or getattr(status.content_region, "width", 0)
@@ -3796,6 +4398,7 @@ def run_textual_interactive(
                 self._status_snapshot,
                 self._status_started_at,
                 remaining_width,
+                rubric_badge=self._rubric_badges.get(self._conversation_tid),
             )
             line = Text(no_wrap=True, overflow="crop")
             line.append_text(hint)
@@ -3845,8 +4448,13 @@ def run_textual_interactive(
         tool_name: str,
         media_sent: set[str],
         send_fn: Any,
+        work_dir: str | None,
     ) -> None:
-        """Check tool calls for media files and forward to channel."""
+        """Check tool calls for media files and forward to channel.
+
+        Virtual paths resolve against ``work_dir``, the folder the agent
+        works in.
+        """
         import os
 
         from ..paths import resolve_virtual_path
@@ -3860,7 +4468,9 @@ def run_textual_interactive(
                 if p and p not in media_sent:
                     ext = os.path.splitext(p)[1].lower()
                     if ext in _MEDIA_EXTENSIONS:
-                        real_path = str(resolve_virtual_path(p))
+                        real_path = (
+                            str(resolve_virtual_path(work_dir, p)) if work_dir else p
+                        )
                         if not os.path.isfile(real_path) and os.path.isfile(p):
                             real_path = p
                         if os.path.isfile(real_path):
@@ -3872,38 +4482,43 @@ def run_textual_interactive(
 
     async def _amain() -> None:
         async with get_checkpointer() as checkpointer:
-            effective_workspace = workspace_dir
+            effective_dirs = dirs
             effective_thread_id: str | None = None
             resumed = False
             resume_warning = ""
             if thread_id:
                 resolution = await graph_gateway.resolve_thread(thread_id)
                 if resolution.thread_id:
-                    meta = await graph_gateway.get_thread_metadata(resolution.thread_id)
-                    ws = (meta or {}).get("workspace_dir", "")
+                    meta = (
+                        await graph_gateway.get_thread_metadata(resolution.thread_id)
+                        or {}
+                    )
+                    stored = SessionDirs.from_stored(
+                        meta.get("workspace_dir"), meta.get("run_dir")
+                    )
                     mismatch_aborted = False
-                    if ws:
-                        effective_workspace = ws
-                        # Sync langgraph dev subprocess to the resumed
-                        # workspace BEFORE the Textual app takes over the
-                        # terminal. Mirrors interactive.py's Rich-CLI fix.
-                        # Without this, --resume against a thread from a
-                        # different workspace would leave background workers
-                        # and deployed sub-agents operating on the launch
-                        # directory's files.
+                    if stored is not None:
+                        effective_dirs = stored
+                        # Move the background agent server to the resumed
+                        # folders BEFORE the Textual app takes over the
+                        # terminal, so background workers and deployed
+                        # sub-agents don't work in the launch folders.
+                        from ..langgraph_dev.manager import WorkspaceMismatchError
                         from ..stream.console import console as _resume_console
+                        from .commands import _move_server_or_keep_session
 
                         try:
-                            from ..langgraph_dev.manager import WorkspaceMismatchError
-                            from .commands import (
-                                _sync_background_agent_server_workspace,
-                            )
-
-                            await _sync_background_agent_server_workspace(
+                            if not await _move_server_or_keep_session(
                                 config,
-                                workspace_dir=ws,
+                                target=stored,
+                                current=dirs,
                                 backend=gateway_backend,
-                            )
+                            ):
+                                resume_warning = (
+                                    "Background agent server sync failed; "
+                                    "resumed the session, but async subagents "
+                                    "and EvoMemory workers may be unavailable."
+                                )
                         except WorkspaceMismatchError as _ws_mismatch_exc:
                             # Surface the user-actionable message via the
                             # Rich console (TUI hasn't taken over the terminal
@@ -3913,27 +4528,13 @@ def run_textual_interactive(
                             # a different workspace.
                             _resume_console.print(f"[red]{_ws_mismatch_exc}[/red]")
                             mismatch_aborted = True
-                        except Exception as _ws_sync_exc:
-                            # Non-fatal at startup — async sub-agents fall back
-                            # to sync via the manager's own availability flag,
-                            # and memory workers skip while the server is down.
-                            # Surface the exception so unexpected failures
-                            # (import errors, regressions in
-                            # ensure_langgraph_dev, etc.) don't hide silently.
-                            logging.getLogger(__name__).warning(
-                                "TUI startup workspace sync to langgraph dev "
-                                "failed: %s. Async sub-agents will fall back "
-                                "to in-process sync delegation and EvoMemory "
-                                "workers will skip for this session.",
-                                _ws_sync_exc,
-                            )
                     if mismatch_aborted:
                         # Revert the workspace mutation and fall through to the
                         # ``effective_thread_id is None`` branch below, which
                         # generates a fresh thread in the original launch
                         # workspace. User keeps the TUI session; the requested
                         # ``--thread-id`` resume is what we refuse.
-                        effective_workspace = workspace_dir
+                        effective_dirs = dirs
                         resume_warning = (
                             f"Resume of thread '{thread_id}' aborted due to "
                             "workspace conflict. Starting new session."
@@ -3941,6 +4542,12 @@ def run_textual_interactive(
                     else:
                         effective_thread_id = resolution.thread_id
                         resumed = True
+                        if effective_dirs != dirs:
+                            # The thread works in its own folders, so the run
+                            # folder made at startup stays unused.
+                            from .agent import _remove_unused_run_dir
+
+                            _remove_unused_run_dir(dirs.run_dir)
                 elif resolution.matches:
                     resume_warning = (
                         f"Thread prefix '{thread_id}' is ambiguous "
@@ -3952,7 +4559,7 @@ def run_textual_interactive(
                     )
             if not effective_thread_id:
                 effective_thread_id = await graph_gateway.create_thread(
-                    GraphTarget(workspace_dir=effective_workspace)
+                    GraphTarget(**effective_dirs.metadata())
                 )
 
             # The TUI opens instantly and starts MCP loading in the
@@ -3960,7 +4567,7 @@ def run_textual_interactive(
             # ``load_agent`` call and awaits it before the first turn.
             app = EvoTextualInteractiveApp(
                 thread_id_value=effective_thread_id,
-                workspace=effective_workspace,
+                dirs=effective_dirs,
                 checkpointer=checkpointer,
                 runtime_gateways=runtime_gateways,
                 channel_send_thinking_value=channel_send_thinking,

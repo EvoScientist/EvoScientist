@@ -58,7 +58,7 @@ class ModelCommand(Command):
         Argument(
             name="model_name",
             type=str,
-            description="Model short name (e.g. claude-sonnet-4-6). Opens picker if omitted.",
+            description="Model short name (e.g. claude-sonnet-5-5). Opens picker if omitted.",
             required=False,
         ),
         Argument(
@@ -216,7 +216,8 @@ class ModelCommand(Command):
         try:
             new_chat_model = _build_chat_model(temp_cfg)
             load_kwargs = {
-                "workspace_dir": ctx.workspace_dir,
+                "work_dir": str(ctx.work_dir),
+                "workspace": ctx.workspace,
                 "checkpointer": ctx.checkpointer,
                 "config": temp_cfg,
                 "chat_model": new_chat_model,

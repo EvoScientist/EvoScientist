@@ -1,5 +1,6 @@
 """Tests for EvoScientist onboarding wizard."""
 
+import os
 import subprocess
 from contextlib import contextmanager
 from unittest.mock import MagicMock, Mock, patch
@@ -17,8 +18,10 @@ from EvoScientist.config.onboard.validators import (
 )
 from EvoScientist.config.onboard.wizard import (
     STEPS,
+    _skills_workspace,
     render_progress,
 )
+from EvoScientist.paths import Workspace
 
 
 @contextmanager
@@ -191,7 +194,7 @@ class TestOAuthModeReconcile:
         config = EvoScientistConfig(
             provider="minimax",
             auxiliary_provider="openai",
-            auxiliary_model="gpt-5.5",
+            auxiliary_model="gpt-6-luna",
             openai_auth_mode="oauth",
             anthropic_auth_mode="oauth",
         )
@@ -659,16 +662,6 @@ class TestStepOAuthAuthMode:
                 "Authentication mode",
                 "Log in to Claude now?",
             ),
-            (
-                "_step_openai_auth_mode",
-                "openai_auth_mode",
-                "OpenAI",
-                "Codex OAuth",
-                "codex",
-                "Codex OAuth",
-                "OpenAI authentication mode",
-                "Log in to Codex now?",
-            ),
         ],
     )
     def test_oauth_wrappers_use_provider_specific_ccproxy_flow(
@@ -682,7 +675,7 @@ class TestStepOAuthAuthMode:
         question_label,
         login_prompt,
     ):
-        """Anthropic/OpenAI wrappers share flow but keep provider-specific IDs."""
+        """The Anthropic wrapper passes its provider-specific IDs to the ccproxy flow."""
         from EvoScientist.config.onboard import steps as onboard_steps
 
         config = EvoScientistConfig(**{config_attr: "oauth"})
@@ -739,6 +732,307 @@ class TestStepOAuthAuthMode:
         assert mock_confirm.call_args.args[0] == login_prompt
 
 
+class TestStepOpenAIAuthMode:
+    def _run(self, *, picked, signed_in, confirm=True, plan="plus"):
+        from EvoScientist.config.onboard import steps as onboard_steps
+        from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
+
+        select_question = MagicMock()
+        select_question.ask.return_value = picked
+        confirm_question = MagicMock()
+        confirm_question.ask.return_value = confirm
+        state = ChatGPTLogin(signed_in=signed_in, plan=plan if signed_in else None)
+        with (
+            patch("EvoScientist.config.onboard.prompter.install_navigation_keys"),
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.select",
+                return_value=select_question,
+            ) as mock_select,
+            patch(
+                "EvoScientist.config.onboard.steps.questionary.confirm",
+                return_value=confirm_question,
+            ) as mock_confirm,
+            patch("EvoScientist.llm.chatgpt_oauth.status", return_value=state),
+            patch("EvoScientist.config.onboard.steps._run_chatgpt_login") as mock_login,
+            patch("EvoScientist.ccproxy_manager.is_ccproxy_available") as mock_ccproxy,
+            patch(
+                "EvoScientist.config.onboard.steps._prompt_ccproxy_port"
+            ) as mock_port,
+            patch("EvoScientist.config.onboard.steps.console") as mock_console,
+        ):
+            result = onboard_steps._step_openai_auth_mode(
+                EvoScientistConfig(openai_auth_mode="oauth")
+            )
+        printed = " ".join(str(c.args[0]) for c in mock_console.print.call_args_list)
+        return {
+            "result": result,
+            "select": mock_select,
+            "confirm": mock_confirm,
+            "login": mock_login,
+            "ccproxy": mock_ccproxy,
+            "port": mock_port,
+            "printed": printed,
+        }
+
+    def test_choices_offer_chatgpt_sign_in_and_back(self):
+        from questionary import Separator
+
+        out = self._run(picked="api_key", signed_in=False)
+
+        assert out["result"] == "api_key"
+        select_call = out["select"].call_args
+        assert select_call.args[0] == "OpenAI authentication mode  [Esc/← to go back]:"
+        assert select_call.kwargs["default"] == "oauth"
+        titles = [
+            choice.title
+            for choice in select_call.kwargs["choices"]
+            if not isinstance(choice, Separator)
+        ]
+        assert titles == [
+            "API Key (direct OpenAI access)",
+            "ChatGPT sign-in (no API key needed)",
+            "← Back (re-pick provider)",
+        ]
+        out["confirm"].assert_not_called()
+
+    def test_not_signed_in_offers_login_without_ccproxy(self):
+        out = self._run(picked="oauth", signed_in=False, confirm=True)
+
+        assert out["result"] == "oauth"
+        assert out["confirm"].call_args.args[0] == "Log in to ChatGPT now?"
+        assert out["confirm"].call_args.kwargs["default"] is True
+        out["login"].assert_called_once_with()
+        out["ccproxy"].assert_not_called()
+        out["port"].assert_not_called()
+        assert "Unofficial; OpenAI's terms apply." in out["printed"]
+
+    def test_signed_in_shows_plan_and_offers_reauthentication(self):
+        out = self._run(picked="oauth", signed_in=True, confirm=False)
+
+        assert out["result"] == "oauth"
+        assert "ChatGPT: signed in (plus)" in out["printed"]
+        assert out["confirm"].call_args.args[0] == (
+            "Re-authenticate to refresh credentials?"
+        )
+        assert out["confirm"].call_args.kwargs["default"] is False
+        out["login"].assert_not_called()
+
+    def test_declining_login_keeps_oauth(self):
+        out = self._run(picked="oauth", signed_in=False, confirm=False)
+
+        assert out["result"] == "oauth"
+        out["login"].assert_not_called()
+
+    def test_back_goes_back(self):
+        from EvoScientist.config.onboard.prompter import BACK_SENTINEL, GoBack
+
+        with pytest.raises(GoBack):
+            self._run(picked=BACK_SENTINEL, signed_in=False)
+
+
+class TestStepReasoningEffort:
+    def _run(self, provider, stored, picked="high"):
+        from EvoScientist.config.onboard import steps as onboard_steps
+
+        question = MagicMock()
+        question.ask.return_value = picked
+        with patch(
+            "EvoScientist.config.onboard.steps.questionary.select",
+            return_value=question,
+        ) as mock_select:
+            result = onboard_steps._step_reasoning_effort(
+                EvoScientistConfig(reasoning_effort=stored), provider
+            )
+        call = mock_select.call_args
+        return result, [c.value for c in call.kwargs["choices"]], call.kwargs["default"]
+
+    def test_openai_offers_the_levels_its_current_models_accept(self):
+        result, values, default = self._run("openai", "", picked="max")
+
+        assert result == "max"
+        assert values == ["", "low", "medium", "high", "xhigh", "max"]
+        assert default == ""
+
+    def test_openrouter_list_is_unchanged(self):
+        _, values, default = self._run("openrouter", "")
+
+        assert values == ["xhigh", "high", "medium", "low", "minimal", "none"]
+        assert default == "high"
+
+    @pytest.mark.parametrize(
+        ("provider", "stored", "default"),
+        [
+            ("openai", "max", "max"),
+            ("openai", "", ""),
+            ("openai", "minimal", ""),  # carried over from another provider
+            ("openrouter", "minimal", "minimal"),
+            ("openrouter", "max", "high"),
+        ],
+    )
+    def test_highlights_the_stored_level_only_when_it_is_offered(
+        self, provider, stored, default
+    ):
+        assert self._run(provider, stored)[2] == default
+
+    @pytest.mark.parametrize(
+        ("provider", "route"),
+        [("openai", "openai"), ("openai", "chatgpt"), ("openrouter", "openrouter")],
+    )
+    def test_every_offered_level_is_sent_unchanged(self, provider, route):
+        from EvoScientist.llm.models import _resolve_reasoning_effort
+
+        _, values, _ = self._run(provider, "")
+
+        with patch.dict("os.environ"):
+            for value in filter(None, values):
+                os.environ["EVOSCIENTIST_REASONING_EFFORT"] = value
+                assert _resolve_reasoning_effort("high", route) == value
+
+    @pytest.mark.parametrize(
+        ("provider", "asked"),
+        [("openai", True), ("openrouter", True), ("anthropic", False), ("", False)],
+    )
+    def test_only_providers_with_a_level_list_are_asked(self, provider, asked):
+        from EvoScientist.config.onboard import steps as onboard_steps
+
+        assert onboard_steps._asks_reasoning_effort(provider) is asked
+
+    def test_model_section_asks_openai_users_for_a_level(self):
+        from EvoScientist.config.onboard.wizard import run_onboard
+
+        mock_q = MagicMock()
+        with (
+            _patch_all_questionary(mock_q),
+            patch("EvoScientist.config.onboard.wizard.load_config") as mock_load,
+            patch("EvoScientist.config.onboard.wizard.save_config") as mock_save,
+            patch("EvoScientist.config.onboard.wizard.console"),
+            patch("EvoScientist.config.onboard.steps.console"),
+            patch("EvoScientist.config.onboard.helpers.console"),
+        ):
+            mock_load.return_value = EvoScientistConfig(
+                provider="openai", model="gpt-6-sol", openai_api_key="sk-test"
+            )
+            mock_q.select.return_value.ask.side_effect = [
+                "gpt-6-luna",  # Model
+                "max",  # Reasoning effort
+            ]
+            mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
+
+            result = run_onboard(skip_validation=True, only_sections={"model"})
+
+        assert result is True
+        final_config = mock_save.call_args_list[-1].args[0]
+        assert final_config.model == "gpt-6-luna"
+        assert final_config.reasoning_effort == "max"
+
+
+class TestRunChatGPTLogin:
+    @pytest.mark.parametrize(
+        ("platform", "env", "expected"),
+        [
+            ("darwin", {}, True),
+            ("darwin", {"SSH_CONNECTION": "1.2.3.4 5 6.7.8.9 22"}, False),
+            ("darwin", {"SSH_TTY": "/dev/ttys001"}, False),
+            ("linux", {"DISPLAY": ":0"}, True),
+            ("linux", {}, False),
+            ("linux", {"BROWSER": "firefox"}, True),
+            ("win32", {}, True),
+        ],
+    )
+    def test_browser_is_opened_only_where_the_user_can_see_it(
+        self, platform, env, expected, monkeypatch
+    ):
+        from EvoScientist.config.onboard import helpers
+
+        for name in (
+            "SSH_CONNECTION",
+            "SSH_TTY",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "BROWSER",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setattr("EvoScientist.deploy.launcher.sys.platform", platform)
+
+        assert helpers._open_browser_here() is expected
+
+    def test_success_prints_the_status(self):
+        from EvoScientist.config.onboard import helpers
+        from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
+
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=True),
+            patch(
+                "EvoScientist.llm.chatgpt_oauth.login",
+                return_value=ChatGPTLogin(signed_in=True, plan="pro"),
+            ) as mock_login,
+            patch.object(helpers, "console") as mock_console,
+        ):
+            assert helpers._run_chatgpt_login() is True
+
+        mock_login.assert_called_once_with(open_browser=True)
+        assert "ChatGPT: signed in (pro)" in str(mock_console.print.call_args.args[0])
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RuntimeError("Port 1455 is in use"),
+            TimeoutError("Timed out waiting for ChatGPT OAuth callback"),
+            PermissionError(13, "Permission denied"),
+            ValueError("Expecting value: line 1 column 1 (char 0)"),
+            KeyboardInterrupt(),
+        ],
+    )
+    def test_failure_prints_one_line_and_returns_false(self, error):
+        from EvoScientist.config.onboard import helpers
+
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=False),
+            patch("EvoScientist.llm.chatgpt_oauth.login", side_effect=error),
+            patch.object(helpers, "console") as mock_console,
+        ):
+            assert helpers._run_chatgpt_login() is False
+
+        assert mock_console.print.call_count == 1
+
+    def test_http_failure_is_reported_too(self):
+        import httpx
+
+        from EvoScientist.config.onboard import helpers
+
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=True),
+            patch(
+                "EvoScientist.llm.chatgpt_oauth.login",
+                side_effect=httpx.ConnectError("no route"),
+            ),
+            patch.object(helpers, "console") as mock_console,
+        ):
+            assert helpers._run_chatgpt_login() is False
+
+        assert "Login failed: no route" in str(mock_console.print.call_args.args[0])
+
+    def test_failure_text_cannot_break_the_console_markup(self):
+        from rich.console import Console
+
+        from EvoScientist.config.onboard import helpers
+
+        console = Console(record=True, width=120)
+        with (
+            patch.object(helpers, "_open_browser_here", return_value=True),
+            patch(
+                "EvoScientist.llm.chatgpt_oauth.login",
+                side_effect=RuntimeError("server said [/red] and [bold]"),
+            ),
+            patch.object(helpers, "console", console),
+        ):
+            assert helpers._run_chatgpt_login() is False
+
+        assert "Login failed: server said [/red] and [bold]" in console.export_text()
+
+
 class TestStepModel:
     def test_returns_selected_model(self):
         """Test that _step_model returns selected model."""
@@ -768,6 +1062,19 @@ class TestStepModel:
         default = mock_q.select.call_args.kwargs["default"]
         assert default == entries[0][0]
         assert default != "__custom__"
+
+    def test_removed_model_defaults_to_the_default_model(self):
+        """A saved model the provider no longer lists preselects the default
+        model, not the provider's first (most expensive) entry."""
+        from EvoScientist.config.onboard.steps import _step_model
+        from EvoScientist.llm import DEFAULT_MODEL
+
+        config = EvoScientistConfig(model="claude-sonnet-4-6")
+        with patch("EvoScientist.config.onboard.steps.questionary") as mock_q:
+            mock_q.select.return_value.ask.return_value = DEFAULT_MODEL
+            _step_model(config, "anthropic")
+
+        assert mock_q.select.call_args.kwargs["default"] == DEFAULT_MODEL
 
     def test_custom_default_value_preselects_and_prefills(self):
         """Co-pilot re-run: a saved custom (non-registry) model preselects and
@@ -1040,8 +1347,27 @@ class TestSetupImessage:
         assert result is False
 
 
+class TestSkillsWorkspace:
+    """Onboarding checks skills where the CLI starts: env override, config, cwd."""
+
+    def test_uses_default_workdir(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("EVOSCIENTIST_WORKSPACE_DIR", raising=False)
+        config = EvoScientistConfig(default_workdir=str(tmp_path / "cfg"))
+        assert _skills_workspace(config) == Workspace(tmp_path / "cfg")
+
+    def test_prefers_env_override(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "env"))
+        config = EvoScientistConfig(default_workdir=str(tmp_path / "cfg"))
+        assert _skills_workspace(config) == Workspace(tmp_path / "env")
+
+    def test_falls_back_to_cwd(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("EVOSCIENTIST_WORKSPACE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert _skills_workspace(EvoScientistConfig()) == Workspace(tmp_path)
+
+
 class TestStepSkills:
-    def test_returns_empty_when_none_selected(self):
+    def test_returns_empty_when_none_selected(self, workspace):
         """Test skills step returns empty list when user selects nothing."""
         from EvoScientist.config.onboard.steps import _step_skills
 
@@ -1055,11 +1381,11 @@ class TestStepSkills:
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
             mock_q.checkbox.return_value.ask.return_value = []
-            result = _step_skills()
+            result = _step_skills(workspace)
 
         assert result == []
 
-    def test_installs_selected_skills(self):
+    def test_installs_selected_skills(self, workspace):
         """Test skills step installs selected skills and returns sources."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
@@ -1072,12 +1398,12 @@ class TestStepSkills:
         ):
             mock_q.checkbox.return_value.ask.return_value = [source]
             mock_install.return_value = {"success": True, "name": "test"}
-            result = _step_skills()
+            result = _step_skills(workspace)
 
         assert result == [source]
-        mock_install.assert_called_once_with(source)
+        mock_install.assert_called_once_with(source, workspace=workspace)
 
-    def test_handles_install_failure(self):
+    def test_handles_install_failure(self, workspace):
         """Test skills step handles installation errors gracefully."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
 
@@ -1090,20 +1416,20 @@ class TestStepSkills:
         ):
             mock_q.checkbox.return_value.ask.return_value = [source]
             mock_install.side_effect = Exception("network error")
-            result = _step_skills()
+            result = _step_skills(workspace)
 
         assert result == []
 
-    def test_raises_keyboard_interrupt_on_cancel(self):
+    def test_raises_keyboard_interrupt_on_cancel(self, workspace):
         """Test skills step raises KeyboardInterrupt on cancel."""
         from EvoScientist.config.onboard.steps import _step_skills
 
         with patch("EvoScientist.config.onboard.style.questionary") as mock_q:
             mock_q.checkbox.return_value.ask.return_value = None
             with pytest.raises(KeyboardInterrupt):
-                _step_skills()
+                _step_skills(workspace)
 
-    def test_detects_pack_via_manifest(self, tmp_path):
+    def test_detects_pack_via_manifest(self, tmp_path, workspace):
         """A pack source recorded in the manifest is detected as installed
         even when none of the unpacked child dir names match the source."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
@@ -1123,8 +1449,7 @@ class TestStepSkills:
             f"evo-memory:\n  source: {pack_source}\n"
             f"research-survey:\n  source: {pack_source}\n"
         )
-        empty_user = tmp_path / "user"
-        empty_user.mkdir()
+        workspace.skills_dir.mkdir()
 
         captured: list = []
 
@@ -1134,7 +1459,6 @@ class TestStepSkills:
 
         with (
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
             patch(
                 "EvoScientist.config.onboard.steps._checkbox_ask", side_effect=_capture
             ),
@@ -1143,7 +1467,7 @@ class TestStepSkills:
             # reach the real _ensure_npx — see test_returns_empty_when_none_selected.
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
-            _step_skills()
+            _step_skills(workspace)
 
         pack_choice = next(c for c in captured if c.value == pack_source)
         # Detection signal: an "installed" hint appears in the choice title,
@@ -1158,7 +1482,7 @@ class TestStepSkills:
             "Installed packs must remain selectable so users can re-sync them"
         )
 
-    def test_surfaces_update_available_when_upstream_moved(self, tmp_path):
+    def test_surfaces_update_available_when_upstream_moved(self, tmp_path, workspace):
         """When a pack records an install-time commit and `git ls-remote`
         reports a different SHA, the choice label should call out the update."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
@@ -1174,8 +1498,7 @@ class TestStepSkills:
         (global_dir / ".installed.yaml").write_text(
             f"paper-writing:\n  source: {pack_source}\n  commit: aaa111\n"
         )
-        empty_user = tmp_path / "user"
-        empty_user.mkdir()
+        workspace.skills_dir.mkdir()
 
         captured: list = []
 
@@ -1185,7 +1508,6 @@ class TestStepSkills:
 
         with (
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
             # Upstream moved past the recorded commit.
             patch(
                 "EvoScientist.tools.skills_manager.resolve_remote_head",
@@ -1199,7 +1521,7 @@ class TestStepSkills:
             # reach the real _ensure_npx — see test_returns_empty_when_none_selected.
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
-            _step_skills()
+            _step_skills(workspace)
 
         pack_choice = next(c for c in captured if c.value == pack_source)
         title_text = "".join(seg[1] for seg in pack_choice.title)
@@ -1207,7 +1529,7 @@ class TestStepSkills:
             f"expected an 'update available' hint in the label, got: {title_text!r}"
         )
 
-    def test_no_update_hint_when_remote_check_fails(self, tmp_path):
+    def test_no_update_hint_when_remote_check_fails(self, tmp_path, workspace):
         """If `git ls-remote` returns None (offline, timeout, etc.), the label
         must fall back to plain 'installed' — never falsely claim 'update'."""
         from EvoScientist.config.onboard.steps import _RECOMMENDED_SKILLS, _step_skills
@@ -1222,8 +1544,7 @@ class TestStepSkills:
         (global_dir / ".installed.yaml").write_text(
             f"paper-writing:\n  source: {pack_source}\n  commit: aaa111\n"
         )
-        empty_user = tmp_path / "user"
-        empty_user.mkdir()
+        workspace.skills_dir.mkdir()
 
         captured: list = []
 
@@ -1233,7 +1554,6 @@ class TestStepSkills:
 
         with (
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", global_dir),
-            patch("EvoScientist.paths.USER_SKILLS_DIR", empty_user),
             patch(
                 "EvoScientist.tools.skills_manager.resolve_remote_head",
                 return_value=None,
@@ -1246,7 +1566,7 @@ class TestStepSkills:
             # reach the real _ensure_npx — see test_returns_empty_when_none_selected.
             patch("EvoScientist.config.onboard.steps._ensure_npx", return_value=True),
         ):
-            _step_skills()
+            _step_skills(workspace)
 
         pack_choice = next(c for c in captured if c.value == pack_source)
         title_text = "".join(seg[1] for seg in pack_choice.title)
@@ -1504,6 +1824,43 @@ class TestStepMcpServersNpxFailure:
         assert result == []
         mock_add.assert_not_called()
 
+    @staticmethod
+    def _render_fetch_failure(exc):
+        """Run the step with a failing index fetch through a real Rich console."""
+        import io
+
+        from rich.console import Console
+
+        from EvoScientist.config.onboard.steps import _step_mcp_servers
+
+        out = io.StringIO()
+        with (
+            patch("EvoScientist.mcp.registry.fetch_marketplace_index", side_effect=exc),
+            patch(
+                "EvoScientist.config.onboard.steps.console",
+                Console(file=out, width=500, color_system=None),
+            ),
+        ):
+            result = _step_mcp_servers()
+        return result, out.getvalue()
+
+    def test_index_failure_prints_the_reason(self):
+        from EvoScientist.git_cli import GitNotFoundError
+
+        result, output = self._render_fetch_failure(GitNotFoundError())
+
+        assert result == []
+        assert "git was not found on PATH." in output
+        assert "GitNotFoundError" not in output
+
+    def test_index_failure_reason_is_not_read_as_markup(self):
+        result, output = self._render_fetch_failure(
+            RuntimeError("git clone failed: fatal: [/b] bad")
+        )
+
+        assert result == []
+        assert "git clone failed: fatal: [/b] bad" in output
+
 
 class TestStepThinking:
     def test_returns_show_thinking(self):
@@ -1620,7 +1977,7 @@ class TestRunOnboard:
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider (a different company)
                 "api_key",  # Auxiliary OpenAI auth mode
-                "gpt-5.5",  # Auxiliary model
+                "gpt-6-luna",  # Auxiliary model
                 "daemon",  # Workspace mode
                 True,  # Show thinking
             ]
@@ -1642,7 +1999,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_auth_mode == "api_key"
         # The auxiliary provider's key is stored in its per-provider field.
         assert final_config.openai_api_key == "sk-aux-openai"
@@ -1664,13 +2021,13 @@ class TestRunOnboard:
         ):
             mock_load.return_value = EvoScientistConfig(
                 provider="openai",
-                model="gpt-5.5",
+                model="gpt-6-luna",
                 openai_api_key="sk-main-openai",
             )
             mock_q.select.return_value.ask.side_effect = [
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Same provider as the main model
-                "gpt-5.5",  # Auxiliary model
+                "gpt-6-luna",  # Auxiliary model
             ]
             mock_q.confirm.return_value.ask.side_effect = [True]  # Save config
 
@@ -1681,7 +2038,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_api_key == "sk-main-openai"
         mock_q.password.assert_not_called()
         assert mock_q.select.return_value.ask.call_count == 3
@@ -1704,7 +2061,7 @@ class TestRunOnboard:
         ):
             mock_load.return_value = EvoScientistConfig(
                 provider="openai",
-                model="gpt-5.5",
+                model="gpt-6-luna",
                 openai_auth_mode="api_key",
                 openai_api_key="",
             )
@@ -1712,7 +2069,7 @@ class TestRunOnboard:
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Same provider as the main model
                 "api_key",  # Shared OpenAI auth mode
-                "gpt-5.5",  # Auxiliary model
+                "gpt-6-luna",  # Auxiliary model
             ]
             mock_q.password.return_value.ask.side_effect = [
                 "sk-shared-openai",
@@ -1726,15 +2083,16 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_auth_mode == "api_key"
         assert final_config.openai_api_key == "sk-shared-openai"
         mock_q.password.assert_called_once()
         assert mock_q.select.return_value.ask.call_count == 4
 
     def test_auxiliary_openai_oauth_skips_api_key(self):
-        """Auxiliary OpenAI now uses the shared auth flow and skips keys on OAuth."""
+        """Auxiliary OpenAI goes through the auth step and skips keys on OAuth."""
         from EvoScientist.config.onboard.wizard import run_onboard
+        from EvoScientist.llm.chatgpt_oauth import ChatGPTLogin
 
         mock_q = MagicMock()
         with (
@@ -1745,25 +2103,19 @@ class TestRunOnboard:
             patch("EvoScientist.config.onboard.steps.console"),
             patch("EvoScientist.config.onboard.helpers.console"),
             patch(
-                "EvoScientist.ccproxy_manager.is_ccproxy_available", return_value=True
-            ),
-            patch(
-                "EvoScientist.ccproxy_manager.check_ccproxy_auth",
-                return_value=(False, "not authenticated"),
-            ) as mock_auth,
+                "EvoScientist.llm.chatgpt_oauth.status",
+                return_value=ChatGPTLogin(signed_in=False),
+            ) as mock_status,
         ):
             mock_load.return_value = EvoScientistConfig()
             mock_q.select.return_value.ask.side_effect = [
                 "assemble",  # Auxiliary: Assemble
                 "openai",  # Auxiliary provider
                 "oauth",  # OpenAI auth mode
-                "gpt-5.5",  # Auxiliary model
-            ]
-            mock_q.text.return_value.ask.side_effect = [
-                "",  # ccproxy port (keep default)
+                "gpt-6-luna",  # Auxiliary model
             ]
             mock_q.confirm.return_value.ask.side_effect = [
-                False,  # Do not log in to Codex now
+                False,  # Do not log in to ChatGPT now
                 True,  # Save config
             ]
 
@@ -1774,11 +2126,11 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         assert final_config.openai_auth_mode == "oauth"
         assert final_config.openai_api_key == ""
         mock_q.password.assert_not_called()
-        mock_auth.assert_called_once_with("codex")
+        mock_status.assert_called_once_with()
 
     def test_auxiliary_reconfigure_clears_unused_openai_oauth(self):
         """Switching co-pilot away from OpenAI clears stale OpenAI OAuth mode."""
@@ -1798,7 +2150,7 @@ class TestRunOnboard:
                 model="claude-sonnet-4-6",
                 anthropic_auth_mode="oauth",
                 auxiliary_provider="openai",
-                auxiliary_model="gpt-5.5",
+                auxiliary_model="gpt-6-luna",
                 openai_auth_mode="oauth",
             )
             mock_q.select.return_value.ask.side_effect = [
@@ -1841,7 +2193,7 @@ class TestRunOnboard:
             mock_q.select.return_value.ask.side_effect = [
                 "assemble",  # Auxiliary: Assemble
                 "custom-openai",  # Auxiliary provider
-                "gpt-5.5",  # Auxiliary model (from the custom-openai registry)
+                "gpt-6-luna",  # Auxiliary model (from the custom-openai registry)
             ]
             mock_q.text.return_value.ask.side_effect = [
                 "https://my-endpoint/v1",  # Auxiliary base URL (custom provider)
@@ -1858,7 +2210,7 @@ class TestRunOnboard:
         assert result is True
         final_config = mock_save.call_args_list[-1].args[0]
         assert final_config.auxiliary_provider == "custom-openai"
-        assert final_config.auxiliary_model == "gpt-5.5"
+        assert final_config.auxiliary_model == "gpt-6-luna"
         # Base URL must be collected for the custom auxiliary provider.
         assert final_config.custom_openai_base_url == "https://my-endpoint/v1"
         assert final_config.custom_openai_api_key == "sk-aux-custom"

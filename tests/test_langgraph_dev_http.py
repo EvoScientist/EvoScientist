@@ -11,8 +11,9 @@ from starlette.testclient import TestClient
 
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.langgraph_dev.http import app
+from EvoScientist.paths import Workspace
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://localhost")
 
 
 def test_get_models_returns_entries_and_default():
@@ -280,14 +281,16 @@ def test_get_teams_returns_empty_list_when_no_experts_installed():
     assert body == {"teams": []}
 
 
-def test_get_teams_calls_loader_with_include_system_true():
+def test_get_teams_calls_loader_with_include_system_true(monkeypatch, tmp_path):
     """First-party experts ship as builtin skills; the endpoint must
     include the builtin tier or the gallery will be empty on a fresh
-    workspace with no user-installed experts."""
+    workspace with no user-installed experts, and it must look in the
+    server's workspace."""
+    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
     calls = []
 
-    def spy(include_system=False):
-        calls.append(include_system)
+    def spy(include_system=False, *, workspace):
+        calls.append((include_system, workspace))
         return []
 
     with patch(
@@ -295,7 +298,48 @@ def test_get_teams_calls_loader_with_include_system_true():
         new=spy,
     ):
         client.get("/api/teams")
-    assert calls == [True]
+    assert calls == [(True, Workspace(tmp_path))]
+
+
+# ---- /api/workspace -------------------------------------------------------
+# The WebUI reads the served folder here instead of from a file on its own
+# machine, and uses the string as-is.
+
+
+def test_get_workspace_returns_the_served_folder_key(monkeypatch, tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path / "link"))
+    monkeypatch.delenv("EVOSCIENTIST_RUN_DIR", raising=False)
+
+    resp = client.get("/api/workspace")
+
+    assert resp.json() == {
+        "workspace_dir": Workspace(tmp_path / "real").key,
+        "run_dir": None,
+    }
+
+
+def test_get_workspace_returns_the_run_folder_of_a_run_mode_server(
+    monkeypatch, tmp_path
+):
+    run_dir = tmp_path / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setenv("EVOSCIENTIST_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setenv("EVOSCIENTIST_RUN_DIR", str(run_dir))
+
+    resp = client.get("/api/workspace")
+
+    assert resp.json() == {
+        "workspace_dir": Workspace(tmp_path).key,
+        "run_dir": run_dir.resolve().as_posix(),
+    }
+
+
+def test_get_workspace_refuses_a_foreign_origin():
+    resp = client.get("/api/workspace", headers={"Origin": "https://evil.example"})
+
+    assert resp.status_code == 403
 
 
 # ---- /api/bg_process_status -----------------------------------------------

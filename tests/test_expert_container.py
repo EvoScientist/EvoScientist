@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from EvoScientist.paths import Workspace
 from EvoScientist.subagents.expert_container import (
     _compose_system_prompt,
     build_expert_subagent_spec,
@@ -300,10 +301,12 @@ class TestBuildExpertSubagentSpec:
 
 class TestBuildExpertSubagentSpecs:
     def test_returns_one_spec_per_installed_expert_skill(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
         # Two expert skills + one utility skill.
-        _write_expert_skill_file(tmp_path, "expert-a")
-        _write_expert_skill_file(tmp_path, "expert-b")
-        util = tmp_path / "util-c"
+        _write_expert_skill_file(skills_dir, "expert-a")
+        _write_expert_skill_file(skills_dir, "expert-b")
+        util = skills_dir / "util-c"
         util.mkdir()
         (util / "SKILL.md").write_text(
             """---
@@ -319,18 +322,19 @@ description: Not an expert
             "think_tool": _FakeTool("think_tool"),
             "skill_manager": _FakeTool("skill_manager"),
         }
-        # Patch USER_SKILLS_DIR to point at our temp dir; patch GLOBAL and
+        # The workspace tier is our temp skills dir; patch GLOBAL and
         # SKILLS_DIR to empty locations so `list_expert_skills(include_system=True)`
         # only surfaces our two experts.
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
 
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
             patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
         ):
-            specs = build_expert_subagent_specs(tool_registry=registry)
+            specs = build_expert_subagent_specs(
+                tool_registry=registry, workspace=Workspace(tmp_path)
+            )
 
         names = sorted(s["name"] for s in specs)
         assert names == ["expert-a", "expert-b"]
@@ -343,11 +347,13 @@ description: Not an expert
             ]
 
     def test_skips_expert_with_empty_body(self, tmp_path, caplog):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
         # A well-formed expert-frontmatter skill whose body is only whitespace.
         # Registering it would advertise a personaless expert in the `task`
         # schema — cleaner to drop it and log.
-        _write_expert_skill_file(tmp_path, "expert-a")
-        blank = tmp_path / "expert-blank"
+        _write_expert_skill_file(skills_dir, "expert-a")
+        blank = skills_dir / "expert-blank"
         blank.mkdir()
         (blank / "SKILL.md").write_text(
             """---
@@ -362,11 +368,12 @@ role: blank
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
             patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
         ):
-            specs = build_expert_subagent_specs(tool_registry={})
+            specs = build_expert_subagent_specs(
+                tool_registry={}, workspace=Workspace(tmp_path)
+            )
 
         assert [s["name"] for s in specs] == ["expert-a"]
         assert any(
@@ -381,8 +388,10 @@ role: blank
         as well as in the async specs. Sharing the name across the two is
         safe: they land on different tools with separate schemas.
         """
-        _write_expert_skill_file(tmp_path, "legacy-expert")
-        actor = tmp_path / "new-expert"
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        _write_expert_skill_file(skills_dir, "legacy-expert")
+        actor = skills_dir / "new-expert"
         actor.mkdir()
         (actor / "SKILL.md").write_text(
             """---
@@ -400,11 +409,12 @@ The workflow.
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
             patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
         ):
-            specs = build_expert_subagent_specs(tool_registry={})
+            specs = build_expert_subagent_specs(
+                tool_registry={}, workspace=Workspace(tmp_path)
+            )
 
         by_name = {s["name"]: s for s in specs}
         assert set(by_name) == {"legacy-expert", "new-expert"}
@@ -420,7 +430,9 @@ The workflow.
         skill must not be dropped from the sync registry. This is the
         behavioural counterpart to the parser's not-read contract.
         """
-        actor = tmp_path / "async-legacy"
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        actor = skills_dir / "async-legacy"
         actor.mkdir()
         (actor / "SKILL.md").write_text(
             """---
@@ -437,16 +449,19 @@ You are the legacy async expert.
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
             patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
         ):
-            specs = build_expert_subagent_specs(tool_registry={})
+            specs = build_expert_subagent_specs(
+                tool_registry={}, workspace=Workspace(tmp_path)
+            )
         assert "async-legacy" in {s["name"] for s in specs}
 
     def test_returns_empty_when_no_expert_skills(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
         # A utility skill only — no experts.
-        util = tmp_path / "util-only"
+        util = skills_dir / "util-only"
         util.mkdir()
         (util / "SKILL.md").write_text(
             """---
@@ -460,11 +475,12 @@ description: Utility
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
         with (
-            patch("EvoScientist.paths.USER_SKILLS_DIR", tmp_path),
             patch("EvoScientist.paths.GLOBAL_SKILLS_DIR", empty_dir),
             patch("EvoScientist.EvoScientist.SKILLS_DIR", str(empty_dir)),
         ):
-            specs = build_expert_subagent_specs(tool_registry={})
+            specs = build_expert_subagent_specs(
+                tool_registry={}, workspace=Workspace(tmp_path)
+            )
         assert specs == []
 
 
@@ -483,7 +499,7 @@ class TestFoldExpertSubagents:
     to ``_fold_expert_subagents``, so testing the helper directly covers the
     "same behaviour in both paths" reviewer requirement."""
 
-    def test_appends_expert_specs_when_no_collisions(self):
+    def test_appends_expert_specs_when_no_collisions(self, workspace):
         from EvoScientist.EvoScientist import _fold_expert_subagents
 
         subs: list[dict] = [{"name": "research"}, {"name": "code"}]
@@ -491,7 +507,7 @@ class TestFoldExpertSubagents:
             "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
             return_value=[_spec("idea-brainstorm"), _spec("critic")],
         ):
-            _fold_expert_subagents(subs, tool_registry={})
+            _fold_expert_subagents(subs, tool_registry={}, workspace=workspace)
 
         assert [s["name"] for s in subs] == [
             "research",
@@ -500,7 +516,7 @@ class TestFoldExpertSubagents:
             "critic",
         ]
 
-    def test_skips_expert_that_collides_with_yaml_subagent(self, caplog):
+    def test_skips_expert_that_collides_with_yaml_subagent(self, caplog, workspace):
         from EvoScientist.EvoScientist import _fold_expert_subagents
 
         subs: list[dict] = [{"name": "research"}, {"name": "planner"}]
@@ -508,7 +524,7 @@ class TestFoldExpertSubagents:
             "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
             return_value=[_spec("planner"), _spec("idea-brainstorm")],
         ):
-            _fold_expert_subagents(subs, tool_registry={})
+            _fold_expert_subagents(subs, tool_registry={}, workspace=workspace)
 
         # Colliding expert dropped; non-colliding one appended.
         assert [s["name"] for s in subs] == [
@@ -524,7 +540,7 @@ class TestFoldExpertSubagents:
             for r in caplog.records
         )
 
-    def test_skips_duplicate_expert_names(self, caplog):
+    def test_skips_duplicate_expert_names(self, caplog, workspace):
         from EvoScientist.EvoScientist import _fold_expert_subagents
 
         subs: list[dict] = []
@@ -532,7 +548,7 @@ class TestFoldExpertSubagents:
             "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
             return_value=[_spec("critic"), _spec("critic")],
         ):
-            _fold_expert_subagents(subs, tool_registry={})
+            _fold_expert_subagents(subs, tool_registry={}, workspace=workspace)
 
         assert [s["name"] for s in subs] == ["critic"]
         assert any(
@@ -541,7 +557,7 @@ class TestFoldExpertSubagents:
             for r in caplog.records
         )
 
-    def test_reserves_general_purpose_name(self, caplog):
+    def test_reserves_general_purpose_name(self, caplog, workspace):
         """The default subagent slot is reserved even when no ``general-purpose``
         entry exists in ``subs`` yet — ``_ensure_general_purpose_subagent``
         runs right after the fold and would otherwise treat the expert entry
@@ -553,7 +569,7 @@ class TestFoldExpertSubagents:
             "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
             return_value=[_spec("general-purpose")],
         ):
-            _fold_expert_subagents(subs, tool_registry={})
+            _fold_expert_subagents(subs, tool_registry={}, workspace=workspace)
 
         assert [s["name"] for s in subs] == ["research"]
         assert any(
@@ -562,7 +578,7 @@ class TestFoldExpertSubagents:
             for r in caplog.records
         )
 
-    def test_forwards_tool_registry_to_specs_factory(self):
+    def test_forwards_tool_registry_to_specs_factory(self, workspace):
         from EvoScientist.EvoScientist import _fold_expert_subagents
 
         registry = {"think_tool": object()}
@@ -570,9 +586,9 @@ class TestFoldExpertSubagents:
             "EvoScientist.subagents.expert_container.build_expert_subagent_specs",
             return_value=[],
         ) as mock_specs:
-            _fold_expert_subagents([], tool_registry=registry)
+            _fold_expert_subagents([], tool_registry=registry, workspace=workspace)
 
-        mock_specs.assert_called_once_with(tool_registry=registry)
+        mock_specs.assert_called_once_with(tool_registry=registry, workspace=workspace)
 
 
 # =============================================================================
@@ -601,17 +617,17 @@ class TestListDispatchableExpertsSurvivesAsyncOutage:
             body="persona body\n",
         )
 
-    def test_experts_survive_async_flag_disabled(self):
+    def test_experts_survive_async_flag_disabled(self, workspace):
         cfg = SimpleNamespace(enable_async_subagents=False)
         skills = [self._skill("idea-brainstorm"), self._skill("lit")]
         with patch(
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=skills,
         ):
-            result = list_dispatchable_experts(cfg=cfg)
+            result = list_dispatchable_experts(workspace=workspace, cfg=cfg)
         assert {s.name for s in result} == {"idea-brainstorm", "lit"}
 
-    def test_experts_survive_dev_unreachable(self):
+    def test_experts_survive_dev_unreachable(self, workspace):
         cfg = SimpleNamespace(enable_async_subagents=True)
         skills = [self._skill("idea-brainstorm"), self._skill("lit")]
         with (
@@ -624,10 +640,10 @@ class TestListDispatchableExpertsSurvivesAsyncOutage:
                 return_value=False,
             ),
         ):
-            result = list_dispatchable_experts(cfg=cfg)
+            result = list_dispatchable_experts(workspace=workspace, cfg=cfg)
         assert {s.name for s in result} == {"idea-brainstorm", "lit"}
 
-    def test_empty_actor_definition_still_dropped(self):
+    def test_empty_actor_definition_still_dropped(self, workspace):
         """The filters that remain are about broken experts, not reach."""
         cfg = SimpleNamespace(enable_async_subagents=True)
         blank = self._skill("blank")
@@ -636,5 +652,5 @@ class TestListDispatchableExpertsSurvivesAsyncOutage:
             "EvoScientist.tools.skills_manager.list_expert_skills",
             return_value=[self._skill("idea-brainstorm"), blank],
         ):
-            result = list_dispatchable_experts(cfg=cfg)
+            result = list_dispatchable_experts(workspace=workspace, cfg=cfg)
         assert [s.name for s in result] == ["idea-brainstorm"]

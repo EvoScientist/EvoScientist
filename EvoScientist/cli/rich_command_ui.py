@@ -16,12 +16,15 @@ always safe to ``await``.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.table import Table
 
 from ..commands.base import CommandUI
+
+if TYPE_CHECKING:
+    from ..paths import SessionDirs
 
 
 class RichCLICommandUI(CommandUI):
@@ -43,7 +46,7 @@ class RichCLICommandUI(CommandUI):
         on_status_after_compact: Callable[[int], None] | None = None,
         on_start_new_session: Callable[[], Awaitable[None]] | None = None,
         on_handle_session_resume: (
-            Callable[[str, str | None], Awaitable[None]] | None
+            Callable[[str, SessionDirs | None], Awaitable[None]] | None
         ) = None,
     ) -> None:
         self.console = console
@@ -193,10 +196,10 @@ class RichCLICommandUI(CommandUI):
             await self._on_start_new_session()
 
     async def handle_session_resume(
-        self, thread_id: str, workspace_dir: str | None = None
+        self, thread_id: str, dirs: SessionDirs | None = None
     ) -> None:
         if self._on_handle_session_resume is not None:
-            await self._on_handle_session_resume(thread_id, workspace_dir)
+            await self._on_handle_session_resume(thread_id, dirs)
 
     # /compact indicator pair — duck-typed by ``CompactCommand`` via
     # ``getattr``, not declared on the ``CommandUI`` Protocol.

@@ -116,7 +116,7 @@ class TestAuxiliaryMiddlewareScope:
 
         return cap, fake_tool_selector, fake_context_editing
 
-    def test_main_agent_tool_selector_aux_context_editing_main(self):
+    def test_main_agent_tool_selector_aux_context_editing_main(self, workspace):
         cap, fake_ts, fake_ce = self._capture()
         main_model, aux_model = object(), object()
         with (
@@ -132,12 +132,12 @@ class TestAuxiliaryMiddlewareScope:
                 side_effect=fake_ce,
             ),
         ):
-            E._get_default_middleware()
+            E._get_default_middleware(workspace=workspace)
 
         assert cap["tool_selector"] is aux_model
         assert cap["context_editing"] is main_model
 
-    def test_async_subagent_tool_selector_stays_main(self):
+    def test_async_subagent_tool_selector_stays_main(self, workspace):
         cap, fake_ts, fake_ce = self._capture()
         main_model, aux_model = object(), object()
         with (
@@ -153,12 +153,12 @@ class TestAuxiliaryMiddlewareScope:
                 side_effect=fake_ce,
             ),
         ):
-            E._get_default_middleware(for_async_subagent=True)
+            E._get_default_middleware(workspace=workspace, for_async_subagent=True)
 
         assert cap["tool_selector"] is main_model
         assert cap["context_editing"] is main_model
 
-    def test_pure_path_tool_selector_uses_threaded_main_when_aux_empty(self):
+    def test_pure_path_tool_selector_uses_threaded_main_when_aux_empty(self, workspace):
         cap, fake_ts, fake_ce = self._capture()
         cfg = _mock_cfg()
         cfg.model = "new-main"
@@ -180,12 +180,14 @@ class TestAuxiliaryMiddlewareScope:
                 side_effect=fake_ce,
             ),
         ):
-            E._get_default_middleware(cfg=cfg, chat_model=main_model)
+            E._get_default_middleware(
+                workspace=workspace, cfg=cfg, chat_model=main_model
+            )
 
         assert cap["tool_selector"] is main_model
         assert cap["context_editing"] is main_model
 
-    def test_pure_path_tool_selector_builds_aux_from_threaded_config(self):
+    def test_pure_path_tool_selector_builds_aux_from_threaded_config(self, workspace):
         cap, fake_ts, fake_ce = self._capture()
         cfg = _mock_cfg()
         cfg.model = "new-main"
@@ -210,7 +212,9 @@ class TestAuxiliaryMiddlewareScope:
                 side_effect=fake_ce,
             ),
         ):
-            E._get_default_middleware(cfg=cfg, chat_model=main_model)
+            E._get_default_middleware(
+                workspace=workspace, cfg=cfg, chat_model=main_model
+            )
 
         get_model.assert_called_once_with(model="new-aux", provider="aux-provider")
         assert cap["tool_selector"] is aux_model

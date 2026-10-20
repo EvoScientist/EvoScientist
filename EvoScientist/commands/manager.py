@@ -105,6 +105,10 @@ class CommandManager:
             return False
 
         ctx.command_error = None
+        # Shell splitting loses newlines and quotes; commands that take free
+        # text (``/rubric``) read the raw remainder instead.
+        remainder = command_str.split(None, 1)
+        ctx.raw_args = remainder[1].strip() if len(remainder) > 1 else ""
         try:
             await cmd.execute(ctx, args)
             await ctx.ui.flush()

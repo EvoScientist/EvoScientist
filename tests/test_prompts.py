@@ -1,5 +1,7 @@
 """Tests for EvoScientist/prompts.py."""
 
+import pytest
+
 from EvoScientist.prompts import (
     DELEGATION_STRATEGY,
     EVOSCIENTIST_IDENTITY,
@@ -183,3 +185,46 @@ class TestDangerousShellGuidelines:
     def test_dangerous_without_cwd_falls_back(self):
         result = get_system_prompt(dangerous=True)
         assert "DANGEROUS MODE" in result
+
+
+class TestBashOnWindowsShellGuidelines:
+    def test_off_by_default(self):
+        assert "Git for Windows" not in get_system_prompt()
+        assert "Git for Windows" not in get_system_prompt(dangerous=True)
+
+    def test_sandbox_names_the_shell_without_windows_paths(self):
+        result = get_system_prompt(bash_on_windows=True)
+        assert "The shell is bash (Git for Windows)." in result
+        assert "Write Windows paths" not in result
+        assert "C:/Users/you" not in result
+        assert "> /output.log" in result
+
+    @pytest.mark.parametrize("dangerous", [False, True])
+    def test_both_modes_explain_git_bash_path_conversion(self, dangerous):
+        result = get_system_prompt(dangerous=dangerous, bash_on_windows=True)
+        assert "any other argument starting with `/` arrives as a path" in result
+        assert "start the command with `MSYS_NO_PATHCONV=1`" in result
+        assert "GNU tools (grep, sed, awk, ...) get arguments unchanged" in result
+        assert "MSYS_NO_PATHCONV" not in get_system_prompt(dangerous=dangerous)
+
+    def test_dangerous_shows_windows_paths_with_forward_slashes(self):
+        result = get_system_prompt(
+            dangerous=True,
+            cwd=r"C:\Users\me\ws\demo",
+            bash_on_windows=True,
+        )
+        assert "Your current working directory is `C:/Users/me/ws/demo`" in result
+        assert "(e.g. `C:/Users/you/Documents/file.txt`)" in result
+        assert "`/Users/you/Documents/file.txt`" not in result
+        assert "The shell is bash from Git for Windows." in result
+
+    def test_agent_prompt_follows_the_shell_decision(self, monkeypatch, tmp_path):
+        from types import SimpleNamespace
+
+        from EvoScientist import EvoScientist as evo
+        from EvoScientist import agent_shell
+
+        cfg = SimpleNamespace(dangerous_mode=False)
+        assert "Git for Windows" not in evo._configured_system_prompt(cfg, tmp_path)
+        monkeypatch.setattr(agent_shell, "agent_bash", lambda: object())
+        assert "Git for Windows" in evo._configured_system_prompt(cfg, tmp_path)

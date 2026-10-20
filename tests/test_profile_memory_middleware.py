@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 import threading
 from types import SimpleNamespace
@@ -18,18 +19,22 @@ from EvoScientist.memory.observations import (
     list_observation_documents,
     record_observation_file,
 )
+from EvoScientist.paths import Workspace
 
 
 def _request():
+    # ``ModelRequest`` always carries a tool list; a normal call has tools.
     request = SimpleNamespace(
         state={},
         runtime=object(),
+        tools=[object()],
         system_message=SystemMessage(content="base system"),
     )
     request.override = lambda **kwargs: SimpleNamespace(
         **{
             "state": request.state,
             "runtime": request.runtime,
+            "tools": request.tools,
             "system_message": kwargs.get("system_message", request.system_message),
         }
     )
@@ -57,9 +62,10 @@ def test_profile_memory_bootstraps_profiles_without_observation_project_dirs(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert (
@@ -97,10 +103,10 @@ def test_profile_memory_can_disable_observation_tool(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories),
+        workspace_dir=workspace,
         enable_observation_tool=False,
     )
     middleware.modify_request(_request())
@@ -116,10 +122,10 @@ def test_memory_middleware_can_disable_all_memory_injection(tmp_path, monkeypatc
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories),
+        workspace_dir=workspace,
         enable_profile_memory=False,
         enable_observation_memory=False,
     )
@@ -136,10 +142,10 @@ def test_observation_memory_can_be_read_only_without_profile(tmp_path, monkeypat
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories),
+        workspace_dir=workspace,
         enable_profile_memory=False,
         enable_observation_memory=True,
         enable_observation_tool=False,
@@ -163,7 +169,6 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     project_id = _path_project_id(workspace)
     global_result = record_observation_file(
         memory_dir=memories,
@@ -206,7 +211,9 @@ def test_observation_index_refreshes_summary_frontmatter(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     indexed = {
         document.observation_id: (
             document.memory_type,
@@ -261,8 +268,7 @@ def test_observation_index_omits_summaries_when_budget_exceeded(tmp_path, monkey
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    memory_module.create_memory_middleware(str(memories))
+    memory_module.create_memory_middleware(str(memories), workspace_dir=workspace)
     record_observation_file(
         memory_dir=memories,
         project_id=_path_project_id(workspace),
@@ -289,7 +295,6 @@ def test_observation_index_over_budget_keeps_entries_that_fit(tmp_path, monkeypa
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     project_id = _path_project_id(workspace)
     record_observation_file(
         memory_dir=memories,
@@ -333,7 +338,6 @@ def test_observation_index_lists_newest_first_and_drops_the_oldest(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     project_id = _path_project_id(workspace)
     for day, label in ((1, "oldest"), (3, "newest"), (2, "middle")):
         result = record_observation_file(
@@ -389,7 +393,6 @@ def test_construction_defers_observation_index_read_to_first_request(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     record_observation_file(
         memory_dir=memories,
@@ -415,7 +418,9 @@ def test_construction_defers_observation_index_read_to_first_request(
         memory_module, "build_observation_index_context", _counting_build
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
 
     # Construction must not read the observation store ...
     assert calls == []
@@ -449,7 +454,6 @@ def test_two_middlewares_share_the_observation_cache(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     record_observation_file(
         memory_dir=memories,
@@ -507,11 +511,10 @@ def test_profile_memory_over_budget_truncates_only_the_oversized_file(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(memory_module, "_warned_profile_truncations", set())
 
     middleware = memory_module.create_memory_middleware(
-        str(memories), max_inline_profile_chars=4_000
+        str(memories), workspace_dir=workspace, max_inline_profile_chars=4_000
     )
     middleware.modify_request(_request())
     profile = memories / "profile"
@@ -582,11 +585,10 @@ def test_profile_truncation_warns_once_per_set_of_files(tmp_path, monkeypatch, c
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(memory_module, "_warned_profile_truncations", set())
 
     middleware = memory_module.create_memory_middleware(
-        str(memories), max_inline_profile_chars=10
+        str(memories), workspace_dir=workspace, max_inline_profile_chars=10
     )
     with caplog.at_level("WARNING", logger=memory_module.__name__):
         middleware.modify_request(_request())
@@ -601,12 +603,13 @@ async def test_profile_memory_async_path_bootstraps_and_injects(tmp_path, monkey
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     async def _handler(request):
         return request
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     await middleware.awrap_model_call(_request(), _handler)
 
     assert (memories / "profile" / "USER_PROFILE.md").exists()
@@ -616,14 +619,15 @@ def test_profile_memory_write_failure_uses_path_pointers(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     monkeypatch.setattr(
         memory_module.EvoMemoryMiddleware,
         "_write_text",
         lambda _self, _path, _content: False,
     )
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
 
     middleware.modify_request(_request())
 
@@ -636,7 +640,6 @@ def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
@@ -644,7 +647,9 @@ def test_profile_memory_read_failure_uses_path_pointers_without_overwriting(
     original_bytes = b"\xff\xfe\xfa existing profile bytes"
     soul_path.write_bytes(original_bytes)
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert soul_path.read_bytes() == original_bytes
@@ -656,9 +661,10 @@ async def test_profile_memory_async_path_inlines_content_under_blockbuster(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
     user_profile = memories / "profile" / "USER_PROFILE.md"
     user_profile.write_text(
@@ -696,7 +702,6 @@ def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     (memories / "MEMORY.md").write_text(
         "\n".join(
             [
@@ -719,7 +724,9 @@ def test_profile_memory_migrates_legacy_memory_once(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
     middleware.modify_request(_request())
 
@@ -745,25 +752,21 @@ def test_profile_memory_deletes_blank_legacy_memory(tmp_path, monkeypatch):
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     legacy_path = memories / "MEMORY.md"
     legacy_path.write_text("  \n\n", encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert not legacy_path.exists()
 
 
-def test_profile_memory_uses_explicit_workspace_for_project_profile(
-    tmp_path, monkeypatch
-):
+def test_profile_memory_uses_explicit_workspace_for_project_profile(tmp_path):
     memories = tmp_path / "memories"
-    global_workspace = tmp_path / "global-workspace"
     active_workspace = tmp_path / "active-workspace"
-    global_workspace.mkdir()
     active_workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", global_workspace)
 
     middleware = memory_module.create_memory_middleware(
         str(memories), workspace_dir=str(active_workspace)
@@ -771,13 +774,9 @@ def test_profile_memory_uses_explicit_workspace_for_project_profile(
     middleware.modify_request(_request())
 
     expected_project_id = _path_project_id(active_workspace)
-    wrong_project_id = _path_project_id(global_workspace)
 
     assert (
         memories / "profile" / "projects" / expected_project_id / "PROJECT_PROFILE.md"
-    ).exists()
-    assert not (
-        memories / "profile" / "projects" / wrong_project_id / "PROJECT_PROFILE.md"
     ).exists()
 
 
@@ -814,7 +813,6 @@ def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     legacy_path = memories / "MEMORY.md"
     custom_note = "Keep this custom deployment note."
     legacy_path.write_text(
@@ -832,7 +830,9 @@ def test_profile_memory_preserves_unmapped_legacy_memory(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     user_profile = (memories / "profile" / "USER_PROFILE.md").read_text(
@@ -847,7 +847,6 @@ def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch)
     memories.mkdir()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     (memories / "MEMORY.md").write_text(
         "\n".join(
             [
@@ -871,7 +870,9 @@ def test_profile_memory_skips_legacy_unknown_placeholders(tmp_path, monkeypatch)
         encoding="utf-8",
     )
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     migrated_profile_text = "\n".join(_profile_texts(memories))
@@ -938,8 +939,9 @@ def test_write_text_is_atomic_and_leaves_no_tmp_sibling(tmp_path, monkeypatch):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     target = memories / "profile" / "SOUL.md"
 
     assert middleware._write_text(target, "content") is True
@@ -954,8 +956,9 @@ def test_write_text_failure_leaves_original_untouched_and_no_tmp_sibling(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     target = memories / "profile" / "SOUL.md"
     target.parent.mkdir(parents=True)
     target.write_text("original", encoding="utf-8")
@@ -985,13 +988,14 @@ def test_existing_user_profile_without_frontmatter_gets_one_with_body_verbatim(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
     body = "# User profile\n\n## Preferences\n- Likes short reports\n"
     (profile_dir / "USER_PROFILE.md").write_text(body, encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     meta, parsed_body = _user_profile_meta(memories)
@@ -1003,13 +1007,14 @@ def test_existing_user_profile_with_frontmatter_is_left_alone(tmp_path, monkeypa
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
     original = "---\nname: Ada\nintro: pending\n---\n# User profile\n"
     (profile_dir / "USER_PROFILE.md").write_text(original, encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert (profile_dir / "USER_PROFILE.md").read_text(encoding="utf-8") == original
@@ -1019,8 +1024,9 @@ def test_write_text_swallows_cleanup_errors_and_returns_false(tmp_path, monkeypa
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     target = memories / "profile" / "USER_PROFILE.md"
     target.parent.mkdir(parents=True)
     target.write_text("original", encoding="utf-8")
@@ -1054,12 +1060,13 @@ def test_ensure_profile_files_does_not_migrate_empty_user_profile(
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     profile_dir = memories / "profile"
     profile_dir.mkdir(parents=True)
     (profile_dir / "USER_PROFILE.md").write_text("", encoding="utf-8")
 
-    middleware = memory_module.create_memory_middleware(str(memories))
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
     middleware.modify_request(_request())
 
     assert (profile_dir / "USER_PROFILE.md").read_text(encoding="utf-8") == ""
@@ -1218,10 +1225,11 @@ def _bootstrap_middleware(tmp_path, monkeypatch, *, thread_id="t1", **kwargs):
     memories = tmp_path / "memories"
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(memory_module, "_current_thread_id", lambda: thread_id)
     kwargs.setdefault("enable_profile_bootstrap", True)
-    return memories, memory_module.create_memory_middleware(str(memories), **kwargs)
+    return memories, memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace, **kwargs
+    )
 
 
 def _system(modified) -> str:
@@ -1497,7 +1505,6 @@ def _assemble(tmp_path, monkeypatch, *, auto_mode: bool, for_async_subagent=Fals
 
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
     with (
         patch(
@@ -1508,7 +1515,9 @@ def _assemble(tmp_path, monkeypatch, *, auto_mode: bool, for_async_subagent=Fals
     ):
         mock_config.return_value = _assembly_cfg(auto_mode=auto_mode)
         mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
-        middleware = _get_default_middleware(for_async_subagent=for_async_subagent)
+        middleware = _get_default_middleware(
+            workspace=Workspace(workspace), for_async_subagent=for_async_subagent
+        )
     return next(
         m for m in middleware if isinstance(m, memory_module.EvoMemoryMiddleware)
     )
@@ -1536,7 +1545,6 @@ def test_sync_subagent_site_does_not_pass_profile_bootstrap(tmp_path, monkeypatc
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    monkeypatch.setattr(paths, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(paths, "MEMORIES_DIR", tmp_path / "memories")
     sub = {"name": "research"}
     with (
@@ -1545,9 +1553,128 @@ def test_sync_subagent_site_does_not_pass_profile_bootstrap(tmp_path, monkeypatc
     ):
         mock_config.return_value = _assembly_cfg(auto_mode=False)
         mock_model.return_value = MagicMock(profile={"max_input_tokens": 200_000})
-        _inject_subagent_middleware([sub], workspace_dir=workspace)
+        _inject_subagent_middleware([sub], workspace=Workspace(workspace))
 
     instance = next(
         m for m in sub["middleware"] if isinstance(m, memory_module.EvoMemoryMiddleware)
     )
     assert instance._enable_profile_bootstrap is False
+
+
+# ---- tool-less requests get no memory tool directives ------------------------
+
+
+def _request_with_tools(tools):
+    request = _request()
+    request.tools = tools
+    return request
+
+
+def test_tool_less_request_gets_no_memory_tool_directives(tmp_path):
+    """A request with an empty tool list (a proactive shadow turn) is not told to
+    run the memory preflight or record observations: with no tools the model
+    acts those directives out as text instead of answering."""
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+
+    with_tools = _system(middleware.modify_request(_request_with_tools([object()])))
+    without = _system(middleware.modify_request(_request_with_tools([])))
+
+    assert "Required memory preflight" in with_tools
+    assert "search_observations" in with_tools
+    assert "Required memory preflight" not in without
+    assert "search_observations" not in without
+    assert "record_observation" not in without
+    assert "No memory tools are available on this turn" in without
+    # Nor the profile edit guidance; the profile paths stay.
+    assert "normal file tools" in with_tools
+    assert "normal file tools" not in without
+    assert "edit the relevant" not in without
+    assert "/memories/profile/USER_PROFILE.md" in without
+    # The observation memory location and index still reach the tool-less call.
+    assert "/memories/observations/" in without
+
+
+def test_tool_less_async_request_gets_no_memory_tool_directives(tmp_path):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace
+    )
+
+    without = _system(asyncio.run(middleware.amodify_request(_request_with_tools([]))))
+
+    assert "Required memory preflight" not in without
+    assert "search_observations" not in without
+    assert "No memory tools are available on this turn" in without
+
+
+def test_tool_less_request_with_a_truncated_profile_is_not_told_to_read_it(
+    tmp_path, monkeypatch
+):
+    memories = tmp_path / "memories"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(memory_module, "_warned_profile_truncations", set())
+    middleware = memory_module.create_memory_middleware(
+        str(memories), workspace_dir=workspace, max_inline_profile_chars=4_000
+    )
+    middleware.modify_request(_request())
+    (memories / "profile" / "USER_PROFILE.md").write_text(
+        "".join(f"- preference {i:04d}\n" for i in range(1_000)), encoding="utf-8"
+    )
+
+    without = _system(middleware.modify_request(_request_with_tools([])))
+
+    assert "characters omitted" in without
+    assert "do not try to read a part marked as omitted" in without
+
+
+def test_index_too_large_to_inline_mentions_search_only_with_hints():
+    from EvoScientist.memory.observations.index import (
+        _truncated_observation_index_context,
+    )
+
+    kwargs = {
+        "header": ["<observation_memory>"],
+        "intro": "Indexed observations:",
+        "lines": ["- " + "x" * 200],
+        "max_inline_chars": 10,
+    }
+    with_hints = _truncated_observation_index_context(
+        footer=["hint"], can_search=True, **kwargs
+    )
+    without = _truncated_observation_index_context(
+        footer=[], can_search=False, **kwargs
+    )
+    # The observation linker: search tools, but no hint footer.
+    linker = _truncated_observation_index_context(footer=[], can_search=True, **kwargs)
+
+    assert "search on demand" in with_hints
+    assert "search on demand" not in without
+    assert "too large to inline" in without
+    assert "search on demand" in linker
+
+
+def test_linker_index_keeps_the_search_advice_when_too_large(tmp_path):
+    from EvoScientist.memory.observations import index as index_module
+
+    documents = [object()]
+    with (
+        patch.object(index_module, "_observation_documents", return_value=documents),
+        patch.object(
+            index_module, "_observation_index_line", return_value="- " + "x" * 500
+        ),
+        patch.object(
+            index_module, "_observation_index_count_line", return_value="1 observation"
+        ),
+    ):
+        text = index_module.build_observation_linker_index_context(
+            memory_dir=tmp_path, project_id="p", exclude_ids=(), max_inline_chars=50
+        )
+    assert "search on demand" in text
