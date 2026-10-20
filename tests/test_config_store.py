@@ -429,3 +429,9 @@ class TestWizard:
             assert run_onboard() is True
         assert seen == {"locked": True}
         assert _mapping(config_file)["model"] == "from-wizard"
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan"])
+def test_number_must_be_finite(value):
+    with pytest.raises(ValueError, match="finite"):
+        validate_setting("code_interpreter_timeout", value)

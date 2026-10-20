@@ -712,3 +712,66 @@ class TestTestKey:
                 headers=secret,
             )
         assert not config_file.exists()
+
+
+class TestPatchValues:
+    def test_secrets_sent_back_as_get_shows_them_are_kept(
+        self, server, secret, config_file
+    ):
+        config_file.write_text(
+            "telegram_bot_token: 123456:TELEGRAMSECRET\n"
+            "email_smtp_password: hunter2-long-password\n"
+            "custom_openai_api_key: sk-custom-1234567890\n",
+            encoding="utf-8",
+        )
+        before = config_file.read_bytes()
+        shown = server.get("/api/settings").json()["settings"]
+        names = ("telegram_bot_token", "email_smtp_password", "custom_openai_api_key")
+        response = server.patch(
+            "/api/settings", json={name: shown[name] for name in names}, headers=secret
+        )
+        assert response.status_code == 200
+        assert response.json()["changed"] == []
+        assert config_file.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        ("body", "field"),
+        [
+            ('{"model": ["m1"]}', "model"),
+            ('{"show_thinking": {"a": 1}}', "show_thinking"),
+            ('{"langgraph_dev_port": true}', "langgraph_dev_port"),
+            ('{"langgraph_dev_port": 6174.5}', "langgraph_dev_port"),
+            ('{"langgraph_dev_port": 1e999}', "langgraph_dev_port"),
+            ('{"code_interpreter_timeout": Infinity}', "code_interpreter_timeout"),
+            ('{"code_interpreter_timeout": "inf"}', "code_interpreter_timeout"),
+        ],
+    )
+    def test_value_that_does_not_fit_the_field_writes_nothing(
+        self, server, secret, config_file, body, field
+    ):
+        config_file.write_text("model: m1\n", encoding="utf-8")
+        before = config_file.read_bytes()
+        response = server.patch(
+            "/api/settings",
+            content=body,
+            headers={**secret, "Content-Type": "application/json"},
+        )
+        assert response.status_code == 400
+        assert list(response.json()["errors"]) == [field]
+        assert config_file.read_bytes() == before
+
+    def test_edited_hidden_url_keeps_the_stored_credentials(
+        self, server, secret, config_file
+    ):
+        config_file.write_text(
+            "telegram_proxy: http://me:hunter2@proxy.test:3128\n", encoding="utf-8"
+        )
+        response = server.patch(
+            "/api/settings",
+            json={"telegram_proxy": "http://***@proxy.test:3129"},
+            headers=secret,
+        )
+        assert response.status_code == 200
+        assert _mapping(config_file)["telegram_proxy"] == (
+            "http://me:hunter2@proxy.test:3129"
+        )

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from dataclasses import asdict, dataclass, fields
 from enum import StrEnum
@@ -1112,6 +1113,8 @@ def validate_setting(key: str, value: Any) -> tuple[Any, str | None]:
         raise ValueError(
             f"expected {getattr(field_type, '__name__', field_type)}"
         ) from None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("must be a finite number")
 
     warning = None
     if key == "sandbox_execute_timeout" and value <= 0:

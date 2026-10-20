@@ -42,6 +42,7 @@ from EvoScientist.config.settings import (
     SECRET_FIELDS,
     EvoScientistConfig,
     SettingsError,
+    _config_field_type,
     _config_to_dict,
     config_from_mapping,
     env_origin,
@@ -393,6 +394,31 @@ def _check_changed_keys(
     return errors, warnings
 
 
+_EXPECTED = {
+    bool: "expected true or false",
+    int: "expected an integer",
+    float: "expected a number",
+}
+
+
+def _json_type_error(name: str, value: Any) -> str | None:
+    """Why a JSON value other than text does not fit ``name``'s type, or
+    ``None``; text is coerced as ``EvoSci config set`` coerces it."""
+    field = next((f for f in fields(EvoScientistConfig) if f.name == name), None)
+    if field is None or isinstance(value, str):
+        return None
+    field_type = _config_field_type(name, field.type)
+    if field_type is bool:
+        ok = isinstance(value, bool)
+    elif field_type is int:
+        ok = isinstance(value, int) and not isinstance(value, bool)
+    elif field_type is float:
+        ok = isinstance(value, int | float) and not isinstance(value, bool)
+    else:
+        ok = False
+    return None if ok else _EXPECTED.get(field_type, "expected a string")
+
+
 def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
     """Apply a ``PATCH /api/settings`` body; return ``(status, payload)``."""
     if not isinstance(body, dict):
@@ -411,10 +437,12 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
     for name, value in body.items():
         if name in READ_ONLY_FIELDS:
             errors[name] = _READ_ONLY_MESSAGE
-        elif name in SECRET_FIELDS and value == "":
-            continue  # an empty secret keeps the stored one
+        elif name in SECRET_FIELDS and (value == "" or isinstance(value, dict)):
+            continue  # "" or GET's {"set": ...} keeps the stored secret
         elif value is None:
             changes[name] = None
+        elif reason := _json_type_error(name, value):
+            errors[name] = reason
         else:
             try:
                 changes[name], _ = validate_setting(name, value)
@@ -428,11 +456,18 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
     except store.ConfigParseError as e:
         return 409, _unreadable(e)
     for name in list(changes):
-        # A page that sends back what GET showed (``http://***@host``) keeps
-        # the stored URL, as ``""`` keeps a secret.
+        # A page that sends back what GET showed (``http://***@host``), edited
+        # or not, keeps the stored user and password, as ``""`` keeps a secret.
         stored = current.get(name)
-        if body[name] != stored and body[name] == _hide_userinfo(stored):
+        new = _USERINFO_URL.match(body[name]) if isinstance(body[name], str) else None
+        old = _USERINFO_URL.match(stored) if isinstance(stored, str) else None
+        if new is None or old is None or new.group(2) != "***":
+            continue
+        restored = f"{new.group(1)}{old.group(2)}@{new.group(3)}{new.group(4)}"
+        if restored == stored:
             del changes[name]
+        else:
+            body[name] = changes[name] = restored
     if not changes:
         # Nothing to change (``{}``, or only ``""`` secrets): write nothing,
         # so the revision and the file's comments stay as they are.
