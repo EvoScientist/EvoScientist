@@ -25,7 +25,7 @@ cfgv==3.5.0
 charset-normalizer==3.5.2
 click==8.5.0
 cloudpickle==3.1.2
-colorama==0.4.6 ; (os_name == 'nt' and platform_machine != 'x86_64') or (os_name != 'nt' and sys_platform == 'win32') or (os_name == 'nt' and sys_platform != 'darwin')
+colorama==0.4.6 ; (os_name == 'nt' and platform_machine != 'x86_64') or (os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'win32') or sys_platform == 'win32'
 coverage==7.16.2
 croniter==6.2.4
 cryptography==48.0.1 ; platform_machine == 'x86_64' and sys_platform == 'darwin'
@@ -39,6 +39,7 @@ distro==1.9.0
 dnspython==2.9.0
 docstring-parser==0.18.0
 email-validator==2.3.0
+execnet==2.1.2
 fastapi==0.141.1
 fastapi-cli==0.0.32
 fastapi-cloud-cli==0.26.0
@@ -154,6 +155,7 @@ pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
 pytest-timeout==2.4.0
+pytest-xdist==3.8.0
 python-dateutil==2.9.0.post0
 python-discovery==1.6.3
 python-dotenv==1.2.4

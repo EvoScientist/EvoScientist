@@ -29,5 +29,7 @@ jobs:
           cache-dependency-glob: "**/pyproject.toml"
       - name: Install dependencies
         run: uv sync --dev --extra all-channels
+      # Four workers, one per runner vCPU; worksteal evens out the slow tests.
+      # The per-test timeout comes from pyproject.toml.
       - name: Run pytest
-        run: uv run pytest -v --timeout=30
+        run: uv run pytest -v -n 4 --dist worksteal
