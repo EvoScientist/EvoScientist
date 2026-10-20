@@ -253,6 +253,14 @@ def _hide_userinfo(value: Any) -> Any:
     return f"{scheme}***@{host}{rest}"
 
 
+def _host_of(authority: str) -> str:
+    """The host of ``host[:port]``, lower-cased; an IPv6 literal such as
+    ``[::1]:3128`` keeps its brackets."""
+    if authority.startswith("["):
+        return authority.partition("]")[0].lower() + "]"
+    return authority.partition(":")[0].lower()
+
+
 def _masked(name: str, value: Any) -> Any:
     if name not in SECRET_FIELDS:
         return _hide_userinfo(value)
@@ -473,7 +481,8 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
     """Apply a ``PATCH /api/settings`` body; return ``(status, payload)``.
 
     ``""`` or GET's ``{"set": ...}`` for a secret keeps the stored one, and a
-    URL sent back with ``***@`` keeps the stored user and password. A JSON
+    URL sent back with ``***@`` keeps the stored user and password when its
+    host is the stored one (another host gets ``400``). A JSON
     value other than text must fit the field's type; text is coerced as
     ``EvoSci config set`` coerces it.
     """
@@ -513,12 +522,17 @@ def patch_settings(body: Any) -> tuple[int, dict[str, Any]]:
         return 409, _unreadable(e)
     for name in list(changes):
         # A page that sends back what GET showed (``http://***@host``), edited
-        # or not, keeps the stored user and password, as ``""`` keeps a secret.
+        # or not, keeps the stored user and password, as ``""`` keeps a secret,
+        # but only for the stored host: they never go to another address.
         stored = current.get(name)
         new = _USERINFO_URL.match(body[name]) if isinstance(body[name], str) else None
         old = _USERINFO_URL.match(stored) if isinstance(stored, str) else None
         if new is None or old is None or new.group(2) != "***":
             continue
+        if _host_of(new.group(3)) != _host_of(old.group(3)):
+            return 400, {
+                "errors": {name: "the host changed; enter the user and password again"}
+            }
         restored = f"{new.group(1)}{old.group(2)}@{new.group(3)}{new.group(4)}"
         if restored == stored:
             del changes[name]

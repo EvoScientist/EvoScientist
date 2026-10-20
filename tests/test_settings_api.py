@@ -779,6 +779,53 @@ class TestPatchValues:
             "http://me:hunter2@proxy.test:3129"
         )
 
+    @pytest.mark.parametrize(
+        "sent", ["http://***@evil.test:3128", "http://***@[::1]:3128"]
+    )
+    def test_hidden_url_with_another_host_writes_nothing(
+        self, server, secret, config_file, sent
+    ):
+        config_file.write_text(
+            "telegram_proxy: http://me:hunter2@proxy.test:3128\n", encoding="utf-8"
+        )
+        before = config_file.read_bytes()
+        response = server.patch(
+            "/api/settings", json={"telegram_proxy": sent}, headers=secret
+        )
+        assert response.status_code == 400
+        assert list(response.json()["errors"]) == ["telegram_proxy"]
+        assert config_file.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        ("stored", "sent", "saved"),
+        [
+            (
+                "http://me:hunter2@Proxy.Test:3128",
+                "http://***@proxy.test:3128/",
+                "http://me:hunter2@proxy.test:3128/",
+            ),
+            (
+                "http://me:hunter2@[::1]:3128",
+                "http://***@[::1]:3129",
+                "http://me:hunter2@[::1]:3129",
+            ),
+            (
+                "http://me:hunter2@[::1]",
+                "http://***@[::1]:3128",
+                "http://me:hunter2@[::1]:3128",
+            ),
+        ],
+    )
+    def test_hidden_url_with_the_same_host_keeps_the_credentials(
+        self, server, secret, config_file, stored, sent, saved
+    ):
+        config_file.write_text(f"telegram_proxy: '{stored}'\n", encoding="utf-8")
+        response = server.patch(
+            "/api/settings", json={"telegram_proxy": sent}, headers=secret
+        )
+        assert response.status_code == 200
+        assert _mapping(config_file)["telegram_proxy"] == saved
+
 
 class TestRestartRules:
     def test_field_the_environment_overrides_is_not_pending(
