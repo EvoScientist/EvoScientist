@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -255,6 +256,35 @@ def test_run_standalone_exits_on_sigint():
     standalone.run_standalone(channel, bus, use_agent=False)
     assert time.monotonic() - started < 20
     assert channel._stopped
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows loops always take this path"
+)
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_run_standalone_exits_on_sigint_without_loop_signal_handlers(monkeypatch):
+    """A loop without add_signal_handler (Windows) still stops on Ctrl+C."""
+    from asyncio import unix_events
+
+    def _unsupported(self, sig, callback, *args):
+        raise NotImplementedError
+
+    monkeypatch.setattr(
+        unix_events._UnixSelectorEventLoop, "add_signal_handler", _unsupported
+    )
+    handler_before = signal.getsignal(signal.SIGINT)
+    channel = _SigintChannel()
+
+    started = time.monotonic()
+    standalone.run_standalone(channel, MessageBus(), use_agent=False)
+
+    assert time.monotonic() - started < 20
+    assert channel._stopped
+    assert signal.getsignal(signal.SIGINT) is handler_before
 
 
 @pytest.mark.skipif(

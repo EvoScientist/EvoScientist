@@ -212,12 +212,26 @@ async def _async_main(
         logger.warning("Second signal received, forcing shutdown")
         shutdown_task.cancel()
 
+    # Windows event loops have no add_signal_handler. A plain handler runs on
+    # the main thread between bytecodes and hands the request to the loop; it
+    # is removed on the way out so a later Ctrl+C never reaches a closed loop.
+    previous_handlers: dict[int, Any] = {}
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _request_shutdown)
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:
+            previous_handlers[sig] = signal.signal(
+                sig, lambda *_: loop.call_soon_threadsafe(_request_shutdown)
+            )
 
-    await asyncio.gather(*workers, return_exceptions=True)
-    if shutdown_task is not None:
-        await asyncio.gather(shutdown_task, return_exceptions=True)
+    try:
+        await asyncio.gather(*workers, return_exceptions=True)
+        if shutdown_task is not None:
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+    finally:
+        for sig, previous in previous_handlers.items():
+            if previous is not None:
+                signal.signal(sig, previous)
 
 
 def _ensure_standalone_dev_server(
