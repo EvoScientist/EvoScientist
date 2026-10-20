@@ -402,10 +402,8 @@ async def test_early_subagent_approval_waits_for_persisted_task_interrupt():
     assert (await graph.aget_state(cfg)).next == ()
 
 
-async def test_checkpointed_interrupt_wait_retries_transient_state_read(monkeypatch):
-    """A transient state read error must not release an uncheckpointed pause."""
-    from types import SimpleNamespace
-
+async def test_checkpointed_interrupt_wait_stops_on_state_read_error():
+    """An unavailable checkpoint must not delay an emitted pause."""
     from EvoScientist.stream.events import _wait_for_checkpointed_interrupt
 
     class _TransientStateReadAgent:
@@ -414,103 +412,53 @@ async def test_checkpointed_interrupt_wait_retries_transient_state_read(monkeypa
 
         async def aget_state(self, _config):
             self.state_reads += 1
-            if self.state_reads == 1:
-                raise RuntimeError("checkpoint temporarily unavailable")
-            return SimpleNamespace(
-                next=("tools",),
-                tasks=(
-                    SimpleNamespace(interrupts=(SimpleNamespace(id="approval-1"),)),
-                ),
-                interrupts=(),
-            )
+            raise RuntimeError("No checkpointer set")
 
-    monkeypatch.setattr(
-        "EvoScientist.stream.events._INTERRUPT_CHECKPOINT_WAIT_SECONDS", 0.1
-    )
-    monkeypatch.setattr(
-        "EvoScientist.stream.events._INTERRUPT_CHECKPOINT_POLL_SECONDS", 0.001
-    )
     agent = _TransientStateReadAgent()
 
     await _wait_for_checkpointed_interrupt(agent, {}, "approval-1")
 
-    assert agent.state_reads == 2
+    assert agent.state_reads == 1
 
 
 @pytest.mark.parametrize("initial_state", ["clean", "unavailable"])
-async def test_resume_timeout_preserves_uncheckpointed_interrupt_state(
-    monkeypatch, initial_state
-):
-    """A missing persisted interrupt times out without recovering the graph."""
+async def test_uncheckpointed_resume_uses_stream_error_path(initial_state):
+    """Resume errors are emitted by streaming even without saved state."""
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
 
     from EvoScientist.backends import build_hitl_resume
 
     class _UncheckpointedResumeAgent:
         def __init__(self):
-            self.astream_events = MagicMock()
-            self.state_updates = []
+            self.stream_started = False
             self.state_reads = 0
 
         async def aget_state(self, _config):
             self.state_reads += 1
             if self.state_reads == 1 and initial_state == "unavailable":
-                raise RuntimeError("checkpoint temporarily unavailable")
+                raise RuntimeError("No checkpointer set")
             if self.state_reads == 1 and initial_state == "clean":
                 return SimpleNamespace(next=(), tasks=(), interrupts=(), values={})
-            return SimpleNamespace(next=("tools",), tasks=(), interrupts=(), values={})
 
-        async def aupdate_state(self, *args, **kwargs):
-            self.state_updates.append((args, kwargs))
+            return SimpleNamespace(next=(), tasks=(), interrupts=(), values={})
 
-    monkeypatch.setattr("EvoScientist.stream.events._RESUME_INTERRUPT_WAIT_SECONDS", 0)
+        async def astream_events(self, *args, **kwargs):
+            self.stream_started = True
+            raise RuntimeError("Cannot use Command(resume=...) without checkpointer")
+
     agent = _UncheckpointedResumeAgent()
-
-    with pytest.raises(RuntimeError, match="Timed out waiting"):
-        await _run_turn(
-            agent,
-            build_hitl_resume("approval-1", [{"type": "approve"}]),
-            "t-uncheckpointed-resume",
-        )
-
-    assert agent.state_reads == 2
-    assert agent.state_updates == []
-    agent.astream_events.assert_not_called()
-
-
-def test_resume_requires_every_interrupt_id_to_be_persisted():
-    """A partial checkpoint must not accept a multi-interrupt resume."""
-    from types import SimpleNamespace
-
-    from langgraph.types import Command
-
-    from EvoScientist.stream.events import _snapshot_has_resume_interrupt
-
-    resume = Command(
-        resume={
-            "approval-1": {"decisions": [{"type": "approve"}]},
-            "approval-2": {"decisions": [{"type": "approve"}]},
-        }
-    )
-    partial = SimpleNamespace(
-        interrupts=(),
-        tasks=(SimpleNamespace(interrupts=(SimpleNamespace(id="approval-1"),)),),
-    )
-    complete = SimpleNamespace(
-        interrupts=(),
-        tasks=(
-            SimpleNamespace(
-                interrupts=(
-                    SimpleNamespace(id="approval-1"),
-                    SimpleNamespace(id="approval-2"),
-                )
-            ),
-        ),
+    events = stream_agent_events(
+        agent,
+        build_hitl_resume("approval-1", [{"type": "approve"}]),
+        "t-uncheckpointed-resume",
     )
 
-    assert not _snapshot_has_resume_interrupt(resume, partial)
-    assert _snapshot_has_resume_interrupt(resume, complete)
+    error_event = await anext(events)
+    assert error_event["type"] == "error"
+    assert agent.stream_started
+
+    with pytest.raises(RuntimeError, match="without checkpointer"):
+        await anext(events)
 
 
 async def _cancel_mid_tools(agent, thread_id: str) -> None:
