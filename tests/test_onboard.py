@@ -145,46 +145,31 @@ class TestSharedConstantsAlignment:
 
         assert VALID_WORKSPACE_MODES == frozenset({"daemon", "run"})
 
-    def test_valid_providers_aligns_with_provider_key_attr(self):
-        """Every provider in ``VALID_PROVIDERS`` (except ``openai`` and
-        ``ollama``, which the wizard handles via fallbacks) must appear in
-        ``_PROVIDER_KEY_ATTR`` — otherwise the auth-mode flow won't know
-        which config attribute to write the validated key to."""
+    def test_valid_providers_aligns_with_provider_table(self):
+        """The provider table in ``provider_keys`` has exactly one row per
+        provider in ``VALID_PROVIDERS``: an unknown provider is an error, not
+        an OpenAI fallback, so a missing row would break that provider."""
         from EvoScientist.config.onboard.constants import VALID_PROVIDERS
-        from EvoScientist.config.onboard.wizard import _PROVIDER_KEY_ATTR
+        from EvoScientist.config.provider_keys import PROVIDERS
 
-        expected = set(VALID_PROVIDERS) - {"openai", "ollama"}
-        missing = expected - set(_PROVIDER_KEY_ATTR.keys())
-        assert not missing, (
-            "VALID_PROVIDERS has providers missing from _PROVIDER_KEY_ATTR "
-            f"in wizard.py: {missing}"
-        )
-        extra = set(_PROVIDER_KEY_ATTR.keys()) - expected
-        assert not extra, (
-            f"_PROVIDER_KEY_ATTR in wizard.py has keys not in VALID_PROVIDERS: {extra}"
-        )
+        assert set(PROVIDERS) == set(VALID_PROVIDERS)
 
-    def test_valid_providers_aligns_with_provider_key_info(self):
-        """``_provider_key_info`` uses ``mapping.get(provider, <openai
-        fallback>)``, so an unknown provider silently behaves like OpenAI.
-        Verify every non-``openai`` provider in ``VALID_PROVIDERS`` has an
-        explicit entry — detected by checking the returned display name is
-        not the OpenAI fallback string."""
-        from EvoScientist.config.onboard.constants import VALID_PROVIDERS
+    def test_provider_key_fields_exist_on_config(self):
+        """Every key and base URL field in the table is a config field."""
+        from dataclasses import fields
+
+        from EvoScientist.config.provider_keys import KEY_SPECS
+
+        names = {f.name for f in fields(EvoScientistConfig)}
+        for provider, spec in KEY_SPECS.items():
+            for attr in (spec.key_field, spec.base_url_field):
+                assert attr is None or attr in names, (provider, attr)
+
+    def test_provider_key_info_rejects_unknown_provider(self):
         from EvoScientist.config.onboard.helpers import _provider_key_info
 
-        cfg = EvoScientistConfig()
-        for provider in VALID_PROVIDERS:
-            display_name, _, _ = _provider_key_info(cfg, provider)
-            if provider == "openai":
-                assert display_name == "OpenAI"
-            else:
-                assert display_name != "OpenAI", (
-                    f"Provider {provider!r} is missing from _provider_key_info "
-                    "in helpers.py — it falls through to the OpenAI default, "
-                    "which would silently send the wrong validator and "
-                    "current-key lookup."
-                )
+        with pytest.raises(KeyError):
+            _provider_key_info(EvoScientistConfig(), "no-such-provider")
 
 
 class TestOAuthModeReconcile:
@@ -496,11 +481,12 @@ class TestValidateXiaomiKey:
             "openai.OpenAI",
             side_effect=lambda **kw: real(
                 **kw,
-                max_retries=0,
                 http_client=httpx.Client(transport=httpx.MockTransport(handler)),
             ),
-        ):
+        ) as client_cls:
             result = validate_xiaomi_key("sk-mimo", **kwargs)
+        assert client_cls.call_args.kwargs["timeout"] == 10
+        assert client_cls.call_args.kwargs["max_retries"] == 0
         return result, seen
 
     def test_empty_key_skipped(self):
@@ -3014,7 +3000,7 @@ class TestXiaomiTokenPlanRegion:
         config = EvoScientistConfig()
         _configure_provider_base_url(config, "xiaomi-token-plan", strict=True)
         with patch(
-            "EvoScientist.config.onboard.helpers.validate_xiaomi_key"
+            "EvoScientist.config.provider_keys.check_xiaomi_key"
         ) as mock_validate:
             _provider_key_info(config, "xiaomi-token-plan")[2]("tp-key")
 
@@ -3041,14 +3027,14 @@ class TestXiaomiTokenPlanRegion:
     [
         (
             "minimax",
-            "validate_minimax_key",
+            "check_minimax_key",
             "minimax_base_url",
             "MINIMAX_BASE_URL",
             "https://api.minimaxi.com/anthropic",
         ),
         (
             "xiaomi-token-plan",
-            "validate_xiaomi_key",
+            "check_xiaomi_key",
             "mimo_token_plan_base_url",
             "MIMO_TOKEN_PLAN_BASE_URL",
             "https://token-plan-cn.xiaomimimo.com/anthropic",
@@ -3063,7 +3049,7 @@ def test_key_validator_ignores_blank_base_url(
 
     monkeypatch.setenv(env, "  ")
     config = EvoScientistConfig(**{field: "  "})
-    with patch(f"EvoScientist.config.onboard.helpers.{validator}") as mock_validate:
+    with patch(f"EvoScientist.config.provider_keys.{validator}") as mock_validate:
         _provider_key_info(config, provider)[2]("key")
 
     assert mock_validate.call_args.kwargs["base_url"] == default

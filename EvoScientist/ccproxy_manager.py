@@ -281,8 +281,12 @@ def setup_ccproxy_env(port: int) -> None:
     Always overrides existing values — when this function is called,
     we've decided to use ccproxy, so env must point to it.
     """
+    from .config.settings import record_env_origin
+
     os.environ["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{port}/claude"
     os.environ["ANTHROPIC_API_KEY"] = "ccproxy-oauth"
+    record_env_origin("ANTHROPIC_BASE_URL", "ccproxy")
+    record_env_origin("ANTHROPIC_API_KEY", "ccproxy")
 
 
 # =============================================================================

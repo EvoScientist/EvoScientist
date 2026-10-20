@@ -640,6 +640,181 @@ async def test_stop_during_start_still_cleans_what_start_opened():
     assert (channel.opened, channel.closed) == (1, 1)
 
 
+def _oauth_config(**overrides):
+    base = {"anthropic_auth_mode": "api_key", "openai_auth_mode": "api_key"}
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_ensure_ccproxy_noop_without_oauth(monkeypatch):
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config)
+    )
+
+    standalone._ensure_ccproxy(_oauth_config())
+
+    assert calls == []
+
+
+def test_ensure_ccproxy_starts_and_registers_shutdown(monkeypatch):
+    import atexit as atexit_mod
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    proc = object()
+    calls: list[object] = []
+    monkeypatch.setattr(
+        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config) or proc
+    )
+    registered: list[tuple] = []
+    monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
+
+    cfg = _oauth_config(anthropic_auth_mode="oauth")
+    standalone._ensure_ccproxy(cfg)
+
+    assert calls == [cfg]
+    assert registered == [(ccproxy_mod.stop_ccproxy, proc)]
+
+
+def test_ensure_ccproxy_reused_instance_registers_no_shutdown(monkeypatch):
+    """An already-running ccproxy (proc is None) needs no atexit shutdown."""
+    import atexit as atexit_mod
+
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", lambda config: None)
+    registered: list[tuple] = []
+    monkeypatch.setattr(atexit_mod, "register", lambda *args: registered.append(args))
+
+    standalone._ensure_ccproxy(_oauth_config(anthropic_auth_mode="oauth"))
+
+    assert registered == []
+
+
+def test_ensure_ccproxy_noop_with_openai_oauth_only(monkeypatch):
+    """OpenAI's OAuth mode signs in to ChatGPT directly: no proxy needed."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        ccproxy_mod, "maybe_start_ccproxy", lambda config: calls.append(config)
+    )
+
+    standalone._ensure_ccproxy(_oauth_config(openai_auth_mode="oauth"))
+
+    assert calls == []
+
+
+def test_ensure_ccproxy_exits_when_the_proxy_cannot_start(monkeypatch, caplog):
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+
+    def _boom(config):
+        raise RuntimeError("ccproxy is required for OAuth mode but not found")
+
+    monkeypatch.setattr(ccproxy_mod, "maybe_start_ccproxy", _boom)
+
+    with caplog.at_level("ERROR"), pytest.raises(SystemExit) as exc_info:
+        standalone._ensure_ccproxy(_oauth_config(anthropic_auth_mode="oauth"))
+
+    assert exc_info.value.code == 1
+    assert "ccproxy startup failed: ccproxy is required" in caplog.text
+
+
+def test_run_standalone_ensures_ccproxy_only_with_agent(monkeypatch):
+    """``run_standalone`` starts ccproxy (OAuth) iff an agent is configured."""
+    import EvoScientist.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "get_effective_config",
+        lambda: SimpleNamespace(
+            gateway_backend="local",
+            default_workdir="",
+            anthropic_auth_mode="oauth",
+            openai_auth_mode="api_key",
+        ),
+    )
+    ensured: list[object] = []
+    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+    monkeypatch.setattr(
+        standalone,
+        "_ensure_standalone_dev_server",
+        lambda cfg, *, workspace_dir, backend=None: None,
+    )
+    monkeypatch.setattr(standalone.asyncio, "run", lambda coro: coro.close())
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+    assert len(ensured) == 1
+
+    ensured.clear()
+    standalone.run_standalone(channel=None, bus=None, use_agent=False)
+    assert ensured == []
+
+
+def test_run_standalone_skips_ccproxy_when_chatgpt_sign_in_missing(monkeypatch):
+    """ccproxy starts only after the ChatGPT sign-in check passes."""
+    _, _ = _standalone_ready(
+        monkeypatch,
+        signed_in=False,
+        openai_auth_mode="oauth",
+        anthropic_auth_mode="oauth",
+    )
+    ensured: list[object] = []
+    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+
+    with pytest.raises(SystemExit):
+        standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert ensured == []
+
+
+def test_run_standalone_starts_ccproxy_after_chatgpt_sign_in(monkeypatch):
+    """Signed-in ChatGPT OAuth + Anthropic OAuth: the proxy starts."""
+    _, _ = _standalone_ready(
+        monkeypatch,
+        signed_in=True,
+        openai_auth_mode="oauth",
+        anthropic_auth_mode="oauth",
+    )
+    ensured: list[object] = []
+    monkeypatch.setattr(standalone, "_ensure_ccproxy", ensured.append)
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert len(ensured) == 1
+
+
+def test_run_standalone_sets_the_proxy_env_before_the_dev_server(monkeypatch):
+    """The dev server copies env from ``os.environ`` at spawn, so the proxy
+    env must be force-set before the dev server starts."""
+    import EvoScientist.ccproxy_manager as ccproxy_mod
+    import EvoScientist.langgraph_dev.manager as manager_mod
+
+    _standalone_ready(
+        monkeypatch, signed_in=True, anthropic_auth_mode="oauth", ccproxy_port=8000
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    monkeypatch.setattr(ccproxy_mod, "is_ccproxy_available", lambda: True)
+    monkeypatch.setattr(ccproxy_mod, "check_ccproxy_auth", lambda provider: (True, ""))
+    monkeypatch.setattr(ccproxy_mod, "ensure_ccproxy", lambda port: None)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        manager_mod,
+        "ensure_langgraph_dev",
+        lambda cfg, *, workspace_dir, backend=None: seen.append(
+            os.environ["ANTHROPIC_BASE_URL"]
+        ),
+    )
+
+    standalone.run_standalone(channel=None, bus=None, use_agent=True)
+
+    assert seen == ["http://127.0.0.1:8000/claude"]
+
+
 def test_run_standalone_quiets_httpx(monkeypatch):
     """HTTP client logs must not expose channel tokens in request URLs."""
     leaking_level = {

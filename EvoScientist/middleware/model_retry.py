@@ -357,12 +357,35 @@ def _wait_after(exc: BaseException, backoff: float) -> float:
     return max(round(backoff if wait is None else wait, 3), MIN_WAIT_SECONDS)
 
 
+# Written on the run's ``model_retry`` marker by the call that ran out of budget.
+_RUN_SPENT_KEY = "budget_spent"
+
+
+def _run_spent(run: dict[str, Any] | None) -> bool:
+    """Whether a model call in this run has already used its whole budget."""
+    return run is not None and run.get(_RUN_SPENT_KEY) is True
+
+
+def _spend_run(run: dict[str, Any] | None) -> None:
+    """Record on the run's marker that a call used its whole budget."""
+    if run is not None:
+        run[_RUN_SPENT_KEY] = True
+
+
 class ModelRetryMiddleware(AgentMiddleware):
-    """Retry a transient model-call failure inside a per-call wait budget.
+    """Retry a transient model-call failure until its budget, or another call's in the run, is spent.
 
     Sits outside the fallback chain: one attempt is primary plus fallbacks.
     The budget starts at the first failure: the waits and the retried attempts
     count against it, the first attempt's own time does not.
+
+    Every model call of a run, its sub-agents' included, sees the same
+    ``model_retry`` marker. A call that runs out of budget records that on
+    it, and from then on no call in the run is retried: a sub-agent that
+    waited the budget out does not leave the main agent a budget of its own.
+    A call that recovers does not mark the run, so the waits of a run's calls
+    can add up to more than one budget. A run without the marker keeps a
+    budget per call.
     """
 
     name = "model_retry"
@@ -386,16 +409,20 @@ class ModelRetryMiddleware(AgentMiddleware):
         self._sync_sleep = sync_sleep
         self._rng = rng
 
-    def _effective_tier(self) -> RetryTier:
+    def _run_marker(self) -> dict[str, Any] | None:
+        """The run's ``model_retry`` marker, or ``None`` (absent, not honoured, outside a run)."""
         if not self._honor_run_key:
-            return self._tier
+            return None
         from ..backends import MODEL_RETRY_RUN_KEY
 
         try:
             marker = (get_config().get("configurable") or {}).get(MODEL_RETRY_RUN_KEY)
         except RuntimeError:
-            return self._tier
-        if not isinstance(marker, dict):
+            return None
+        return marker if isinstance(marker, dict) else None
+
+    def _effective_tier(self, marker: dict[str, Any] | None) -> RetryTier:
+        if marker is None:
             return self._tier
         budget = marker.get("wait_budget_seconds")
         # The config's rule: whole seconds as an int, anything else is the default.
@@ -423,11 +450,23 @@ class ModelRetryMiddleware(AgentMiddleware):
         return min(jittered, tier.cap_seconds)
 
     def _plan_retry(
-        self, exc: BaseException, attempt: int, tier: RetryTier, deadline: float
+        self,
+        exc: BaseException,
+        attempt: int,
+        tier: RetryTier,
+        deadline: float,
+        run: dict[str, Any] | None,
     ) -> tuple[float, dict[str, Any]] | None:
         """The wait and event for the next attempt, or ``None`` to give up now."""
         failures = [] if isinstance(exc, GraphBubbleUp) else retryable_failures(exc)
         if not failures:
+            return None
+        # Checked before every wait, so a call that is already retrying stops too.
+        if _run_spent(run):
+            logger.warning(
+                "model call failed (%s); not retrying: another model call in this run used up its retry budget",
+                describe_failure(failures[0]),
+            )
             return None
         # Any model that may answer makes the attempt worth making, so the
         # shortest wait is sat out; one backoff draw, so a tie names the earlier model.
@@ -445,6 +484,10 @@ class ModelRetryMiddleware(AgentMiddleware):
                 now - (deadline - tier.wait_budget_seconds),
                 describe_failure(failure),
             )
+            # A first failure whose Retry-After does not fit ends this call only;
+            # after a wait, or once the backoff no longer fits, the run is spent.
+            if attempt > 1 or now + max(backoff, MIN_WAIT_SECONDS) > deadline:
+                _spend_run(run)
             return None
         left = deadline - now - wait
         event = {
@@ -467,7 +510,13 @@ class ModelRetryMiddleware(AgentMiddleware):
         )
         return wait, event
 
-    def _overran(self, reason: str, tier: RetryTier, deadline: float) -> bool:
+    def _overran(
+        self,
+        reason: str,
+        tier: RetryTier,
+        deadline: float,
+        run: dict[str, Any] | None,
+    ) -> bool:
         """Whether the wait itself ran past the deadline (suspended process, stalled loop)."""
         late = self._clock() - deadline
         if late <= DEADLINE_SLACK_SECONDS:
@@ -478,6 +527,7 @@ class ModelRetryMiddleware(AgentMiddleware):
             tier.wait_budget_seconds,
             reason,
         )
+        _spend_run(run)
         return True
 
     async def awrap_model_call(
@@ -485,7 +535,8 @@ class ModelRetryMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        tier = self._effective_tier()
+        run = self._run_marker()
+        tier = self._effective_tier(run)
         if tier.wait_budget_seconds <= 0:
             return self._check_response(await handler(request))
         deadline: float | None = None
@@ -496,13 +547,13 @@ class ModelRetryMiddleware(AgentMiddleware):
             except Exception as exc:
                 if deadline is None:
                     deadline = self._clock() + tier.wait_budget_seconds
-                plan = self._plan_retry(exc, attempt, tier, deadline)
+                plan = self._plan_retry(exc, attempt, tier, deadline, run)
                 if plan is None:
                     raise
                 wait, event = plan
                 _emit(request, event)
                 await self._sleep(wait)
-                if self._overran(event["reason"], tier, deadline):
+                if self._overran(event["reason"], tier, deadline, run):
                     raise
                 attempt += 1
 
@@ -511,7 +562,8 @@ class ModelRetryMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        tier = self._effective_tier()
+        run = self._run_marker()
+        tier = self._effective_tier(run)
         if tier.wait_budget_seconds <= 0:
             return self._check_response(handler(request))
         deadline: float | None = None
@@ -522,13 +574,13 @@ class ModelRetryMiddleware(AgentMiddleware):
             except Exception as exc:
                 if deadline is None:
                     deadline = self._clock() + tier.wait_budget_seconds
-                plan = self._plan_retry(exc, attempt, tier, deadline)
+                plan = self._plan_retry(exc, attempt, tier, deadline, run)
                 if plan is None:
                     raise
                 wait, event = plan
                 _emit(request, event)
                 self._sync_sleep(wait)
-                if self._overran(event["reason"], tier, deadline):
+                if self._overran(event["reason"], tier, deadline, run):
                     raise
                 attempt += 1
 

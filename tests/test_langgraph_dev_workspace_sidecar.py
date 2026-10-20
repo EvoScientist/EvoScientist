@@ -18,11 +18,31 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import time
 
+import psutil
 import pytest
 
 from EvoScientist import paths
 from EvoScientist.langgraph_dev import manager
+
+
+def _wait_for_child_argv(pid: int, needle: str, timeout: float = 5.0) -> bool:
+    """Wait until a just-started child shows its own argv.
+
+    ``Popen`` can return while the child is still inside ``exec``, before
+    Linux has recorded the new argv, so a read right then comes back empty.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if needle in psutil.Process(pid).cmdline():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
 
 
 def test_sidecar_path_is_next_to_pid_file():
@@ -686,6 +706,9 @@ def test_stop_recorded_server_kills_owned_langgraph_process(
         [sys.executable, "-c", "import time; time.sleep(30)", "langgraph"]
     )
     try:
+        assert _wait_for_child_argv(victim.pid, "langgraph"), (
+            "child never reported its own argv"
+        )
         pid_file = tmp_path / "pid.txt"
         sidecar = tmp_path / "ws.json"
         pid_file.write_text(str(victim.pid))
@@ -788,6 +811,9 @@ def test_pid_serves_port_matrix():
         [sys.executable, "-c", "import time; time.sleep(30)", "langgraph", "6174"]
     )
     try:
+        assert _wait_for_child_argv(victim.pid, "6174"), (
+            "child never reported its own argv"
+        )
         assert manager._pid_serves_port(victim.pid, 6174) is True
         assert manager._pid_serves_port(victim.pid, 9999) is False, (
             "must not attribute a server bound to a different port"

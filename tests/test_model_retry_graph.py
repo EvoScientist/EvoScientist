@@ -36,15 +36,20 @@ def test_config(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def waits(monkeypatch):
-    """Every retry layer built in a test waits on this list instead of the clock."""
+    """Every retry layer built in a test waits on this list, without jitter, on a
+    clock only the waits move."""
     recorded: list[float] = []
     build = ModelRetryMiddleware.__init__
+
+    def _clock():
+        return sum(recorded)
 
     async def _sleep(seconds):
         recorded.append(seconds)
 
     def _build(self, **kwargs):
-        build(self, **{**kwargs, "sleep": _sleep})
+        fakes = {"clock": _clock, "sleep": _sleep, "rng": lambda: 0.5}
+        build(self, **{**kwargs, **fakes})
 
     monkeypatch.setattr(ModelRetryMiddleware, "__init__", _build)
     return recorded
@@ -244,6 +249,68 @@ async def test_a_sub_agents_dropped_stream_is_retried_inside_the_sub_agent(
     state = await agent.aget_state({"configurable": {"thread_id": "t5"}})
     (result,) = [m for m in state.values["messages"] if m.type == "tool"]
     assert result.text == "Sub done."
+
+
+class _SubAgentDown(GenericFakeChatModel):
+    """The provider stays down for the sub-agent; the main agent's next call fails once."""
+
+    main_calls: int = 0
+    sub_calls: int = 0
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        metadata = get_config().get("metadata") or {}
+        if metadata.get("lc_agent_name") == "general-purpose":
+            self.sub_calls += 1
+            raise ConnectionError("down")
+        self.main_calls += 1
+        if self.main_calls == 2:
+            raise ConnectionError("down")
+        if self.main_calls > 2:
+            yield _text("All done.")
+            return
+        args = {"subagent_type": "general-purpose", "description": "say hi"}
+        call = {"name": "task", "args": json.dumps(args), "id": "call_1", "index": 0}
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content="", tool_call_chunks=[call])
+        )
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+async def _collect(stream, events: list[dict]) -> None:
+    """Keep each event of a run that may end by raising."""
+    async for event in stream:
+        events.append(event)
+
+
+async def test_a_sub_agent_that_used_the_budget_leaves_the_main_agent_one_try(
+    tmp_path, waits
+):
+    """The run waits one budget, not one for the sub-agent and another for the main agent."""
+    model = _SubAgentDown(messages=iter([]))
+    agent = _agent(tmp_path, model)
+    events: list[dict] = []
+    with pytest.raises(ConnectionError):
+        await _collect(stream_agent_events(agent, "hi", "t8"), events)
+    # 1 + 2 + 4 + 8 + 4 x 10 s in the sub-agent; the next 10 s wait does not fit in 60 s
+    assert sum(waits) == 55.0
+    retries = [e for e in events if e["type"] == "model_retry"]
+    assert {e["subagent"] for e in retries} == {"general-purpose"}
+    # The task failed, the main agent carried on, and its failed call was not retried.
+    assert (model.main_calls, model.sub_calls) == (2, 9)
+
+
+async def test_the_next_turn_gets_a_budget_of_its_own(tmp_path, waits):
+    model = _SubAgentDown(messages=iter([]))
+    agent = _agent(tmp_path, model)
+    with pytest.raises(ConnectionError):
+        await _collect(stream_agent_events(agent, "hi", "t9"), [])
+    spent = sum(waits)
+    model.main_calls = 1  # the next call fails once, then the provider is back
+    events = [event async for event in stream_agent_events(agent, "again", "t9")]
+    assert sum(waits) == spent + 1.0
+    assert next(e for e in events if e["type"] == "done")["response"] == "All done."
 
 
 class _Answering(GenericFakeChatModel):
