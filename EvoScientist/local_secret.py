@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import hmac
 import logging
 import os
@@ -61,6 +62,23 @@ def load_local_secret() -> None:
             "Local secret unavailable, so routes that need it refuse every request: %s",
             exc,
         )
+
+
+INSTANCE_PREFIX = b"evoscientist-instance:"
+
+
+def instance_id() -> str | None:
+    """A public name for the secret this server loaded, or ``None`` without one.
+
+    The first 16 hex characters of ``sha256(INSTANCE_PREFIX + secret)``. A
+    client that reads the secret file computes the same value, so it can tell
+    whether a server it reaches over HTTP is the one it sends writes to,
+    without the secret leaving the machine. The WebUI derives it with the
+    same bytes; keep them in step.
+    """
+    if _value is None:
+        return None
+    return hashlib.sha256(INSTANCE_PREFIX + _value.encode("ascii")).hexdigest()[:16]
 
 
 def require_local_secret(request: Request) -> JSONResponse | None:

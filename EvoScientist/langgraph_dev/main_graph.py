@@ -18,6 +18,11 @@ closes the gap without touching the middleware's write path, preserving
 cross-turn REPL persistence as ``langchain-ai/deepagents#3064`` shipped it.
 """
 
+# Records config.yaml before the agent import below reads it.
+import EvoScientist.langgraph_dev.config_baseline  # noqa: F401
+
+# isort: split
+
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import PregelTask, StateSnapshot
 

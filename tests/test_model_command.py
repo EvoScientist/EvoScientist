@@ -220,13 +220,17 @@ class TestModelCommandSwitch:
                 "EvoScientist.cli.agent._load_agent",
                 return_value=MagicMock(),
             ),
-            patch("EvoScientist.config.settings.set_config_value") as mock_save,
+            patch(
+                "EvoScientist.config.settings.set_config_values",
+                return_value=("rev", {}),
+            ) as mock_save,
         ):
             await cmd.execute(ctx, ["claude-opus-5-5", "--save"])
 
-        # Config file should be updated
-        mock_save.assert_any_call("model", "claude-opus-5-5")
-        mock_save.assert_any_call("provider", "anthropic")
+        # Config file should be updated, model and provider in one write
+        mock_save.assert_called_once_with(
+            {"model": "claude-opus-5-5", "provider": "anthropic"}
+        )
 
         # Success message should mention save
         msg = ui.append_system.call_args[0][0]
