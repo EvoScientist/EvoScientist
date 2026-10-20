@@ -28,12 +28,10 @@ from EvoScientist.langgraph_dev import manager
 
 
 def _wait_for_child_argv(pid: int, needle: str, timeout: float = 5.0) -> bool:
-    """Wait until a freshly spawned child reports its own command line.
+    """Wait until a just-started child shows its own argv.
 
-    Between ``fork`` and ``exec`` the child still shows the parent's command
-    line (the ``pytest`` one), so a cmdline check issued right after
-    ``Popen`` can read the wrong argv and fail. Poll until the argument we
-    passed is visible, so the assertions see the process we started.
+    ``Popen`` can return while the child is still inside ``exec``, before
+    Linux has recorded the new argv, so a read right then comes back empty.
     """
     deadline = time.monotonic() + timeout
     while True:
