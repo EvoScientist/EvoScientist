@@ -2011,7 +2011,8 @@ class TestReduceMessagesDeltaUpstreamParity:
     """
 
     @pytest.fixture(scope="class")
-    def upstream(self):
+    @classmethod
+    def upstream(cls):
         return _import_upstream_reducer()
 
     def _assert_parity(self, upstream, state, writes):
@@ -2950,25 +2951,6 @@ def _restored_simple_user():
     from langgraph_api.auth.custom import SimpleUser
 
     return pickle.loads(pickle.dumps(SimpleUser("")))
-
-
-@pytest.fixture
-def langgraph_api_env(monkeypatch):
-    """Read when langgraph-api's config is first imported, as in the server."""
-    import logging
-
-    for name, value in {
-        "LANGGRAPH_RUNTIME_EDITION": "inmem",
-        "REDIS_URI": "fake",
-        "DATABASE_URI": ":memory:",
-        "MIGRATIONS_PATH": "__inmem",
-    }.items():
-        monkeypatch.setenv(name, value)
-    # Importing langgraph-api's logging sets the root logger's level.
-    root = logging.getLogger()
-    level = root.level
-    yield
-    root.setLevel(level)
 
 
 class TestStoredCronUsers:

@@ -234,11 +234,16 @@ def _run_webui_once(
     monkeypatch.setattr(signal, "signal", lambda _sig, _handler: lambda *a: None)
     monkeypatch.setattr(threading, "Event", _ImmediateEvent)
 
-    if interrupt_on:
-        with pytest.raises(KeyboardInterrupt):
+    try:
+        if interrupt_on:
+            with pytest.raises(KeyboardInterrupt):
+                webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+        else:
             webui_mod.run_webui(config, workspace_dir="/tmp/ws")
-    else:
-        webui_mod.run_webui(config, workspace_dir="/tmp/ws")
+    finally:
+        # The registered teardown closes it at exit; the tests never run it.
+        if captured.get("node_stdout") is not None:
+            captured["node_stdout"].close()
     return captured
 
 

@@ -180,12 +180,18 @@ def test_manifest_leaves_out_stages_for_other_platforms(monkeypatch):
 
 
 def test_json_emitter_writes_one_line_per_event(tmp_path):
-    out = (tmp_path / "out.txt").open("w+", encoding="utf-8")
-    emit = JsonEmitter(out)
-    emit(make_event("node", "running", progress=0.4, message="Downloading Node 24.x"))
-    emit(make_event("node", "done", detail={"source": "system", "version": "22.11.0"}))
-    out.seek(0)
-    lines = [json.loads(line) for line in out.read().splitlines()]
+    with (tmp_path / "out.txt").open("w+", encoding="utf-8") as out:
+        emit = JsonEmitter(out)
+        emit(
+            make_event("node", "running", progress=0.4, message="Downloading Node 24.x")
+        )
+        emit(
+            make_event(
+                "node", "done", detail={"source": "system", "version": "22.11.0"}
+            )
+        )
+        out.seek(0)
+        lines = [json.loads(line) for line in out.read().splitlines()]
     assert [e["status"] for e in lines] == ["running", "done"]
     assert all(set(e) <= _ALLOWED_FIELDS for e in lines)
 

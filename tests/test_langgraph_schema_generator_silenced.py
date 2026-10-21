@@ -10,28 +10,23 @@ entry. The patch keeps the fallback shape but silences the log spam.
 
 from __future__ import annotations
 
-import os
+import pytest
 
-# ``langgraph_api.config`` reads several required env vars at import
-# time via starlette's ``Config(...)`` helper. We don't actually use the
-# DB or Redis here — any non-empty string keeps the loader happy.
-os.environ.setdefault("DATABASE_URI", "sqlite:///:memory:")
-os.environ.setdefault("REDIS_URI", "redis://localhost:6379")
 
-# Importing patches.py applies the eager module-level monkey-patch.
-import langgraph_api.utils as _lgapi_utils
+@pytest.fixture(autouse=True)
+def lgapi_utils(langgraph_api_env):
+    """``langgraph_api.utils``, imported with the variables its config needs."""
+    import langgraph_api.utils
 
-import EvoScientist.llm.patches as _patches
+    import EvoScientist.llm.patches as patches
 
-# Re-invoke the patch after env vars are set. Required because earlier test
-# modules (e.g. test_llm.py) import patches.py *without* DATABASE_URI/
-# REDIS_URI, which makes ``langgraph_api.utils`` fail to import inside the
-# patch's bare ``except``; the loader swallows it and the flag stays False
-# forever (Python won't re-run module-level code on subsequent imports).
-# The patch function is idempotent (early-return on the flag), so calling
-# it here is a no-op when the patch already landed and a successful retry
-# when the prior import failed.
-_patches._patch_langgraph_schema_generator_silence_warnings()
+    # Re-invoke the patch now that the variables are set. Earlier imports of
+    # patches.py ran without them, so importing ``langgraph_api.utils``
+    # inside the patch failed, its bare ``except`` swallowed that, and
+    # module-level code never runs twice. The patch returns early once it
+    # has landed.
+    patches._patch_langgraph_schema_generator_silence_warnings()
+    return langgraph_api.utils
 
 
 class _FakeEndpoint:
@@ -66,13 +61,13 @@ class _DocstringFixture:
         pass
 
 
-def _generator():
-    return _lgapi_utils.SchemaGenerator(
+def _generator(lgapi_utils):
+    return lgapi_utils.SchemaGenerator(
         {"openapi": "3.1.0", "info": {"title": "test", "version": "0"}}
     )
 
 
-def test_prose_docstring_no_longer_logs_warning():
+def test_prose_docstring_no_longer_logs_warning(lgapi_utils):
     """The patched ``parse_docstring`` must silence upstream's structlog
     WARNING when ``yaml.safe_load`` fails on a prose docstring.
 
@@ -83,20 +78,20 @@ def test_prose_docstring_no_longer_logs_warning():
     """
     from structlog.testing import capture_logs
 
-    gen = _generator()
+    gen = _generator(lgapi_utils)
     endpoint = _FakeEndpoint("/x", "get", _DocstringFixture.prose_with_colon)
     gen.get_endpoints = lambda _routes: [endpoint]
 
-    patched_parse = _lgapi_utils.SchemaGenerator.parse_docstring
+    patched_parse = lgapi_utils.SchemaGenerator.parse_docstring
     # Phase 1: baseline. Drop the subclass override so MRO falls through
     # to Starlette's BaseSchemaGenerator.parse_docstring, which is what
     # production hits before our patch installs.
-    del _lgapi_utils.SchemaGenerator.parse_docstring
+    del lgapi_utils.SchemaGenerator.parse_docstring
     try:
         with capture_logs() as baseline_records:
             gen.get_schema([])
     finally:
-        _lgapi_utils.SchemaGenerator.parse_docstring = patched_parse
+        lgapi_utils.SchemaGenerator.parse_docstring = patched_parse
 
     baseline_warnings = [r for r in baseline_records if r.get("log_level") == "warning"]
     assert any(
@@ -118,11 +113,11 @@ def test_prose_docstring_no_longer_logs_warning():
     assert "Query params" in entry["description"]
 
 
-def test_valid_yaml_docstring_keeps_structured_parse():
+def test_valid_yaml_docstring_keeps_structured_parse(lgapi_utils):
     """Endpoints with parseable YAML keep their structured metadata —
     we only changed the failure branch, not the success path.
     """
-    gen = _generator()
+    gen = _generator(lgapi_utils)
     endpoint = _FakeEndpoint("/y", "get", _DocstringFixture.valid_yaml)
     gen.get_endpoints = lambda _routes: [endpoint]
     schema = gen.get_schema([])
@@ -131,11 +126,11 @@ def test_valid_yaml_docstring_keeps_structured_parse():
     assert entry.get("description") == "Stays structured."
 
 
-def test_no_docstring_still_handled():
+def test_no_docstring_still_handled(lgapi_utils):
     """Endpoints with ``__doc__ = None`` must not raise — fallback uses
     empty string for ``description``.
     """
-    gen = _generator()
+    gen = _generator(lgapi_utils)
     endpoint = _FakeEndpoint("/z", "get", _DocstringFixture.no_docstring)
     gen.get_endpoints = lambda _routes: [endpoint]
     schema = gen.get_schema([])
