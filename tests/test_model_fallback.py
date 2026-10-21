@@ -6,11 +6,13 @@ fallback chain behaviour via _try_fallbacks / _guard_and_fallback.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain.agents.middleware.types import ModelResponse
+from langchain_anthropic import ChatAnthropic
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -1178,3 +1180,121 @@ class TestExplicitSeeding:
             ("cfg-a", "prov-a"),
             ("session", "prov-s"),
         ]
+
+
+# ═════════════════════════════════════════════════════════════════
+# Regression: get_chat_model() raising during construction must not abort
+# the walk or be blamed on another model. The unbuilt entry is recorded as
+# its own failure (request=None) and the walk continues (issue #498
+# follow-up).
+# ═════════════════════════════════════════════════════════════════
+
+
+class TestFallbackChainConstructionError:
+    """A fallback model whose get_chat_model() raises during construction
+    (e.g. a routed provider with no API key) is the unbuilt entry's own
+    failure: ``fb_request`` stays None, the walk continues to the next
+    fallback, and if every entry fails the original construction error is
+    re-raised instead of being attributed to another model."""
+
+    async def test_construction_error_skips_to_next_fallback_async(self):
+        add_fallback("minimax-m3", "minimax")
+        add_fallback("claude-sonnet-4-6", "anthropic")
+        req = _fake_request()
+
+        async def _invoke(_r):
+            return AI_RESPONSE
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            # First fallback (routed provider, no key) raises during construction.
+            mock_gcm.side_effect = [
+                ValueError("The 'minimax' provider requires an API key."),
+                MagicMock(),  # second fallback constructs fine
+            ]
+            result = await _try_fallbacks(req, _invoke, Exception("primary 503"), _SINK)
+
+        assert result is AI_RESPONSE
+        assert mock_gcm.call_count == 2
+
+    def test_construction_error_skips_to_next_fallback_sync(self):
+        add_fallback("minimax-m3", "minimax")
+        add_fallback("gpt-5.5", "openai")
+        req = _fake_request()
+
+        def _invoke(_r):
+            return AI_RESPONSE
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.side_effect = [
+                ValueError("The 'minimax' provider requires an API key."),
+                MagicMock(),
+            ]
+            result = _try_fallbacks_sync(req, _invoke, Exception("primary 503"), _SINK)
+
+        assert result is AI_RESPONSE
+        assert mock_gcm.call_count == 2
+
+    async def test_all_construction_errors_raise_last_async(self):
+        """When every fallback fails at construction, re-raise the last ValueError."""
+        add_fallback("minimax-m3", "minimax")
+        add_fallback("novita-model", "novita")
+        req = _fake_request()
+
+        async def _invoke(_r):
+            return AI_RESPONSE  # never reached
+
+        with patch("EvoScientist.llm.models.get_chat_model") as mock_gcm:
+            mock_gcm.side_effect = [
+                ValueError("MINIMAX_API_KEY missing"),
+                ValueError("NOVITA_API_KEY missing"),
+            ]
+            with pytest.raises(ValueError, match="NOVITA_API_KEY missing"):
+                await _try_fallbacks(req, _invoke, Exception("primary"), _SINK)
+
+        assert mock_gcm.call_count == 2
+
+
+# Construction error must surface as the original exception, not be wrapped
+# as the primary model's ProviderStreamError. The primary model is a real
+# ChatAnthropic instance, which _normalize would recognize; because the
+# unbuilt fallback entry passes request=None to _raise_normalized,
+# _normalize returns None and the ValueError is re-raised unchanged.
+
+
+def _raise(_r):
+    raise AssertionError("invoke must not run")
+
+
+async def _raise_async(_r):
+    raise AssertionError("invoke must not run")
+
+
+@pytest.mark.parametrize("loop", ["sync", "async"])
+def test_fallback_construction_error_keeps_original_exception(
+    monkeypatch: pytest.MonkeyPatch, loop: str
+):
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    request = MagicMock()
+    request.model = ChatAnthropic(model="claude-sonnet-4-6", api_key="sk-test")
+
+    def _run():
+        if loop == "sync":
+            _try_fallbacks_sync(
+                request, _raise, RuntimeError("primary failed"), MagicMock()
+            )
+        else:
+            asyncio.run(
+                _try_fallbacks(
+                    request,
+                    _raise_async,
+                    RuntimeError("primary failed"),
+                    MagicMock(),
+                )
+            )
+
+    with patch(
+        "EvoScientist.middleware.model_fallback.get_fallback_chain",
+        return_value=[("minimax-m3", "minimax")],
+    ):
+        with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
+            _run()
