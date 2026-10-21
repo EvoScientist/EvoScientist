@@ -557,6 +557,24 @@ def test_private_node_on_path_is_not_taken_for_system(env):
     assert node.ensure_node("default").source == "private"
 
 
+def test_node_in_the_current_directory_is_not_taken_for_system(env, monkeypatch):
+    exe = _system_node(env, monkeypatch, (22, 0, 0))
+    monkeypatch.chdir(exe.parent)
+    monkeypatch.setenv("PATH", str(env["tmp"] / "empty-bin"))
+    assert node.ensure_node("default").source == "private"
+
+
+def test_npx_only_in_the_current_directory_does_not_count(env, monkeypatch):
+    _system_node(env, monkeypatch, (22, 0, 0), with_npx=False)
+    cwd = env["tmp"] / "project"
+    cwd.mkdir()
+    npx = cwd / ("npx.cmd" if os.name == "nt" else "npx")
+    npx.write_text("")
+    npx.chmod(0o755)
+    monkeypatch.chdir(cwd)
+    assert node.ensure_node("default").source == "private"
+
+
 def test_install_without_a_record_is_used_again_without_a_download(env, monkeypatch):
     node.ensure_node("default")
     _system_node(env, monkeypatch, (22, 0, 0))

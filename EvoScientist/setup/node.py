@@ -36,6 +36,8 @@ from ._install import (
     prepend_to_path,
     remove_stale_temp_dirs,
     tools_dir,
+    which_in,
+    which_on_path,
 )
 from .download import download, fetch_text, verify_sha256_from_sums
 from .protocol import (
@@ -194,14 +196,8 @@ def _system_node() -> NodeInfo | None:
     Every consumer runs ``npx``, and some distros package ``npm`` (which
     provides it) separately from ``node``; a Node without it does not count.
     """
-    root = tools_dir()
-    search = os.pathsep.join(
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and not is_under(Path(p), root)
-    )
-    found = shutil.which("node", path=search)
-    if found is None or shutil.which("npx", path=str(Path(found).parent)) is None:
+    found = which_on_path("node", outside=tools_dir())
+    if found is None or which_in("npx", Path(found).parent) is None:
         return None
     version = _probe(Path(found))
     if version is None or version[:2] < MIN_SYSTEM_NODE:
@@ -488,7 +484,7 @@ def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | Non
         if key.lower() == "npm_config_registry" and value.strip():
             return value.strip()
 
-    npm = shutil.which("npm", path=str(Path(node_exe).parent))
+    npm = which_in("npm", Path(node_exe).parent)
     if npm is None:
         return None
     if npm not in _npm_config_registry:
