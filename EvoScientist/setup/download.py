@@ -1,10 +1,22 @@
-"""Download and checksum helpers shared by the setup stages.
+"""Download helpers shared by the setup stages.
 
-Downloads use ``urllib``'s default opener: it honours ``HTTPS_PROXY`` (and, on
+Downloads use ``urllib``'s proxy handling: it honours ``HTTPS_PROXY`` (and, on
 Windows and macOS, the system proxy settings) and verifies TLS with the default
 SSL context, which honours ``SSL_CERT_FILE`` and on Windows also loads the
 system certificate store. That is deliberate and differs from the loopback
 probes elsewhere, which bypass proxies.
+
+Two time limits apply to every request, and none to its total time:
+
+- the connect budget covers connecting to the host's addresses in turn, the
+  proxy's ``CONNECT`` tunnel and the TLS handshake, all together (name
+  resolution is not bounded);
+- the no-data timeout covers each wait for the next bytes afterwards.
+
+A failure before the connection is up (no route, refused, the budget spent, a
+proxy that cannot reach the host, a TLS error) is the same on every try, so it
+fails at once. One after it is up (an HTTP 5xx, a reset, a stall, a truncated
+body) is retried a few times.
 """
 
 from __future__ import annotations
@@ -12,12 +24,21 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import http.client
+import logging
+import socket
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TypeVar
 
-from .protocol import StageError
+from .protocol import CN_MIRROR_HINT, StageError
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 _CHUNK = 256 * 1024
 # A truncated chunked body (IncompleteRead) or a garbled proxy reply
@@ -29,13 +50,154 @@ _NETWORK_ERRORS = (
     OSError,
     ValueError,
 )
-# Socket timeouts, per operation (connect, each read), not per download. The
-# small checksum file is fetched first with the short one, so a blocked
-# network fails fast; the archive keeps the long one for slow reads.
-_TEXT_TIMEOUT = 30
+# Seconds for the whole connect phase: a working tunnel and TLS handshake take
+# well under a second, and a proxy's own error page arrives within about 10 s.
+CONNECT_BUDGET = 15.0
+# Seconds an archive download may receive nothing (no limit on its total time).
 _ARCHIVE_TIMEOUT = 120
+# Pauses before the 2nd, 3rd and 4th attempt.
+_RETRY_PAUSES = (1.0, 2.0, 4.0)
 
 ProgressFn = Callable[[float], None]
+
+
+class NotConnected(Exception):
+    """No connection to the host within the connect budget; ``__cause__`` says why."""
+
+    def __init__(self, host: str, cause: BaseException) -> None:
+        if isinstance(cause, TimeoutError):
+            reason = f"no answer within {CONNECT_BUDGET:g} s"
+        else:
+            reason = str(cause) or type(cause).__name__
+        super().__init__(f"Could not connect to {host}: {reason}")
+
+
+class _Truncated(Exception):
+    """The body ended before its ``Content-Length``."""
+
+
+def _connect_within(
+    address: tuple[str, int],
+    timeout: float | None,
+    source_address: tuple[str, int] | None = None,
+    *,
+    deadline: float,
+) -> socket.socket:
+    """``socket.create_connection`` with one deadline for all addresses.
+
+    The stdlib version gives every resolved address the full timeout, so a
+    host with many addresses on a network that drops packets takes that many
+    timeouts. Name resolution itself is not bounded.
+    """
+    host, port = address
+    error: OSError | None = None
+    for family, kind, proto, _name, sockaddr in socket.getaddrinfo(
+        host, port, 0, socket.SOCK_STREAM
+    ):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.settimeout(remaining)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+        except OSError as exc:
+            error = exc
+            sock.close()
+            continue
+        # The tunnel and the TLS handshake get what is left of the budget.
+        sock.settimeout(max(deadline - time.monotonic(), 1.0))
+        return sock
+    raise error if error is not None else TimeoutError("timed out")
+
+
+class _BudgetedConnection:
+    """Connect within :data:`CONNECT_BUDGET`, then read with ``timeout``."""
+
+    host: str
+    timeout: float | None
+    sock: socket.socket | None
+    _create_connection: Callable[..., socket.socket]
+    _tunnel_host: str | None
+
+    def connect(self) -> None:
+        read_timeout = self.timeout
+        deadline = time.monotonic() + CONNECT_BUDGET
+
+        def create(address, timeout, source_address=None):
+            return _connect_within(address, timeout, source_address, deadline=deadline)
+
+        self._create_connection = create
+        try:
+            super().connect()  # type: ignore[misc]
+        except OSError as exc:
+            # Includes a refused proxy tunnel ("Tunnel connection failed: 502")
+            # and TLS errors.
+            raise NotConnected(self._tunnel_host or self.host, exc) from exc
+        assert self.sock is not None
+        self.sock.settimeout(read_timeout)
+
+
+class _HTTPConnection(_BudgetedConnection, http.client.HTTPConnection):
+    pass
+
+
+class _HTTPSConnection(_BudgetedConnection, http.client.HTTPSConnection):
+    pass
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def do_open(self, http_class, req, **kwargs):
+        return super().do_open(_HTTPConnection, req, **kwargs)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def do_open(self, http_class, req, **kwargs):
+        return super().do_open(_HTTPSConnection, req, **kwargs)
+
+
+def open_url(request: str | urllib.request.Request, timeout: float):
+    """``urlopen`` with the connect budget; ``timeout`` is the no-data timeout.
+
+    Raises :class:`NotConnected` before the connection is up, ``urllib`` and
+    ``http.client`` errors after it.
+    """
+    opener = urllib.request.build_opener(_HTTPHandler, _HTTPSHandler)
+    return opener.open(request, timeout=timeout)
+
+
+def _retryable(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    if isinstance(exc, NotConnected | ValueError):
+        return False
+    return isinstance(
+        exc, _Truncated | urllib.error.URLError | http.client.HTTPException | OSError
+    )
+
+
+def with_retries(attempt: Callable[[], T], what: str) -> T:
+    """Run ``attempt``; retry a failure after the connection was up.
+
+    At most ``len(_RETRY_PAUSES)`` retries. Anything else, and the last
+    failure, is raised as it is; the caller turns it into a stage error.
+    """
+    for pause in (*_RETRY_PAUSES, None):
+        try:
+            return attempt()
+        except Exception as exc:
+            if pause is None or not _retryable(exc):
+                raise
+            logger.warning(f"{what} failed ({exc}); retrying in {pause:g} s.")
+            time.sleep(pause)
+    raise AssertionError("unreachable")
+
+
+def with_hint(message: str, cn_hint: bool) -> str:
+    """``message``, plus the ``--cn`` hint when the caller asks for it."""
+    return f"{message} {CN_MIRROR_HINT}" if cn_hint else message
 
 
 @contextlib.contextmanager
@@ -47,69 +209,48 @@ def _local_io(dest: Path) -> Iterator[None]:
         raise StageError("install_failed", f"Could not write {dest}: {exc}") from exc
 
 
-def download(url: str, dest: Path, progress: ProgressFn | None = None) -> str:
+def _download_once(url: str, dest: Path, progress: ProgressFn | None) -> str:
+    digest = hashlib.sha256()
+    with open_url(url, _ARCHIVE_TIMEOUT) as resp:
+        total = int(resp.headers.get("Content-Length") or 0)
+        done = 0
+        # "wb" also empties what an earlier attempt left.
+        with _local_io(dest):
+            fh = open(dest, "wb")
+        with fh:
+            while chunk := resp.read(_CHUNK):
+                with _local_io(dest):
+                    fh.write(chunk)
+                digest.update(chunk)
+                done += len(chunk)
+                if progress is not None and total:
+                    progress(done / total)
+        # http.client's read(amt) returns b"" at an early end of stream
+        # instead of raising IncompleteRead.
+        if total and done != total:
+            raise _Truncated(f"the body ended after {done} of {total} bytes")
+    return digest.hexdigest()
+
+
+def download(
+    url: str, dest: Path, progress: ProgressFn | None = None, *, cn_hint: bool = False
+) -> str:
     """Stream ``url`` into ``dest`` and return the file's SHA-256 hex digest.
 
     ``progress`` receives the downloaded fraction when the server sends a
     ``Content-Length``. Network and HTTP errors raise
-    ``StageError("download_failed")``; a failed write to ``dest`` raises
+    ``StageError("download_failed")``, with the ``--cn`` hint when
+    ``cn_hint``; a failed write to ``dest`` raises
     ``StageError("install_failed")``.
     """
-    digest = hashlib.sha256()
+    host = urllib.parse.urlsplit(url).hostname or url
     try:
-        with urllib.request.urlopen(url, timeout=_ARCHIVE_TIMEOUT) as resp:
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            with _local_io(dest):
-                fh = open(dest, "wb")
-            with fh:
-                while chunk := resp.read(_CHUNK):
-                    with _local_io(dest):
-                        fh.write(chunk)
-                    digest.update(chunk)
-                    done += len(chunk)
-                    if progress is not None and total:
-                        progress(done / total)
-            # http.client's read(amt) returns b"" at an early end of stream
-            # instead of raising IncompleteRead.
-            if total and done != total:
-                raise StageError(
-                    "download_failed",
-                    f"Download of {url} ended after {done} of {total} bytes.",
-                )
-    except _NETWORK_ERRORS as exc:
-        raise StageError("download_failed", f"Download of {url} failed: {exc}") from exc
-    return digest.hexdigest()
-
-
-def fetch_text(url: str) -> str:
-    """GET a small text resource, e.g. ``SHASUMS256.txt``."""
-    try:
-        with urllib.request.urlopen(url, timeout=_TEXT_TIMEOUT) as resp:
-            return resp.read().decode("utf-8")
-    except _NETWORK_ERRORS as exc:
-        raise StageError("download_failed", f"Download of {url} failed: {exc}") from exc
-
-
-def verify_sha256_from_sums(actual: str, sums_text: str, filename: str) -> None:
-    """Check ``actual`` against ``filename``'s entry in a ``SHASUMS256.txt``.
-
-    Parses ``<sha256>  <filename>`` lines (``*name`` marks binary mode in
-    ``sha256sum`` output). A missing entry fails too: the publisher lists every
-    asset, so an absent line means the wrong file or a tampered list.
-    """
-    expected = None
-    for line in sums_text.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1].lstrip("*") == filename:
-            expected = parts[0].lower()
-            break
-    if expected is None:
-        raise StageError(
-            "checksum_mismatch", f"{filename} is not listed in the published checksums."
+        return with_retries(
+            lambda: _download_once(url, dest, progress), f"Download from {host}"
         )
-    if actual.lower() != expected:
+    except NotConnected as exc:
+        raise StageError("download_failed", with_hint(f"{exc}.", cn_hint)) from exc
+    except (_Truncated, *_NETWORK_ERRORS) as exc:
         raise StageError(
-            "checksum_mismatch",
-            f"{filename} sha256 {actual} does not match the published {expected}.",
-        )
+            "download_failed", with_hint(f"Download of {url} failed: {exc}.", cn_hint)
+        ) from exc

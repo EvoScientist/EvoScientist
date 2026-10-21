@@ -627,6 +627,7 @@ def _install(mirror: str, report: ProgressFn) -> GitInfo:
             lambda f: report(
                 0.05 + 0.7 * f, f"Downloading Git for Windows {GIT_VERSION}"
             ),
+            cn_hint=mirror != "cn",
         )
         report(0.76, "Verifying checksum")
         if actual.lower() != sha256:

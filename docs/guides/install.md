@@ -83,10 +83,13 @@ older release, when you added a channel or an MCP server) is not in the
 receipt and is removed; add it again afterwards. Close EvoScientist first; on Windows the script stops and names the EvoScientist
 processes that still run, because a running process keeps the files locked.
 
-A dropped connection while Node.js, Git for Windows or the WebUI downloads fails
-that stage: `EvoSci setup` finishes the other stages, and the script then ends
-with an error although EvoScientist itself is installed. Run `EvoSci setup` or
-the command again; that download starts from the beginning.
+A download of Node.js, Git for Windows or the WebUI that breaks off (a reset, a
+server error, no data for two minutes) is retried up to three times. One that
+cannot connect at all (no route, a proxy that cannot reach the server, a
+certificate error) fails at once, within 15 seconds. Either way the stage
+fails: `EvoSci setup` finishes the other stages, and the script then ends with
+an error although EvoScientist itself is installed. Run `EvoSci setup` or the
+command again; that download starts from the beginning.
 
 When `EvoSci setup` installed its own Node.js because none was found, the
 agent's shell keeps finding that one first, also after you install a Node.js

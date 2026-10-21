@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import http.client
 import io
 import json
 import os
@@ -53,19 +52,16 @@ def _archive_bytes(extra_member: str | None = None) -> bytes:
 
 
 class FakeNet:
-    """Serves one archive and its SHASUMS256.txt; records requested URLs."""
+    """Serves one archive; records requested URLs and the ``--cn`` hint flag."""
 
-    def __init__(self, data: bytes, *, sums: str | None = None) -> None:
+    def __init__(self, data: bytes) -> None:
         self.data = data
-        self.sums = sums or f"{hashlib.sha256(data).hexdigest()}  {FILENAME}\n"
         self.urls: list[str] = []
+        self.hints: list[bool] = []
 
-    def fetch_text(self, url: str) -> str:
+    def download(self, url, dest: Path, progress=None, *, cn_hint=False) -> str:
         self.urls.append(url)
-        return self.sums
-
-    def download(self, url, dest: Path, progress=None) -> str:
-        self.urls.append(url)
+        self.hints.append(cn_hint)
         dest.write_bytes(self.data)
         if progress:
             progress(1.0)
@@ -99,8 +95,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(node, "platform_id", lambda: PLAT)
     monkeypatch.setattr(node, "_failed_install", None)
     net = FakeNet(_archive_bytes())
-    monkeypatch.setattr(node, "fetch_text", net.fetch_text)
     monkeypatch.setattr(node, "download", net.download)
+    # Pin the fake archive, as NODE_SHA256 pins the real one.
+    monkeypatch.setitem(node.NODE_SHA256, PLAT, hashlib.sha256(net.data).hexdigest())
     probes = ProbeTable()
     # Anything under our tools dir probes as the pinned version by default.
     monkeypatch.setattr(
@@ -230,76 +227,6 @@ def test_record_with_non_string_path_is_ignored(env):
     assert node.ensure_node("default").source == "private"
 
 
-@pytest.mark.parametrize(
-    "exc",
-    [http.client.IncompleteRead(b""), http.client.BadStatusLine("garbled")],
-)
-def test_http_client_errors_become_download_failed(tmp_path, monkeypatch, exc):
-    from EvoScientist.setup import download as dl
-
-    def boom(*_a, **_k):
-        raise exc
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", boom)
-    with pytest.raises(StageError) as ei:
-        dl.download("https://example.invalid/x", tmp_path / "x")
-    assert ei.value.code == "download_failed"
-    with pytest.raises(StageError) as ei:
-        dl.fetch_text("https://example.invalid/x")
-    assert ei.value.code == "download_failed"
-
-
-def test_download_that_ends_early_is_download_failed(tmp_path, monkeypatch):
-    from EvoScientist.setup import download as dl
-
-    def urlopen(url, timeout):
-        response = io.BytesIO(b"half")
-        response.headers = {"Content-Length": "8"}
-        return response
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
-    with pytest.raises(StageError) as ei:
-        dl.download("https://example.invalid/x", tmp_path / "x")
-    assert ei.value.code == "download_failed"
-
-
-def test_checksum_file_uses_the_short_timeout_and_the_archive_the_long_one(
-    tmp_path, monkeypatch
-):
-    from EvoScientist.setup import download as dl
-
-    timeouts: dict[str, float] = {}
-
-    def urlopen(url, timeout):
-        timeouts[url] = timeout
-        response = io.BytesIO(b"data")
-        response.headers = {}
-        return response
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
-    dl.fetch_text("https://example.invalid/SHASUMS256.txt")
-    dl.download("https://example.invalid/node.tar.xz", tmp_path / "x")
-    assert timeouts == {
-        "https://example.invalid/SHASUMS256.txt": dl._TEXT_TIMEOUT,
-        "https://example.invalid/node.tar.xz": dl._ARCHIVE_TIMEOUT,
-    }
-    assert dl._TEXT_TIMEOUT < dl._ARCHIVE_TIMEOUT
-
-
-def test_disk_error_while_downloading_is_install_failed(tmp_path, monkeypatch):
-    from EvoScientist.setup import download as dl
-
-    def urlopen(url, timeout):
-        response = io.BytesIO(b"data")
-        response.headers = {}
-        return response
-
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
-    with pytest.raises(StageError) as ei:
-        dl.download("https://example.invalid/x", tmp_path / "missing-dir" / "x")
-    assert ei.value.code == "install_failed"
-
-
 def test_stage_reports_download_progress_lines(env, monkeypatch):
     from EvoScientist.setup import download as dl
 
@@ -311,7 +238,7 @@ def test_stage_reports_download_progress_lines(env, monkeypatch):
         return response
 
     monkeypatch.setattr(dl, "_CHUNK", len(data) // 4)
-    monkeypatch.setattr(dl.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(dl, "open_url", urlopen)
     monkeypatch.setattr(node, "download", dl.download)
     events: list[dict] = []
     detail = node.run_stage(events.append, "default").detail
@@ -337,8 +264,8 @@ def test_system_node_20_9_or_newer_wins_without_download(env, monkeypatch):
 def test_no_node_downloads_and_records(env):
     info = node.ensure_node("default")
     assert info.source == "private"
-    assert env["net"].urls[0] == f"https://nodejs.org/dist/v{V}/SHASUMS256.txt"
-    assert env["net"].urls[1] == f"https://nodejs.org/dist/v{V}/{FILENAME}"
+    # The pinned hash replaces SHASUMS256.txt: the archive is the only request.
+    assert env["net"].urls == [f"https://nodejs.org/dist/v{V}/{FILENAME}"]
     record = _record(env["data"])
     assert record["version"] == V
     assert Path(record["path"]) == env["data"] / "tools" / f"node-v{V}"
@@ -371,24 +298,43 @@ def test_cn_mirror_urls(env):
     )
 
 
+@pytest.mark.parametrize(("mirror", "hint"), [("default", True), ("cn", False)])
+def test_download_errors_name_cn_only_when_the_mirror_is_off(env, mirror, hint):
+    node.ensure_node(mirror)
+    assert env["net"].hints == [hint]
+
+
+def test_pinned_hashes_cover_every_platform_platform_id_returns():
+    assert set(node.NODE_SHA256) == {
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-x64",
+        "linux-arm64",
+        "win-x64",
+    }
+    assert all(len(h) == 64 and int(h, 16) >= 0 for h in node.NODE_SHA256.values())
+
+
 def test_checksum_mismatch_keeps_current_node(env):
     node.ensure_node("default")
     before = _record(env["data"])
     # Break the current install's probe so a new download is attempted.
     env["probes"][str(node._node_exe(Path(before["path"])))] = None
-    env["net"].sums = f"{'0' * 64}  {FILENAME}\n"
+    node.NODE_SHA256[PLAT] = "0" * 64
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "checksum_mismatch"
     assert _record(env["data"]) == before
 
 
-def test_file_missing_from_sums_fails(env):
-    env["net"].sums = f"{'0' * 64}  some-other-file.zip\n"
+def test_checksum_mismatch_leaves_no_partial_files(env):
+    node.NODE_SHA256[PLAT] = "0" * 64
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "checksum_mismatch"
+    assert "pinned" in ei.value.message
     assert _record(env["data"]) is None
+    assert {p.name for p in (env["data"] / "tools").iterdir()} == {"node.lock"}
 
 
 def test_probe_failure_records_nothing(env):
@@ -415,10 +361,10 @@ def test_record_is_written_only_after_the_probe(env, monkeypatch):
 
 
 def test_download_failure_keeps_current_node(env, monkeypatch):
-    def offline(url):
+    def offline(url, *_a, **_k):
         raise StageError("download_failed", "offline")
 
-    monkeypatch.setattr(node, "fetch_text", offline)
+    monkeypatch.setattr(node, "download", offline)
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "download_failed"
@@ -430,11 +376,11 @@ def test_failed_install_is_not_retried_in_the_same_process(env, monkeypatch):
     process; after a failure they must not wait out the network again."""
     attempts: list[str] = []
 
-    def offline(url):
+    def offline(url, *_a, **_k):
         attempts.append(url)
         raise StageError("download_failed", "offline")
 
-    monkeypatch.setattr(node, "fetch_text", offline)
+    monkeypatch.setattr(node, "download", offline)
     for _ in range(3):
         with pytest.raises(StageError) as ei:
             node.ensure_node("default")
@@ -448,7 +394,7 @@ def test_failed_install_is_not_retried_in_the_same_process(env, monkeypatch):
 @pytest.mark.skipif(os.name == "nt", reason="tar.xz archives are not used on Windows")
 def test_tar_member_escaping_dest_is_rejected(env):
     env["net"].data = _archive_bytes(extra_member="../../evil")
-    env["net"].sums = f"{hashlib.sha256(env['net'].data).hexdigest()}  {FILENAME}\n"
+    node.NODE_SHA256[PLAT] = hashlib.sha256(env["net"].data).hexdigest()
     with pytest.raises(StageError) as ei:
         node.ensure_node("default")
     assert ei.value.code == "download_failed"
@@ -466,6 +412,14 @@ def test_zip_extracts_into_path_with_space_and_non_ascii(tmp_path):
     assert (dest / "node-v1-win-x64" / "node.exe").read_bytes() == b"x"
 
 
+@pytest.fixture
+def glibc(monkeypatch):
+    """The glibc version platform_id() sees; (2, 28) unless a test sets it."""
+    version = {"value": (2, 28)}
+    monkeypatch.setattr(node, "_glibc_version", lambda: version["value"])
+    return version
+
+
 @pytest.mark.parametrize(
     ("sys_platform", "machine", "expected"),
     [
@@ -474,60 +428,92 @@ def test_zip_extracts_into_path_with_space_and_non_ascii(tmp_path):
         ("linux", "x86_64", "linux-x64"),
         ("linux", "aarch64", "linux-arm64"),
         ("win32", "AMD64", "win-x64"),
-        ("win32", "ARM64", "win-arm64"),
     ],
 )
-def test_platform_id(monkeypatch, sys_platform, machine, expected):
+def test_platform_id(monkeypatch, glibc, sys_platform, machine, expected):
     monkeypatch.setattr(node.sys, "platform", sys_platform)
     monkeypatch.setattr(node.platform, "machine", lambda: machine)
-    monkeypatch.setattr(node, "_is_musl", lambda: False)
     assert node.platform_id() == expected
     assert node.archive_name(expected).endswith(
         ".zip" if expected.startswith("win") else ".tar.xz"
     )
 
 
-def test_platform_id_musl_x64_uses_the_musl_build(monkeypatch):
-    monkeypatch.setattr(node.sys, "platform", "linux")
-    monkeypatch.setattr(node.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(node, "_is_musl", lambda: True)
-    assert node.platform_id() == "linux-x64-musl"
-    assert node.archive_name("linux-x64-musl") == f"node-v{V}-linux-x64-musl.tar.xz"
-
-
 @pytest.mark.parametrize(
-    ("sys_platform", "machine", "musl"),
+    ("sys_platform", "machine", "libc", "words"),
     [
-        ("linux", "riscv64", False),
-        ("freebsd14", "amd64", False),
-        # nodejs.org publishes no musl build for arm64.
-        ("linux", "aarch64", True),
+        ("win32", "ARM64", None, "Windows on arm64"),
+        # musl (Alpine): no glibc at all.
+        ("linux", "x86_64", None, "apk add nodejs npm"),
+        # CentOS 7 / RHEL 7.
+        ("linux", "x86_64", (2, 17), "glibc 2.17"),
+        ("linux", "aarch64", (2, 27), "glibc 2.27"),
+        ("linux", "riscv64", (2, 39), "No Node.js build"),
+        ("freebsd14", "amd64", None, "No Node.js build"),
     ],
 )
-def test_platform_id_unsupported(monkeypatch, sys_platform, machine, musl):
+def test_platform_id_unsupported(
+    monkeypatch, glibc, sys_platform, machine, libc, words
+):
     monkeypatch.setattr(node.sys, "platform", sys_platform)
     monkeypatch.setattr(node.platform, "machine", lambda: machine)
-    monkeypatch.setattr(node, "_is_musl", lambda: musl)
+    glibc["value"] = libc
     with pytest.raises(StageError) as ei:
         node.platform_id()
     assert ei.value.code == "unsupported_platform"
+    assert words in ei.value.message
+    assert "EvoSci setup" in ei.value.message
 
 
-def test_is_musl_detects_the_musl_loader(monkeypatch, tmp_path):
-    lib = tmp_path / "lib"
-    lib.mkdir()
-    real_path = node.Path
-    monkeypatch.setattr(node.sys, "platform", "linux")
-    monkeypatch.setattr(node, "Path", lambda p: lib if p == "/lib" else real_path(p))
-    # On musl, libc_ver() reports nothing (checked on Alpine 3.22).
-    monkeypatch.setattr(node.platform, "libc_ver", lambda: ("", ""))
-    assert node._is_musl() is False
-    (lib / "ld-musl-x86_64.so.1").write_text("")
-    assert node._is_musl() is True
-    # Debian / Ubuntu with the `musl` package: the loader exists, but the
-    # interpreter runs on glibc, so the glibc build is the right one.
-    monkeypatch.setattr(node.platform, "libc_ver", lambda: ("glibc", "2.41"))
-    assert node._is_musl() is False
+@pytest.mark.parametrize(
+    ("confstr", "expected"),
+    [
+        (lambda _n: "glibc 2.28", (2, 28)),
+        (lambda _n: "glibc 2.17", (2, 17)),
+        (lambda _n: None, None),
+        (lambda _n: "musl 1.2", None),
+    ],
+)
+def test_glibc_version_reads_confstr(monkeypatch, confstr, expected):
+    monkeypatch.setattr(node.os, "confstr", confstr, raising=False)
+    assert node._glibc_version() == expected
+
+
+def test_glibc_version_is_none_without_confstr_support(monkeypatch):
+    def unsupported(_name):
+        raise ValueError("unrecognized configuration name")
+
+    monkeypatch.setattr(node.os, "confstr", unsupported, raising=False)
+    assert node._glibc_version() is None
+
+
+def _unsupported_here(monkeypatch):
+    def refuse():
+        raise StageError("unsupported_platform", "This Linux has no glibc.")
+
+    monkeypatch.setattr(node, "platform_id", refuse)
+
+
+def test_unsupported_platform_is_refused_before_any_download(env, monkeypatch):
+    _unsupported_here(monkeypatch)
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "unsupported_platform"
+    assert env["net"].urls == []
+
+
+def test_unsupported_platform_still_uses_a_system_node(env, monkeypatch):
+    _unsupported_here(monkeypatch)
+    _system_node(env, monkeypatch, (22, 0, 0))
+    assert node.ensure_node("default").source == "system"
+
+
+def test_unsupported_platform_keeps_a_recorded_private_node(env, monkeypatch):
+    node.ensure_node("default")
+    _unsupported_here(monkeypatch)
+    env["net"].urls.clear()
+    assert node.ensure_node("default").source == "private"
+    assert env["net"].urls == []
 
 
 def test_activate_runtime_prepends_once(env):
