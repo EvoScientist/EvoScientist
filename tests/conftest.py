@@ -7,6 +7,7 @@ import shutil
 import socket
 import sys
 import tempfile
+from asyncio.proactor_events import BaseProactorEventLoop
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,9 @@ def _no_network(monkeypatch):
     running server would otherwise serve the tests its threads and schedules.
     A refusal raises, or returns from ``connect_ex``, as a closed port would,
     so code that handles an offline network carries on.
+
+    uvloop connects in C, past both patches; a test that installs it is not
+    guarded.
     """
     from EvoScientist import update_check
     from EvoScientist.langgraph_dev.sdk import DEFAULT_LANGGRAPH_DEV_PORT
@@ -114,6 +118,7 @@ def _no_network(monkeypatch):
     attempts: list[str] = []
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
+    real_sock_connect = BaseProactorEventLoop.sock_connect
 
     def _refused(sock: socket.socket, address) -> bool:
         if sock.family not in (socket.AF_INET, socket.AF_INET6):
@@ -134,8 +139,16 @@ def _no_network(monkeypatch):
             return errno.ECONNREFUSED
         return real_connect_ex(sock, address)
 
+    # Windows' default event loop connects through ConnectEx, never calling
+    # socket.connect, so async clients are checked here instead.
+    async def sock_connect(loop, sock, address):
+        if _refused(sock, address):
+            raise ConnectionRefusedError(errno.ECONNREFUSED, "refused by the tests")
+        return await real_sock_connect(loop, sock, address)
+
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(BaseProactorEventLoop, "sock_connect", sock_connect)
     # The TUI and CLI check PyPI for a newer release at start.
     monkeypatch.setattr(update_check, "is_update_available", lambda: (False, None))
     yield
