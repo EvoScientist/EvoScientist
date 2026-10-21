@@ -74,7 +74,9 @@ def test_routed_provider_without_own_key_raises(
     monkeypatch.setenv(vendor_key_env, "sk-vendor-fallback")
 
     with pytest.raises(ValueError, match=api_key_env):
-        get_chat_model("some-model", provider=provider)
+        # Routers (requesty, openrouter) reject a bare model id before the
+        # key check, so use a vendor/model id to reach the missing-key error.
+        get_chat_model("vendor/some-model", provider=provider)
 
 
 # ---------------------------------------------------------------------------
