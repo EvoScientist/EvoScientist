@@ -1343,11 +1343,9 @@ class LangGraphServerGateway:
         except Exception as exc:
             # Cancel this request's run, then repair, both before the first yield:
             # a consumer that stops iterating after the error event (aclose /
-            # abandon) triggers GeneratorExit
-            # at the yield, so any repair after it never runs and the thread
-            # keeps its non-empty ``next`` — the failed step would replay on
-            # the next request.
-            #
+            # abandon) triggers GeneratorExit at the yield, so nothing after it
+            # runs and the thread keeps its non-empty ``next`` — the failed step
+            # would replay on the next request.
             cancelled_run_id = await self._cancel_incomplete_run(
                 request.thread_id,
                 run_id,
