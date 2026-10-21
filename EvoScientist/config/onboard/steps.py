@@ -861,6 +861,23 @@ def _step_model(
     choices = []
     for name, model_id in entries:
         choices.append(Choice(title=f"{name} ({model_id})", value=name))
+    # A saved legacy choice remains selectable on a rerun. Do not silently
+    # switch its model or provider just because it is hidden from new choices.
+    if model_default not in provider_models and (
+        default_value or config.provider == provider
+    ):
+        current_ids = {model_id for _, model_id in entries}
+        for name, model_id in get_models_for_provider(
+            provider, include_deprecated=True
+        ):
+            if model_id not in current_ids and model_default in (name, model_id):
+                choices.append(
+                    Choice(
+                        title=f"{model_default} (saved, legacy)", value=model_default
+                    )
+                )
+                provider_models.append(model_default)
+                break
     choices.append(Choice(title="Type a model name...", value=_CUSTOM_SENTINEL))
 
     # Determine default. An explicit ``default_value`` override (e.g. a saved

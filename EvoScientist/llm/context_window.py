@@ -29,9 +29,10 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "grok-4.5": 500_000,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
     "claude-haiku-4-5": 200_000,
-    # MiniMax M3 — 1M context (M2.x variants stay at provider default ~204K).
-    # Covers OpenRouter ``minimax/minimax-m3`` (via split('/')[-1]) and direct
-    # ``MiniMax-M3`` (via lowercased exact match).
+    # MiniMax M3.1 Flash / M3 — 1M context (M2.x stays at provider defaults).
+    # Covers OpenRouter namespaced IDs and direct IDs via lowercase matching.
+    "minimax-m3.1-flash": 1_000_000,
+    "minimax-m3.1-flash:free": 1_000_000,
     "minimax-m3": 1_000_000,
     # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2 (1M); the
     # dashed id misses the ``glm-5.2`` family pattern below.

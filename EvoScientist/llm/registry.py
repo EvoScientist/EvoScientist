@@ -147,6 +147,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", "google-genai"),
     ("gemini-2.5-pro", "gemini-2.5-pro", "google-genai"),
     # MiniMax (direct API — Anthropic-compatible; default: api.minimaxi.com, global: api.minimax.io)
+    ("minimax-m3.1-flash", "MiniMax-M3.1-Flash", "minimax"),
     ("minimax-m3", "MiniMax-M3", "minimax"),
     ("minimax-m2.7", "MiniMax-M2.7", "minimax"),
     ("minimax-m2.7-highspeed", "MiniMax-M2.7-highspeed", "minimax"),
@@ -189,6 +190,7 @@ _MODEL_ENTRIES: list[tuple[str, str, str]] = [
     ("glm-5.3-flashx", "z-ai/glm-5.3-flashx", "openrouter"),
     ("glm-5.2", "z-ai/glm-5.2", "openrouter"),
     ("glm-5v-turbo", "z-ai/glm-5v-turbo", "openrouter"),
+    ("minimax-m3.1-flash", "minimax/minimax-m3.1-flash:free", "openrouter"),
     ("minimax-m3", "minimax/minimax-m3", "openrouter"),
     ("mimo-v2.6-pro", "xiaomi/mimo-v2.6-pro", "openrouter"),
     ("mimo-v2.6-flash", "xiaomi/mimo-v2.6-flash", "openrouter"),
@@ -292,17 +294,36 @@ MODELS: dict[str, tuple[str, str]] = {
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
 
+# Keep legacy entries in _MODEL_ENTRIES and MODELS for saved configurations and
+# explicit lookups; only omit them from current model selection surfaces.
+_DEPRECATED_MODEL_NAMES = frozenset(
+    {
+        "minimax-m2.7",
+        "minimax-m2.7-highspeed",
+        "minimax-m2.5",
+        "minimax-m2.5-highspeed",
+        "minimax-m2.1",
+    }
+)
 
-def get_models_for_provider(provider: str) -> list[tuple[str, str]]:
-    """Get all models for a specific provider.
+
+def get_models_for_provider(
+    provider: str, *, include_deprecated: bool = False
+) -> list[tuple[str, str]]:
+    """Get current selectable models for a specific provider.
 
     Args:
         provider: Provider name (e.g., 'anthropic', 'openrouter').
+        include_deprecated: Include legacy entries for saved-model lookups.
 
     Returns:
         List of (short_name, model_id) tuples for the provider.
     """
-    return [(name, model_id) for name, model_id, p in _MODEL_ENTRIES if p == provider]
+    return [
+        (name, model_id)
+        for name, model_id, p in _MODEL_ENTRIES
+        if p == provider and (include_deprecated or name not in _DEPRECATED_MODEL_NAMES)
+    ]
 
 
 def list_models() -> list[str]:
@@ -314,7 +335,7 @@ def list_models() -> list[str]:
     seen = set()
     result = []
     for name, _, _ in _MODEL_ENTRIES:
-        if name not in seen:
+        if name not in seen and name not in _DEPRECATED_MODEL_NAMES:
             seen.add(name)
             result.append(name)
     return result
@@ -330,7 +351,7 @@ def list_models_by_provider() -> list[tuple[str, str, str]]:
     result: list[tuple[str, str, str]] = []
     for name, model_id, provider in _MODEL_ENTRIES:
         key = (name, provider)
-        if key not in seen:
+        if key not in seen and name not in _DEPRECATED_MODEL_NAMES:
             seen.add(key)
             result.append((name, model_id, provider))
     return result
