@@ -79,9 +79,11 @@ class FakeRun:
 class FakeNet:
     def __init__(self) -> None:
         self.urls: list[str] = []
+        self.hints: list[bool] = []
         self.data = DATA
 
-    def download(self, url, dest: Path, progress=None) -> str:
+    def download(self, url, dest: Path, progress=None, *, cn_hint=False) -> str:
+        self.hints.append(cn_hint)
         self.urls.append(url)
         dest.write_bytes(self.data)
         if progress:

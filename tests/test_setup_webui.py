@@ -22,6 +22,13 @@ from EvoScientist.setup.protocol import ERROR_CODES, StageError
 REG = "https://registry.npmjs.org"
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_pause(monkeypatch):
+    from EvoScientist.setup import download
+
+    monkeypatch.setattr(download, "_RETRY_PAUSES", (0, 0, 0))
+
+
 def _tarball(version: str, *, name: str = webui.PACKAGE, extra=()) -> bytes:
     """An npm-style tarball: ``package/package.json`` + ``package/dist/server.js``."""
     buf = io.BytesIO()
@@ -51,6 +58,7 @@ class FakeRegistry:
     """Serves metadata and tarballs; records requested URLs."""
 
     def __init__(self, versions: dict[str, bytes]) -> None:
+        self.hints: list[bool] = []
         self.tarballs = {f"{REG}/webui-{v}.tgz": data for v, data in versions.items()}
         self.metadata = {
             "versions": {
@@ -63,13 +71,14 @@ class FakeRegistry:
         self.urls: list[str] = []
         self.offline = False
 
-    def fetch_metadata(self, registry: str) -> dict:
+    def fetch_metadata(self, registry: str, *, cn_hint: bool = False) -> dict:
+        self.hints.append(cn_hint)
         self.urls.append(registry)
         if self.offline:
             raise StageError("download_failed", f"Could not read from {registry}")
         return self.metadata
 
-    def download(self, url: str, dest: Path, progress=None) -> str:
+    def download(self, url: str, dest: Path, progress=None, *, cn_hint=False) -> str:
         self.urls.append(url)
         data = self.tarballs[url]
         dest.write_bytes(data)
@@ -179,7 +188,7 @@ def test_fetch_metadata_sends_the_abbreviated_accept_header(monkeypatch):
         seen["url"], seen["accept"] = request.full_url, request.get_header("Accept")
         return _Resp(json.dumps({"versions": {"0.3.0": {}}}).encode())
 
-    monkeypatch.setattr(webui.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(webui, "open_url", urlopen)
     assert webui.fetch_metadata(REG)["versions"] == {"0.3.0": {}}
     assert seen["url"] == f"{REG}/@evoscientist%2Fwebui"
     assert seen["accept"].startswith("application/vnd.npm.install-v1+json")
@@ -198,7 +207,7 @@ def test_fetch_metadata_http_errors_name_the_registry(monkeypatch, status, words
     def urlopen(request, timeout):
         raise urllib.error.HTTPError(request.full_url, status, "x", {}, None)
 
-    monkeypatch.setattr(webui.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(webui, "open_url", urlopen)
     with pytest.raises(StageError) as exc:
         webui.fetch_metadata("https://corp.example/npm")
     assert exc.value.code == "download_failed"
@@ -215,7 +224,7 @@ def test_fetch_metadata_network_error_is_download_failed(monkeypatch, error):
             raise http.client.IncompleteRead(b'{"versions": {"0.3', 4982)
         raise urllib.error.URLError(error)
 
-    monkeypatch.setattr(webui.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(webui, "open_url", urlopen)
     with pytest.raises(StageError) as exc:
         webui.fetch_metadata(REG)
     assert exc.value.code == "download_failed"

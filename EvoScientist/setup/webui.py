@@ -34,7 +34,14 @@ from pathlib import Path
 from typing import Any
 
 from ._install import move_into_place, remove_stale_temp_dirs, tools_dir
-from .download import _NETWORK_ERRORS, download
+from .download import (
+    _NETWORK_ERRORS,
+    NotConnected,
+    download,
+    open_url,
+    with_hint,
+    with_retries,
+)
 from .protocol import Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
@@ -168,12 +175,28 @@ def registry_url(mirror: str, node_exe: Path) -> str:
     return chosen.rstrip("/")
 
 
-def fetch_metadata(registry: str) -> dict[str, Any]:
-    url = f"{registry}/{PACKAGE.replace('/', '%2F')}"
+def cn_hint(mirror: str, node_exe: Path | None) -> bool:
+    """Whether a download error should name ``--cn``: the mirror is off and
+    the registry is not one the user configured."""
+    from .node import configured_npm_registry
+
+    if mirror == "cn":
+        return False
+    return node_exe is None or configured_npm_registry(os.environ, node_exe) is None
+
+
+def _read_metadata(url: str) -> Any:
     request = urllib.request.Request(url, headers={"Accept": _METADATA_ACCEPT})
+    with open_url(request, _METADATA_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_metadata(registry: str, *, cn_hint: bool = False) -> dict[str, Any]:
+    url = f"{registry}/{PACKAGE.replace('/', '%2F')}"
     try:
-        with urllib.request.urlopen(request, timeout=_METADATA_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = with_retries(lambda: _read_metadata(url), f"Reading {PACKAGE}")
+    except NotConnected as exc:
+        raise StageError("download_failed", with_hint(f"{exc}.", cn_hint)) from exc
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             hint = (
@@ -186,11 +209,14 @@ def fetch_metadata(registry: str) -> dict[str, Any]:
             hint = ""
         raise StageError(
             "download_failed",
-            f"{registry} answered HTTP {exc.code} for {PACKAGE}.{hint}",
+            with_hint(
+                f"{registry} answered HTTP {exc.code} for {PACKAGE}.{hint}", cn_hint
+            ),
         ) from exc
     except _NETWORK_ERRORS as exc:
         raise StageError(
-            "download_failed", f"Could not read {PACKAGE} from {registry}: {exc}"
+            "download_failed",
+            with_hint(f"Could not read {PACKAGE} from {registry}: {exc}.", cn_hint),
         ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("versions"), dict):
         raise StageError(
@@ -485,6 +511,8 @@ def _download_into_place(
     dist: Mapping[str, Any],
     report: ProgressFn,
     node_exe: Path | None,
+    *,
+    cn_hint: bool = False,
 ) -> Path:
     """Download, verify and unpack ``version`` into ``tools/webui/<version>/``.
 
@@ -510,6 +538,7 @@ def _download_into_place(
             tarball,
             archive,
             lambda f: report(0.1 + 0.6 * f, f"Downloading WebUI {version}"),
+            cn_hint=cn_hint,
         )
         report(0.72, "Verifying checksum")
         verify_integrity(archive, dist, name)
@@ -621,10 +650,12 @@ def ensure_webui(
             recorded = recorded_webui(compat)
             if recorded is not None and not refresh:
                 return recorded
-            registry = registry_url(mirror or configured_mirror(), node_exe)
+            mirror = mirror or configured_mirror()
+            registry = registry_url(mirror, node_exe)
+            hint = cn_hint(mirror, node_exe)
             report(0.02, f"Checking {registry} for WebUI releases in {compat}")
             try:
-                metadata = fetch_metadata(registry)
+                metadata = fetch_metadata(registry, cn_hint=hint)
                 version = pick_version(metadata["versions"], compat)
             except StageError as exc:
                 # The registry cannot offer a release in range (offline, an
@@ -638,7 +669,8 @@ def ensure_webui(
                 return recorded
             dist = dist_of(metadata, version)
             info = WebUIInfo(
-                version, _download_into_place(version, dist, report, node_exe)
+                version,
+                _download_into_place(version, dist, report, node_exe, cn_hint=hint),
             )
             _write_record(_set_current(_read_record(), info))
             return info
