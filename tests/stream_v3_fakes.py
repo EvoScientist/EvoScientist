@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 
+from langgraph.types import Interrupt
+
 from EvoScientist.stream.events import stream_agent_events
 
 
@@ -168,6 +170,18 @@ def tool_finished(
 @dataclass
 class FakeStateSnapshot:
     values: dict[str, Any] = field(default_factory=dict)
+    interrupts: tuple[Interrupt, ...] = ()
+
+
+def _interrupts_in(value: Any) -> list[Interrupt]:
+    """Every ``Interrupt`` inside an event, however deeply nested."""
+    if isinstance(value, Interrupt):
+        return [value]
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list | tuple):
+        return [found for item in value for found in _interrupts_in(item)]
+    return []
 
 
 class FakeV3Run:
@@ -194,9 +208,11 @@ class FakeV3Agent:
         self._run = FakeV3Run(events, subagents=subagents)
         self.astream_events = MagicMock(return_value=self._run)
         self._state_values = state_values if state_values is not None else {}
+        # As a checkpointer would have saved them by the time they stream.
+        self._interrupts = tuple(_interrupts_in(self._run._events))
 
     async def aget_state(self, _config):
-        return FakeStateSnapshot(values=self._state_values)
+        return FakeStateSnapshot(values=self._state_values, interrupts=self._interrupts)
 
 
 class ErroringV3Agent:

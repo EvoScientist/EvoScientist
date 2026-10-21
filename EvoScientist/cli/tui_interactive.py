@@ -707,6 +707,11 @@ def run_textual_interactive(
             self._idle_reader_inflight: bool = (
                 False  # prevent overlapping throttled idle state reads
             )
+            # At most one channel message is off the queue and not yet started:
+            # scheduled by the poll, or held because the app was taken before
+            # its turn began. A held message goes before the queue.
+            self._channel_turn_scheduled = False
+            self._held_channel_msg: ChannelMessage | None = None
             self._run_task: Any = None  # asyncio.Task for current _run_turn
             self._queued_messages: list[
                 str
@@ -1181,7 +1186,7 @@ def run_textual_interactive(
                     current = _installed_version()
                     self.notify(
                         f"Update available: v{latest} (current: v{current}).\n"
-                        "Run: uv tool upgrade EvoScientist",
+                        "Run: EvoSci update",
                         severity="information",
                         timeout=15,
                     )
@@ -1244,14 +1249,22 @@ def run_textual_interactive(
 
         def _poll_channel_queue(self) -> None:
             """Poll the channel + notification queues (every 100ms)."""
-            try:
-                msg = _message_queue.get_nowait()
-            except queue.Empty:
-                msg = None
+            if self._channel_turn_scheduled:
+                # That turn has not started yet: nothing goes before it.
+                return
+            # A held message goes first. While the app is taken nothing comes
+            # off the queue, so the messages on it keep their order.
+            msg = self._held_channel_msg
+            if msg is None and not self._busy:
+                try:
+                    msg = _message_queue.get_nowait()
+                except queue.Empty:
+                    msg = None
             if msg is not None:
                 if self._busy:
-                    _message_queue.put(msg)
                     return
+                self._held_channel_msg = None
+                self._channel_turn_scheduled = True
                 self.call_later(
                     lambda m=msg: asyncio.ensure_future(
                         self._process_channel_message(m)
@@ -1292,6 +1305,10 @@ def run_textual_interactive(
             """
             target_tid = self._conversation_tid
             try:
+                if self._busy:
+                    # The poll found the app free, but input handled since then
+                    # took it. The notifications stay queued for a later poll.
+                    return
                 try:
                     await consume_notifications(
                         run_message=lambda text, notifs: self._inject_notification_tui(
@@ -3235,11 +3252,20 @@ def run_textual_interactive(
               (streaming response)
               [channel: Replied to sender]
             """
+            # This message is dealt with below, so the poll may take the next.
+            self._channel_turn_scheduled = False
+            if self._busy:
+                # The poll found the app free, but input handled since then
+                # took it. Held for a poll that finds it free, ahead of any
+                # message that arrived since.
+                self._held_channel_msg = msg
+                return
             prompt_widget = None
             if not _ch_mod._claim_or_complete_channel_request(msg):
                 return
             _ch_mod.remember_channel_origin(self._conversation_tid, msg)
             try:
+                # Taken in the step that checked it: nothing ran in between.
                 self._busy = True
                 self._turn_started_at = datetime.now()
                 self._status_phase = ResearchPhase.THINKING

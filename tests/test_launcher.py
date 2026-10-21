@@ -17,6 +17,11 @@ from EvoScientist.deploy import launcher as lm
 from EvoScientist.langgraph_dev import manager as lgm
 
 
+@pytest.fixture(autouse=True)
+def _isolated_runtime(runtime_paths):
+    """The start lock, pid file and sidecar under tmp_path."""
+
+
 def _cfg(workspace_dir: str = "/tmp/wsA", **kw):
     base = {
         "workspace_dir": workspace_dir,
@@ -60,6 +65,7 @@ def test_resolve_backend_foreign_occupant_is_port_conflict(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(), object())
     assert ei.value.code == "port_conflict"
+    assert ei.value.fields == {"reason": "foreign"}
 
 
 def test_resolve_backend_other_workspace_is_mismatch(monkeypatch):
@@ -146,6 +152,87 @@ def test_resolve_backend_fingerprint_drift_reuses_with_warning(monkeypatch, lega
     assert any("EvoSci server stop" in w for w in decision.warnings)
 
 
+def test_resolve_backend_reuse_returns_the_record_it_read(monkeypatch):
+    sidecar = {"workspace": "/tmp/wsA", "config_fingerprint": "fp-now"}
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert decision.sidecar is sidecar
+
+
+def test_resolve_backend_record_less_server_reuses_by_default(monkeypatch):
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    decision = lm._resolve_backend(_cfg(), object())
+    assert decision.action == "reuse"
+    assert decision.sidecar is None
+
+
+def test_resolve_backend_record_less_server_is_port_conflict_when_required(
+    monkeypatch,
+):
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=None)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(), object(), require_record=True)
+    assert ei.value.code == "port_conflict"
+    assert "no ownership record" in ei.value.message
+    assert ei.value.fields == {"reason": "no_record"}
+
+
+def test_resolve_backend_takes_a_backend_target(monkeypatch):
+    """A caller without a front-end passes only the backend fields."""
+    _patch_backend_probes(
+        monkeypatch, occupied=True, running=True, sidecar={"workspace": "/tmp/wsB"}
+    )
+    target = lm.BackendTarget(
+        workspace_dir="/tmp/wsA", backend_host="127.0.0.1", backend_port=6174
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(target, object())
+    assert ei.value.code == "workspace_mismatch"
+
+
+def test_workspace_mismatch_carries_the_workspace(monkeypatch):
+    _patch_backend_probes(
+        monkeypatch, occupied=True, running=True, sidecar={"workspace": "/tmp/wsB"}
+    )
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.fields == {"workspace": "/tmp/wsB"}
+
+
+def test_run_folder_mismatch_carries_the_run_folder(monkeypatch):
+    sidecar = {"workspace": "/tmp/wsA", "run_dir": "/tmp/wsA/runs/20260930_120000"}
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
+    assert ei.value.fields == sidecar
+
+
+def test_launcher_error_fields_default_to_empty():
+    assert lm.LauncherError("port_conflict", "m").fields == {}
+
+
+def test_resolve_backend_no_drift_for_a_session_started_with_auto_flags(monkeypatch):
+    """``EvoSci --auto-approve`` / ``--auto-mode`` override fields the server
+    reads from config.yaml; a second launcher with the file's values must not
+    report drift (and advise ``EvoSci server stop``)."""
+    from EvoScientist.config.settings import EvoScientistConfig
+
+    fingerprint = lgm._server_config_fingerprint
+    recorded = fingerprint(
+        EvoScientistConfig(auto_approve=True, auto_mode=True, enable_ask_user=False)
+    )
+    _patch_backend_probes(
+        monkeypatch,
+        occupied=True,
+        running=True,
+        sidecar={"workspace": "/tmp/wsA", "config_fingerprint": recorded},
+    )
+    monkeypatch.setattr(lgm, "_server_config_fingerprint", fingerprint)
+    decision = lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), EvoScientistConfig())
+    assert decision.action == "reuse"
+    assert decision.warnings == []
+
+
 def test_resolve_backend_python_drift_reuses_with_warning(monkeypatch):
     from EvoScientist.setup import research_env
 
@@ -205,9 +292,46 @@ def test_resolve_backend_sidecar_pid_not_serving_port_is_refused(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         lm._resolve_backend(_cfg(workspace_dir="/tmp/wsA"), object())
     assert ei.value.code == "sidecar_port_mismatch"
+    assert ei.value.fields == {"reason": "record_mismatch"}
     # The remedy must not misdirect to `EvoSci server stop` (which stops the
     # recorded server on another port, not the one occupying this one).
     assert "not this one" in (ei.value.detail or "")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "requested", "reused"),
+    [
+        (None, "192.168.1.5", True),  # an older record: not checked
+        ("127.0.0.1", "127.0.0.1", True),
+        ("localhost", "127.0.0.1", True),
+        ("::1", "localhost", True),
+        ("127.0.0.1", "::1", False),  # two servers can hold the port on these
+        ("::1", "127.0.0.1", False),
+        ("0.0.0.0", "192.168.1.5", True),
+        ("0.0.0.0", "::1", False),  # an IPv4 wildcard is not on ::1
+        ("::", "::1", True),
+        ("127.0.0.1", "0.0.0.0", True),  # probed at 127.0.0.1
+        ("192.168.1.5", "127.0.0.1", False),
+        ("127.0.0.1", "192.168.1.5", False),
+        ("192.168.1.5", "0.0.0.0", False),
+    ],
+)
+def test_resolve_backend_checks_the_recorded_bind_host(
+    monkeypatch, recorded, requested, reused
+):
+    """Two servers can share a port on different interfaces: a record for the
+    one the probe did not reach is refused before its workspace is trusted."""
+    sidecar = {"workspace": "/tmp/wsA", "pid": 12345, "config_fingerprint": "fp-now"}
+    if recorded is not None:
+        sidecar["host"] = recorded
+    _patch_backend_probes(monkeypatch, occupied=True, running=True, sidecar=sidecar)
+    cfg = _cfg(workspace_dir="/tmp/wsA", backend_host=requested)
+    if reused:
+        assert lm._resolve_backend(cfg, object()).action == "reuse"
+        return
+    with pytest.raises(lm.LauncherError) as ei:
+        lm._resolve_backend(cfg, object())
+    assert ei.value.fields == {"reason": "record_mismatch"}
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +372,17 @@ def test_start_raises_on_foreign_occupant(monkeypatch):
     with pytest.raises(lm.LauncherError) as ei:
         launcher.start()
     assert ei.value.code == "port_conflict"
+
+
+def test_start_passes_backend_allowed_origins(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    started: dict = {}
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **kw: started.update(kw) or _FakeProc()
+    )
+    config = SimpleNamespace(backend_allowed_origins="https://smith.langchain.com")
+    lm.WebUILauncher(config, _cfg(), _FakeRunner()).start()
+    assert started["allowed_origins"] == "https://smith.langchain.com"
 
 
 def test_start_failure_after_backend_start_tears_the_backend_down(monkeypatch):
@@ -349,6 +484,179 @@ def test_stop_during_backend_health_wait_reports_cancelled(monkeypatch):
     t.join(5)
     assert not t.is_alive()
     assert errors[0].code == "cancelled"
+
+
+def test_start_waits_for_another_start_before_the_backend_decision(monkeypatch):
+    """Another start holds the server start lock: the decision and the start
+    wait for it, so a backend that is bound but not answering yet is never
+    taken for a stale one."""
+    import threading
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    holder = _LockHolder()
+    checks: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "_is_port_occupied",
+        lambda *_a, **_k: checks.append(holder.release.is_set()) or False,
+    )
+    threading.Timer(0.3, holder.done).start()
+    result = lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert checks
+    assert all(checks)
+    assert result.backend_started is True
+
+
+def _start_lock_is_held() -> bool:
+    from filelock import FileLock, Timeout
+
+    probe = FileLock(str(lgm.RUNTIME.lock_file))
+    try:
+        probe.acquire(timeout=0)
+    except Timeout:
+        return True
+    probe.release()
+    return False
+
+
+def test_the_backend_starts_under_the_start_lock(monkeypatch):
+    _patch_for_start(monkeypatch, set())
+    held: list[bool] = []
+    monkeypatch.setattr(
+        lgm,
+        "start_langgraph_dev",
+        lambda **_k: held.append(_start_lock_is_held()) or _FakeProc(),
+    )
+    lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert held == [True]
+    assert not _start_lock_is_held()
+
+
+@pytest.mark.parametrize("then_free", [False, True])
+def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_free):
+    """A stop() during the wait starts nothing, also when the lock is freed
+    right after it."""
+    import threading
+
+    from filelock import FileLock
+
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    started: list = []
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **k: started.append(k) or _FakeProc()
+    )
+    holder = _LockHolder()
+    launcher = lm.WebUILauncher(object(), _cfg(), _FakeRunner())
+
+    def _stop() -> None:
+        launcher.stop()
+        if then_free:
+            holder.done()
+
+    threading.Timer(0.3, _stop).start()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            launcher.start()
+        assert then_free or holder.thread.is_alive()
+    finally:
+        holder.done()
+    assert ei.value.code == "cancelled"
+    assert started == []
+    lock = FileLock(str(lgm.RUNTIME.lock_file))
+    lock.acquire(timeout=0.5)
+    lock.release()
+
+
+def test_start_lock_held_too_long_is_backend_start_failed(monkeypatch):
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
+    holder = _LockHolder()
+    try:
+        with pytest.raises(lm.LauncherError) as ei:
+            lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    finally:
+        holder.done()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.fields == {"lock_file": str(lgm.RUNTIME.lock_file)}
+
+
+def _break_start_lock(monkeypatch, tmp_path, step: str) -> None:
+    """Make the server start lock fail with an OSError, as a read-only or
+    full config dir does: at the mkdir of its folder, or at the acquire."""
+    import filelock
+
+    if step == "mkdir":
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        monkeypatch.setattr(
+            lgm, "RUNTIME", lgm.LanggraphRuntimePaths.for_directory(blocker / "rt")
+        )
+    else:
+
+        def _denied(self, *_a, **_k):
+            raise PermissionError(13, "Permission denied", str(self.lock_file))
+
+        monkeypatch.setattr(filelock.FileLock, "acquire", _denied)
+
+
+@pytest.mark.parametrize("step", ["mkdir", "acquire"])
+def test_start_lock_os_error_is_backend_start_failed(monkeypatch, tmp_path, step):
+    """An OSError from the start lock is backend_start_failed, as before the
+    lock, so run_webui shows its panel instead of a traceback."""
+    _patch_for_start(monkeypatch, set())
+    started: list = []
+    monkeypatch.setattr(
+        lgm, "start_langgraph_dev", lambda **k: started.append(k) or _FakeProc()
+    )
+    _break_start_lock(monkeypatch, tmp_path, step)
+    with pytest.raises(lm.LauncherError) as ei:
+        lm.WebUILauncher(object(), _cfg(), _FakeRunner()).start()
+    assert ei.value.code == "backend_start_failed"
+    assert ei.value.message.startswith("langgraph dev startup failed: ")
+    assert isinstance(ei.value.__cause__, OSError)
+    assert started == []
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_start_tells_the_caller_it_waits_for_another_start(monkeypatch, held):
+    """on_lock_wait hears True while another start holds the lock and False
+    once this start has it, before the backend decision; nothing when the
+    lock is free."""
+    from tests.test_cli_deploy_json import _LockHolder
+
+    _patch_for_start(monkeypatch, set())
+    events: list = []
+    monkeypatch.setattr(
+        lgm,
+        "_is_port_occupied",
+        lambda *_a, **_k: events.append("port check") or False,
+    )
+    holder = _LockHolder() if held else None
+
+    def _on_lock_wait(waiting: bool) -> None:
+        events.append(waiting)
+        if waiting and holder is not None:
+            holder.release.set()
+
+    try:
+        launcher = lm.WebUILauncher(
+            object(), _cfg(), _FakeRunner(), on_lock_wait=_on_lock_wait
+        )
+        launcher.start()
+    finally:
+        if holder is not None:
+            holder.done()
+    if held:
+        assert events[:2] == [True, False]
+        events = events[2:]
+    assert events
+    assert set(events) == {"port check"}
 
 
 def test_stop_mid_backend_start_stops_only_owned_process(monkeypatch):
@@ -471,6 +779,27 @@ def test_scrubbed_env_strips_secrets_keeps_essentials(monkeypatch):
     assert env["PATH"] == "/usr/bin"
     assert env["NODE_OPTIONS"] == "--max-old-space-size=4096"
     assert env["PORT"] == "4716"
+
+
+def test_frontend_env_drops_a_config_folder_set_after_startup(monkeypatch):
+    """A workspace ``.env`` merged into os.environ must not give the WebUI
+    another config folder than this process uses."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "_XDG_CONFIG_HOME_SET", False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/from/a/dotenv")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert "XDG_CONFIG_HOME" not in env
+
+
+def test_frontend_env_has_this_process_data_folder(monkeypatch, tmp_path):
+    """The WebUI reads the same local files as this process."""
+    from EvoScientist import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setenv("EVOSCIENTIST_DATA_DIR", "rel-data")
+    env = lm.WebUILauncher(object(), _cfg(), _FakeRunner())._build_frontend_env()
+    assert env["EVOSCIENTIST_DATA_DIR"] == str(tmp_path / "data")
 
 
 # --------------------------------------------------------------------------- #

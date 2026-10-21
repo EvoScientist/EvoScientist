@@ -7,6 +7,7 @@ import asyncio
 import base64
 import inspect
 import mimetypes
+import ntpath
 import os
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from ..memory.worker_activity import clear_completed_memory_activity_counts
 from ..middleware.tool_history_repair import (
     _INTERRUPTED_RESULT as _INTERRUPTED_TOOL_RESULT,
 )
+from ..paths import file_tool_path
 from .emitter import StreamEventEmitter
 from .summarization import (
     _extract_summary_message_text,
@@ -52,6 +54,8 @@ UserMessageContent: TypeAlias = str | list[dict[str, object]]
 GraphRunInput: TypeAlias = str | Command
 LangGraphStreamInput: TypeAlias = dict[str, object] | Command
 _ValueMessageKey: TypeAlias = tuple[str, ...]
+_INTERRUPT_CHECKPOINT_WAIT_SECONDS = 5.0
+_INTERRUPT_CHECKPOINT_POLL_SECONDS = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +85,46 @@ def _snapshot_has_pending_interrupt(snapshot: Any) -> bool:
         if getattr(task, "interrupts", None):
             return True
     return False
+
+
+def _snapshot_interrupt_ids(snapshot: Any) -> set[str]:
+    """Return interrupt IDs currently persisted at the root or task level."""
+    if snapshot is None:
+        return set()
+    interrupts = list(getattr(snapshot, "interrupts", None) or ())
+    for task in getattr(snapshot, "tasks", None) or ():
+        interrupts.extend(getattr(task, "interrupts", None) or ())
+    return {
+        str(interrupt_id)
+        for interrupt in interrupts
+        if (interrupt_id := getattr(interrupt, "id", None)) is not None
+    }
+
+
+async def _wait_for_checkpointed_interrupt(
+    agent: Any, config: dict[str, Any], interrupt_id: str
+) -> None:
+    """Wait for an emitted interrupt to become visible in its checkpoint."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _INTERRUPT_CHECKPOINT_WAIT_SECONDS
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        try:
+            snapshot = await asyncio.wait_for(
+                agent.aget_state(config), timeout=remaining
+            )
+        except Exception:
+            return
+        if str(interrupt_id) in _snapshot_interrupt_ids(snapshot):
+            return
+        if snapshot is None:
+            return
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(_INTERRUPT_CHECKPOINT_POLL_SECONDS, remaining))
 
 
 def _snapshot_needs_recovery(snapshot: Any) -> bool:
@@ -1351,9 +1395,20 @@ async def build_agent_stream_input(
             else:
                 file_refs.append(path)
         if file_refs:
-            ref_text = "\n".join(
-                f"[attached file: {os.path.basename(p)}] path: {p}" for p in file_refs
-            )
+            references = []
+            for path in file_refs:
+                tool_path = file_tool_path(path)
+                if tool_path != path:
+                    shell_path = path.replace("\\", "/")
+                    references.append(
+                        f"[attached file: {ntpath.basename(path)}] "
+                        f"file tools path: {tool_path}; shell path: {shell_path}"
+                    )
+                else:
+                    references.append(
+                        f"[attached file: {os.path.basename(path)}] path: {path}"
+                    )
+            ref_text = "\n".join(references)
             content_blocks.append({"type": "text", "text": ref_text})
         if content_blocks:
             user_content = content_blocks
@@ -1596,6 +1651,13 @@ async def stream_agent_events(
                     task.cancel()
                 await asyncio.gather(*producers, return_exceptions=True)
                 raise item
+            if item.get("type") == "interrupt":
+                # The client may close this generator as soon as it sees the
+                # pause. Let LangGraph persist the interrupt before aborting
+                # the underlying stream in our ``finally`` block.
+                await _wait_for_checkpointed_interrupt(
+                    agent, config, item["interrupt_id"]
+                )
             yield item
     except Exception as e:
         _run_raised = True

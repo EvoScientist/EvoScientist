@@ -8,7 +8,7 @@ import queue
 import re
 import sys
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
@@ -69,6 +69,7 @@ from .channel import (
     get_channel_origin,
     publish_to_channel_origin,
     remember_channel_origin,
+    restore_channel_origin,
 )
 from .channel_sends import PendingChannelSends
 from .mcp_ui import (
@@ -220,7 +221,7 @@ def onboard(
     workspace settings, and agent parameters.
 
     Any answer can be pre-set via a flag (``--provider anthropic
-    --model claude-sonnet-4-6 ...``); prompts for unset answers stay
+    --model claude-sonnet-5-5 ...``); prompts for unset answers stay
     interactive unless ``--non-interactive`` is passed, in which case any
     missing required answer aborts the wizard.
     """
@@ -305,6 +306,73 @@ def onboard(
 
 
 # =============================================================================
+# Update command
+# =============================================================================
+
+
+@app.command()
+def update(
+    version: str | None = typer.Option(
+        None,
+        "--version",
+        help=(
+            "Install this release instead of the newest one; an older one rolls "
+            "back. An older release keeps only the config keys and values it "
+            "knows: its next config save drops the rest (all settings, if it "
+            "cannot read the file), so config.yaml is copied to "
+            "config.yaml.bak-<current version> first. sessions.db is used as it is."
+        ),
+    ),
+    check: bool = typer.Option(
+        False, "--check", help="Only print the installed and the newest version"
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="Stop a running server without asking"
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print one JSON event per line; never asks"
+    ),
+    skip: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--skip", help="Pass --skip <id> to the new EvoSci setup (repeatable)"
+        ),
+    ] = None,
+):
+    """Update EvoScientist to the newest release, with its tested dependencies.
+
+    A uv tool install (the install scripts, or uv tool install) is reinstalled
+    with the release's constraints.txt, keeping its extras, Python version and
+    packages added with --with, on uv's own Python (an install made without
+    --python moves to uv's Python of the same version on its first update).
+    The new version's EvoSci setup runs afterwards. For pip, conda, an
+    editable install or the Docker image, it prints what to run instead.
+    """
+    from ..setup.protocol import ConsoleEmitter, JsonEmitter
+    from ..updater import UpdateOptions, run_update
+
+    if json_output:
+        from ..stream.json_sink import redirect_console_to_stderr
+
+        redirect_console_to_stderr()
+        emit = JsonEmitter()
+        confirm = None
+    else:
+        emit = ConsoleEmitter(console)
+        confirm = (
+            (lambda question: typer.confirm(question, default=False))
+            if sys.stdin.isatty()
+            else None
+        )
+    opts = UpdateOptions(
+        version=version, check=check, yes=yes, json=json_output, skip=list(skip or ())
+    )
+    code = run_update(opts, emit, confirm=confirm)
+    if code:
+        raise typer.Exit(code)
+
+
+# =============================================================================
 # Setup command
 # =============================================================================
 
@@ -378,9 +446,11 @@ def setup(
         selected = (found,)
 
     if cn:
+        from ..config.store import ConfigError
+
         try:
             set_config_value("mirror", "cn")
-        except OSError as exc:
+        except (OSError, ConfigError) as exc:
             # Saving the choice is secondary; this run still uses the mirror.
             logging.getLogger(__name__).warning(
                 f"Could not save mirror: cn to the config ({exc}); "
@@ -420,8 +490,10 @@ def _run_onboard_cli(**kwargs: Any) -> None:
 
     The wizard raises ``RuntimeError`` for *expected* non-interactive
     failures: rejected ``--api-key`` / ``--tavily-key`` presets, missing
-    required flags under ``--non-interactive``, or a missing base URL.
-    Those are user-input problems, not bugs — surface them like any other
+    required flags under ``--non-interactive``, or a missing base URL. A
+    refused config file (one that does not parse, or the lock held
+    elsewhere) or a write that keeps failing raises ``ConfigError``, a
+    ``RuntimeError`` too. Those are user-input problems, not bugs — surface them like any other
     CLI validation error rather than dumping a stack trace.
     """
     from ..config import run_onboard
@@ -542,15 +614,22 @@ def channel_setup(ctx: typer.Context):
     Guides you through selecting and configuring messaging channels
     (Telegram, Discord, or iMessage).
     """
-    from ..config import load_config, save_config
+    from ..config import load_config
     from ..config.onboard.channels import _step_channels
+    from ..config.settings import SettingsError, set_config_values
+    from ..config.store import ConfigError, config_lock, read_config_mapping
 
-    config = load_config()
-    updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
+    try:
+        with config_lock():
+            read_config_mapping()
+            config = load_config()
+            updates = _step_channels(config, runtime=_get_cli_async_runtime(ctx))
+            if updates:
+                set_config_values(updates)
+    except (SettingsError, ConfigError, OSError) as e:
+        console.print(f"[red]Channel configuration not saved: {escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
     if updates:
-        for key, value in updates.items():
-            setattr(config, key, value)
-        save_config(config)
         console.print("[green]Channel configuration saved.[/green]")
     else:
         console.print("[dim]No changes made.[/dim]")
@@ -1423,6 +1502,21 @@ async def _apply_serve_resume_state(
 
     new_dirs = dirs if dirs is not None and dirs != runtime_state.dirs else None
     workspace_update: tuple[SessionDirs, CompiledStateGraph] | None = None
+    old_thread_id = runtime_state.thread_id
+    thread_changed = thread_id != old_thread_id
+    # Serve pauses the thread it leaves and ends the wait on a thread restored
+    # after a restart, in the store of the workspace it leaves them in; a
+    # refused move puts back what the snapshot recorded.
+    left: Any = None
+
+    async def leave_thread(proactive: Any) -> None:
+        nonlocal left
+        left = proactive.snapshot_leave(old_thread_id)
+        for call in (
+            lambda: proactive.leave(old_thread_id),
+            lambda: proactive.on_turn(thread_id),
+        ):
+            await asyncio.to_thread(_serve_proactive_call, call)
 
     if new_dirs is not None:
         effective_config = _serve_resume_config(runtime_state, config)
@@ -1438,28 +1532,222 @@ async def _apply_serve_resume_state(
             config=effective_config,
             runtime=runtime_state.async_runtime,
         )
-        if not await _move_server_or_keep_session(
-            effective_config,
-            target=new_dirs,
-            current=runtime_state.dirs,
-            backend=runtime_state.gateway_backend,
-        ):
+        proactive = getattr(channel_runtime, "proactive", None)
+        moves_workspace = new_dirs.workspace != runtime_state.dirs.workspace
+        if proactive is not None and moves_workspace:
+            # Until C17 each workspace has its own cron store: pause the thread
+            # serve leaves and delete this workspace's proactive cron while its
+            # store is still the served one.
+            if thread_changed:
+                await leave_thread(proactive)
+            await asyncio.to_thread(_serve_proactive_call, proactive.stop)
+        from ..langgraph_dev.manager import WorkspaceMismatchError
+
+        try:
+            moved = await _move_server_or_keep_session(
+                effective_config,
+                target=new_dirs,
+                current=runtime_state.dirs,
+                backend=runtime_state.gateway_backend,
+            )
+        except WorkspaceMismatchError:
+            if proactive is not None and moves_workspace:
+                if left is not None:
+                    # The session stays where it was: arm again what serve paused.
+                    snapshot = left
+                    await asyncio.to_thread(
+                        _serve_proactive_call, lambda: proactive.undo_leave(snapshot)
+                    )
+                # ``stop`` deleted the cron above; bring it back for the threads
+                # that stay armed.
+                await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+            raise
+        if not moved:
             console.print(
                 "[yellow]Background agent server sync failed; async "
                 "subagents and EvoMemory workers may be unavailable.[/yellow]"
             )
+            if proactive is not None and moves_workspace:
+                from ..proactive.serve import MOVE_FAILED_REASON
+
+                proactive.unavailable_reason = MOVE_FAILED_REASON
+        elif proactive is not None and moves_workspace:
+            proactive.move_to(new_dirs.workspace)
+            # Clears a proactive cron an earlier serve left in that workspace.
+            await asyncio.to_thread(_serve_proactive_call, proactive.reconcile)
         workspace_update = (new_dirs, new_agent)
 
-    old_thread_id = runtime_state.thread_id
-    thread_changed = thread_id != old_thread_id
     if thread_changed:
         runtime_state.set_thread_id(thread_id, channel_runtime)
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            if left is None:
+                await leave_thread(proactive)
+            # A thread armed or paused earlier is armed again here.
+            await asyncio.to_thread(
+                _serve_proactive_call, lambda: proactive.adopt(thread_id)
+            )
 
     if workspace_update is not None:
         updated_dirs, updated_agent = workspace_update
         runtime_state.dirs = updated_dirs
         _set_channels_media_dir(updated_dirs.workspace.media_dir)
         runtime_state.set_agent(updated_agent, channel_runtime)
+
+    # Tell the proactive cron which threads serve can now deliver to. Last, so
+    # the thread, folders and agent are already the new ones. Idempotent:
+    # ``/resume`` reaches this function twice.
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None:
+        await asyncio.to_thread(_serve_proactive_call, proactive.mirror)
+
+
+def _serve_turn_metadata(
+    dirs: SessionDirs,
+    model: str | None,
+    thread_id: str,
+    channel_runtime: ChannelRuntime | None,
+) -> dict[str, str]:
+    """Run metadata of a serve turn: ``build_metadata`` plus, for a thread armed
+    for proactive pushes, its channel origin.
+
+    The runtime copies run metadata into the run's checkpoints, which is how
+    the origin survives a restart. ``build_metadata`` itself stays as it is:
+    the TUI, the CLI and single-shot runs share it.
+    """
+    from ..proactive.serve import origin_run_metadata
+
+    meta = build_metadata(dirs, model)
+    proactive = getattr(channel_runtime, "proactive", None)
+    if proactive is not None and proactive.is_armed(thread_id):
+        origin = get_channel_origin(thread_id)
+        if origin is not None:
+            meta.update(origin_run_metadata(origin))
+    return meta
+
+
+def _serve_proactive_call(call: Callable[[], None]) -> None:
+    """Run a proactive-controller call; a failure is logged, never raised.
+
+    Proactive pushes are best effort: a dev-server error must not break the
+    channel turn or the ``/new`` / ``/resume`` that triggered the call.
+    """
+    try:
+        call()
+    except Exception:
+        _serve_logger.warning("Proactive push bookkeeping failed", exc_info=True)
+
+
+def _serve_proactive_controller(
+    config: "EvoScientistConfig",
+    runtime_gateways: "RuntimeGateways",
+    *,
+    gateway_backend: str | None,
+    workspace: Workspace,
+) -> Any:
+    """Build serve's proactive controller, marked unavailable with the reason.
+
+    The cron runs on the dev server, so the feature needs serve's gateway to
+    be the server one: not the ``local`` backend, and not #470's fallback to
+    the in-process gateway when the dev server was unavailable at startup.
+    """
+    from ..gateway.composite import CompositeGraphGateway
+    from ..langgraph_dev.sdk import (
+        configured_langgraph_dev_url,
+        default_scheduler_timezone,
+        get_langgraph_sync_client,
+    )
+    from ..proactive.serve import ProactiveServe
+
+    reason = None
+    client = None
+    if gateway_backend != "langgraph_server":
+        reason = "proactive follow-ups need `gateway_backend_serve: langgraph_server`"
+    elif not isinstance(runtime_gateways.graph_gateway, CompositeGraphGateway):
+        reason = (
+            "the dev server was unavailable when serve started, so serve runs "
+            "in-process; restart serve to use proactive follow-ups"
+        )
+    else:
+        # Serve's message loop makes these calls: a dev server that accepts
+        # connections but stalls must not hold channel messages for minutes.
+        client = get_langgraph_sync_client(
+            url=configured_langgraph_dev_url(), timeout=10.0
+        )
+    return ProactiveServe(
+        workspace=workspace,
+        client=client,
+        timezone=default_scheduler_timezone(config),
+        unavailable_reason=reason,
+        publish=publish_to_channel_origin,
+        can_deliver=lambda thread_id: get_channel_origin(thread_id) is not None,
+        forget_origin=forget_channel_origin,
+        origin_of=get_channel_origin,
+        remember_origin=lambda thread_id, origin: restore_channel_origin(
+            thread_id, **asdict(origin)
+        ),
+    )
+
+
+def _serve_restore_proactive(proactive: Any, async_runtime: AsyncRuntime) -> None:
+    """Re-arm the conversation that was armed before serve restarted.
+
+    Its channel origin comes back from checkpoint metadata, so a push can
+    reach the chat even though serve starts on a fresh thread.
+    """
+    from ..sessions import latest_origin_checkpoints
+
+    if not proactive.available:
+        return
+    rows = async_runtime.run_sync(latest_origin_checkpoints)
+    restored = proactive.restore(
+        rows,
+        restore_origin=lambda thread_id, origin: restore_channel_origin(
+            thread_id, **origin
+        ),
+    )
+    if restored is not None:
+        console.print(
+            f"[dim]Proactive follow-ups: waiting on thread {restored[:8]} "
+            "from before the restart.[/dim]"
+        )
+
+
+def _make_serve_proactive_switch(
+    runtime_state: ServeRuntimeState,
+    channel_runtime: ChannelRuntime | None,
+) -> Callable[[str], None]:
+    """Make a thread serve's current one after a push was applied to it.
+
+    Used for the thread restored after a restart: the user's reply to the
+    push then continues that conversation, as after ``/resume``.
+    """
+
+    def _switch(thread_id: str) -> None:
+        import asyncio
+
+        from ..sessions import get_thread_metadata
+
+        async def _go() -> None:
+            stored = await get_thread_metadata(thread_id) or {}
+            dirs = await asyncio.to_thread(
+                SessionDirs.from_stored,
+                stored.get("workspace_dir"),
+                stored.get("run_dir"),
+            )
+            await _apply_serve_resume_state(
+                runtime_state,
+                channel_runtime,
+                thread_id=thread_id,
+                dirs=dirs or runtime_state.dirs,
+            )
+
+        runtime_state.async_runtime.run_sync(_go)
+        console.print(
+            f"[dim][serve] Continuing thread {thread_id} (proactive push)[/dim]"
+        )
+
+    return _switch
 
 
 def _make_serve_handle_session_resume_cb(
@@ -1713,7 +2001,13 @@ def _serve_process_message(
             console.print(f"[dim][{msg.channel_type}] Replied to {msg.sender}[/dim]")
             return
 
-        meta = build_metadata(dirs, model)
+        meta = _serve_turn_metadata(
+            dirs, model, runtime_state.thread_id, channel_runtime
+        )
+        proactive = getattr(channel_runtime, "proactive", None)
+        if proactive is not None:
+            # A turn in serve's fresh thread ends a restored thread's candidacy.
+            _serve_proactive_call(lambda: proactive.on_turn(runtime_state.thread_id))
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1776,8 +2070,8 @@ def _serve_drain_notifications(
             console.print(line_text, style=line_style, markup=False)
         # Use the current folders from runtime_state (updated by /resume's
         # session-rebind callback).
-        meta = build_metadata(runtime_state.dirs, model)
         tid = runtime_state.thread_id
+        meta = _serve_turn_metadata(runtime_state.dirs, model, tid, channel_runtime)
         try:
             response = run_streaming(
                 ui_backend="cli",
@@ -1903,8 +2197,12 @@ def serve(
     config = get_effective_config(cli_overrides)
     async_runtime = _get_cli_async_runtime(ctx)
     if debug:
+        from ..config.settings import record_env_origin
+
         os.environ["EVOSCIENTIST_LOG_LEVEL"] = "DEBUG"
         os.environ["EVOSCIENTIST_CHANNEL_DEBUG_TRACING"] = "true"
+        record_env_origin("EVOSCIENTIST_LOG_LEVEL", "cli")
+        record_env_origin("EVOSCIENTIST_CHANNEL_DEBUG_TRACING", "cli")
     apply_config_to_env(config)
     if debug:
         _configure_logging()
@@ -1981,6 +2279,23 @@ def serve(
     )
 
     channel_runtime = ChannelRuntime(agent=agent, thread_id=tid)
+
+    # Proactive pushes (#263): serve owns the workspace's proactive cron.
+    # Re-arm the conversation armed before a restart, then recreate the cron,
+    # or delete it when nothing is armed: a cron kept from an earlier run
+    # fails every tick after a dev-server restart.
+    proactive = _serve_proactive_controller(
+        config,
+        runtime_gateways,
+        gateway_backend=gateway_backend,
+        workspace=dirs.workspace,
+    )
+    channel_runtime.proactive = proactive
+    _serve_proactive_call(lambda: _serve_restore_proactive(proactive, async_runtime))
+    _serve_proactive_call(proactive.reconcile)
+    _serve_proactive_switch = _make_serve_proactive_switch(
+        runtime_state, channel_runtime
+    )
 
     # Build the slash-dispatch callbacks once; the poll loop reuses
     # them for every inbound message.  Without this hoist each message
@@ -2132,12 +2447,23 @@ def serve(
                 # finished -> start writing) that would otherwise sit in state
                 # with the reader disarmed until an inbound channel message.
                 runtime_state.async_runtime.run_sync(_serve_enqueue_completions)
+
+            # Apply proactive pushes the cron decided (throttled inside).
+            _serve_proactive_call(
+                lambda: proactive.poll(
+                    current_thread_id=runtime_state.thread_id,
+                    switch_to=_serve_proactive_switch,
+                )
+            )
     except KeyboardInterrupt:
         shutdown_event.set()
     finally:
         signal.signal(signal.SIGINT, _orig_sigint)
         signal.signal(signal.SIGTERM, _orig_sigterm)
         console.print("\n[dim]Shutting down...[/dim]")
+        # Before the atexit hook stops the dev server serve started: without
+        # serve nothing can be delivered, so the cron would only cost calls.
+        _serve_proactive_call(proactive.stop)
         _channels_stop(runtime=channel_runtime)
         console.print("[dim]Stopped.[/dim]")
 
@@ -2158,6 +2484,7 @@ def config_callback(ctx: typer.Context):
 def config_list():
     """List all configuration values"""
     from ..config import get_config_path, list_config
+    from ..config.settings import display_config_value
 
     config_data = list_config()
 
@@ -2165,13 +2492,11 @@ def config_list():
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
 
-    # Mask API keys
+    # Mask API keys, tokens, secrets and passwords
     def format_value(key: str, value: Any) -> str:
-        if "api_key" in key and value:
-            return "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
         if value == "":
             return "[dim](not set)[/dim]"
-        return str(value)
+        return escape(display_config_value(key, value))
 
     for key, value in config_data.items():
         table.add_row(key, format_value(key, value))
@@ -2184,21 +2509,17 @@ def config_list():
 def config_get(key: str = typer.Argument(..., help="Configuration key to get")):
     """Get a single configuration value"""
     from ..config import get_config_value
+    from ..config.settings import display_config_value
 
     value = get_config_value(key)
     if value is None:
         console.print(f"[red]Unknown key: {key}[/red]")
         raise typer.Exit(1)
 
-    # Mask API keys
-    if "api_key" in key and value:
-        display_value = "***" + str(value)[-4:] if len(str(value)) > 4 else "***"
-    elif value == "":
-        display_value = "(not set)"
-    else:
-        display_value = str(value)
+    # Mask API keys, tokens, secrets and passwords
+    display_value = display_config_value(key, value)
 
-    console.print(f"[cyan]{key}[/cyan]: {display_value}")
+    console.print(f"[cyan]{key}[/cyan]: {escape(display_value)}")
 
 
 @config_app.command("set")
@@ -2207,13 +2528,23 @@ def config_set(
     value: str = typer.Argument(..., help="New value"),
 ):
     """Set a single configuration value"""
-    from ..config import set_config_value
+    from ..config.settings import SettingsError, set_config_values
+    from ..config.store import ConfigError
 
-    if set_config_value(key, value):
-        console.print(f"[green]Set {escape(key)}[/green]")
-    else:
-        console.print(f"[red]Could not set {escape(key)}: invalid key or value[/red]")
-        raise typer.Exit(1)
+    try:
+        _, warnings = set_config_values({key: value})
+    except SettingsError as e:
+        reason = e.errors.get(key, "invalid key or value")
+        console.print(f"[red]Could not set {escape(key)}: {escape(reason)}[/red]")
+        raise typer.Exit(1) from None
+    except (ConfigError, OSError) as e:
+        # OSError: for example a Windows replace that kept failing while
+        # another program had the file open; nothing was written.
+        console.print(f"[red]Could not set {escape(key)}: {escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
+    console.print(f"[green]Set {escape(key)}[/green]")
+    if key in warnings:
+        console.print(f"[yellow]Note: {escape(warnings[key])}[/yellow]")
 
 
 @config_app.command("reset")
@@ -2235,7 +2566,13 @@ def config_reset(
             console.print("[dim]Cancelled.[/dim]")
             return
 
-    reset_config()
+    from ..config.store import ConfigError
+
+    try:
+        reset_config()
+    except ConfigError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        raise typer.Exit(1) from None
     console.print("[green]Configuration reset to defaults.[/green]")
 
 

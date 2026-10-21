@@ -16,6 +16,7 @@ Usage from a channel's ``main()``::
 import asyncio
 import logging
 import signal
+import threading
 from typing import Any
 
 from ..paths import Workspace
@@ -113,6 +114,13 @@ async def _async_main(
 
     await manager.start_health()
 
+    # Bound into the consumer task's context so blocking sync tools (shell)
+    # see it via current_cancel_event() — the same mechanism serve's
+    # run_streaming uses. Set on shutdown so in-flight tool subprocesses die
+    # and asyncio.run's executor join cannot hang. Only takes effect when
+    # the agent runs in-process with the `local` backend.
+    turn_cancel = threading.Event()
+
     tasks = [channel.run()]
 
     dispatcher = standalone_outbound_dispatcher(bus, channel)
@@ -139,42 +147,105 @@ async def _async_main(
             send_thinking=send_thinking,
         )
         manager.register_health_provider("consumer", lambda: consumer.metrics)
-        tasks.append(consumer.run())
+
+        async def _run_consumer() -> None:
+            from ..cancellation import bind_cancel_event
+
+            with bind_cancel_event(turn_cancel):
+                await consumer.run()
+
+        tasks.append(_run_consumer())
         if send_thinking:
             logger.info("Thinking messages enabled")
+
+    # Wrap the coroutines in Task objects once, after agent init (so the
+    # channel still only starts when the agent is ready) and before the
+    # signal handlers go in. Everything below operates on `workers`.
+    workers: list[asyncio.Task] = [asyncio.create_task(coro) for coro in tasks]
 
     async def _graceful_shutdown() -> None:
         """Graceful shutdown: drain consumer, flush outbound, stop channel."""
         logger.info("Graceful shutdown initiated...")
-        if consumer is not None:
-            await consumer.stop()
-        # Drain outbound queue before stopping the channel
-        drained = 0
-        while True:
-            try:
-                msg = bus.outbound.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            try:
-                await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
-                if msg.content or msg.media:
-                    drained += 1
-            except Exception:
-                pass
-        if drained:
-            logger.info(f"Outbound drain: {drained} sent")
-        channel._running = False
-        await channel.stop()
-        await manager.stop_health()
+        turn_cancel.set()
+        try:
+            if consumer is not None:
+                from ..backends import cancel_active_shell_processes
+
+                cancel_active_shell_processes(turn_cancel)
+                await consumer.stop()
+            # Drain outbound queue before stopping the channel
+            drained = 0
+            while True:
+                try:
+                    msg = bus.outbound.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                try:
+                    await asyncio.wait_for(_deliver_outbound(channel, msg), timeout=5.0)
+                    if msg.content or msg.media:
+                        drained += 1
+                except Exception:
+                    pass
+            if drained:
+                logger.info(f"Outbound drain: {drained} sent")
+            channel._running = False
+            await channel.stop()
+            await manager.stop_health()
+        except Exception:
+            # A failing stop step must never skip worker cancellation — that
+            # path leaves the first gather waiting forever (hung process).
+            logger.exception("Graceful shutdown failed")
+        finally:
+            for t in workers:
+                t.cancel()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda s=sig: asyncio.create_task(_graceful_shutdown()),
-        )
+    shutdown_task: asyncio.Task[None] | None = None
 
-    await asyncio.gather(*tasks)
+    def _request_shutdown() -> None:
+        nonlocal shutdown_task
+        if shutdown_task is None:
+            shutdown_task = asyncio.create_task(_graceful_shutdown())
+            return
+        # Second signal forces the exit: cancel the graceful path, whose
+        # `finally` then cancels the workers. Deferred one step so a task
+        # created by a signal handled in the same loop pass enters its `try`.
+        logger.warning("Second signal received, forcing shutdown")
+        loop.call_soon(shutdown_task.cancel)
+
+    # Windows event loops have no add_signal_handler. A plain handler runs on
+    # the main thread between bytecodes and hands the request to the loop; it
+    # is removed on the way out so a later Ctrl+C never reaches a closed loop.
+    previous_handlers: dict[int, Any] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_shutdown)
+        except NotImplementedError:
+            previous_handlers[sig] = signal.signal(
+                sig, lambda *_: loop.call_soon_threadsafe(_request_shutdown)
+            )
+
+    try:
+        await asyncio.gather(*workers, return_exceptions=True)
+        if shutdown_task is not None:
+            await asyncio.gather(shutdown_task, return_exceptions=True)
+    finally:
+        for sig, previous in previous_handlers.items():
+            if previous is not None:
+                signal.signal(sig, previous)
+        if consumer is not None:
+            from ..middleware.code_interpreter import aclose_code_interpreters
+
+            # A forced exit leaves the consumer's turns running; settle them
+            # first so none reopens an interpreter after the close.
+            current = asyncio.current_task()
+            leftover = [t for t in asyncio.all_tasks() if t is not current]
+            try:
+                for t in leftover:
+                    t.cancel()
+                await asyncio.gather(*leftover, return_exceptions=True)
+            finally:
+                await aclose_code_interpreters()
 
 
 def _ensure_standalone_dev_server(
@@ -218,6 +289,27 @@ def _ensure_standalone_dev_server(
         raise
 
 
+def _ensure_ccproxy(config: Any) -> None:
+    """Start ccproxy, or reuse a running one, when Anthropic uses OAuth.
+
+    Must run before the dev server spawns: its env is copied from ``os.environ``.
+    """
+    if getattr(config, "anthropic_auth_mode", "api_key") != "oauth":
+        return
+
+    import atexit
+
+    from ..ccproxy_manager import maybe_start_ccproxy, stop_ccproxy
+
+    try:
+        proc = maybe_start_ccproxy(config)
+    except RuntimeError as exc:
+        logger.error("ccproxy startup failed: %s", exc)
+        raise SystemExit(1) from exc
+    if proc:
+        atexit.register(stop_ccproxy, proc)
+
+
 def run_standalone(
     channel: Channel,
     bus: MessageBus,
@@ -242,6 +334,17 @@ def run_standalone(
     """
     from ..paths import process_workspace
 
+    # HTTP request URLs can embed channel credentials (e.g. Telegram's Bot
+    # API puts the bot token in the URL path), and httpx logs every request
+    # URL at INFO. A standalone channel started with DEBUG logging (each
+    # serve.py) would therefore write secrets to stdout and any redirected
+    # file. Elevate httpx above INFO here — the same effect `EvoSci serve`
+    # has. Keep this in run_standalone (shared by every channel), not in a
+    # single channel's serve.py.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.INFO)
+
     config = None
     backend = None
     if use_agent:
@@ -263,6 +366,8 @@ def run_standalone(
                     logger.error("ChatGPT: %s", state.problem)
                 logger.error("%s", chatgpt_oauth.SIGN_IN_HINT)
                 raise SystemExit(1)
+        # ccproxy starts after the sign-in check, like the other entry points.
+        _ensure_ccproxy(config)
         reload_env_dirs()
         backend = resolve_gateway_backend(config, GatewaySurface.STANDALONE)
         # The agent serves ``default_workdir``, else the current directory.

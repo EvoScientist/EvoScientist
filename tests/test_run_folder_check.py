@@ -224,9 +224,10 @@ def test_manual_autoskills_runs_forward_the_root(workspace, monkeypatch):
     assert configurable["workspace_dir"] == workspace.key
 
 
-def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch):
-    """Graphs that work in the session's folder refuse another run folder;
-    graphs built for the workspace root only check the workspace."""
+def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch, request):
+    """Every registered graph refuses another workspace. Graphs that work in
+    the session's folder also refuse another run folder; graphs built for the
+    workspace root only check the workspace."""
     import importlib
     import json
     import sys
@@ -251,6 +252,8 @@ def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch):
         "EvoScientist.langgraph_dev.main_graph",
     ):
         monkeypatch.delitem(sys.modules, name, raising=False)
+        # Built below from stubbed graphs: later imports must build their own.
+        request.addfinalizer(lambda name=name: sys.modules.pop(name, None))
 
     registry = json.loads(
         (Path(evo.__file__).parent / "langgraph_dev" / "langgraph.json").read_text()
@@ -258,12 +261,15 @@ def test_registered_graphs_check_the_folders_they_work_in(served, monkeypatch):
     other_run = _config(
         SessionDirs(served.workspace, served.workspace.runs_dir / "other")
     )
+    other_workspace = _config(SessionDirs(Workspace(served.workspace.root / "other")))
     running = SimpleNamespace(execution_runtime=object())
     assert FOLDER_GRAPH_IDS <= registry.keys()
 
     for graph_id, target in registry.items():
         module_path, attr = target.rsplit(":", 1)
         factory = getattr(importlib.import_module(module_path), attr)
+        with pytest.raises(RunFolderMismatchError):
+            asyncio.run(factory(other_workspace, running))
         if graph_id in FOLDER_GRAPH_IDS:
             with pytest.raises(RunFolderMismatchError):
                 asyncio.run(factory(other_run, running))

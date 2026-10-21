@@ -391,6 +391,11 @@ HITL_APPROVE_ALL_KEY = "hitl_approve_all"
 # rubric left in the thread by a run that never reached a verdict cannot grade
 # a later turn or a continuation started by another client.
 RUBRIC_RUN_KEY = "rubric_run"
+
+# Per-run ``configurable`` key carrying the retry tier (``model_retry_for_run``),
+# written fresh on every gateway run. All model calls of the run, sub-agents
+# included, share the one dict, so the retry layer also marks on it that a
+# call used its whole budget: later calls in the run are then not retried.
 MODEL_RETRY_RUN_KEY = "model_retry"
 
 
@@ -1314,7 +1319,14 @@ def _resolve_virtual_mount_path(
     outside the workspace's ``media/``: the folder as configured (how channel
     attachments are referenced) and its resolved target, both kept as they
     are.
+
+    On Windows a ``/C:/...`` file-tool alias becomes the drive path the shell
+    takes.
     """
+    host = paths.host_file_tool_path(token)
+    if not host.startswith("/"):
+        return _platform_quote(host)
+
     rel = _subpath_under_mount(token, "/skills")
     if rel is not None:
         for tier in _skills_tier_paths(skills_dir):
@@ -1876,7 +1888,7 @@ class _MediaFolderView(ReadOnlyFilesystemBackend):
         # ValueError for an entry that resolves outside the folder; the
         # listing skips it.
         path.resolve().relative_to(self.cwd)
-        return (self._media_dir / path.relative_to(self.cwd)).as_posix()
+        return paths.file_tool_path(self._media_dir / path.relative_to(self.cwd))
 
 
 class CustomSandboxBackend(LocalShellBackend):
@@ -1983,9 +1995,10 @@ class CustomSandboxBackend(LocalShellBackend):
           3. /Users/name/.../<ws_name>/f   → /f  (strip at LAST <ws_name>/)
           4. /Users/name/file.py           → /file.py (keep basename)
 
-        In dangerous (real-filesystem) mode, skip all rewriting and let the
-        parent resolve real absolute paths as-is.
+        In dangerous (real-filesystem) mode, only decode a Windows ``/C:/...``
+        alias and let the parent resolve real absolute paths as-is.
         """
+        key = paths.host_file_tool_path(key)
         if self._dangerous:
             return super()._resolve_path(key)
 
@@ -1993,16 +2006,21 @@ class CustomSandboxBackend(LocalShellBackend):
         if media_path is not None:
             return media_path
 
-        cwd_str = str(self.cwd).rstrip("/")
+        cwd_str = self.cwd.as_posix().rstrip("/")
         ws_name = Path(cwd_str).name  # e.g. "workspace", "my-project"
 
         # Prefer the full cwd match so a parent path that happens to contain
         # "/<ws_name>/" (e.g. cwd = /Users/u/workspace/.../workspace) doesn't
         # confuse the basename-based fallback below.
-        if key == cwd_str:
-            return super()._resolve_path("/")
-        if key.startswith(cwd_str + "/"):
-            return super()._resolve_path("/" + key[len(cwd_str) + 1 :])
+        key_path = Path(key)
+        if key_path.is_absolute():
+            try:
+                relative = key_path.relative_to(self.cwd)
+            except ValueError:
+                pass
+            else:
+                virtual = relative.as_posix()
+                return super()._resolve_path("/" if virtual == "." else "/" + virtual)
 
         # Auto-strip /<ws_name>/ prefix to prevent nesting
         ws_prefix = f"/{ws_name}/"
@@ -2029,10 +2047,8 @@ class CustomSandboxBackend(LocalShellBackend):
 
         return super()._resolve_path(key)
 
-    # On Windows the file tools never reach the media folder here: deepagents'
-    # ``validate_path`` rejects drive-letter paths (``C:\...``, ``C:/...``)
-    # for every file tool before the backend sees them. In run mode a channel
-    # attachment on Windows is reachable through the shell only.
+    # Windows attachment references use a /C:/... file-tool alias so they
+    # pass deepagents' validation before reaching this backend.
     def _media_relative(self, key: str) -> Path | None:
         """*key* relative to the media folder, if it names a path inside it.
 
@@ -2041,7 +2057,7 @@ class CustomSandboxBackend(LocalShellBackend):
         """
         if self._media_dir is None:
             return None
-        path = Path(key)
+        path = Path(paths.host_file_tool_path(key))
         if not path.is_absolute():
             return None
         for base in (self._media_dir, self._media_real):
@@ -2090,15 +2106,25 @@ class CustomSandboxBackend(LocalShellBackend):
     def _in_media(self, file_path: str) -> bool:
         return not self._dangerous and self._media_relative(file_path) is not None
 
+    def _tool_paths(self, items: list | None) -> list | None:
+        """Spell dangerous-mode result paths the way the file tools accept them."""
+        if not self._dangerous or not items:
+            return items
+        return [{**item, "path": paths.file_tool_path(item["path"])} for item in items]
+
     def ls(self, path: str) -> LsResult:
         if self._in_media(path):
             return self._media_view.ls(path)
-        return super().ls(path)
+        result = super().ls(path)
+        result.entries = self._tool_paths(result.entries)
+        return result
 
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         if path is not None and self._in_media(path):
             return self._media_view.glob(pattern, path)
-        return super().glob(pattern, path)
+        result = super().glob(pattern, path)
+        result.matches = self._tool_paths(result.matches)
+        return result
 
     def grep(
         self,
@@ -2113,9 +2139,11 @@ class CustomSandboxBackend(LocalShellBackend):
             return self._media_view.grep(
                 pattern, path, glob, max_count=max_count, context_lines=context_lines
             )
-        return super().grep(
+        result = super().grep(
             pattern, path, glob, max_count=max_count, context_lines=context_lines
         )
+        result.matches = self._tool_paths(result.matches)
+        return result
 
     def write(self, file_path: str, content: str) -> WriteResult:
         if self._in_media(file_path):

@@ -56,13 +56,16 @@ GRADER_TOOLS = ("ls", "read_file")
 # grader's strategy from the model profile plus a model-name regex table, and
 # OpenRouter breaks each family differently: Gemini tool schemas lose the
 # criteria ``oneOf`` (every entry comes back null), Anthropic JSON mode returns
-# non-JSON, OpenAI's strict JSON mode rejects that ``oneOf`` with a 400.
-# Verified live 2026-09-04 and 2026-09-26. Passed explicitly because a profile
-# pin loses to the name regex (``anthropic/claude-fable-5``).
+# non-JSON, OpenAI's strict JSON mode rejects that ``oneOf`` with a 400; Muse
+# Spark answers only through JSON mode and Qwen only through a tool call. Verified
+# live 2026-09-04, 2026-09-26 and 2026-10-16. Passed explicitly because a
+# profile pin loses to the name regex (``anthropic/claude-fable-5``).
 _OPENROUTER_GRADER_STRATEGY: dict[str, type[ProviderStrategy] | type[ToolStrategy]] = {
     "google/": ProviderStrategy,
     "anthropic/": ToolStrategy,
     "openai/": ToolStrategy,
+    "meta/muse-spark": ProviderStrategy,
+    "qwen/": ToolStrategy,
 }
 
 # Model calls one grader attempt may spend before the run fails closed with
@@ -169,14 +172,19 @@ GRADER_FILE_CHECK_PROMPT = (
 )
 
 # OpenRouter ids for which neither strategy yields a verdict (re-probed 2026-09-22,
-# sonnet-5.5 probed 2026-09-29): the model rejects forced ``tool_choice`` and JSON
-# mode rejects the grader schema's ``oneOf``. Exact ids, not families:
+# sonnet-5.5 probed 2026-09-29, qwen3.8-flash and muse-wonder 2026-10-16): these
+# Claude routes reject forced ``tool_choice`` and their JSON mode rejects the
+# grader schema's ``oneOf``; qwen3.8-flash returns no parsable verdict either way,
+# and muse-wonder's JSON mode often runs away into an unparsable reply hundreds of
+# thousands of tokens long. Exact ids, not families:
 # ``anthropic/claude-fable-5`` and the native ``claude-fable-5-1`` /
 # ``claude-opus-5-5`` grade fine.
 _OPENROUTER_UNGRADABLE_IDS = (
     "anthropic/claude-fable-5.1",
     "anthropic/claude-opus-5.5",
     "anthropic/claude-sonnet-5.5",
+    "qwen/qwen3.8-flash",
+    "meta/muse-wonder",
 )
 
 
@@ -189,11 +197,10 @@ def _warn_if_grader_unsupported(model: BaseChatModel) -> None:
     if model_id in _OPENROUTER_UNGRADABLE_IDS:
         logger.warning(
             "rubric: grader model %s via OpenRouter cannot return "
-            "structured verdicts (this route rejects forced tool_choice and its "
-            "JSON mode rejects the grader schema); rubric runs will end in "
-            "grader_error. Use the native anthropic provider for this model, or "
-            "set auxiliary_model to another model (claude-fable-5, claude-sonnet-5, "
-            "Haiku, GPT and Gemini all grade through OpenRouter).",
+            "structured verdicts; rubric runs will end in grader_error. Set "
+            "auxiliary_model to another model (claude-haiku-5.5, GPT and Gemini "
+            "grade through OpenRouter), or use this model's native provider if "
+            "it has one.",
             model_id,
         )
 

@@ -14,15 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 def tools_dir() -> Path:
-    """``<DATA_DIR>/tools`` as an absolute path, read at call time so an
-    overridden DATA_DIR applies.
-
-    Absolute because the recorded path is put on ``PATH`` for children that run
-    in other working dirs; ``EVOSCIENTIST_DATA_DIR`` may be relative.
-    """
+    """``<DATA_DIR>/tools``, read at call time so an overridden DATA_DIR applies."""
     from .. import paths
 
-    return (paths.DATA_DIR / "tools").resolve()
+    return paths.DATA_DIR / "tools"
 
 
 def is_under(path: Path, root: Path) -> bool:

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import typer
 from langchain_core.messages import AIMessage, HumanMessage
@@ -244,6 +245,106 @@ async def test_local_gateway_get_process_status_reads_registry(monkeypatch):
     status = await gateway.get_process_status(GraphTarget(), "cli-thread", "proc-9")
 
     assert status == "interrupted"
+
+
+def _query_dev_server(monkeypatch, client=None, *, enabled=True, url="http://dev"):
+    needs = MagicMock(return_value=enabled)
+    scoped = MagicMock()
+    scoped.return_value.__aenter__.return_value = client
+    monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: "unknown")
+    monkeypatch.setattr(
+        "EvoScientist.EvoScientist._ensure_config", lambda: SimpleNamespace()
+    )
+    monkeypatch.setattr("EvoScientist.gateway.local.needs_langgraph_dev", needs)
+    monkeypatch.setattr(
+        "EvoScientist.langgraph_dev.sdk.configured_langgraph_dev_url", lambda: url
+    )
+    if client is not None:
+        monkeypatch.setattr(
+            "EvoScientist.langgraph_dev.sdk.langgraph_async_client_scoped", scoped
+        )
+    return needs, scoped
+
+
+@pytest.mark.parametrize("remote_status", ["running", "success", "error", "unknown"])
+async def test_local_process_status_falls_back_to_dev_server(
+    monkeypatch, remote_status
+):
+    client = MagicMock()
+    client.http.get = AsyncMock(return_value={"status": remote_status})
+    needs, scoped = _query_dev_server(monkeypatch, client)
+    assert (
+        await LocalGraphGateway().get_process_status(
+            GraphTarget(), "thread", "remote-process"
+        )
+        == remote_status
+    )
+    assert needs.call_args.kwargs == {"backend": "local"}
+    scoped.assert_called_once_with("http://dev")
+    client.http.get.assert_awaited_once_with(
+        "/api/bg_process_status", params={"process_id": "remote-process"}
+    )
+
+
+async def test_local_process_status_no_dev_server_returns_unknown(monkeypatch):
+    _needs, scoped = _query_dev_server(monkeypatch, MagicMock(), enabled=False)
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
+    )
+    scoped.assert_not_called()
+
+
+async def test_local_process_status_connect_error_returns_unknown(monkeypatch):
+    client = MagicMock()
+    client.http.get = AsyncMock(side_effect=httpx.ConnectError("offline"))
+    _query_dev_server(monkeypatch, client)
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
+    )
+
+
+@pytest.mark.timeout(3)
+async def test_local_process_status_refused_connect_returns_unknown_at_once(
+    monkeypatch, unused_tcp_port
+):
+    _query_dev_server(monkeypatch, url=f"http://127.0.0.1:{unused_tcp_port}")
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == "unknown"
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("timed out"),
+        httpx.HTTPStatusError(
+            "server error",
+            request=httpx.Request("GET", "http://dev"),
+            response=httpx.Response(503),
+        ),
+    ],
+)
+async def test_local_process_status_other_errors_propagate(monkeypatch, error):
+    client = MagicMock()
+    client.http.get = AsyncMock(side_effect=error)
+    _query_dev_server(monkeypatch, client)
+    with pytest.raises(type(error)):
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+
+
+@pytest.mark.parametrize("status", ["running", "success", "error", "interrupted"])
+async def test_known_local_process_never_queries_server(monkeypatch, status):
+    needs, scoped = _query_dev_server(monkeypatch, MagicMock())
+    monkeypatch.setattr("EvoScientist.background.poll_status", lambda _: status)
+    assert (
+        await LocalGraphGateway().get_process_status(GraphTarget(), "thread", "process")
+        == status
+    )
+    needs.assert_not_called()
+    scoped.assert_not_called()
 
 
 async def test_local_graph_gateway_updates_state_values():
@@ -936,6 +1037,11 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
     assert isinstance(created_metadata["updated_at"], str)
     assert threads.metadata_updates == [("abc12345", threads.created[0]["metadata"])]
     assert threads.stream_calls == [("abc12345", "writing-agent")]
+    run_request_id = stream.run.starts[0]["metadata"].get(
+        "_evoscientist_gateway_request_id"
+    )
+    assert isinstance(run_request_id, str)
+    assert run_request_id
     assert stream.run.starts == [
         {
             "input": {
@@ -952,7 +1058,10 @@ async def test_langgraph_server_gateway_streams_root_protocol_events():
                 },
                 "recursion_limit": 4242,
             },
-            "metadata": {"workspace_dir": "/tmp/ws"},
+            "metadata": {
+                "workspace_dir": "/tmp/ws",
+                "_evoscientist_gateway_request_id": run_request_id,
+            },
         }
     ]
     assert events == [
@@ -1016,6 +1125,11 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
     with patch("EvoScientist.EvoScientist._ensure_config", return_value=live_cfg):
         events = await _collect()
 
+    run_request_id = stream.run.starts[0]["metadata"].get(
+        "_evoscientist_gateway_request_id"
+    )
+    assert isinstance(run_request_id, str)
+    assert run_request_id
     assert stream.run.starts == [
         {
             "input": {
@@ -1034,7 +1148,7 @@ async def test_langgraph_server_gateway_forwards_configurable_extra():
                 },
                 "recursion_limit": 4242,
             },
-            "metadata": None,
+            "metadata": {"_evoscientist_gateway_request_id": run_request_id},
         }
     ]
     assert events == [
@@ -2379,8 +2493,18 @@ async def test_state_repair_requires_this_request_to_attempt_a_run(
         states={"thread": {"values": {}, "next": ("model",)}},
         streams={"thread": stream},
     )
+    client = FakeLangGraphClient(threads)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            pass
+
+    client.runs = _FakeRunsClient()
     gateway = LangGraphServerGateway(
-        LangGraphServerThreadStore(client=FakeLangGraphClient(threads)),
+        LangGraphServerThreadStore(client=client),
         interrupt_wait_seconds=0,
     )
     message = "hi"
@@ -2594,7 +2718,7 @@ async def test_langgraph_server_gateway_repair_swallows_update_state_failure(
     )
 
 
-async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
+async def test_langgraph_server_gateway_cancels_only_its_run_on_consumer_abort():
     stream = FakeLangGraphThreadStream(
         "abc12345",
         events=[
@@ -2622,7 +2746,10 @@ async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
     class _FakeRunsClient:
         async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
             if status == "running":
-                return [{"run_id": "run-active", "status": "running"}]
+                return [
+                    {"run_id": "run-1", "status": "running"},
+                    {"run_id": "other-run", "status": "running"},
+                ]
             return []
 
         async def cancel_many(self, *, thread_id: str, run_ids):
@@ -2638,7 +2765,485 @@ async def test_langgraph_server_gateway_cancels_run_on_consumer_abort():
     await gen.__anext__()
     await gen.aclose()
 
-    assert cancel_calls == [("abc12345", ["run-active"])]
+    assert cancel_calls == [("abc12345", ["run-1"])]
+
+
+@pytest.mark.parametrize(
+    ("active_after_respond", "expected_run_ids"),
+    [
+        (
+            [
+                {
+                    "run_id": "resumed-run",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {
+                            "resume": {
+                                "interrupt-1": {"decisions": [{"type": "approve"}]}
+                            }
+                        }
+                    },
+                },
+                {
+                    "run_id": "concurrent-fresh-run",
+                    "status": "running",
+                    "kwargs": {"command": None},
+                },
+            ],
+            ["resumed-run"],
+        ),
+        (
+            [
+                {
+                    "run_id": "unrelated-new-run",
+                    "status": "running",
+                    "kwargs": {"command": None},
+                }
+            ],
+            [],
+        ),
+        (
+            [
+                {
+                    "run_id": "pending-resumed-run",
+                    "status": "pending",
+                    "kwargs": {
+                        "command": {
+                            "resume": {
+                                "interrupt-1": {"decisions": [{"type": "approve"}]}
+                            }
+                        }
+                    },
+                }
+            ],
+            ["pending-resumed-run"],
+        ),
+        (
+            [
+                {
+                    "run_id": "different-resume",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {"resume": {"interrupt-2": {"decisions": []}}}
+                    },
+                }
+            ],
+            [],
+        ),
+        (
+            [
+                {
+                    "run_id": "different-response",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {
+                            "resume": {
+                                "interrupt-1": {"decisions": [{"type": "reject"}]}
+                            }
+                        }
+                    },
+                }
+            ],
+            [],
+        ),
+        (
+            [
+                {
+                    "run_id": "matching-resume-a",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {
+                            "resume": {
+                                "interrupt-1": {"decisions": [{"type": "approve"}]}
+                            }
+                        }
+                    },
+                },
+                {
+                    "run_id": "matching-resume-b",
+                    "status": "running",
+                    "kwargs": {
+                        "command": {
+                            "resume": {
+                                "interrupt-1": {"decisions": [{"type": "approve"}]}
+                            }
+                        }
+                    },
+                },
+                {"run_id": "missing-kwargs", "status": "running"},
+                {
+                    "run_id": "malformed-command",
+                    "status": "running",
+                    "kwargs": {"command": []},
+                },
+            ],
+            [],
+        ),
+    ],
+    ids=[
+        "matching-resume-among-concurrent-runs",
+        "resumed-run-finished-before-list",
+        "matching-pending-resume",
+        "different-interrupt",
+        "same-interrupt-different-response",
+        "ambiguous-matches-and-malformed-records",
+    ],
+)
+async def test_server_gateway_scopes_resumed_run_on_consumer_abort(
+    active_after_respond: list[dict[str, Any]],
+    expected_run_ids: list[str],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch,
+):
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+        ],
+        interrupts=[{"interrupt_id": "interrupt-1"}],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr("EvoScientist.gateway.server._RUN_LOOKUP_PAGE_SIZE", 1)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            runs = [{"run_id": "other-run", "status": "running"}]
+            if stream.run.responses:
+                runs.extend(active_after_respond)
+            return [run for run in runs if run["status"] == status][
+                offset : offset + limit
+            ]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    gen = gateway.stream_events(
+        RunRequest(
+            message=Command(resume={"decisions": [{"type": "approve"}]}),
+            thread_id="abc12345",
+        )
+    )
+    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+        await gen.__anext__()
+        await gen.aclose()
+
+    assert cancel_calls == (
+        [("abc12345", expected_run_ids)] if expected_run_ids else []
+    )
+    if not expected_run_ids:
+        assert any(
+            "Could not identify resumed run" in record.message
+            for record in caplog.records
+        )
+
+
+@pytest.mark.parametrize("multiple_interrupts", [False, True])
+async def test_server_gateway_successful_resume_does_not_list_active_runs(
+    multiple_interrupts, caplog
+):
+    """Successful resumes need no ownership lookup or ambiguity warnings."""
+    from langgraph.types import Command
+
+    interrupts = [{"interrupt_id": "interrupt-1"}]
+    if multiple_interrupts:
+        interrupts.append({"interrupt_id": "interrupt-2"})
+    stream = FakeLangGraphThreadStream("thread", interrupts=interrupts)
+    threads = FakeLangGraphThreadsClient(
+        states={"thread": {"values": {}}}, streams={"thread": stream}
+    )
+    client = FakeLangGraphClient(threads)
+    client.runs = SimpleNamespace(list=AsyncMock(return_value=[]))
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+        async for _ in gateway.stream_events(
+            RunRequest(
+                message=Command(
+                    resume={"interrupt-1": {"decisions": [{"type": "approve"}]}}
+                ),
+                thread_id="thread",
+            )
+        ):
+            pass
+
+    assert stream.run.responses == [
+        {
+            "interrupt_id": "interrupt-1",
+            "response": {"decisions": [{"type": "approve"}]},
+        }
+    ]
+    client.runs.list.assert_not_awaited()
+    assert not any("resumed run" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "cancel"])
+@pytest.mark.parametrize(
+    ("run_status", "multiple_interrupts", "response"),
+    [
+        ("pending", False, 0),
+        ("running", False, None),
+        ("pending", True, {"decisions": [{"type": "approve"}]}),
+        ("running", True, {"decisions": [{"type": "approve"}]}),
+    ],
+)
+@pytest.mark.parametrize("has_neighbour", [False, True])
+async def test_server_gateway_cleans_up_resume_accepted_before_respond_finishes(
+    failure, run_status, multiple_interrupts, response, has_neighbour, monkeypatch
+):
+    """Record resume identity before the awaited respond can fail or cancel."""
+    import asyncio
+
+    from langgraph.types import Command
+
+    interrupts = [{"interrupt_id": "interrupt-1"}]
+    if multiple_interrupts:
+        interrupts.append({"interrupt_id": "interrupt-2"})
+    stream = FakeLangGraphThreadStream("thread", interrupts=interrupts)
+    accepted = asyncio.Event()
+    respond = stream.run.respond
+
+    async def _accepted_then_interrupted(response, *, interrupt_id=None):
+        await respond(response, interrupt_id=interrupt_id)
+        accepted.set()
+        if failure == "timeout":
+            raise TimeoutError("run.respond response timed out")
+        await asyncio.Event().wait()
+
+    stream.run.respond = _accepted_then_interrupted
+    threads = FakeLangGraphThreadsClient(
+        states={"thread": {"values": {}, "next": ("model",)}},
+        streams={"thread": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancelled = False
+    cancel_calls = []
+    # Exercise pagination as well as both active statuses; the neighbour shares
+    # the interrupt id but has a different response and must never be cancelled.
+    monkeypatch.setattr("EvoScientist.gateway.server._RUN_LOOKUP_PAGE_SIZE", 1)
+
+    class _FakeRunsClient:
+        async def list(self, thread_id, *, limit, offset, status):
+            runs = []
+            if has_neighbour:
+                runs.append(
+                    {
+                        "run_id": "other-run",
+                        "status": "running",
+                        "kwargs": {"command": {"resume": {"interrupt-1": "other"}}},
+                    }
+                )
+            if accepted.is_set() and not cancelled:
+                runs.append(
+                    {
+                        "run_id": "accepted-resume",
+                        "status": run_status,
+                        "kwargs": {"command": {"resume": {"interrupt-1": response}}},
+                    }
+                )
+            return [run for run in runs if run["status"] == status][
+                offset : offset + limit
+            ]
+
+        async def cancel_many(self, *, thread_id, run_ids):
+            nonlocal cancelled
+            cancel_calls.append((thread_id, list(run_ids)))
+            cancelled = True
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+    gen = gateway.stream_events(
+        RunRequest(
+            message=Command(resume={"interrupt-1": response}), thread_id="thread"
+        )
+    )
+    if failure == "timeout":
+        event = await gen.__anext__()
+        assert event["type"] == "error"
+    else:
+        pending = asyncio.create_task(gen.__anext__())
+        await asyncio.wait_for(accepted.wait(), timeout=2)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+
+    # On the error path this must already hold before the first yield, since
+    # the consumer may abandon the generator as soon as it receives the error.
+    assert cancel_calls == [("thread", ["accepted-resume"])]
+    assert threads.state_updates == (
+        [("thread", None, "__end__")]
+        if failure == "timeout" and not has_neighbour
+        else []
+    )
+    await gen.aclose()
+    assert cancel_calls == [("thread", ["accepted-resume"])]
+
+
+async def test_server_gateway_resume_cleanup_skips_incomplete_run_listing(
+    monkeypatch, caplog
+):
+    """A matching first page is not enough if a later page cannot be read."""
+    from langgraph.types import Command
+
+    stream = FakeLangGraphThreadStream(
+        "thread",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            }
+        ],
+        interrupts=[{"interrupt_id": "interrupt-1"}],
+    )
+    threads = FakeLangGraphThreadsClient(
+        states={"thread": {"values": {}}}, streams={"thread": stream}
+    )
+    client = FakeLangGraphClient(threads)
+    cancel = AsyncMock()
+    monkeypatch.setattr("EvoScientist.gateway.server._RUN_LOOKUP_PAGE_SIZE", 1)
+
+    async def _list(thread_id, *, limit, offset, status):
+        if not stream.run.responses or status != "pending":
+            return []
+        if offset:
+            raise TimeoutError("second page unavailable")
+        return [
+            {
+                "run_id": "matching-first-page",
+                "status": "pending",
+                "kwargs": {"command": {"resume": {"interrupt-1": "yes"}}},
+            }
+        ]
+
+    client.runs = SimpleNamespace(list=_list, cancel_many=cancel)
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+    gen = gateway.stream_events(
+        RunRequest(message=Command(resume="yes"), thread_id="thread")
+    )
+    with caplog.at_level("WARNING", logger="EvoScientist.gateway.server"):
+        await gen.__anext__()
+        await gen.aclose()
+
+    cancel.assert_not_awaited()
+    assert threads.state_updates == []
+    assert any("Could not list active runs" in r.message for r in caplog.records)
+
+
+async def test_server_gateway_failure_does_not_cancel_or_repair_another_run():
+    class _FailingStream(FakeLangGraphThreadStream):
+        async def _iter_events(self):
+            raise RuntimeError("subscription failed")
+            yield  # pragma: no cover
+
+    stream = _FailingStream("abc12345")
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}, "next": ("slow",)}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[tuple[str, list[str]]] = []
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if status == "running":
+                return [{"run_id": "other-run", "status": "running"}]
+            if status == "pending":
+                return [{"run_id": "run-1", "status": "pending"}]
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            cancel_calls.append((thread_id, list(run_ids)))
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    with pytest.raises(RuntimeError, match="subscription failed"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert cancel_calls == [("abc12345", ["run-1"])]
+    assert threads.state_updates == []
+
+
+async def test_server_gateway_recovers_run_accepted_before_start_timeout():
+    stream = FakeLangGraphThreadStream("abc12345")
+
+    async def _accepted_then_timeout(**kwargs):
+        stream.run.starts.append(kwargs)
+        raise TimeoutError("run.start response timed out")
+
+    stream.run.start = _accepted_then_timeout
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[tuple[str, list[str]]] = []
+    cancelled = False
+
+    class _FakeRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            if cancelled or status != "running":
+                return []
+            return [
+                {
+                    "run_id": "accepted-run",
+                    "status": "running",
+                    "metadata": stream.run.starts[0]["metadata"],
+                },
+                {
+                    "run_id": "other-run",
+                    "status": "success",
+                    "metadata": {},
+                },
+            ]
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            nonlocal cancelled
+            cancel_calls.append((thread_id, list(run_ids)))
+            cancelled = True
+
+    client.runs = _FakeRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    with pytest.raises(TimeoutError, match=r"run\.start response timed out"):
+        async for _event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            pass
+
+    assert cancel_calls == [("abc12345", ["accepted-run"])]
+    metadata = stream.run.starts[0]["metadata"]
+    assert metadata["_evoscientist_gateway_request_id"]
 
 
 async def test_langgraph_server_gateway_does_not_cancel_on_normal_completion():

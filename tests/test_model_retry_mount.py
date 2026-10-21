@@ -79,10 +79,11 @@ def test_a_negative_budget_is_kept_and_switches_the_retry_off(caplog):
 
 def test_a_malformed_budget_in_the_config_file_keeps_the_default(tmp_path, monkeypatch):
     """From the file, through the loader, to the retry layer and the run's key."""
+    from EvoScientist import paths
     from EvoScientist.config.settings import load_config
     from EvoScientist.EvoScientist import _model_retry_middleware
 
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path / "evoscientist")
     (tmp_path / "evoscientist").mkdir()
     (tmp_path / "evoscientist" / "config.yaml").write_text(
         "model_retry_wait_seconds: 60s\nauto_mode_retry_wait_seconds: .inf\n",

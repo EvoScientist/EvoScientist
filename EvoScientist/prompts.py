@@ -308,7 +308,11 @@ _SHELL_BASH_ON_WINDOWS_SANDBOX = (
 )
 _SHELL_BASH_ON_WINDOWS_DANGEROUS = (
     "**Shell**: The shell is bash from Git for Windows. Write Windows paths with "
-    f"forward slashes (e.g. `C:/Users/you/Documents/file.txt`). {_SHELL_PATH_CONVERSION}"
+    f"forward slashes (e.g. `C:/Users/you/Documents/file.txt`). {_SHELL_PATH_CONVERSION} "
+    "For file tools (read_file, ls, glob, grep, write_file, edit_file, delete), "
+    "drive paths are taken and returned with a leading `/` "
+    "(e.g. `/C:/Users/you/Documents/file.txt`); "
+    "use the original `C:/...` path in shell commands."
 )
 
 
