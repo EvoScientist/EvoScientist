@@ -762,6 +762,42 @@ def test_failed_pip_leaves_no_ready_marker(env):
     assert not re_env.is_ready(env["env"])
 
 
+@pytest.mark.parametrize("failure", ["pip", "imports"])
+def test_failed_build_removes_the_half_built_environment(env, failure):
+    if failure == "pip":
+        env["run"].pip_ok = False
+    else:
+        env["run"].imports_ok = False
+    with pytest.raises(StageError):
+        re_env.ensure_research_env("default")
+    assert not env["env"].exists()
+
+
+def test_failed_repair_keeps_the_environment(env):
+    re_env.ensure_research_env("default")
+    env["run"].imports_ok = False
+    env["run"].failed_packages = ["scipy"]
+    env["run"].pip_ok = False
+    with pytest.raises(StageError):
+        re_env.ensure_research_env("default")
+    assert re_env.is_ready(env["env"])
+
+
+@pytest.mark.parametrize(("mirror", "hinted"), [("default", True), ("cn", False)])
+def test_pip_timeout_names_the_mirror_while_it_is_off(env, monkeypatch, mirror, hinted):
+    def run(cmd, timeout):
+        if FakeRunner._kind(list(cmd)) == "pip":
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return env["run"](cmd, timeout)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    with pytest.raises(StageError) as exc:
+        re_env.ensure_research_env(mirror)
+    assert exc.value.code == "install_failed"
+    assert "did not finish" in exc.value.message
+    assert (re_env.CN_MIRROR_HINT in exc.value.message) is hinted
+
+
 def test_failed_pip_logs_its_whole_output_at_warning(env, monkeypatch, caplog):
     """Offline, pip's last line reads like a packaging problem; the network
     errors before it must reach the user (WARNING is shown by default)."""
