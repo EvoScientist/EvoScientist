@@ -9,8 +9,9 @@ and not the environment EvoScientist's installer made (see
 :func:`find_usable_python`).
 
 The environment reaches only the agent's ``execute`` and ``run_in_background``
-commands, through :func:`research_env_overrides`; EvoScientist's own child
-processes keep their PATH.
+commands, through :func:`research_env_overrides` (by way of
+:func:`~EvoScientist.setup.agent_env.agent_shell_overrides`); EvoScientist's
+own child processes keep their PATH.
 
 A venv is used rather than the Python EvoScientist runs on: uv-managed Pythons
 are marked ``EXTERNALLY-MANAGED``, so pip refuses to install into them. A venv

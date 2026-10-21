@@ -511,20 +511,95 @@ def is_private(exe: str | Path | None) -> bool:
     return exe is not None and is_under(Path(exe), tools_dir())
 
 
+# The user's npm network settings: a company or campus network may need its
+# own registry, proxy or CA certificate, so these reach our Node's npm too.
+NPM_NETWORK_VARS = frozenset(
+    {
+        "npm_config_registry",
+        "npm_config_proxy",
+        "npm_config_https_proxy",
+        "npm_config_noproxy",
+        "npm_config_cafile",
+        "npm_config_ca",
+        "npm_config_strict_ssl",
+    }
+)
+
+
 def node_child_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
     """Copy ``env`` for a child that runs the private ``node`` / ``npm`` / ``npx``.
 
-    With ``private`` set, drops ``npm_config_*`` and ``NODE_OPTIONS`` so a
-    user's global npm settings cannot break our Node. A system Node keeps the
-    user's environment as it is.
+    With ``private`` set, drops ``NODE_OPTIONS`` and the ``npm_config_*``
+    variables other than :data:`NPM_NETWORK_VARS` (names compared without
+    case, as npm does), so a user's global npm settings cannot break our
+    Node. A system Node keeps the user's environment as it is.
     """
     if not private:
         return dict(env)
     return {
         k: v
         for k, v in env.items()
-        if not k.lower().startswith("npm_config_") and k.upper() != "NODE_OPTIONS"
+        if k.upper() != "NODE_OPTIONS"
+        and (not k.lower().startswith("npm_config_") or k.lower() in NPM_NETWORK_VARS)
     }
+
+
+def npm_network_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The :data:`NPM_NETWORK_VARS` set in ``env``, as written there."""
+    return {k: v for k, v in env.items() if k.lower() in NPM_NETWORK_VARS}
+
+
+_PROXY_VARS = ("http_proxy", "https_proxy")
+_LOOPBACK = ("localhost", "127.0.0.1", "::1")
+
+
+def node_proxy_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
+    """Variables to add for a Node child so its own requests use the proxy.
+
+    Node's built-in ``fetch`` (and ``http``) ignore ``HTTPS_PROXY`` unless
+    ``NODE_USE_ENV_PROXY=1`` is set (Node 24). Set only for the private Node
+    (a system Node may be too old to know it) and only when every proxy
+    variable that is set is an ``http://`` or ``https://`` URL: Node exits at
+    start for a value it refuses (``socks4://``, a malformed URL), and
+    ``http`` ignores ``socks5://`` silently. Loopback goes into each
+    ``NO_PROXY`` / ``no_proxy`` already set, or ``NO_PROXY`` alone when none
+    is (two names differing only in case would both land in one Windows
+    environment block), so requests to this machine (Next.js calls its own
+    ``localhost`` port) never go to the proxy. Empty when nothing applies.
+    """
+    if not private:
+        return {}
+    proxies = [
+        v.strip() for k, v in env.items() if k.lower() in _PROXY_VARS and v.strip()
+    ]
+    if not proxies or not all(_is_http_url(v) for v in proxies):
+        return {}
+    extra = {"NODE_USE_ENV_PROXY": "1"}
+    no_proxy_keys = [k for k in env if k.lower() == "no_proxy"] or ["NO_PROXY"]
+    for key in no_proxy_keys:
+        entries = [e.strip() for e in env.get(key, "").split(",") if e.strip()]
+        extra[key] = ",".join(entries + [h for h in _LOOPBACK if h not in entries])
+    return extra
+
+
+def _is_http_url(value: str) -> bool:
+    import urllib.parse
+
+    try:
+        parts = urllib.parse.urlsplit(value)
+        return parts.scheme.lower() in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        return False
+
+
+def npm_registry_override(env: Mapping[str, str], node_exe: Path) -> str | None:
+    """npmmirror for ``npx`` children under ``mirror: cn``, unless the user
+    configured a registry (environment or ``npm config get registry``)."""
+    if configured_mirror() != "cn":
+        return None
+    if configured_npm_registry(env, node_exe) is not None:
+        return None
+    return NPM_REGISTRIES["cn"] + "/"
 
 
 DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org"

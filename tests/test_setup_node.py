@@ -628,15 +628,81 @@ def test_is_private_tells_the_private_npx_from_a_system_one(env):
     assert not node.is_private(None)
 
 
-def test_node_child_env_strips_npm_config_and_node_options():
+def test_node_child_env_keeps_only_the_npm_network_settings():
+    kept = {
+        "npm_config_registry": "r",
+        "NPM_CONFIG_PROXY": "http://proxy:3128",
+        "npm_config_https_proxy": "http://proxy:3128",
+        "npm_config_noproxy": "corp.example",
+        "npm_config_cafile": "/ca.pem",
+        "npm_config_ca": "-----BEGIN",
+        "npm_config_strict_ssl": "false",
+    }
     env = {
         "PATH": "p",
-        "npm_config_registry": "r",
+        **kept,
         "NPM_CONFIG_PREFIX": "x",
+        "npm_config_globalconfig": "/etc/npmrc",
         "NODE_OPTIONS": "--foo",
     }
-    assert node.node_child_env(env, private=True) == {"PATH": "p"}
+    assert node.node_child_env(env, private=True) == {"PATH": "p", **kept}
     assert node.node_child_env(env, private=False) == env
+    assert node.npm_network_env(env) == kept
+
+
+HTTP = "http://proxy.example:3128"
+
+
+@pytest.mark.parametrize(
+    ("env", "flag"),
+    [
+        ({"HTTPS_PROXY": HTTP}, True),
+        ({"https_proxy": "https://proxy.example:3128", "HTTP_PROXY": HTTP}, True),
+        ({}, False),
+        ({"HTTPS_PROXY": "socks4://127.0.0.1:1080"}, False),
+        ({"HTTPS_PROXY": "socks5://127.0.0.1:1080"}, False),
+        ({"HTTPS_PROXY": "ftp://proxy.example"}, False),
+        ({"HTTPS_PROXY": "not a url"}, False),
+        # One refused value among good ones still leaves the flag off.
+        ({"HTTPS_PROXY": HTTP, "http_proxy": "socks4://127.0.0.1:1080"}, False),
+    ],
+)
+def test_node_proxy_env_sets_the_flag_only_for_http_proxies(env, flag):
+    extra = node.node_proxy_env(env, private=True)
+    assert (extra.get("NODE_USE_ENV_PROXY") == "1") is flag
+
+
+def test_node_proxy_env_is_empty_for_a_system_node():
+    assert node.node_proxy_env({"HTTPS_PROXY": HTTP}, private=False) == {}
+
+
+def test_node_proxy_env_adds_loopback_to_each_no_proxy_it_finds():
+    extra = node.node_proxy_env(
+        {"HTTPS_PROXY": HTTP, "no_proxy": "corp.example, localhost", "NO_PROXY": "a"},
+        private=True,
+    )
+    assert extra["no_proxy"] == "corp.example,localhost,127.0.0.1,::1"
+    assert extra["NO_PROXY"] == "a,localhost,127.0.0.1,::1"
+
+
+def test_node_proxy_env_sets_only_no_proxy_when_none_is_set():
+    """Two names that differ only in case would share one Windows env block."""
+    extra = node.node_proxy_env({"HTTPS_PROXY": HTTP}, private=True)
+    assert extra == {"NODE_USE_ENV_PROXY": "1", "NO_PROXY": "localhost,127.0.0.1,::1"}
+
+
+@pytest.mark.parametrize(
+    ("mirror", "configured", "expected"),
+    [
+        ("cn", None, "https://registry.npmmirror.com/"),
+        ("cn", "https://registry.yarnpkg.com/", None),
+        ("default", None, None),
+    ],
+)
+def test_npm_registry_override(monkeypatch, mirror, configured, expected):
+    monkeypatch.setattr(node, "configured_mirror", lambda: mirror)
+    monkeypatch.setattr(node, "configured_npm_registry", lambda _env, _exe: configured)
+    assert node.npm_registry_override({}, Path("node")) == expected
 
 
 class FakeNpmConfig:

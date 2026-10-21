@@ -344,13 +344,18 @@ def _get_status(url: str, timeout: float) -> int | None:
 
 def server_env(node_exe: Path, port: int) -> dict[str, str]:
     """Environment for ``node dist/server.js``: the parent's, without secrets,
-    and without npm / Node options when the Node is our private one."""
+    and without npm / Node options when the Node is our private one; with the
+    proxy variables the launcher gives the server, so the probe checks the
+    environment the WebUI runs with."""
     from ..deploy.launcher import _scrubbed_env
-    from .node import is_private, node_child_env
+    from .node import is_private, node_child_env, node_proxy_env
 
     env = _scrubbed_env({"PORT": str(port), "HOSTNAME": "127.0.0.1"})
     env["NODE_ENV"] = "production"
-    return node_child_env(env, private=is_private(node_exe))
+    private = is_private(node_exe)
+    env = node_child_env(env, private=private)
+    env.update(node_proxy_env(env, private=private))
+    return env
 
 
 def probe(root: Path, node_exe: Path, timeout: float = _PROBE_TIMEOUT) -> None:

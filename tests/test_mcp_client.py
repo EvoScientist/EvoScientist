@@ -254,6 +254,98 @@ class TestBuildConnections:
         conns = _build_connections(config)
         assert conns["fs"]["env"]["https_proxy"] == "http://user-proxy:9000"
 
+    @pytest.fixture
+    def node_rules(self, monkeypatch):
+        """The Node rules' inputs: mirror, configured registry, private Node."""
+        from EvoScientist.setup import node as setup_node
+
+        state = {"mirror": "default", "registry": None, "private": False}
+        monkeypatch.setattr(setup_node, "configured_mirror", lambda: state["mirror"])
+        monkeypatch.setattr(
+            setup_node, "configured_npm_registry", lambda _e, _x: state["registry"]
+        )
+        monkeypatch.setattr(setup_node, "is_private", lambda _c: state["private"])
+        for name in ("http_proxy", "https_proxy", "no_proxy"):
+            monkeypatch.delenv(name, raising=False)
+            monkeypatch.delenv(name.upper(), raising=False)
+        return state
+
+    def test_npx_server_gets_the_npm_network_settings(self, monkeypatch, node_rules):
+        monkeypatch.setenv("npm_config_cafile", "/ca.pem")
+        monkeypatch.setenv("npm_config_prefix", "/somewhere")
+        monkeypatch.setenv("NODE_OPTIONS", "--x")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["npm_config_cafile"] == "/ca.pem"
+        assert "npm_config_prefix" not in env
+        assert "NODE_OPTIONS" not in env
+
+    def test_npx_server_gets_npmmirror_under_cn(self, node_rules):
+        node_rules["mirror"] = "cn"
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["npm_config_registry"] == "https://registry.npmmirror.com/"
+
+    def test_npx_server_keeps_the_users_registry_under_cn(
+        self, monkeypatch, node_rules
+    ):
+        node_rules["mirror"] = "cn"
+        node_rules["registry"] = "https://registry.yarnpkg.com/"
+        monkeypatch.setenv("npm_config_registry", "https://registry.yarnpkg.com/")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["npm_config_registry"] == "https://registry.yarnpkg.com/"
+
+    def test_private_npx_server_gets_the_proxy_switch(self, monkeypatch, node_rules):
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["NODE_USE_ENV_PROXY"] == "1"
+        assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+
+    def test_server_env_wins_over_the_node_rules(self, monkeypatch, node_rules):
+        node_rules.update(mirror="cn", private=True)
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {
+                    "npm_config_registry": "https://own.example/",
+                    "NODE_USE_ENV_PROXY": "0",
+                },
+            }
+        }
+        env = _build_connections(config)["fs"]["env"]
+        assert env["npm_config_registry"] == "https://own.example/"
+        assert env["NODE_USE_ENV_PROXY"] == "0"
+
+    def test_server_env_socks_proxy_leaves_the_switch_off(
+        self, monkeypatch, node_rules
+    ):
+        """The switch is decided on what the server gets, its own env included."""
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {"https_proxy": "socks4://127.0.0.1:1080"},
+            }
+        }
+        assert "NODE_USE_ENV_PROXY" not in _build_connections(config)["fs"]["env"]
+
+    def test_other_servers_get_no_node_rules(self, monkeypatch, node_rules):
+        node_rules.update(mirror="cn", private=True)
+        monkeypatch.setenv("npm_config_cafile", "/ca.pem")
+        config = {"py": {"transport": "stdio", "command": "uvx", "args": ["x"]}}
+        env = _build_connections(config)["py"].get("env", {})
+        assert "npm_config_registry" not in env
+        assert "npm_config_cafile" not in env
+
     def test_http_connection(self):
         config = {
             "api": {

@@ -989,6 +989,28 @@ def _unresolved_node_servers(config: dict[str, Any]) -> list[str]:
     ]
 
 
+def _node_server_env(command: str, env: dict[str, str]) -> dict[str, str]:
+    """What a ``node`` / ``npx`` / ``npm`` server gets on top of the forwarded
+    variables: the user's npm network settings, the npmmirror registry under
+    ``mirror: cn`` (unless the user set a registry) and, for our private Node,
+    the proxy switch for Node's own requests. ``env`` is what the server gets
+    so far, its ``mcp.yaml`` env included, which still wins over all of it.
+    """
+    from ..setup.node import (
+        is_private,
+        node_proxy_env,
+        npm_network_env,
+        npm_registry_override,
+    )
+
+    extra = npm_network_env(os.environ)
+    registry = npm_registry_override(os.environ, Path(command))
+    if registry is not None:
+        extra["npm_config_registry"] = registry
+    extra.update(node_proxy_env(env, private=is_private(command)))
+    return extra
+
+
 def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Convert YAML config to ``MultiServerMCPClient`` connections format.
 
@@ -1000,15 +1022,18 @@ def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         transport = server.get("transport", "")
 
         if transport == "stdio":
+            command = _resolve_command(server.get("command", ""))
             conn: dict[str, Any] = {
                 "transport": "stdio",
-                "command": _resolve_command(server.get("command", "")),
+                "command": command,
                 "args": server.get("args", []),
             }
             forwarded = {
                 k: os.environ[k] for k in _STDIO_FORWARDED_ENV_VARS if k in os.environ
             }
             user_env = server.get("env") or {}
+            if Path(command).stem.lower() in _NODE_COMMANDS:
+                forwarded.update(_node_server_env(command, {**forwarded, **user_env}))
             merged = {**forwarded, **user_env}
             if merged:
                 conn["env"] = merged
