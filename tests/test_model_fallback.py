@@ -1183,16 +1183,19 @@ class TestExplicitSeeding:
 
 
 # ═════════════════════════════════════════════════════════════════
-# Regression: get_chat_model() raising during construction must not
-# crash the fallback walk with UnboundLocalError (issue #498 follow-up).
+# Regression: get_chat_model() raising during construction must not abort
+# the walk or be blamed on another model. The unbuilt entry is recorded as
+# its own failure (request=None) and the walk continues (issue #498
+# follow-up).
 # ═════════════════════════════════════════════════════════════════
 
 
 class TestFallbackChainConstructionError:
     """A fallback model whose get_chat_model() raises during construction
-    (e.g. a routed provider with no API key) must be skipped cleanly — the
-    walk continues to the next fallback instead of crashing with
-    UnboundLocalError because ``fb_request`` was never assigned."""
+    (e.g. a routed provider with no API key) is the unbuilt entry's own
+    failure: ``fb_request`` stays None, the walk continues to the next
+    fallback, and if every entry fails the original construction error is
+    re-raised instead of being attributed to another model."""
 
     async def test_construction_error_skips_to_next_fallback_async(self):
         add_fallback("minimax-m3", "minimax")
@@ -1253,8 +1256,9 @@ class TestFallbackChainConstructionError:
 
 # Construction error must surface as the original exception, not be wrapped
 # as the primary model's ProviderStreamError. The primary model is a real
-# ChatAnthropic instance so _normalize recognizes it; this test fails with
-# main's model_fallback and passes with the fix.
+# ChatAnthropic instance, which _normalize would recognize; because the
+# unbuilt fallback entry passes request=None to _raise_normalized,
+# _normalize returns None and the ValueError is re-raised unchanged.
 
 
 def _raise(_r):
