@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage
 
 from EvoScientist.channels.interaction import ApprovalOutcome
 from EvoScientist.stream import display as display_mod
-from tests.fakes import (
+from tests.fakes.common import (
     FakeCheckpointAgent,
     FakeGraphGateway,
     attended_config,
@@ -306,7 +306,7 @@ class TestConsumerClosesAtADecline:
         from EvoScientist.channels.bus.message_bus import MessageBus
         from EvoScientist.channels.channel_manager import ChannelManager
         from EvoScientist.channels.consumer import InboundConsumer
-        from tests.fakes import StubChannel
+        from tests.fakes.common import StubChannel
 
         bus = MessageBus()
         manager = ChannelManager(bus, media_dir=media_dir)

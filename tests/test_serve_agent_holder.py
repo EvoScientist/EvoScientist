@@ -31,7 +31,7 @@ from EvoScientist.config import EvoScientistConfig
 from EvoScientist.gateway import RuntimeGateways, ThreadStore
 from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.runtime import AsyncRuntime
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
 
 def _agent(name: str = "agent") -> CompiledStateGraph:

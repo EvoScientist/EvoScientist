@@ -11,7 +11,7 @@ from rich.console import Console
 from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.middleware.goal import new_goal_request
 from EvoScientist.stream import display as display_mod
-from tests.goal_fakes import ACCEPT, CANCEL, OBJECTIVE, cli_goal_agent, feedback
+from tests.fakes.goal import ACCEPT, CANCEL, OBJECTIVE, cli_goal_agent, feedback
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 

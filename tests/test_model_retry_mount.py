@@ -209,7 +209,7 @@ def test_grader_list_contains_the_retry_when_given(tmp_path):
     from deepagents.backends import FilesystemBackend
 
     from EvoScientist.middleware.rubric import create_rubric_middleware
-    from tests.rubric_fakes import ScriptedGrader
+    from tests.fakes.rubric import ScriptedGrader
 
     retry = ModelRetryMiddleware(wait_budget_seconds=60, unattended=False)
     rubric = create_rubric_middleware(
@@ -226,7 +226,7 @@ def test_grader_boundary_comes_with_its_retry_layer(tmp_path):
     from deepagents.backends import FilesystemBackend
 
     from EvoScientist.middleware.rubric import create_rubric_middleware
-    from tests.rubric_fakes import ScriptedGrader
+    from tests.fakes.rubric import ScriptedGrader
 
     def _build(**kwargs):
         return create_rubric_middleware(

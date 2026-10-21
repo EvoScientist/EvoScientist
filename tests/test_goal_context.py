@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.goal_fakes import goal_agent, message_input, run, seed_goal
+from tests.fakes.goal import goal_agent, message_input, run, seed_goal
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 
@@ -157,7 +157,7 @@ async def test_a_goal_whose_checklist_was_replaced_is_not_shown(tmp_path):
 
 async def test_on_the_main_graph_the_block_ends_our_part_of_the_prompt(tmp_path):
     from EvoScientist.middleware.goal import new_goal_request
-    from tests.goal_fakes import ACCEPT, cli_goal_agent, request_input, resume_input
+    from tests.fakes.goal import ACCEPT, cli_goal_agent, request_input, resume_input
 
     agent, model = cli_goal_agent(tmp_path, keep_system=True)
     await run(

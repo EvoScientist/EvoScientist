@@ -7,7 +7,7 @@ import signal
 
 from EvoScientist.cli import commands
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.serve_fakes import run_serve_once, serve_config
+from tests.fakes.serve import run_serve_once, serve_config
 
 
 def test_serve_workdir_has_highest_priority(monkeypatch, tmp_path):

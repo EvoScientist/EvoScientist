@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from EvoScientist.middleware.skills_reload import SkillsReloadMiddleware
-from tests.fakes import build_default_middleware
+from tests.fakes.common import build_default_middleware
 
 _SEEN: list[list[BaseMessage]] = []
 _FAIL = {"on": False}

@@ -7,7 +7,7 @@ from langgraph.types import Interrupt
 
 from EvoScientist.stream.emitter import StreamEvent, StreamEventEmitter
 from EvoScientist.stream.state import StreamState
-from tests.stream_v3_fakes import (
+from tests.fakes.stream_v3 import (
     FakeV3Agent,
     collect_events,
     message_delta,

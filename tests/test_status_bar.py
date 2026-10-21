@@ -21,7 +21,7 @@ from EvoScientist.cli.status_bar import (
     trim_status_text,
 )
 from EvoScientist.memory import worker_activity
-from tests.fakes import FakeGraphGateway, FakeThreadStore, status_snapshot
+from tests.fakes.common import FakeGraphGateway, FakeThreadStore, status_snapshot
 
 
 def _render_fragments(fragments: list[tuple[str, str]]) -> str:

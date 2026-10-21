@@ -25,8 +25,8 @@ from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.paths import Workspace
-from tests.fakes import close_result
-from tests.tui_fakes import capture_app
+from tests.fakes.common import close_result
+from tests.fakes.tui import capture_app
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 
@@ -348,7 +348,7 @@ async def test_the_consumer_closes_a_declined_sub_agent_command(tmp_path, monkey
     from EvoScientist.channels.bus.message_bus import MessageBus
     from EvoScientist.channels.channel_manager import ChannelManager
     from EvoScientist.channels.consumer import InboundConsumer
-    from tests.fakes import StubChannel
+    from tests.fakes.common import StubChannel
 
     monkeypatch.setattr(
         interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})

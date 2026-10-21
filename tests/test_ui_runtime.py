@@ -15,7 +15,7 @@ from EvoScientist.cli.tui_runtime import (
     run_streaming_async,
 )
 from EvoScientist.runtime import AsyncRuntimeError
-from tests.fakes import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway
 
 
 def test_normalize_ui_backend_defaults_to_cli():

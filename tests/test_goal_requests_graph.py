@@ -6,7 +6,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from EvoScientist.middleware.goal import CONTINUE_MESSAGE, new_goal_request
-from tests.goal_fakes import (
+from tests.fakes.goal import (
     ACCEPT,
     CANCEL,
     ESCAPED,
@@ -19,7 +19,7 @@ from tests.goal_fakes import (
     run,
     seed_goal,
 )
-from tests.rubric_fakes import PASS
+from tests.fakes.rubric import PASS
 
 OBJECTIVE = "ship the report"
 DRAFT_1 = "- the report exists"

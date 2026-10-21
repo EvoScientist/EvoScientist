@@ -26,7 +26,7 @@ from EvoScientist.gateway.server import _THREAD_SEARCH_LIMIT
 from EvoScientist.gateway.types import DEFAULT_GRAPH_ID
 from EvoScientist.paths import SessionDirs, Workspace
 from EvoScientist.stream import display as display_mod
-from tests.fakes import (
+from tests.fakes.common import (
     TEST_WORKSPACE,
     FakeGraphGateway,
     FakeLangGraphClient,

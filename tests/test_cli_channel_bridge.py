@@ -21,7 +21,7 @@ from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.cli import channel as channel_mod
 from EvoScientist.cli.channel import ChannelMessage
-from tests.fakes import QueueFakeChannel
+from tests.fakes.common import QueueFakeChannel
 
 
 def _reset_channel_state():

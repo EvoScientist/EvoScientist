@@ -16,7 +16,7 @@ from EvoScientist.middleware.rubric import (
     GRADER_FILE_CHECK_PROMPT,
     create_rubric_middleware,
 )
-from tests.rubric_fakes import FAIL, PASS, MainModel, ScriptedGrader
+from tests.fakes.rubric import FAIL, PASS, MainModel, ScriptedGrader
 
 
 class _OtherAfterAgent(AgentMiddleware):

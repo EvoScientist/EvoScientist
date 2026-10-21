@@ -453,7 +453,7 @@ class TestConsumerUnrecognizedRefeed:
         from EvoScientist.channels.bus.message_bus import MessageBus
         from EvoScientist.channels.channel_manager import ChannelManager
         from EvoScientist.channels.consumer import InboundConsumer
-        from tests.fakes import FakeGraphGateway, StubChannel
+        from tests.fakes.common import FakeGraphGateway, StubChannel
 
         # Force the manual-prompt path (no config auto-approve).
         monkeypatch.setattr(I, "config_policy_snapshot", lambda reqs: (None, {}))

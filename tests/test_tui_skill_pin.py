@@ -14,7 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 pytest.importorskip("textual")
 
-from tests.tui_fakes import (
+from tests.fakes.tui import (
     capture_app,
     finish_turns,
     isolated_skills,  # noqa: F401  (autouse fixture)
@@ -35,7 +35,7 @@ def _write_skill(workspace, name, description=None):
 
 
 def _gateway(messages=None):
-    from tests.fakes import FakeGraphGateway, FakeThreadStore
+    from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
     return FakeGraphGateway(
         events=[{"type": "text", "content": "ok"}, {"type": "done", "response": "ok"}],

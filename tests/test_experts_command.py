@@ -15,7 +15,7 @@ from EvoScientist.commands.implementation.experts import (
     invalidate_experts_cache,
 )
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.fakes import TEST_WORKSPACE
+from tests.fakes.common import TEST_WORKSPACE
 
 
 @pytest.fixture(autouse=True)

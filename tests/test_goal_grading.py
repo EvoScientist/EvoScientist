@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from EvoScientist.middleware.goal import new_goal_request
-from tests.goal_fakes import (
+from tests.fakes.goal import (
     ACCEPT,
     goal_agent,
     message_input,
@@ -18,7 +18,7 @@ from tests.goal_fakes import (
     seed_goal,
     tool_call,
 )
-from tests.rubric_fakes import FAIL, PASS
+from tests.fakes.rubric import FAIL, PASS
 
 BLOCKED = tool_call("update_goal", "b1", status="blocked", note="need an API key")
 EVIDENCE = tool_call("update_goal", "c1", status="complete", note="all tests pass")

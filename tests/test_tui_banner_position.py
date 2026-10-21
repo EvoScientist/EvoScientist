@@ -20,7 +20,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from tests.tui_fakes import capture_app
+from tests.fakes.tui import capture_app
 
 # ---------------------------------------------------------------------------
 # Tests

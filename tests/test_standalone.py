@@ -17,7 +17,7 @@ import EvoScientist.channels.standalone as standalone
 from EvoScientist.channels.base import Channel
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.paths import Workspace
-from tests.fakes import QueueFakeChannel
+from tests.fakes.common import QueueFakeChannel
 
 
 @pytest.fixture(autouse=True)

@@ -20,7 +20,7 @@ from EvoScientist.proactive.serve import (
     clear_post_append_next,
     terminal_node,
 )
-from tests.serve_fakes import MAIN_GRAPH, FakeProactiveClient, seed_source_thread
+from tests.fakes.serve import MAIN_GRAPH, FakeProactiveClient, seed_source_thread
 
 # ---- terminal node ----------------------------------------------------------
 

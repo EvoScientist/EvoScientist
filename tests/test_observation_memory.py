@@ -51,7 +51,7 @@ from EvoScientist.memory.observations import (
 from EvoScientist.memory.search import _tokens
 from EvoScientist.memory.types import ObservationRelation
 from EvoScientist.middleware import memory_lifecycle
-from tests.memory_fakes import (
+from tests.fakes.memory import (
     fake_execution_info,
     fake_runtime,
     linker_context,
@@ -2481,7 +2481,7 @@ def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
 
     from EvoScientist.llm import get_chat_model
     from EvoScientist.memory.agents._factory import build_memory_agent_graph
-    from tests.fakes import deepseek_tool_call_response
+    from tests.fakes.common import deepseek_tool_call_response
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     bodies: list[dict[str, Any]] = []

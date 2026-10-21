@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from tests.tui_fakes import (
+from tests.fakes.tui import (
     GatedStream,
     assistant_texts,
     capture_app,
@@ -247,8 +247,8 @@ async def test_a_retry_notice_follows_the_tool_selection_line(monkeypatch, works
 
 
 async def test_a_retry_after_a_pause_that_found_the_spinner_up(monkeypatch, workspace):
-    from tests.tui_fakes import FINISHED_REPLY, run_turn
-    from tests.tui_fakes import approval_interrupt as _interrupt
+    from tests.fakes.tui import FINISHED_REPLY, run_turn
+    from tests.fakes.tui import approval_interrupt as _interrupt
 
     # The paused round's cleanup removed the spinner; the resumed round has
     # none to keep last. ``_turn`` asserts that the answer still arrives.

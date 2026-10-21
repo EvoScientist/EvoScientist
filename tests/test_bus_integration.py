@@ -12,7 +12,7 @@ import pytest
 from EvoScientist.channels.bus.events import InboundMessage
 from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.channels.channel_manager import ChannelManager
-from tests.fakes import QueueFakeChannel as FakeChannel
+from tests.fakes.common import QueueFakeChannel as FakeChannel
 
 
 def _drain_queue(q):

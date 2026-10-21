@@ -328,7 +328,7 @@ def test_a_crashed_webui_points_at_webui_log(monkeypatch):
 def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
     import typer
 
-    from tests.langgraph_dev_fakes import break_start_lock
+    from tests.fakes.langgraph_dev import break_start_lock
 
     break_start_lock(monkeypatch, tmp_path, "mkdir")
     with pytest.raises(typer.Exit):
@@ -341,7 +341,7 @@ def test_an_unwritable_start_lock_shows_the_failed_panel(monkeypatch, tmp_path):
 def test_the_spinner_says_when_it_waits_for_another_start(monkeypatch):
     """While another process holds the server start lock the spinner says so,
     as EvoSci deploy does, then goes back to starting langgraph dev."""
-    from tests.langgraph_dev_fakes import LockHolder
+    from tests.fakes.langgraph_dev import LockHolder
 
     holder = LockHolder()
 

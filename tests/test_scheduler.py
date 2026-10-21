@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from tests.fakes import TEST_WORKSPACE
+from tests.fakes.common import TEST_WORKSPACE
 
 
 def _mw():

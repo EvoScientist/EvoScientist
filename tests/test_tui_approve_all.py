@@ -9,8 +9,8 @@ import pytest
 pytest.importorskip("textual")
 
 from EvoScientist.channels.interaction import ApprovalOutcome
-from tests.fakes import no_config_rule as _no_config_rule
-from tests.tui_fakes import (
+from tests.fakes.common import no_config_rule as _no_config_rule
+from tests.fakes.tui import (
     APPROVE,
     APPROVING_ONCE,
     ASK,
@@ -19,8 +19,8 @@ from tests.tui_fakes import (
     capture_app,
     run_turn,
 )
-from tests.tui_fakes import approval_interrupt as _interrupt
-from tests.tui_fakes import widget_answers as _widget_answers
+from tests.fakes.tui import approval_interrupt as _interrupt
+from tests.fakes.tui import widget_answers as _widget_answers
 
 
 def _keyed(extras: list[dict]) -> list[bool]:

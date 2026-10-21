@@ -11,8 +11,8 @@ pytest.importorskip("textual")
 
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.middleware import events as mw_events
-from tests.fakes import FakeGraphGateway
-from tests.tui_fakes import capture_app
+from tests.fakes.common import FakeGraphGateway
+from tests.fakes.tui import capture_app
 
 
 @pytest.mark.parametrize("pause", ["interrupt", "ask_user"])

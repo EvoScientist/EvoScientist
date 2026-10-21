@@ -8,7 +8,7 @@ import pytest
 
 from EvoScientist.commands.channel_ui import ChannelCommandUI
 from EvoScientist.gateway import ThreadStore
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
 
 def _make_ui(*, thread_store: ThreadStore, callback=None, bus_ref=None):

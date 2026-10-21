@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from EvoScientist.gateway import GraphTarget
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.fakes import FakeCommandUI, FakeGraphGateway
+from tests.fakes.common import FakeCommandUI, FakeGraphGateway
 
 _TARGET = GraphTarget()
 

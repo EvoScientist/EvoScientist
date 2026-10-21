@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from tests.tui_fakes import (
+from tests.fakes.tui import (
     GatedStream,
     capture_app,
     chat_sequence,

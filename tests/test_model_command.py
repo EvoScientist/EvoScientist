@@ -619,7 +619,7 @@ class TestApplyModelServerBackend:
             LangGraphServerGateway,
             LangGraphServerThreadStore,
         )
-        from tests.fakes import FakeLangGraphClient, FakeLangGraphThreadsClient
+        from tests.fakes.common import FakeLangGraphClient, FakeLangGraphThreadsClient
 
         return LangGraphServerGateway(
             LangGraphServerThreadStore(

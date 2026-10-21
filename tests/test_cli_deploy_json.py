@@ -22,7 +22,7 @@ import typer
 from EvoScientist import paths
 from EvoScientist.deploy import json_mode
 from EvoScientist.deploy import server as deploy_server
-from tests.langgraph_dev_fakes import LockHolder
+from tests.fakes.langgraph_dev import LockHolder
 
 
 def _config(**overrides):

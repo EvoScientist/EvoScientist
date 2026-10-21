@@ -10,7 +10,7 @@ import EvoScientist.commands.implementation  # noqa: F401  (registers the comman
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.commands.manager import manager
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.fakes import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway
 
 _LOADED_AGENT = object()
 GOAL_ID = "goal:abc"
@@ -468,7 +468,7 @@ class TestBadge:
         from datetime import datetime
 
         from EvoScientist.cli.status_bar import build_status_fragments
-        from tests.fakes import status_snapshot
+        from tests.fakes.common import status_snapshot
 
         snapshot = status_snapshot()
         frags = build_status_fragments(

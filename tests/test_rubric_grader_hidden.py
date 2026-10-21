@@ -13,7 +13,7 @@ from EvoScientist.config import EvoScientistConfig
 from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.paths import Workspace
 from EvoScientist.stream.events import stream_agent_events
-from tests.rubric_fakes import PASS
+from tests.fakes.rubric import PASS
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 

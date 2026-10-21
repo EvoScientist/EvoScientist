@@ -35,8 +35,8 @@ from EvoScientist.cli.channel import (
 from EvoScientist.commands import manager as cmd_manager
 from EvoScientist.paths import SessionDirs
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeGraphGateway, FakeThreadStore
-from tests.tui_fakes import NoHistory, capture_app, submit
+from tests.fakes.common import FakeGraphGateway, FakeThreadStore
+from tests.fakes.tui import NoHistory, capture_app, submit
 
 NOTICE = "notice"
 

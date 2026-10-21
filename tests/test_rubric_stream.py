@@ -14,7 +14,7 @@ from langgraph.types import Command
 
 from EvoScientist.middleware.rubric import create_rubric_middleware
 from EvoScientist.stream.events import stream_agent_events
-from tests.rubric_fakes import FAIL, PASS, MainModel, ScriptedGrader
+from tests.fakes.rubric import FAIL, PASS, MainModel, ScriptedGrader
 
 
 def _deep(tmp_path, verdicts, replies, **middleware_kwargs):
@@ -168,7 +168,7 @@ async def test_approval_from_another_client_is_not_graded(tmp_path):
 
 
 async def test_a_subagent_that_only_shares_the_graders_name_is_shown():
-    from tests.stream_v3_fakes import (
+    from tests.fakes.stream_v3 import (
         FakeSubagent,
         FakeV3Agent,
         collect_events,

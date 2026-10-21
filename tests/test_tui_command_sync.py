@@ -6,7 +6,7 @@ import pytest
 
 from EvoScientist.commands.base import ChannelRuntime, CommandContext
 from EvoScientist.paths import SessionDirs
-from tests.fakes import TEST_WORKSPACE
+from tests.fakes.common import TEST_WORKSPACE
 
 pytest.importorskip("textual")
 

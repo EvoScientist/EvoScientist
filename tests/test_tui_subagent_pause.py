@@ -19,8 +19,8 @@ from EvoScientist.cli.widgets.subagent_widget import SubAgentWidget
 from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeGraphGateway, no_config_rule
-from tests.tui_fakes import (
+from tests.fakes.common import FakeGraphGateway, no_config_rule
+from tests.fakes.tui import (
     APPROVE,
     APPROVING_ONCE,
     DONE,

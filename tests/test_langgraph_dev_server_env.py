@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from EvoScientist.langgraph_dev import boundary, manager
-from tests.langgraph_dev_fakes import PopenAbort, patch_start_prereqs
+from tests.fakes.langgraph_dev import PopenAbort, patch_start_prereqs
 
 
 @pytest.mark.parametrize("inherited", [None, "", "0"])

@@ -21,7 +21,7 @@ from EvoScientist.stream.tool_results import (
     _extract_command_tool_content,
     _extract_tool_content,
 )
-from tests.stream_v3_fakes import (
+from tests.fakes.stream_v3 import (
     ErroringV3Agent,
     FakeSubagent,
     FakeV3Agent,
@@ -1695,7 +1695,7 @@ class TestModelRetryRollback:
 
     @staticmethod
     async def _run(events, *, subagents=None):
-        from tests.stream_v3_fakes import FakeV3Agent, collect_events
+        from tests.fakes.stream_v3 import FakeV3Agent, collect_events
 
         return await collect_events(FakeV3Agent(events, subagents=subagents), "hi")
 
@@ -1716,7 +1716,7 @@ class TestModelRetryRollback:
         return {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []}
 
     async def test_retry_after_partial_text_discards_it_and_reports_counts(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             local_text_delta,
             message_finish,
             model_call_end,
@@ -1752,7 +1752,7 @@ class TestModelRetryRollback:
     async def test_a_rolled_back_call_never_reaches_into_an_earlier_pass(self):
         """A graded run's last pass starts after the verdict; a failed call of
         the revision pass is cut back to its own start, not past that point."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             custom_subagent_event,
             local_text_delta,
             message_finish,
@@ -1796,7 +1796,7 @@ class TestModelRetryRollback:
 
     async def test_server_transport_shape_without_message_metadata(self):
         """langgraph-api strips run metadata before SSE: the boundary events alone must do."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1820,7 +1820,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Full answer."
 
     async def test_connect_time_failure_after_tool_step_discards_nothing(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             message_tool_call_block,
             model_call_end,
@@ -1857,7 +1857,7 @@ class TestModelRetryRollback:
         ] == ["tool_call", "tool_result"]
 
     async def test_error_finished_call_is_discarded_on_retry(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1882,7 +1882,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Whole."
 
     async def test_error_finished_primary_then_fallback_discards_the_primary(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1908,7 +1908,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Fallback answer."
 
     async def test_open_primary_then_fallback_discards_the_primary(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1932,7 +1932,7 @@ class TestModelRetryRollback:
     async def test_error_finished_primary_then_fallback_dying_at_connect_then_retry(
         self,
     ):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1960,7 +1960,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Whole."
 
     async def test_clean_call_is_never_discarded(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -1988,7 +1988,7 @@ class TestModelRetryRollback:
     async def test_whole_message_fallback_after_partial_primary(self):
         from langchain_core.messages import AIMessage
 
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             model_call_end,
             model_call_start,
             text_delta,
@@ -2009,7 +2009,7 @@ class TestModelRetryRollback:
         assert len(self._discards(out)) == 1
 
     async def test_tool_calls_of_the_failed_attempt_are_discarded(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             message_tool_call_block,
             model_call_end,
@@ -2036,7 +2036,7 @@ class TestModelRetryRollback:
 
     async def test_text_outside_a_call_is_not_tracked(self):
         """Model streams that bypass the boundary (a tool's own model) are never discarded."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -2062,7 +2062,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "ABY"
 
     async def test_summarization_messages_are_skipped(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_delta,
             message_finish,
             model_call_end,
@@ -2084,7 +2084,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Answer."
 
     async def test_grader_namespace_retry_leaves_the_main_answer_alone(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             FakeSubagent,
             message_finish,
             model_call_end,
@@ -2120,7 +2120,7 @@ class TestModelRetryRollback:
         assert self._done(out)["response"] == "Main answer."
 
     async def test_subagent_retry_is_keyed_by_raw_namespace(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             FakeSubagent,
             message_finish,
             model_call_end,
@@ -2155,7 +2155,7 @@ class TestModelRetryRollback:
         assert self._discards(out) == []  # the sibling's open call survived
 
     async def test_empty_discards_emit_no_event(self):
-        from tests.stream_v3_fakes import model_call_end, model_call_start
+        from tests.fakes.stream_v3 import model_call_end, model_call_start
 
         out = await self._run(
             [
@@ -2168,7 +2168,7 @@ class TestModelRetryRollback:
         assert self._discards(out) == []
 
     async def test_end_of_another_call_leaves_the_open_record_alone(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             model_call_end,
             model_call_start,
             retry_event,
@@ -2187,7 +2187,7 @@ class TestModelRetryRollback:
 
     async def test_call_without_an_end_mark_is_left_alone_by_the_next_start(self):
         """A lost end mark must not cost a good answer: only a call known to have ended badly is dropped."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -2210,7 +2210,7 @@ class TestModelRetryRollback:
 
     async def test_retry_names_the_agent_from_the_event_not_the_namespace(self):
         """The server tracker names a namespace after its graph node; the event knows the agent."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             FakeSubagent,
             model_call_end,
             model_call_start,
@@ -2229,7 +2229,7 @@ class TestModelRetryRollback:
         assert self._retries(out)[0]["subagent"] == "research-agent"
 
     async def test_retry_without_an_agent_name_falls_back_to_the_namespace_name(self):
-        from tests.stream_v3_fakes import FakeSubagent, retry_event
+        from tests.fakes.stream_v3 import FakeSubagent, retry_event
 
         ns = ("tools:t1",)
         out = await self._run(
@@ -2238,7 +2238,7 @@ class TestModelRetryRollback:
         assert self._retries(out)[0]["subagent"] == "research"
 
     async def test_main_agent_retry_carries_no_name(self):
-        from tests.stream_v3_fakes import retry_event
+        from tests.fakes.stream_v3 import retry_event
 
         out = await self._run([retry_event(agent="EvoScientist")])
         assert self._retries(out)[0]["subagent"] == ""
@@ -2255,7 +2255,7 @@ class TestModelRetryRollback:
 
     async def test_root_text_after_a_failed_call_is_trimmed_on_both_sides(self):
         """What the decoder cuts from the answer is exactly what it tells clients to trim."""
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,
@@ -2278,7 +2278,7 @@ class TestModelRetryRollback:
         assert self._screen(out) == "Answer."
 
     async def test_stray_root_text_before_a_retry_is_trimmed_on_both_sides(self):
-        from tests.stream_v3_fakes import (
+        from tests.fakes.stream_v3 import (
             message_finish,
             model_call_end,
             model_call_start,

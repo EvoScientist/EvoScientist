@@ -20,7 +20,7 @@ from langgraph.types import Overwrite
 from EvoScientist.message_meta import is_pinned_skill, pinned_skill_name
 from EvoScientist.middleware.skill_pin import SkillPinMiddleware, skills_to_pin
 from EvoScientist.middleware.skills_reload import SkillsReloadMiddleware
-from tests.fakes import build_default_middleware
+from tests.fakes.common import build_default_middleware
 
 _SEEN: list[list[BaseMessage]] = []
 

@@ -15,7 +15,7 @@ import pytest
 
 from EvoScientist.deploy import launcher as lm
 from EvoScientist.langgraph_dev import manager as lgm
-from tests.langgraph_dev_fakes import break_start_lock, start_lock_is_held
+from tests.fakes.langgraph_dev import break_start_lock, start_lock_is_held
 
 
 @pytest.fixture(autouse=True)
@@ -493,7 +493,7 @@ def test_start_waits_for_another_start_before_the_backend_decision(monkeypatch):
     taken for a stale one."""
     import threading
 
-    from tests.langgraph_dev_fakes import LockHolder
+    from tests.fakes.langgraph_dev import LockHolder
 
     _patch_for_start(monkeypatch, set())
     holder = LockHolder()
@@ -531,7 +531,7 @@ def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_
 
     from filelock import FileLock
 
-    from tests.langgraph_dev_fakes import LockHolder
+    from tests.fakes.langgraph_dev import LockHolder
 
     _patch_for_start(monkeypatch, set())
     started: list = []
@@ -561,7 +561,7 @@ def test_stop_while_waiting_for_the_start_lock_starts_nothing(monkeypatch, then_
 
 
 def test_start_lock_held_too_long_is_backend_start_failed(monkeypatch):
-    from tests.langgraph_dev_fakes import LockHolder
+    from tests.fakes.langgraph_dev import LockHolder
 
     _patch_for_start(monkeypatch, set())
     monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
@@ -598,7 +598,7 @@ def test_start_tells_the_caller_it_waits_for_another_start(monkeypatch, held):
     """on_lock_wait hears True while another start holds the lock and False
     once this start has it, before the backend decision; nothing when the
     lock is free."""
-    from tests.langgraph_dev_fakes import LockHolder
+    from tests.fakes.langgraph_dev import LockHolder
 
     _patch_for_start(monkeypatch, set())
     events: list = []

@@ -13,7 +13,7 @@ from EvoScientist.cli.async_notifier import (
     format_notification_lines,
 )
 from EvoScientist.gateway import GraphTarget
-from tests.fakes import FakeGraphGateway
+from tests.fakes.common import FakeGraphGateway
 
 
 def test_notification_dataclass_fields():

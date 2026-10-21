@@ -17,7 +17,7 @@ from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.gateway.types import GraphTarget
 from EvoScientist.paths import Workspace
 from EvoScientist.stream.events import stream_agent_events
-from tests.fakes import close_result
+from tests.fakes.common import close_result
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 

@@ -22,8 +22,8 @@ from EvoScientist.cli.widgets.user_message import UserMessage
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.paths import SessionDirs
-from tests.goal_fakes import OBJECTIVE, cli_goal_agent
-from tests.tui_fakes import (
+from tests.fakes.goal import OBJECTIVE, cli_goal_agent
+from tests.fakes.tui import (
     NoHistory,
     capture_app,
     isolated_skills,  # noqa: F401  (autouse fixture)
@@ -405,7 +405,7 @@ class _HeldGateway:
     """A fake gateway whose first run waits until the test lets it finish."""
 
     def __init__(self) -> None:
-        from tests.fakes import FakeGraphGateway, FakeThreadStore
+        from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
         self.release = asyncio.Event()
         self.started = asyncio.Event()
@@ -849,7 +849,7 @@ class _StepGateway:
     """A fake gateway whose runs each wait until the test lets that run finish."""
 
     def __init__(self) -> None:
-        from tests.fakes import FakeGraphGateway, FakeThreadStore
+        from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
         self.gates: dict[str, asyncio.Event] = {}
         self.running: list[str] = []
@@ -1076,7 +1076,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_an_open_question_alone(
     """The turn that took the app is waiting for an answer when the old
     command ends: the question keeps the focus, and the input comes back
     with its answer."""
-    from tests.fakes import FakeGraphGateway, FakeThreadStore
+    from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
     class _Asking(FakeGraphGateway):
         async def stream_events(self, request):
@@ -1324,8 +1324,8 @@ async def test_a_command_cut_by_ctrl_c_leaves_an_open_approval_alone(
     """The same with a tool approval open in the turn that took the app."""
     from EvoScientist.channels import interaction as interaction_mod
     from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
-    from tests.fakes import FakeGraphGateway, FakeThreadStore
-    from tests.fakes import interrupt_event as _interrupt_event
+    from tests.fakes.common import FakeGraphGateway, FakeThreadStore
+    from tests.fakes.common import interrupt_event as _interrupt_event
 
     # No config rule answers the approval: the widget is shown.
     monkeypatch.setattr(

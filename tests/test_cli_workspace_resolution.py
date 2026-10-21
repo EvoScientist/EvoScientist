@@ -11,7 +11,7 @@ import pytest
 
 from EvoScientist.cli import commands
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
 
 def _config(

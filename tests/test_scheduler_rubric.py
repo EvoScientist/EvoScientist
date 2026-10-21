@@ -263,7 +263,7 @@ def test_scheduler_grader_uses_tool_calling_without_thinking_on_deepseek(
     import httpx
 
     from EvoScientist.llm import get_chat_model
-    from tests.fakes import deepseek_tool_call_response
+    from tests.fakes.common import deepseek_tool_call_response
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     bodies = []

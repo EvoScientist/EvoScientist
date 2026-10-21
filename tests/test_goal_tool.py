@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from langchain_core.messages import AIMessage
 
-from tests.goal_fakes import goal_agent, message_input, run, seed_goal, tool_call
+from tests.fakes.goal import goal_agent, message_input, run, seed_goal, tool_call
 
 
 def _calls(*calls) -> AIMessage:
@@ -212,7 +212,7 @@ def test_the_tool_selector_never_drops_the_tool():
 
 def test_the_sync_end_hook_also_leaves_a_blocked_turn_ungraded(tmp_path):
     """Every surface runs the graph async; the sync hooks must not drift."""
-    from tests.rubric_fakes import FAIL
+    from tests.fakes.rubric import FAIL
 
     agent, models = goal_agent(
         tmp_path, replies=[_calls(BLOCKED), "I need you"], verdicts=[FAIL]

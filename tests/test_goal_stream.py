@@ -13,7 +13,7 @@ from rich.console import Console
 from EvoScientist.middleware.goal import new_goal_request
 from EvoScientist.stream.display import create_streaming_display, goal_event_lines
 from EvoScientist.stream.state import StreamState
-from tests.goal_fakes import ACCEPT, CANCEL
+from tests.fakes.goal import ACCEPT, CANCEL
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 
@@ -161,7 +161,7 @@ class TestDecoder:
     async def _events(self, tmp_path, payloads):
         from EvoScientist.gateway import GraphTarget, RunRequest
         from EvoScientist.gateway.local import LocalGraphGateway
-        from tests.goal_fakes import cli_goal_agent
+        from tests.fakes.goal import cli_goal_agent
 
         agent, _ = cli_goal_agent(tmp_path)
         gateway = LocalGraphGateway()
@@ -201,7 +201,7 @@ class TestDecoder:
 
         from EvoScientist.gateway import GraphTarget, RunRequest
         from EvoScientist.gateway.local import LocalGraphGateway
-        from tests.goal_fakes import cli_goal_agent
+        from tests.fakes.goal import cli_goal_agent
 
         agent, _ = cli_goal_agent(
             tmp_path,
@@ -340,7 +340,7 @@ class TestEventsArriveWhileWorkGoesOn:
     async def test_the_drafting_line_is_there_while_the_draft_is_written(
         self, tmp_path
     ):
-        from tests.goal_fakes import cli_goal_agent
+        from tests.fakes.goal import cli_goal_agent
 
         hold = threading.Event()
         agent, _model = cli_goal_agent(tmp_path, holds={"draft": hold})
@@ -362,7 +362,7 @@ class TestEventsArriveWhileWorkGoesOn:
         from EvoScientist.config import EvoScientistConfig
         from EvoScientist.EvoScientist import create_cli_agent
         from EvoScientist.paths import Workspace
-        from tests.goal_fakes import AllRoles
+        from tests.fakes.goal import AllRoles
 
         hold = threading.Event()
         agent = create_cli_agent(
@@ -399,7 +399,7 @@ class TestEventsArriveWhileWorkGoesOn:
         from EvoScientist.config import EvoScientistConfig
         from EvoScientist.EvoScientist import create_cli_agent
         from EvoScientist.paths import Workspace
-        from tests.goal_fakes import AllRoles
+        from tests.fakes.goal import AllRoles
 
         class _Streaming(AllRoles):
             def _stream(self, messages, stop=None, run_manager=None, **kwargs):

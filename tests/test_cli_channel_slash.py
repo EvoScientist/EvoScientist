@@ -17,7 +17,7 @@ from EvoScientist.cli.channel import (
     dispatch_channel_slash_command as _dispatch_channel_slash_command,
 )
 from EvoScientist.paths import SessionDirs, Workspace
-from tests.fakes import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
+from tests.fakes.common import TEST_WORKSPACE, FakeGraphGateway, FakeThreadStore
 
 
 def _thread_store() -> FakeThreadStore:

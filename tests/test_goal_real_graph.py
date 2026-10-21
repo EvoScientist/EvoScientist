@@ -9,7 +9,7 @@ from EvoScientist.config import EvoScientistConfig
 from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.middleware.goal import new_goal_request
 from EvoScientist.paths import Workspace
-from tests.goal_fakes import (
+from tests.fakes.goal import (
     ACCEPT,
     CANCEL,
     ESCAPED,

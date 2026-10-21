@@ -28,10 +28,10 @@ from EvoScientist.channels.channel_manager import ChannelManager
 from EvoScientist.channels.consumer import InboundConsumer
 from EvoScientist.middleware import events as mw_events
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
-from tests.fakes import StubChannel as _StubChannel
-from tests.fakes import attended_config as _attended_config
-from tests.fakes import interrupt_event as _interrupt_event
+from tests.fakes.common import FakeCheckpointAgent, FakeGraphGateway
+from tests.fakes.common import StubChannel as _StubChannel
+from tests.fakes.common import attended_config as _attended_config
+from tests.fakes.common import interrupt_event as _interrupt_event
 
 
 class TestRichCliHitlRoundBudget:

@@ -1,6 +1,6 @@
 """Shared pieces for tests that drive the real TUI loop.
 
-Kept apart from ``tests.fakes`` because everything here needs textual.
+Kept apart from ``tests.fakes.common`` because everything here needs textual.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from EvoScientist.cli.widgets.approval_widget import ApprovalWidget
 from EvoScientist.cli.widgets.tool_call_widget import ToolCallWidget
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.stream import display as display_mod
-from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
+from tests.fakes.common import FakeCheckpointAgent, FakeGraphGateway
 
 # -- the app ------------------------------------------------------------------------
 #
@@ -307,7 +307,7 @@ async def run_turn(monkeypatch, workspace, script, *, prepare=None, **kwargs):
 
 def rubric_gateway(events=None, state_values=None, post_state=None):
     """A fake gateway; ``post_state`` becomes the thread state once a run finished."""
-    from tests.fakes import FakeGraphGateway, FakeThreadStore
+    from tests.fakes.common import FakeGraphGateway, FakeThreadStore
 
     class _Gateway(FakeGraphGateway):
         async def stream_events(self, request):

@@ -24,7 +24,7 @@ from EvoScientist.gateway.server import (
     LangGraphServerGateway,
     LangGraphServerThreadStore,
 )
-from tests.fakes import (
+from tests.fakes.common import (
     FakeCheckpointAgent,
     FakeGraphGateway,
     FakeLangGraphClient,

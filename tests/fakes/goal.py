@@ -21,7 +21,7 @@ from EvoScientist.message_meta import this_run_messages
 from EvoScientist.middleware.goal import GoalContextMiddleware, GoalMiddleware
 from EvoScientist.middleware.rubric import create_rubric_middleware
 from EvoScientist.paths import Workspace
-from tests.rubric_fakes import FAIL, PASS, ScriptedGrader
+from tests.fakes.rubric import FAIL, PASS, ScriptedGrader
 
 ACCEPT = {"answers": ["Accept"], "status": "answered"}
 CANCEL = {"answers": ["Cancel"], "status": "answered"}

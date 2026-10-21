@@ -335,7 +335,7 @@ async def test_close_parked_checkpoint_through_composite():
 
     from EvoScientist.backends import close_parked_checkpoint
     from EvoScientist.gateway import GraphTarget
-    from tests.fakes import FakeCheckpointAgent, FakeGraphGateway
+    from tests.fakes.common import FakeCheckpointAgent, FakeGraphGateway
 
     agent = FakeCheckpointAgent(
         values={

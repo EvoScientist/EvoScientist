@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from EvoScientist.memory.scheduler import MemoryScheduler
 from EvoScientist.memory.types import MemorySourceType
 from EvoScientist.middleware import memory_lifecycle
-from tests.memory_fakes import fake_runtime
+from tests.fakes.memory import fake_runtime
 
 TURN = [HumanMessage("hi", id="h1"), AIMessage("done", name="EvoScientist", id="a1")]
 
