@@ -30,12 +30,30 @@ import shutil
 import struct
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+import tempfile
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
-from ._install import same_path
-from .protocol import CN_MIRROR_HINT, Emitter, StageError, StageResult, make_event
+from ._install import (
+    kill_tree,
+    remove_stale_temp_dirs,
+    same_path,
+    stage_lock,
+    tree_signature,
+)
+from .protocol import (
+    CN_MIRROR_HINT,
+    HEARTBEAT_INTERVAL,
+    Emitter,
+    Heartbeat,
+    StageError,
+    StageResult,
+    StepStalled,
+    make_event,
+    wait_with_heartbeat,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +93,15 @@ _MIN_PYTHON = (3, 9)
 # Files that mark an environment EvoScientist's installer made (uv tool
 # install; the Docker image's /opt/venv). uv builds both without pip.
 _MANAGED_ENV_MARKERS = ("uv-receipt.toml", ".evoscientist-managed")
-_VENV_TIMEOUT = 300
-_PIP_TIMEOUT = 1800
-# The first matplotlib import builds its font cache.
+# Seconds venv creation and pip may go without printing anything or writing
+# a file before they are stopped; no limit while they make progress.
+_SILENCE_LIMIT = 300
+# pip's temporary folders next to the environment; removed after each run,
+# and by the next run under the lock when a run was killed.
+_PIP_TEMP_PREFIX = ".pip-"
+# How often a watched step repeats its last progress line.
+_BEAT_INTERVAL = HEARTBEAT_INTERVAL
+# The first matplotlib import builds its font cache, printing nothing.
 _IMPORT_TIMEOUT = 300
 # Prints the Python version, then one "failed <name>: <error>" line per
 # package that does not import; exits 1 if any failed. Each package is tried
@@ -158,23 +182,96 @@ def is_ready(env: Path | None = None) -> bool:
 # --------------------------------------------------------------------------- #
 # Subprocesses
 # --------------------------------------------------------------------------- #
-def _run(cmd: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+class _Stalled(subprocess.SubprocessError):
+    """A watched step showed no sign of work for its silence limit."""
+
+
+def _stop(proc: subprocess.Popen[str]) -> None:
+    """Kill ``proc``'s tree and reap it."""
+    kill_tree(proc.pid)
+    try:
+        proc.wait(30)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            f"{proc.args[0]} (pid {proc.pid}) did not stop after being killed"
+        )
+
+
+def _run(
+    cmd: Sequence[str],
+    timeout: float,
+    *,
+    beat: Callable[[], None] | None = None,
+    watched: Sequence[Path] = (),
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run ``cmd`` capturing combined output. Raises OSError / SubprocessError.
+
+    Without ``beat``, ``timeout`` limits the whole run. With it, the step is
+    watched instead: ``beat()`` runs every few seconds, and ``timeout`` is a
+    silence limit, counted while the output and the files under ``watched``
+    stay unchanged; past it the process tree is stopped and :class:`_Stalled`
+    raised. pip prints nothing while it downloads a wheel when its output is
+    piped, so the files it writes are the better sign of work.
 
     No console window on Windows: the python probes also run when an agent is
     built, and a process without a console (the desktop app) would otherwise
     flash one for every probe.
     """
-    return subprocess.run(
+    if beat is None:
+        return subprocess.run(
+            list(cmd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    proc = subprocess.Popen(
         list(cmd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         text=True,
         errors="replace",
-        timeout=timeout,
+        env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+    output: list[str] = []
+    assert proc.stdout is not None
+    # Only collects: every line to the caller comes from this thread.
+    reader = threading.Thread(target=lambda: output.extend(proc.stdout), daemon=True)
+    reader.start()
+
+    def poll(seconds: float) -> int | None:
+        try:
+            return proc.wait(seconds)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def activity() -> tuple[object, ...]:
+        return (sum(map(len, output)), *(tree_signature(p) for p in watched))
+
+    try:
+        code = wait_with_heartbeat(
+            poll, beat, activity, silence_limit=timeout, interval=_BEAT_INTERVAL
+        )
+    except StepStalled as exc:
+        _stop(proc)
+        raise _Stalled(
+            f"{Path(cmd[0]).name} printed and wrote nothing for {timeout:g} s and "
+            "was stopped"
+        ) from exc
+    except BaseException:
+        _stop(proc)
+        raise
+    finally:
+        # A grandchild that keeps the pipe open must not hold the stage.
+        reader.join(30)
+    return subprocess.CompletedProcess(list(cmd), code, "".join(output))
 
 
 def _runs(
@@ -364,7 +461,7 @@ class ImportCheck(NamedTuple):
         return self.version is not None and not self.failed
 
 
-def _import_check(env: Path) -> ImportCheck:
+def _import_check(env: Path, beat: Callable[[], None] | None = None) -> ImportCheck:
     """Import each package in the environment's Python, one by one.
 
     Isolated (``-I``) like every command that maintains the environment: the
@@ -375,7 +472,7 @@ def _import_check(env: Path) -> ImportCheck:
     """
     cmd = [str(_env_python(env)), "-I", "-c", _IMPORT_CHECK]
     try:
-        result = _run(cmd, _IMPORT_TIMEOUT)
+        result = _run(cmd, _IMPORT_TIMEOUT, beat=beat)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning(f"Import check in {env} failed: {exc}")
         return ImportCheck(None, PACKAGES)
@@ -443,10 +540,10 @@ def _sync_pip_config(env: Path, mirror: str) -> None:
         )
 
 
-def _create_venv(env: Path) -> None:
+def _create_venv(env: Path, beat: Callable[[], None]) -> None:
     cmd = [sys.executable, "-I", "-m", "venv", str(env)]
     try:
-        result = _run(cmd, _VENV_TIMEOUT)
+        result = _run(cmd, _SILENCE_LIMIT, beat=beat, watched=(env,))
     except (OSError, subprocess.SubprocessError) as exc:
         raise StageError("install_failed", f"Could not create {env}: {exc}") from exc
     if result.returncode == 0:
@@ -466,19 +563,53 @@ def _create_venv(env: Path) -> None:
     raise StageError("install_failed", message)
 
 
-def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
+def _pip_install(
+    env: Path,
+    mirror: str,
+    packages: Sequence[str],
+    beat: Callable[[], None],
+    *,
+    force: bool = False,
+) -> list[str]:
     """Install ``packages`` at their :data:`PINS`; returns the ones installed
     without the pin.
 
     Without ``--upgrade``, so packages already there stay as they are unless a
-    missing one requires a change. When the pinned version of a package has
-    no wheel for this interpreter (pip's "from versions:" lists others), that
-    package is installed without the pin and pip takes its newest wheel, once
-    per package. "from versions: none" means the index was not reached (or
-    has nothing for this interpreter), which no fallback fixes.
+    missing one requires a change. ``force`` reinstalls the packages
+    themselves (``--force-reinstall --no-deps``), for a package whose files
+    are broken although pip counts it as installed. When the pinned version
+    of a package has no wheel for this interpreter (pip's "from versions:"
+    lists others), that package is installed without the pin and pip takes
+    its newest wheel, once per package. "from versions: none" means the index
+    was not reached (or has nothing for this interpreter), which no fallback
+    fixes.
+
+    pip gets a temporary folder of its own (``TMPDIR`` / ``TEMP``), where it
+    downloads: its growth, and the environment's, show that pip still works
+    while it prints nothing.
     """
     requirements = {name: f"{name}=={PINS[name]}" for name in packages}
     unpinned: list[str] = []
+    tmp = Path(tempfile.mkdtemp(prefix=_PIP_TEMP_PREFIX, dir=env.parent))
+    child_env = {**os.environ, "TMPDIR": str(tmp), "TEMP": str(tmp), "TMP": str(tmp)}
+    try:
+        return _pip_install_in(
+            env, mirror, requirements, unpinned, beat, force, tmp, child_env
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _pip_install_in(
+    env: Path,
+    mirror: str,
+    requirements: dict[str, str],
+    unpinned: list[str],
+    beat: Callable[[], None],
+    force: bool,
+    tmp: Path,
+    child_env: Mapping[str, str],
+) -> list[str]:
     while True:
         cmd = [
             str(_env_python(env)),
@@ -490,14 +621,17 @@ def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
             ":all:",
             "--disable-pip-version-check",
             "--no-input",
+            *(["--force-reinstall", "--no-deps"] if force else []),
             *requirements.values(),
         ]
         if mirror == "cn":
             cmd += ["--index-url", CN_INDEX_URL]
         try:
-            result = _run(cmd, _PIP_TIMEOUT)
-        except subprocess.TimeoutExpired as exc:
-            message = f"pip install did not finish within {_PIP_TIMEOUT} s."
+            result = _run(
+                cmd, _SILENCE_LIMIT, beat=beat, watched=(tmp, env), env=child_env
+            )
+        except _Stalled as exc:
+            message = f"pip install failed: {exc}."
             if mirror != "cn":
                 message += f" {CN_MIRROR_HINT}"
             raise StageError("install_failed", message) from exc
@@ -575,15 +709,17 @@ def _write_ready_marker(env: Path, result: EnvResult) -> None:
 
 
 def _repair(
-    env: Path, mirror: str, failed: Sequence[str], report: ProgressFn
+    env: Path, mirror: str, failed: Sequence[str], report: Heartbeat
 ) -> EnvResult | None:
     """Try to fix a ready environment in place; None to rebuild it.
 
     A Python that does not start (e.g. its base interpreter was removed) cannot
     be repaired. Otherwise only the ``failed`` packages are installed again, at
     their pins, so a newer version of another package that the agent installed
-    stays. A pip failure raises and leaves the environment and its marker as
-    they are, so the agent keeps a mostly working Python.
+    stays: first their own files (pip counts a package with broken files as
+    installed), then whatever they need that is missing. A pip failure raises
+    and leaves the environment and its marker as they are, so the agent keeps
+    a mostly working Python.
     """
     python = str(_env_python(env))
     if _runs([python, "-I", "-c", "import sys"], _PYTHON_PROBE_TIMEOUT) is None:
@@ -594,16 +730,21 @@ def _repair(
     # back to a rebuild, and progress must not jump backwards.
     report(0.03, f"Installing {', '.join(failed)}")
     still_unpinned = [name for name in _read_unpinned(env) if name not in failed]
-    unpinned = _pip_install(env, mirror, failed)
+    unpinned = _pip_install(env, mirror, failed, report.beat, force=True)
+    unpinned += [
+        name
+        for name in _pip_install(env, mirror, failed, report.beat)
+        if name not in unpinned
+    ]
     report(0.06, "Checking the packages")
-    check = _import_check(env)
+    check = _import_check(env, report.beat)
     if not check.ok:
         return None
     # A package reinstalled at its pin is no longer unpinned.
     return EnvResult(check.version, still_unpinned + unpinned)
 
 
-def _build(env: Path, mirror: str, report: ProgressFn) -> EnvResult:
+def _build(env: Path, mirror: str, report: Heartbeat) -> EnvResult:
     try:
         (env / _READY_MARKER).unlink(missing_ok=True)
         if env.exists():
@@ -612,12 +753,12 @@ def _build(env: Path, mirror: str, report: ProgressFn) -> EnvResult:
         raise StageError("install_failed", f"Could not remove {env}: {exc}") from exc
     try:
         report(0.1, "Creating the virtual environment")
-        _create_venv(env)
+        _create_venv(env, report.beat)
         _sync_pip_config(env, mirror)
         report(0.2, f"Installing {', '.join(PACKAGES)}")
-        unpinned = _pip_install(env, mirror, PACKAGES)
+        unpinned = _pip_install(env, mirror, PACKAGES, report.beat)
         report(0.9, "Checking the packages")
-        check = _import_check(env)
+        check = _import_check(env, report.beat)
         if not check.ok:
             failed = ", ".join(check.failed) or ", ".join(PACKAGES)
             raise StageError("probe_failed", f"{failed} do not import in {env}.")
@@ -637,16 +778,16 @@ def ensure_research_env(mirror: str, progress: ProgressFn | None = None) -> EnvR
     it is repaired in place when its Python still starts, and rebuilt
     otherwise. The pip config follows ``mirror`` on every run.
     """
-    report = progress or (lambda _f, _m: None)
+    report = Heartbeat(progress or (lambda _f, _m: None))
     env = env_dir()
-
-    from filelock import FileLock
 
     try:
         env.parent.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(env.parent / f"{env.name}.lock")):
+        lock = env.parent / f"{env.name}.lock"
+        with stage_lock(lock, "the research environment", progress):
+            remove_stale_temp_dirs(env.parent, _PIP_TEMP_PREFIX)
             if is_ready(env):
-                check = _import_check(env)
+                check = _import_check(env, report.beat)
                 if check.ok:
                     _sync_pip_config(env, mirror)
                     return EnvResult(check.version, _read_unpinned(env))

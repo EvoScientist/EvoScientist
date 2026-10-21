@@ -806,3 +806,45 @@ def test_malformed_version_entry_is_download_failed(env, entry):
     with pytest.raises(StageError) as exc:
         webui.ensure_webui(env["node"], "default")
     assert exc.value.code == "download_failed"
+
+
+def test_extract_ticks_once_per_member(tmp_path):
+    archive = tmp_path / "w.tgz"
+    archive.write_bytes(_tarball("0.3.0"))
+    ticks: list[int] = []
+    webui.extract_package(archive, tmp_path / "out", lambda: ticks.append(1))
+    with tarfile.open(archive) as tf:
+        assert len(ticks) == len(tf.getmembers())
+
+
+def test_install_waits_for_another_process_and_says_so(env, monkeypatch):
+    import threading
+
+    from filelock import FileLock
+
+    from EvoScientist.setup import _install
+
+    monkeypatch.setattr(_install, "HEARTBEAT_INTERVAL", 0.05)
+    webui.webui_root().mkdir(parents=True, exist_ok=True)
+    holder = FileLock(str(webui._lock_path()))
+    holder.acquire()
+    lines: list[str] = []
+    waiter = threading.Thread(
+        target=lambda: webui.ensure_webui(
+            env["node"], "default", lambda _f, m: lines.append(m)
+        )
+    )
+    waiter.start()
+    try:
+        for _ in range(50):
+            if lines:
+                break
+            waiter.join(0.05)
+    finally:
+        holder.release()
+    waiter.join(10)
+    assert (
+        lines[0]
+        == "Waiting for another EvoScientist process to finish installing the WebUI"
+    )
+    assert _record(env["data"]) is not None

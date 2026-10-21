@@ -25,16 +25,21 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from ._install import (
+    PolicyBlocked,
+    atomic_write_text,
+    is_policy_block,
     is_under,
     move_into_place,
+    policy_error,
     prepend_to_path,
     remove_stale_temp_dirs,
+    stage_lock,
     tools_dir,
     which_in,
     which_on_path,
@@ -42,6 +47,7 @@ from ._install import (
 from .download import download
 from .protocol import (
     Emitter,
+    Heartbeat,
     ProgressThrottle,
     StageError,
     StageResult,
@@ -49,6 +55,8 @@ from .protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 NODE_VERSION = "24.21.0"
 # (major, minor): the WebUI's Next.js declares ``engines.node >=20.9.0``.
@@ -77,6 +85,8 @@ NODE_SHA256 = {
 # The official Linux builds need glibc 2.28 or newer (Node's BUILDING.md).
 MIN_GLIBC = (2, 28)
 _TRY_YOUR_OWN = "Install Node.js 20.9 or newer yourself and run `EvoSci setup` again."
+# Completes policy_error()'s "or ..., and run `EvoSci setup` again".
+_POLICY_ALTERNATIVE = "install Node.js 20.9 or newer yourself"
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
@@ -197,7 +207,12 @@ def _parse_version(text: str) -> tuple[int, int, int] | None:
 
 
 def _probe(exe: Path) -> tuple[int, int, int] | None:
-    """Run ``<exe> --version``; return the parsed version, or None on any failure."""
+    """Run ``<exe> --version``; return the parsed version, or None on any failure.
+
+    A program blocked by a Windows policy raises :class:`PolicyBlocked`
+    instead, so a blocked system Node is skipped while a blocked private one
+    is reported, not downloaded again.
+    """
     env = node_child_env(os.environ, private=True)
     try:
         result = subprocess.run(
@@ -207,7 +222,11 @@ def _probe(exe: Path) -> tuple[int, int, int] | None:
             timeout=30,
             env=env,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError as exc:
+        if is_policy_block(exc):
+            raise PolicyBlocked(exe) from exc
+        return None
+    except subprocess.SubprocessError:
         return None
     if result.returncode != 0:
         return None
@@ -224,7 +243,11 @@ def _system_node() -> NodeInfo | None:
     found = which_on_path("node", outside=tools_dir())
     if found is None or which_in("npx", Path(found).parent) is None:
         return None
-    version = _probe(Path(found))
+    try:
+        version = _probe(Path(found))
+    except PolicyBlocked as exc:
+        logger.info(f"Not using {found}: a Windows policy blocked {exc.path}")
+        return None
     if version is None or version[:2] < MIN_SYSTEM_NODE:
         return None
     return NodeInfo("system", ".".join(map(str, version)), Path(found))
@@ -244,12 +267,9 @@ def _read_record() -> dict[str, str] | None:
 
 
 def _write_record(version: str, install_dir: Path) -> None:
-    record = _record_path()
-    tmp = record.with_name(record.name + ".tmp")
-    tmp.write_text(
-        json.dumps({"version": version, "path": str(install_dir)}), encoding="utf-8"
+    atomic_write_text(
+        _record_path(), json.dumps({"version": version, "path": str(install_dir)})
     )
-    os.replace(tmp, record)
 
 
 def _recorded_node() -> NodeInfo | None:
@@ -267,21 +287,31 @@ def _recorded_node() -> NodeInfo | None:
 # --------------------------------------------------------------------------- #
 # Install
 # --------------------------------------------------------------------------- #
-def _extract(archive: Path, dest: Path) -> None:
-    """Unpack ``archive`` into ``dest``.
+def _ticking(members: Iterable[T], tick: Callable[[], None]) -> Iterator[T]:
+    """``members``, calling ``tick`` before each one is unpacked."""
+    for member in members:
+        tick()
+        yield member
+
+
+def _extract(
+    archive: Path, dest: Path, tick: Callable[[], None] = lambda: None
+) -> None:
+    """Unpack ``archive`` into ``dest``, calling ``tick`` between members.
 
     ``.zip`` (Windows) goes through ``zipfile``, which strips absolute and
     ``..`` member paths and creates no symlinks. ``.tar.xz`` uses the ``data``
     filter, which keeps Node's relative ``bin/npm`` / ``bin/npx`` links and
-    rejects members or links that escape ``dest``.
+    rejects members or links that escape ``dest``. Both unpack the members as
+    the iterator yields them, so ``tick`` runs while the work goes on.
     """
     if archive.suffix == ".zip":
         with zipfile.ZipFile(archive) as zf:
-            zf.extractall(dest)
+            zf.extractall(dest, members=_ticking(zf.namelist(), tick))
         return
     with tarfile.open(archive, "r:xz") as tf:
         if hasattr(tarfile, "data_filter"):
-            tf.extractall(dest, filter="data")
+            tf.extractall(dest, members=_ticking(tf, tick), filter="data")
             return
         # Python < 3.11.4 has no extraction filters: check each member by hand.
         root = dest.resolve()
@@ -295,10 +325,10 @@ def _extract(archive: Path, dest: Path) -> None:
                     (link_base / member.linkname).resolve(), root
                 ):
                     raise tarfile.TarError(f"link {member.name!r} escapes {dest}")
-        tf.extractall(dest)
+        tf.extractall(dest, members=_ticking(tf.getmembers(), tick))
 
 
-def _install(mirror: str, report: ProgressFn) -> NodeInfo:
+def _install(mirror: str, report: Heartbeat) -> NodeInfo:
     plat = platform_id()
     source = SOURCES.get(mirror, SOURCES["default"])
     filename = archive_name(plat)
@@ -327,7 +357,7 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
         report(0.9, "Unpacking")
         unpack = tmp / "unpack"
         try:
-            _extract(archive, unpack)
+            _extract(archive, unpack, report.tick)
         except (tarfile.TarError, zipfile.BadZipFile) as exc:
             raise StageError(
                 "download_failed", f"Could not unpack {filename}: {exc}"
@@ -353,6 +383,9 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
 
         report(0.96, "Checking the installed Node")
         exe = _node_exe(final)
+        # A policy block propagates (see ensure_node) and leaves the install on
+        # disk unrecorded: the next run adopts it, is blocked again and reports
+        # it without a new download.
         version = _probe(exe)
         if version is None:
             shutil.rmtree(final, ignore_errors=True)
@@ -407,7 +440,7 @@ def ensure_node(
 
     ``mirror`` defaults to the configured ``mirror``.
     """
-    report = progress or (lambda _f, _m: None)
+    report = Heartbeat(progress or (lambda _f, _m: None))
 
     system = _system_node()
     if system is not None:
@@ -417,28 +450,30 @@ def ensure_node(
             _record_path().unlink(missing_ok=True)
         return system
 
-    recorded = _recorded_node()
-    if recorded is not None:
-        return recorded
-
     global _failed_install
-    if _failed_install is not None:
-        # One process can ask several times (server spawn, MCP load, WebUI);
-        # on a blocked network each attempt would wait out the timeouts again.
-        raise _failed_install
-
-    from filelock import FileLock
-
     root = tools_dir()
     try:
+        recorded = _recorded_node()
+        if recorded is not None:
+            return recorded
+        if _failed_install is not None:
+            # One process can ask several times (server spawn, MCP load,
+            # WebUI); on a blocked network each attempt would wait out the
+            # timeouts again.
+            raise _failed_install
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(root / "node.lock")):
+        with stage_lock(root / "node.lock", "Node.js", progress):
             # Another process may have finished the install while we waited.
             recorded = _recorded_node() or _adopt_installed(root)
             if recorded is not None:
                 return recorded
             remove_stale_temp_dirs(root, ".node-")
             return _install(mirror or configured_mirror(), report)
+    except PolicyBlocked as exc:
+        # Our recorded, left-over or fresh Node is blocked: report it instead
+        # of downloading the same blocked program again.
+        _failed_install = policy_error(exc.path, _POLICY_ALTERNATIVE)
+        raise _failed_install from exc
     except StageError as exc:
         _failed_install = exc
         raise

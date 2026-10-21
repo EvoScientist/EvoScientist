@@ -258,3 +258,66 @@ def test_posix_path_entries_follow_a_link_before_dot_dot(tmp_path, monkeypatch):
     assert _install.same_path(_install.which_on_path("node"), real)
     assert _install.same_path(entry, real.parent)
     assert not _install.same_path(entry, tmp_path / "bin")
+
+
+# --------------------------------------------------------------------------- #
+# Stage lock, policy errors
+# --------------------------------------------------------------------------- #
+def test_stage_lock_says_nothing_when_the_lock_is_free(tmp_path):
+    lines: list[str] = []
+    with _install.stage_lock(
+        tmp_path / "x.lock", "Node.js", lambda _f, m: lines.append(m)
+    ):
+        pass
+    assert lines == []
+
+
+def test_stage_lock_reports_while_it_waits(tmp_path, monkeypatch):
+    import threading
+
+    from filelock import FileLock
+
+    monkeypatch.setattr(_install, "HEARTBEAT_INTERVAL", 0.05)
+    holder = FileLock(str(tmp_path / "x.lock"))
+    holder.acquire()
+    lines: list[str] = []
+    entered = threading.Event()
+
+    def wait() -> None:
+        with _install.stage_lock(
+            tmp_path / "x.lock", "Git", lambda _f, m: lines.append(m)
+        ):
+            entered.set()
+
+    waiter = threading.Thread(target=wait)
+    waiter.start()
+    try:
+        for _ in range(50):
+            if len(lines) >= 2:
+                break
+            waiter.join(0.05)
+        assert not entered.is_set()
+    finally:
+        holder.release()
+    waiter.join(10)
+    assert entered.is_set()
+    assert set(lines) == {
+        "Waiting for another EvoScientist process to finish installing Git"
+    }
+
+
+def test_policy_error_names_the_program_and_the_way_out(tmp_path):
+    err = _install.policy_error(tmp_path / "node.exe", "install Node.js yourself")
+    assert err.code == "probe_failed"
+    assert "AppLocker, WDAC or Smart App Control" in err.message
+    assert str(tmp_path / "node.exe") in err.message
+    assert err.message.endswith(
+        "or install Node.js yourself and run `EvoSci setup` again."
+    )
+
+
+def test_is_policy_block_reads_winerror():
+    exc = OSError(13, "blocked")
+    assert not _install.is_policy_block(exc)
+    exc.winerror = 4551
+    assert _install.is_policy_block(exc)
