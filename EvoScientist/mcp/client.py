@@ -924,6 +924,8 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     """
     if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
+    from ..setup._install import which_on_path
+
     missing = [
         name
         for name, server in config.items()
@@ -931,7 +933,7 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
         and (command := str(server.get("command", "")))
         and not os.path.isabs(command)
         and Path(command).stem.lower() in _NODE_COMMANDS
-        and shutil.which(command) is None
+        and which_on_path(command) is None
     ]
     if not missing:
         return

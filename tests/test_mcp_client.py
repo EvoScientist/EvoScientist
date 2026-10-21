@@ -2675,6 +2675,15 @@ class TestNetworkDiscoveryDeadline:
 # ---- _ensure_node_for_stdio ----
 
 
+def _fake_npx(directory: Path) -> Path:
+    """A folder holding an ``npx`` the PATH lookup accepts on this OS."""
+    directory.mkdir(parents=True)
+    exe = directory / ("npx.cmd" if os.name == "nt" else "npx")
+    exe.write_text("")
+    exe.chmod(0o755)
+    return directory
+
+
 class TestEnsureNodeForStdio:
     @pytest.fixture
     def calls(self, monkeypatch):
@@ -2693,12 +2702,26 @@ class TestEnsureNodeForStdio:
         monkeypatch.setattr(setup_node, "activate_runtime", activate)
         return calls
 
-    def test_installs_when_npx_missing(self, monkeypatch, calls):
+    def test_installs_when_npx_missing(self, monkeypatch, calls, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        )
+        assert calls == {"ensure": 1, "activate": 1}
+
+    def test_npx_in_the_current_directory_does_not_count(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """On Windows ``shutil.which`` looks in the current directory first; an
+        ``npx.cmd`` there must not stand in for a Node on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.chdir(_fake_npx(tmp_path / "project"))
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx"}}
         )
         assert calls == {"ensure": 1, "activate": 1}
 
@@ -2710,18 +2733,14 @@ class TestEnsureNodeForStdio:
             {"transport": "http", "url": "http://x"},
         ],
     )
-    def test_skips_when_not_needed(self, monkeypatch, calls, server):
+    def test_skips_when_not_needed(self, monkeypatch, calls, server, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setattr(
-            mcp_client.shutil,
-            "which",
-            lambda c: "/usr/bin/npx" if c == "npx" else None,
-        )
+        monkeypatch.setenv("PATH", str(_fake_npx(tmp_path / "bin")))
         mcp_client._ensure_node_for_stdio({"s": server})
         assert calls == {"ensure": 0, "activate": 0}
 
-    def test_failure_is_logged_not_raised(self, monkeypatch, caplog):
+    def test_failure_is_logged_not_raised(self, monkeypatch, caplog, tmp_path):
         from EvoScientist.mcp import client as mcp_client
         from EvoScientist.setup import node as setup_node
         from EvoScientist.setup.protocol import StageError
@@ -2730,7 +2749,7 @@ class TestEnsureNodeForStdio:
             raise StageError("download_failed", "offline")
 
         monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
             mcp_client._ensure_node_for_stdio(
@@ -2739,7 +2758,7 @@ class TestEnsureNodeForStdio:
         assert "offline" in caplog.text
         assert "EvoSci setup" in caplog.text
 
-    def test_unexpected_error_is_logged_not_raised(self, monkeypatch, caplog):
+    def test_unexpected_error_is_logged_not_raised(self, monkeypatch, caplog, tmp_path):
         """A non-StageError from the install must not abort the MCP load for
         every server."""
         from EvoScientist.mcp import client as mcp_client
@@ -2749,7 +2768,7 @@ class TestEnsureNodeForStdio:
             raise NotImplementedError("compression type 99")
 
         monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
             mcp_client._ensure_node_for_stdio(
@@ -2757,11 +2776,11 @@ class TestEnsureNodeForStdio:
             )
         assert "compression type 99" in caplog.text
 
-    def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls):
+    def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
         monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}
         )
