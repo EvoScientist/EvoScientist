@@ -21,7 +21,7 @@ from EvoScientist.cli.status_bar import (
     trim_status_text,
 )
 from EvoScientist.memory import worker_activity
-from tests.fakes import FakeGraphGateway, FakeThreadStore
+from tests.fakes import FakeGraphGateway, FakeThreadStore, status_snapshot
 
 
 def _render_fragments(fragments: list[tuple[str, str]]) -> str:
@@ -339,27 +339,16 @@ def test_make_usage_status_snapshot_marks_usage_source(monkeypatch):
 
 
 class TestRubricBadge:
-    def _snapshot(self):
-        from EvoScientist.cli.status_bar import SessionStatusSnapshot
-
-        return SessionStatusSnapshot(
-            model_full="claude-sonnet-4-6",
-            model_short="sonnet-4-6",
-            context_tokens=1000,
-            context_window=200000,
-            context_percent=1,
-        )
-
     def test_badge_is_a_strong_fragment_on_wide_bars(self):
         from datetime import datetime
 
         from EvoScientist.cli.status_bar import build_status_fragments
 
         frags = build_status_fragments(
-            self._snapshot(), datetime.now(), 120, rubric_badge="on+next"
+            status_snapshot(), datetime.now(), 120, rubric_badge="on+next"
         )
         assert ("class:status-bar-strong", "rubric: on+next") in frags
-        plain = build_status_fragments(self._snapshot(), datetime.now(), 120)
+        plain = build_status_fragments(status_snapshot(), datetime.now(), 120)
         assert not any("rubric" in text for _style, text in plain)
 
     def test_badge_is_left_out_of_narrow_bars(self):
@@ -368,7 +357,7 @@ class TestRubricBadge:
         from EvoScientist.cli.status_bar import build_status_fragments
 
         narrow = build_status_fragments(
-            self._snapshot(), datetime.now(), 60, rubric_badge="on"
+            status_snapshot(), datetime.now(), 60, rubric_badge="on"
         )
         assert not any("rubric" in text for _style, text in narrow)
 
@@ -378,6 +367,6 @@ class TestRubricBadge:
         from EvoScientist.cli.status_bar import build_status_text
 
         text = build_status_text(
-            self._snapshot(), datetime.now(), 120, rubric_badge="next"
+            status_snapshot(), datetime.now(), 120, rubric_badge="next"
         )
         assert "rubric: next" in text.plain

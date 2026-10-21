@@ -11,8 +11,7 @@ from rich.console import Console
 from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.middleware.goal import new_goal_request
 from EvoScientist.stream import display as display_mod
-from tests.goal_fakes import ACCEPT, CANCEL, feedback
-from tests.test_goal_real_graph import OBJECTIVE, _agent
+from tests.goal_fakes import ACCEPT, CANCEL, OBJECTIVE, cli_goal_agent, feedback
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 
@@ -63,7 +62,7 @@ def _create():
 
 
 async def test_accepting_runs_the_goal_to_completion_in_one_turn(tmp_path, screen):
-    agent, model = _agent(tmp_path)
+    agent, model = cli_goal_agent(tmp_path)
     text, asked = await _turn(agent, answers=[ACCEPT], goal_request=_create())
     assert len(asked) == 1
     assert OBJECTIVE in asked[0]["questions"][0]["question"]
@@ -85,7 +84,7 @@ async def test_accepting_runs_the_goal_to_completion_in_one_turn(tmp_path, scree
 
 
 async def test_feedback_is_redrafted_and_asked_again(tmp_path, screen):
-    agent, model = _agent(tmp_path, drafts=["- first", "- second"])
+    agent, model = cli_goal_agent(tmp_path, drafts=["- first", "- second"])
     _text, asked = await _turn(
         agent, answers=[feedback("make it shorter"), ACCEPT], goal_request=_create()
     )
@@ -99,7 +98,7 @@ async def test_feedback_is_redrafted_and_asked_again(tmp_path, screen):
 
 
 async def test_a_cancelled_review_leaves_one_line_and_nothing_else(tmp_path, screen):
-    agent, model = _agent(tmp_path)
+    agent, model = cli_goal_agent(tmp_path)
     text, _asked = await _turn(agent, answers=[CANCEL], goal_request=_create())
     assert text == ""
     assert model.calls["main"] == 0
@@ -112,7 +111,7 @@ async def test_a_cancelled_review_leaves_one_line_and_nothing_else(tmp_path, scr
 
 
 async def test_a_status_change_is_one_line_without_a_model_call(tmp_path, screen):
-    agent, model = _agent(tmp_path)
+    agent, model = cli_goal_agent(tmp_path)
     await _turn(agent, answers=[ACCEPT], goal_request=_create())
     target = (await _values(agent))["_goal"]["rubric_id"]
     before = dict(model.calls)
@@ -130,7 +129,7 @@ async def test_a_status_change_is_one_line_without_a_model_call(tmp_path, screen
 
 
 async def test_the_next_typed_message_is_an_ordinary_turn(tmp_path, screen):
-    agent, model = _agent(tmp_path)
+    agent, model = cli_goal_agent(tmp_path)
     await _turn(agent, answers=[CANCEL], goal_request=_create())
     text, asked = await _turn(agent, message="hello")
     assert (text, asked) == ("working on it", [])

@@ -184,16 +184,16 @@ def test_memory_workers_and_the_linker_forward_the_root(workspace, tmp_path):
         _memory_worker_run_payload,
         _observation_linker_run_payload,
     )
-    from tests.test_observation_memory import _linker_context, _memory_source_context
+    from tests.memory_fakes import linker_context, memory_source_context
 
     worker = _memory_worker_run_payload(
-        context=_memory_source_context(
+        context=memory_source_context(
             memory_dir=tmp_path / "memories", workspace_dir=workspace.root
         ),
         thread_id="t1",
     )
     linker = _observation_linker_run_payload(
-        context=_linker_context(
+        context=linker_context(
             memory_dir=tmp_path / "memories",
             workspace_dir=workspace.root,
             observation_ids=("o1",),

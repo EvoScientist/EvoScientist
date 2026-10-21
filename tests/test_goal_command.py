@@ -468,9 +468,9 @@ class TestBadge:
         from datetime import datetime
 
         from EvoScientist.cli.status_bar import build_status_fragments
-        from tests.test_status_bar import TestRubricBadge
+        from tests.fakes import status_snapshot
 
-        snapshot = TestRubricBadge()._snapshot()
+        snapshot = status_snapshot()
         frags = build_status_fragments(
             snapshot, datetime.now(), 120, rubric_badge="goal: active+next"
         )

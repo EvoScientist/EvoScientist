@@ -9,68 +9,14 @@ from deepagents.backends import FilesystemBackend
 from deepagents.middleware.rubric import GRADER_SYSTEM_PROMPT
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
 from EvoScientist.middleware.rubric import (
     GRADER_FILE_CHECK_PROMPT,
     create_rubric_middleware,
 )
-
-FAIL = {
-    "result": "needs_revision",
-    "explanation": "not yet",
-    "criteria": [{"name": "c1", "passed": False, "gap": "missing"}],
-}
-PASS = {
-    "result": "satisfied",
-    "explanation": "ok",
-    "criteria": [{"name": "c1", "passed": True}],
-}
-
-
-class _Main(GenericFakeChatModel):
-    def bind_tools(self, tools, **kwargs):
-        return self
-
-
-class _ScriptedGrader(BaseChatModel):
-    """Answers each grading pass with the next scripted verdict (or raises it)."""
-
-    verdicts: list
-    calls: int = 0
-    last_payload: str = ""
-
-    @property
-    def _llm_type(self) -> str:
-        return "scripted-grader"
-
-    def bind_tools(self, tools, **kwargs):
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        item = self.verdicts[min(self.calls, len(self.verdicts) - 1)]
-        self.calls += 1
-        self.last_payload = next(
-            (str(m.content) for m in reversed(messages) if m.type == "human"), ""
-        )
-        if isinstance(item, Exception):
-            raise item
-        msg = AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "GraderResponse",
-                    "args": item,
-                    "id": f"call-{self.calls}",
-                    "type": "tool_call",
-                }
-            ],
-        )
-        return ChatResult(generations=[ChatGeneration(message=msg)])
+from tests.rubric_fakes import FAIL, PASS, MainModel, ScriptedGrader
 
 
 class _OtherAfterAgent(AgentMiddleware):
@@ -87,7 +33,7 @@ class _OtherAfterAgent(AgentMiddleware):
 
 
 def _agent(tmp_path, verdicts, replies, *, max_iterations=3, require_run_marker=False):
-    grader = _ScriptedGrader(verdicts=verdicts)
+    grader = ScriptedGrader(verdicts=verdicts)
     other = _OtherAfterAgent()
     rubric = create_rubric_middleware(
         model=grader,
@@ -96,7 +42,7 @@ def _agent(tmp_path, verdicts, replies, *, max_iterations=3, require_run_marker=
         require_run_marker=require_run_marker,
     )
     agent = create_agent(
-        model=_Main(messages=iter([AIMessage(r) for r in replies])),
+        model=MainModel(messages=iter([AIMessage(r) for r in replies])),
         tools=[],
         middleware=[other, rubric],
         checkpointer=InMemorySaver(),
@@ -275,7 +221,7 @@ async def test_rubric_key_is_ignored_by_a_graph_without_the_grader():
     from EvoScientist.stream.events import build_agent_stream_input
 
     plain = create_agent(
-        model=_Main(messages=iter([AIMessage("one")])),
+        model=MainModel(messages=iter([AIMessage("one")])),
         tools=[],
         checkpointer=InMemorySaver(),
     )
@@ -295,7 +241,7 @@ def _replies_then_crash(crash_at: int):
 
 def test_rerun_after_a_cut_short_run_gets_all_its_passes(tmp_path):
     """The same rubric text on the same thread starts a new attempt, not the dead one."""
-    grader = _ScriptedGrader(verdicts=[FAIL])
+    grader = ScriptedGrader(verdicts=[FAIL])
     rubric = create_rubric_middleware(
         model=grader,
         backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
@@ -305,7 +251,7 @@ def test_rerun_after_a_cut_short_run_gets_all_its_passes(tmp_path):
     cfg = {"configurable": {"thread_id": "cut"}}
 
     first = create_agent(
-        model=_Main(messages=_replies_then_crash(3)),
+        model=MainModel(messages=_replies_then_crash(3)),
         tools=[],
         middleware=[rubric],
         checkpointer=saver,
@@ -315,7 +261,7 @@ def test_rerun_after_a_cut_short_run_gets_all_its_passes(tmp_path):
     assert first.get_state(cfg).values["_rubric_iterations"] == 2
 
     second = create_agent(
-        model=_Main(messages=_replies_then_crash(99)),
+        model=MainModel(messages=_replies_then_crash(99)),
         tools=[],
         middleware=[rubric],
         checkpointer=saver,
@@ -378,7 +324,7 @@ def test_a_dropped_rubric_is_noted_in_the_debug_log(tmp_path, caplog):
 
 def _parked_before_grading(tmp_path):
     """A marked run on the main-agent grader, stopped just before it grades."""
-    grader = _ScriptedGrader(verdicts=[PASS])
+    grader = ScriptedGrader(verdicts=[PASS])
     rubric = create_rubric_middleware(
         model=grader,
         backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
@@ -386,7 +332,7 @@ def _parked_before_grading(tmp_path):
         require_run_marker=True,
     )
     agent = create_agent(
-        model=_Main(messages=iter([AIMessage("a")])),
+        model=MainModel(messages=iter([AIMessage("a")])),
         tools=[],
         middleware=[rubric],
         checkpointer=InMemorySaver(),

@@ -14,17 +14,17 @@ from langgraph.types import Command
 
 from EvoScientist.middleware.rubric import create_rubric_middleware
 from EvoScientist.stream.events import stream_agent_events
-from tests.test_rubric_middleware import FAIL, PASS, _Main, _ScriptedGrader
+from tests.rubric_fakes import FAIL, PASS, MainModel, ScriptedGrader
 
 
 def _deep(tmp_path, verdicts, replies, **middleware_kwargs):
-    grader = _ScriptedGrader(verdicts=verdicts)
+    grader = ScriptedGrader(verdicts=verdicts)
     backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
     rubric = create_rubric_middleware(
         model=grader, backend=backend, max_iterations=3, **middleware_kwargs
     )
     agent = create_deep_agent(
-        model=_Main(messages=iter([AIMessage(r) for r in replies])),
+        model=MainModel(messages=iter([AIMessage(r) for r in replies])),
         backend=backend,
         middleware=[rubric],
         checkpointer=InMemorySaver(),
@@ -124,7 +124,7 @@ _APPROVE = {"decisions": [{"type": "approve"}]}
 
 
 async def _parked_at_an_approval(tmp_path):
-    grader = _ScriptedGrader(verdicts=[PASS])
+    grader = ScriptedGrader(verdicts=[PASS])
     backend = FilesystemBackend(root_dir=str(tmp_path), virtual_mode=True)
     rubric = create_rubric_middleware(
         model=grader, backend=backend, max_iterations=3, require_run_marker=True

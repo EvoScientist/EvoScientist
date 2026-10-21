@@ -36,8 +36,7 @@ from EvoScientist.commands import manager as cmd_manager
 from EvoScientist.paths import SessionDirs
 from EvoScientist.stream import display as display_mod
 from tests.fakes import FakeGraphGateway, FakeThreadStore
-from tests.test_tui_skill_pin import _NoHistory, _submit
-from tests.tui_fakes import capture_app
+from tests.tui_fakes import NoHistory, capture_app, submit
 
 NOTICE = "notice"
 
@@ -121,7 +120,7 @@ def _wire(app, workspace, runs: _Runs) -> None:
     app._dirs = SessionDirs(workspace)
     app._runtime_gateways = SimpleNamespace(graph_gateway=runs.gateway)
     app._await_agent_ready = AsyncMock(return_value=object())
-    app._history_suggester = _NoHistory()
+    app._history_suggester = NoHistory()
 
 
 def _channel_message(content: str) -> None:
@@ -195,7 +194,7 @@ async def test_a_channel_turn_waits_for_input_typed_before_it_starts(
             _wire(app, workspace, runs)
             _channel_message("from the channel")
             app._poll_channel_queue()  # schedules the channel turn
-            await _submit(app, "typed")  # Enter, handled before that turn starts
+            await submit(app, "typed")  # Enter, handled before that turn starts
             typed = app._run_task
             await _until(lambda: runs.started)
             await asyncio.sleep(0.3)
@@ -234,7 +233,7 @@ async def test_a_channel_turn_waits_for_a_command_typed_before_it_starts(
             _wire(app, workspace, runs)
             _channel_message("from the channel")
             app._poll_channel_queue()  # schedules the channel turn
-            await _submit(app, "/hold")  # a command that runs until released
+            await submit(app, "/hold")  # a command that runs until released
             await asyncio.sleep(0.5)
             assert runs.started == []
             assert app._busy is True
@@ -262,7 +261,7 @@ async def test_a_notifier_turn_waits_for_input_typed_before_it_starts(
             _wire(app, workspace, runs)
             _notification(app, "task-1")
             app._poll_channel_queue()  # schedules the notifier
-            await _submit(app, "typed")  # Enter, handled before the notifier runs
+            await submit(app, "typed")  # Enter, handled before the notifier runs
             typed = app._run_task
             await _until(lambda: runs.started)
             # Past the notifier's batch wait.
@@ -331,7 +330,7 @@ async def test_a_channel_turn_that_waits_stays_ahead_of_a_later_message(
             _channel_message("first")
             app._poll_channel_queue()  # schedules the turn for "first"
             _channel_message("second")
-            await _submit(app, "typed")  # Enter, handled before that turn starts
+            await submit(app, "typed")  # Enter, handled before that turn starts
             await _until(lambda: runs.started)
             await asyncio.sleep(0.3)
             assert runs.started == ["typed"]
@@ -357,7 +356,7 @@ async def test_channel_messages_keep_their_order_while_the_app_is_busy(
         try:
             await pilot.pause()
             _wire(app, workspace, runs)
-            await _submit(app, "typed")
+            await submit(app, "typed")
             await _until(lambda: runs.started)
             _channel_message("first")
             _channel_message("second")
@@ -393,7 +392,7 @@ async def test_polls_before_a_channel_turn_starts_take_no_second_message(
             app._poll_channel_queue()  # schedules the turn for "first"
             app._poll_channel_queue()  # ticks again before that turn starts
             app._poll_channel_queue()
-            await _submit(app, "typed")  # Enter, handled before that turn starts
+            await submit(app, "typed")  # Enter, handled before that turn starts
             await _until(lambda: runs.started)
             await asyncio.sleep(0.3)
             assert runs.started == ["typed"]

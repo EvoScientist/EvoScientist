@@ -262,3 +262,183 @@ async def ctrl_c_turn(
         approvals_left=approvals_left,
         session_grant=session_grant,
     )
+
+
+def pausing_stream(script: list[list[dict]]):
+    """One list of events per stream call; a call that pauses stays open until closed."""
+    calls = 0
+
+    async def _fake_stream(_request):
+        nonlocal calls
+        events = script[calls]
+        calls += 1
+        for event in events:
+            yield event
+        if events and events[-1]["type"] in ("interrupt", "ask_user"):
+            await asyncio.Event().wait()
+
+    return _fake_stream
+
+
+FINISHED_REPLY = [
+    {"type": "text", "content": "finished"},
+    {"type": "done", "response": "finished"},
+]
+
+
+async def run_turn(monkeypatch, workspace, script, *, prepare=None, **kwargs):
+    """Run one turn through the real TUI loop; return each call's ``configurable_extra``."""
+    app = await capture_app(monkeypatch, workspace)
+    gateway = FakeGraphGateway(stream=pausing_stream(script))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._runtime_gateways = RuntimeGateways(
+            thread_store=gateway.thread_store, graph_gateway=gateway
+        )
+        monkeypatch.setattr(
+            app, "_await_agent_ready", AsyncMock(return_value=MagicMock())
+        )
+        if prepare is not None:
+            prepare(app)
+        response = await app._stream_with_widgets("hello", **kwargs)
+    assert response == "finished"
+    return [request.configurable_extra or {} for request in gateway.requests]
+
+
+def rubric_gateway(events=None, state_values=None, post_state=None):
+    """A fake gateway; ``post_state`` becomes the thread state once a run finished."""
+    from tests.fakes import FakeGraphGateway, FakeThreadStore
+
+    class _Gateway(FakeGraphGateway):
+        async def stream_events(self, request):
+            async for event in super().stream_events(request):
+                yield event
+            if post_state is not None:
+                self.state_values = dict(post_state)
+
+    return _Gateway(
+        events=events
+        or [{"type": "text", "content": "ok"}, {"type": "done", "response": "ok"}],
+        thread_store=FakeThreadStore(messages=[]),
+        state_values=state_values or {},
+    )
+
+
+def assistant_texts(app) -> list[str]:
+    from EvoScientist.cli.widgets.assistant_message import AssistantMessage
+
+    out = []
+    for w in app.query_one("#chat").children:
+        if isinstance(w, AssistantMessage):
+            out.append(str(getattr(w, "_content", None) or w.render()))
+    return out
+
+
+def chat_sequence(app) -> list[tuple[str, str]]:
+    from EvoScientist.cli.widgets.assistant_message import AssistantMessage
+    from EvoScientist.cli.widgets.system_message import SystemMessage
+
+    seq = []
+    for w in app.query_one("#chat").children:
+        if isinstance(w, AssistantMessage):
+            seq.append(("assistant", str(getattr(w, "_content", None) or w.render())))
+        elif isinstance(w, SystemMessage):
+            seq.append(("system", str(w.render())))
+    return seq
+
+
+class GatedStream:
+    """A scripted stream that stops at each named gate until the test lets it go on."""
+
+    def __init__(self, *script):
+        import asyncio
+
+        self._script = script
+        self._reached = {s: asyncio.Event() for s in script if isinstance(s, str)}
+        self._go_on = {s: asyncio.Event() for s in self._reached}
+
+    async def stream(self, _request):
+        for step in self._script:
+            if isinstance(step, str):
+                self._reached[step].set()
+                await self._go_on[step].wait()
+            else:
+                yield step
+
+    async def chat_at(self, app, pilot, gate) -> list:
+        """The chat's widgets once the stream stands at *gate*."""
+        import asyncio
+
+        await asyncio.wait_for(self._reached[gate].wait(), 10)
+        await pilot.pause()
+        return list(app.query_one("#chat").children)
+
+    def go_on(self, gate) -> None:
+        self._go_on[gate].set()
+
+
+async def run_gated(app, workspace, gated) -> None:
+    gateway = rubric_gateway()
+    gateway.stream = gated.stream
+    prepare_app(app, workspace, gateway)
+    await submit(app, "task")
+
+
+@pytest.fixture(autouse=True)
+def isolated_skills(monkeypatch, tmp_path):
+    """Keep the user's real skills and the notices thread out of the app."""
+    from EvoScientist import paths
+    from EvoScientist.cli import tui_interactive as tui_mod
+    from EvoScientist.tools import skills_manager
+
+    monkeypatch.setattr(paths, "GLOBAL_SKILLS_DIR", tmp_path / "noglobal")
+    monkeypatch.setattr(tui_mod, "_agent_shell_notices", lambda: [])
+    skills_manager._skill_index_cache.clear()
+    yield
+    skills_manager._skill_index_cache.clear()
+
+
+class NoHistory:
+    """Stand-in for the prompt history file (the one ``capture_app`` fakes has no
+    ``append_entry``)."""
+
+    def __init__(self):
+        self._entries: list[str] = []
+
+    def append_entry(self, *_args):
+        pass
+
+
+def prepare_app(app, workspace, gateway):
+    """Point the booted app at *workspace* and a fake gateway."""
+    from EvoScientist.paths import SessionDirs
+
+    app._dirs = SessionDirs(workspace)
+    app._runtime_gateways = SimpleNamespace(graph_gateway=gateway)
+    app._await_agent_ready = AsyncMock(return_value=object())
+    app._history_suggester = NoHistory()
+
+
+def system_lines(app) -> list[str]:
+    from EvoScientist.cli.widgets.system_message import SystemMessage
+
+    return [
+        str(w.render())
+        for w in app.query_one("#chat").children
+        if isinstance(w, SystemMessage)
+    ]
+
+
+async def submit(app, text: str) -> None:
+    await app.on_chat_text_area_submitted(SimpleNamespace(value=text))
+
+
+async def finish_turns(app, pilot) -> None:
+    """Wait for the running turn and for every queued turn replayed after it."""
+    for _ in range(10):
+        task = app._run_task
+        if task is None:
+            break
+        await task
+        await pilot.pause()
+    assert app._run_task is None, "turns did not finish"

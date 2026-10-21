@@ -161,9 +161,9 @@ class TestDecoder:
     async def _events(self, tmp_path, payloads):
         from EvoScientist.gateway import GraphTarget, RunRequest
         from EvoScientist.gateway.local import LocalGraphGateway
-        from tests.test_goal_real_graph import _agent
+        from tests.goal_fakes import cli_goal_agent
 
-        agent, _ = _agent(tmp_path)
+        agent, _ = cli_goal_agent(tmp_path)
         gateway = LocalGraphGateway()
         seen: list[list[dict]] = []
         for message, request in payloads:
@@ -201,9 +201,9 @@ class TestDecoder:
 
         from EvoScientist.gateway import GraphTarget, RunRequest
         from EvoScientist.gateway.local import LocalGraphGateway
-        from tests.test_goal_real_graph import _agent
+        from tests.goal_fakes import cli_goal_agent
 
-        agent, _ = _agent(
+        agent, _ = cli_goal_agent(
             tmp_path,
             drafts=["- a", "OBJECTIVE:\nship the report soon\n\nCRITERIA:\n- a\n- b"],
         )
@@ -340,10 +340,10 @@ class TestEventsArriveWhileWorkGoesOn:
     async def test_the_drafting_line_is_there_while_the_draft_is_written(
         self, tmp_path
     ):
-        from tests.test_goal_real_graph import _agent
+        from tests.goal_fakes import cli_goal_agent
 
         hold = threading.Event()
-        agent, _model = _agent(tmp_path, holds={"draft": hold})
+        agent, _model = cli_goal_agent(tmp_path, holds={"draft": hold})
         seen: list = []
         task = asyncio.ensure_future(self._stream(agent, seen))
         try:
@@ -362,7 +362,7 @@ class TestEventsArriveWhileWorkGoesOn:
         from EvoScientist.config import EvoScientistConfig
         from EvoScientist.EvoScientist import create_cli_agent
         from EvoScientist.paths import Workspace
-        from tests.test_goal_real_graph import _AllRoles
+        from tests.goal_fakes import AllRoles
 
         hold = threading.Event()
         agent = create_cli_agent(
@@ -372,7 +372,7 @@ class TestEventsArriveWhileWorkGoesOn:
                 memory_workers_enabled=False,
                 auto_mode=True,
             ),
-            chat_model=_AllRoles(holds={"main": hold}),
+            chat_model=AllRoles(holds={"main": hold}),
             checkpointer=InMemorySaver(),
         )
         seen: list = []
@@ -399,9 +399,9 @@ class TestEventsArriveWhileWorkGoesOn:
         from EvoScientist.config import EvoScientistConfig
         from EvoScientist.EvoScientist import create_cli_agent
         from EvoScientist.paths import Workspace
-        from tests.test_goal_real_graph import _AllRoles
+        from tests.goal_fakes import AllRoles
 
-        class _Streaming(_AllRoles):
+        class _Streaming(AllRoles):
             def _stream(self, messages, stop=None, run_manager=None, **kwargs):
                 message = self._generate(messages, stop=stop).generations[0].message
                 text = message.content if isinstance(message.content, str) else ""

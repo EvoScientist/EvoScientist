@@ -22,6 +22,7 @@ import typer
 from EvoScientist import paths
 from EvoScientist.deploy import json_mode
 from EvoScientist.deploy import server as deploy_server
+from tests.langgraph_dev_fakes import LockHolder
 
 
 def _config(**overrides):
@@ -897,37 +898,11 @@ def test_a_pipe_stdin_is_not_handed_on(h, capsys):
     assert stdin_is_pipe() is False
 
 
-class _LockHolder:
-    """Another process's start: holds the start lock until released."""
-
-    def __init__(self) -> None:
-        from filelock import FileLock
-
-        from EvoScientist.langgraph_dev import manager as lgm
-
-        lgm.RUNTIME.pid_dir.mkdir(parents=True, exist_ok=True)
-        self.lock = FileLock(str(lgm.RUNTIME.lock_file))
-        self.held = threading.Event()
-        self.release = threading.Event()
-        self.thread = threading.Thread(target=self._hold, daemon=True)
-        self.thread.start()
-        assert self.held.wait(5)
-
-    def _hold(self) -> None:
-        with self.lock:
-            self.held.set()
-            self.release.wait(10)
-
-    def done(self) -> None:
-        self.release.set()
-        self.thread.join(5)
-
-
 def test_a_second_start_waits_for_the_lock(h, capsys, monkeypatch):
     """Decision and start wait until another start released the lock."""
     from EvoScientist.langgraph_dev import manager as lgm
 
-    holder = _LockHolder()
+    holder = LockHolder()
     decided: list[bool] = []
     occupied = lgm._is_port_occupied
 
@@ -945,7 +920,7 @@ def test_a_second_start_waits_for_the_lock(h, capsys, monkeypatch):
 
 
 def test_a_stop_while_waiting_for_the_lock_starts_nothing(h, capsys):
-    holder = _LockHolder()
+    holder = LockHolder()
     threading.Timer(0.3, h.close_stdin).start()
     try:
         code, lines = h.run(capsys)
@@ -960,7 +935,7 @@ def test_a_lock_held_too_long_is_backend_start_failed(h, capsys, monkeypatch):
     from EvoScientist.langgraph_dev import manager as lgm
 
     monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
-    holder = _LockHolder()
+    holder = LockHolder()
     try:
         code, lines = h.run(capsys)
     finally:

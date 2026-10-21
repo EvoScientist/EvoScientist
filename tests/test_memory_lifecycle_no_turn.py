@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from EvoScientist.memory.scheduler import MemoryScheduler
 from EvoScientist.memory.types import MemorySourceType
 from EvoScientist.middleware import memory_lifecycle
-from tests.test_observation_memory import _runtime
+from tests.memory_fakes import fake_runtime
 
 TURN = [HumanMessage("hi", id="h1"), AIMessage("done", name="EvoScientist", id="a1")]
 
@@ -58,7 +58,7 @@ def recorder(monkeypatch):
 
 
 async def _exit(middleware, state, *, sync):
-    runtime = _runtime("thread-1")
+    runtime = fake_runtime("thread-1")
     if sync:
         return middleware.after_agent(state, runtime)
     return await middleware.aafter_agent(state, runtime)

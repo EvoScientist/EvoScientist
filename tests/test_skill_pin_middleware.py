@@ -20,7 +20,7 @@ from langgraph.types import Overwrite
 from EvoScientist.message_meta import is_pinned_skill, pinned_skill_name
 from EvoScientist.middleware.skill_pin import SkillPinMiddleware, skills_to_pin
 from EvoScientist.middleware.skills_reload import SkillsReloadMiddleware
-from tests.test_skills_reload_middleware import _default_middleware
+from tests.fakes import build_default_middleware
 
 _SEEN: list[list[BaseMessage]] = []
 
@@ -198,10 +198,10 @@ def test_skill_added_between_turns_can_be_pinned_with_reload(tmp_path):
 
 
 def test_main_agent_stack_pins_skills(workspace):
-    stack = _default_middleware(workspace, for_async_subagent=False)
+    stack = build_default_middleware(workspace, for_async_subagent=False)
     assert sum(isinstance(m, SkillPinMiddleware) for m in stack) == 1
 
 
 def test_async_subagent_stack_does_not_pin_skills(workspace):
-    stack = _default_middleware(workspace, for_async_subagent=True)
+    stack = build_default_middleware(workspace, for_async_subagent=True)
     assert not any(isinstance(m, SkillPinMiddleware) for m in stack)

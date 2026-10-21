@@ -177,11 +177,11 @@ async def test_resume_into_another_workspace_moves_the_cron_with_the_server():
 
 async def test_a_restart_in_the_workspace_serve_moved_from_restores_nothing(tmp_path):
     from EvoScientist.proactive.serve import ProactiveServe
-    from tests.test_proactive_serve import _Client, _source
+    from tests.serve_fakes import FakeProactiveClient, seed_source_thread
 
     old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
-    client = _Client()
-    _source(client, "old-tid")
+    client = FakeProactiveClient()
+    seed_source_thread(client, "old-tid")
     client.threads.update("old-tid", metadata=SessionDirs(old_ws).metadata())
     proactive = ProactiveServe(workspace=old_ws, client=client)
     proactive.arm("old-tid")
@@ -207,11 +207,11 @@ async def test_a_restart_in_the_workspace_serve_moved_from_restores_nothing(tmp_
 async def test_a_refused_server_move_keeps_the_current_thread_armed(tmp_path):
     from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
     from EvoScientist.proactive.serve import ProactiveServe
-    from tests.test_proactive_serve import _Client, _source
+    from tests.serve_fakes import FakeProactiveClient, seed_source_thread
 
     old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
-    client = _Client()
-    _source(client, "old-tid")
+    client = FakeProactiveClient()
+    seed_source_thread(client, "old-tid")
     proactive = ProactiveServe(
         workspace=old_ws, client=client, can_deliver=lambda tid: True
     )
@@ -245,16 +245,16 @@ async def test_a_refused_move_right_after_a_restart_keeps_the_restored_thread(
 
     from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
     from EvoScientist.proactive.serve import ProactiveServe
-    from tests.test_proactive_serve import _Client, _source
+    from tests.serve_fakes import FakeProactiveClient, seed_source_thread
 
     old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
-    client = _Client()
+    client = FakeProactiveClient()
     origins = {
         tid: SimpleNamespace(channel_type="telegram", chat_id=tid, metadata=None)
         for tid in ("restored-tid", "fresh-tid")
     }
     for tid in origins:
-        _source(client, tid)
+        seed_source_thread(client, tid)
     proactive = ProactiveServe(
         workspace=old_ws,
         client=client,
@@ -296,11 +296,11 @@ async def test_a_refused_server_move_does_not_arm_a_thread_that_was_not_armed(
 ):
     from EvoScientist.langgraph_dev.manager import WorkspaceMismatchError
     from EvoScientist.proactive.serve import ProactiveServe
-    from tests.test_proactive_serve import _Client, _source
+    from tests.serve_fakes import FakeProactiveClient, seed_source_thread
 
     old_ws, new_ws = (Workspace(tmp_path / name) for name in ("ws1", "ws2"))
-    client = _Client()
-    _source(client, "old-tid")
+    client = FakeProactiveClient()
+    seed_source_thread(client, "old-tid")
     client.threads.update("old-tid", metadata={"proactive": "paused"})
     proactive = ProactiveServe(
         workspace=old_ws, client=client, can_deliver=lambda tid: True
@@ -374,7 +374,7 @@ def test_serve_restores_then_reconciles_and_deletes_the_cron_when_it_stops(
     monkeypatch, tmp_path
 ):
     from EvoScientist.cli import commands
-    from tests.test_cli_serve import _make_config, _run_serve_once
+    from tests.serve_fakes import run_serve_once, serve_config
 
     calls = []
     controller = MagicMock()
@@ -387,6 +387,6 @@ def test_serve_restores_then_reconciles_and_deletes_the_cron_when_it_stops(
         commands, "_serve_restore_proactive", lambda *a: calls.append("restore")
     )
 
-    _run_serve_once(monkeypatch, _make_config(), workdir=str(tmp_path))
+    run_serve_once(monkeypatch, serve_config(), workdir=str(tmp_path))
 
     assert calls == ["restore", "reconcile", "stop"]

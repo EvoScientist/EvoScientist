@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import itertools
 import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
-from langgraph_sdk.errors import NotFoundError
 
 from EvoScientist.paths import Workspace
 from EvoScientist.proactive.commit import read_proactive_tag
@@ -22,28 +20,7 @@ from EvoScientist.proactive.serve import (
     clear_post_append_next,
     terminal_node,
 )
-
-MAIN_GRAPH = {
-    "nodes": [],
-    "edges": [
-        {"source": "__start__", "target": "model"},
-        {"source": "model", "target": "HumanInTheLoopMiddleware.after_model"},
-        {
-            "source": "HumanInTheLoopMiddleware.after_model",
-            "target": "Todo.after_model",
-        },
-        {"source": "Todo.after_model", "target": "tools", "conditional": True},
-        {
-            "source": "Todo.after_model",
-            "target": "memory.after_agent",
-            "conditional": True,
-        },
-        {"source": "tools", "target": "model"},
-        {"source": "memory.after_agent", "target": "Interp.after_agent"},
-        {"source": "Interp.after_agent", "target": "__end__"},
-    ],
-}
-
+from tests.serve_fakes import MAIN_GRAPH, FakeProactiveClient, seed_source_thread
 
 # ---- terminal node ----------------------------------------------------------
 
@@ -75,114 +52,9 @@ def test_terminal_node_is_none_when_not_unique():
 # ---- a fake dev server -------------------------------------------------------
 
 
-class _Crons:
-    def __init__(self):
-        self.rows = []
-        self.created = []
-        self.updated = []
-        self._ids = itertools.count(1)
-
-    def search(self, *, metadata, limit, offset):
-        rows = [
-            r
-            for r in self.rows
-            if all(r["metadata"].get(k) == v for k, v in metadata.items())
-        ]
-        return rows[offset : offset + limit]
-
-    def delete(self, cron_id):
-        self.rows = [r for r in self.rows if r["cron_id"] != cron_id]
-
-    def create_for_thread(self, thread_id, assistant_id, **kwargs):
-        row = {
-            "cron_id": f"c{next(self._ids)}",
-            "thread_id": thread_id,
-            "assistant_id": assistant_id,
-            **kwargs,
-        }
-        self.rows.append(row)
-        self.created.append(row)
-        return row
-
-    def update(self, cron_id, **kwargs):
-        if not any(r["cron_id"] == cron_id for r in self.rows):
-            raise NotFoundError("no cron", response=MagicMock(), body=None)
-        self.updated.append((cron_id, kwargs))
-
-
-class _Threads:
-    def __init__(self):
-        self.threads = {}
-        self.states = {}
-        self.created = []
-        self.writes = []
-        self.deleted = []
-
-    def get(self, thread_id):
-        if thread_id not in self.threads:
-            raise NotFoundError("gone", response=MagicMock(), body=None)
-        return self.threads[thread_id]
-
-    def get_state(self, thread_id):
-        return self.states.get(thread_id, {"values": {}})
-
-    def search(self, *, metadata, limit, sort_by=None, sort_order=None):
-        return [
-            {"thread_id": tid}
-            for tid, t in self.threads.items()
-            if all((t.get("metadata") or {}).get(k) == v for k, v in metadata.items())
-        ][:limit]
-
-    def delete(self, thread_id):
-        self.threads.pop(thread_id, None)
-        self.deleted.append(thread_id)
-
-    def create(self, *, metadata):
-        tid = f"cron-thread-{len(self.created) + 1}"
-        self.threads[tid] = {"thread_id": tid, "metadata": metadata, "status": "idle"}
-        self.created.append(tid)
-        return {"thread_id": tid}
-
-    def update(self, thread_id, *, metadata):
-        self.threads[thread_id].setdefault("metadata", {}).update(metadata)
-
-    def update_state(self, thread_id, values, *, as_node):
-        self.writes.append((thread_id, values, as_node))
-        return {"checkpoint": {"checkpoint_id": f"after-{len(self.writes)}"}}
-
-
-class _Runs:
-    def __init__(self):
-        self.running = {}
-        self.cancelled = []
-
-    def list(self, thread_id, *, status):
-        return self.running.get(thread_id, []) if status == "running" else []
-
-    def cancel(self, thread_id, run_id, *, action):
-        self.cancelled.append((thread_id, run_id, action))
-
-
-class _Assistants:
-    def __init__(self, graph):
-        self.graph = graph
-
-    def get_graph(self, assistant_id):
-        assert assistant_id == "EvoScientist"
-        return self.graph
-
-
-class _Client:
-    def __init__(self, graph=MAIN_GRAPH):
-        self.crons = _Crons()
-        self.threads = _Threads()
-        self.runs = _Runs()
-        self.assistants = _Assistants(graph)
-
-
 @pytest.fixture
 def setup(workspace):
-    client = _Client()
+    client = FakeProactiveClient()
     origins = {"t1"}
     published = []
     controller = ProactiveServe(
@@ -193,15 +65,6 @@ def setup(workspace):
         can_deliver=lambda tid: tid in origins,
     )
     return controller, client, origins, published
-
-
-def _source(client, tid="t1", *, head="h1", status="idle", interrupts=()):
-    client.threads.threads[tid] = {"thread_id": tid, "status": status, "metadata": {}}
-    client.threads.states[tid] = {
-        "checkpoint": {"checkpoint_id": head},
-        "next": [],
-        "interrupts": list(interrupts),
-    }
 
 
 def _tick(client, controller, *, decisions=(), age=0.0, status="idle"):
@@ -423,7 +286,7 @@ def _refuse_crons(client):
 
 def test_a_failed_arm_leaves_the_thread_disarmed(setup):
     controller, client, _, _ = setup
-    _source(client)
+    seed_source_thread(client)
     _refuse_crons(client)
 
     with pytest.raises(RuntimeError, match="assistant not found"):
@@ -435,7 +298,7 @@ def test_a_failed_arm_leaves_the_thread_disarmed(setup):
 
 def test_a_failed_arm_of_an_armed_thread_keeps_it_armed(setup):
     controller, client, _, _ = setup
-    _source(client)
+    seed_source_thread(client)
     controller.arm("t1")
     _refuse_crons(client)
 
@@ -448,7 +311,7 @@ def test_a_failed_arm_of_an_armed_thread_keeps_it_armed(setup):
 
 def test_leaving_an_armed_thread_pauses_it_until_serve_resumes_it(setup):
     controller, client, _, _ = setup
-    _source(client)
+    seed_source_thread(client)
     controller.arm("t1")
 
     controller.leave("t1")
@@ -465,7 +328,7 @@ def test_leaving_an_armed_thread_pauses_it_until_serve_resumes_it(setup):
 
 def test_reconcile_writes_back_a_flag_a_restart_dropped(setup):
     controller, client, _, _ = setup
-    _source(client)
+    seed_source_thread(client)
     controller.armed.add("t1")
 
     controller.reconcile()
@@ -555,7 +418,7 @@ def armed(setup):
     controller, client, origins, published = setup
     controller.armed.add("t1")
     controller.reconcile()
-    _source(client)
+    seed_source_thread(client)
     return controller, client, origins, published
 
 
@@ -669,11 +532,11 @@ def test_guards_skip_the_write(armed, change):
     elif change == "no_origin":
         origins.clear()
     elif change in ("busy", "interrupted"):
-        _source(client, status=change)
+        seed_source_thread(client, status=change)
     elif change == "interrupt":
-        _source(client, interrupts=[{"id": "i1"}])
+        seed_source_thread(client, interrupts=[{"id": "i1"}])
     else:
-        _source(client, head="h2")
+        seed_source_thread(client, head="h2")
     _tick(client, controller, decisions=[_decision()])
 
     controller.poll(current_thread_id="t1")
@@ -721,7 +584,7 @@ def test_a_push_to_another_thread_switches_serve_to_it(armed):
     controller, client, origins, _ = armed
     origins.add("t0")
     controller.armed.add("t0")
-    _source(client, "t0")
+    seed_source_thread(client, "t0")
     _tick(client, controller, decisions=[_decision(tid="t0")])
     switched = []
 
@@ -734,7 +597,7 @@ def test_without_a_unique_terminal_node_the_push_is_appended_as_model_and_cleare
     workspace,
 ):
     graph = {"edges": [{"source": "model", "target": "after"}]}
-    client = _Client(graph=graph)
+    client = FakeProactiveClient(graph=graph)
     controller = ProactiveServe(
         workspace=workspace,
         client=client,
@@ -743,7 +606,7 @@ def test_without_a_unique_terminal_node_the_push_is_appended_as_model_and_cleare
     )
     controller.armed.add("t1")
     controller.reconcile()
-    _source(client)
+    seed_source_thread(client)
     _tick(client, controller, decisions=[_decision()])
     original_update = client.threads.update_state
 
@@ -782,7 +645,7 @@ def test_without_a_unique_terminal_node_the_push_is_appended_as_model_and_cleare
     ],
 )
 def test_the_fallback_clear_leaves_any_other_state_alone(state):
-    client = _Client()
+    client = FakeProactiveClient()
     client.threads.states["t1"] = state
     assert (
         clear_post_append_next(

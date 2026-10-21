@@ -157,10 +157,9 @@ async def test_a_goal_whose_checklist_was_replaced_is_not_shown(tmp_path):
 
 async def test_on_the_main_graph_the_block_ends_our_part_of_the_prompt(tmp_path):
     from EvoScientist.middleware.goal import new_goal_request
-    from tests.goal_fakes import ACCEPT, request_input, resume_input
-    from tests.test_goal_real_graph import _agent
+    from tests.goal_fakes import ACCEPT, cli_goal_agent, request_input, resume_input
 
-    agent, model = _agent(tmp_path, keep_system=True)
+    agent, model = cli_goal_agent(tmp_path, keep_system=True)
     await run(
         agent, request_input(new_goal_request("create", objective="ship the report"))
     )

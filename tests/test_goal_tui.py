@@ -22,13 +22,13 @@ from EvoScientist.cli.widgets.user_message import UserMessage
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.gateway.local import LocalGraphGateway
 from EvoScientist.paths import SessionDirs
-from tests.test_goal_real_graph import OBJECTIVE, _agent
-from tests.test_tui_skill_pin import (
-    _isolated_skills,  # noqa: F401  (autouse fixture)
-    _NoHistory,
-    _submit,
+from tests.goal_fakes import OBJECTIVE, cli_goal_agent
+from tests.tui_fakes import (
+    NoHistory,
+    capture_app,
+    isolated_skills,  # noqa: F401  (autouse fixture)
+    submit,
 )
-from tests.tui_fakes import capture_app as _capture_app
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
 
@@ -42,7 +42,7 @@ def _wire(app, workspace, agent) -> None:
     app._await_agent_ready = AsyncMock(return_value=agent)
     # Commands and the badge read the thread through the loaded agent.
     app._agent_loader.adopt(agent)
-    app._history_suggester = _NoHistory()
+    app._history_suggester = NoHistory()
 
 
 async def _until(pilot, condition, *, seconds: float = 20.0) -> None:
@@ -106,12 +106,12 @@ async def _question(app, pilot) -> AskUserWidget:
 async def test_accepting_a_goal_shows_one_user_message_and_runs_to_completion(
     monkeypatch, workspace, tmp_path
 ):
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         await _question(app, pilot)
         # While the question is open: no spinner, no leftover drafting line.
         assert "loading" not in [kind for kind, _ in _chat(app)]
@@ -161,12 +161,12 @@ async def test_while_the_draft_is_written_a_line_and_a_spinner_show(
         return await real_draft(self, spec)
 
     monkeypatch.setattr(GoalDrafter, "draft", _held)
-    agent, _model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, _model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         try:
             await _until(
                 pilot,
@@ -197,13 +197,13 @@ async def test_ctrl_c_while_the_draft_is_written_leaves_nothing_behind(
         return await real_draft(self, spec)
 
     monkeypatch.setattr(GoalDrafter, "draft", _held)
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
             _wire(app, workspace, agent)
-            await _submit(app, f"/goal {OBJECTIVE}")
+            await submit(app, f"/goal {OBJECTIVE}")
             try:
                 await _until(
                     pilot,
@@ -218,7 +218,7 @@ async def test_ctrl_c_while_the_draft_is_written_leaves_nothing_behind(
             assert not list(app.query(AskUserWidget))
             assert not app.query_one("#prompt").disabled
             # The next message is an ordinary turn; the draft is not made again.
-            await _submit(app, "hello")
+            await submit(app, "hello")
             await _idle(app, pilot)
             # (The stopped turn keeps its usual "[Stopped.]" mark.)
             assert _texts(app, "assistant")[-1] == "working on it"
@@ -231,12 +231,12 @@ async def test_ctrl_c_while_the_draft_is_written_leaves_nothing_behind(
 async def test_escape_on_the_review_leaves_one_line_and_no_bubbles(
     monkeypatch, workspace, tmp_path
 ):
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         await _question(app, pilot)
         await pilot.press("escape")
         await _idle(app, pilot)
@@ -252,12 +252,12 @@ async def test_escape_on_the_review_leaves_one_line_and_no_bubbles(
 
 
 async def test_feedback_redrafts_and_asks_again(monkeypatch, workspace, tmp_path):
-    agent, model = _agent(tmp_path, drafts=["- first", "- second"])
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path, drafts=["- first", "- second"])
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         first = await _question(app, pilot)
         await pilot.press("down", "down", "enter")  # Other (type your answer)
         await pilot.pause(0.1)
@@ -287,8 +287,8 @@ async def test_the_app_stays_busy_between_the_command_and_its_run(
 ):
     """The 100 ms queue poll starts a channel or notifier turn whenever the app
     is not busy; a gap here would let one slip in before the goal's run."""
-    agent, _model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, _model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
@@ -314,12 +314,12 @@ async def test_the_app_stays_busy_between_the_command_and_its_run(
 async def test_a_status_change_is_one_line_and_updates_the_badge(
     monkeypatch, workspace, tmp_path
 ):
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         await _question(app, pilot)
         await pilot.press("enter")
         await _idle(app, pilot)
@@ -327,7 +327,7 @@ async def test_a_status_change_is_one_line_and_updates_the_badge(
         users = _texts(app, "user")
         assistants = _texts(app, "assistant")
 
-        await _submit(app, "/goal clear")
+        await submit(app, "/goal clear")
         await _idle(app, pilot)
         assert "Goal cleared." in _texts(app, "system")
         assert model.calls == before
@@ -338,17 +338,17 @@ async def test_a_status_change_is_one_line_and_updates_the_badge(
 
 
 async def test_show_prints_the_goal_without_a_run(monkeypatch, workspace, tmp_path):
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         await _question(app, pilot)
         await pilot.press("enter")
         await _idle(app, pilot)
         before = dict(model.calls)
-        await _submit(app, "/goal")
+        await submit(app, "/goal")
         await _idle(app, pilot)
         assert "Goal (complete)" in _texts(app, "system")
         assert model.calls == before
@@ -370,8 +370,8 @@ async def test_the_review_question_is_brought_on_screen(
         return await real_draft(self, spec)
 
     monkeypatch.setattr(GoalDrafter, "draft", _held)
-    agent, _model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, _model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
@@ -379,7 +379,7 @@ async def test_the_review_question_is_brought_on_screen(
             app._append_system(f"earlier line {index}")
         await pilot.pause(0.2)
         chat = app.query_one("#chat")
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         try:
             await _until(
                 pilot,
@@ -427,21 +427,21 @@ def _fake_wire(app, workspace, gateway) -> None:
     app._dirs = SessionDirs(workspace)
     app._runtime_gateways = SimpleNamespace(graph_gateway=gateway)
     app._await_agent_ready = AsyncMock(return_value=object())
-    app._history_suggester = _NoHistory()
+    app._history_suggester = NoHistory()
 
 
 async def test_a_slash_command_typed_during_a_turn_runs_as_a_command(
     monkeypatch, workspace
 ):
     held = _HeldGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, held.gateway)
-        await _submit(app, "first")
+        await submit(app, "first")
         await asyncio.wait_for(held.started.wait(), timeout=10)
-        await _submit(app, "/rubric next - once")
-        await _submit(app, "second")
+        await submit(app, "/rubric next - once")
+        await submit(app, "second")
         assert app._queued_messages == ["/rubric next - once", "second"]
         held.release.set()
         await _idle(app, pilot)
@@ -460,14 +460,14 @@ async def test_a_slash_command_typed_during_a_turn_runs_as_a_command(
 
 async def test_queued_commands_in_a_row_all_run(monkeypatch, workspace):
     held = _HeldGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, held.gateway)
-        await _submit(app, "first")
+        await submit(app, "first")
         await asyncio.wait_for(held.started.wait(), timeout=10)
-        await _submit(app, "/nosuchcommand")
-        await _submit(app, "/rubric next - once")
+        await submit(app, "/nosuchcommand")
+        await submit(app, "/rubric next - once")
         held.release.set()
         await _idle(app, pilot)
 
@@ -485,15 +485,15 @@ async def test_ctrl_c_drops_what_was_queued_before_it(monkeypatch, workspace):
     from EvoScientist.stream import display as display_mod
 
     held = _HeldGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
             _fake_wire(app, workspace, held.gateway)
-            await _submit(app, "first")
+            await submit(app, "first")
             await asyncio.wait_for(held.started.wait(), timeout=10)
-            await _submit(app, "/rubric next - once")
-            await _submit(app, "second")
+            await submit(app, "/rubric next - once")
+            await submit(app, "second")
             app.action_request_quit()
             await _idle(app, pilot)
             assert app._queued_messages == []
@@ -513,7 +513,7 @@ async def test_input_sent_after_ctrl_c_runs_when_the_stopped_turn_has_ended(
 
     steps = _StepGateway()
     steps.gate("second").set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
@@ -532,11 +532,11 @@ async def test_input_sent_after_ctrl_c_runs_when_the_stopped_turn_has_ended(
                 return await real_refresh(*args, **kwargs)
 
             monkeypatch.setattr(app, "_refresh_status_snapshot", _refresh)
-            await _submit(app, "first")
+            await submit(app, "first")
             await _until(pilot, lambda: "first" in steps.running)
             app.action_request_quit()
             await asyncio.wait_for(in_cleanup.wait(), timeout=10)
-            await _submit(app, "second")
+            await submit(app, "second")
             assert app._queued_messages == ["second"]
             cleanup.set()
             await _idle(app, pilot)
@@ -554,14 +554,14 @@ async def test_input_sent_right_after_stopping_an_unstarted_turn_runs(
 
     steps = _StepGateway()
     steps.gate("again").set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
             _fake_wire(app, workspace, steps.gateway)
             app._dispatch_input("hello")
             app.action_request_quit()  # before the turn's task has run a step
-            await _submit(app, "again")  # the app is still held: queued
+            await submit(app, "again")  # the app is still held: queued
             assert app._queued_messages == ["again"]
             await _idle(app, pilot)
             assert [request.message for request in steps.gateway.requests] == ["again"]
@@ -576,7 +576,7 @@ async def test_the_app_stays_busy_until_a_turn_has_cleaned_up(monkeypatch, works
     into the other turn."""
     held = _HeldGateway()
     held.release.set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, held.gateway)
@@ -591,8 +591,8 @@ async def test_the_app_stays_busy_until_a_turn_has_cleaned_up(monkeypatch, works
             return await real_refresh(*args, **kwargs)
 
         monkeypatch.setattr(app, "_refresh_status_snapshot", _refresh)
-        await _submit(app, "first")
-        await _submit(app, "second")
+        await submit(app, "first")
+        await submit(app, "second")
         await _idle(app, pilot)
         assert seen == [True, True, True, True]
         assert [request.message for request in held.gateway.requests] == [
@@ -607,7 +607,7 @@ async def test_dispatching_reserves_the_app_in_the_same_step(
 ):
     held = _HeldGateway()
     held.release.set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, held.gateway)
@@ -622,8 +622,8 @@ async def test_ctrl_c_during_the_command_starts_no_goal_run(
     monkeypatch, workspace, tmp_path
 ):
     """The command waits for the agent to load; the user gives up on it."""
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
@@ -642,7 +642,7 @@ async def test_ctrl_c_during_the_command_starts_no_goal_run(
             return await execute(command, ctx)
 
         monkeypatch.setattr(tui_mod.cmd_manager, "execute", _watched)
-        await _submit(app, f"/goal {OBJECTIVE}")
+        await submit(app, f"/goal {OBJECTIVE}")
         await pilot.pause(0.2)
         assert app._busy is True
         try:
@@ -671,8 +671,8 @@ async def test_ctrl_c_on_a_command_past_its_agent_load_leaves_the_input_off(
 ):
     """Past the load a command may hold its own widget (a picker), so the
     input stays off for it; it comes back when the command ends."""
-    agent, _model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, _model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
@@ -684,7 +684,7 @@ async def test_ctrl_c_on_a_command_past_its_agent_load_leaves_the_input_off(
 
         monkeypatch.setattr(tui_mod.cmd_manager, "execute", _held)
         # A command that waits for the agent first: the load is over at once.
-        await _submit(app, "/goal pause")
+        await submit(app, "/goal pause")
         await pilot.pause(0.2)
         assert app._busy is True
         try:
@@ -706,8 +706,8 @@ async def test_a_command_cut_by_ctrl_c_leaves_a_later_turn_alone(
     start a notifier turn); the old command, still waiting in the background,
     ends inside that turn. It must not take the app away, and when everything
     is over the input the command had switched off is on again."""
-    agent, model = _agent(tmp_path, holds={"main": threading.Event()})
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path, holds={"main": threading.Event()})
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
@@ -722,7 +722,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_a_later_turn_alone(
             return agent
 
         app._await_agent_ready = _ready
-        await _submit(app, "/goal pause")
+        await submit(app, "/goal pause")
         await pilot.pause(0.2)
         app.action_request_quit()
         await pilot.pause(0.1)
@@ -753,8 +753,8 @@ async def test_a_command_cut_by_ctrl_c_leaves_a_channel_turns_input_off(
 
     from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
 
-    agent, _model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, _model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     msg = ChannelMessage(
         msg_id="m-2",
         content="from the channel",
@@ -786,7 +786,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_a_channel_turns_input_off(
 
         app._await_agent_ready = _ready
         monkeypatch.setattr(app, "_stream_with_widgets", _held_stream)
-        await _submit(app, "/goal pause")
+        await submit(app, "/goal pause")
         await pilot.pause(0.2)
         app.action_request_quit()
         await pilot.pause(0.1)
@@ -817,7 +817,7 @@ async def test_a_second_ctrl_c_drops_the_handle_of_a_turn_that_never_ran(
     from EvoScientist.stream import display as display_mod
 
     steps = _StepGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
@@ -883,7 +883,7 @@ async def test_ctrl_c_during_a_turns_cleanup_does_not_let_two_turns_run(
 
     steps = _StepGateway()
     steps.gate("first").set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
@@ -902,13 +902,13 @@ async def test_ctrl_c_during_a_turns_cleanup_does_not_let_two_turns_run(
                 return await real_refresh(*args, **kwargs)
 
             monkeypatch.setattr(app, "_refresh_status_snapshot", _refresh)
-            await _submit(app, "first")
+            await submit(app, "first")
             await asyncio.wait_for(in_cleanup.wait(), timeout=10)
             app.action_request_quit()
             await pilot.pause(0.1)
-            await _submit(app, "second")
+            await submit(app, "second")
             await _until(pilot, lambda: "second" in steps.running)
-            await _submit(app, "third")
+            await submit(app, "third")
             cleanup.set()
             await pilot.pause(0.3)
             # The first turn is over for good; "third" waits for "second".
@@ -933,7 +933,7 @@ async def test_ctrl_c_before_a_dispatched_turn_starts_frees_the_app(
 
     steps = _StepGateway()
     steps.gate("again").set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
@@ -944,7 +944,7 @@ async def test_ctrl_c_before_a_dispatched_turn_starts_frees_the_app(
             assert app._busy is False
             assert app._run_task is None
             assert steps.gateway.requests == []
-            await _submit(app, "again")
+            await submit(app, "again")
             await _idle(app, pilot)
             assert [request.message for request in steps.gateway.requests] == ["again"]
     finally:
@@ -959,7 +959,7 @@ async def test_ctrl_c_before_a_notifier_turn_starts_frees_the_app(
 
     steps = _StepGateway()
     steps.gate("again").set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
@@ -971,7 +971,7 @@ async def test_ctrl_c_before_a_notifier_turn_starts_frees_the_app(
             assert app._busy is False
             assert app._run_task is None
             assert steps.gateway.requests == []
-            await _submit(app, "again")
+            await submit(app, "again")
             await _idle(app, pilot)
             assert [request.message for request in steps.gateway.requests] == ["again"]
     finally:
@@ -981,8 +981,8 @@ async def test_ctrl_c_before_a_notifier_turn_starts_frees_the_app(
 async def test_ctrl_c_before_a_dispatched_command_starts_stops_it(
     monkeypatch, workspace, tmp_path
 ):
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
@@ -1005,7 +1005,7 @@ async def test_ctrl_c_during_a_channel_turn_keeps_the_input_off(monkeypatch, wor
 
     from EvoScientist.cli.channel import ChannelMessage, _register_channel_request
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     msg = ChannelMessage(
         msg_id="m-1",
         content="from the channel",
@@ -1051,8 +1051,8 @@ async def test_ctrl_c_right_after_the_command_handed_over_frees_the_app(
     must not leave the app held by a run that never starts."""
     from EvoScientist.stream import display as display_mod
 
-    agent, model = _agent(tmp_path)
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
@@ -1092,7 +1092,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_an_open_question_alone(
             yield {"type": "done", "response": "ok"}
 
     gateway = _Asking(thread_store=FakeThreadStore(messages=[]))
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, gateway)
@@ -1107,7 +1107,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_an_open_question_alone(
             return object()
 
         app._await_agent_ready = _ready
-        await _submit(app, "/goal pause")
+        await submit(app, "/goal pause")
         await pilot.pause(0.2)
         app.action_request_quit()
         await pilot.pause(0.1)
@@ -1140,7 +1140,7 @@ async def test_a_failed_agent_load_keeps_what_was_queued(monkeypatch, workspace)
     fails. Sending the queue would start the load again for each entry and
     lose the entry when it fails again."""
     steps = _StepGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, steps.gateway)
@@ -1154,10 +1154,10 @@ async def test_a_failed_agent_load_keeps_what_was_queued(monkeypatch, workspace)
             raise RuntimeError("MCP server did not start")
 
         app._await_agent_ready = _load
-        await _submit(app, "first")
+        await submit(app, "first")
         await _until(pilot, lambda: loads == 1)
-        await _submit(app, "second")
-        await _submit(app, "third")
+        await submit(app, "second")
+        await submit(app, "third")
         failing.set()
         await _until(pilot, lambda: not app._busy and app._run_task is None)
         await pilot.pause(0.2)
@@ -1171,7 +1171,7 @@ async def test_a_command_whose_agent_load_fails_keeps_what_was_queued(
 ):
     """The same for a command that waits for the agent."""
     steps = _StepGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, steps.gateway)
@@ -1185,10 +1185,10 @@ async def test_a_command_whose_agent_load_fails_keeps_what_was_queued(
             raise RuntimeError("MCP server did not start")
 
         app._await_agent_ready = _load
-        await _submit(app, "/goal pause")
+        await submit(app, "/goal pause")
         await _until(pilot, lambda: loads == 1)
-        await _submit(app, "second")
-        await _submit(app, "third")
+        await submit(app, "second")
+        await submit(app, "third")
         failing.set()
         await _until(
             pilot,
@@ -1207,14 +1207,14 @@ async def test_a_turn_started_from_the_queue_can_be_stopped(monkeypatch, workspa
     from EvoScientist.stream import display as display_mod
 
     steps = _StepGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
             _fake_wire(app, workspace, steps.gateway)
-            await _submit(app, "first")
+            await submit(app, "first")
             await _until(pilot, lambda: "first" in steps.running)
-            await _submit(app, "second")
+            await submit(app, "second")
             steps.gate("first").set()
             await _until(pilot, lambda: steps.running == ["second"])
             assert app._run_task is not None
@@ -1229,14 +1229,14 @@ async def test_a_turn_started_from_the_queue_can_be_stopped(monkeypatch, workspa
 
 async def test_the_queue_is_sent_one_entry_at_a_time(monkeypatch, workspace):
     steps = _StepGateway()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, steps.gateway)
-        await _submit(app, "first")
+        await submit(app, "first")
         await _until(pilot, lambda: "first" in steps.running)
-        await _submit(app, "second")
-        await _submit(app, "third")
+        await submit(app, "second")
+        await submit(app, "third")
         steps.gate("first").set()
         await _until(pilot, lambda: "second" in steps.running)
         await pilot.pause(0.2)
@@ -1255,16 +1255,16 @@ async def test_input_queued_behind_a_goal_command_waits_for_the_goal_run(
 ):
     """The command hands the app to its run; the message typed after it stays
     queued while the review is open and runs when the goal's turn has ended."""
-    agent, model = _agent(tmp_path, holds={"main": threading.Event()})
-    app = await _capture_app(monkeypatch, workspace)
+    agent, model = cli_goal_agent(tmp_path, holds={"main": threading.Event()})
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _wire(app, workspace, agent)
         try:
-            await _submit(app, "hello")
+            await submit(app, "hello")
             await _until(pilot, lambda: app._run_task is not None)
-            await _submit(app, f"/goal {OBJECTIVE}")
-            await _submit(app, "and then this")
+            await submit(app, f"/goal {OBJECTIVE}")
+            await submit(app, "and then this")
             model.holds["main"].set()
             await _question(app, pilot)
             assert app._queued_messages == ["and then this"]
@@ -1288,7 +1288,7 @@ async def test_input_sent_after_ctrl_c_in_a_finished_turns_cleanup_runs(
     steps = _StepGateway()
     steps.gate("first").set()
     steps.gate("after").set()
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     try:
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
@@ -1306,10 +1306,10 @@ async def test_input_sent_after_ctrl_c_in_a_finished_turns_cleanup_runs(
                 return await real_refresh(*args, **kwargs)
 
             monkeypatch.setattr(app, "_refresh_status_snapshot", _refresh)
-            await _submit(app, "first")
+            await submit(app, "first")
             await asyncio.wait_for(in_cleanup.wait(), timeout=10)
             app.action_request_quit()
-            await _submit(app, "after")  # before the cancellation has landed
+            await submit(app, "after")  # before the cancellation has landed
             assert app._queued_messages == ["after"]
             await _idle(app, pilot)
             sent = [request.message for request in steps.gateway.requests]
@@ -1342,7 +1342,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_an_open_approval_alone(
             yield {"type": "done", "response": "ok"}
 
     gateway = _Pausing(thread_store=FakeThreadStore(messages=[]))
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
         _fake_wire(app, workspace, gateway)
@@ -1358,7 +1358,7 @@ async def test_a_command_cut_by_ctrl_c_leaves_an_open_approval_alone(
             return object()
 
         app._await_agent_ready = _ready
-        await _submit(app, "/goal pause")
+        await submit(app, "/goal pause")
         await pilot.pause(0.2)
         app.action_request_quit()
         await pilot.pause(0.1)

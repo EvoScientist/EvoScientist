@@ -21,7 +21,7 @@ from langgraph_sdk.errors import NotFoundError
 from EvoScientist.message_meta import this_run_messages
 from EvoScientist.middleware.background import BackgroundState
 from EvoScientist.middleware.rubric import create_rubric_middleware
-from tests.test_rubric_middleware import FAIL, PASS, _Main, _ScriptedGrader
+from tests.rubric_fakes import FAIL, PASS, MainModel, ScriptedGrader
 
 GRADER_NODE = "EvoRubricMiddleware.after_agent"
 
@@ -77,7 +77,7 @@ STARTED_THIS_TURN = ["unknown", "running"]
 
 
 def _agent(tmp_path, verdicts, replies, live, *, max_iterations=3):
-    grader = _ScriptedGrader(verdicts=verdicts)
+    grader = ScriptedGrader(verdicts=verdicts)
     rubric = create_rubric_middleware(
         model=grader,
         backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
@@ -89,7 +89,7 @@ def _agent(tmp_path, verdicts, replies, live, *, max_iterations=3):
     )
     work = _WorkChannels()
     agent = create_agent(
-        model=_Main(messages=iter([AIMessage(r) for r in replies])),
+        model=MainModel(messages=iter([AIMessage(r) for r in replies])),
         tools=[],
         middleware=[work, rubric],
         checkpointer=InMemorySaver(),
@@ -591,7 +591,7 @@ async def test_read_timeout_grades_with_a_warning(tmp_path, caplog):
 
 async def test_status_reads_are_skipped_when_the_server_is_unavailable(tmp_path):
     live = _Live(task_answers=["running"])
-    grader = _ScriptedGrader(verdicts=[PASS])
+    grader = ScriptedGrader(verdicts=[PASS])
 
     async def _down():
         return False
@@ -607,7 +607,7 @@ async def test_status_reads_are_skipped_when_the_server_is_unavailable(tmp_path)
         server_available=_down,
     )
     agent = create_agent(
-        model=_Main(messages=iter([AIMessage("a"), AIMessage("b")])),
+        model=MainModel(messages=iter([AIMessage("a"), AIMessage("b")])),
         tools=[],
         middleware=[work := _WorkChannels(), rubric],
         checkpointer=InMemorySaver(),
@@ -737,7 +737,7 @@ async def test_availability_runs_only_with_candidate_tasks_and_inside_the_budget
 
     monkeypatch.setattr(rubric_mod, "DEFER_QUERY_TIMEOUT_SECONDS", 0.05)
     live = _Live(task_answers=["running"])
-    grader = _ScriptedGrader(verdicts=[PASS, PASS])
+    grader = ScriptedGrader(verdicts=[PASS, PASS])
     rubric = create_rubric_middleware(
         model=grader,
         backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
@@ -749,7 +749,7 @@ async def test_availability_runs_only_with_candidate_tasks_and_inside_the_budget
         server_available=_slow_check,
     )
     agent = create_agent(
-        model=_Main(messages=iter([AIMessage(str(i)) for i in range(4)])),
+        model=MainModel(messages=iter([AIMessage(str(i)) for i in range(4)])),
         tools=[],
         middleware=[work := _WorkChannels(), rubric],
         checkpointer=InMemorySaver(),

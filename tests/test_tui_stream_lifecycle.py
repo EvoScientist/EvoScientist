@@ -12,7 +12,7 @@ pytest.importorskip("textual")
 from EvoScientist.gateway import RuntimeGateways
 from EvoScientist.middleware import events as mw_events
 from tests.fakes import FakeGraphGateway
-from tests.test_tui_banner_position import _capture_app
+from tests.tui_fakes import capture_app
 
 
 @pytest.mark.parametrize("pause", ["interrupt", "ask_user"])
@@ -55,7 +55,7 @@ async def test_pause_closes_stream_in_tui_turn_context(monkeypatch, workspace, p
             closed_in.append(asyncio.current_task())
             mw_events.reset_run_event_sink(token)
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     gateway = FakeGraphGateway(stream=_fake_stream)
 
     async with app.run_test(size=(80, 24)) as pilot:
@@ -98,7 +98,7 @@ async def test_pause_closes_stream_in_tui_turn_context(monkeypatch, workspace, p
 
 async def test_a_status_refresh_during_teardown_is_ignored(monkeypatch, workspace):
     """The 1 s status refresh can fire while the app is being torn down."""
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
     app._render_status()

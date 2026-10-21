@@ -19,7 +19,7 @@ from tests.goal_fakes import (
     run,
     seed_goal,
 )
-from tests.test_rubric_middleware import PASS
+from tests.rubric_fakes import PASS
 
 OBJECTIVE = "ship the report"
 DRAFT_1 = "- the report exists"

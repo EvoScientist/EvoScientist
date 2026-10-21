@@ -2,14 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import Field
 
 from EvoScientist.config import EvoScientistConfig
 from EvoScientist.EvoScientist import create_cli_agent
@@ -19,87 +13,17 @@ from tests.goal_fakes import (
     ACCEPT,
     CANCEL,
     ESCAPED,
+    OBJECTIVE,
+    AllRoles,
+    cli_goal_agent,
     history,
     message_input,
     request_input,
     resume_input,
     run,
 )
-from tests.test_rubric_middleware import PASS
 
 pytestmark = pytest.mark.usefixtures("no_mcp")
-
-OBJECTIVE = "ship the report"
-
-
-class _AllRoles(BaseChatModel):
-    """Main model, drafter and grader in one, told apart by the system prompt."""
-
-    profile: dict = Field(default_factory=lambda: {"max_input_tokens": 200_000})
-    drafts: list = Field(default_factory=list)
-    calls: dict = Field(default_factory=lambda: {"main": 0, "draft": 0, "grade": 0})
-    tools_seen: list = Field(default_factory=list)
-    keep_system: bool = False
-    main_systems: list = Field(default_factory=list)
-    # ``threading.Event``s: the role named waits for its event before replying.
-    holds: dict = Field(default_factory=dict)
-
-    @property
-    def _llm_type(self) -> str:
-        return "scripted-all-roles"
-
-    def _wait(self, role: str) -> None:
-        hold = self.holds.get(role)
-        if hold is not None:
-            assert hold.wait(timeout=30), f"the {role} reply was never released"
-
-    def bind_tools(self, tools, **kwargs):
-        self.tools_seen.append(
-            [getattr(t, "name", None) or t.get("name") for t in tools]
-        )
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        system = (
-            str(messages[0].content)
-            if messages and messages[0].type == "system"
-            else ""
-        )
-        if system.startswith("You draft minimal acceptance criteria"):
-            self._wait("draft")
-            self.calls["draft"] += 1
-            reply: Any = self.drafts.pop(0) if self.drafts else "- the report exists"
-            if isinstance(reply, Exception):
-                raise reply
-            message = AIMessage(reply)
-        elif system.startswith("You are a grader"):
-            self.calls["grade"] += 1
-            call = {
-                "name": "GraderResponse",
-                "args": PASS,
-                "id": "g1",
-                "type": "tool_call",
-            }
-            message = AIMessage("", tool_calls=[call])
-        else:
-            self._wait("main")
-            self.calls["main"] += 1
-            if self.keep_system:
-                self.main_systems.append(system)
-            message = AIMessage("working on it")
-        return ChatResult(generations=[ChatGeneration(message=message)])
-
-
-def _agent(tmp_path, **model_kwargs):
-    model = _AllRoles(**model_kwargs)
-    cfg = EvoScientistConfig(enable_async_subagents=False, memory_workers_enabled=False)
-    agent = create_cli_agent(
-        workspace=Workspace(tmp_path),
-        config=cfg,
-        chat_model=model,
-        checkpointer=InMemorySaver(),
-    )
-    return agent, model
 
 
 def _create(**kwargs):
@@ -111,7 +35,7 @@ class TestFirstRunOfAThread:
 
     @pytest.mark.parametrize("answer", [CANCEL, ESCAPED])
     async def test_a_cancelled_review_ends_cleanly(self, tmp_path, answer):
-        agent, model = _agent(tmp_path)
+        agent, model = cli_goal_agent(tmp_path)
         parked = await run(agent, request_input(_create()))
         assert parked.question is not None
         result = await run(agent, resume_input(answer))
@@ -121,14 +45,14 @@ class TestFirstRunOfAThread:
         assert model.calls == {"main": 0, "draft": 1, "grade": 0}
 
     async def test_a_failed_first_draft_ends_cleanly(self, tmp_path):
-        agent, model = _agent(tmp_path, drafts=[RuntimeError("503 upstream")])
+        agent, model = cli_goal_agent(tmp_path, drafts=[RuntimeError("503 upstream")])
         result = await run(agent, request_input(_create()))
         assert result.changes == ["drafting", "failed"]
         assert result.next == ()
         assert model.calls["main"] == 0
 
     async def test_an_ignored_request_ends_cleanly(self, tmp_path):
-        agent, model = _agent(tmp_path)
+        agent, model = cli_goal_agent(tmp_path)
         request = new_goal_request("pause", target="goal:none")
         result = await run(agent, request_input(request))
         assert result.changes == ["ignored"]
@@ -136,7 +60,7 @@ class TestFirstRunOfAThread:
         assert model.calls == {"main": 0, "draft": 0, "grade": 0}
 
     async def test_the_thread_works_afterwards(self, tmp_path):
-        agent, _ = _agent(tmp_path)
+        agent, _ = cli_goal_agent(tmp_path)
         await run(agent, request_input(_create()))
         await run(agent, resume_input(CANCEL))
         result = await run(agent, message_input("hi"))
@@ -145,7 +69,7 @@ class TestFirstRunOfAThread:
 
 class TestAcceptedGoal:
     async def test_the_same_run_does_the_work_and_is_graded(self, tmp_path):
-        agent, model = _agent(tmp_path)
+        agent, model = cli_goal_agent(tmp_path)
         await run(agent, request_input(_create()))
         result = await run(agent, resume_input(ACCEPT))
         assert history(result) == [("human", OBJECTIVE), ("ai", "working on it")]
@@ -156,7 +80,7 @@ class TestAcceptedGoal:
 
     async def test_the_agent_is_offered_the_goal_tool_only_with_a_goal(self, tmp_path):
         """On the real main graph, with every other middleware in the list."""
-        agent, model = _agent(tmp_path)
+        agent, model = cli_goal_agent(tmp_path)
         await run(agent, message_input("hi"))
         assert model.tools_seen  # the other tools were offered
         assert not any("update_goal" in names for names in model.tools_seen)
@@ -180,7 +104,7 @@ class TestMemoryWorker:
             return None
 
         monkeypatch.setattr(lifecycle, "alaunch_memory_worker", _alaunch)
-        model = _AllRoles()
+        model = AllRoles()
         agent = create_cli_agent(
             workspace=Workspace(tmp_path),
             config=EvoScientistConfig(enable_async_subagents=False),
@@ -211,7 +135,7 @@ class TestMemoryWorker:
 
 async def test_an_agent_built_for_auto_mode_adopts_the_draft(tmp_path):
     """The TUI passes commands no config, so the graph reads its own."""
-    model = _AllRoles()
+    model = AllRoles()
     agent = create_cli_agent(
         workspace=Workspace(tmp_path),
         config=EvoScientistConfig(

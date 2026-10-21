@@ -18,7 +18,7 @@ from tests.goal_fakes import (
     seed_goal,
     tool_call,
 )
-from tests.test_rubric_middleware import FAIL, PASS
+from tests.rubric_fakes import FAIL, PASS
 
 BLOCKED = tool_call("update_goal", "b1", status="blocked", note="need an API key")
 EVIDENCE = tool_call("update_goal", "c1", status="complete", note="all tests pass")

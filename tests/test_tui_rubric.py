@@ -1,7 +1,7 @@
 """TUI side of ``/rubric``: the run marker, acknowledgement, badge and grading lines.
 
 Boots the real TUI class through Textual's pilot (see
-``test_tui_banner_position._capture_app``) and drives it with a fake gateway.
+``test_tui_banner_position.capture_app``) and drives it with a fake gateway.
 """
 
 from __future__ import annotations
@@ -10,75 +10,37 @@ import pytest
 
 pytest.importorskip("textual")
 
-from tests.test_tui_banner_position import _capture_app
-from tests.test_tui_skill_pin import (
-    _finish_turns,
-    _isolated_skills,  # noqa: F401  (autouse fixture)
-    _prepare,
-    _submit,
-    _system_lines,
+from tests.tui_fakes import (
+    GatedStream,
+    capture_app,
+    chat_sequence,
+    finish_turns,
+    isolated_skills,  # noqa: F401  (autouse fixture)
+    prepare_app,
+    rubric_gateway,
+    run_gated,
+    submit,
+    system_lines,
 )
-
-
-def _gateway(events=None, state_values=None, post_state=None):
-    """A fake gateway; ``post_state`` becomes the thread state once a run finished."""
-    from tests.fakes import FakeGraphGateway, FakeThreadStore
-
-    class _Gateway(FakeGraphGateway):
-        async def stream_events(self, request):
-            async for event in super().stream_events(request):
-                yield event
-            if post_state is not None:
-                self.state_values = dict(post_state)
-
-    return _Gateway(
-        events=events
-        or [{"type": "text", "content": "ok"}, {"type": "done", "response": "ok"}],
-        thread_store=FakeThreadStore(messages=[]),
-        state_values=state_values or {},
-    )
-
-
-def _assistant_texts(app) -> list[str]:
-    from EvoScientist.cli.widgets.assistant_message import AssistantMessage
-
-    out = []
-    for w in app.query_one("#chat").children:
-        if isinstance(w, AssistantMessage):
-            out.append(str(getattr(w, "_content", None) or w.render()))
-    return out
-
-
-def _chat_sequence(app) -> list[tuple[str, str]]:
-    from EvoScientist.cli.widgets.assistant_message import AssistantMessage
-    from EvoScientist.cli.widgets.system_message import SystemMessage
-
-    seq = []
-    for w in app.query_one("#chat").children:
-        if isinstance(w, AssistantMessage):
-            seq.append(("assistant", str(getattr(w, "_content", None) or w.render())))
-        elif isinstance(w, SystemMessage):
-            seq.append(("system", str(w.render())))
-    return seq
 
 
 async def test_typed_turn_carries_the_thread_marker_and_acknowledges(
     monkeypatch, workspace
 ):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
         session = app._channel_runtime.rubric
         tid = app._conversation_tid
         op = session.record(tid, sticky="- s")
-        gateway = _gateway(
+        gateway = rubric_gateway(
             post_state={
                 "_rubric_applied": {session.session_id: 1},
                 "_sticky_rubric": {"text": "- s", "id": f"{session.session_id}:1"},
             }
         )
-        _prepare(app, workspace, gateway)
-        await _submit(app, "hello")
-        await _finish_turns(app, pilot)
+        prepare_app(app, workspace, gateway)
+        await submit(app, "hello")
+        await finish_turns(app, pilot)
         request = gateway.requests[-1]
         assert request.configurable_extra["rubric_run"] == {
             "mode": "thread",
@@ -91,10 +53,10 @@ async def test_typed_turn_carries_the_thread_marker_and_acknowledges(
 async def test_notifier_turn_is_a_followup_for_the_current_thread_only(
     monkeypatch, workspace
 ):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test():
-        gateway = _gateway()
-        _prepare(app, workspace, gateway)
+        gateway = rubric_gateway()
+        prepare_app(app, workspace, gateway)
         tid = app._conversation_tid
         await app._run_turn(
             "[Async tasks update]",
@@ -124,13 +86,13 @@ async def test_no_marker_when_the_session_executes_on_the_server(
 
     from EvoScientist.gateway.server import LangGraphServerGateway
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gateway = _gateway()
+        gateway = rubric_gateway()
         gateway.execute_gateway = MagicMock(spec=LangGraphServerGateway)
-        _prepare(app, workspace, gateway)
-        await _submit(app, "hello")
-        await _finish_turns(app, pilot)
+        prepare_app(app, workspace, gateway)
+        await submit(app, "hello")
+        await finish_turns(app, pilot)
         extra = gateway.requests[-1].configurable_extra or {}
         assert "rubric_run" not in extra
 
@@ -138,9 +100,9 @@ async def test_no_marker_when_the_session_executes_on_the_server(
 async def test_grading_lines_sit_between_the_draft_and_the_revision(
     monkeypatch, workspace
 ):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gateway = _gateway(
+        gateway = rubric_gateway(
             events=[
                 {"type": "text", "content": "draft"},
                 {"type": "rubric_evaluation_start", "iteration": 0},
@@ -165,10 +127,10 @@ async def test_grading_lines_sit_between_the_draft_and_the_revision(
                 {"type": "done", "response": "draft\n\nfixed"},
             ]
         )
-        _prepare(app, workspace, gateway)
-        await _submit(app, "task")
-        await _finish_turns(app, pilot)
-        seq = _chat_sequence(app)
+        prepare_app(app, workspace, gateway)
+        await submit(app, "task")
+        await finish_turns(app, pilot)
+        seq = chat_sequence(app)
         verdicts = [
             i
             for i, (k, t) in enumerate(seq)
@@ -186,19 +148,19 @@ async def test_grading_lines_sit_between_the_draft_and_the_revision(
 
 
 async def test_deferred_event_mounts_one_line(monkeypatch, workspace):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gateway = _gateway(
+        gateway = rubric_gateway(
             events=[
                 {"type": "text", "content": "started the job"},
                 {"type": "rubric_evaluation_deferred", "tasks": 0, "processes": 1},
                 {"type": "done", "response": "started the job"},
             ]
         )
-        _prepare(app, workspace, gateway)
-        await _submit(app, "task")
-        await _finish_turns(app, pilot)
-        lines = _system_lines(app)
+        prepare_app(app, workspace, gateway)
+        await submit(app, "task")
+        await finish_turns(app, pilot)
+        lines = system_lines(app)
         assert any(
             "Acceptance check deferred: 1 background process still running" in line
             for line in lines
@@ -208,10 +170,10 @@ async def test_deferred_event_mounts_one_line(monkeypatch, workspace):
 async def test_rubric_command_updates_the_badge_before_the_next_message(
     monkeypatch, workspace
 ):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        _prepare(app, workspace, _gateway())
-        await _submit(app, "/rubric set - a")
+        prepare_app(app, workspace, rubric_gateway())
+        await submit(app, "/rubric set - a")
         await pilot.pause()
         for _ in range(20):
             if app._rubric_badges.get(app._conversation_tid) == "on":
@@ -222,14 +184,14 @@ async def test_rubric_command_updates_the_badge_before_the_next_message(
 
 
 async def test_show_uses_the_loaded_agent_without_waiting(monkeypatch, workspace):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gateway = _gateway(
+        gateway = rubric_gateway(
             state_values={"_sticky_rubric": {"text": "- saved here", "id": "s:1"}}
         )
-        _prepare(app, workspace, gateway)
+        prepare_app(app, workspace, gateway)
         app._agent_loader.agent = object()
-        await _submit(app, "/rubric show")
+        await submit(app, "/rubric show")
         shown: list[str] = []
         for _ in range(20):
             await pilot.pause()
@@ -242,12 +204,12 @@ async def test_show_uses_the_loaded_agent_without_waiting(monkeypatch, workspace
 
 
 async def test_badge_appears_once_the_agent_has_loaded(monkeypatch, workspace):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gateway = _gateway(
+        gateway = rubric_gateway(
             state_values={"_sticky_rubric": {"text": "- saved", "id": "s:1"}}
         )
-        _prepare(app, workspace, gateway)
+        prepare_app(app, workspace, gateway)
         app._agent_loader.agent = None
         await app._refresh_status_snapshot()
         assert app._rubric_badges.get(app._conversation_tid) is None
@@ -264,9 +226,9 @@ async def test_badge_appears_once_the_agent_has_loaded(monkeypatch, workspace):
 async def test_a_late_subagent_end_event_does_not_repeat_the_draft(
     monkeypatch, workspace
 ):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gateway = _gateway(
+        gateway = rubric_gateway(
             events=[
                 {"type": "text", "content": "draft"},
                 {
@@ -291,10 +253,10 @@ async def test_a_late_subagent_end_event_does_not_repeat_the_draft(
                 {"type": "done", "response": "draft\n\nfixed"},
             ]
         )
-        _prepare(app, workspace, gateway)
-        await _submit(app, "task")
-        await _finish_turns(app, pilot)
-        seq = _chat_sequence(app)
+        prepare_app(app, workspace, gateway)
+        await submit(app, "task")
+        await finish_turns(app, pilot)
+        seq = chat_sequence(app)
         verdict = next(
             i
             for i, (k, t) in enumerate(seq)
@@ -303,36 +265,6 @@ async def test_a_late_subagent_end_event_does_not_repeat_the_draft(
         after = [t for k, t in seq[verdict:] if k == "assistant"]
         assert after, seq
         assert all("draft" not in t for t in after), after
-
-
-class _Gated:
-    """A scripted stream that stops at each named gate until the test lets it go on."""
-
-    def __init__(self, *script):
-        import asyncio
-
-        self._script = script
-        self._reached = {s: asyncio.Event() for s in script if isinstance(s, str)}
-        self._go_on = {s: asyncio.Event() for s in self._reached}
-
-    async def stream(self, _request):
-        for step in self._script:
-            if isinstance(step, str):
-                self._reached[step].set()
-                await self._go_on[step].wait()
-            else:
-                yield step
-
-    async def chat_at(self, app, pilot, gate) -> list:
-        """The chat's widgets once the stream stands at *gate*."""
-        import asyncio
-
-        await asyncio.wait_for(self._reached[gate].wait(), 10)
-        await pilot.pause()
-        return list(app.query_one("#chat").children)
-
-    def go_on(self, gate) -> None:
-        self._go_on[gate].set()
 
 
 _CHECK = {"type": "rubric_evaluation_start", "iteration": 0}
@@ -347,22 +279,15 @@ _SATISFIED = {
 }
 
 
-async def _run_gated(app, workspace, gated) -> None:
-    gateway = _gateway()
-    gateway.stream = gated.stream
-    _prepare(app, workspace, gateway)
-    await _submit(app, "task")
-
-
 async def test_a_spinner_runs_under_the_checking_line_until_the_verdict(
     monkeypatch, workspace
 ):
     from EvoScientist.cli.widgets.loading_widget import LoadingWidget
     from EvoScientist.cli.widgets.system_message import SystemMessage
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gated = _Gated(
+        gated = GatedStream(
             {"type": "text", "content": "draft"},
             _CHECK,
             "grading",
@@ -370,7 +295,7 @@ async def test_a_spinner_runs_under_the_checking_line_until_the_verdict(
             "verdict",
             {"type": "done", "response": "draft"},
         )
-        await _run_gated(app, workspace, gated)
+        await run_gated(app, workspace, gated)
 
         # The grader's own work is not shown: the spinner says it is running.
         *_, line, last = await gated.chat_at(app, pilot, "grading")
@@ -386,30 +311,32 @@ async def test_a_spinner_runs_under_the_checking_line_until_the_verdict(
         assert str(last.render()) == "Acceptance criteria satisfied"
         assert not list(app.query(LoadingWidget))
         gated.go_on("verdict")
-        await _finish_turns(app, pilot)
+        await finish_turns(app, pilot)
 
 
 async def test_a_check_that_opens_the_turn_keeps_one_spinner(monkeypatch, workspace):
     from EvoScientist.cli.widgets.loading_widget import LoadingWidget
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
         # The answer had no text, so the turn's first spinner is still up.
-        gated = _Gated(_CHECK, "grading", _SATISFIED, {"type": "done", "response": ""})
-        await _run_gated(app, workspace, gated)
+        gated = GatedStream(
+            _CHECK, "grading", _SATISFIED, {"type": "done", "response": ""}
+        )
+        await run_gated(app, workspace, gated)
 
         chat = await gated.chat_at(app, pilot, "grading")
         assert [isinstance(w, LoadingWidget) for w in chat].count(True) == 1
         assert isinstance(chat[-1], LoadingWidget)
         gated.go_on("grading")
-        await _finish_turns(app, pilot)
+        await finish_turns(app, pilot)
         assert not list(app.query(LoadingWidget))
 
 
 async def test_a_grader_retry_notice_goes_above_the_spinner(monkeypatch, workspace):
     from EvoScientist.cli.widgets.loading_widget import LoadingWidget
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
         retry = {
             "type": "model_retry",
@@ -422,7 +349,7 @@ async def test_a_grader_retry_notice_goes_above_the_spinner(monkeypatch, workspa
             "instance_id": "EvoRubricMiddleware.after_agent:1",
             "discarded": {"text_chars": 0, "thinking_chars": 0, "tool_call_ids": []},
         }
-        gated = _Gated(
+        gated = GatedStream(
             {"type": "text", "content": "draft"},
             _CHECK,
             retry,
@@ -430,25 +357,27 @@ async def test_a_grader_retry_notice_goes_above_the_spinner(monkeypatch, workspa
             _SATISFIED,
             {"type": "done", "response": "draft"},
         )
-        await _run_gated(app, workspace, gated)
+        await run_gated(app, workspace, gated)
 
         *_, line, notice, last = await gated.chat_at(app, pilot, "waiting")
         assert str(line.render()) == _CHECKING_LINE
         assert str(notice.render()).startswith("rubric_grader: Model request failed")
         assert isinstance(last, LoadingWidget)
         gated.go_on("waiting")
-        await _finish_turns(app, pilot)
+        await finish_turns(app, pilot)
         assert not list(app.query(LoadingWidget))
 
 
 async def test_checklist_text_is_shown_literally_in_the_tui(monkeypatch, workspace):
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
         text = "- [x] report.md exists\n- cite [docs] and keep [/tmp/out] intact"
-        gateway = _gateway(state_values={"_sticky_rubric": {"text": text, "id": "s:1"}})
-        _prepare(app, workspace, gateway)
+        gateway = rubric_gateway(
+            state_values={"_sticky_rubric": {"text": text, "id": "s:1"}}
+        )
+        prepare_app(app, workspace, gateway)
         app._agent_loader.agent = object()
-        await _submit(app, "/rubric show")
+        await submit(app, "/rubric show")
         shown: list[str] = []
         for _ in range(20):
             await pilot.pause()
@@ -465,12 +394,12 @@ async def test_a_session_change_keeps_its_own_agent_load(
 ):
     """``/new`` and ``/resume`` restart the load; the agent the command was
     handed must not be put back in its place."""
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        gateway = _gateway()
+        gateway = rubric_gateway()
         gateway.thread_store.resolved_thread_id = "other"
         gateway.thread_store.metadata = {"workspace_dir": str(workspace.root)}
-        _prepare(app, workspace, gateway)
+        prepare_app(app, workspace, gateway)
         previous = object()
         app._agent_loader.agent = previous
         adopted: list[object] = []
@@ -483,12 +412,12 @@ async def test_a_session_change_keeps_its_own_agent_load(
             start(dirs)
 
         monkeypatch.setattr(app, "_start_background_agent_load", _restart)
-        await _submit(app, command)
+        await submit(app, command)
         for _ in range(40):
             await pilot.pause()
             if restarts and not app._busy:
                 break
-        assert restarts, _system_lines(app)
+        assert restarts, system_lines(app)
         assert adopted == []
         assert app._agent_loader.agent is not previous
 
@@ -499,9 +428,9 @@ async def test_a_command_that_builds_a_new_agent_still_has_it_adopted(
     """The other side of the rule above: ``/model`` hands a new agent back."""
     import EvoScientist.cli.tui_interactive as tui_mod
 
-    app = await _capture_app(monkeypatch, workspace)
+    app = await capture_app(monkeypatch, workspace)
     async with app.run_test() as pilot:
-        _prepare(app, workspace, _gateway())
+        prepare_app(app, workspace, rubric_gateway())
         previous, built = object(), object()
         app._agent_loader.agent = previous
         adopted: list[object] = []
@@ -519,7 +448,7 @@ async def test_a_command_that_builds_a_new_agent_still_has_it_adopted(
 
         monkeypatch.setattr(tui_mod.cmd_manager, "resolve", lambda _c: (_Swap(), []))
         monkeypatch.setattr(tui_mod.cmd_manager, "execute", _execute)
-        await _submit(app, "/swap")
+        await submit(app, "/swap")
         for _ in range(40):
             await pilot.pause()
             if adopted:

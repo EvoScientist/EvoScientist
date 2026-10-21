@@ -17,7 +17,6 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
-from langgraph.runtime import ExecutionInfo, Runtime
 from pydantic import BaseModel
 
 from EvoScientist.config import EvoScientistConfig, MemoryObservationWriter
@@ -52,6 +51,12 @@ from EvoScientist.memory.observations import (
 from EvoScientist.memory.search import _tokens
 from EvoScientist.memory.types import ObservationRelation
 from EvoScientist.middleware import memory_lifecycle
+from tests.memory_fakes import (
+    fake_execution_info,
+    fake_runtime,
+    linker_context,
+    memory_source_context,
+)
 
 
 def _read_memory_document(path) -> tuple[dict[str, Any], str]:
@@ -80,15 +85,6 @@ def _markdown_sections(body: str) -> dict[str, str]:
     return sections
 
 
-def _execution_info(thread_id: str | None = None) -> ExecutionInfo:
-    return ExecutionInfo(
-        checkpoint_id="checkpoint-1",
-        checkpoint_ns="",
-        task_id="task-1",
-        thread_id=thread_id,
-    )
-
-
 def _tool_runtime(
     tool: Any,
     *,
@@ -105,35 +101,8 @@ def _tool_runtime(
         tool_call_id=tool_call_id,
         store=None,
         tools=[tool],
-        execution_info=_execution_info(thread_id),
+        execution_info=fake_execution_info(thread_id),
         server_info=None,
-    )
-
-
-def _runtime(thread_id: str | None = None) -> Runtime[None]:
-    return Runtime(execution_info=_execution_info(thread_id))
-
-
-def _memory_source_context(
-    *,
-    memory_dir,
-    workspace_dir,
-    source_type: MemorySourceType = MemorySourceType.TURN,
-    project_id: str = "P-project",
-    source_agent: str = "EvoScientist",
-    session_id: str = "thread-1",
-    trajectory: list[source_context.CompactMessage] | None = None,
-) -> source_context.MemorySourceContext:
-    context_trajectory = trajectory or [{"role": "human", "content": "hi"}]
-    return source_context.MemorySourceContext(
-        source_type=source_type,
-        memory_dir=memory_dir,
-        workspace_dir=workspace_dir,
-        project_id=project_id,
-        source_agent=source_agent,
-        session_id=session_id,
-        trajectory=context_trajectory,
-        trajectory_digest=source_context._trajectory_digest(context_trajectory),
     )
 
 
@@ -177,21 +146,6 @@ def _observation_linker_run(
         run_id=run_id,
         assistant_id=memory_launch.OBSERVATION_LINKER_GRAPH_ID,
         metadata={},
-    )
-
-
-def _linker_context(
-    *,
-    memory_dir,
-    workspace_dir,
-    observation_ids: tuple[str, ...],
-    project_id: str = "P-project",
-) -> memory_scheduler.ObservationLinkerContext:
-    return memory_scheduler.ObservationLinkerContext(
-        memory_dir=memory_dir,
-        workspace_dir=workspace_dir,
-        project_id=project_id,
-        observation_ids=observation_ids,
     )
 
 
@@ -1784,7 +1738,7 @@ def test_direct_record_observation_queues_linking_until_worker_finish(tmp_path):
     hooks.on_finished(worker_run)
 
     assert launched == [
-        _linker_context(
+        linker_context(
             memory_dir=memory_dir,
             workspace_dir=workspace,
             project_id=middleware.project_id,
@@ -1951,7 +1905,7 @@ async def test_lifecycle_schedules_turn_worker_without_awaiting(tmp_path, monkey
         source_agent="EvoScientist",
         memory_scheduler=coordinator,
     )
-    runtime = _runtime("thread-1")
+    runtime = fake_runtime("thread-1")
 
     state: AgentState[object] = {
         "messages": [
@@ -1979,7 +1933,7 @@ async def test_lifecycle_schedules_turn_worker_without_awaiting(tmp_path, monkey
     observation = _record_test_observation(memory_dir)
     hooks.on_finished(worker_run)
     assert launched == [
-        _linker_context(
+        linker_context(
             memory_dir=memory_dir,
             workspace_dir=workspace_dir,
             observation_ids=(observation["observation_id"],),
@@ -2002,7 +1956,7 @@ def test_lifecycle_skips_memory_worker_without_runtime_thread_id(tmp_path, monke
 
     middleware.after_agent(
         {"messages": [HumanMessage("hi"), AIMessage("done", name="EvoScientist")]},
-        _runtime(),
+        fake_runtime(),
     )
 
 
@@ -2028,7 +1982,7 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
     }
     middleware.after_agent(
         state,
-        _runtime(),
+        fake_runtime(),
     )
 
     paths = list((tmp_path / "memories" / "executions" / "thread-1").glob("*.md"))
@@ -2062,7 +2016,7 @@ def test_memory_worker_run_payload_use_server_thread_id_and_source_metadata(
     trajectory: list[source_context.CompactMessage] = [
         {"role": "human", "content": "hi"}
     ]
-    context = _memory_source_context(
+    context = memory_source_context(
         memory_dir="/memories",
         workspace_dir="/active/workspace",
         source_type=MemorySourceType.SUBAGENT,
@@ -2119,7 +2073,7 @@ def test_memory_worker_finish_launches_linker_for_new_observations(
     )
 
     assert launched == [
-        _linker_context(
+        linker_context(
             memory_dir=memory_dir,
             workspace_dir=workspace_dir,
             observation_ids=(observation["observation_id"],),
@@ -2299,7 +2253,7 @@ def test_memory_worker_linker_flushes_pending_batch_when_last_worker_aborts(tmp_
     )
 
     assert launched == [
-        _linker_context(
+        linker_context(
             memory_dir=memory_dir,
             workspace_dir=workspace_dir,
             observation_ids=(observation["observation_id"],),
@@ -2357,7 +2311,7 @@ def test_memory_worker_abort_queues_written_observations_for_linking(tmp_path):
     )
 
     assert launched == [
-        _linker_context(
+        linker_context(
             memory_dir=memory_dir,
             workspace_dir=workspace_dir,
             observation_ids=(observation["observation_id"],),
@@ -2395,7 +2349,7 @@ def test_memory_worker_watcher_start_failure_queues_written_observations_for_lin
     hooks.on_watcher_start_failed(worker_run)
 
     assert launched == [
-        _linker_context(
+        linker_context(
             memory_dir=memory_dir,
             workspace_dir=workspace_dir,
             observation_ids=(observation["observation_id"],),
@@ -2407,7 +2361,7 @@ def test_memory_worker_watcher_start_failure_queues_written_observations_for_lin
 
 
 def test_observation_linker_launch_request_encodes_batch_context(tmp_path):
-    context = _linker_context(
+    context = linker_context(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         observation_ids=("O-2", "O-1"),
@@ -2431,7 +2385,7 @@ def test_observation_linker_does_not_launch_when_observations_disabled(
     tmp_path,
     monkeypatch,
 ):
-    context = _linker_context(
+    context = linker_context(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         observation_ids=("O-1",),
@@ -2454,7 +2408,7 @@ async def test_async_observation_linker_does_not_launch_when_observations_disabl
     tmp_path,
     monkeypatch,
 ):
-    context = _linker_context(
+    context = linker_context(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         observation_ids=("O-1",),
@@ -2816,7 +2770,7 @@ def test_memory_worker_skips_when_langgraph_dev_unavailable(tmp_path, monkeypatc
     )
     middleware.after_agent(
         {"messages": [HumanMessage("hi"), AIMessage("done", name="EvoScientist")]},
-        _runtime("thread-1"),
+        fake_runtime("thread-1"),
     )
 
 
@@ -2846,7 +2800,7 @@ def test_memory_worker_marks_active_status(tmp_path, monkeypatch):
     ]
 
     memory_dir = tmp_path / "memories"
-    context = _memory_source_context(
+    context = memory_source_context(
         memory_dir=memory_dir,
         workspace_dir=tmp_path / "workspace",
         trajectory=trajectory,
@@ -2940,7 +2894,7 @@ async def test_async_memory_worker_offloads_blocking_work(tmp_path, monkeypatch)
     spawned: list[background_runs.BackgroundRun] = []
 
     event_loop_thread = threading.get_ident()
-    context = _memory_source_context(
+    context = memory_source_context(
         memory_dir=tmp_path / "memories",
         workspace_dir=tmp_path / "workspace",
         trajectory=[{"role": "human", "content": "hi"}],
@@ -3139,7 +3093,7 @@ def test_memory_pipeline_waits_while_observation_linker_is_launching(tmp_path):
 
     coordinator = memory_scheduler.MemoryScheduler(launch_linker=launch_linker)
     coordinator.record_observation_created(
-        _linker_context(
+        linker_context(
             memory_dir=tmp_path / "memories",
             workspace_dir=tmp_path / "workspace",
             observation_ids=("O-1",),

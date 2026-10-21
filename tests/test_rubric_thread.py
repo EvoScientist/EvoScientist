@@ -9,13 +9,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from EvoScientist.message_meta import this_run_messages
 from EvoScientist.middleware.rubric import create_rubric_middleware
-from tests.test_rubric_middleware import FAIL, PASS, _Main, _ScriptedGrader
+from tests.rubric_fakes import FAIL, PASS, MainModel, ScriptedGrader
 
 GRADER_NODE = "EvoRubricMiddleware.after_agent"
 
 
 def _agent(tmp_path, verdicts, replies, *, max_iterations=3):
-    grader = _ScriptedGrader(verdicts=verdicts)
+    grader = ScriptedGrader(verdicts=verdicts)
     rubric = create_rubric_middleware(
         model=grader,
         backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
@@ -24,7 +24,7 @@ def _agent(tmp_path, verdicts, replies, *, max_iterations=3):
         require_run_marker=True,
     )
     agent = create_agent(
-        model=_Main(messages=iter([AIMessage(r) for r in replies])),
+        model=MainModel(messages=iter([AIMessage(r) for r in replies])),
         tools=[],
         middleware=[rubric],
         checkpointer=InMemorySaver(),
@@ -256,14 +256,14 @@ def test_evaluations_keep_only_the_current_grading(tmp_path):
 
 
 def test_scheduler_without_marker_requirement_grades_its_input_as_before(tmp_path):
-    grader = _ScriptedGrader(verdicts=[PASS])
+    grader = ScriptedGrader(verdicts=[PASS])
     rubric = create_rubric_middleware(
         model=grader,
         backend=FilesystemBackend(root_dir=tmp_path, virtual_mode=True),
         max_iterations=2,
     )
     agent = create_agent(
-        model=_Main(messages=iter([AIMessage("a")])),
+        model=MainModel(messages=iter([AIMessage("a")])),
         tools=[],
         middleware=[rubric],
         checkpointer=InMemorySaver(),

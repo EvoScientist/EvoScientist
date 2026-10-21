@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import httpx
 from langgraph_sdk.client import LangGraphClient
@@ -886,4 +887,49 @@ def no_config_rule(monkeypatch) -> None:
 
     monkeypatch.setattr(
         interaction_mod, "config_policy_snapshot", lambda reqs: (None, {})
+    )
+
+
+def _mock_config():
+    cfg = MagicMock()
+    cfg.enable_ask_user = False
+    cfg.auto_mode = False
+    cfg.auto_approve = False
+    cfg.model_fallbacks = None
+    cfg.auxiliary_model = ""
+    cfg.auxiliary_provider = ""
+    cfg.code_interpreter_timeout = 60
+    cfg.code_interpreter_max_result_chars = 6000
+    return cfg
+
+
+def build_default_middleware(workspace, *, for_async_subagent: bool):
+    from EvoScientist.EvoScientist import _get_default_middleware
+
+    with (
+        patch(
+            "EvoScientist.middleware.create_tool_selector_middleware",
+            return_value=[MagicMock()],
+        ),
+        patch(
+            "EvoScientist.EvoScientist._ensure_chat_model",
+            return_value=MagicMock(profile={"max_input_tokens": 200_000}),
+        ),
+        patch("EvoScientist.EvoScientist._ensure_config", return_value=_mock_config()),
+    ):
+        return _get_default_middleware(
+            workspace=workspace, for_async_subagent=for_async_subagent
+        )
+
+
+def status_snapshot():
+    """A status bar snapshot with a model and a little context in use."""
+    from EvoScientist.cli.status_bar import SessionStatusSnapshot
+
+    return SessionStatusSnapshot(
+        model_full="claude-sonnet-4-6",
+        model_short="sonnet-4-6",
+        context_tokens=1000,
+        context_window=200000,
+        context_percent=1,
     )

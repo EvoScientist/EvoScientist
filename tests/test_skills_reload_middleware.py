@@ -5,7 +5,6 @@ from __future__ import annotations
 import shutil
 import uuid
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 from deepagents import create_deep_agent
@@ -17,6 +16,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from EvoScientist.middleware.skills_reload import SkillsReloadMiddleware
+from tests.fakes import build_default_middleware
 
 _SEEN: list[list[BaseMessage]] = []
 _FAIL = {"on": False}
@@ -112,45 +112,13 @@ def test_unchanged_library_keeps_the_system_prompt_identical(tmp_path):
     assert _system_text(_SEEN[0]) == _system_text(_SEEN[1])
 
 
-def _mock_config():
-    cfg = MagicMock()
-    cfg.enable_ask_user = False
-    cfg.auto_mode = False
-    cfg.auto_approve = False
-    cfg.model_fallbacks = None
-    cfg.auxiliary_model = ""
-    cfg.auxiliary_provider = ""
-    cfg.code_interpreter_timeout = 60
-    cfg.code_interpreter_max_result_chars = 6000
-    return cfg
-
-
-def _default_middleware(workspace, *, for_async_subagent: bool):
-    from EvoScientist.EvoScientist import _get_default_middleware
-
-    with (
-        patch(
-            "EvoScientist.middleware.create_tool_selector_middleware",
-            return_value=[MagicMock()],
-        ),
-        patch(
-            "EvoScientist.EvoScientist._ensure_chat_model",
-            return_value=MagicMock(profile={"max_input_tokens": 200_000}),
-        ),
-        patch("EvoScientist.EvoScientist._ensure_config", return_value=_mock_config()),
-    ):
-        return _get_default_middleware(
-            workspace=workspace, for_async_subagent=for_async_subagent
-        )
-
-
 def test_main_agent_stack_reloads_skills(workspace):
-    stack = _default_middleware(workspace, for_async_subagent=False)
+    stack = build_default_middleware(workspace, for_async_subagent=False)
     assert sum(isinstance(m, SkillsReloadMiddleware) for m in stack) == 1
 
 
 def test_async_subagent_stack_does_not_reload_skills(workspace):
-    stack = _default_middleware(workspace, for_async_subagent=True)
+    stack = build_default_middleware(workspace, for_async_subagent=True)
     assert not any(isinstance(m, SkillsReloadMiddleware) for m in stack)
 
 

@@ -15,10 +15,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from pydantic import Field
 
+from EvoScientist.config import EvoScientistConfig
+from EvoScientist.EvoScientist import create_cli_agent
 from EvoScientist.message_meta import this_run_messages
 from EvoScientist.middleware.goal import GoalContextMiddleware, GoalMiddleware
 from EvoScientist.middleware.rubric import create_rubric_middleware
-from tests.test_rubric_middleware import FAIL, _ScriptedGrader
+from EvoScientist.paths import Workspace
+from tests.rubric_fakes import FAIL, PASS, ScriptedGrader
 
 ACCEPT = {"answers": ["Accept"], "status": "answered"}
 CANCEL = {"answers": ["Cancel"], "status": "answered"}
@@ -92,7 +95,7 @@ def goal_agent(
     models = models or SimpleNamespace(
         main=Scripted(replies=list(replies)),
         drafter=Scripted(replies=list(drafts)),
-        grader=_ScriptedGrader(verdicts=list(verdicts) or [FAIL]),
+        grader=ScriptedGrader(verdicts=list(verdicts) or [FAIL]),
     )
     backend = FilesystemBackend(root_dir=tmp_path, virtual_mode=True)
     agent = create_agent(
@@ -182,3 +185,76 @@ async def seed_goal(agent, *, status="active", thread="t", **fields):
     await agent.aupdate_state(cfg, values, as_node=GOAL_NODE)
     await agent.aupdate_state(cfg, None, as_node="__end__")
     return goal["rubric_id"]
+
+
+OBJECTIVE = "ship the report"
+
+
+class AllRoles(BaseChatModel):
+    """Main model, drafter and grader in one, told apart by the system prompt."""
+
+    profile: dict = Field(default_factory=lambda: {"max_input_tokens": 200_000})
+    drafts: list = Field(default_factory=list)
+    calls: dict = Field(default_factory=lambda: {"main": 0, "draft": 0, "grade": 0})
+    tools_seen: list = Field(default_factory=list)
+    keep_system: bool = False
+    main_systems: list = Field(default_factory=list)
+    # ``threading.Event``s: the role named waits for its event before replying.
+    holds: dict = Field(default_factory=dict)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-all-roles"
+
+    def _wait(self, role: str) -> None:
+        hold = self.holds.get(role)
+        if hold is not None:
+            assert hold.wait(timeout=30), f"the {role} reply was never released"
+
+    def bind_tools(self, tools, **kwargs):
+        self.tools_seen.append(
+            [getattr(t, "name", None) or t.get("name") for t in tools]
+        )
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        system = (
+            str(messages[0].content)
+            if messages and messages[0].type == "system"
+            else ""
+        )
+        if system.startswith("You draft minimal acceptance criteria"):
+            self._wait("draft")
+            self.calls["draft"] += 1
+            reply: Any = self.drafts.pop(0) if self.drafts else "- the report exists"
+            if isinstance(reply, Exception):
+                raise reply
+            message = AIMessage(reply)
+        elif system.startswith("You are a grader"):
+            self.calls["grade"] += 1
+            call = {
+                "name": "GraderResponse",
+                "args": PASS,
+                "id": "g1",
+                "type": "tool_call",
+            }
+            message = AIMessage("", tool_calls=[call])
+        else:
+            self._wait("main")
+            self.calls["main"] += 1
+            if self.keep_system:
+                self.main_systems.append(system)
+            message = AIMessage("working on it")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def cli_goal_agent(tmp_path, **model_kwargs):
+    model = AllRoles(**model_kwargs)
+    cfg = EvoScientistConfig(enable_async_subagents=False, memory_workers_enabled=False)
+    agent = create_cli_agent(
+        workspace=Workspace(tmp_path),
+        config=cfg,
+        chat_model=model,
+        checkpointer=InMemorySaver(),
+    )
+    return agent, model

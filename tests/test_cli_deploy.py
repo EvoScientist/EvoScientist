@@ -577,9 +577,9 @@ def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_p
     from filelock import FileLock
 
     from EvoScientist.langgraph_dev import manager as lgm
-    from tests.test_cli_deploy_json import _LockHolder
+    from tests.langgraph_dev_fakes import LockHolder
 
-    holder = _LockHolder()
+    holder = LockHolder()
     checks: list[bool] = []
     threading.Timer(0.3, holder.done).start()
     captured = _run_deploy_once(
@@ -597,10 +597,10 @@ def test_deploy_waits_for_another_start_before_the_port_check(monkeypatch, tmp_p
 
 def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
     from EvoScientist.langgraph_dev import manager as lgm
-    from tests.test_cli_deploy_json import _LockHolder
+    from tests.langgraph_dev_fakes import LockHolder
 
     monkeypatch.setattr(lgm, "_FILE_LOCK_TIMEOUT", 0.2)
-    holder = _LockHolder()
+    holder = LockHolder()
     checks: list[bool] = []
     try:
         with pytest.raises(typer.Exit) as exc:
@@ -618,29 +618,29 @@ def test_deploy_gives_up_on_a_start_lock_held_too_long(monkeypatch, tmp_path):
 
 def test_deploy_starts_under_the_start_lock(monkeypatch, tmp_path):
     from EvoScientist.langgraph_dev import manager as lgm
-    from tests.test_launcher import _start_lock_is_held
+    from tests.langgraph_dev_fakes import start_lock_is_held
 
     held: list[bool] = []
     monkeypatch.setattr(
         lgm,
         "_server_config_fingerprint",
-        lambda _c: held.append(_start_lock_is_held()) or "fp",
+        lambda _c: held.append(start_lock_is_held()) or "fp",
     )
     captured = _run_deploy_once(
         monkeypatch, _make_config(default_workdir=str(tmp_path))
     )
     assert captured["langgraph_dev_started"] is True
     assert held == [True]
-    assert not _start_lock_is_held()
+    assert not start_lock_is_held()
 
 
 @pytest.mark.parametrize("step", ["mkdir", "acquire"])
 def test_deploy_start_lock_os_error_is_startup_failed(monkeypatch, tmp_path, step):
     """An OSError from the start lock ends in the startup failed message, as
     before the lock, not in a traceback."""
-    from tests.test_launcher import _break_start_lock
+    from tests.langgraph_dev_fakes import break_start_lock
 
-    _break_start_lock(monkeypatch, tmp_path, step)
+    break_start_lock(monkeypatch, tmp_path, step)
     checks: list[bool] = []
     with pytest.raises(typer.Exit) as exc:
         _run_deploy_once(
