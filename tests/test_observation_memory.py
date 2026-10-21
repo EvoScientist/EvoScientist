@@ -3724,100 +3724,67 @@ class TestObservationCache:
         )
         assert len(docs1) == len(docs2)
 
-    def test_concurrent_calls_survive_cache_eviction(self, tmp_path, monkeypatch):
-        """Concurrent callers must not race the eviction path.
+    @pytest.mark.parametrize("cached", [True, False], ids=["hit", "parse"])
+    def test_cache_trim_waits_for_in_flight_recency_update(
+        self, tmp_path, monkeypatch, cached
+    ):
+        """Another call's trim cannot evict an entry between its lookup or
+        insert and its recency update.
 
-        A tiny cap forces ``_trim_parse_cache`` to evict on every call while
-        several threads hit ``list_observation_documents`` at once. Without
-        serialized cache transactions, one thread can evict a key between
-        another thread's lookup and recency update (KeyError), or between its
-        insert and recency update. The switch interval is shrunk so the GIL
-        switches threads inside those windows often enough to make the race
-        reproducible; it is restored before the test exits.
-
-        The hammer is deadline-bounded rather than iteration-bounded: a fixed
-        iteration count overran the 30s CI per-test timeout on Windows runners
-        (context switches and file I/O are much slower there), while on fast
-        runners a fixed count needlessly capped race coverage. A deadline
-        finishes within budget on every platform and still maximizes race
-        opportunities where threads are cheap.
-
-        All workers park at a ``threading.Barrier`` and the deadline is armed
-        in the barrier's action, so the clock starts only when every worker is
-        ready and thread startup cannot consume the window. Each worker counts
-        its iterations and the test asserts all of them made progress, so it
-        cannot pass vacuously if a worker never ran.
+        One call is held inside that window (``move_to_end`` is the recency
+        update on both paths); a second call that would evict the entry runs
+        straight to trim, since its directory has no files and the cap is 0.
+        It must block until the first call is released. Unserialized, the
+        first raises KeyError.
         """
-        import sys
-        import threading
-        import time
+        from collections import OrderedDict
 
         from EvoScientist.memory.observations import store
 
-        memories_a = tmp_path / "memories-a"
-        memories_b = tmp_path / "memories-b"
-        for memories in (memories_a, memories_b):
-            for index in range(1, 9):
-                _write_observation(
-                    memories / "observations" / "global" / f"O-{index}.md",
-                    f"O-{index}",
-                )
+        held_dir = tmp_path / "held"
+        empty_dir = tmp_path / "empty"
+        _write_observation(held_dir / "observations" / "global" / "O-1.md", "O-1")
+        monkeypatch.setattr(store, "_max_cached_files", lambda: 0)
+        if cached:
+            list_observation_documents(memory_dir=held_dir, project_id="P-test")
+        held_key = str(held_dir / "observations" / "global" / "O-1.md")
+        in_window = threading.Event()
+        release = threading.Event()
 
-        monkeypatch.setattr(store, "_max_cached_files", lambda: 1)
+        class _HoldingCache(OrderedDict):
+            def move_to_end(self, key, last=True):
+                if key == held_key and not in_window.is_set():
+                    in_window.set()
+                    release.wait(10.0)
+                super().move_to_end(key, last)
 
+        monkeypatch.setattr(
+            store, "_file_parse_cache", _HoldingCache(store._file_parse_cache)
+        )
         errors: list[BaseException] = []
-        memory_dirs = [
-            memories_a,
-            memories_a,
-            memories_a,
-            memories_b,
-            memories_b,
-            memories_b,
-        ]
-        iterations = [0] * len(memory_dirs)
-        deadline = 0.0
 
-        def _start_clock():
-            # The barrier runs this once, immediately before releasing every
-            # party, so the deadline begins only when all six workers are ready
-            # to hammer - thread startup cannot eat any worker's window.
-            nonlocal deadline
-            deadline = time.monotonic() + 8.0
-
-        gate = threading.Barrier(len(memory_dirs) + 1, action=_start_clock)
-
-        def _hammer(memory_dir, index):
-            gate.wait()
+        def _list(memory_dir):
             try:
-                while time.monotonic() < deadline and not errors:
-                    docs = list_observation_documents(
-                        memory_dir=memory_dir, project_id="P-test"
-                    )
-                    assert len(docs) == 8
-                    iterations[index] += 1
+                list_observation_documents(memory_dir=memory_dir, project_id="P-test")
             except BaseException as exc:
                 errors.append(exc)
 
-        threads = [
-            threading.Thread(target=_hammer, args=(memory_dir, index))
-            for index, memory_dir in enumerate(memory_dirs)
-        ]
-        old_interval = sys.getswitchinterval()
-        sys.setswitchinterval(1e-6)
-        try:
-            for thread in threads:
-                thread.start()
-            # Wait for all workers to reach the gate, then release them together.
-            gate.wait()
-            for thread in threads:
-                thread.join()
-        finally:
-            sys.setswitchinterval(old_interval)
+        held = threading.Thread(target=_list, args=(held_dir,))
+        trimming = threading.Thread(target=_list, args=(empty_dir,))
+        held.start()
+        assert in_window.wait(10.0)
+        trimming.start()
+        trimming.join(0.5)
+        # Unserialized, the trimming call has finished and evicted by now.
+        still_waiting = trimming.is_alive()
+        release.set()
+        held.join(10.0)
+        trimming.join(10.0)
 
-        assert errors == [], f"racing cache transactions raised: {errors[:3]}"
-        assert all(count > 0 for count in iterations), (
-            f"every worker must make progress, got iterations={iterations}"
-        )
+        assert not held.is_alive()
+        assert not trimming.is_alive()
+        assert errors == [], f"racing cache transactions raised: {errors}"
+        assert still_waiting, "the trimming call did not wait for the held call"
 
 
 def test_turn_compaction_starts_at_the_user_message_not_a_pinned_skill():
