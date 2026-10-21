@@ -33,7 +33,7 @@ def is_under(path: Path, root: Path) -> bool:
     return True
 
 
-def _clean_entry(entry: str) -> str:
+def clean_path_entry(entry: str) -> str:
     """A ``PATH`` entry as the OS reads it. On Windows: without surrounding
     whitespace, one surrounding pair of quotes (Windows allows
     ``"C:\\Program Files\\Git\\cmd"`` in ``PATH``) or a trailing separator,
@@ -53,7 +53,7 @@ def same_path(a: str | Path, b: str | Path) -> bool:
     ``PATH`` entry, links resolved, case folded where the OS ignores it."""
 
     def key(p: str | Path) -> str:
-        return os.path.normcase(os.path.realpath(_clean_entry(str(p))))
+        return os.path.normcase(os.path.realpath(clean_path_entry(str(p))))
 
     return key(a) == key(b)
 
@@ -66,13 +66,13 @@ def prepend_to_path(directory: Path) -> None:
     resolved, since resolving each of them is slow for a network path.
     """
     keys = {
-        os.path.normcase(_clean_entry(str(directory))),
+        os.path.normcase(clean_path_entry(str(directory))),
         os.path.normcase(os.path.realpath(directory)),
     }
     parts = [
         p
         for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p.strip() and os.path.normcase(_clean_entry(p)) not in keys
+        if p.strip() and os.path.normcase(clean_path_entry(p)) not in keys
     ]
     os.environ["PATH"] = os.pathsep.join([str(directory), *parts])
 
@@ -124,7 +124,7 @@ def which_on_path(
     if path is None:
         path = os.environ.get("PATH", "")
     for entry in path.split(os.pathsep):
-        directory = _clean_entry(entry)
+        directory = clean_path_entry(entry)
         if not directory or not os.path.isabs(directory):
             continue
         if outside is not None and is_under(Path(directory), outside):

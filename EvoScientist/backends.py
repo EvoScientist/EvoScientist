@@ -1617,7 +1617,7 @@ def build_autoskill_agent_backend(
     """
     from deepagents.backends import CompositeBackend
 
-    from .setup.research_env import research_env_overrides
+    from .setup.agent_env import agent_shell_overrides
 
     return CompositeBackend(
         default=AutoskillProposalSandboxBackend(
@@ -1625,7 +1625,7 @@ def build_autoskill_agent_backend(
             timeout=sandbox_timeout,
             # Its prompt validates proposals with `execute`; same python as
             # the other agents.
-            env=research_env_overrides(),
+            env=agent_shell_overrides(),
             skills_dir=skills_dir,
         ),
         routes={

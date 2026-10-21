@@ -32,7 +32,7 @@ When it finishes, open a new terminal and run `EvoSci onboard`, then `EvoSci`
 
 | bash | PowerShell | What it does |
 |---|---|---|
-| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. Packages that `npx` fetches (MCP servers, the `find-skills` skill) still come from `registry.npmjs.org`; add `registry=https://registry.npmmirror.com/` to `~/.npmrc` to send them to the mirror, which the agent's shell and `npx` MCP servers both read. |
+| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. With `mirror: cn`, packages that `npx` fetches (MCP servers, the `find-skills` skill in the agent's shell) come from npmmirror too, unless you set a registry yourself (`npm_config_registry`, or `registry=` in `~/.npmrc`), which always wins. |
 | `--version <ver>` | `-Version <ver>` | Install this release instead of the newest one. 0.3.5 and older cannot be installed this way: they have no `constraints.txt`. |
 | `--no-modify-path` | `-NoModifyPath` | Do not put uv's tool bin directory on PATH. |
 | `--no-setup` | `-NoSetup` | Install the package and stop before `EvoSci setup`. |
@@ -93,10 +93,12 @@ finishes the other stages, and the script then ends with an error although
 EvoScientist itself is installed. Run `EvoSci setup` or the command again;
 that download starts from the beginning.
 
-When `EvoSci setup` installed its own Node.js because none was found, the
-agent's shell keeps finding that one first, also after you install a Node.js
-of your own later (for example with nvm). Run `EvoSci setup` again from a
-terminal where your Node.js 20.9 or newer is on PATH, and it switches to yours.
+When `EvoSci setup` installed its own Node.js because none was found, and you
+later install a Node.js 20.9 or newer of your own (for example with nvm), the
+agent's shell finds yours first when EvoScientist starts from a terminal where
+it is on PATH; EvoScientist's own programs (the WebUI, MCP servers) keep using
+its Node.js. Run `EvoSci setup` again from such a terminal to switch those to
+yours as well.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
 reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the

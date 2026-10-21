@@ -848,3 +848,14 @@ def test_install_waits_for_another_process_and_says_so(env, monkeypatch):
         == "Waiting for another EvoScientist process to finish installing the WebUI"
     )
     assert _record(env["data"]) is not None
+
+
+def test_probe_env_matches_the_launcher_env(monkeypatch, tmp_path):
+    from EvoScientist.setup import node as setup_node
+
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: True)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NODE_OPTIONS", "--x")
+    env = webui.server_env(tmp_path / "node", 4716)
+    assert env["NODE_USE_ENV_PROXY"] == "1"
+    assert "NODE_OPTIONS" not in env
