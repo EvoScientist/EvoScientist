@@ -327,7 +327,7 @@ def get_models_for_provider(
 
 
 def list_models() -> list[str]:
-    """List all available model short names.
+    """List current selectable model short names.
 
     Returns:
         List of unique model short names that can be passed to get_chat_model().

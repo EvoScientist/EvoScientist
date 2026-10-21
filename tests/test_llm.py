@@ -169,10 +169,17 @@ class TestListModels:
         result = list_models()
         assert isinstance(result, list)
 
-    def test_returns_all_model_names(self):
-        """Test that list_models returns all model names."""
-        result = list_models()
-        assert set(result) == set(MODELS.keys())
+    def test_returns_current_model_names(self):
+        """Selections omit legacy names that still resolve from saved configs."""
+        result = set(list_models())
+        assert result <= MODELS.keys()
+        assert MODELS.keys() - result == {
+            "minimax-m2.1",
+            "minimax-m2.5",
+            "minimax-m2.5-highspeed",
+            "minimax-m2.7",
+            "minimax-m2.7-highspeed",
+        }
 
     def test_list_is_not_empty(self):
         """Test that the list is not empty."""
