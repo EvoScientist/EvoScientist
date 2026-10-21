@@ -303,6 +303,9 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             maxsize=queue_maxsize
         )
         self._running = False
+        # True from the start of a stop() until it finishes: run()'s
+        # ``finally`` must not restart a stop that a forced shutdown cut short.
+        self._stop_unfinished = False
         self._startup_event = threading.Event()
         self._startup_error: str | None = None
 
@@ -449,6 +452,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
     async def stop(self) -> None:
         """Stop the channel and flush pending debounce buffers."""
         self._running = False
+        self._stop_unfinished = True
 
         # Cancel pending debounce timers, then flush buffered messages so they
         # are not lost when stopping within the debounce window.
@@ -474,6 +478,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
 
         await self._typing_manager.stop_all()
         await self._cleanup()
+        self._stop_unfinished = False
 
     async def _cleanup(self) -> None:
         """Channel-specific teardown. Override in subclasses."""
@@ -1299,6 +1304,7 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
         self._startup_error = None
         self._running = True
         while self._running:
+            self._stop_unfinished = False
             try:
                 await self.start()
                 self._startup_error = None
@@ -1330,10 +1336,11 @@ class Channel(TraceMixin, ChannelPlugin, ABC):
             finally:
                 # Preserve reconnect intent across stop()
                 should_reconnect = self._running
-                try:
-                    await self.stop()
-                except Exception:
-                    pass
+                if not self._stop_unfinished:
+                    try:
+                        await self.stop()
+                    except Exception:
+                        pass
                 self._running = should_reconnect
 
             if self._running:

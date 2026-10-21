@@ -57,6 +57,23 @@ _RUN_SUBSCRIBE_CHANNELS = [
     "input",
     "custom",
 ]
+_RUN_REQUEST_ID_METADATA_KEY = "_evoscientist_gateway_request_id"
+_RUN_LOOKUP_PAGE_SIZE = 100
+_ACTIVE_RUN_STATUSES = ("pending", "running")
+
+
+def _run_matches_resume(
+    run: Mapping[str, Any], interrupt_id: str, response: object
+) -> bool:
+    """Return whether *run* was created for this exact interrupt response."""
+    kwargs = run.get("kwargs")
+    command = kwargs.get("command") if isinstance(kwargs, Mapping) else None
+    resume = command.get("resume") if isinstance(command, Mapping) else None
+    return (
+        isinstance(resume, Mapping)
+        and interrupt_id in resume
+        and resume[interrupt_id] == response
+    )
 
 
 def _thread_metadata(thread: Thread) -> dict[str, Any]:
@@ -724,7 +741,9 @@ class LangGraphServerGateway:
         *,
         thread_ready: bool = False,
         on_run_attempt: Callable[[], None],
-    ) -> None:
+        on_resume_attempt: Callable[[str, object], None],
+        run_metadata: Mapping[str, object] | None = None,
+    ) -> str | None:
         config = self._resolve_run_config(
             request.thread_id,
             request.configurable_extra,
@@ -777,9 +796,9 @@ class LangGraphServerGateway:
                     stream,
                     request.thread_id,
                     request.message.resume,
-                    on_run_attempt=on_run_attempt,
+                    on_resume_attempt=on_resume_attempt,
                 )
-                return
+                return None
             raise RuntimeError(
                 "LangGraph server gateway only supports Command(resume=...) messages."
             )
@@ -791,11 +810,13 @@ class LangGraphServerGateway:
             goal_request=request.goal_request,
         )
         on_run_attempt()
-        await stream.run.start(
+        result = await stream.run.start(
             input=run_input,
             config=config,
-            metadata=request.metadata,
+            metadata=dict(run_metadata) if run_metadata is not None else None,
         )
+        run_id = result.get("run_id") if isinstance(result, Mapping) else None
+        return str(run_id) if run_id else None
 
     async def _respond_to_interrupt(
         self,
@@ -803,7 +824,7 @@ class LangGraphServerGateway:
         thread_id: str,
         response: object,
         *,
-        on_run_attempt: Callable[[], None],
+        on_resume_attempt: Callable[[str, object], None],
     ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.interrupt_wait_seconds
@@ -831,7 +852,7 @@ class LangGraphServerGateway:
                     str(i.get("interrupt_id") or i.get("id") or "") for i in interrupts
                 }
                 if str(key) in ids:
-                    on_run_attempt()
+                    on_resume_attempt(str(key), response[key])
                     await stream.run.respond(response[key], interrupt_id=str(key))
                     return
             raise RuntimeError(
@@ -878,8 +899,122 @@ class LangGraphServerGateway:
                 interrupt_id,
                 thread_id,
             )
-        on_run_attempt()
+        # Record the resume identity before respond: it may be accepted by the server
+        # even when this await raises or the consumer cancels the request.
+        on_resume_attempt(interrupt_id, resolved)
         await stream.run.respond(resolved, interrupt_id=interrupt_id or None)
+
+    async def _list_active_runs(self, thread_id: str) -> list[Mapping[str, Any]] | None:
+        """Return active runs on the thread, or ``None`` when listing fails."""
+        runs: list[Mapping[str, Any]] = []
+        try:
+            for status in _ACTIVE_RUN_STATUSES:
+                offset = 0
+                while True:
+                    page = await self.thread_store.client.runs.list(
+                        thread_id,
+                        limit=_RUN_LOOKUP_PAGE_SIZE,
+                        offset=offset,
+                        status=status,
+                    )
+                    runs.extend(page)
+                    if len(page) < _RUN_LOOKUP_PAGE_SIZE:
+                        break
+                    offset += _RUN_LOOKUP_PAGE_SIZE
+        except Exception:
+            logger.warning(
+                "Could not list active runs on thread %s",
+                thread_id,
+                exc_info=True,
+            )
+            return None
+        return runs
+
+    async def _find_active_run_for_request(
+        self,
+        thread_id: str,
+        request_id: str,
+    ) -> str | None:
+        """Recover a run accepted before ``run.start`` lost its response."""
+        for run in await self._list_active_runs(thread_id) or []:
+            metadata = run.get("metadata")
+            if (
+                isinstance(metadata, Mapping)
+                and metadata.get(_RUN_REQUEST_ID_METADATA_KEY) == request_id
+            ):
+                run_id = run.get("run_id")
+                return str(run_id) if run_id else None
+        return None
+
+    async def _cancel_incomplete_run(
+        self,
+        thread_id: str,
+        run_id: str | None,
+        request_id: str | None,
+        *,
+        resume_identity: tuple[str, object] | None = None,
+    ) -> str | None:
+        """Cancel an identified run, recovering a lost response conservatively."""
+        resolved_run_id = run_id
+        if resolved_run_id is None and request_id is not None:
+            resolved_run_id = await self._find_active_run_for_request(
+                thread_id, request_id
+            )
+        if resolved_run_id is None and resume_identity is not None:
+            resolved_run_id = await self._find_active_run_for_resume(
+                thread_id, *resume_identity
+            )
+        if resolved_run_id is None:
+            return None
+        try:
+            await self.thread_store.client.runs.cancel_many(
+                thread_id=thread_id,
+                run_ids=[resolved_run_id],
+            )
+        except Exception:
+            logger.warning(
+                "Failed to cancel incomplete run %s on thread %s",
+                resolved_run_id,
+                thread_id,
+                exc_info=True,
+            )
+            return None
+        return resolved_run_id
+
+    async def _find_active_run_for_resume(
+        self, thread_id: str, interrupt_id: str, response: object
+    ) -> str | None:
+        """Find a unique active run matching this interrupt response for cleanup.
+
+        Multiple matching IDs are ambiguous. Identical duplicate submissions
+        cannot be distinguished by this persisted resume identity alone.
+        """
+        runs = await self._list_active_runs(thread_id)
+        if runs is None:
+            return None
+        matching_ids = {
+            str(run_id)
+            for run in runs
+            if (run_id := run.get("run_id"))
+            and _run_matches_resume(run, interrupt_id, response)
+        }
+        if len(matching_ids) != 1:
+            logger.warning(
+                "Could not identify resumed run on thread %s: "
+                "expected one active run for interrupt %s, found %d",
+                thread_id,
+                interrupt_id,
+                len(matching_ids),
+            )
+            return None
+        return matching_ids.pop()
+
+    async def _has_other_active_runs(self, thread_id: str, run_id: str) -> bool:
+        """Conservatively protect another request before repairing thread state."""
+        runs = await self._list_active_runs(thread_id)
+        return runs is None or any(
+            str(run.get("run_id") or "") != run_id for run in runs
+        )
 
     async def _repair_stuck_thread_state(self, thread_id: str) -> None:
         """Clear a non-empty ``next`` left by a failed run, preserving HITL pauses.
@@ -1146,24 +1281,39 @@ class LangGraphServerGateway:
             assistant_id=self._target_graph_id(request.target),
         )
 
-        run_started = False
+        request_id = (
+            uuid.uuid4().hex if not isinstance(request.message, Command) else None
+        )
+        run_metadata: dict[str, object] | None = None
+        if request_id is not None:
+            run_metadata = dict(request.metadata or {})
+            run_metadata[_RUN_REQUEST_ID_METADATA_KEY] = request_id
         run_attempted = False
+        run_id: str | None = None
+        resume_identity: tuple[str, object] | None = None
         run_completed = False
         emitted_interrupt = False
+        run_cleaned_up = False
 
         def mark_run_attempted() -> None:
             nonlocal run_attempted
             run_attempted = True
 
+        def mark_resume_attempted(interrupt_id: str, response: object) -> None:
+            nonlocal resume_identity
+            resume_identity = interrupt_id, response
+            mark_run_attempted()
+
         try:
             async with stream:
-                await self._start_or_resume(
+                run_id = await self._start_or_resume(
                     stream,
                     request,
                     thread_ready=thread_ready,
                     on_run_attempt=mark_run_attempted,
+                    on_resume_attempt=mark_resume_attempted,
+                    run_metadata=run_metadata,
                 )
-                run_started = True
                 async for event in stream.subscribe(_RUN_SUBSCRIBE_CHANNELS):
                     raw_event = _as_raw_map(event)
                     if raw_event is None:
@@ -1191,28 +1341,46 @@ class LangGraphServerGateway:
             for event in tracker.finish():
                 yield event
         except Exception as exc:
-            # Repair before the first yield: a consumer that stops iterating
-            # after the error event (aclose / abandon) triggers GeneratorExit
-            # at the yield, so any repair after it never runs and the thread
-            # keeps its non-empty ``next`` — the failed step would replay on
-            # the next request.
-            #
-            # Only repair once this request reached run.start / run.respond,
-            # even if that call raised. Earlier failures (thread registration,
-            # input building, resume validation) have not touched the
-            # checkpoint, and a non-empty ``next`` there may belong to another
-            # in-flight request on the same thread.
-            if run_attempted:
+            # Cancel this request's run, then repair, both before the first yield:
+            # a consumer that stops iterating after the error event (aclose /
+            # abandon) triggers GeneratorExit at the yield, so nothing after it
+            # runs and the thread keeps its non-empty ``next`` — the failed step
+            # would replay on the next request.
+            cancelled_run_id = await self._cancel_incomplete_run(
+                request.thread_id,
+                run_id,
+                request_id if run_attempted else None,
+                resume_identity=resume_identity,
+            )
+            run_cleaned_up = True
+            can_repair = (
+                cancelled_run_id is not None
+                and not await self._has_other_active_runs(
+                    request.thread_id, cancelled_run_id
+                )
+            )
+            if cancelled_run_id is None and run_attempted:
+                # A synchronous start/respond rejection creates no run to
+                # cancel. Preserve the existing repair in that safe case, but
+                # never clear state while any unidentified active run remains.
+                can_repair = await self._list_active_runs(request.thread_id) == []
+            if can_repair:
                 await self._repair_stuck_thread_state(request.thread_id)
             yield emitter.error(str(exc)).data
             for event in tracker.finish():
                 yield event
             raise
         finally:
-            if run_started and not run_completed and not emitted_interrupt:
-                await _acancel_thread_runs(
-                    self.thread_store.client,
+            if (
+                run_attempted
+                and not run_completed
+                and not emitted_interrupt
+                and not run_cleaned_up
+            ):
+                await self._cancel_incomplete_run(
                     request.thread_id,
-                    name="incomplete run",
+                    run_id,
+                    request_id,
+                    resume_identity=resume_identity,
                 )
         yield emitter.done(processor.full_response).data

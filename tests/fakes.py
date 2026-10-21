@@ -595,7 +595,7 @@ class FakeLangGraphRunModule:
                 "interrupt_id": interrupt_id,
             }
         )
-        return {"run_id": "run-1"}
+        return {}
 
 
 class FakeLangGraphThreadStream:

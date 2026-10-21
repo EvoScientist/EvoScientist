@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import signal
+import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
 import EvoScientist.channels.standalone as standalone
+from EvoScientist.channels.base import Channel
+from EvoScientist.channels.bus.message_bus import MessageBus
 from EvoScientist.paths import Workspace
+from tests.fakes import QueueFakeChannel
 
 
 @pytest.fixture(autouse=True)
@@ -217,6 +225,422 @@ def test_run_standalone_does_not_look_at_the_sign_in_in_api_key_mode(
 
     assert len(ensure_calls) == 1
     assert status_calls == []
+
+
+@pytest.fixture(autouse=True)
+def _no_health_server(monkeypatch):
+    """Keep the runner off 0.0.0.0:8080; a forced exit never stops the server."""
+    from EvoScientist.channels.channel_manager import ChannelManager
+
+    async def _noop(self):
+        return None
+
+    monkeypatch.setattr(ChannelManager, "start_health", _noop)
+
+
+class _SigintChannel(QueueFakeChannel):
+    """Fake channel that schedules SIGINT once its worker is running."""
+
+    def __init__(
+        self, *, second_sigint_at: float | None = None, hang_stop: bool = False
+    ):
+        super().__init__()
+        self._second_sigint_at = second_sigint_at
+        self._hang_stop = hang_stop
+
+    async def run(self) -> None:
+        threading.Timer(0.1, signal.raise_signal, [signal.SIGINT]).start()
+        if self._second_sigint_at is not None:
+            threading.Timer(
+                self._second_sigint_at, signal.raise_signal, [signal.SIGINT]
+            ).start()
+        await asyncio.Future()
+
+    async def stop(self) -> None:
+        if self._hang_stop:
+            # Simulate a stop step that blocks (e.g. consumer drain wait).
+            self._stop_release = asyncio.Event()
+            await self._stop_release.wait()
+        await super().stop()
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_run_standalone_exits_on_sigint():
+    """Ctrl+C runs the graceful path and asyncio.run returns (issue #565)."""
+    channel = _SigintChannel()
+    bus = MessageBus()
+
+    started = time.monotonic()
+    standalone.run_standalone(channel, bus, use_agent=False)
+    assert time.monotonic() - started < 20
+    assert channel._stopped
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows loops always take this path"
+)
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_run_standalone_exits_on_sigint_without_loop_signal_handlers(monkeypatch):
+    """A loop without add_signal_handler (Windows) still stops on Ctrl+C."""
+    from asyncio import unix_events
+
+    def _unsupported(self, sig, callback, *args):
+        raise NotImplementedError
+
+    monkeypatch.setattr(
+        unix_events._UnixSelectorEventLoop, "add_signal_handler", _unsupported
+    )
+    handler_before = signal.getsignal(signal.SIGINT)
+    channel = _SigintChannel()
+
+    started = time.monotonic()
+    standalone.run_standalone(channel, MessageBus(), use_agent=False)
+
+    assert time.monotonic() - started < 20
+    assert channel._stopped
+    assert signal.getsignal(signal.SIGINT) is handler_before
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_second_sigint_forces_shutdown():
+    """A second signal cancels a blocked graceful path instead of no-op."""
+    channel = _SigintChannel(second_sigint_at=0.3, hang_stop=True)
+    bus = MessageBus()
+
+    started = time.monotonic()
+    standalone.run_standalone(channel, bus, use_agent=False)
+    # Forced exit: the hanging stop() never completed.
+    assert time.monotonic() - started < 20
+    assert not channel._stopped
+
+
+class _SameTickChannel(QueueFakeChannel):
+    """Both signals land while a sync step holds the loop."""
+
+    async def run(self) -> None:
+        def _fire() -> None:
+            signal.raise_signal(signal.SIGINT)
+            signal.raise_signal(signal.SIGINT)
+
+        threading.Timer(0.1, _fire).start()
+        time.sleep(0.3)
+        await asyncio.Future()
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_two_signals_in_one_loop_pass_still_exit():
+    """The second signal must not cancel the shutdown before it has started."""
+    started = time.monotonic()
+    standalone.run_standalone(_SameTickChannel(), MessageBus(), use_agent=False)
+
+    assert time.monotonic() - started < 20
+
+
+class _HangingCleanupChannel(QueueFakeChannel):
+    """Keeps Channel.run() and Channel.stop(); its cleanup never finishes."""
+
+    stop = Channel.stop
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanups = 0
+
+    async def receive(self):
+        threading.Timer(0.1, signal.raise_signal, [signal.SIGINT]).start()
+        threading.Timer(0.5, signal.raise_signal, [signal.SIGINT]).start()
+        await asyncio.Future()
+        yield  # pragma: no cover
+
+    async def _cleanup(self) -> None:
+        self.cleanups += 1
+        await asyncio.Event().wait()
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_second_sigint_exits_when_channel_cleanup_hangs():
+    """Cancelling the channel's worker must not start the hung cleanup again."""
+    channel = _HangingCleanupChannel()
+
+    started = time.monotonic()
+    standalone.run_standalone(channel, MessageBus(), use_agent=False)
+
+    assert time.monotonic() - started < 20
+    assert channel.cleanups == 1
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_sigint_closes_the_code_interpreter_of_an_unfinished_turn(
+    monkeypatch, tmp_path
+):
+    """A turn cut off by the signal never evicts its QuickJS slot."""
+    from EvoScientist.middleware.code_interpreter import (
+        create_code_interpreter_middleware,
+    )
+
+    interpreter = create_code_interpreter_middleware()
+    interpreter._registry.get("unfinished-turn")
+
+    async def _agent(workspace):
+        return object()
+
+    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
+    monkeypatch.setattr(
+        "EvoScientist.gateway.create_runtime_gateways_for_config",
+        lambda config, backend=None: SimpleNamespace(graph_gateway=None),
+    )
+    try:
+        asyncio.run(
+            standalone._async_main(
+                _SigintChannel(),
+                MessageBus(),
+                use_agent=True,
+                send_thinking=False,
+                workspace=Workspace(tmp_path),
+            )
+        )
+        assert interpreter._registry.get_if_exists("unfinished-turn") is None
+    finally:
+        interpreter._registry.close()
+
+
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_forced_exit_settles_turns_before_closing_code_interpreters(
+    monkeypatch, tmp_path
+):
+    """A turn still running after a forced exit must not reopen its QuickJS slot."""
+    from EvoScientist.middleware.code_interpreter import (
+        create_code_interpreter_middleware,
+    )
+
+    interpreter = create_code_interpreter_middleware()
+
+    class _TurnConsumer:
+        def __init__(self, **_kwargs) -> None:
+            self.metrics = {}
+
+        async def run(self) -> None:
+            self._turn = asyncio.create_task(self._reopening_turn())
+            threading.Timer(0.2, signal.raise_signal, [signal.SIGINT]).start()
+            threading.Timer(0.5, signal.raise_signal, [signal.SIGINT]).start()
+            await asyncio.Future()
+
+        async def _reopening_turn(self) -> None:
+            while True:
+                interpreter._registry.get("running-turn")
+                await asyncio.sleep(0.01)
+
+        async def stop(self) -> None:
+            await asyncio.Future()
+
+    async def _agent(_workspace):
+        return object()
+
+    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
+    monkeypatch.setattr(standalone, "InboundConsumer", _TurnConsumer)
+    monkeypatch.setattr(
+        "EvoScientist.gateway.create_runtime_gateways_for_config",
+        lambda *a, **k: SimpleNamespace(graph_gateway=None),
+    )
+    try:
+        asyncio.run(
+            standalone._async_main(
+                QueueFakeChannel(),
+                MessageBus(),
+                True,
+                False,
+                workspace=Workspace(tmp_path),
+            )
+        )
+        assert interpreter._registry.get_if_exists("running-turn") is None
+    finally:
+        interpreter._registry.close()
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows loops always take this path"
+)
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_ctrl_c_while_turns_settle_still_closes_code_interpreters(
+    monkeypatch, tmp_path
+):
+    """A third Ctrl+C during the final cleanup must not skip the interpreter close."""
+    from asyncio import unix_events
+
+    from EvoScientist.middleware.code_interpreter import (
+        create_code_interpreter_middleware,
+    )
+
+    def _unsupported(self, sig, callback, *args):
+        raise NotImplementedError
+
+    monkeypatch.setattr(
+        unix_events._UnixSelectorEventLoop, "add_signal_handler", _unsupported
+    )
+    interpreter = create_code_interpreter_middleware()
+    interpreter._registry.get("slow-turn")
+
+    class _TurnConsumer:
+        def __init__(self, **_kwargs) -> None:
+            self.metrics = {}
+
+        async def run(self) -> None:
+            self._turn = asyncio.create_task(self._slow_to_cancel_turn())
+            await asyncio.sleep(0.1)
+            signal.raise_signal(signal.SIGINT)
+            await asyncio.sleep(0.1)
+            signal.raise_signal(signal.SIGINT)
+            await asyncio.Future()
+
+        async def _slow_to_cancel_turn(self) -> None:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                signal.raise_signal(signal.SIGINT)
+                await asyncio.sleep(2)
+                raise
+
+        async def stop(self) -> None:
+            await asyncio.Future()
+
+    async def _agent(_workspace):
+        return object()
+
+    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
+    monkeypatch.setattr(standalone, "InboundConsumer", _TurnConsumer)
+    monkeypatch.setattr(
+        "EvoScientist.gateway.create_runtime_gateways_for_config",
+        lambda *a, **k: SimpleNamespace(graph_gateway=None),
+    )
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(
+                standalone._async_main(
+                    QueueFakeChannel(),
+                    MessageBus(),
+                    True,
+                    False,
+                    workspace=Workspace(tmp_path),
+                )
+            )
+        assert interpreter._registry.get_if_exists("slow-turn") is None
+    finally:
+        interpreter._registry.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sleep")
+@pytest.mark.skipif(
+    threading.current_thread() is not threading.main_thread(),
+    reason="process signal handlers require the main thread",
+)
+@pytest.mark.timeout(30)
+def test_sigint_stops_a_shell_command_the_turn_is_running(monkeypatch, tmp_path):
+    """Ctrl+C kills the shell command an in-process turn is running."""
+    from EvoScientist.backends import CustomSandboxBackend
+
+    backend = CustomSandboxBackend(root_dir=str(tmp_path / "ws"))
+    result = {}
+
+    def _tool() -> None:
+        result["resp"] = backend.execute("sleep 15")
+
+    class _ToolConsumer:
+        def __init__(self, **_kwargs) -> None:
+            self.metrics = {}
+
+        async def run(self) -> None:
+            threading.Timer(0.5, signal.raise_signal, [signal.SIGINT]).start()
+            await asyncio.create_task(asyncio.to_thread(_tool))
+
+        async def stop(self) -> None:
+            pass
+
+    async def _agent(_workspace):
+        return object()
+
+    monkeypatch.setattr(standalone, "_create_standalone_agent", _agent)
+    monkeypatch.setattr(standalone, "InboundConsumer", _ToolConsumer)
+    monkeypatch.setattr(
+        "EvoScientist.gateway.create_runtime_gateways_for_config",
+        lambda *a, **k: SimpleNamespace(graph_gateway=None),
+    )
+
+    started = time.monotonic()
+    asyncio.run(
+        standalone._async_main(
+            QueueFakeChannel(), MessageBus(), True, False, workspace=Workspace(tmp_path)
+        )
+    )
+
+    assert time.monotonic() - started < 10
+    assert result["resp"].exit_code == 130
+
+
+async def test_stop_during_start_still_cleans_what_start_opened():
+    """A stop() during start() still closes what start() opens afterwards."""
+    gate = asyncio.Event()
+
+    class _Channel(QueueFakeChannel):
+        stop = Channel.stop
+        receive = Channel.receive
+
+        def __init__(self):
+            super().__init__()
+            self.opened = self.closed = 0
+            self._resource = None
+
+        async def start(self):
+            await gate.wait()
+            self._resource = object()
+            self.opened += 1
+            self._running = True
+
+        async def _cleanup(self):
+            if self._resource is not None:
+                self._resource = None
+                self.closed += 1
+
+    channel = _Channel()
+    task = asyncio.create_task(channel.run())
+    await asyncio.sleep(0)
+    await channel.stop()
+    gate.set()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert (channel.opened, channel.closed) == (1, 1)
 
 
 def _oauth_config(**overrides):
