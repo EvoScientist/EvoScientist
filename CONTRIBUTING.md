@@ -29,13 +29,15 @@ If you want to add a niche or specialized workflow, consider contributing to the
 
 2. **Install dependencies** (requires [uv](https://docs.astral.sh/uv/)):
    ```bash
-   uv sync --dev
+   uv sync --dev --extra all-channels
    ```
+   The channel extras let the channel tests run; without them they are skipped.
 
-3. **Run the test suite** (no API keys needed):
+3. **Run the test suite** (no API keys or network needed):
    ```bash
-   uv run pytest
+   uv run pytest -n auto --dist worksteal
    ```
+   `-n auto` runs one worker per CPU; plain `uv run pytest` runs serially.
 
 4. **Run the linter:**
    ```bash
