@@ -496,6 +496,11 @@ def _pip_install(env: Path, mirror: str, packages: Sequence[str]) -> list[str]:
             cmd += ["--index-url", CN_INDEX_URL]
         try:
             result = _run(cmd, _PIP_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            message = f"pip install did not finish within {_PIP_TIMEOUT} s."
+            if mirror != "cn":
+                message += f" {CN_MIRROR_HINT}"
+            raise StageError("install_failed", message) from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise StageError("install_failed", f"pip install failed: {exc}") from exc
         if result.returncode == 0:
@@ -605,16 +610,22 @@ def _build(env: Path, mirror: str, report: ProgressFn) -> EnvResult:
             shutil.rmtree(env)
     except OSError as exc:
         raise StageError("install_failed", f"Could not remove {env}: {exc}") from exc
-    report(0.1, "Creating the virtual environment")
-    _create_venv(env)
-    _sync_pip_config(env, mirror)
-    report(0.2, f"Installing {', '.join(PACKAGES)}")
-    unpinned = _pip_install(env, mirror, PACKAGES)
-    report(0.9, "Checking the packages")
-    check = _import_check(env)
-    if not check.ok:
-        failed = ", ".join(check.failed) or ", ".join(PACKAGES)
-        raise StageError("probe_failed", f"{failed} do not import in {env}.")
+    try:
+        report(0.1, "Creating the virtual environment")
+        _create_venv(env)
+        _sync_pip_config(env, mirror)
+        report(0.2, f"Installing {', '.join(PACKAGES)}")
+        unpinned = _pip_install(env, mirror, PACKAGES)
+        report(0.9, "Checking the packages")
+        check = _import_check(env)
+        if not check.ok:
+            failed = ", ".join(check.failed) or ", ".join(PACKAGES)
+            raise StageError("probe_failed", f"{failed} do not import in {env}.")
+    except BaseException:
+        # Nothing uses an environment without its ready marker, and the next
+        # run would delete it anyway; free the space now.
+        shutil.rmtree(env, ignore_errors=True)
+        raise
     return EnvResult(check.version, unpinned)
 
 
