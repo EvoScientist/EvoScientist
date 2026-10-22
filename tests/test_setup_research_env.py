@@ -1237,6 +1237,11 @@ def _python(code: str) -> list[str]:
     return [sys.executable, "-c", code]
 
 
+# A silence limit longer than starting Python takes on a slow Windows CI
+# runner (the start itself is silent); the steps below stay active for longer.
+LIMIT = 2.0
+
+
 def test_watched_step_returns_its_output_and_exit_code(fast_beats):
     result = re_env._run(
         _python("print('hi'); raise SystemExit(3)"), 5, beat=lambda: None
@@ -1251,13 +1256,13 @@ def test_watched_step_that_only_writes_files_is_not_stopped(fast_beats, tmp_path
     code = (
         "import pathlib, sys, time\n"
         "p = pathlib.Path(sys.argv[1]) / 'wheel.part'\n"
-        "for _ in range(12):\n"
+        "for _ in range(30):\n"
         "    with p.open('ab') as f: f.write(b'x' * 100)\n"
-        "    time.sleep(0.05)\n"
+        "    time.sleep(0.1)\n"
     )
     result = re_env._run(
         [*_python(code), str(tmp_path)],
-        0.3,
+        LIMIT,
         beat=lambda: beats.append(1),
         watched=(tmp_path,),
     )
@@ -1266,8 +1271,8 @@ def test_watched_step_that_only_writes_files_is_not_stopped(fast_beats, tmp_path
 
 
 def test_watched_step_that_prints_is_not_stopped(fast_beats):
-    code = "import time\nfor _ in range(12):\n    print('.', flush=True); time.sleep(0.05)\n"
-    assert re_env._run(_python(code), 0.3, beat=lambda: None).returncode == 0
+    code = "import time\nfor _ in range(30):\n    print('.', flush=True); time.sleep(0.1)\n"
+    assert re_env._run(_python(code), LIMIT, beat=lambda: None).returncode == 0
 
 
 def test_silent_watched_step_is_stopped(fast_beats, tmp_path):
@@ -1280,7 +1285,7 @@ def test_silent_watched_step_is_stopped(fast_beats, tmp_path):
         "time.sleep(60)\n"
     )
     with pytest.raises(re_env._Stalled) as exc:
-        re_env._run([*_python(code), str(pid_file)], 0.5, beat=lambda: None)
+        re_env._run([*_python(code), str(pid_file)], LIMIT, beat=lambda: None)
     assert "was stopped" in str(exc.value)
     assert not psutil.pid_exists(int(pid_file.read_text()))
 
@@ -1307,7 +1312,7 @@ def test_a_stopped_step_leaves_no_grandchild(fast_beats, tmp_path):
         "time.sleep(60)\n"
     )
     with pytest.raises(re_env._Stalled):
-        re_env._run([*_python(code), str(pid_file)], 1.0, beat=lambda: None)
+        re_env._run([*_python(code), str(pid_file)], LIMIT, beat=lambda: None)
     assert not psutil.pid_exists(int(pid_file.read_text()))
 
 
