@@ -95,14 +95,17 @@ def test_the_users_node_gets_no_system_ca_switch(setup):
     assert "NODE_USE_SYSTEM_CA" not in agent_env.agent_shell_overrides()
 
 
-def test_research_environment_stays_first(setup, monkeypatch):
-    venv_bin = "/data/envs/default/bin"
+def test_research_environment_stays_first(setup, monkeypatch, tmp_path):
+    # Absolute on every OS: on Windows, Python 3.13 no longer counts a path
+    # without a drive as absolute.
+    venv = tmp_path / "envs" / "default"
+    venv_bin = str(venv / "bin")
     monkeypatch.setattr(
         research_env,
         "research_env_overrides",
         lambda: {
             "PATH": os.pathsep.join([venv_bin, os.environ["PATH"]]),
-            "VIRTUAL_ENV": "/data/envs/default",
+            "VIRTUAL_ENV": str(venv),
         },
     )
     overrides = agent_env.agent_shell_overrides()
@@ -111,7 +114,7 @@ def test_research_environment_stays_first(setup, monkeypatch):
         setup["user"],
         setup["private"],
     ]
-    assert overrides["VIRTUAL_ENV"] == "/data/envs/default"
+    assert overrides["VIRTUAL_ENV"] == str(venv)
 
 
 def test_mirror_cn_adds_npmmirror_for_npx(setup):
