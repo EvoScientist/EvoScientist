@@ -46,6 +46,7 @@ class FakeRunner:
         self.pip_ok = True
         self.env_starts = True
         self.imports_ok = True
+        self.imports_crash = False
         # Results for the next import checks, used before ``imports_ok``.
         self.imports_script: list[bool] = []
         # Packages a failing import check reports (all of them when empty).
@@ -109,6 +110,9 @@ class FakeRunner:
         if kind == "config":
             return self._pip_config(cmd)
         if kind == "imports":
+            if self.imports_crash:
+                # Python failed before the check could name a package.
+                return subprocess.CompletedProcess(cmd, 1, "")
             scripted = self.imports_script.pop(0) if self.imports_script else None
             ok = self.env_starts and (self.imports_ok if scripted is None else scripted)
             if not self.env_starts:
@@ -1018,6 +1022,34 @@ def test_repair_reinstalls_the_broken_files_then_what_is_missing(env):
     assert flags == [["--force-reinstall", "--no-deps"], []]
 
 
+def test_repair_after_a_crashed_check_does_not_force_a_reinstall(env):
+    """With no package named, a forced reinstall would download all four
+    again for nothing."""
+    re_env.ensure_research_env("default")
+    env["run"].calls.clear()
+    env["run"].imports_crash = True
+    with pytest.raises(StageError):
+        re_env.ensure_research_env("default")
+    assert any(FakeRunner._kind(cmd) == "pip" for cmd in env["run"].calls)
+    assert not any("--force-reinstall" in cmd for cmd in env["run"].calls)
+
+
+def test_check_of_a_ready_env_repeats_its_line(env, monkeypatch):
+    """The heartbeat needs a line to repeat while the import check runs."""
+    re_env.ensure_research_env("default")
+    runner = env["run"]
+
+    def beating(cmd, timeout, **kw):
+        if FakeRunner._kind([p for p in cmd if p != "-I"]) == "imports":
+            kw["beat"]()
+        return runner(cmd, timeout, **kw)
+
+    monkeypatch.setattr(re_env, "_run", beating)
+    lines: list[str] = []
+    re_env.ensure_research_env("default", lambda _f, m: lines.append(m))
+    assert lines.count("Checking the packages") == 2
+
+
 def test_build_installs_without_force_reinstall(env):
     re_env.ensure_research_env("default")
     assert not any("--force-reinstall" in cmd for cmd in env["run"].calls)
@@ -1250,6 +1282,28 @@ def test_silent_watched_step_is_stopped(fast_beats, tmp_path):
     with pytest.raises(re_env._Stalled) as exc:
         re_env._run([*_python(code), str(pid_file)], 0.5, beat=lambda: None)
     assert "was stopped" in str(exc.value)
+    assert not psutil.pid_exists(int(pid_file.read_text()))
+
+
+def test_a_stopped_step_leaves_no_grandchild(fast_beats, tmp_path):
+    """The kill waits for the whole tree: a grandchild still exiting would
+    keep files open in the folder the caller deletes next (on Windows a
+    venv's python.exe is a launcher whose child is the interpreter)."""
+    import psutil
+
+    pid_file = tmp_path / "pid"
+    grandchild = (
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    code = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}, sys.argv[1]])\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.raises(re_env._Stalled):
+        re_env._run([*_python(code), str(pid_file)], 1.0, beat=lambda: None)
     assert not psutil.pid_exists(int(pid_file.read_text()))
 
 
