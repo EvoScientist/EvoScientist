@@ -900,7 +900,14 @@ def _resolve_command(command: str) -> str:
     """
     if os.path.isabs(command):
         return command
-    found = shutil.which(command)
+    if not os.path.dirname(command) and Path(command).stem.lower() in _NODE_COMMANDS:
+        # Never the current directory, as in _ensure_node_for_stdio(): on
+        # Windows shutil.which() would return an npx.cmd found there.
+        from ..setup._install import which_on_path
+
+        found = which_on_path(command)
+    else:
+        found = shutil.which(command)
     if found:
         return found
     candidate = os.path.join(os.path.dirname(sys.executable), command)
@@ -932,6 +939,9 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
         if server.get("transport") == "stdio"
         and (command := str(server.get("command", "")))
         and not os.path.isabs(command)
+        # A path with a folder part (node_modules/.bin/npx) is not looked up
+        # on PATH.
+        and not os.path.dirname(command)
         and Path(command).stem.lower() in _NODE_COMMANDS
         and which_on_path(command) is None
     ]

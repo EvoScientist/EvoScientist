@@ -29,8 +29,10 @@ def is_under(path: Path, root: Path) -> bool:
 
 
 def _clean_entry(entry: str) -> str:
-    """A ``PATH`` entry without one surrounding pair of quotes or a trailing
-    separator; Windows allows ``"C:\\Program Files\\Git\\cmd"`` in ``PATH``."""
+    """A ``PATH`` entry without surrounding whitespace, one surrounding pair
+    of quotes (Windows allows ``"C:\\Program Files\\Git\\cmd"`` in ``PATH``)
+    or a trailing separator, normalised by ``os.path.normpath`` (``.`` and
+    ``..`` collapsed; on Windows, ``/`` turned into ``\\``)."""
     entry = entry.strip()
     if len(entry) >= 2 and entry[0] == entry[-1] == '"':
         entry = entry[1:-1]
@@ -51,8 +53,8 @@ def prepend_to_path(directory: Path) -> None:
     """Put ``directory`` first on this process's ``PATH``, dropping any other
     entry for it, so child processes inherit it.
 
-    Only ``directory`` is resolved; the other entries are compared as written,
-    since resolving each of them is slow for a network path.
+    Only ``directory`` is resolved; the other entries are cleaned but not
+    resolved, since resolving each of them is slow for a network path.
     """
     keys = {
         os.path.normcase(_clean_entry(str(directory))),
@@ -77,7 +79,8 @@ def _command_names(name: str) -> list[str]:
         return [name]
     exts = [
         e.lower()
-        for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
+        # An empty PATHEXT falls back too, as in shutil.which.
+        for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";")
         if e
     ]
     names = [name] if os.path.splitext(name)[1].lower() in exts else []
