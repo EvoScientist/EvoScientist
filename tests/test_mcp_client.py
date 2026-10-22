@@ -335,7 +335,8 @@ class TestBuildConnections:
             "EvoScientist.mcp.client._resolve_command", lambda command: command
         )
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
-        env = _lower_keys(_build_connections(config)["fs"]["env"])
+        # No env at all when nothing is forwarded (as on a bare Windows host).
+        env = _lower_keys(_build_connections(config)["fs"].get("env", {}))
         assert asked == []
         assert "npm_config_registry" not in env
 
