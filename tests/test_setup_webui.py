@@ -79,6 +79,7 @@ class FakeRegistry:
         return self.metadata
 
     def download(self, url: str, dest: Path, progress=None, *, cn_hint=False) -> str:
+        self.hints.append(cn_hint)
         self.urls.append(url)
         data = self.tarballs[url]
         dest.write_bytes(data)
@@ -171,6 +172,23 @@ def test_registry_priority(monkeypatch, tmp_path, user, mirror, expected):
 
     monkeypatch.setattr(node, "configured_npm_registry", lambda env, exe: user)
     assert webui.registry_url(mirror, tmp_path / "node") == expected
+
+
+@pytest.mark.parametrize(
+    ("mirror", "user", "hint"),
+    [
+        ("default", None, True),
+        ("cn", None, False),
+        ("default", "https://corp.example/npm/", False),
+    ],
+)
+def test_download_errors_name_cn_only_for_npmjs(env, monkeypatch, mirror, user, hint):
+    """No ``--cn`` hint under the mirror, or for a registry the user chose."""
+    from EvoScientist.setup import node
+
+    monkeypatch.setattr(node, "configured_npm_registry", lambda e, x: user)
+    webui.ensure_webui(env["node"], mirror)
+    assert env["reg"].hints == [hint, hint]
 
 
 class _Resp(io.BytesIO):

@@ -87,10 +87,11 @@ A download of Node.js, Git for Windows or the WebUI that breaks off (a reset, a
 server error, no data for two minutes) is retried up to three times; a retry
 asks only for the part still missing, when the server allows it. One that
 cannot connect at all (no route, a proxy that cannot reach the server, a
-certificate error) fails at once, within 15 seconds. When the retries run out
-too, the stage fails: `EvoSci setup` finishes the other stages, and the script
-then ends with an error although EvoScientist itself is installed. Run
-`EvoSci setup` or the command again; that download starts from the beginning.
+certificate error) fails at once, within 15 seconds after the server's name
+is looked up. When the retries run out too, the stage fails: `EvoSci setup`
+finishes the other stages, and the script then ends with an error although
+EvoScientist itself is installed. Run `EvoSci setup` or the command again;
+that download starts from the beginning.
 
 When `EvoSci setup` installed its own Node.js because none was found, the
 agent's shell keeps finding that one first, also after you install a Node.js

@@ -304,7 +304,7 @@ def test_download_errors_name_cn_only_when_the_mirror_is_off(env, mirror, hint):
     assert env["net"].hints == [hint]
 
 
-def test_pinned_hashes_cover_every_platform_platform_id_returns():
+def test_pinned_hashes_are_sha256_for_the_supported_platforms():
     assert set(node.NODE_SHA256) == {
         "darwin-arm64",
         "darwin-x64",

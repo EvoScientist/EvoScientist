@@ -378,6 +378,12 @@ def test_cn_mirror_downloads_from_npmmirror(env):
     ]
 
 
+@pytest.mark.parametrize(("mirror", "hint"), [("default", True), ("cn", False)])
+def test_download_errors_name_cn_only_when_the_mirror_is_off(env, mirror, hint):
+    git.ensure_git(mirror)
+    assert env["net"].hints == [hint]
+
+
 def test_sfx_process_is_always_closed(env):
     env["sfx"].exit_code = 1
     with pytest.raises(StageError):

@@ -189,7 +189,6 @@ def test_client_error_is_not_retried(serve, tmp_path, code):
         dl.download(server.url, tmp_path / "a")
     assert server.requests == 1
     assert ei.value.code == "download_failed"
-    assert CN_MIRROR_HINT not in ei.value.message
 
 
 def test_truncated_body_is_resumed_from_where_it_ended(serve, tmp_path):
@@ -208,6 +207,74 @@ def test_server_that_ignores_range_restarts_from_an_empty_file(serve, tmp_path):
     assert server.requests == 2
     assert (tmp_path / "a").read_bytes() == BODY
     assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def chunked_then_cut(handler) -> None:
+    """A chunked body (no Content-Length) that ends after its first chunk."""
+    handler.send_response(200)
+    handler.send_header("Transfer-Encoding", "chunked")
+    handler.send_header("ETag", '"v1"')
+    handler.end_headers()
+    handler.wfile.write(b"%x\r\n%s\r\n" % (100, BODY[:100]))
+    handler.close_connection = True
+
+
+def test_resume_without_a_content_length_accepts_the_size(serve, tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "_CHUNK", 100)
+    server = serve(chunked_then_cut, ranged)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert server.requests == 2
+    assert server.headers[1]["Range"] == "bytes=100-"
+    assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def test_a_resume_that_cannot_connect_is_retried(serve, tmp_path, monkeypatch):
+    """After a cut, a failed reconnect is likely the same blip (a VPN
+    reconnecting), not a blocked network."""
+    server = serve(truncated, ranged)
+    real = dl.open_url
+    calls: list[int] = []
+
+    def flaky(request, timeout):
+        calls.append(1)
+        if len(calls) == 2:
+            raise dl.NotConnected("127.0.0.1", ConnectionRefusedError("refused"))
+        return real(request, timeout)
+
+    monkeypatch.setattr(dl, "open_url", flaky)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert len(calls) == 3
+    assert server.headers[1]["Range"] == "bytes=100-"
+    assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def test_garbled_tunnel_reply_fails_at_once(tmp_path, monkeypatch):
+    """A proxy that answers CONNECT with garbage never connected."""
+    tunnels: list[bytes] = []
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+
+    def proxy() -> None:
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                tunnels.append(conn.recv(4096).split(b"\r\n")[0])
+                conn.sendall(b"garbage\r\n\r\n")
+
+    threading.Thread(target=proxy, daemon=True).start()
+    monkeypatch.delenv("no_proxy")
+    monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{listener.getsockname()[1]}")
+    try:
+        with pytest.raises(StageError) as ei:
+            dl.download("https://nodejs.example/node.tar.xz", tmp_path / "a")
+    finally:
+        listener.close()
+    assert len(tunnels) == 1
+    assert "Could not connect to nodejs.example" in ei.value.message
 
 
 def test_resume_at_the_wrong_offset_restarts_the_download(serve, tmp_path):
@@ -294,7 +361,7 @@ def test_proxy_that_cannot_reach_the_host_fails_at_once(tmp_path, monkeypatch):
 
 def test_connect_budget_is_shared_by_all_addresses(monkeypatch):
     """socket.create_connection gives each address the full timeout; the
-    budget here covers them all."""
+    budget here covers them all, in shares."""
     clock = {"now": 0.0}
     timeouts: list[float] = []
 
@@ -305,8 +372,10 @@ def test_connect_budget_is_shared_by_all_addresses(monkeypatch):
         def settimeout(self, value) -> None:
             self.timeout = value
 
-        def connect(self, _addr) -> None:
+        def connect(self, addr) -> None:
             timeouts.append(self.timeout)
+            if addr[0] in reachable:
+                return
             clock["now"] += self.timeout
             raise TimeoutError("timed out")
 
@@ -320,10 +389,20 @@ def test_connect_budget_is_shared_by_all_addresses(monkeypatch):
     monkeypatch.setattr(dl.socket, "getaddrinfo", lambda *_a: addresses)
     monkeypatch.setattr(dl.socket, "socket", DroppingSocket)
     monkeypatch.setattr(dl.time, "monotonic", lambda: clock["now"])
+    reachable: set[str] = set()
     with pytest.raises(TimeoutError):
         dl._connect_within(("registry.example", 443), None, deadline=15.0)
-    assert timeouts == [15.0]
+    # Each address gets an equal share, at least 3 s, until the budget is spent.
+    assert timeouts == [3.0] * 5
     assert clock["now"] == 15.0
+
+    # A first address that drops packets leaves time for the next one.
+    timeouts.clear()
+    clock["now"] = 0.0
+    reachable.add("192.0.2.1")
+    sock = dl._connect_within(("registry.example", 443), None, deadline=15.0)
+    assert isinstance(sock, DroppingSocket)
+    assert timeouts[:2] == [3.0, 3.0]
 
 
 def test_notconnected_names_the_budget_for_a_timeout():
