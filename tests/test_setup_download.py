@@ -353,7 +353,9 @@ def test_proxy_that_cannot_reach_the_host_fails_at_once(tmp_path, monkeypatch):
             dl.download("https://nodejs.example/node.tar.xz", tmp_path / "a")
     finally:
         listener.close()
-    assert tunnels == [b"CONNECT nodejs.example:443 HTTP/1.1"]
+    # Python 3.11 sends HTTP/1.0 here, 3.12 and later HTTP/1.1.
+    assert len(tunnels) == 1
+    assert tunnels[0].startswith(b"CONNECT nodejs.example:443 HTTP/1.")
     assert ei.value.code == "download_failed"
     assert "Could not connect to nodejs.example" in ei.value.message
     assert "502" in ei.value.message
