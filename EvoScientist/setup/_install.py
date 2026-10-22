@@ -1,4 +1,6 @@
-"""Install helpers shared by the stages that unpack a tool into ``<DATA_DIR>/tools``."""
+"""Helpers shared by the setup stages: the tools dir and moving an unpacked
+tool into ``<DATA_DIR>/tools``, PATH lookups, stage locks, watching and
+stopping a process tree, and Windows policy errors."""
 
 from __future__ import annotations
 

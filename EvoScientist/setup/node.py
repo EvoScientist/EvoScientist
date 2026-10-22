@@ -85,7 +85,7 @@ NODE_SHA256 = {
 # The official Linux builds need glibc 2.28 or newer (Node's BUILDING.md).
 MIN_GLIBC = (2, 28)
 _TRY_YOUR_OWN = "Install Node.js 20.9 or newer yourself and run `EvoSci setup` again."
-# Completes policy_error()'s "or ..., and run `EvoSci setup` again".
+# Completes policy_error()'s "or ... and run `EvoSci setup` again".
 _POLICY_ALTERNATIVE = "install Node.js 20.9 or newer yourself"
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
