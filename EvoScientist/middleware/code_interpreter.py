@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 import weakref
 
 from langchain.agents.middleware.types import ModelRequest
@@ -96,6 +97,16 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             with contextlib.suppress(Exception):
                 await registry.aevict(slot_id)
         self._ptc_tools_by_slot.clear()
+
+    # Upstream closes leftover slots here with a blocking ``run_sync`` on each
+    # slot's worker thread. Once the interpreter is finalizing, those daemon
+    # threads can no longer run, so the close would wait forever and the
+    # process would never exit. ``aclose_code_interpreters`` stays the normal
+    # cleanup; this only matters for slots still open at exit.
+    def __del__(self) -> None:
+        if sys.is_finalizing():
+            return
+        super().__del__()
 
 
 _live_interpreters = weakref.WeakSet()
