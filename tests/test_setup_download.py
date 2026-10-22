@@ -43,9 +43,33 @@ def status(code: int) -> Reply:
 def truncated(handler) -> None:
     handler.send_response(200)
     handler.send_header("Content-Length", str(len(BODY)))
+    handler.send_header("ETag", '"v1"')
     handler.end_headers()
     handler.wfile.write(BODY[:100])
     handler.close_connection = True
+
+
+def ranged(handler) -> None:
+    """Honour a ``Range: bytes=<start>-`` request, else send the whole body."""
+    asked = handler.headers.get("Range", "")
+    if not asked.startswith("bytes="):
+        ok(handler)
+        return
+    start = int(asked.removeprefix("bytes=").rstrip("-"))
+    handler.send_response(206)
+    handler.send_header("Content-Range", f"bytes {start}-{len(BODY) - 1}/{len(BODY)}")
+    handler.send_header("Content-Length", str(len(BODY) - start))
+    handler.end_headers()
+    handler.wfile.write(BODY[start:])
+
+
+def wrong_range(handler) -> None:
+    """A ``206`` that does not start where it was asked to."""
+    handler.send_response(206)
+    handler.send_header("Content-Range", f"bytes 0-{len(BODY) - 1}/{len(BODY)}")
+    handler.send_header("Content-Length", str(len(BODY)))
+    handler.end_headers()
+    handler.wfile.write(BODY)
 
 
 def stall(seconds: float) -> Reply:
@@ -83,12 +107,14 @@ class Server:
     def __init__(self, *replies: Reply) -> None:
         self.replies = list(replies)
         self.requests = 0
+        self.headers: list[dict[str, str]] = []
         server = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 index = min(server.requests, len(server.replies) - 1)
                 server.requests += 1
+                server.headers.append(dict(self.headers))
                 server.replies[index](self)
 
             def log_message(self, *_args) -> None:
@@ -166,18 +192,41 @@ def test_client_error_is_not_retried(serve, tmp_path, code):
     assert CN_MIRROR_HINT not in ei.value.message
 
 
-def test_truncated_body_is_retried_from_an_empty_file(serve, tmp_path):
+def test_truncated_body_is_resumed_from_where_it_ended(serve, tmp_path):
+    server = serve(truncated, ranged)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert server.requests == 2
+    assert server.headers[1]["Range"] == "bytes=100-"
+    assert server.headers[1]["If-Range"] == '"v1"'
+    assert (tmp_path / "a").read_bytes() == BODY
+    assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def test_server_that_ignores_range_restarts_from_an_empty_file(serve, tmp_path):
     server = serve(truncated, ok)
-    dl.download(server.url, tmp_path / "a")
+    digest = dl.download(server.url, tmp_path / "a")
     assert server.requests == 2
     assert (tmp_path / "a").read_bytes() == BODY
+    assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def test_resume_at_the_wrong_offset_restarts_the_download(serve, tmp_path):
+    server = serve(truncated, wrong_range, ranged)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert server.requests == 3
+    assert "Range" not in server.headers[2]
+    assert (tmp_path / "a").read_bytes() == BODY
+    assert digest == hashlib.sha256(BODY).hexdigest()
 
 
 def test_stall_past_the_no_data_timeout_is_retried(serve, tmp_path, monkeypatch):
     monkeypatch.setattr(dl, "_ARCHIVE_TIMEOUT", 0.3)
-    server = serve(stall(1.5), ok)
+    server = serve(stall(1.5), ranged)
     dl.download(server.url, tmp_path / "a")
     assert server.requests == 2
+    # The 100 bytes never completed a read, so nothing was kept to resume.
+    assert "Range" not in server.headers[1]
+    assert (tmp_path / "a").read_bytes() == BODY
 
 
 def test_slow_but_steady_body_outlasts_the_connect_budget(serve, tmp_path, monkeypatch):
