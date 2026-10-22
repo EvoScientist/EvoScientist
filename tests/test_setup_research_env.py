@@ -1297,9 +1297,13 @@ def test_a_stopped_step_leaves_no_grandchild(fast_beats, tmp_path):
         "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
         "time.sleep(60)\n"
     )
+    # The child prints until the grandchild is up (starting Python is slow on
+    # Windows), then goes silent.
     code = (
-        "import subprocess, sys, time\n"
+        "import pathlib, subprocess, sys, time\n"
         f"subprocess.Popen([sys.executable, '-c', {grandchild!r}, sys.argv[1]])\n"
+        "while not pathlib.Path(sys.argv[1]).exists():\n"
+        "    print('.', flush=True); time.sleep(0.1)\n"
         "time.sleep(60)\n"
     )
     with pytest.raises(re_env._Stalled):
