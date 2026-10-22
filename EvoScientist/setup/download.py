@@ -16,7 +16,11 @@ Two time limits apply to every request, and none to its total time:
 A failure before the connection is up (no route, refused, the budget spent, a
 proxy that cannot reach the host, a TLS error) is the same on every try, so it
 fails at once. One after it is up (an HTTP 5xx, a reset, a stall, a truncated
-body) is retried a few times.
+body) is retried a few times. A retry of a download that had received data
+asks only for the rest (an HTTP ``Range`` request): a slow proxy may cut a
+long download near its end, and each full restart would load the link for as
+long again. The callers check the whole file against a pinned or published
+hash afterwards.
 """
 
 from __future__ import annotations
@@ -31,8 +35,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from .protocol import CN_MIRROR_HINT, StageError
 
@@ -209,27 +214,84 @@ def _local_io(dest: Path) -> Iterator[None]:
         raise StageError("install_failed", f"Could not write {dest}: {exc}") from exc
 
 
-def _download_once(url: str, dest: Path, progress: ProgressFn | None) -> str:
-    digest = hashlib.sha256()
-    with open_url(url, _ARCHIVE_TIMEOUT) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        # "wb" also empties what an earlier attempt left.
+@dataclass
+class _Partial:
+    """What earlier attempts of one download left in the file."""
+
+    digest: Any = field(default_factory=hashlib.sha256)
+    done: int = 0
+    total: int = 0
+    # The ETag or Last-Modified of the first reply, sent back as If-Range so a
+    # file changed in between comes back whole instead of being spliced.
+    validator: str | None = None
+
+    def restart(self, resp) -> None:
+        """Forget earlier attempts; ``resp`` is a reply with the whole file."""
+        self.digest = hashlib.sha256()
+        self.done = 0
+        self.total = int(resp.headers.get("Content-Length") or 0)
+        etag = resp.headers.get("ETag")
+        # A weak ETag may not be sent in If-Range.
+        if etag and not etag.startswith("W/"):
+            self.validator = etag
+        else:
+            self.validator = resp.headers.get("Last-Modified")
+
+
+def _resume_offset(resp, partial: _Partial) -> int:
+    """Where ``resp``'s body starts: ``partial.done`` for a matching ``206``,
+    else 0 (the server sent the whole file)."""
+    if not partial.done or resp.status != 206:
+        return 0
+    unit, _, spec = resp.headers.get("Content-Range", "").partition(" ")
+    span, _, size = spec.partition("/")
+    start, _, _end = span.partition("-")
+    if (
+        unit != "bytes"
+        or start != str(partial.done)
+        or size not in (str(partial.total), "*")
+    ):
+        raise _Truncated(f"the server resumed with Content-Range {spec!r}")
+    return partial.done
+
+
+def _download_once(
+    url: str, dest: Path, progress: ProgressFn | None, partial: _Partial
+) -> str:
+    request = urllib.request.Request(url)
+    if partial.done:
+        request.add_header("Range", f"bytes={partial.done}-")
+        if partial.validator:
+            request.add_header("If-Range", partial.validator)
+    with open_url(request, _ARCHIVE_TIMEOUT) as resp:
+        try:
+            offset = _resume_offset(resp, partial)
+        except _Truncated:
+            # The next attempt asks for the whole file.
+            partial.done = 0
+            raise
+        if offset == 0:
+            partial.restart(resp)
         with _local_io(dest):
-            fh = open(dest, "wb")
+            fh = open(dest, "r+b" if offset else "wb")
+            # Drop whatever an earlier attempt wrote past what was hashed.
+            fh.seek(offset)
+            fh.truncate()
         with fh:
             while chunk := resp.read(_CHUNK):
                 with _local_io(dest):
                     fh.write(chunk)
-                digest.update(chunk)
-                done += len(chunk)
-                if progress is not None and total:
-                    progress(done / total)
+                partial.digest.update(chunk)
+                partial.done += len(chunk)
+                if progress is not None and partial.total:
+                    progress(partial.done / partial.total)
         # http.client's read(amt) returns b"" at an early end of stream
         # instead of raising IncompleteRead.
-        if total and done != total:
-            raise _Truncated(f"the body ended after {done} of {total} bytes")
-    return digest.hexdigest()
+        if partial.total and partial.done != partial.total:
+            raise _Truncated(
+                f"the body ended after {partial.done} of {partial.total} bytes"
+            )
+    return partial.digest.hexdigest()
 
 
 def download(
@@ -244,9 +306,11 @@ def download(
     ``StageError("install_failed")``.
     """
     host = urllib.parse.urlsplit(url).hostname or url
+    partial = _Partial()
     try:
         return with_retries(
-            lambda: _download_once(url, dest, progress), f"Download from {host}"
+            lambda: _download_once(url, dest, progress, partial),
+            f"Download from {host}",
         )
     except NotConnected as exc:
         raise StageError("download_failed", with_hint(f"{exc}.", cn_hint)) from exc
