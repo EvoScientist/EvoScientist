@@ -10,13 +10,12 @@ allowlist (``task()`` stays reachable as the REPL global, with responseSchema).
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from EvoScientist.middleware import code_interpreter
 from EvoScientist.middleware.code_interpreter import (
     _DEFAULT_PTC_ALLOWLIST,
     aclose_code_interpreters,
@@ -88,25 +87,18 @@ async def test_aclose_code_interpreters_bounds_stalled_cleanup(monkeypatch, capl
     assert "cleanup did not finish within 0.01 seconds" in caplog.text
 
 
-def test_process_exits_when_cleanup_leaves_a_slot():
-    """A slot left by a timed-out cleanup must not hang interpreter exit (#669)."""
-    code = (
-        "import asyncio, time\n"
-        "from EvoScientist.middleware.code_interpreter import (\n"
-        "    aclose_code_interpreters, create_code_interpreter_middleware)\n"
-        "interpreter = create_code_interpreter_middleware()\n"
-        "interpreter._registry.get('first')\n"
-        "interpreter._registry.get('second')\n"
-        "worker = interpreter._registry._slots['first'].worker\n"
-        "worker._loop.call_soon_threadsafe(time.sleep, 3)\n"
-        "asyncio.run(aclose_code_interpreters(timeout=0.5))\n"
-        "print(sorted(interpreter._registry._slots))\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=45
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == "['second']"
+def test_del_skips_slot_close_during_interpreter_shutdown(monkeypatch):
+    middleware = create_code_interpreter_middleware()
+    registry = middleware._registry
+    registry.get("slot")
+    monkeypatch.setattr(code_interpreter.sys, "is_finalizing", lambda: True)
+
+    middleware.__del__()
+
+    remaining = sorted(registry._slots)
+    monkeypatch.undo()
+    registry.close()
+    assert remaining == ["slot"]
 
 
 def test_del_still_closes_slots_before_shutdown():
