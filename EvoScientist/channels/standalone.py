@@ -213,6 +213,20 @@ async def _async_main(
         logger.warning("Second signal received, forcing shutdown")
         loop.call_soon(shutdown_task.cancel)
 
+    owner = asyncio.current_task()
+
+    def _channel_finished(worker: asyncio.Task[None]) -> None:
+        if not worker.cancelled():
+            error = worker.exception()
+            if error is not None:
+                logger.error("Channel %s worker failed", channel.name, exc_info=error)
+        # Worker completion is not a second signal, and outer cancellation
+        # must not start another shutdown task while the runner is exiting.
+        if shutdown_task is None and not (owner is not None and owner.cancelling()):
+            _request_shutdown()
+
+    workers[0].add_done_callback(_channel_finished)
+
     # Windows event loops have no add_signal_handler. A plain handler runs on
     # the main thread between bytecodes and hands the request to the loop; it
     # is removed on the way out so a later Ctrl+C never reaches a closed loop.
