@@ -260,9 +260,15 @@ class TestBuildConnections:
         assert conns["fs"]["env"]["https_proxy"] == "http://user-proxy:9000"
 
     @pytest.fixture
-    def node_rules(self, monkeypatch):
-        """The Node rules' inputs: mirror, configured registry, private Node."""
+    def node_rules(self, monkeypatch, tmp_path):
+        """The Node rules' inputs: mirror, configured registry, private Node;
+        ``npx`` resolves to an absolute path whether or not this host has one."""
         from EvoScientist.setup import node as setup_node
+
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client._resolve_command",
+            lambda command: str(tmp_path / "bin" / command),
+        )
 
         state = {"mirror": "default", "registry": None, "private": False}
         monkeypatch.setattr(setup_node, "configured_mirror", lambda: state["mirror"])
@@ -311,6 +317,26 @@ class TestBuildConnections:
         assert env["NODE_USE_ENV_PROXY"] == "1"
         assert env["NODE_USE_SYSTEM_CA"] == "1"
         assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+
+    def test_an_unresolved_npx_asks_no_npm_for_a_registry(
+        self, monkeypatch, node_rules, tmp_path
+    ):
+        """With no npx found there is no folder to read npm from; a bare name
+        would make the lookup try the current directory."""
+        from EvoScientist.setup import node as setup_node
+
+        node_rules["mirror"] = "cn"
+        asked: list = []
+        monkeypatch.setattr(
+            setup_node, "configured_npm_registry", lambda e, x: asked.append(x)
+        )
+        monkeypatch.setattr(
+            "EvoScientist.mcp.client._resolve_command", lambda command: command
+        )
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _lower_keys(_build_connections(config)["fs"]["env"])
+        assert asked == []
+        assert "npm_config_registry" not in env
 
     def test_server_env_wins_over_the_node_rules(self, monkeypatch, node_rules):
         node_rules.update(mirror="cn", private=True)

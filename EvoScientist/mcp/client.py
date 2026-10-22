@@ -1005,7 +1005,13 @@ def _node_server_env(command: str, env: dict[str, str]) -> dict[str, str]:
     )
 
     extra = npm_network_env(os.environ)
-    registry = npm_registry_override(os.environ, Path(command))
+    # An unresolved command (no npx found) has no folder to read npm from; a
+    # bare name would make the lookup try the current directory.
+    registry = (
+        npm_registry_override(os.environ, Path(command))
+        if os.path.isabs(command)
+        else None
+    )
     if registry is not None:
         extra["npm_config_registry"] = registry
     extra.update(node_network_env(env, private=is_private(command)))

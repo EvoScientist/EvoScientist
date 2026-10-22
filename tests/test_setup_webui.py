@@ -851,12 +851,34 @@ def test_install_waits_for_another_process_and_says_so(env, monkeypatch):
 
 
 def test_probe_env_matches_the_launcher_env(monkeypatch, tmp_path):
+    from EvoScientist.deploy import launcher as lm
     from EvoScientist.setup import node as setup_node
 
+    for name in ("http_proxy", "https_proxy", "no_proxy", "node_use_system_ca"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.upper(), raising=False)
     monkeypatch.setattr(setup_node, "is_private", lambda _exe: True)
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
     monkeypatch.setenv("NODE_OPTIONS", "--x")
-    env = webui.server_env(tmp_path / "node", 4716)
+    node = tmp_path / "node"
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "server.js").write_text("// server")
+    captured: dict = {}
+
+    class Done:
+        def poll(self):
+            return 0
+
+    def popen(_argv, env, **_kw):
+        captured.update(env)
+        return Done()
+
+    monkeypatch.setattr(lm.subprocess, "Popen", popen)
+    cfg = lm.LauncherConfig("", "127.0.0.1", 6174, "127.0.0.1", 4716)
+    launch_env = lm._scrubbed_env({"PORT": "4716", "HOSTNAME": "127.0.0.1"})
+    lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(cfg, launch_env)
+    env = webui.server_env(node, 4716)
+    assert env == captured
     assert env["NODE_USE_ENV_PROXY"] == "1"
     assert env["NODE_USE_SYSTEM_CA"] == "1"
     assert "NODE_OPTIONS" not in env
