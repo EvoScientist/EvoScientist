@@ -180,11 +180,15 @@ it pointed out to them:
 | `SSL_CERT_FILE` | Python, including EvoScientist's own downloads (`EvoSci setup` on macOS and Linux) |
 | `UV_SYSTEM_CERTS=1` | uv calls that EvoScientist makes later, such as the MCP installer's |
 | `PIP_CERT` | pip |
-| `NODE_EXTRA_CA_CERTS` | Node programs (the WebUI, MCP servers) |
-| `npm_config_cafile` | npm and `npx` in the agent's shell |
+| `NODE_EXTRA_CA_CERTS` | Node programs (the WebUI, MCP servers) on a Node.js of your own |
+| `npm_config_cafile` | npm and `npx`, in the agent's shell and for MCP servers |
 
 Point the file variables at a PEM file that contains your company's
-certificate. MCP servers started with `npx` do not see `npm_config_cafile`:
-put `cafile=` (and `registry`, `proxy` or `strict-ssl` if you need them) in
-`~/.npmrc` or in the server's `env` in `mcp.yaml`, or rely on
-`NODE_EXTRA_CA_CERTS`, which reaches them.
+certificate. The Node.js that `EvoSci setup` installs already trusts the
+operating system's certificates (it runs with `NODE_USE_SYSTEM_CA=1` unless you
+set that variable yourself), so it needs `NODE_EXTRA_CA_CERTS` only for a
+certificate that is not in the system store. MCP servers started with `npx` get
+your `npm_config_cafile`, `npm_config_ca`, `npm_config_strict_ssl`,
+`npm_config_registry`, `npm_config_proxy`, `npm_config_https_proxy` and
+`npm_config_noproxy`; put other npm settings in `~/.npmrc` or in the server's
+`env` in `mcp.yaml`.

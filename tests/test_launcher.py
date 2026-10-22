@@ -911,7 +911,11 @@ def test_bundled_runner_cleans_env_only_for_private_node(
     env = {"PATH": "p", "npm_config_prefix": "x", "NODE_OPTIONS": "--x"}
     lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
     if private:
-        assert captured["env"] == {"PATH": "p", "NODE_ENV": "production"}
+        assert captured["env"] == {
+            "PATH": "p",
+            "NODE_ENV": "production",
+            "NODE_USE_SYSTEM_CA": "1",
+        }
     else:
         assert captured["env"] == {**env, "NODE_ENV": "production"}
 
@@ -934,6 +938,7 @@ def test_bundled_runner_gives_the_private_node_the_proxy_switch(
     env = {"PATH": "p", "HTTPS_PROXY": "http://proxy.example:3128"}
     lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
     assert ("NODE_USE_ENV_PROXY" in captured["env"]) is private
+    assert ("NODE_USE_SYSTEM_CA" in captured["env"]) is private
     if private:
         assert captured["env"]["NO_PROXY"] == "localhost,127.0.0.1,::1"
 

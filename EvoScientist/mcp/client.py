@@ -1011,12 +1011,13 @@ def _node_server_env(command: str, env: dict[str, str]) -> dict[str, str]:
     """What a ``node`` / ``npx`` / ``npm`` server gets on top of the forwarded
     variables: the user's npm network settings, the npmmirror registry under
     ``mirror: cn`` (unless the user set a registry) and, for our private Node,
-    the proxy switch for Node's own requests. ``env`` is what the server gets
-    so far, its ``mcp.yaml`` env included, which still wins over all of it.
+    the system-certificate and proxy switches for Node's own requests. ``env``
+    is what the server gets so far, its ``mcp.yaml`` env included, which still
+    wins over all of it.
     """
     from ..setup.node import (
         is_private,
-        node_proxy_env,
+        node_network_env,
         npm_network_env,
         npm_registry_override,
     )
@@ -1025,7 +1026,7 @@ def _node_server_env(command: str, env: dict[str, str]) -> dict[str, str]:
     registry = npm_registry_override(os.environ, Path(command))
     if registry is not None:
         extra["npm_config_registry"] = registry
-    extra.update(node_proxy_env(env, private=is_private(command)))
+    extra.update(node_network_env(env, private=is_private(command)))
     return extra
 
 
