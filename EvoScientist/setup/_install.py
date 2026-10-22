@@ -243,19 +243,27 @@ def tree_signature(root: Path) -> tuple[int, int]:
 
 
 def kill_tree(pid: int) -> None:
-    """Kill process ``pid`` and all its descendants; gone ones are skipped."""
+    """Kill process ``pid`` and all its descendants; gone ones are skipped.
+
+    Waits up to 10 s for the descendants to exit (the caller reaps ``pid``
+    itself): a kill on Windows returns before the process is gone, and until
+    then it keeps its files open, so the caller could not delete them. A
+    Windows venv's ``python.exe`` is a launcher whose child is the real
+    interpreter.
+    """
     import psutil
 
     try:
         proc = psutil.Process(pid)
-        targets = [*proc.children(recursive=True), proc]
+        children = proc.children(recursive=True)
     except psutil.Error:
         return
-    for target in targets:
+    for target in [*children, proc]:
         try:
             target.kill()
         except psutil.Error:
             pass
+    psutil.wait_procs(children, timeout=10)
 
 
 # Windows errors for a program blocked by a code-integrity policy:
