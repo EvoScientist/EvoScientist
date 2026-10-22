@@ -23,6 +23,7 @@ from __future__ import annotations
 import configparser
 import functools
 import json
+import locale
 import logging
 import os
 import re
@@ -237,15 +238,21 @@ def _run(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
-        text=True,
-        errors="replace",
         env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    output: list[str] = []
+    output: list[bytes] = []
     assert proc.stdout is not None
+    fd = proc.stdout.fileno()
+
+    def read() -> None:
+        # Raw chunks, so output without a newline (a progress dot) counts as
+        # activity at once; reading by line would hide it until the line ends.
+        while chunk := os.read(fd, 65536):
+            output.append(chunk)
+
     # Only collects: every line to the caller comes from this thread.
-    reader = threading.Thread(target=lambda: output.extend(proc.stdout), daemon=True)
+    reader = threading.Thread(target=read, daemon=True)
     reader.start()
 
     def poll(seconds: float) -> int | None:
@@ -273,7 +280,13 @@ def _run(
     finally:
         # A grandchild that keeps the pipe open must not hold the stage.
         reader.join(30)
-    return subprocess.CompletedProcess(list(cmd), code, "".join(output))
+        if not reader.is_alive():
+            proc.stdout.close()
+    # As text=True would: the locale's encoding, bad bytes replaced, any line
+    # ending turned into "\n".
+    text = b"".join(output).decode(locale.getpreferredencoding(False), "replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return subprocess.CompletedProcess(list(cmd), code, text)
 
 
 def _runs(
