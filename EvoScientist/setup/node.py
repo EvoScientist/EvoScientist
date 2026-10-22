@@ -66,8 +66,8 @@ SOURCES = {
     "default": "https://nodejs.org/dist",
     "cn": "https://cdn.npmmirror.com/binaries/node",
 }
-# npm registry for packages fetched with our `npx` under a mirror; the default
-# mirror leaves npm's own setting alone.
+# npm registry for `npx` / `npm` children under a mirror, unless the user set
+# one; the default mirror leaves npm's own setting alone.
 NPM_REGISTRIES = {"cn": "https://registry.npmmirror.com"}
 
 _OS = {"darwin": "darwin", "linux": "linux", "win32": "win"}
@@ -492,7 +492,8 @@ def activate_runtime() -> Path | None:
 
     Reads ``tools/node.json`` only (no subprocess), so it is cheap enough for
     CLI start-up. Child processes - the WebUI launcher, ``npx`` MCP servers,
-    ``langgraph dev`` and the agent's shell - inherit the change. Returns the
+    ``langgraph dev`` - inherit the change; the agent's shell moves it last
+    when a usable Node of the user's is on PATH (``agent_env``). Returns the
     directory put on PATH, or None when no private Node is recorded.
     """
     record = _read_record()

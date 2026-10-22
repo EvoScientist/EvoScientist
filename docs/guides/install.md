@@ -94,11 +94,12 @@ EvoScientist itself is installed. Run `EvoSci setup` or the command again;
 that download starts from the beginning.
 
 When `EvoSci setup` installed its own Node.js because none was found, and you
-later install a Node.js 20.9 or newer of your own (for example with nvm), the
-agent's shell finds yours first when EvoScientist starts from a terminal where
-it is on PATH; EvoScientist's own programs (the WebUI, MCP servers) keep using
-its Node.js. Run `EvoSci setup` again from such a terminal to switch those to
-yours as well.
+later install a Node.js 20.9 or newer of your own (for example with nvm),
+EvoScientist moves to yours when it starts from a terminal where yours is on
+PATH: the agent's shell at once, the WebUI when it starts, and MCP servers from
+the start after that. `EvoSci setup` from such a terminal moves all of them.
+EvoScientist's own Node.js stays in `~/.evoscientist/tools` but is no longer
+used.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
 reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
