@@ -334,7 +334,8 @@ def test_checksum_mismatch_leaves_no_partial_files(env):
     assert ei.value.code == "checksum_mismatch"
     assert "pinned" in ei.value.message
     assert _record(env["data"]) is None
-    assert {p.name for p in (env["data"] / "tools").iterdir()} == {"node.lock"}
+    # filelock deletes its lock file on release on Windows only.
+    assert {p.name for p in (env["data"] / "tools").iterdir()} <= {"node.lock"}
 
 
 def test_probe_failure_records_nothing(env):
