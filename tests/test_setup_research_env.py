@@ -1275,6 +1275,22 @@ def test_watched_step_that_prints_is_not_stopped(fast_beats):
     assert re_env._run(_python(code), LIMIT, beat=lambda: None).returncode == 0
 
 
+def test_watched_step_that_prints_without_newlines_is_not_stopped(fast_beats):
+    """A progress dot with no line end is activity too."""
+    code = (
+        "import sys, time\n"
+        "for _ in range(30):\n"
+        "    sys.stdout.write('.'); sys.stdout.flush(); time.sleep(0.1)\n"
+    )
+    result = re_env._run(_python(code), LIMIT, beat=lambda: None)
+    assert (result.returncode, result.stdout) == (0, "." * 30)
+
+
+def test_watched_step_output_has_plain_line_ends(fast_beats):
+    code = "import sys\nsys.stdout.buffer.write(b'a\\r\\nb\\rc\\n')"
+    assert re_env._run(_python(code), LIMIT, beat=lambda: None).stdout == "a\nb\nc\n"
+
+
 def test_silent_watched_step_is_stopped(fast_beats, tmp_path):
     import psutil
 
