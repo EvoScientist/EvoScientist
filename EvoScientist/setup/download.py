@@ -8,19 +8,22 @@ probes elsewhere, which bypass proxies.
 
 Two time limits apply to every request, and none to its total time:
 
-- the connect budget covers connecting to the host's addresses in turn, the
+- the connect budget covers connecting to the host's addresses in turn (each
+  gets a share of it, so one that drops packets does not use it all up), the
   proxy's ``CONNECT`` tunnel and the TLS handshake, all together (name
   resolution is not bounded);
 - the no-data timeout covers each wait for the next bytes afterwards.
 
 A failure before the connection is up (no route, refused, the budget spent, a
-proxy that cannot reach the host, a TLS error) is the same on every try, so it
-fails at once. One after it is up (an HTTP 5xx, a reset, a stall, a truncated
-body) is retried a few times. A retry of a download that had received data
-asks only for the rest (an HTTP ``Range`` request): a slow proxy may cut a
-long download near its end, and each full restart would load the link for as
-long again. The callers check the whole file against a pinned or published
-hash afterwards.
+proxy that cannot reach the host or answers its tunnel request with garbage,
+a TLS error) is the same on every try, so it fails at once. One after it is up
+(an HTTP 5xx, a reset, a stall, a truncated body) is retried a few times. A
+retry of a download that had received data asks only for the rest (an HTTP
+``Range`` request): a slow proxy may cut a long download near its end, and
+each full restart would load the link for as long again. Such a retry is
+retried also when it cannot connect, since the cut that preceded it is the
+likely cause (a VPN or Wi-Fi reconnecting). The callers check the whole file
+against a pinned or published hash afterwards.
 """
 
 from __future__ import annotations
@@ -58,6 +61,9 @@ _NETWORK_ERRORS = (
 # Seconds for the whole connect phase: a working tunnel and TLS handshake take
 # well under a second, and a proxy's own error page arrives within about 10 s.
 CONNECT_BUDGET = 15.0
+# Seconds each resolved address gets at least, out of what is left of the
+# budget.
+_MIN_ADDRESS_SLICE = 3.0
 # Seconds an archive download may receive nothing (no limit on its total time).
 _ARCHIVE_TIMEOUT = 120
 # Pauses before the 2nd, 3rd and 4th attempt.
@@ -78,7 +84,13 @@ class NotConnected(Exception):
 
 
 class _Truncated(Exception):
-    """The body ended before its ``Content-Length``."""
+    """The body ended before its length, or a resume came back at another
+    offset."""
+
+
+class _ResumeNotConnected(Exception):
+    """A retry that would resume a download could not connect; retried, unlike
+    :class:`NotConnected` on the first attempt."""
 
 
 def _connect_within(
@@ -92,19 +104,22 @@ def _connect_within(
 
     The stdlib version gives every resolved address the full timeout, so a
     host with many addresses on a network that drops packets takes that many
-    timeouts. Name resolution itself is not bounded.
+    timeouts. Here each address gets an equal share of what is left, at least
+    :data:`_MIN_ADDRESS_SLICE`, so a first address that drops packets (a broken
+    IPv6 route) leaves time for the others. Name resolution itself is not
+    bounded. ``timeout`` is unused; it keeps ``create_connection``'s signature.
     """
     host, port = address
     error: OSError | None = None
-    for family, kind, proto, _name, sockaddr in socket.getaddrinfo(
-        host, port, 0, socket.SOCK_STREAM
-    ):
+    addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    for index, (family, kind, proto, _name, sockaddr) in enumerate(addresses):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
+        share = max(remaining / (len(addresses) - index), _MIN_ADDRESS_SLICE)
         sock = socket.socket(family, kind, proto)
         try:
-            sock.settimeout(remaining)
+            sock.settimeout(min(remaining, share))
             if source_address:
                 sock.bind(source_address)
             sock.connect(sockaddr)
@@ -137,9 +152,9 @@ class _BudgetedConnection:
         self._create_connection = create
         try:
             super().connect()  # type: ignore[misc]
-        except OSError as exc:
-            # Includes a refused proxy tunnel ("Tunnel connection failed: 502")
-            # and TLS errors.
+        except (OSError, http.client.HTTPException) as exc:
+            # Includes a refused proxy tunnel ("Tunnel connection failed: 502"),
+            # a garbled tunnel reply (BadStatusLine) and TLS errors.
             raise NotConnected(self._tunnel_host or self.host, exc) from exc
         assert self.sock is not None
         self.sock.settimeout(read_timeout)
@@ -179,7 +194,12 @@ def _retryable(exc: BaseException) -> bool:
     if isinstance(exc, NotConnected | ValueError):
         return False
     return isinstance(
-        exc, _Truncated | urllib.error.URLError | http.client.HTTPException | OSError
+        exc,
+        _Truncated
+        | _ResumeNotConnected
+        | urllib.error.URLError
+        | http.client.HTTPException
+        | OSError,
     )
 
 
@@ -195,7 +215,8 @@ def with_retries(attempt: Callable[[], T], what: str) -> T:
         except Exception as exc:
             if pause is None or not _retryable(exc):
                 raise
-            logger.warning(f"{what} failed ({exc}); retrying in {pause:g} s.")
+            reason = str(exc).strip() or type(exc).__name__
+            logger.warning(f"{what} failed ({reason}); retrying in {pause:g} s.")
             time.sleep(pause)
     raise AssertionError("unreachable")
 
@@ -249,7 +270,8 @@ def _resume_offset(resp, partial: _Partial) -> int:
     if (
         unit != "bytes"
         or start != str(partial.done)
-        or size not in (str(partial.total), "*")
+        # Without a Content-Length on the first reply, any size will do.
+        or (partial.total and size not in (str(partial.total), "*"))
     ):
         raise _Truncated(f"the server resumed with Content-Range {spec!r}")
     return partial.done
@@ -263,7 +285,13 @@ def _download_once(
         request.add_header("Range", f"bytes={partial.done}-")
         if partial.validator:
             request.add_header("If-Range", partial.validator)
-    with open_url(request, _ARCHIVE_TIMEOUT) as resp:
+    try:
+        opened = open_url(request, _ARCHIVE_TIMEOUT)
+    except NotConnected as exc:
+        if not partial.done:
+            raise
+        raise _ResumeNotConnected(str(exc)) from exc
+    with opened as resp:
         try:
             offset = _resume_offset(resp, partial)
         except _Truncated:
@@ -314,7 +342,7 @@ def download(
         )
     except NotConnected as exc:
         raise StageError("download_failed", with_hint(f"{exc}.", cn_hint)) from exc
-    except (_Truncated, *_NETWORK_ERRORS) as exc:
+    except (_Truncated, _ResumeNotConnected, *_NETWORK_ERRORS) as exc:
         raise StageError(
             "download_failed", with_hint(f"Download of {url} failed: {exc}.", cn_hint)
         ) from exc

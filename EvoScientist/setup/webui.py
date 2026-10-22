@@ -175,7 +175,7 @@ def registry_url(mirror: str, node_exe: Path) -> str:
     return chosen.rstrip("/")
 
 
-def cn_hint(mirror: str, node_exe: Path | None) -> bool:
+def wants_cn_hint(mirror: str, node_exe: Path | None) -> bool:
     """Whether a download error should name ``--cn``: the mirror is off and
     the registry is not one the user configured."""
     from .node import configured_npm_registry
@@ -652,7 +652,7 @@ def ensure_webui(
                 return recorded
             mirror = mirror or configured_mirror()
             registry = registry_url(mirror, node_exe)
-            hint = cn_hint(mirror, node_exe)
+            hint = wants_cn_hint(mirror, node_exe)
             report(0.02, f"Checking {registry} for WebUI releases in {compat}")
             try:
                 metadata = fetch_metadata(registry, cn_hint=hint)
