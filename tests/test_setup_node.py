@@ -560,7 +560,9 @@ def test_private_node_on_path_is_not_taken_for_system(env):
 def test_node_in_the_current_directory_is_not_taken_for_system(env, monkeypatch):
     exe = _system_node(env, monkeypatch, (22, 0, 0))
     monkeypatch.chdir(exe.parent)
-    monkeypatch.setenv("PATH", str(env["tmp"] / "empty-bin"))
+    # "." is how PATH reaches the current directory on POSIX; Windows
+    # searches it without one.
+    monkeypatch.setenv("PATH", os.pathsep.join([str(env["tmp"] / "empty-bin"), "."]))
     assert node.ensure_node("default").source == "private"
 
 
@@ -572,6 +574,7 @@ def test_npx_only_in_the_current_directory_does_not_count(env, monkeypatch):
     npx.write_text("")
     npx.chmod(0o755)
     monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", os.pathsep.join([os.environ["PATH"], "."]))
     assert node.ensure_node("default").source == "private"
 
 

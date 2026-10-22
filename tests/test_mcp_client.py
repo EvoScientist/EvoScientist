@@ -142,6 +142,17 @@ class TestResolveCommand:
 
         assert _resolve_command("my-mcp-tool") == str(fake_exe)
 
+    def test_node_command_is_never_taken_from_the_current_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """The launch agrees with the Node check: an ``npx`` in the current
+        directory is not the one on PATH."""
+        cwd = _fake_npx(tmp_path / "project")
+        on_path = _fake_npx(tmp_path / "bin")
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(on_path)]))
+        assert Path(_resolve_command("npx")).parent == on_path
+
     def test_not_found_returns_original(self, monkeypatch):
         """Returns the original command when not found anywhere (let OS report the error)."""
         monkeypatch.setattr("shutil.which", lambda _: None)
@@ -2719,11 +2730,27 @@ class TestEnsureNodeForStdio:
         from EvoScientist.mcp import client as mcp_client
 
         monkeypatch.chdir(_fake_npx(tmp_path / "project"))
-        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        # "." is how PATH reaches the current directory on POSIX.
+        monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path / "empty"), "."]))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}
         )
         assert calls == {"ensure": 1, "activate": 1}
+
+    def test_a_command_with_a_folder_part_is_not_looked_up(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """``node_modules/.bin/npx`` names a file, not a program on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.chdir(tmp_path)
+        _fake_npx(tmp_path / "node_modules" / ".bin")
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        name = "npx.cmd" if os.name == "nt" else "npx"
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": f"node_modules/.bin/{name}"}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
 
     @pytest.mark.parametrize(
         "server",

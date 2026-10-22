@@ -154,6 +154,14 @@ def test_which_in_tries_pathext_on_windows(tmp_path, windows_lookup):
     assert _install.which_in("npm", tmp_path) is None
 
 
+def test_which_in_treats_an_empty_pathext_as_unset(
+    tmp_path, monkeypatch, windows_lookup
+):
+    monkeypatch.setenv("PATHEXT", "")
+    (tmp_path / "npx.cmd").write_text("")
+    assert _install.which_in("npx", tmp_path) == str(tmp_path / "npx.cmd")
+
+
 def test_which_in_never_looks_in_the_current_directory(
     tmp_path, monkeypatch, windows_lookup
 ):
