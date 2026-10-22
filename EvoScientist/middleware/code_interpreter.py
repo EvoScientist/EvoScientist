@@ -98,11 +98,8 @@ class EvoCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 await registry.aevict(slot_id)
         self._ptc_tools_by_slot.clear()
 
-    # Upstream closes leftover slots here with a blocking ``run_sync`` on each
-    # slot's worker thread. Once the interpreter is finalizing, those daemon
-    # threads can no longer run, so the close would wait forever and the
-    # process would never exit. ``aclose_code_interpreters`` stays the normal
-    # cleanup; this only matters for slots still open at exit.
+    # Upstream's close blocks on each slot's worker thread, and those threads
+    # can no longer run once the interpreter is finalizing.
     def __del__(self) -> None:
         if sys.is_finalizing():
             return
