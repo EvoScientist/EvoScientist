@@ -55,6 +55,28 @@ def test_private_node_goes_last_when_the_user_has_a_usable_node(setup):
     assert os.environ["PATH"] == before
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "bin",  # relative: resolves against the working directory
+        pytest.param(
+            "",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="Windows ignores empty PATH entries"
+            ),
+        ),
+    ],
+)
+def test_private_node_stays_first_when_path_searches_the_workspace(
+    setup, monkeypatch, extra
+):
+    """Moved last, the private Node would come after the working directory,
+    where a ``node`` in the agent's workspace could win."""
+    path = os.pathsep.join([setup["private"], extra, setup["user"]])
+    monkeypatch.setenv("PATH", path)
+    assert "PATH" not in (agent_env.agent_shell_overrides() or {})
+
+
 def test_private_node_stays_first_when_the_users_node_was_rejected(setup):
     """A Node EvoScientist did not accept (too old, no npx) must not win. The
     private one then trusts the system's certificates, as its other
