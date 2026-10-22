@@ -436,6 +436,8 @@ _STDIO_FORWARDED_ENV_VARS = (
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
+    # Also read by node_network_env(): a user's 0 must not become our 1.
+    "NODE_USE_SYSTEM_CA",
 )
 
 

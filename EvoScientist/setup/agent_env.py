@@ -11,7 +11,9 @@ overrides (its ``python`` first, ``VIRTUAL_ENV``) and adds the Node rules:
   ``ensure_node()`` (the WebUI launcher's, ``EvoSci setup``) finds the user's
   Node and drops the private record. With no usable Node of the user's, the
   private one stays first: the one that was there is the reason EvoScientist
-  installed its own. It then also gets ``NODE_USE_SYSTEM_CA=1``, as the
+  installed its own. It also stays first when ``PATH`` searches the working
+  directory (an empty or relative entry), which would otherwise come before
+  it. It then also gets ``NODE_USE_SYSTEM_CA=1``, as the
   private Node's other children do, so ``npx`` trusts a certificate that only
   the system store holds;
 - under ``mirror: cn``, ``npx`` (``find-skills``) and ``npm`` use npmmirror
@@ -59,6 +61,20 @@ def _node_dirs_last(path: str, ours_dir: str) -> str:
     return os.pathsep.join(others + ours)
 
 
+def _searches_the_current_directory(path: str) -> bool:
+    """Whether ``path`` has an entry that resolves against the working
+    directory: a relative one, or on POSIX an empty one (``a::b``). Moving the
+    private Node behind it would let a ``node`` in the agent's workspace win.
+    Windows ignores empty entries, and its ``PATH`` often ends with one."""
+    for entry in path.split(os.pathsep):
+        directory = clean_path_entry(entry)
+        if directory and not os.path.isabs(directory):
+            return True
+        if not directory and os.name != "nt":
+            return True
+    return False
+
+
 def agent_shell_overrides() -> dict[str, str] | None:
     """Environment overrides for the agent's shell, or None when there are none.
 
@@ -72,7 +88,7 @@ def agent_shell_overrides() -> dict[str, str] | None:
     env = {**os.environ, **overrides}
     path = env.get("PATH", "")
     ours_dir = _private_node_dir()
-    if ours_dir is not None:
+    if ours_dir is not None and not _searches_the_current_directory(path):
         reordered = _node_dirs_last(path, ours_dir)
         if reordered != path and _user_node_usable():
             overrides["PATH"] = env["PATH"] = reordered

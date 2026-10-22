@@ -224,6 +224,7 @@ class TestBuildConnections:
             "REQUESTS_CA_BUNDLE",
             "CURL_CA_BUNDLE",
             "NODE_EXTRA_CA_CERTS",
+            "NODE_USE_SYSTEM_CA",
         ):
             monkeypatch.delenv(var, raising=False)
         config = {
@@ -277,7 +278,7 @@ class TestBuildConnections:
             setup_node, "configured_npm_registry", lambda _e, _x: state["registry"]
         )
         monkeypatch.setattr(setup_node, "is_private", lambda _c: state["private"])
-        for name in ("http_proxy", "https_proxy", "no_proxy"):
+        for name in ("http_proxy", "https_proxy", "no_proxy", "node_use_system_ca"):
             monkeypatch.delenv(name, raising=False)
             monkeypatch.delenv(name.upper(), raising=False)
         return state
@@ -339,6 +340,17 @@ class TestBuildConnections:
         env = _lower_keys(_build_connections(config)["fs"].get("env", {}))
         assert asked == []
         assert "npm_config_registry" not in env
+
+    def test_private_npx_server_keeps_the_users_system_ca_choice(
+        self, monkeypatch, node_rules
+    ):
+        """The MCP SDK passes a fixed set of variables, so the user's opt-out
+        has to be forwarded for the rule to see it."""
+        node_rules["private"] = True
+        monkeypatch.setenv("NODE_USE_SYSTEM_CA", "0")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["NODE_USE_SYSTEM_CA"] == "0"
 
     def test_server_env_wins_over_the_node_rules(self, monkeypatch, node_rules):
         node_rules.update(mirror="cn", private=True)
