@@ -28,6 +28,11 @@ from EvoScientist.mcp.client import (
 )
 from EvoScientist.runtime import AsyncRuntime, AsyncRuntimeError
 
+
+def _lower_keys(env: dict[str, str]) -> dict[str, str]:
+    return {k.lower(): v for k, v in env.items()}
+
+
 # ---- _interpolate_env ----
 
 
@@ -276,10 +281,12 @@ class TestBuildConnections:
         monkeypatch.setenv("npm_config_prefix", "/somewhere")
         monkeypatch.setenv("NODE_OPTIONS", "--x")
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
-        env = _build_connections(config)["fs"]["env"]
+        # Windows stores environment names in upper case; npm reads them
+        # without case, so compare names that way.
+        env = _lower_keys(_build_connections(config)["fs"]["env"])
         assert env["npm_config_cafile"] == "/ca.pem"
         assert "npm_config_prefix" not in env
-        assert "NODE_OPTIONS" not in env
+        assert "node_options" not in env
 
     def test_npx_server_gets_npmmirror_under_cn(self, node_rules):
         node_rules["mirror"] = "cn"
@@ -294,7 +301,7 @@ class TestBuildConnections:
         node_rules["registry"] = "https://registry.yarnpkg.com/"
         monkeypatch.setenv("npm_config_registry", "https://registry.yarnpkg.com/")
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
-        env = _build_connections(config)["fs"]["env"]
+        env = _lower_keys(_build_connections(config)["fs"]["env"])
         assert env["npm_config_registry"] == "https://registry.yarnpkg.com/"
 
     def test_private_npx_server_gets_the_proxy_switch(self, monkeypatch, node_rules):
