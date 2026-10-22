@@ -858,4 +858,5 @@ def test_probe_env_matches_the_launcher_env(monkeypatch, tmp_path):
     monkeypatch.setenv("NODE_OPTIONS", "--x")
     env = webui.server_env(tmp_path / "node", 4716)
     assert env["NODE_USE_ENV_PROXY"] == "1"
+    assert env["NODE_USE_SYSTEM_CA"] == "1"
     assert "NODE_OPTIONS" not in env

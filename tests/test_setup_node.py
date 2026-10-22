@@ -667,17 +667,28 @@ HTTP = "http://proxy.example:3128"
         ({"HTTPS_PROXY": HTTP, "http_proxy": "socks4://127.0.0.1:1080"}, False),
     ],
 )
-def test_node_proxy_env_sets_the_flag_only_for_http_proxies(env, flag):
-    extra = node.node_proxy_env(env, private=True)
+def test_node_network_env_sets_the_flag_only_for_http_proxies(env, flag):
+    extra = node.node_network_env(env, private=True)
     assert (extra.get("NODE_USE_ENV_PROXY") == "1") is flag
 
 
-def test_node_proxy_env_is_empty_for_a_system_node():
-    assert node.node_proxy_env({"HTTPS_PROXY": HTTP}, private=False) == {}
+def test_node_network_env_is_empty_for_a_system_node():
+    assert node.node_network_env({"HTTPS_PROXY": HTTP}, private=False) == {}
 
 
-def test_node_proxy_env_adds_loopback_to_each_no_proxy_it_finds():
-    extra = node.node_proxy_env(
+def test_node_network_env_trusts_the_system_certificates_without_a_proxy():
+    """A TLS-inspecting network re-signs sites with a company certificate
+    that only the system store holds, with or without a proxy variable."""
+    assert node.node_network_env({}, private=True) == {"NODE_USE_SYSTEM_CA": "1"}
+
+
+@pytest.mark.parametrize("name", ["NODE_USE_SYSTEM_CA", "node_use_system_ca"])
+def test_node_network_env_keeps_the_users_system_ca_choice(name):
+    assert "NODE_USE_SYSTEM_CA" not in node.node_network_env({name: "0"}, private=True)
+
+
+def test_node_network_env_adds_loopback_to_each_no_proxy_it_finds():
+    extra = node.node_network_env(
         {"HTTPS_PROXY": HTTP, "no_proxy": "corp.example, localhost", "NO_PROXY": "a"},
         private=True,
     )
@@ -685,10 +696,14 @@ def test_node_proxy_env_adds_loopback_to_each_no_proxy_it_finds():
     assert extra["NO_PROXY"] == "a,localhost,127.0.0.1,::1"
 
 
-def test_node_proxy_env_sets_only_no_proxy_when_none_is_set():
+def test_node_network_env_sets_only_no_proxy_when_none_is_set():
     """Two names that differ only in case would share one Windows env block."""
-    extra = node.node_proxy_env({"HTTPS_PROXY": HTTP}, private=True)
-    assert extra == {"NODE_USE_ENV_PROXY": "1", "NO_PROXY": "localhost,127.0.0.1,::1"}
+    extra = node.node_network_env({"HTTPS_PROXY": HTTP}, private=True)
+    assert extra == {
+        "NODE_USE_SYSTEM_CA": "1",
+        "NODE_USE_ENV_PROXY": "1",
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+    }
 
 
 @pytest.mark.parametrize(

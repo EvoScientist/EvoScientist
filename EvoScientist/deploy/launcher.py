@@ -180,15 +180,16 @@ class BundledWebUIRunner:
             )
 
     def start(self, cfg: LauncherConfig, env: dict[str, str]) -> subprocess.Popen:
-        from ..setup.node import is_private, node_child_env, node_proxy_env
+        from ..setup.node import is_private, node_child_env, node_network_env
 
         # The standalone server reads PORT / HOSTNAME / NODE_ENV; the base env
         # already carries PORT + HOSTNAME, we add production mode here. Our
         # private Node runs without the user's npm / Node options, and its own
-        # requests (the skills catalog on GitHub) follow the proxy variables.
+        # requests (the skills catalog on GitHub) follow the proxy variables
+        # and trust the system's certificates.
         private = is_private(self.node_exe)
         run_env = node_child_env({**env, "NODE_ENV": "production"}, private=private)
-        run_env.update(node_proxy_env(run_env, private=private))
+        run_env.update(node_network_env(run_env, private=private))
         kwargs = _popen_group_kwargs()
         if os.name == "nt":
             # Keep the node process off any console so no window flashes. OR it

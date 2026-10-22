@@ -553,28 +553,39 @@ _PROXY_VARS = ("http_proxy", "https_proxy")
 _LOOPBACK = ("localhost", "127.0.0.1", "::1")
 
 
-def node_proxy_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
-    """Variables to add for a Node child so its own requests use the proxy.
+def node_network_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
+    """Variables to add for a private Node child so its own requests get
+    through a company network. Empty for a system Node, which keeps the
+    user's setup as it is (and may be too old to know these variables).
+
+    ``NODE_USE_SYSTEM_CA=1`` (unless the user set it either way) makes Node
+    trust the operating system's certificates on top of its bundled ones, as
+    EvoScientist's Python downloads do: a proxy or firewall that inspects TLS
+    re-signs every site with a company certificate that only the system store
+    holds. :func:`node_child_env` removes ``NODE_OPTIONS``, so a
+    ``--use-system-ca`` set there would not reach the child.
 
     Node's built-in ``fetch`` (and ``http``) ignore ``HTTPS_PROXY`` unless
-    ``NODE_USE_ENV_PROXY=1`` is set (Node 24). Set only for the private Node
-    (a system Node may be too old to know it) and only when every proxy
-    variable that is set is an ``http://`` or ``https://`` URL: Node exits at
-    start for a value it refuses (``socks4://``, a malformed URL), and
-    ``http`` ignores ``socks5://`` silently. Loopback goes into each
+    ``NODE_USE_ENV_PROXY=1`` is set (Node 24). It is set only when every
+    proxy variable that is set is an ``http://`` or ``https://`` URL: Node
+    exits at start for a value it refuses (``socks4://``, a malformed URL),
+    and ``http`` ignores ``socks5://`` silently. Loopback then goes into each
     ``NO_PROXY`` / ``no_proxy`` already set, or ``NO_PROXY`` alone when none
     is (two names differing only in case would both land in one Windows
     environment block), so requests to this machine (Next.js calls its own
-    ``localhost`` port) never go to the proxy. Empty when nothing applies.
+    ``localhost`` port) never go to the proxy.
     """
     if not private:
         return {}
+    extra: dict[str, str] = {}
+    if not any(k.upper() == "NODE_USE_SYSTEM_CA" for k in env):
+        extra["NODE_USE_SYSTEM_CA"] = "1"
     proxies = [
         v.strip() for k, v in env.items() if k.lower() in _PROXY_VARS and v.strip()
     ]
     if not proxies or not all(_is_http_url(v) for v in proxies):
-        return {}
-    extra = {"NODE_USE_ENV_PROXY": "1"}
+        return extra
+    extra["NODE_USE_ENV_PROXY"] = "1"
     no_proxy_keys = [k for k in env if k.lower() == "no_proxy"] or ["NO_PROXY"]
     for key in no_proxy_keys:
         entries = [e.strip() for e in env.get(key, "").split(",") if e.strip()]

@@ -309,6 +309,7 @@ class TestBuildConnections:
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
         env = _build_connections(config)["fs"]["env"]
         assert env["NODE_USE_ENV_PROXY"] == "1"
+        assert env["NODE_USE_SYSTEM_CA"] == "1"
         assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
 
     def test_server_env_wins_over_the_node_rules(self, monkeypatch, node_rules):
