@@ -45,14 +45,19 @@ class ObservationRelation(StrEnum):
 
 
 class ObservationRecordResult(TypedDict):
-    """Result returned by `record_observation`."""
+    """Result returned by `record_observation`.
 
-    observation_id: str
-    path: str
+    `observation_id` and `path` name the written or matching file; a refused
+    placeholder has neither.
+    """
+
+    observation_id: NotRequired[str]
+    path: NotRequired[str]
     created: bool
     memory_type: MemoryType
     scope: MemoryScope
     project_id: NotRequired[str]
+    note: NotRequired[str]
 
 
 class RelatedObservationResult(TypedDict):
@@ -80,6 +85,7 @@ class ObservationSearchDocument:
     text: str
     related_observations: tuple[RelatedObservationResult, ...] = ()
     created_at: str | None = None
+    source_session_id: str | None = None
 
 
 class ObservationSearchHit(TypedDict):

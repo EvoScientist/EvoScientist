@@ -31,6 +31,7 @@ from langchain_core.messages import HumanMessage
 
 from .. import paths as _paths
 from ..memory import (
+    DEFAULT_INLINE_ROWS_PER_SESSION,
     MemorySourceType,
     ObservationRecordResult,
     build_observation_index_context,
@@ -554,6 +555,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         enable_observation_tool: bool = True,
         memory_scheduler: MemoryScheduler | None = None,
         enable_profile_bootstrap: bool = False,
+        inline_rows_per_session: int | None = DEFAULT_INLINE_ROWS_PER_SESSION,
     ) -> None:
         self._memory_dir = Path(memory_dir).expanduser()
         workspace = Path(workspace_dir).expanduser()
@@ -562,6 +564,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
         self._enable_profile_memory = enable_profile_memory
         self._enable_profile_bootstrap = enable_profile_bootstrap
         self._enable_observation_memory = enable_observation_memory
+        self._inline_rows_per_session = inline_rows_per_session
         self._memory_scheduler = memory_scheduler
         self._profile_specs = _profile_specs(self._project_id)
         pointer_lines = ["Profile files are available at:"]
@@ -870,6 +873,7 @@ class EvoMemoryMiddleware(AgentMiddleware):
                 memory_dir=self._memory_dir,
                 project_id=self._project_id,
                 include_search_hints=include_search_hints,
+                rows_per_session=self._inline_rows_per_session,
             )
         except OSError as e:
             logger.warning("Failed to refresh observation memory index: %s", e)
@@ -1062,6 +1066,7 @@ def create_memory_middleware(
     enable_observation_tool: bool = True,
     memory_scheduler: MemoryScheduler | None = None,
     enable_profile_bootstrap: bool = False,
+    inline_rows_per_session: int | None = DEFAULT_INLINE_ROWS_PER_SESSION,
 ) -> EvoMemoryMiddleware:
     """Build profile-memory middleware, defaulting to the shared memories directory."""
 
@@ -1079,4 +1084,5 @@ def create_memory_middleware(
         enable_observation_tool=enable_observation_tool,
         memory_scheduler=memory_scheduler,
         enable_profile_bootstrap=enable_profile_bootstrap,
+        inline_rows_per_session=inline_rows_per_session,
     )

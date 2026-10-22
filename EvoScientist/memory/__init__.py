@@ -1,6 +1,7 @@
 """File-backed memory helpers used by EvoScientist middleware."""
 
 from .observations import (
+    DEFAULT_INLINE_ROWS_PER_SESSION,
     DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS,
     OBSERVATION_DIR,
     LinkObservationsArgs,
@@ -32,6 +33,7 @@ from .types import (
 )
 
 __all__ = [
+    "DEFAULT_INLINE_ROWS_PER_SESSION",
     "DEFAULT_MAX_INLINE_OBSERVATION_INDEX_CHARS",
     "OBSERVATION_DIR",
     "LinkObservationsArgs",

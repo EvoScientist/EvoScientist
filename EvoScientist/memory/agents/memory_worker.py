@@ -6,16 +6,26 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import Mapping
+import re
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    ModelRequest,
+    ToolCallRequest,
+    hook_config,
+)
+from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from ...config import (
@@ -32,11 +42,27 @@ from ._factory import (
     resolve_memory_agent_paths,
 )
 
+try:
+    from langchain.agents.factory import (
+        FALLBACK_MODELS_WITH_STRUCTURED_OUTPUT as _STRUCTURED_OUTPUT_MODEL_PATTERNS,
+    )
+except ImportError:  # pragma: no cover - without the list, no wrap-up
+    _STRUCTURED_OUTPUT_MODEL_PATTERNS: Sequence[str] | None = None
+
 logger = logging.getLogger(__name__)
 
 _MEMORY_WORKER_EXCLUDED_TOOLS = frozenset(
     {"delete", "execute", "task", "write_file", "write_todos"}
 )
+MEMORY_WORKER_OBSERVATION_LIMIT = 3
+MEMORY_WORKER_RECORD_CALL_LIMIT = 6
+MEMORY_WORKER_MODEL_CALL_BUDGET = 20
+_RECORD_OBSERVATION_TOOL = "record_observation"
+_WRAP_UP_INSTRUCTION = (
+    "This is your last model call in this run. Return the execution summary "
+    "now; no other tool is available."
+)
+_WRAP_UP_RETRY = "Return the execution summary now; no other tool is available."
 
 
 def _memory_worker_observation_target(
@@ -240,7 +266,14 @@ class _MemoryWorkerPromptBuilder:
             "Use the optional evidence field for source-backed or time-sensitive "
             "claims. Prefer durable source identifiers, exact commands, or "
             "artifact paths. Do not store unsupported claims or internally "
-            "inconsistent dates."
+            "inconsistent dates.\n\n"
+            f"Record at most {MEMORY_WORKER_OBSERVATION_LIMIT} observations in "
+            "this run; most runs need none or one. Decide which candidates "
+            "matter most and record them in order of importance, highest "
+            "first, then drop the rest. If an earlier entry turns out to be a "
+            "duplicate or a mistake, do not record a correction or placeholder "
+            "entry. Do not record the per-chunk results of a batch job; the "
+            "job's output files already hold them."
         )
 
     def _subagent_guardrail(self) -> str:
@@ -419,6 +452,251 @@ def _write_subagent_summary(
     return f"/memories{memory_path}"
 
 
+def _observations_written(messages: Sequence[object]) -> int:
+    """Count the ``record_observation`` results in *messages* that created a file."""
+    return sum(payload.get("created") is True for payload in _record_results(messages))
+
+
+def _record_attempts(messages: Sequence[object]) -> int:
+    """Count every ``record_observation`` result in *messages*, created or not.
+
+    An error result is plain text, so this counts by tool name only.
+    """
+    return sum(
+        isinstance(message, ToolMessage) and message.name == _RECORD_OBSERVATION_TOOL
+        for message in messages
+    )
+
+
+def _record_results(messages: Sequence[object]) -> Iterator[Mapping[str, object]]:
+    for message in messages:
+        if (
+            not isinstance(message, ToolMessage)
+            or message.name != _RECORD_OBSERVATION_TOOL
+            or not isinstance(message.content, str)
+        ):
+            continue
+        try:
+            payload = json.loads(message.content)
+        except ValueError:
+            continue
+        if isinstance(payload, Mapping):
+            yield payload
+
+
+def _record_calls_ahead(messages: Sequence[object], tool_call_id: object) -> int:
+    """Count ``record_observation`` calls queued before *tool_call_id* in the
+    same model step; parallel calls all see the state from before the step."""
+    for message in reversed(messages):
+        if not isinstance(message, AIMessage):
+            continue
+        ahead = 0
+        for call in message.tool_calls:
+            if call.get("id") == tool_call_id:
+                return ahead
+            if call.get("name") == _RECORD_OBSERVATION_TOOL:
+                ahead += 1
+        return 0
+    return 0
+
+
+def _tool_strategy_run(request: ModelRequest) -> bool:
+    """Whether langchain already binds every call of this run with a forced
+    tool choice (its tool strategy), mirroring its automatic strategy choice:
+    a profile that offers native structured output, or else a model name on
+    its fallback list, means the provider strategy instead."""
+    if isinstance(request.response_format, ToolStrategy):
+        return True
+    model = request.model
+    if (getattr(model, "profile", None) or {}).get("structured_output"):
+        return False
+    if _STRUCTURED_OUTPUT_MODEL_PATTERNS is None:
+        return False
+    name = (
+        getattr(model, "model_name", None)
+        or getattr(model, "model", None)
+        or getattr(model, "model_id", None)
+    )
+    if not isinstance(name, str):
+        return True
+    return not any(
+        re.search(pattern, name.lower())
+        for pattern in _STRUCTURED_OUTPUT_MODEL_PATTERNS
+    )
+
+
+def _model_calls(messages: Sequence[object]) -> int:
+    return sum(isinstance(message, AIMessage) for message in messages)
+
+
+class _MemoryWorkerGuardrailMiddleware(AgentMiddleware):
+    """Bound what one worker run writes and how long it may loop.
+
+    Every limit is read off the run's own messages, so parallel tool calls
+    need no shared counter and nothing is kept between runs.
+    """
+
+    name = "evomemory_worker_guardrail"
+
+    def __init__(
+        self,
+        *,
+        agent_name: str,
+        summary_schema: type[BaseModel] | None = None,
+        observation_limit: int = MEMORY_WORKER_OBSERVATION_LIMIT,
+        record_call_limit: int = MEMORY_WORKER_RECORD_CALL_LIMIT,
+        model_call_budget: int = MEMORY_WORKER_MODEL_CALL_BUDGET,
+    ) -> None:
+        self._agent_name = agent_name
+        self._summary_schema = summary_schema
+        self.observation_limit = observation_limit
+        self.record_call_limit = record_call_limit
+        self.model_call_budget = model_call_budget
+
+    def _budget_used(self, messages: Sequence[object], *, ahead: int = 0) -> bool:
+        return (
+            _observations_written(messages) + ahead >= self.observation_limit
+            or _record_attempts(messages) + ahead >= self.record_call_limit
+        )
+
+    def _over_limit(self, request: ToolCallRequest) -> bool:
+        call = request.tool_call
+        if call.get("name") != _RECORD_OBSERVATION_TOOL:
+            return False
+        messages = request.state.get("messages", [])
+        return self._budget_used(
+            messages, ahead=_record_calls_ahead(messages, call.get("id"))
+        )
+
+    def _budget_reply(self, request: ToolCallRequest) -> ToolMessage:
+        payload = {
+            "created": False,
+            "note": (
+                "This run's observation budget is used up "
+                f"({self.observation_limit} written or {self.record_call_limit} "
+                "calls). Do not record more; finish the run."
+            ),
+        }
+        return ToolMessage(
+            content=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            tool_call_id=request.tool_call["id"],
+            name=_RECORD_OBSERVATION_TOOL,
+        )
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
+    ) -> ToolMessage | Command[Any]:
+        if self._over_limit(request):
+            return self._budget_reply(request)
+        return handler(request)
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        if self._over_limit(request):
+            return self._budget_reply(request)
+        return await handler(request)
+
+    def _model_request(self, request: ModelRequest) -> tuple[ModelRequest, bool]:
+        """Narrow the tools of one model call; the flag marks the wrap-up call.
+
+        The last budgeted call of a subagent worker gets only its summary
+        tool, so a looping run still ends with an execution summary. A turn
+        worker has nothing structured to save and keeps its tools until the
+        stop.
+        """
+        messages = request.state.get("messages", [])
+        if (
+            self._summary_schema is not None
+            and _model_calls(messages) == self.model_call_budget - 1
+            # Only a run that forces a tool choice on every call can be
+            # narrowed to its summary tool without a request shape it never
+            # sent: a provider-strategy run would get an empty tool list or
+            # a forced choice some models reject, so it keeps its tools.
+            and _tool_strategy_run(request)
+        ):
+            from ...middleware.utils import append_to_system_message
+
+            self._log_budget("is making the last of", messages)
+            return request.override(
+                tools=[],
+                response_format=ToolStrategy(self._summary_schema),
+                system_message=append_to_system_message(
+                    request.system_message, _WRAP_UP_INSTRUCTION
+                ),
+            ), True
+        if not self._budget_used(messages):
+            return request, False
+        from ...middleware.utils import request_without_tool
+
+        return request_without_tool(request, _RECORD_OBSERVATION_TOOL), False
+
+    @staticmethod
+    def _retry_request(request: ModelRequest) -> ModelRequest:
+        """One more try when the wrap-up call named a tool instead of summarizing."""
+        return request.override(
+            messages=[*request.messages, HumanMessage(_WRAP_UP_RETRY)]
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Any],
+    ) -> Any:
+        request, wrap_up = self._model_request(request)
+        response = handler(request)
+        if wrap_up and response.structured_response is None:
+            response = handler(self._retry_request(request))
+        return response
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[Any]],
+    ) -> Any:
+        request, wrap_up = self._model_request(request)
+        response = await handler(request)
+        if wrap_up and response.structured_response is None:
+            response = await handler(self._retry_request(request))
+        return response
+
+    def _log_budget(self, event: str, messages: Sequence[object]) -> None:
+        configurable = _current_configurable()
+        logger.warning(
+            "%s %s its %d model calls with %d observations written "
+            "(source %s, session %s)",
+            self._agent_name,
+            event,
+            self.model_call_budget,
+            _observations_written(messages),
+            _config_str(configurable, "evomemory_source_agent"),
+            _config_str(configurable, "evomemory_source_session_id"),
+        )
+
+    def _stop_update(self, state: AgentState[object]) -> dict[str, object] | None:
+        messages = state.get("messages", [])
+        if _model_calls(messages) < self.model_call_budget:
+            return None
+        self._log_budget("stopped at the budget of", messages)
+        return {"jump_to": "end"}
+
+    @hook_config(can_jump_to=["end"])
+    def before_model(
+        self, state: AgentState[object], runtime: Runtime
+    ) -> dict[str, object] | None:
+        return self._stop_update(state)
+
+    @hook_config(can_jump_to=["end"])
+    async def abefore_model(
+        self, state: AgentState[object], runtime: Runtime
+    ) -> dict[str, object] | None:
+        return self._stop_update(state)
+
+
 def _memory_worker_middleware(
     *,
     memory_dir: str | Path,
@@ -454,8 +732,20 @@ def _memory_worker_middleware(
                 enable_profile_memory=enable_profile_memory,
                 enable_observation_memory=enable_observation_memory,
                 enable_observation_tool=enable_observation_tool,
+                # The worker checks what its own, newest session already
+                # recorded, so its index fills by time alone.
+                inline_rows_per_session=None,
             ),
             excluded_tools=_MEMORY_WORKER_EXCLUDED_TOOLS,
+        ),
+        # Innermost on the tool path, so the exclusion check runs first.
+        _MemoryWorkerGuardrailMiddleware(
+            agent_name=_memory_worker_agent_name(source_type),
+            summary_schema=(
+                SubagentMemoryDecision
+                if source_type == MemorySourceType.SUBAGENT
+                else None
+            ),
         ),
     ]
 

@@ -895,19 +895,9 @@ _REPORTABLE_STATUSES = frozenset({"active", "blocked"})
 
 def _without_update_goal(request: Any) -> Any:
     """*request* without the goal tool: nothing to report on in this call."""
+    from .utils import request_without_tool
 
-    def _name(candidate: Any) -> Any:
-        if isinstance(candidate, Mapping):
-            # A provider schema names its tool at the top or under "function".
-            nested = candidate.get("function")
-            inner = nested.get("name") if isinstance(nested, Mapping) else None
-            return candidate.get("name") or inner
-        return getattr(candidate, "name", None)
-
-    tools = [t for t in request.tools if _name(t) != update_goal.name]
-    return (
-        request if len(tools) == len(request.tools) else request.override(tools=tools)
-    )
+    return request_without_tool(request, update_goal.name)
 
 
 class GoalContextMiddleware(AgentMiddleware):
