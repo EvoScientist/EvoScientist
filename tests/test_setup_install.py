@@ -105,7 +105,7 @@ def windows_lookup(monkeypatch):
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
 
 
-def test_same_path_ignores_quotes_and_trailing_separators(tmp_path):
+def test_same_path_ignores_quotes_and_trailing_separators(tmp_path, windows_lookup):
     folder = tmp_path / "Program Files ąę" / "Git"
     folder.mkdir(parents=True)
     assert _install.same_path(f'"{folder}"', folder)
@@ -128,7 +128,9 @@ def test_same_path_resolves_links(tmp_path):
     assert _install.same_path(tmp_path / "link", real)
 
 
-def test_prepend_to_path_drops_other_spellings_of_the_entry(tmp_path, monkeypatch):
+def test_prepend_to_path_drops_other_spellings_of_the_entry(
+    tmp_path, monkeypatch, windows_lookup
+):
     folder = tmp_path / "node-v24"
     folder.mkdir()
     other = str(tmp_path / "other")
@@ -211,8 +213,31 @@ def test_which_on_path_skips_entries_under_outside(tmp_path, monkeypatch):
     assert _install.which_on_path("node", outside=tools) == str(system)
 
 
-def test_which_on_path_reads_quoted_entries(tmp_path, monkeypatch):
-    name = "git.exe" if os.name == "nt" else "git"
-    real = _exe(tmp_path / "Program Files" / "Git" / "cmd", name)
+def test_which_on_path_reads_quoted_entries(tmp_path, monkeypatch, windows_lookup):
+    real = _exe(tmp_path / "Program Files" / "Git" / "cmd", "git.exe")
     monkeypatch.setenv("PATH", f'"{real.parent}"')
     assert _install.which_on_path("git") == str(real)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cleans PATH entries")
+def test_posix_path_entries_are_read_as_written(tmp_path, monkeypatch):
+    """Quotes and spaces belong to the folder name, as in ``sh``."""
+    folder = _exe(tmp_path / "opt" / "node" / "bin", "node").parent
+    monkeypatch.setenv("PATH", os.pathsep.join([f'"{folder}"', f"{folder} "]))
+    assert _install.which_on_path("node") is None
+    monkeypatch.setenv("PATH", f"{folder}/")
+    _install.prepend_to_path(folder)
+    assert os.environ["PATH"] == str(folder)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows folds .. before links")
+def test_posix_path_entries_follow_a_link_before_dot_dot(tmp_path, monkeypatch):
+    real = _exe(tmp_path / "real" / "bin", "node")
+    _exe(tmp_path / "bin", "node")
+    (tmp_path / "real" / "deep").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real" / "deep")
+    entry = str(tmp_path / "link" / ".." / "bin")
+    monkeypatch.setenv("PATH", entry)
+    assert _install.same_path(_install.which_on_path("node"), real)
+    assert _install.same_path(entry, real.parent)
+    assert not _install.same_path(entry, tmp_path / "bin")

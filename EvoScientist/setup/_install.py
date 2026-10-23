@@ -29,10 +29,14 @@ def is_under(path: Path, root: Path) -> bool:
 
 
 def _clean_entry(entry: str) -> str:
-    """A ``PATH`` entry without surrounding whitespace, one surrounding pair
-    of quotes (Windows allows ``"C:\\Program Files\\Git\\cmd"`` in ``PATH``)
-    or a trailing separator, normalised by ``os.path.normpath`` (``.`` and
-    ``..`` collapsed; on Windows, ``/`` turned into ``\\``)."""
+    """A ``PATH`` entry as the OS reads it. On Windows: without surrounding
+    whitespace, one surrounding pair of quotes (Windows allows
+    ``"C:\\Program Files\\Git\\cmd"`` in ``PATH``) or a trailing separator,
+    normalised by ``os.path.normpath`` (``.`` and ``..`` collapsed, as Windows
+    does, ``/`` turned into ``\\``). On POSIX only a trailing ``/`` is
+    dropped: ``execvp`` and ``sh`` read the rest as written, ``..`` included."""
+    if not _WINDOWS:
+        return entry.rstrip("/") or entry
     entry = entry.strip()
     if len(entry) >= 2 and entry[0] == entry[-1] == '"':
         entry = entry[1:-1]
@@ -40,8 +44,8 @@ def _clean_entry(entry: str) -> str:
 
 
 def same_path(a: str | Path, b: str | Path) -> bool:
-    """True when ``a`` and ``b`` name the same location: quotes and trailing
-    separators dropped, links resolved, case folded where the OS ignores it."""
+    """True when ``a`` and ``b`` name the same location: cleaned like a
+    ``PATH`` entry, links resolved, case folded where the OS ignores it."""
 
     def key(p: str | Path) -> str:
         return os.path.normcase(os.path.realpath(_clean_entry(str(p))))
