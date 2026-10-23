@@ -900,7 +900,14 @@ def _resolve_command(command: str) -> str:
     """
     if os.path.isabs(command):
         return command
-    found = shutil.which(command)
+    if not os.path.dirname(command) and Path(command).stem.lower() in _NODE_COMMANDS:
+        # Never the current directory, as in _ensure_node_for_stdio(): on
+        # Windows shutil.which() would return an npx.cmd found there.
+        from ..setup._install import which_on_path
+
+        found = which_on_path(command)
+    else:
+        found = shutil.which(command)
     if found:
         return found
     candidate = os.path.join(os.path.dirname(sys.executable), command)
@@ -924,14 +931,19 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
     """
     if os.environ.get("EVOSCIENTIST_SERVER_PROCESS") == "1":
         return
+    from ..setup._install import which_on_path
+
     missing = [
         name
         for name, server in config.items()
         if server.get("transport") == "stdio"
         and (command := str(server.get("command", "")))
         and not os.path.isabs(command)
+        # A path with a folder part (node_modules/.bin/npx) is not looked up
+        # on PATH.
+        and not os.path.dirname(command)
         and Path(command).stem.lower() in _NODE_COMMANDS
-        and shutil.which(command) is None
+        and which_on_path(command) is None
     ]
     if not missing:
         return
@@ -958,6 +970,23 @@ def _ensure_node_for_stdio(config: dict[str, Any]) -> None:
         )
         return
     activate_runtime()
+
+
+def _unresolved_node_servers(config: dict[str, Any]) -> list[str]:
+    """Stdio servers whose bare ``node`` / ``npx`` / ``npm`` command is not on
+    ``PATH``. Started anyway, the OS would take that command from the current
+    directory (Windows, or a ``.`` entry on POSIX), which the lookup never
+    searches, so they are reported as failed instead."""
+    return [
+        name
+        for name, server in config.items()
+        if server.get("transport") == "stdio"
+        and (command := str(server.get("command", "")))
+        # A path with a folder part (node_modules/.bin/npx) is started as written.
+        and not os.path.dirname(command)
+        and Path(command).stem.lower() in _NODE_COMMANDS
+        and _resolve_command(command) == command
+    ]
 
 
 def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1132,11 +1161,10 @@ async def _load_tools(
     # May download Node (in the CLI process only); off the event loop so the
     # running session stays responsive.
     await asyncio.to_thread(_ensure_node_for_stdio, config)
-    connections = _build_connections(config)
-    if not connections:
-        return {}
-
-    client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
+    unresolved = _unresolved_node_servers(config)
+    connections = _build_connections(
+        {name: server for name, server in config.items() if name not in unresolved}
+    )
 
     def _report(event: str, name: str, detail: str = "") -> None:
         if on_progress is None:
@@ -1147,6 +1175,31 @@ async def _load_tools(
             # Progress callbacks are UI glue — never let their bugs break
             # the actual MCP load.
             logger.debug("MCP progress callback raised", exc_info=True)
+
+    def _fail(name: str, detail: str) -> tuple[str, list]:
+        # When the caller wired up ``on_progress`` they own the
+        # user-facing display; downgrade the logger so we don't
+        # double-print.
+        if on_progress is None:
+            logger.warning("MCP server %r: failed to load tools: %s", name, detail)
+        else:
+            logger.debug("MCP server %r: failed to load tools: %s", name, detail)
+        _report("error", name, detail)
+        return name, []
+
+    skipped: dict[str, list] = {}
+    for name in unresolved:
+        _report("start", name)
+        command = config[name]["command"]
+        _fail(
+            name,
+            f"{command} was not found on PATH. Run 'EvoSci setup' to install Node.js",
+        )
+        skipped[name] = []
+    if not connections:
+        return skipped
+
+    client = MultiServerMCPClient(connections)  # type: ignore[invalid-argument-type]
 
     # Cap in-flight connections so a user with many servers doesn't
     # spawn all their stdio subprocesses at once (fd/ulimit pressure,
@@ -1182,24 +1235,12 @@ async def _load_tools(
                     detail = f"timed out after {server_timeout}s"
                 else:
                     detail = str(exc)
-                # When the caller wired up ``on_progress`` they own the
-                # user-facing display; downgrade the logger so we don't
-                # double-print.
-                if on_progress is None:
-                    logger.warning(
-                        "MCP server %r: failed to load tools: %s", name, detail
-                    )
-                else:
-                    logger.debug(
-                        "MCP server %r: failed to load tools: %s", name, detail
-                    )
-                _report("error", name, detail)
-                return name, []
+                return _fail(name, detail)
 
     # ``return_exceptions=False`` is fine because ``_fetch`` already
     # swallows errors per server.
     results = await asyncio.gather(*(_fetch(name) for name in connections))
-    return dict(results)
+    return {**skipped, **dict(results)}
 
 
 async def aload_mcp_tools(

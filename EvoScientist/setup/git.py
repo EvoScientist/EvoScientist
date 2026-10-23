@@ -44,6 +44,7 @@ from ._install import (
     prepend_to_path,
     remove_stale_temp_dirs,
     tools_dir,
+    which_on_path,
 )
 from .download import download
 from .protocol import (
@@ -239,12 +240,7 @@ def _system_git() -> GitInfo | None:
     ``EvoSci setup``, so the private PortableGit would otherwise be found.
     """
     root = tools_dir()
-    search = os.pathsep.join(
-        p
-        for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and not is_under(Path(p), root)
-    )
-    found = shutil.which("git", path=search)
+    found = which_on_path("git", outside=root)
     if found is None:
         return None
     try:

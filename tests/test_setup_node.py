@@ -557,6 +557,38 @@ def test_private_node_on_path_is_not_taken_for_system(env):
     assert node.ensure_node("default").source == "private"
 
 
+def test_node_in_the_current_directory_is_not_taken_for_system(env, monkeypatch):
+    exe = _system_node(env, monkeypatch, (22, 0, 0))
+    monkeypatch.chdir(exe.parent)
+    # "." is how PATH reaches the current directory on POSIX; Windows
+    # searches it without one.
+    monkeypatch.setenv("PATH", os.pathsep.join([str(env["tmp"] / "empty-bin"), "."]))
+    assert node.ensure_node("default").source == "private"
+
+
+def test_npx_only_in_the_current_directory_does_not_count(env, monkeypatch):
+    _system_node(env, monkeypatch, (22, 0, 0), with_npx=False)
+    cwd = env["tmp"] / "project"
+    cwd.mkdir()
+    npx = cwd / ("npx.cmd" if os.name == "nt" else "npx")
+    npx.write_text("")
+    npx.chmod(0o755)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", os.pathsep.join([os.environ["PATH"], "."]))
+    assert node.ensure_node("default").source == "private"
+
+
+def test_npx_only_elsewhere_on_path_does_not_count(env, monkeypatch):
+    _system_node(env, monkeypatch, (22, 0, 0), with_npx=False)
+    other = env["tmp"] / "other-bin"
+    other.mkdir()
+    npx = other / ("npx.cmd" if os.name == "nt" else "npx")
+    npx.write_text("")
+    npx.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([os.environ["PATH"], str(other)]))
+    assert node.ensure_node("default").source == "private"
+
+
 def test_install_without_a_record_is_used_again_without_a_download(env, monkeypatch):
     node.ensure_node("default")
     _system_node(env, monkeypatch, (22, 0, 0))
@@ -692,6 +724,21 @@ def test_configured_registry_is_none_when_npm_fails(npm_env, monkeypatch, fake):
 
 
 def test_configured_registry_is_none_without_npm(env, monkeypatch):
+    fake = FakeNpmConfig("https://npmrc.example/")
+    monkeypatch.setattr(node.subprocess, "run", fake)
+    monkeypatch.setattr(node, "_npm_config_registry", {})
+    assert node.configured_npm_registry({}, env["tmp"] / "nowhere" / "node") is None
+    assert fake.calls == []
+
+
+def test_configured_registry_ignores_npm_in_the_current_directory(env, monkeypatch):
+    """On Windows ``shutil.which`` would take an ``npm.cmd`` from there."""
+    cwd = env["tmp"] / "project"
+    cwd.mkdir()
+    for name in ("npm", "npm.cmd"):
+        (cwd / name).write_text("")
+        (cwd / name).chmod(0o755)
+    monkeypatch.chdir(cwd)
     fake = FakeNpmConfig("https://npmrc.example/")
     monkeypatch.setattr(node.subprocess, "run", fake)
     monkeypatch.setattr(node, "_npm_config_registry", {})

@@ -142,6 +142,32 @@ class TestResolveCommand:
 
         assert _resolve_command("my-mcp-tool") == str(fake_exe)
 
+    def test_node_command_is_never_taken_from_the_current_directory(
+        self, tmp_path, monkeypatch
+    ):
+        """The launch agrees with the Node check: an ``npx`` in the current
+        directory is not the one on PATH."""
+        cwd = _fake_npx(tmp_path / "project")
+        on_path = _fake_npx(tmp_path / "bin")
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(on_path)]))
+        assert Path(_resolve_command("npx")).parent == on_path
+
+    def test_node_command_with_a_folder_part_is_not_looked_up_on_path(
+        self, tmp_path, monkeypatch
+    ):
+        """``node_modules/.bin/npx`` names a file, not a program on PATH."""
+        on_path = tmp_path / "bin"
+        _fake_npx(on_path / "node_modules" / ".bin")
+        _fake_npx(tmp_path / "node_modules" / ".bin")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PATH", str(on_path))
+        name = "npx.cmd" if os.name == "nt" else "npx"
+        command = f"node_modules/.bin/{name}"
+        # The file mcp.yaml names, relative to the current directory; Windows
+        # spells it with a backslash.
+        assert Path(_resolve_command(command)) == Path(command)
+
     def test_not_found_returns_original(self, monkeypatch):
         """Returns the original command when not found anywhere (let OS report the error)."""
         monkeypatch.setattr("shutil.which", lambda _: None)
@@ -2281,6 +2307,64 @@ class TestLoadToolsProgressCallback:
             ("error", "srv", "boom"),
         ]
 
+    async def test_unresolved_node_server_is_reported_and_not_started(
+        self, monkeypatch, tmp_path
+    ):
+        """An ``npx`` not on PATH would be taken from the current directory."""
+        from EvoScientist.mcp import client as mcp_client
+
+        seen: dict[str, dict] = {}
+        self._patch_client(monkeypatch, {"srv": ["tool1"]})
+        import langchain_mcp_adapters.client as lc_client
+
+        fake = lc_client.MultiServerMCPClient
+
+        def client(connections):
+            seen.update(connections)
+            return fake(connections)
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", client)
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        cwd = _fake_npx(tmp_path / "project")
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(tmp_path / "empty")]))
+        config = {
+            "fs": {"transport": "stdio", "command": "npx", "args": []},
+            "srv": {"transport": "stdio", "command": "demo"},
+        }
+        events: list[tuple[str, str, str]] = []
+
+        result = await mcp_client._load_tools(
+            config, on_progress=lambda *e: events.append(e)
+        )
+
+        assert list(seen) == ["srv"]
+        assert result == {"fs": [], "srv": ["tool1"]}
+        assert events[:2] == [
+            ("start", "fs", ""),
+            (
+                "error",
+                "fs",
+                "npx was not found on PATH. Run 'EvoSci setup' to install Node.js",
+            ),
+        ]
+
+    async def test_unresolved_node_server_alone_returns_its_failure(
+        self, monkeypatch, tmp_path
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        config = {"fs": {"transport": "stdio", "command": "npx"}}
+        assert await mcp_client._load_tools(config) == {"fs": []}
+
     async def test_mixed_fleet_reports_each_server_independently(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
@@ -2675,6 +2759,15 @@ class TestNetworkDiscoveryDeadline:
 # ---- _ensure_node_for_stdio ----
 
 
+def _fake_npx(directory: Path) -> Path:
+    """A folder holding an ``npx`` the PATH lookup accepts on this OS."""
+    directory.mkdir(parents=True)
+    exe = directory / ("npx.cmd" if os.name == "nt" else "npx")
+    exe.write_text("")
+    exe.chmod(0o755)
+    return directory
+
+
 class TestEnsureNodeForStdio:
     @pytest.fixture
     def calls(self, monkeypatch):
@@ -2693,14 +2786,63 @@ class TestEnsureNodeForStdio:
         monkeypatch.setattr(setup_node, "activate_runtime", activate)
         return calls
 
-    def test_installs_when_npx_missing(self, monkeypatch, calls):
+    def test_installs_when_npx_missing(self, monkeypatch, calls, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx", "args": []}}
         )
         assert calls == {"ensure": 1, "activate": 1}
+
+    def test_npx_in_the_current_directory_does_not_count(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """On Windows ``shutil.which`` looks in the current directory first; an
+        ``npx.cmd`` there must not stand in for a Node on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.chdir(_fake_npx(tmp_path / "project"))
+        # "." is how PATH reaches the current directory on POSIX.
+        monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path / "empty"), "."]))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx"}}
+        )
+        assert calls == {"ensure": 1, "activate": 1}
+
+    def test_a_command_with_a_folder_part_is_not_looked_up(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """``node_modules/.bin/npx`` names a file, not a program on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.chdir(tmp_path)
+        _fake_npx(tmp_path / "node_modules" / ".bin")
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        name = "npx.cmd" if os.name == "nt" else "npx"
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": f"node_modules/.bin/{name}"}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
+
+    def test_a_command_with_its_windows_extension_is_found(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """``command: npx.cmd`` names the ``npx.cmd`` on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+        from EvoScientist.setup import _install
+
+        monkeypatch.setattr(_install, "_WINDOWS", True)
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        nodejs = tmp_path / "nodejs"
+        nodejs.mkdir()
+        (nodejs / "npx.cmd").write_text("")
+        monkeypatch.setenv("PATH", str(nodejs))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx.cmd"}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
+        assert mcp_client._resolve_command("npx.cmd") == str(nodejs / "npx.cmd")
 
     @pytest.mark.parametrize(
         "server",
@@ -2710,18 +2852,14 @@ class TestEnsureNodeForStdio:
             {"transport": "http", "url": "http://x"},
         ],
     )
-    def test_skips_when_not_needed(self, monkeypatch, calls, server):
+    def test_skips_when_not_needed(self, monkeypatch, calls, server, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
-        monkeypatch.setattr(
-            mcp_client.shutil,
-            "which",
-            lambda c: "/usr/bin/npx" if c == "npx" else None,
-        )
+        monkeypatch.setenv("PATH", str(_fake_npx(tmp_path / "bin")))
         mcp_client._ensure_node_for_stdio({"s": server})
         assert calls == {"ensure": 0, "activate": 0}
 
-    def test_failure_is_logged_not_raised(self, monkeypatch, caplog):
+    def test_failure_is_logged_not_raised(self, monkeypatch, caplog, tmp_path):
         from EvoScientist.mcp import client as mcp_client
         from EvoScientist.setup import node as setup_node
         from EvoScientist.setup.protocol import StageError
@@ -2730,7 +2868,7 @@ class TestEnsureNodeForStdio:
             raise StageError("download_failed", "offline")
 
         monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", offline)
         with caplog.at_level("WARNING"):
             mcp_client._ensure_node_for_stdio(
@@ -2739,7 +2877,7 @@ class TestEnsureNodeForStdio:
         assert "offline" in caplog.text
         assert "EvoSci setup" in caplog.text
 
-    def test_unexpected_error_is_logged_not_raised(self, monkeypatch, caplog):
+    def test_unexpected_error_is_logged_not_raised(self, monkeypatch, caplog, tmp_path):
         """A non-StageError from the install must not abort the MCP load for
         every server."""
         from EvoScientist.mcp import client as mcp_client
@@ -2749,7 +2887,7 @@ class TestEnsureNodeForStdio:
             raise NotImplementedError("compression type 99")
 
         monkeypatch.delenv("EVOSCIENTIST_SERVER_PROCESS", raising=False)
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.setattr(setup_node, "ensure_node", broken)
         with caplog.at_level("WARNING"):
             mcp_client._ensure_node_for_stdio(
@@ -2757,11 +2895,11 @@ class TestEnsureNodeForStdio:
             )
         assert "compression type 99" in caplog.text
 
-    def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls):
+    def test_does_not_install_inside_langgraph_dev(self, monkeypatch, calls, tmp_path):
         from EvoScientist.mcp import client as mcp_client
 
         monkeypatch.setenv("EVOSCIENTIST_SERVER_PROCESS", "1")
-        monkeypatch.setattr(mcp_client.shutil, "which", lambda _c: None)
+        monkeypatch.setenv("PATH", str(tmp_path))
         mcp_client._ensure_node_for_stdio(
             {"fs": {"transport": "stdio", "command": "npx"}}
         )

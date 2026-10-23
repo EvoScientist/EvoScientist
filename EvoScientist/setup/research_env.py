@@ -34,6 +34,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
+from ._install import same_path
 from .protocol import CN_MIRROR_HINT, Emitter, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
@@ -295,12 +296,6 @@ def _is_untrusted_alias(path: str) -> bool:
     )
 
 
-def _same_path(a: str, b: str) -> bool:
-    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(
-        os.path.realpath(b)
-    )
-
-
 def _unusable_reason(probe_output: str) -> str | None:
     """Why a probed ``python`` is not usable for the agent, or None if it is."""
     # The probe's own three lines come last: stderr shares the pipe, and a
@@ -316,7 +311,7 @@ def _unusable_reason(probe_output: str) -> str | None:
     if managed:
         return "it is EXTERNALLY-MANAGED (PEP 668), so pip refuses to install into it"
     # EvoScientist's own environment when its installer made it: no pip there.
-    if _same_path(prefix, sys.prefix) and any(
+    if same_path(prefix, sys.prefix) and any(
         os.path.isfile(os.path.join(prefix, name)) for name in _MANAGED_ENV_MARKERS
     ):
         return "it is the environment EvoScientist's installer made, without pip"

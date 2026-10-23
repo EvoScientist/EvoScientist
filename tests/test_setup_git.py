@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from EvoScientist.setup import git
+from EvoScientist.setup import _install, git
 from EvoScientist.setup.protocol import HEARTBEAT_INTERVAL, StageError
 
 # The env fixture pins _arch() to x64; the platform tests restore this one.
@@ -188,6 +188,10 @@ def env(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr(git.shutil, "which", which)
+    # The system-Git lookup walks PATH itself; make it apply Windows rules
+    # (PATHEXT, no execute bit) on any OS.
+    monkeypatch.setattr(_install, "_WINDOWS", True)
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     return {
         "data": data,
         "tools": tools,

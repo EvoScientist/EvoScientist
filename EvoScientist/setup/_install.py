@@ -28,16 +28,102 @@ def is_under(path: Path, root: Path) -> bool:
     return True
 
 
+def _clean_entry(entry: str) -> str:
+    """A ``PATH`` entry as the OS reads it. On Windows: without surrounding
+    whitespace, one surrounding pair of quotes (Windows allows
+    ``"C:\\Program Files\\Git\\cmd"`` in ``PATH``) or a trailing separator,
+    normalised by ``os.path.normpath`` (``.`` and ``..`` collapsed, as Windows
+    does, ``/`` turned into ``\\``). On POSIX only a trailing ``/`` is
+    dropped: ``execvp`` and ``sh`` read the rest as written, ``..`` included."""
+    if not _WINDOWS:
+        return entry.rstrip("/") or entry
+    entry = entry.strip()
+    if len(entry) >= 2 and entry[0] == entry[-1] == '"':
+        entry = entry[1:-1]
+    return os.path.normpath(entry) if entry else entry
+
+
+def same_path(a: str | Path, b: str | Path) -> bool:
+    """True when ``a`` and ``b`` name the same location: cleaned like a
+    ``PATH`` entry, links resolved, case folded where the OS ignores it."""
+
+    def key(p: str | Path) -> str:
+        return os.path.normcase(os.path.realpath(_clean_entry(str(p))))
+
+    return key(a) == key(b)
+
+
 def prepend_to_path(directory: Path) -> None:
     """Put ``directory`` first on this process's ``PATH``, dropping any other
-    entry for it, so child processes inherit it."""
-    key = os.path.normcase(str(directory))
+    entry for it, so child processes inherit it.
+
+    Only ``directory`` is resolved; the other entries are cleaned but not
+    resolved, since resolving each of them is slow for a network path.
+    """
+    keys = {
+        os.path.normcase(_clean_entry(str(directory))),
+        os.path.normcase(os.path.realpath(directory)),
+    }
     parts = [
         p
         for p in os.environ.get("PATH", "").split(os.pathsep)
-        if p and os.path.normcase(p) != key
+        if p.strip() and os.path.normcase(_clean_entry(p)) not in keys
     ]
     os.environ["PATH"] = os.pathsep.join([str(directory), *parts])
+
+
+# Read at call time, so tests can exercise the Windows lookup on any OS.
+_WINDOWS = os.name == "nt"
+
+
+def _command_names(name: str) -> list[str]:
+    """File names that run as ``name``: on Windows ``name`` plus each
+    ``PATHEXT`` extension (``name`` itself first when it already has one)."""
+    if not _WINDOWS:
+        return [name]
+    exts = [
+        e.lower()
+        # An empty PATHEXT falls back too, as in shutil.which.
+        for e in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";")
+        if e
+    ]
+    names = [name] if os.path.splitext(name)[1].lower() in exts else []
+    return names + [name + ext for ext in exts]
+
+
+def which_in(name: str, directory: str | Path) -> str | None:
+    """The program ``name`` in ``directory`` only, or None.
+
+    Unlike ``shutil.which(name, path=directory)``, never looks in the current
+    directory: on Windows that search comes first (always on Python 3.11, on
+    3.12+ unless ``NoDefaultCurrentDirectoryInExePath`` is set) and its hit is
+    returned, so a ``node.cmd`` in the folder EvoScientist runs from would win.
+    """
+    for candidate in _command_names(name):
+        path = os.path.join(directory, candidate)
+        if os.path.isfile(path) and (_WINDOWS or os.access(path, os.X_OK)):
+            return path
+    return None
+
+
+def which_on_path(name: str, *, outside: Path | None = None) -> str | None:
+    """The first program ``name`` on ``PATH``, or None.
+
+    Never the current directory (see :func:`which_in`): empty and relative
+    ``PATH`` entries are skipped, since both resolve against it. With
+    ``outside``, entries under that folder are skipped too, e.g. our tools
+    dir when looking for a system tool.
+    """
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        directory = _clean_entry(entry)
+        if not directory or not os.path.isabs(directory):
+            continue
+        if outside is not None and is_under(Path(directory), outside):
+            continue
+        found = which_in(name, directory)
+        if found is not None:
+            return found
+    return None
 
 
 # Pauses between attempts to move an unpacked tool into place (about 4 s).
