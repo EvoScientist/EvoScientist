@@ -32,7 +32,7 @@ When it finishes, open a new terminal and run `EvoSci onboard`, then `EvoSci`
 
 | bash | PowerShell | What it does |
 |---|---|---|
-| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. With `mirror: cn`, packages that `npx` fetches (MCP servers, the `find-skills` skill in the agent's shell) come from npmmirror too, unless you set a registry yourself (`npm_config_registry`, or `registry=` in `~/.npmrc`), which always wins. |
+| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. With `mirror: cn`, packages that `npx` fetches (MCP servers, the `find-skills` skill in the agent's shell) come from npmmirror too, unless you set a registry other than npm's default yourself (`npm_config_registry`, or `registry=` in `~/.npmrc`); to keep `https://registry.npmjs.org/`, set `npm_config_registry` to it. |
 | `--version <ver>` | `-Version <ver>` | Install this release instead of the newest one. 0.3.5 and older cannot be installed this way: they have no `constraints.txt`. |
 | `--no-modify-path` | `-NoModifyPath` | Do not put uv's tool bin directory on PATH. |
 | `--no-setup` | `-NoSetup` | Install the package and stop before `EvoSci setup`. |
@@ -96,10 +96,10 @@ that download starts from the beginning.
 When `EvoSci setup` installed its own Node.js because none was found, and you
 later install a Node.js 20.9 or newer of your own (for example with nvm),
 EvoScientist moves to yours when it starts from a terminal where yours is on
-PATH: the agent's shell at once, the WebUI when it starts, and MCP servers from
-the start after that. `EvoSci setup` from such a terminal moves all of them.
-EvoScientist's own Node.js stays in `~/.evoscientist/tools` but is no longer
-used.
+PATH: the agent's shell at once and the WebUI when it starts. MCP servers move
+from the next start after the WebUI started or `EvoSci setup` ran from such a
+terminal. EvoScientist's own Node.js stays in `~/.evoscientist/tools` but is
+no longer used.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
 reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
