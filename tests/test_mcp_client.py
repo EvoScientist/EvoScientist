@@ -386,6 +386,55 @@ class TestBuildConnections:
         }
         assert "NODE_USE_ENV_PROXY" not in _build_connections(config)["fs"]["env"]
 
+    def test_registry_is_asked_with_the_servers_own_env(self, monkeypatch, node_rules):
+        """A server's own ``.npmrc`` (``npm_config_userconfig`` or ``HOME`` in
+        mcp.yaml) decides its registry, so no npmmirror is forced over it."""
+        from EvoScientist.setup import node as setup_node
+
+        node_rules["mirror"] = "cn"
+        asked: list[dict] = []
+
+        def configured(env, _exe):
+            asked.append(dict(env))
+            if env.get("npm_config_userconfig") == "/srv/.npmrc":
+                return "https://private.example/"
+            return None
+
+        monkeypatch.setattr(setup_node, "configured_npm_registry", configured)
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": {"npm_config_userconfig": "/srv/.npmrc"},
+            }
+        }
+        env = _lower_keys(_build_connections(config)["fs"]["env"])
+        assert asked[0]["npm_config_userconfig"] == "/srv/.npmrc"
+        assert "npm_config_registry" not in env
+
+    @pytest.mark.parametrize(
+        "user_env", [{"HTTPS_PROXY": None}, {"NO_PROXY": None}, {True: "x"}]
+    )
+    def test_server_env_that_is_not_text_still_builds_every_server(
+        self, monkeypatch, node_rules, user_env
+    ):
+        """A key with no value in ``mcp.yaml`` loads as None, ``ON:`` as True."""
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        config = {
+            "fs": {
+                "transport": "stdio",
+                "command": "npx",
+                "args": [],
+                "env": user_env,
+            },
+            "py": {"transport": "stdio", "command": "uvx", "args": ["x"]},
+        }
+        conns = _build_connections(config)
+        assert sorted(conns) == ["fs", "py"]
+        assert user_env.items() <= conns["fs"]["env"].items()
+
     def test_other_servers_get_no_node_rules(self, monkeypatch, node_rules):
         node_rules.update(mirror="cn", private=True)
         monkeypatch.setenv("npm_config_cafile", "/ca.pem")
@@ -3097,3 +3146,20 @@ class TestEnsureNodeForStdio:
         )
         await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
         assert order == ["node", "connect"]
+
+    async def test_load_tools_builds_connections_off_the_event_loop(self, monkeypatch):
+        """Under mirror: cn building them may run ``npm config get registry``."""
+        import threading
+
+        from EvoScientist.mcp import client as mcp_client
+
+        threads: list[threading.Thread] = []
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client,
+            "_build_connections",
+            lambda _c: threads.append(threading.current_thread()) or {},
+        )
+        await mcp_client._load_tools({"fs": {"transport": "stdio", "command": "npx"}})
+        (thread,) = threads
+        assert thread is not threading.current_thread()

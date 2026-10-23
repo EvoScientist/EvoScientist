@@ -616,9 +616,22 @@ def npm_registry_override(env: Mapping[str, str], node_exe: Path) -> str | None:
 
 DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org"
 _NPM_CONFIG_TIMEOUT = 10
-# `npm config get registry` per npm executable; it starts a Node process, so
-# ask once per process.
-_npm_config_registry: dict[str, str | None] = {}
+# `npm config get registry` per npm executable and npm config context (see
+# _npm_config_context); it starts a Node process, so ask once per process.
+_npm_config_registry: dict[tuple[str, tuple[tuple[str, str], ...]], str | None] = {}
+
+
+def _npm_config_context(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """What in ``env`` changes npm's answer besides its own files: the
+    ``npm_config_*`` variables and the home folder that holds ``~/.npmrc``."""
+    return tuple(
+        sorted(
+            (k.lower(), v)
+            for k, v in env.items()
+            if k.lower().startswith("npm_config_")
+            or k.lower() in ("home", "userprofile")
+        )
+    )
 
 
 def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | None:
@@ -639,9 +652,10 @@ def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | Non
     npm = which_in("npm", Path(node_exe).parent)
     if npm is None:
         return None
-    if npm not in _npm_config_registry:
-        _npm_config_registry[npm] = _ask_npm_registry(npm, env)
-    return _npm_config_registry[npm]
+    key = (npm, _npm_config_context(env))
+    if key not in _npm_config_registry:
+        _npm_config_registry[key] = _ask_npm_registry(npm, env)
+    return _npm_config_registry[key]
 
 
 def _ask_npm_registry(npm: str, env: Mapping[str, str]) -> str | None:

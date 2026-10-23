@@ -786,6 +786,30 @@ def test_configured_registry_asks_npm_once_per_process(npm_env, monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "other",
+    [
+        {"npm_config_userconfig": "/srv/mcp/.npmrc"},
+        {"HOME": "/srv/mcp"},
+        {"NPM_CONFIG_GLOBALCONFIG": "/srv/npmrc"},
+    ],
+)
+def test_configured_registry_asks_again_for_another_npm_config(
+    npm_env, monkeypatch, other
+):
+    """A server whose env points npm at another ``.npmrc`` gets its own answer,
+    not the parent's cached one."""
+    answers = iter(["https://registry.npmjs.org/", "https://private.example/"])
+
+    def run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, next(answers), "")
+
+    monkeypatch.setattr(node.subprocess, "run", run)
+    assert node.configured_npm_registry({"HOME": "/home/me"}, npm_env) is None
+    env = {"HOME": "/home/me", **other}
+    assert node.configured_npm_registry(env, npm_env) == "https://private.example/"
+
+
+@pytest.mark.parametrize(
     "fake",
     [
         FakeNpmConfig(exc=OSError("blocked")),
