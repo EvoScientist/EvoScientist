@@ -169,10 +169,17 @@ class TestListModels:
         result = list_models()
         assert isinstance(result, list)
 
-    def test_returns_all_model_names(self):
-        """Test that list_models returns all model names."""
-        result = list_models()
-        assert set(result) == set(MODELS.keys())
+    def test_returns_current_model_names(self):
+        """Selections omit legacy names that still resolve from saved configs."""
+        result = set(list_models())
+        assert result <= MODELS.keys()
+        assert MODELS.keys() - result == {
+            "minimax-m2.1",
+            "minimax-m2.5",
+            "minimax-m2.5-highspeed",
+            "minimax-m2.7",
+            "minimax-m2.7-highspeed",
+        }
 
     def test_list_is_not_empty(self):
         """Test that the list is not empty."""
@@ -1827,20 +1834,19 @@ class TestMiniMaxProvider:
         assert "minimax" not in _OPENAI_ROUTED_PROVIDERS
 
     def test_minimax_models_registered(self):
-        """MiniMax should have 5 direct model entries in _MODEL_ENTRIES."""
-        minimax_models = get_models_for_provider("minimax")
-        assert len(minimax_models) == 5
-        model_names = {name for name, _ in minimax_models}
-        assert "minimax-m3" in model_names
-        assert "minimax-m2.7" in model_names
-        assert "minimax-m2.7-highspeed" in model_names
-        assert "minimax-m2.5" in model_names
-        assert "minimax-m2.5-highspeed" in model_names
+        """New selections prefer Flash, while M3 remains available."""
+        assert get_models_for_provider("minimax") == [
+            ("minimax-m3.1-flash", "MiniMax-M3.1-Flash"),
+            ("minimax-m3", "MiniMax-M3"),
+        ]
 
     def test_minimax_model_ids_correct(self):
-        """MiniMax model IDs should match the official API model names."""
-        minimax_models = get_models_for_provider("minimax")
-        model_dict = dict(minimax_models)
+        """Legacy IDs remain registered for saved and explicit selections."""
+        model_dict = {
+            name: model_id
+            for name, model_id, provider in _MODEL_ENTRIES
+            if provider == "minimax"
+        }
         assert model_dict["minimax-m2.7"] == "MiniMax-M2.7"
         assert model_dict["minimax-m2.5"] == "MiniMax-M2.5"
         assert model_dict["minimax-m2.5-highspeed"] == "MiniMax-M2.5-highspeed"

@@ -372,7 +372,14 @@ def _apply_auto_config(
             _is_proxy = "127.0.0.1" in base_url or "localhost" in base_url
         else:
             _is_proxy = False
-        if _is_proxy or (is_third_party and not _supports_thinking):
+        if original_provider == "minimax" and model_id.lower() in {
+            "minimax-m3.1-flash",
+            "minimax-m3",
+        }:
+            # Flash always thinks; M3 needs adaptive to enable thinking. Unlike
+            # Claude, neither requires a token budget or a display setting.
+            kwargs["thinking"] = {"type": "adaptive"}
+        elif _is_proxy or (is_third_party and not _supports_thinking):
             # Mandatory-thinking Kimi models (K3 / Kimi For Coding) must declare
             # thinking so with_structured_output avoids forced tool_choice (400).
             # max_tokens must exceed budget_tokens (default resolves to 4096).
