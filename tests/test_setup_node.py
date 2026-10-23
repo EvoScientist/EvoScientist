@@ -875,3 +875,15 @@ def test_probe_returns_none_for_other_start_errors(monkeypatch):
 
     monkeypatch.setattr(node.subprocess, "run", missing)
     assert node._probe(Path("node.exe")) is None
+
+
+def test_record_is_written_atomically(env, monkeypatch):
+    written: list[Path] = []
+
+    def atomic_write_text(path, text):
+        written.append(path)
+        _install.atomic_write_text(path, text)
+
+    monkeypatch.setattr(node, "atomic_write_text", atomic_write_text)
+    node.ensure_node("default")
+    assert written == [env["data"] / "tools" / "node.json"]

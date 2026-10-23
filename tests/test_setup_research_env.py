@@ -1410,3 +1410,48 @@ def test_stage_waits_for_another_process_and_says_so(env, monkeypatch):
         "research environment"
     )
     assert re_env.is_ready(env["env"])
+
+
+def test_pip_temp_folders_left_by_a_killed_run_are_removed(env):
+    leftover = env["env"].parent / f"{re_env._PIP_TEMP_PREFIX}killed"
+    leftover.mkdir(parents=True)
+    (leftover / "scipy.whl").write_bytes(b"x")
+    re_env.ensure_research_env("default")
+    assert not leftover.exists()
+
+
+def test_an_interrupted_watched_step_is_stopped(fast_beats, tmp_path):
+    """A heartbeat written to a closed pipe (the desktop app quit) stops the step."""
+    import psutil
+
+    pid_file = tmp_path / "pid"
+    code = (
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+
+    def beat():
+        if pid_file.exists() and pid_file.read_text():
+            raise BrokenPipeError
+
+    with pytest.raises(BrokenPipeError):
+        re_env._run([*_python(code), str(pid_file)], LIMIT, beat=beat)
+    assert not psutil.pid_exists(int(pid_file.read_text()))
+
+
+def test_stalled_check_of_a_ready_env_leads_to_a_repair(env, monkeypatch):
+    """Like a check that could not run: a repair, never probe_failed."""
+    re_env.ensure_research_env("default")
+    runner = env["run"]
+    runner.calls.clear()
+    stalls = [re_env._Stalled()]
+
+    def run(cmd, timeout, **kw):
+        if FakeRunner._kind(list(cmd)) == "imports" and stalls:
+            raise stalls.pop()
+        return runner(cmd, timeout, **kw)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    assert re_env.ensure_research_env("default").version == "3.12.9"
+    assert runner.kinds() == ["starts", "pip", "imports"]
