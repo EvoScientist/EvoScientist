@@ -196,7 +196,9 @@ def fetch_metadata(registry: str, *, cn_hint: bool = False) -> dict[str, Any]:
     try:
         data = with_retries(lambda: _read_metadata(url), f"Reading {PACKAGE}")
     except NotConnected as exc:
-        raise StageError("download_failed", with_hint(f"{exc}.", cn_hint)) from exc
+        raise StageError(
+            "download_failed", with_hint(f"{exc}.", cn_hint and not exc.proxy)
+        ) from exc
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
             hint = (

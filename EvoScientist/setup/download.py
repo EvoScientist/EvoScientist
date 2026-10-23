@@ -10,8 +10,9 @@ Two time limits apply to every request, and none to its total time:
 
 - the connect budget covers connecting to the host's addresses in turn (each
   gets a share of it, so one that drops packets does not use it all up), the
-  proxy's ``CONNECT`` tunnel and the TLS handshake, all together (name
-  resolution is not bounded);
+  proxy's ``CONNECT`` tunnel and the TLS handshake, all together, from when
+  the name is resolved (name resolution is not bounded; a read in the tunnel
+  or handshake waits at most what is left of the budget when it starts);
 - the no-data timeout covers each wait for the next bytes afterwards.
 
 A failure before the connection is up (no route, refused, the budget spent, a
@@ -31,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import http.client
+import itertools
 import logging
 import socket
 import time
@@ -73,14 +75,19 @@ ProgressFn = Callable[[float], None]
 
 
 class NotConnected(Exception):
-    """No connection to the host within the connect budget; ``__cause__`` says why."""
+    """No connection to the host within the connect budget; ``__cause__`` says
+    why. ``proxy`` is set when the proxy itself could not be reached."""
 
-    def __init__(self, host: str, cause: BaseException) -> None:
+    def __init__(
+        self, host: str, cause: BaseException, *, proxy: str | None = None
+    ) -> None:
         if isinstance(cause, TimeoutError):
             reason = f"no answer within {CONNECT_BUDGET:g} s"
         else:
             reason = str(cause) or type(cause).__name__
-        super().__init__(f"Could not connect to {host}: {reason}")
+        self.proxy = proxy
+        target = f"the proxy {proxy} (for {host})" if proxy else host
+        super().__init__(f"Could not connect to {target}: {reason}")
 
 
 class _Truncated(Exception):
@@ -94,38 +101,48 @@ class _ResumeNotConnected(Exception):
 
 
 def _connect_within(
-    address: tuple[str, int],
-    timeout: float | None,
+    resolved: list[tuple[Any, ...]],
     source_address: tuple[str, int] | None = None,
     *,
     deadline: float,
 ) -> socket.socket:
-    """``socket.create_connection`` with one deadline for all addresses.
+    """``socket.create_connection`` over the ``getaddrinfo`` result
+    ``resolved``, with one deadline for all addresses.
 
     The stdlib version gives every resolved address the full timeout, so a
     host with many addresses on a network that drops packets takes that many
     timeouts. Here each address gets an equal share of what is left, at least
     :data:`_MIN_ADDRESS_SLICE`, so a first address that drops packets (a broken
-    IPv6 route) leaves time for the others. Name resolution itself is not
-    bounded. ``timeout`` is unused; it keeps ``create_connection``'s signature.
+    IPv6 route) leaves time for the others. The address families take turns
+    (RFC 8305), so a family with many such addresses cannot use up the budget
+    before the other one is tried.
     """
-    host, port = address
     error: OSError | None = None
-    addresses = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    by_family: dict[int, list] = {}
+    for entry in resolved:
+        by_family.setdefault(entry[0], []).append(entry)
+    addresses = [
+        entry
+        for turn in itertools.zip_longest(*by_family.values())
+        for entry in turn
+        if entry is not None
+    ]
     for index, (family, kind, proto, _name, sockaddr) in enumerate(addresses):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         share = max(remaining / (len(addresses) - index), _MIN_ADDRESS_SLICE)
-        sock = socket.socket(family, kind, proto)
+        sock = None
         try:
+            sock = socket.socket(family, kind, proto)
             sock.settimeout(min(remaining, share))
             if source_address:
                 sock.bind(source_address)
             sock.connect(sockaddr)
         except OSError as exc:
             error = exc
-            sock.close()
+            if sock is not None:
+                sock.close()
             continue
         # The tunnel and the TLS handshake get what is left of the budget.
         sock.settimeout(max(deadline - time.monotonic(), 1.0))
@@ -134,20 +151,43 @@ def _connect_within(
 
 
 class _BudgetedConnection:
-    """Connect within :data:`CONNECT_BUDGET`, then read with ``timeout``."""
+    """Connect within :data:`CONNECT_BUDGET`, counted from when the name is
+    resolved (the lookup itself is not bounded), then read with ``timeout``.
+
+    The proxy's ``CONNECT`` reply and the TLS handshake each start with what
+    is left of the budget; a single read in them may still wait that long.
+    """
 
     host: str
+    port: int
     timeout: float | None
     sock: socket.socket | None
     _create_connection: Callable[..., socket.socket]
     _tunnel_host: str | None
+    _deadline: float
+
+    def _left(self) -> float:
+        """Seconds left of the connect budget; TimeoutError once it is spent."""
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("timed out")
+        return left
 
     def connect(self) -> None:
         read_timeout = self.timeout
-        deadline = time.monotonic() + CONNECT_BUDGET
 
         def create(address, timeout, source_address=None):
-            return _connect_within(address, timeout, source_address, deadline=deadline)
+            try:
+                resolved = socket.getaddrinfo(*address, 0, socket.SOCK_STREAM)
+                self._deadline = time.monotonic() + CONNECT_BUDGET
+                return _connect_within(
+                    resolved, source_address, deadline=self._deadline
+                )
+            except OSError as exc:
+                if not self._tunnel_host:
+                    raise
+                proxy = f"{self.host}:{self.port}"
+                raise NotConnected(self._tunnel_host, exc, proxy=proxy) from exc
 
         self._create_connection = create
         try:
@@ -155,9 +195,21 @@ class _BudgetedConnection:
         except (OSError, http.client.HTTPException) as exc:
             # Includes a refused proxy tunnel ("Tunnel connection failed: 502"),
             # a garbled tunnel reply (BadStatusLine) and TLS errors.
-            raise NotConnected(self._tunnel_host or self.host, exc) from exc
+            target = self.host
+            if self._tunnel_host:
+                target = (
+                    f"{self._tunnel_host} through the proxy {self.host}:{self.port}"
+                )
+            raise NotConnected(target, exc) from exc
         assert self.sock is not None
         self.sock.settimeout(read_timeout)
+
+    def _tunnel(self) -> None:
+        assert self.sock is not None
+        self.sock.settimeout(self._left())
+        super()._tunnel()  # type: ignore[misc]
+        # The TLS handshake that follows gets what is left after the tunnel.
+        self.sock.settimeout(self._left())
 
 
 class _HTTPConnection(_BudgetedConnection, http.client.HTTPConnection):
@@ -348,8 +400,13 @@ def download(
             f"Download from {host}",
         )
     except NotConnected as exc:
-        raise StageError("download_failed", with_hint(f"{exc}.", cn_hint)) from exc
-    except (_Truncated, _ResumeNotConnected, *_NETWORK_ERRORS) as exc:
         raise StageError(
-            "download_failed", with_hint(f"Download of {url} failed: {exc}.", cn_hint)
+            "download_failed", with_hint(f"{exc}.", cn_hint and not exc.proxy)
+        ) from exc
+    except (_Truncated, _ResumeNotConnected, *_NETWORK_ERRORS) as exc:
+        # No --cn hint when the proxy is down: the mirror goes through it too.
+        proxy_down = getattr(exc.__cause__, "proxy", None)
+        raise StageError(
+            "download_failed",
+            with_hint(f"Download of {url} failed: {exc}.", cn_hint and not proxy_down),
         ) from exc
