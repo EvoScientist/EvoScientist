@@ -2468,6 +2468,118 @@ async def test_langgraph_server_gateway_clears_stuck_state_after_run_failure():
     ]
 
 
+def _run_lifecycle(phase: str, *, namespace=(), error=None) -> dict[str, Any]:
+    data: dict[str, Any] = {"event": phase}
+    if error is not None:
+        data["error"] = error
+    return {
+        "method": "lifecycle",
+        "params": {"namespace": list(namespace), "data": data},
+    }
+
+
+async def test_langgraph_server_gateway_reports_a_failed_server_run_as_an_error():
+    """A run that raises on the server ends the turn with an error, not done,
+    and the thread is repaired even though the ended run can't be cancelled."""
+    from langgraph_sdk.errors import NotFoundError
+
+    stream = FakeLangGraphThreadStream(
+        "abc12345",
+        events=[
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "content-block-delta",
+                        "delta": {"type": "text-delta", "text": "partial"},
+                    },
+                },
+            },
+            _run_lifecycle("failed", error="RuntimeError('boom')"),
+        ],
+    )
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}, "next": ("boom",)}},
+        streams={"abc12345": stream},
+    )
+    client = FakeLangGraphClient(threads)
+    cancel_calls: list[list[str]] = []
+
+    class _EndedRunsClient:
+        async def list(self, thread_id: str, *, limit: int, offset: int, status: str):
+            return []
+
+        async def cancel_many(self, *, thread_id: str, run_ids):
+            # The run has already ended on the server, so it can't be cancelled.
+            cancel_calls.append(list(run_ids))
+            raise NotFoundError(
+                "run not found",
+                response=httpx.Response(
+                    404, request=httpx.Request("POST", "http://test/cancel")
+                ),
+                body=None,
+            )
+
+    client.runs = _EndedRunsClient()
+    gateway = LangGraphServerGateway(LangGraphServerThreadStore(client=client))
+
+    events: list[dict[str, Any]] = []
+
+    async def collect() -> None:
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        ):
+            events.append(event)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await collect()
+
+    types = [event["type"] for event in events]
+    assert "done" not in types
+    (error,) = [event for event in events if event["type"] == "error"]
+    assert "boom" in error["message"]
+    assert len(cancel_calls) == 1
+    assert threads.state_updates == [("abc12345", None, "__end__")]
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _run_lifecycle("completed"),
+        _run_lifecycle("failed", namespace=["research-agent:tool-1"], error="x"),
+    ],
+    ids=["root-completed", "subagent-failed"],
+)
+async def test_langgraph_server_gateway_finishes_normally_without_a_root_failure(
+    event,
+):
+    """Only a root-namespace failure fails the turn: a completed run, or a
+    sub-agent whose own run failed, still ends with done."""
+    stream = FakeLangGraphThreadStream("abc12345", events=[event])
+    threads = FakeLangGraphThreadsClient(
+        threads=[],
+        states={"abc12345": {"values": {}}},
+        streams={"abc12345": stream},
+    )
+    gateway = LangGraphServerGateway(
+        LangGraphServerThreadStore(client=FakeLangGraphClient(threads))
+    )
+
+    events = [
+        event
+        async for event in gateway.stream_events(
+            RunRequest(message="hi", thread_id="abc12345")
+        )
+    ]
+
+    types = [event["type"] for event in events]
+    assert types[-1] == "done"
+    assert "error" not in types
+    assert threads.state_updates == []
+
+
 @pytest.mark.parametrize(
     "failure",
     [
