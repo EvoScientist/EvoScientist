@@ -658,11 +658,36 @@ HTTP = "http://proxy.example:3128"
     [
         ({"HTTPS_PROXY": HTTP}, True),
         ({"https_proxy": "https://proxy.example:3128", "HTTP_PROXY": HTTP}, True),
+        ({"HTTPS_PROXY": "HTTP://user:p%40ss@[::1]:3128/"}, True),
+        ({"HTTPS_PROXY": HTTP, "https_proxy": ""}, True),
+        ({"HTTPS_PROXY": f" {HTTP} "}, True),
+        ({"HTTPS_PROXY": "http://user:p ss@proxy.example:3128"}, True),
         ({}, False),
         ({"HTTPS_PROXY": "socks4://127.0.0.1:1080"}, False),
         ({"HTTPS_PROXY": "socks5://127.0.0.1:1080"}, False),
         ({"HTTPS_PROXY": "ftp://proxy.example"}, False),
         ({"HTTPS_PROXY": "not a url"}, False),
+        ({"HTTPS_PROXY": "http://"}, False),
+        ({"HTTPS_PROXY": "http://127.0.0.1:bad"}, False),
+        ({"HTTPS_PROXY": "http://127.0.0.1:99999"}, False),
+        ({"HTTPS_PROXY": "http://proxy.example:80800"}, False),
+        ({"HTTPS_PROXY": "http://proxy.example:3128/path"}, False),
+        ({"HTTPS_PROXY": "http://us?er@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://us#er@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://user:50%off@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://user:caf%e9@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy example:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy.example: 3128"}, False),
+        ({"HTTPS_PROXY": "http://pro\u00a0xy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://DOMAIN\\user:pass@proxy.example:3128"}, False),
+        ({"HTTPS_PROXY": "http://%00:3128"}, False),
+        ({"HTTPS_PROXY": "http://256.256.256.256:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy.123:3128"}, False),
+        ({"HTTPS_PROXY": "http://[fe80::1%25en0]:3128"}, False),
+        ({"HTTPS_PROXY": "http://[v1.fe]:3128"}, False),
+        ({"HTTPS_PROXY": "http://proxy%E3%80%82123:3128"}, False),
+        ({"HTTPS_PROXY": HTTP + "\r"}, False),
+        ({"HTTPS_PROXY": HTTP, "https_proxy": " "}, False),
         # One refused value among good ones still leaves the flag off.
         ({"HTTPS_PROXY": HTTP, "http_proxy": "socks4://127.0.0.1:1080"}, False),
     ],
@@ -687,13 +712,27 @@ def test_node_network_env_keeps_the_users_system_ca_choice(name):
     assert "NODE_USE_SYSTEM_CA" not in node.node_network_env({name: "0"}, private=True)
 
 
+@pytest.mark.parametrize(
+    ("name", "value", "loopback"),
+    [
+        ("NODE_USE_ENV_PROXY", "0", False),
+        ("node_use_env_proxy", "0", False),
+        ("NODE_USE_ENV_PROXY", "1", True),
+    ],
+)
+def test_node_network_env_keeps_the_users_proxy_switch(name, value, loopback):
+    extra = node.node_network_env({"HTTPS_PROXY": HTTP, name: value}, private=True)
+    assert "NODE_USE_ENV_PROXY" not in extra
+    assert ("NO_PROXY" in extra) is loopback
+
+
 def test_node_network_env_adds_loopback_to_each_no_proxy_it_finds():
     extra = node.node_network_env(
         {"HTTPS_PROXY": HTTP, "no_proxy": "corp.example, localhost", "NO_PROXY": "a"},
         private=True,
     )
-    assert extra["no_proxy"] == "corp.example,localhost,127.0.0.1,::1"
-    assert extra["NO_PROXY"] == "a,localhost,127.0.0.1,::1"
+    assert extra["no_proxy"] == "corp.example,localhost,127.0.0.1,::1,[::1]"
+    assert extra["NO_PROXY"] == "a,localhost,127.0.0.1,::1,[::1]"
 
 
 def test_node_network_env_sets_only_no_proxy_when_none_is_set():
@@ -702,7 +741,7 @@ def test_node_network_env_sets_only_no_proxy_when_none_is_set():
     assert extra == {
         "NODE_USE_SYSTEM_CA": "1",
         "NODE_USE_ENV_PROXY": "1",
-        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "NO_PROXY": "localhost,127.0.0.1,::1,[::1]",
     }
 
 

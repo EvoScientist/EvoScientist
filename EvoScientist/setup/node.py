@@ -551,7 +551,10 @@ def npm_network_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 _PROXY_VARS = ("http_proxy", "https_proxy")
-_LOOPBACK = ("localhost", "127.0.0.1", "::1")
+# Node 24's fetch matches an IPv6 host only in brackets, ``http`` without.
+_LOOPBACK = ("localhost", "127.0.0.1", "::1", "[::1]")
+_URL_TRIM = "".join(map(chr, range(0x21)))
+_FORBIDDEN_HOST = re.compile(r"[\x00-\x20#%/:<>?@\[\\\]^|\x7f]")
 
 
 def node_network_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
@@ -568,25 +571,30 @@ def node_network_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]
 
     Node's built-in ``fetch`` (and ``http``) ignore ``HTTPS_PROXY`` unless
     ``NODE_USE_ENV_PROXY=1`` is set (Node 24). It is set only when every
-    proxy variable that is set is an ``http://`` or ``https://`` URL: Node
-    exits at start for a value it refuses (``socks4://``, a malformed URL),
-    and ``http`` ignores ``socks5://`` silently. Loopback then goes into each
+    proxy variable that is set (an empty one is not, a blank one is) is a URL
+    Node takes (:func:`_is_http_url`): Node exits at start for a value it
+    refuses (``socks4://``, a malformed URL), and ``http`` ignores
+    ``socks5://`` silently. Loopback then goes into each
     ``NO_PROXY`` / ``no_proxy`` already set, or ``NO_PROXY`` alone when none
     is (two names differing only in case would both land in one Windows
     environment block), so requests to this machine (Next.js calls its own
-    ``localhost`` port) never go to the proxy.
+    ``localhost`` port) never go to the proxy. A ``NODE_USE_ENV_PROXY`` the
+    user set, in any case, is kept, and loopback is added only while it is
+    ``1``.
     """
     if not private:
         return {}
     extra: dict[str, str] = {}
     if not any(k.upper() == "NODE_USE_SYSTEM_CA" for k in env):
         extra["NODE_USE_SYSTEM_CA"] = "1"
-    proxies = [
-        v.strip() for k, v in env.items() if k.lower() in _PROXY_VARS and v.strip()
-    ]
+    proxies = [v for k, v in env.items() if k.lower() in _PROXY_VARS and v]
     if not proxies or not all(_is_http_url(v) for v in proxies):
         return extra
-    extra["NODE_USE_ENV_PROXY"] = "1"
+    switch = [v for k, v in env.items() if k.upper() == "NODE_USE_ENV_PROXY"]
+    if not switch:
+        extra["NODE_USE_ENV_PROXY"] = "1"
+    elif "1" not in switch:
+        return extra
     no_proxy_keys = [k for k in env if k.lower() == "no_proxy"] or ["NO_PROXY"]
     for key in no_proxy_keys:
         entries = [e.strip() for e in env.get(key, "").split(",") if e.strip()]
@@ -595,11 +603,45 @@ def node_network_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]
 
 
 def _is_http_url(value: str) -> bool:
+    """Whether ``value`` is an ``http`` or ``https`` URL that Node 24 takes as
+    its proxy. Read as Node reads it (C0 controls and spaces trimmed at both
+    ends; its ``http`` module refuses a CR or LF anywhere), it needs a host
+    Node accepts (an IPv6 address in brackets, with no zone; else an ASCII
+    name, an IPv4 address when the last label is a number) and a port from 1
+    to 65535 if any; no ``\\`` (Node reads it as ``/``), path, query or
+    fragment (undici refuses them; a ``#``, ``?`` or ``/`` in the user name or
+    password makes one); and ``%`` escapes that decode as UTF-8 (undici
+    decodes the user name and password)."""
+    import ipaddress
     import urllib.parse
 
+    if "\r" in value or "\n" in value:
+        return False
+    value = value.strip(_URL_TRIM)
+    if "\\" in value or re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return False
     try:
+        urllib.parse.unquote(value, errors="strict")
         parts = urllib.parse.urlsplit(value)
-        return parts.scheme.lower() in ("http", "https") and bool(parts.hostname)
+        host = urllib.parse.unquote(parts.hostname or "")
+        if parts.netloc.rpartition("@")[2].startswith("["):
+            ipaddress.IPv6Address(host)
+            bad_host = "%" in host
+        else:
+            last = host.rstrip(".").rpartition(".")[2]
+            if last.isdigit() or last[:2].lower() == "0x":
+                ipaddress.IPv4Address(host.rstrip("."))
+            bad_host = (
+                not host or not host.isascii() or bool(_FORBIDDEN_HOST.search(host))
+            )
+        return (
+            parts.scheme.lower() in ("http", "https")
+            and not bad_host
+            and parts.port != 0
+            and parts.path in ("", "/")
+            and not parts.query
+            and not parts.fragment
+        )
     except ValueError:
         return False
 

@@ -940,7 +940,28 @@ def test_bundled_runner_gives_the_private_node_the_proxy_switch(
     assert ("NODE_USE_ENV_PROXY" in captured["env"]) is private
     assert ("NODE_USE_SYSTEM_CA" in captured["env"]) is private
     if private:
-        assert captured["env"]["NO_PROXY"] == "localhost,127.0.0.1,::1"
+        assert captured["env"]["NO_PROXY"] == "localhost,127.0.0.1,::1,[::1]"
+
+
+def test_bundled_runner_keeps_the_users_proxy_switch(monkeypatch, tmp_path):
+    from EvoScientist.setup import node as setup_node
+
+    node = _bundled_runner_files(tmp_path)
+    captured = {}
+
+    def fake_popen(argv, env, **_kw):
+        captured["env"] = env
+        return _DoneProc()
+
+    monkeypatch.setattr(setup_node, "is_private", lambda _exe: True)
+    monkeypatch.setattr(lm.subprocess, "Popen", fake_popen)
+    env = {
+        "PATH": "p",
+        "HTTPS_PROXY": "http://proxy.example:3128",
+        "NODE_USE_ENV_PROXY": "0",
+    }
+    lm.BundledWebUIRunner(app_dir=tmp_path, node_exe=node).start(_cfg(), env)
+    assert captured["env"]["NODE_USE_ENV_PROXY"] == "0"
 
 
 def test_bundled_runner_preflight_missing_node(tmp_path):

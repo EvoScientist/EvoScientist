@@ -225,6 +225,7 @@ class TestBuildConnections:
             "CURL_CA_BUNDLE",
             "NODE_EXTRA_CA_CERTS",
             "NODE_USE_SYSTEM_CA",
+            "NODE_USE_ENV_PROXY",
         ):
             monkeypatch.delenv(var, raising=False)
         config = {
@@ -278,7 +279,13 @@ class TestBuildConnections:
             setup_node, "configured_npm_registry", lambda _e, _x: state["registry"]
         )
         monkeypatch.setattr(setup_node, "is_private", lambda _c: state["private"])
-        for name in ("http_proxy", "https_proxy", "no_proxy", "node_use_system_ca"):
+        for name in (
+            "http_proxy",
+            "https_proxy",
+            "no_proxy",
+            "node_use_system_ca",
+            "node_use_env_proxy",
+        ):
             monkeypatch.delenv(name, raising=False)
             monkeypatch.delenv(name.upper(), raising=False)
         return state
@@ -318,7 +325,7 @@ class TestBuildConnections:
         env = _build_connections(config)["fs"]["env"]
         assert env["NODE_USE_ENV_PROXY"] == "1"
         assert env["NODE_USE_SYSTEM_CA"] == "1"
-        assert env["NO_PROXY"] == "localhost,127.0.0.1,::1"
+        assert env["NO_PROXY"] == "localhost,127.0.0.1,::1,[::1]"
 
     def test_an_unresolved_npx_asks_no_npm_for_a_registry(
         self, monkeypatch, node_rules, tmp_path
@@ -351,6 +358,16 @@ class TestBuildConnections:
         config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
         env = _build_connections(config)["fs"]["env"]
         assert env["NODE_USE_SYSTEM_CA"] == "0"
+
+    def test_private_npx_server_keeps_the_users_proxy_switch(
+        self, monkeypatch, node_rules
+    ):
+        node_rules["private"] = True
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        monkeypatch.setenv("NODE_USE_ENV_PROXY", "0")
+        config = {"fs": {"transport": "stdio", "command": "npx", "args": []}}
+        env = _build_connections(config)["fs"]["env"]
+        assert env["NODE_USE_ENV_PROXY"] == "0"
 
     def test_server_env_wins_over_the_node_rules(self, monkeypatch, node_rules):
         node_rules.update(mirror="cn", private=True)
