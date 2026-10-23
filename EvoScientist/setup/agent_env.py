@@ -3,19 +3,20 @@
 :func:`agent_shell_overrides` starts from the research environment's
 overrides (its ``python`` first, ``VIRTUAL_ENV``) and adds the Node rules:
 
-- the private Node goes to the end of ``PATH`` when a usable Node of the
-  user's own is on it, so a Node installed later (for example with nvm) wins
-  inside the user's projects. The CLI's own children (``npx`` MCP servers,
-  ``langgraph dev``) keep the private Node first, as
-  :func:`~EvoScientist.setup.node.activate_runtime` set it, until the next
-  ``ensure_node()`` (the WebUI launcher's, ``EvoSci setup``) finds the user's
-  Node and drops the private record. With no usable Node of the user's, the
-  private one stays first: the one that was there is the reason EvoScientist
-  installed its own. It also stays first when ``PATH`` searches the working
-  directory (an empty or relative entry), which would otherwise come before
-  it. It then also gets ``NODE_USE_SYSTEM_CA=1``, as the
-  private Node's other children do, so ``npx`` trusts a certificate that only
-  the system store holds;
+- the private Node goes to the end of ``PATH`` when it is the first ``node``
+  there and a usable Node of the user's own is on it, so a Node installed
+  later (for example with nvm) wins inside the user's projects. This is
+  decided from ``PATH``, not from the private record: the CLI's own children
+  (``npx`` MCP servers, ``langgraph dev``) keep the private Node first, as
+  :func:`~EvoScientist.setup.node.activate_runtime` set it, until a start
+  after an ``ensure_node()`` (the WebUI launcher's, ``EvoSci setup``) found
+  the user's Node and dropped the record. With no usable Node of the user's,
+  the private one stays first: the one that was there is the reason
+  EvoScientist installed its own. It also stays first when ``PATH`` searches
+  the working directory (an empty or relative entry) before the user's Node,
+  which would otherwise come before it. It then also gets
+  ``NODE_USE_SYSTEM_CA=1``, as the private Node's other children do, so
+  ``npx`` trusts a certificate that only the system store holds;
 - under ``mirror: cn``, ``npx`` (``find-skills``) and ``npm`` use npmmirror
   unless the user configured a registry.
 """
@@ -30,24 +31,17 @@ from ._install import clean_path_entry, which_on_path
 
 
 @functools.cache
-def _user_node_usable() -> bool:
-    """Whether a Node outside our tools dir passes the checks a system Node
-    must pass to be used (``node.ensure_node``). Asked once per process: it
-    runs ``node --version``."""
+def _user_node_dir() -> str | None:
+    """The folder of a Node outside our tools dir that passes the checks a
+    system Node must pass to be used (``node.ensure_node``), as :class:`Path`
+    spells it and case-folded, or None. Asked once per process: it runs
+    ``node --version``."""
     from .node import _system_node
 
-    return _system_node() is not None
-
-
-def _private_node_dir() -> str | None:
-    """The recorded private Node's folder, as :func:`activate_runtime` puts it
-    on ``PATH`` (cleaned and case-folded), or None without a record."""
-    from .node import _bin_dir, _read_record
-
-    record = _read_record()
-    if record is None:
+    system = _system_node()
+    if system is None:
         return None
-    return os.path.normcase(clean_path_entry(str(_bin_dir(Path(record["path"])))))
+    return os.path.normcase(clean_path_entry(str(system.path.parent)))
 
 
 def _node_dirs_last(path: str, ours_dir: str) -> str:
@@ -61,13 +55,16 @@ def _node_dirs_last(path: str, ours_dir: str) -> str:
     return os.pathsep.join(others + ours)
 
 
-def _searches_the_current_directory(path: str) -> bool:
-    """Whether ``path`` has an entry that resolves against the working
-    directory: a relative one, or on POSIX an empty one (``a::b``). Moving the
-    private Node behind it would let a ``node`` in the agent's workspace win.
-    Windows ignores empty entries, and its ``PATH`` often ends with one."""
+def _searches_the_current_directory(path: str, user_dir: str) -> bool:
+    """Whether ``path`` has an entry before ``user_dir`` that resolves against
+    the working directory: a relative one, or on POSIX an empty one
+    (``a::b``). A ``node`` in the agent's workspace would then win over the
+    user's. Windows ignores empty entries, and its ``PATH`` often ends with
+    one."""
     for entry in path.split(os.pathsep):
         directory = clean_path_entry(entry)
+        if directory and os.path.normcase(str(Path(directory))) == user_dir:
+            return False
         if directory and not os.path.isabs(directory):
             return True
         if not directory and os.name != "nt":
@@ -87,12 +84,13 @@ def agent_shell_overrides() -> dict[str, str] | None:
     overrides = dict(research_env_overrides() or {})
     env = {**os.environ, **overrides}
     path = env.get("PATH", "")
-    ours_dir = _private_node_dir()
-    if ours_dir is not None and not _searches_the_current_directory(path):
+    node = which_on_path("node", path=path) if path else None
+    if node is not None and is_private(node) and (user_dir := _user_node_dir()):
+        ours_dir = os.path.normcase(clean_path_entry(os.path.dirname(node)))
         reordered = _node_dirs_last(path, ours_dir)
-        if reordered != path and _user_node_usable():
+        if not _searches_the_current_directory(reordered, user_dir):
             overrides["PATH"] = env["PATH"] = reordered
-    node = which_on_path("node", path=env["PATH"]) if path else None
+            node = which_on_path("node", path=reordered)
     if node is not None:
         registry = npm_registry_override(env, Path(node))
         if registry is not None:

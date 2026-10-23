@@ -27,14 +27,15 @@ def setup(tmp_path, monkeypatch):
     off; no research environment; no NODE_USE_SYSTEM_CA of the user's."""
     install = tools_dir() / "node-v24.21.0"
     private = _node_dir(node._bin_dir(install))
-    monkeypatch.setattr(node, "_read_record", lambda: {"path": str(install)})
+    node._write_record("24.21.0", install)
     user = _node_dir(tmp_path / "nvm" / "v22" / "bin")
+    system = node.NodeInfo("system", "22.12.0", user / "node")
     monkeypatch.setenv("PATH", os.pathsep.join([str(private), str(user)]))
     monkeypatch.delenv("NODE_USE_SYSTEM_CA", raising=False)
     state = {"usable": True, "mirror": "default", "registry": None, "asked": []}
-    agent_env._user_node_usable.cache_clear()
+    agent_env._user_node_dir.cache_clear()
     monkeypatch.setattr(
-        node, "_system_node", lambda: object() if state["usable"] else None
+        node, "_system_node", lambda: system if state["usable"] else None
     )
     monkeypatch.setattr(node, "configured_mirror", lambda: state["mirror"])
 
@@ -44,8 +45,8 @@ def setup(tmp_path, monkeypatch):
 
     monkeypatch.setattr(node, "configured_npm_registry", configured)
     monkeypatch.setattr(research_env, "research_env_overrides", lambda: None)
-    yield {"private": str(private), "user": str(user), "state": state}
-    agent_env._user_node_usable.cache_clear()
+    yield {"private": str(private), "user": str(user), "system": system, "state": state}
+    agent_env._user_node_dir.cache_clear()
 
 
 def test_private_node_goes_last_when_the_user_has_a_usable_node(setup):
@@ -53,6 +54,14 @@ def test_private_node_goes_last_when_the_user_has_a_usable_node(setup):
     overrides = agent_env.agent_shell_overrides()
     assert overrides["PATH"].split(os.pathsep) == [setup["user"], setup["private"]]
     assert os.environ["PATH"] == before
+
+
+def test_private_node_goes_last_after_ensure_node_dropped_its_record(setup):
+    """The private folder stays first on this process's PATH without a record."""
+    node.ensure_node()
+    assert node._read_record() is None
+    overrides = agent_env.agent_shell_overrides()
+    assert overrides["PATH"].split(os.pathsep) == [setup["user"], setup["private"]]
 
 
 @pytest.mark.parametrize(
@@ -75,6 +84,33 @@ def test_private_node_stays_first_when_path_searches_the_workspace(
     path = os.pathsep.join([setup["private"], extra, setup["user"]])
     monkeypatch.setenv("PATH", path)
     assert "PATH" not in (agent_env.agent_shell_overrides() or {})
+
+
+@pytest.mark.parametrize("extra", ["bin", ""])
+def test_private_node_goes_last_when_the_users_node_comes_before_the_workspace(
+    setup, monkeypatch, extra
+):
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join([setup["private"], setup["user"], extra])
+    )
+    overrides = agent_env.agent_shell_overrides()
+    assert overrides["PATH"].split(os.pathsep) == [
+        setup["user"],
+        extra,
+        setup["private"],
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cleans PATH entries")
+@pytest.mark.parametrize("sep", ["/./", "//"])
+def test_private_node_goes_last_whatever_the_spelling_of_the_users_folder(
+    setup, monkeypatch, sep
+):
+    head, tail = os.path.split(setup["user"])
+    spelled = head + sep + tail
+    monkeypatch.setenv("PATH", os.pathsep.join([setup["private"], spelled, ""]))
+    overrides = agent_env.agent_shell_overrides()
+    assert overrides["PATH"].split(os.pathsep) == [spelled, "", setup["private"]]
 
 
 def test_private_node_stays_first_when_the_users_node_was_rejected(setup):
@@ -142,16 +178,17 @@ def test_a_registry_the_user_set_wins_under_cn(setup):
 def test_nothing_to_change_without_a_private_node(tmp_path, monkeypatch):
     user = _node_dir(tmp_path / "usr" / "bin")
     monkeypatch.setenv("PATH", str(user))
-    monkeypatch.setattr(node, "_read_record", lambda: None)
     monkeypatch.setattr(node, "configured_mirror", lambda: "default")
     monkeypatch.setattr(research_env, "research_env_overrides", lambda: None)
-    agent_env._user_node_usable.cache_clear()
+    agent_env._user_node_dir.cache_clear()
     assert agent_env.agent_shell_overrides() is None
 
 
 def test_the_usable_node_check_runs_once_per_process(setup, monkeypatch):
     calls: list[int] = []
-    monkeypatch.setattr(node, "_system_node", lambda: calls.append(1) or object())
+    monkeypatch.setattr(
+        node, "_system_node", lambda: calls.append(1) or setup["system"]
+    )
     agent_env.agent_shell_overrides()
     agent_env.agent_shell_overrides()
     assert calls == [1]
