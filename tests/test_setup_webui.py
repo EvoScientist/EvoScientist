@@ -854,7 +854,13 @@ def test_probe_env_matches_the_launcher_env(monkeypatch, tmp_path):
     from EvoScientist.deploy import launcher as lm
     from EvoScientist.setup import node as setup_node
 
-    for name in ("http_proxy", "https_proxy", "no_proxy", "node_use_system_ca"):
+    for name in (
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "node_use_system_ca",
+        "node_use_env_proxy",
+    ):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.upper(), raising=False)
     monkeypatch.setattr(setup_node, "is_private", lambda _exe: True)
