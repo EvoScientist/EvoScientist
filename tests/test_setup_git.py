@@ -79,9 +79,11 @@ class FakeRun:
 class FakeNet:
     def __init__(self) -> None:
         self.urls: list[str] = []
+        self.hints: list[bool] = []
         self.data = DATA
 
-    def download(self, url, dest: Path, progress=None) -> str:
+    def download(self, url, dest: Path, progress=None, *, cn_hint=False) -> str:
+        self.hints.append(cn_hint)
         self.urls.append(url)
         dest.write_bytes(self.data)
         if progress:
@@ -374,6 +376,12 @@ def test_cn_mirror_downloads_from_npmmirror(env):
     assert env["net"].urls == [
         f"https://registry.npmmirror.com/-/binary/git-for-windows/{git.GIT_TAG}/{ASSET}",
     ]
+
+
+@pytest.mark.parametrize(("mirror", "hint"), [("default", True), ("cn", False)])
+def test_download_errors_name_cn_only_when_the_mirror_is_off(env, mirror, hint):
+    git.ensure_git(mirror)
+    assert env["net"].hints == [hint]
 
 
 def test_sfx_process_is_always_closed(env):

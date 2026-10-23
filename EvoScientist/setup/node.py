@@ -39,7 +39,7 @@ from ._install import (
     which_in,
     which_on_path,
 )
-from .download import download, fetch_text, verify_sha256_from_sums
+from .download import download
 from .protocol import (
     Emitter,
     ProgressThrottle,
@@ -64,18 +64,19 @@ NPM_REGISTRIES = {"cn": "https://registry.npmmirror.com"}
 
 _OS = {"darwin": "darwin", "linux": "linux", "win32": "win"}
 _ARCH = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}
-# Node publishes .tar.xz for macOS / Linux and .zip for Windows. The glibc
-# Linux builds do not run on musl (Alpine); nodejs.org publishes a musl build
-# for x64 only (from 24.20.0).
-_SUPPORTED = {
-    "darwin-arm64",
-    "darwin-x64",
-    "linux-x64",
-    "linux-arm64",
-    "linux-x64-musl",
-    "win-x64",
-    "win-arm64",
+# SHA-256 of each supported platform's archive (.tar.xz for macOS / Linux,
+# .zip for Windows), from the release's SHASUMS256.txt; npmmirror serves the
+# same files. Update together with NODE_VERSION.
+NODE_SHA256 = {
+    "darwin-arm64": "6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe",
+    "darwin-x64": "0ae5a24c24bb7d015cd816c5036b3f90f2945aa872fcf54e58da054753b3a299",
+    "linux-x64": "fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6",
+    "linux-arm64": "6ad1325edbdb5649c379b75a237147a666c95d4f9ae8d340fef2d1575d289ad2",
+    "win-x64": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
 }
+# The official Linux builds need glibc 2.28 or newer (Node's BUILDING.md).
+MIN_GLIBC = (2, 28)
+_TRY_YOUR_OWN = "Install Node.js 20.9 or newer yourself and run `EvoSci setup` again."
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)")
 
@@ -127,31 +128,55 @@ def _node_exe(install_dir: Path) -> Path:
     return _bin_dir(install_dir) / ("node.exe" if os.name == "nt" else "node")
 
 
-def _is_musl() -> bool:
-    """True on a musl-based Linux (e.g. Alpine).
-
-    Decided by the running interpreter's libc first: Debian and Ubuntu install
-    the musl loader with their ``musl`` package on a glibc system, where the
-    glibc build is the one that runs. The loader check covers the musl side,
-    where ``libc_ver()`` reports nothing.
-    """
-    if sys.platform != "linux" or platform.libc_ver()[0] == "glibc":
-        return False
-    return any(Path("/lib").glob("ld-musl-*.so.1"))
+def _glibc_version() -> tuple[int, int] | None:
+    """The C library's glibc version, or None when there is none (e.g. musl)."""
+    try:
+        text = os.confstr("CS_GNU_LIBC_VERSION")
+    except (AttributeError, OSError, ValueError):
+        return None
+    match = re.match(r"glibc (\d+)\.(\d+)", text or "")
+    return (int(match[1]), int(match[2])) if match else None
 
 
 def platform_id() -> str:
-    """The Node archive platform for this machine, e.g. ``linux-x64``."""
+    """The Node archive platform for this machine, e.g. ``linux-x64``.
+
+    Raises ``unsupported_platform`` before any download where the official
+    builds do not run or are not offered: Windows on arm64, a Linux without
+    glibc (musl, e.g. Alpine) and glibc older than :data:`MIN_GLIBC`. A system
+    Node is looked for first, so it is still used there.
+    """
+    machine = platform.machine()
     os_id = _OS.get(sys.platform)
-    arch = _ARCH.get(platform.machine().lower())
-    plat = f"{os_id}-{arch}"
-    if os_id == "linux" and _is_musl():
-        plat += "-musl"
-    if os_id is None or arch is None or plat not in _SUPPORTED:
-        libc = " (musl)" if plat.endswith("-musl") else ""
+    arch = _ARCH.get(machine.lower())
+    if os_id == "win" and arch == "arm64":
         raise StageError(
             "unsupported_platform",
-            f"No Node.js build for {sys.platform} / {platform.machine()}{libc}.",
+            "Windows on arm64 is not supported: no Node.js 20.9 or newer with npx "
+            f"was found on PATH, and the private Node is x64 only. {_TRY_YOUR_OWN}",
+        )
+    if os_id == "linux":
+        glibc = _glibc_version()
+        if glibc is None:
+            raise StageError(
+                "unsupported_platform",
+                "This Linux has no glibc (musl-based systems such as Alpine are "
+                "not supported), so the official Node.js builds do not run. "
+                "Install Node.js 20.9 or newer yourself, e.g. `apk add nodejs "
+                "npm` on Alpine, and run `EvoSci setup` again.",
+            )
+        if glibc < MIN_GLIBC:
+            found, need = (".".join(map(str, v)) for v in (glibc, MIN_GLIBC))
+            raise StageError(
+                "unsupported_platform",
+                f"This Linux has glibc {found}; the official Node.js builds need "
+                f"glibc {need} or newer. {_TRY_YOUR_OWN}",
+            )
+    plat = f"{os_id}-{arch}"
+    if os_id is None or arch is None or plat not in NODE_SHA256:
+        raise StageError(
+            "unsupported_platform",
+            f"No Node.js build for {sys.platform} / {machine}. {_TRY_YOUR_OWN}",
         )
     return plat
 
@@ -278,21 +303,26 @@ def _install(mirror: str, report: ProgressFn) -> NodeInfo:
     source = SOURCES.get(mirror, SOURCES["default"])
     filename = archive_name(plat)
     base_url = f"{source}/v{NODE_VERSION}"
+    expected = NODE_SHA256[plat]
     root = tools_dir()
     final = root / f"node-v{NODE_VERSION}"
 
     tmp = Path(tempfile.mkdtemp(prefix=".node-", dir=root))
     try:
         report(0.05, f"Downloading Node {NODE_VERSION}")
-        sums = fetch_text(f"{base_url}/SHASUMS256.txt")
         archive = tmp / filename
         actual = download(
             f"{base_url}/{filename}",
             archive,
             lambda f: report(0.05 + 0.8 * f, f"Downloading Node {NODE_VERSION}"),
+            cn_hint=mirror != "cn",
         )
         report(0.86, "Verifying checksum")
-        verify_sha256_from_sums(actual, sums, filename)
+        if actual.lower() != expected:
+            raise StageError(
+                "checksum_mismatch",
+                f"{filename} sha256 {actual} does not match the pinned {expected}.",
+            )
 
         report(0.9, "Unpacking")
         unpack = tmp / "unpack"

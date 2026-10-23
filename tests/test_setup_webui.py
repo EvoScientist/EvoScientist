@@ -22,6 +22,13 @@ from EvoScientist.setup.protocol import ERROR_CODES, StageError
 REG = "https://registry.npmjs.org"
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_pause(monkeypatch):
+    from EvoScientist.setup import download
+
+    monkeypatch.setattr(download, "_RETRY_PAUSES", (0, 0, 0))
+
+
 def _tarball(version: str, *, name: str = webui.PACKAGE, extra=()) -> bytes:
     """An npm-style tarball: ``package/package.json`` + ``package/dist/server.js``."""
     buf = io.BytesIO()
@@ -51,6 +58,7 @@ class FakeRegistry:
     """Serves metadata and tarballs; records requested URLs."""
 
     def __init__(self, versions: dict[str, bytes]) -> None:
+        self.hints: list[bool] = []
         self.tarballs = {f"{REG}/webui-{v}.tgz": data for v, data in versions.items()}
         self.metadata = {
             "versions": {
@@ -63,13 +71,15 @@ class FakeRegistry:
         self.urls: list[str] = []
         self.offline = False
 
-    def fetch_metadata(self, registry: str) -> dict:
+    def fetch_metadata(self, registry: str, *, cn_hint: bool = False) -> dict:
+        self.hints.append(cn_hint)
         self.urls.append(registry)
         if self.offline:
             raise StageError("download_failed", f"Could not read from {registry}")
         return self.metadata
 
-    def download(self, url: str, dest: Path, progress=None) -> str:
+    def download(self, url: str, dest: Path, progress=None, *, cn_hint=False) -> str:
+        self.hints.append(cn_hint)
         self.urls.append(url)
         data = self.tarballs[url]
         dest.write_bytes(data)
@@ -164,6 +174,23 @@ def test_registry_priority(monkeypatch, tmp_path, user, mirror, expected):
     assert webui.registry_url(mirror, tmp_path / "node") == expected
 
 
+@pytest.mark.parametrize(
+    ("mirror", "user", "hint"),
+    [
+        ("default", None, True),
+        ("cn", None, False),
+        ("default", "https://corp.example/npm/", False),
+    ],
+)
+def test_download_errors_name_cn_only_for_npmjs(env, monkeypatch, mirror, user, hint):
+    """No ``--cn`` hint under the mirror, or for a registry the user chose."""
+    from EvoScientist.setup import node
+
+    monkeypatch.setattr(node, "configured_npm_registry", lambda e, x: user)
+    webui.ensure_webui(env["node"], mirror)
+    assert env["reg"].hints == [hint, hint]
+
+
 class _Resp(io.BytesIO):
     def __enter__(self):
         return self
@@ -179,7 +206,7 @@ def test_fetch_metadata_sends_the_abbreviated_accept_header(monkeypatch):
         seen["url"], seen["accept"] = request.full_url, request.get_header("Accept")
         return _Resp(json.dumps({"versions": {"0.3.0": {}}}).encode())
 
-    monkeypatch.setattr(webui.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(webui, "open_url", urlopen)
     assert webui.fetch_metadata(REG)["versions"] == {"0.3.0": {}}
     assert seen["url"] == f"{REG}/@evoscientist%2Fwebui"
     assert seen["accept"].startswith("application/vnd.npm.install-v1+json")
@@ -198,7 +225,7 @@ def test_fetch_metadata_http_errors_name_the_registry(monkeypatch, status, words
     def urlopen(request, timeout):
         raise urllib.error.HTTPError(request.full_url, status, "x", {}, None)
 
-    monkeypatch.setattr(webui.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(webui, "open_url", urlopen)
     with pytest.raises(StageError) as exc:
         webui.fetch_metadata("https://corp.example/npm")
     assert exc.value.code == "download_failed"
@@ -215,10 +242,53 @@ def test_fetch_metadata_network_error_is_download_failed(monkeypatch, error):
             raise http.client.IncompleteRead(b'{"versions": {"0.3', 4982)
         raise urllib.error.URLError(error)
 
-    monkeypatch.setattr(webui.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(webui, "open_url", urlopen)
     with pytest.raises(StageError) as exc:
         webui.fetch_metadata(REG)
     assert exc.value.code == "download_failed"
+
+
+def test_fetch_metadata_retries_a_server_error(monkeypatch):
+    calls: list[int] = []
+
+    def urlopen(request, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
+        return _Resp(json.dumps({"versions": {"0.3.0": {}}}).encode())
+
+    monkeypatch.setattr(webui, "open_url", urlopen)
+    assert webui.fetch_metadata(REG)["versions"] == {"0.3.0": {}}
+    assert len(calls) == 2
+
+
+def test_fetch_metadata_that_cannot_connect_fails_at_once(monkeypatch):
+    from EvoScientist.setup.download import NotConnected
+
+    calls: list[int] = []
+
+    def urlopen(request, timeout):
+        calls.append(1)
+        raise NotConnected("registry.npmjs.org", ConnectionRefusedError("refused"))
+
+    monkeypatch.setattr(webui, "open_url", urlopen)
+    with pytest.raises(StageError) as exc:
+        webui.fetch_metadata(REG)
+    assert exc.value.code == "download_failed"
+    assert len(calls) == 1
+
+
+def test_fetch_metadata_names_no_mirror_when_the_proxy_is_down(monkeypatch):
+    from EvoScientist.setup.download import NotConnected
+
+    def urlopen(request, timeout):
+        raise NotConnected("registry.npmjs.org", ConnectionRefusedError(), proxy="p:1")
+
+    monkeypatch.setattr(webui, "open_url", urlopen)
+    with pytest.raises(StageError) as exc:
+        webui.fetch_metadata(REG, cn_hint=True)
+    assert "the proxy p:1" in exc.value.message
+    assert "--cn" not in exc.value.message
 
 
 # --------------------------------------------------------------------------- #
