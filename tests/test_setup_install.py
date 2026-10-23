@@ -141,6 +141,18 @@ def test_prepend_to_path_drops_other_spellings_of_the_entry(
     assert os.environ["PATH"].split(os.pathsep) == [str(folder), other]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_prepend_to_path_drops_the_folder_a_link_points_to(tmp_path, monkeypatch):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    other = str(tmp_path / "other")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(real), other]))
+    _install.prepend_to_path(link)
+    assert os.environ["PATH"].split(os.pathsep) == [str(link), other]
+
+
 def test_which_in_needs_the_execute_bit_on_posix(tmp_path):
     if os.name == "nt":
         pytest.skip("Windows has no execute bit")
@@ -154,6 +166,11 @@ def test_which_in_tries_pathext_on_windows(tmp_path, windows_lookup):
     (tmp_path / "npx.cmd").write_text("")
     assert _install.which_in("npx", tmp_path) == str(tmp_path / "npx.cmd")
     assert _install.which_in("npm", tmp_path) is None
+
+
+def test_which_in_takes_a_name_that_already_has_its_extension(tmp_path, windows_lookup):
+    (tmp_path / "npx.cmd").write_text("")
+    assert _install.which_in("npx.cmd", tmp_path) == str(tmp_path / "npx.cmd")
 
 
 def test_which_in_treats_an_empty_pathext_as_unset(
