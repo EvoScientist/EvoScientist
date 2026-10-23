@@ -153,6 +153,19 @@ class TestResolveCommand:
         monkeypatch.setenv("PATH", os.pathsep.join([".", str(on_path)]))
         assert Path(_resolve_command("npx")).parent == on_path
 
+    def test_node_command_with_a_folder_part_is_not_looked_up_on_path(
+        self, tmp_path, monkeypatch
+    ):
+        """``node_modules/.bin/npx`` names a file, not a program on PATH."""
+        on_path = tmp_path / "bin"
+        _fake_npx(on_path / "node_modules" / ".bin")
+        _fake_npx(tmp_path / "node_modules" / ".bin")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PATH", str(on_path))
+        name = "npx.cmd" if os.name == "nt" else "npx"
+        command = f"node_modules/.bin/{name}"
+        assert _resolve_command(command) == command
+
     def test_not_found_returns_original(self, monkeypatch):
         """Returns the original command when not found anywhere (let OS report the error)."""
         monkeypatch.setattr("shutil.which", lambda _: None)
@@ -2751,6 +2764,25 @@ class TestEnsureNodeForStdio:
             {"fs": {"transport": "stdio", "command": f"node_modules/.bin/{name}"}}
         )
         assert calls == {"ensure": 0, "activate": 0}
+
+    def test_a_command_with_its_windows_extension_is_found(
+        self, monkeypatch, calls, tmp_path
+    ):
+        """``command: npx.cmd`` names the ``npx.cmd`` on PATH."""
+        from EvoScientist.mcp import client as mcp_client
+        from EvoScientist.setup import _install
+
+        monkeypatch.setattr(_install, "_WINDOWS", True)
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        nodejs = tmp_path / "nodejs"
+        nodejs.mkdir()
+        (nodejs / "npx.cmd").write_text("")
+        monkeypatch.setenv("PATH", str(nodejs))
+        mcp_client._ensure_node_for_stdio(
+            {"fs": {"transport": "stdio", "command": "npx.cmd"}}
+        )
+        assert calls == {"ensure": 0, "activate": 0}
+        assert mcp_client._resolve_command("npx.cmd") == str(nodejs / "npx.cmd")
 
     @pytest.mark.parametrize(
         "server",
