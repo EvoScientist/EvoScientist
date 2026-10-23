@@ -364,7 +364,7 @@ def _download_once(
             # Drop whatever an earlier attempt wrote past what was hashed.
             fh.seek(offset)
             fh.truncate()
-        with fh:
+        try:
             while chunk := resp.read(_CHUNK):
                 with _local_io(dest):
                     fh.write(chunk)
@@ -372,6 +372,13 @@ def _download_once(
                 partial.done += len(chunk)
                 if progress is not None and partial.total:
                     progress(partial.done / partial.total)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                fh.close()
+            raise
+        # Closing writes out what is still buffered, so it can fail like a write.
+        with _local_io(dest):
+            fh.close()
         # http.client's read(amt) returns b"" at an early end of stream
         # instead of raising IncompleteRead.
         if partial.total and partial.done != partial.total:

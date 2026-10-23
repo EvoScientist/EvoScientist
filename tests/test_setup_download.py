@@ -644,6 +644,32 @@ def test_disk_error_while_downloading_is_install_failed(monkeypatch, tmp_path):
     assert ei.value.code == "install_failed"
 
 
+def test_disk_error_when_closing_the_file_is_install_failed(
+    serve, monkeypatch, tmp_path
+):
+    """Buffered bytes are written when the file is closed; that failure is the
+    disk's, not the network's, so it is not retried."""
+    server = serve(ok)
+    real_open = open
+
+    class FullDisk:
+        def __init__(self, *args) -> None:
+            self.fh = real_open(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.fh, name)
+
+        def close(self) -> None:
+            self.fh.close()
+            raise OSError(27, "File too large")
+
+    monkeypatch.setattr(dl, "open", FullDisk, raising=False)
+    with pytest.raises(StageError) as ei:
+        dl.download(server.url, tmp_path / "a")
+    assert ei.value.code == "install_failed"
+    assert server.requests == 1
+
+
 def test_retries_log_a_warning(serve, tmp_path, caplog):
     server = serve(status(503), ok)
     with caplog.at_level("WARNING", logger=dl.__name__):
