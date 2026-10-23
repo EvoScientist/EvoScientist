@@ -261,12 +261,14 @@ class _Partial:
 
 def _resume_offset(resp, partial: _Partial) -> int:
     """Where ``resp``'s body starts: ``partial.done`` for a matching ``206``,
-    else 0 (the server sent the whole file)."""
+    else 0 (the server sent the whole file). When the first reply had no
+    ``Content-Length``, a ``206`` sets ``partial.total`` (its size, or the end
+    of its range when the size is ``*``), so a cut resume is caught."""
     if not partial.done or resp.status != 206:
         return 0
     unit, _, spec = resp.headers.get("Content-Range", "").partition(" ")
     span, _, size = spec.partition("/")
-    start, _, _end = span.partition("-")
+    start, _, end = span.partition("-")
     if (
         unit != "bytes"
         or start != str(partial.done)
@@ -274,6 +276,11 @@ def _resume_offset(resp, partial: _Partial) -> int:
         or (partial.total and size not in (str(partial.total), "*"))
     ):
         raise _Truncated(f"the server resumed with Content-Range {spec!r}")
+    if not partial.total:
+        if size.isdecimal():
+            partial.total = int(size)
+        elif end.isdecimal():
+            partial.total = int(end) + 1
     return partial.done
 
 
