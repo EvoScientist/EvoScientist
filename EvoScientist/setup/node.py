@@ -66,8 +66,8 @@ SOURCES = {
     "default": "https://nodejs.org/dist",
     "cn": "https://cdn.npmmirror.com/binaries/node",
 }
-# npm registry for packages fetched with our `npx` under a mirror; the default
-# mirror leaves npm's own setting alone.
+# npm registry for `npx` / `npm` children under a mirror, unless the user set
+# one; the default mirror leaves npm's own setting alone.
 NPM_REGISTRIES = {"cn": "https://registry.npmmirror.com"}
 
 _OS = {"darwin": "darwin", "linux": "linux", "win32": "win"}
@@ -492,7 +492,8 @@ def activate_runtime() -> Path | None:
 
     Reads ``tools/node.json`` only (no subprocess), so it is cheap enough for
     CLI start-up. Child processes - the WebUI launcher, ``npx`` MCP servers,
-    ``langgraph dev`` and the agent's shell - inherit the change. Returns the
+    ``langgraph dev`` - inherit the change; the agent's shell moves it last
+    when a usable Node of the user's is on PATH (``agent_env``). Returns the
     directory put on PATH, or None when no private Node is recorded.
     """
     record = _read_record()
@@ -511,27 +512,168 @@ def is_private(exe: str | Path | None) -> bool:
     return exe is not None and is_under(Path(exe), tools_dir())
 
 
+# The user's npm network settings: a company or campus network may need its
+# own registry, proxy or CA certificate, so these reach our Node's npm too.
+NPM_NETWORK_VARS = frozenset(
+    {
+        "npm_config_registry",
+        "npm_config_proxy",
+        "npm_config_https_proxy",
+        "npm_config_noproxy",
+        "npm_config_cafile",
+        "npm_config_ca",
+        "npm_config_strict_ssl",
+    }
+)
+
+
 def node_child_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
     """Copy ``env`` for a child that runs the private ``node`` / ``npm`` / ``npx``.
 
-    With ``private`` set, drops ``npm_config_*`` and ``NODE_OPTIONS`` so a
-    user's global npm settings cannot break our Node. A system Node keeps the
-    user's environment as it is.
+    With ``private`` set, drops ``NODE_OPTIONS`` and the ``npm_config_*``
+    variables other than :data:`NPM_NETWORK_VARS` (names compared without
+    case, as npm does), so a user's global npm settings cannot break our
+    Node. A system Node keeps the user's environment as it is.
     """
     if not private:
         return dict(env)
     return {
         k: v
         for k, v in env.items()
-        if not k.lower().startswith("npm_config_") and k.upper() != "NODE_OPTIONS"
+        if k.upper() != "NODE_OPTIONS"
+        and (not k.lower().startswith("npm_config_") or k.lower() in NPM_NETWORK_VARS)
     }
+
+
+def npm_network_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The :data:`NPM_NETWORK_VARS` set in ``env``, as written there."""
+    return {k: v for k, v in env.items() if k.lower() in NPM_NETWORK_VARS}
+
+
+_PROXY_VARS = ("http_proxy", "https_proxy")
+# Node 24's fetch matches an IPv6 host only in brackets, ``http`` without.
+_LOOPBACK = ("localhost", "127.0.0.1", "::1", "[::1]")
+_URL_TRIM = "".join(map(chr, range(0x21)))
+_FORBIDDEN_HOST = re.compile(r"[\x00-\x20#%/:<>?@\[\\\]^|\x7f]")
+
+
+def node_network_env(env: Mapping[str, str], *, private: bool) -> dict[str, str]:
+    """Variables to add for a private Node child so its own requests get
+    through a company network. Empty for a system Node, which keeps the
+    user's setup as it is (and may be too old to know these variables).
+
+    ``NODE_USE_SYSTEM_CA=1`` (unless the user set it either way) makes Node
+    trust the operating system's certificates on top of its bundled ones, as
+    EvoScientist's Python downloads do: a proxy or firewall that inspects TLS
+    re-signs every site with a company certificate that only the system store
+    holds. :func:`node_child_env` removes ``NODE_OPTIONS``, so a
+    ``--use-system-ca`` set there would not reach the child.
+
+    Node's built-in ``fetch`` (and ``http``) ignore ``HTTPS_PROXY`` unless
+    ``NODE_USE_ENV_PROXY=1`` is set (Node 24). It is set only when every
+    proxy variable that is set (an empty one is not, a blank one is) is a URL
+    Node takes (:func:`_is_http_url`): Node exits at start for a value it
+    refuses (``socks4://``, a malformed URL), and ``http`` ignores
+    ``socks5://`` silently. Loopback then goes into each
+    ``NO_PROXY`` / ``no_proxy`` already set, or ``NO_PROXY`` alone when none
+    is (two names differing only in case would both land in one Windows
+    environment block), so requests to this machine (Next.js calls its own
+    ``localhost`` port) never go to the proxy. A ``NODE_USE_ENV_PROXY`` the
+    user set, in any case, is kept, and loopback is added only while it is
+    ``1``.
+    """
+    if not private:
+        return {}
+    extra: dict[str, str] = {}
+    if not any(k.upper() == "NODE_USE_SYSTEM_CA" for k in env):
+        extra["NODE_USE_SYSTEM_CA"] = "1"
+    proxies = [v for k, v in env.items() if k.lower() in _PROXY_VARS and v]
+    if not proxies or not all(_is_http_url(v) for v in proxies):
+        return extra
+    switch = [v for k, v in env.items() if k.upper() == "NODE_USE_ENV_PROXY"]
+    if not switch:
+        extra["NODE_USE_ENV_PROXY"] = "1"
+    elif "1" not in switch:
+        return extra
+    no_proxy_keys = [k for k in env if k.lower() == "no_proxy"] or ["NO_PROXY"]
+    for key in no_proxy_keys:
+        entries = [e.strip() for e in env.get(key, "").split(",") if e.strip()]
+        extra[key] = ",".join(entries + [h for h in _LOOPBACK if h not in entries])
+    return extra
+
+
+def _is_http_url(value: str) -> bool:
+    """Whether ``value`` is an ``http`` or ``https`` URL that Node 24 takes as
+    its proxy. Read as Node reads it (C0 controls and spaces trimmed at both
+    ends; its ``http`` module refuses a CR or LF anywhere), it needs a host
+    Node accepts (an IPv6 address in brackets, with no zone; else an ASCII
+    name, an IPv4 address when the last label is a number) and a port from 1
+    to 65535 if any; no ``\\`` (Node reads it as ``/``), path, query or
+    fragment (undici refuses them; a ``#``, ``?`` or ``/`` in the user name or
+    password makes one); and ``%`` escapes that decode as UTF-8 (undici
+    decodes the user name and password)."""
+    import ipaddress
+    import urllib.parse
+
+    if "\r" in value or "\n" in value:
+        return False
+    value = value.strip(_URL_TRIM)
+    if "\\" in value or re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return False
+    try:
+        urllib.parse.unquote(value, errors="strict")
+        parts = urllib.parse.urlsplit(value)
+        host = urllib.parse.unquote(parts.hostname or "")
+        if parts.netloc.rpartition("@")[2].startswith("["):
+            ipaddress.IPv6Address(host)
+            bad_host = "%" in host
+        else:
+            last = host.rstrip(".").rpartition(".")[2]
+            if last.isdigit() or last[:2].lower() == "0x":
+                ipaddress.IPv4Address(host.rstrip("."))
+            bad_host = (
+                not host or not host.isascii() or bool(_FORBIDDEN_HOST.search(host))
+            )
+        return (
+            parts.scheme.lower() in ("http", "https")
+            and not bad_host
+            and parts.port != 0
+            and parts.path in ("", "/")
+            and not parts.query
+            and not parts.fragment
+        )
+    except ValueError:
+        return False
+
+
+def npm_registry_override(env: Mapping[str, str], node_exe: Path) -> str | None:
+    """npmmirror for ``npx`` children under ``mirror: cn``, unless the user
+    configured a registry (environment or ``npm config get registry``)."""
+    if configured_mirror() != "cn":
+        return None
+    if configured_npm_registry(env, node_exe) is not None:
+        return None
+    return NPM_REGISTRIES["cn"] + "/"
 
 
 DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org"
 _NPM_CONFIG_TIMEOUT = 10
-# `npm config get registry` per npm executable; it starts a Node process, so
-# ask once per process.
-_npm_config_registry: dict[str, str | None] = {}
+# `npm config get registry` per npm executable and npm config context (see
+# _npm_config_context); it starts a Node process, so ask once per process.
+_npm_config_registry: dict[tuple[str, tuple[tuple[str, str], ...]], str | None] = {}
+
+
+def _npm_config_context(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """What in ``env`` changes npm's answer besides its own files: the
+    ``npm_config_*`` variables and the home folder that holds ``~/.npmrc``."""
+    return tuple(
+        sorted(
+            (k.lower(), v)
+            for k, v in env.items()
+            if k.lower().startswith("npm_config_")
+            or k.lower() in ("home", "userprofile")
+        )
+    )
 
 
 def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | None:
@@ -552,9 +694,10 @@ def configured_npm_registry(env: Mapping[str, str], node_exe: Path) -> str | Non
     npm = which_in("npm", Path(node_exe).parent)
     if npm is None:
         return None
-    if npm not in _npm_config_registry:
-        _npm_config_registry[npm] = _ask_npm_registry(npm, env)
-    return _npm_config_registry[npm]
+    key = (npm, _npm_config_context(env))
+    if key not in _npm_config_registry:
+        _npm_config_registry[key] = _ask_npm_registry(npm, env)
+    return _npm_config_registry[key]
 
 
 def _ask_npm_registry(npm: str, env: Mapping[str, str]) -> str | None:

@@ -250,15 +250,16 @@ def launch(
     ``origin_thread_id`` records the launching CLI session so ``list_all`` can scope to it.
 
     The child gets the same env overrides as the ``execute`` shell
-    (:func:`~EvoScientist.setup.research_env.research_env_overrides`), so a
-    background ``python`` resolves the same interpreter as a foreground one.
+    (:func:`~EvoScientist.setup.agent_env.agent_shell_overrides`), so a
+    background ``python`` or ``node`` resolves the same program as a
+    foreground one.
     """
     from . import agent_shell
-    from .setup.research_env import research_env_overrides
+    from .setup.agent_env import agent_shell_overrides
 
     # PWD as in the execute shell: the folder the job runs in, not a symlink
     # this process was started in.
-    overrides = research_env_overrides()
+    overrides = agent_shell_overrides()
     env = {**os.environ, **(overrides or {}), "PWD": cwd}
     process_id = uuid.uuid4().hex[:8]
     log_dir = Path(cwd) / _BG_DIRNAME

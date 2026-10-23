@@ -436,6 +436,9 @@ _STDIO_FORWARDED_ENV_VARS = (
     "REQUESTS_CA_BUNDLE",
     "CURL_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
+    # Also read by node_network_env(): a user's 0 must not become our 1.
+    "NODE_USE_SYSTEM_CA",
+    "NODE_USE_ENV_PROXY",
 )
 
 
@@ -989,6 +992,39 @@ def _unresolved_node_servers(config: dict[str, Any]) -> list[str]:
     ]
 
 
+def _node_server_env(command: str, env: dict[Any, Any]) -> dict[str, str]:
+    """What a ``node`` / ``npx`` / ``npm`` server gets on top of the forwarded
+    variables: the user's npm network settings, the npmmirror registry under
+    ``mirror: cn`` (unless the user set a registry) and, for our private Node,
+    the system-certificate and proxy switches for Node's own requests. ``env``
+    is what the server gets so far, its ``mcp.yaml`` env included, which still
+    wins over all of it. Only its string keys and values are read: a key with
+    no value in ``mcp.yaml`` loads as None, and fails that server alone.
+    """
+    from ..setup.node import (
+        is_private,
+        node_network_env,
+        npm_network_env,
+        npm_registry_override,
+    )
+
+    env = {k: v for k, v in env.items() if isinstance(k, str) and isinstance(v, str)}
+    extra = npm_network_env(os.environ)
+    # An unresolved command (no npx found) has no folder to read npm from; a
+    # bare name would make the lookup try the current directory. npm reads the
+    # server's environment: a HOME or npm_config_userconfig in mcp.yaml points
+    # it at another .npmrc.
+    registry = (
+        npm_registry_override({**os.environ, **env}, Path(command))
+        if os.path.isabs(command)
+        else None
+    )
+    if registry is not None:
+        extra["npm_config_registry"] = registry
+    extra.update(node_network_env(env, private=is_private(command)))
+    return extra
+
+
 def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Convert YAML config to ``MultiServerMCPClient`` connections format.
 
@@ -1000,15 +1036,18 @@ def _build_connections(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
         transport = server.get("transport", "")
 
         if transport == "stdio":
+            command = _resolve_command(server.get("command", ""))
             conn: dict[str, Any] = {
                 "transport": "stdio",
-                "command": _resolve_command(server.get("command", "")),
+                "command": command,
                 "args": server.get("args", []),
             }
             forwarded = {
                 k: os.environ[k] for k in _STDIO_FORWARDED_ENV_VARS if k in os.environ
             }
             user_env = server.get("env") or {}
+            if Path(command).stem.lower() in _NODE_COMMANDS:
+                forwarded.update(_node_server_env(command, {**forwarded, **user_env}))
             merged = {**forwarded, **user_env}
             if merged:
                 conn["env"] = merged
@@ -1162,8 +1201,11 @@ async def _load_tools(
     # running session stays responsive.
     await asyncio.to_thread(_ensure_node_for_stdio, config)
     unresolved = _unresolved_node_servers(config)
-    connections = _build_connections(
-        {name: server for name, server in config.items() if name not in unresolved}
+    # Off the event loop too: under mirror: cn the first Node server runs
+    # `npm config get registry`.
+    connections = await asyncio.to_thread(
+        _build_connections,
+        {name: server for name, server in config.items() if name not in unresolved},
     )
 
     def _report(event: str, name: str, detail: str = "") -> None:

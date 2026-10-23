@@ -32,7 +32,7 @@ When it finishes, open a new terminal and run `EvoSci onboard`, then `EvoSci`
 
 | bash | PowerShell | What it does |
 |---|---|---|
-| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. Packages that `npx` fetches (MCP servers, the `find-skills` skill) still come from `registry.npmjs.org`; add `registry=https://registry.npmmirror.com/` to `~/.npmrc` to send them to the mirror, which the agent's shell and `npx` MCP servers both read. |
+| `--cn` | `-Cn` | Download from mainland China mirrors: uv from the Tsinghua PyPI mirror, Python from npmmirror, packages from `https://pypi.tuna.tsinghua.edu.cn/simple`, `constraints.txt` from jsDelivr, Node and the WebUI from npmmirror. `EvoSci setup --cn` also saves `mirror: cn`, so later WebUI updates use the mirror too. With `mirror: cn`, packages that `npx` fetches (MCP servers, the `find-skills` skill in the agent's shell) come from npmmirror too, unless you set a registry other than npm's default yourself (`npm_config_registry`, or `registry=` in `~/.npmrc`); to keep `https://registry.npmjs.org/`, set `npm_config_registry` to it. |
 | `--version <ver>` | `-Version <ver>` | Install this release instead of the newest one. 0.3.5 and older cannot be installed this way: they have no `constraints.txt`. |
 | `--no-modify-path` | `-NoModifyPath` | Do not put uv's tool bin directory on PATH. |
 | `--no-setup` | `-NoSetup` | Install the package and stop before `EvoSci setup`. |
@@ -93,10 +93,13 @@ finishes the other stages, and the script then ends with an error although
 EvoScientist itself is installed. Run `EvoSci setup` or the command again;
 that download starts from the beginning.
 
-When `EvoSci setup` installed its own Node.js because none was found, the
-agent's shell keeps finding that one first, also after you install a Node.js
-of your own later (for example with nvm). Run `EvoSci setup` again from a
-terminal where your Node.js 20.9 or newer is on PATH, and it switches to yours.
+When `EvoSci setup` installed its own Node.js because none was found, and you
+later install a Node.js 20.9 or newer of your own (for example with nvm),
+EvoScientist moves to yours when it starts from a terminal where yours is on
+PATH: the agent's shell at once and the WebUI when it starts. MCP servers move
+from the next start after the WebUI started or `EvoSci setup` ran from such a
+terminal. EvoScientist's own Node.js stays in `~/.evoscientist/tools` but is
+no longer used.
 
 A script install pins the exact version, so `uv tool upgrade EvoScientist`
 reports "Nothing to upgrade". Update with `EvoSci update`, which keeps the
@@ -178,11 +181,15 @@ it pointed out to them:
 | `SSL_CERT_FILE` | Python, including EvoScientist's own downloads (`EvoSci setup` on macOS and Linux) |
 | `UV_SYSTEM_CERTS=1` | uv calls that EvoScientist makes later, such as the MCP installer's |
 | `PIP_CERT` | pip |
-| `NODE_EXTRA_CA_CERTS` | Node programs (the WebUI, MCP servers) |
-| `npm_config_cafile` | npm and `npx` in the agent's shell |
+| `NODE_EXTRA_CA_CERTS` | Node programs (the WebUI, MCP servers) on a Node.js of your own |
+| `npm_config_cafile` | npm and `npx`, in the agent's shell and for MCP servers |
 
 Point the file variables at a PEM file that contains your company's
-certificate. MCP servers started with `npx` do not see `npm_config_cafile`:
-put `cafile=` (and `registry`, `proxy` or `strict-ssl` if you need them) in
-`~/.npmrc` or in the server's `env` in `mcp.yaml`, or rely on
-`NODE_EXTRA_CA_CERTS`, which reaches them.
+certificate. The Node.js that `EvoSci setup` installs already trusts the
+operating system's certificates (it runs with `NODE_USE_SYSTEM_CA=1` unless you
+set that variable yourself), so it needs `NODE_EXTRA_CA_CERTS` only for a
+certificate that is not in the system store. MCP servers started with `npx` get
+your `npm_config_cafile`, `npm_config_ca`, `npm_config_strict_ssl`,
+`npm_config_registry`, `npm_config_proxy`, `npm_config_https_proxy` and
+`npm_config_noproxy`; put other npm settings in `~/.npmrc` or in the server's
+`env` in `mcp.yaml`.
