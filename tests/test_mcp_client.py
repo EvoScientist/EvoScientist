@@ -164,7 +164,9 @@ class TestResolveCommand:
         monkeypatch.setenv("PATH", str(on_path))
         name = "npx.cmd" if os.name == "nt" else "npx"
         command = f"node_modules/.bin/{name}"
-        assert _resolve_command(command) == command
+        # The file mcp.yaml names, relative to the current directory; Windows
+        # spells it with a backslash.
+        assert Path(_resolve_command(command)) == Path(command)
 
     def test_not_found_returns_original(self, monkeypatch):
         """Returns the original command when not found anywhere (let OS report the error)."""
