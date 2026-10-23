@@ -37,15 +37,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._install import PolicyBlocked as _PolicyBlocked
 from ._install import (
     atomic_write_text,
     is_under,
     move_into_place,
+    policy_error,
     prepend_to_path,
     remove_stale_temp_dirs,
+    stage_lock,
     tools_dir,
     which_on_path,
 )
+from ._install import is_policy_block as _is_policy_block
+from ._install import kill_tree as _kill_tree
+from ._install import tree_signature as _tree_signature
 from .download import download
 from .protocol import (
     Emitter,
@@ -112,36 +118,8 @@ def _no_window() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-# Windows errors for a program blocked by a code-integrity policy:
-# ERROR_ACCESS_DISABLED_BY_POLICY (AppLocker) and
-# ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION (WDAC).
-_POLICY_WINERRORS = frozenset({1260, 4551})
-
-
-class _PolicyBlocked(Exception):
-    """A Windows policy refused to start ``path``."""
-
-    def __init__(self, path: str) -> None:
-        super().__init__(path)
-        self.path = path
-
-
-def _is_policy_block(exc: OSError) -> bool:
-    return getattr(exc, "winerror", None) in _POLICY_WINERRORS
-
-
 def _policy_error(path: str | Path) -> StageError:
-    """The readable error for a program of ours that a Windows policy blocked.
-
-    ``probe_failed``, and no new download: the same program would be blocked
-    again.
-    """
-    return StageError(
-        "probe_failed",
-        f"A Windows policy (AppLocker or WDAC) blocked {path}. Ask your "
-        f"administrator to allow programs under {tools_dir()}, or install Git "
-        "for Windows and run `EvoSci setup` again.",
-    )
+    return policy_error(path, "install Git for Windows")
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
@@ -344,21 +322,6 @@ def _arch() -> str:
     return arch
 
 
-def _kill_tree(pid: int) -> None:
-    import psutil
-
-    try:
-        proc = psutil.Process(pid)
-        targets = [*proc.children(recursive=True), proc]
-    except psutil.Error:
-        return
-    for target in targets:
-        try:
-            target.kill()
-        except psutil.Error:
-            pass
-
-
 class _HiddenDesktopProcess:
     """A process started on its own desktop, which is never shown.
 
@@ -480,31 +443,6 @@ _WAIT_TIMEOUT = 0x102
 
 def _launch(argv: list[str]) -> _HiddenDesktopProcess:
     return _HiddenDesktopProcess(argv)
-
-
-def _tree_signature(root: Path) -> tuple[int, int]:
-    """(file count, total bytes) under ``root``; changes while files are written.
-
-    Files that vanish or cannot be read mid-walk are skipped: the value only
-    has to differ while the extractor makes progress.
-    """
-    files = size = 0
-    stack = [root]
-    while stack:
-        try:
-            entries = list(os.scandir(stack.pop()))
-        except OSError:
-            continue
-        for entry in entries:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
-                else:
-                    files += 1
-                    size += entry.stat(follow_symlinks=False).st_size
-            except OSError:
-                continue
-    return files, size
 
 
 def _stop(proc: _HiddenDesktopProcess, exe: Path) -> bool:
@@ -691,7 +629,7 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
     """
     report = progress or (lambda _f, _m: None)
     root = tools_dir()
-    from filelock import FileLock
+    lock = root / "git.lock"
 
     try:
         system = _system_git()
@@ -699,7 +637,7 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
             root.mkdir(parents=True, exist_ok=True)
             # Under the lock: a concurrent setup (CLI and desktop app) writes
             # the same record.
-            with FileLock(str(root / "git.lock")):
+            with stage_lock(lock, "Git for Windows", progress):
                 _write_record(system)
             return system
 
@@ -708,7 +646,7 @@ def ensure_git(mirror: str = "default", progress: ProgressFn | None = None) -> G
             return recorded
 
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(root / "git.lock")):
+        with stage_lock(lock, "Git for Windows", progress):
             # Another process may have finished the install while we waited.
             recorded = _recorded_portablegit() or _adopt_installed(root)
             if recorded is not None:

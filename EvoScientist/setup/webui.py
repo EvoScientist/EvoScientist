@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ._install import move_into_place, remove_stale_temp_dirs, tools_dir
+from ._install import move_into_place, remove_stale_temp_dirs, stage_lock, tools_dir
 from .download import (
     _NETWORK_ERRORS,
     NotConnected,
@@ -42,7 +42,7 @@ from .download import (
     with_hint,
     with_retries,
 )
-from .protocol import Emitter, StageError, StageResult, make_event
+from .protocol import Emitter, Heartbeat, StageError, StageResult, make_event
 
 logger = logging.getLogger(__name__)
 
@@ -269,16 +269,19 @@ def verify_integrity(path: Path, dist: Mapping[str, Any], name: str) -> None:
 # --------------------------------------------------------------------------- #
 # Unpack and probe
 # --------------------------------------------------------------------------- #
-def extract_package(archive: Path, dest: Path) -> None:
+def extract_package(
+    archive: Path, dest: Path, tick: Callable[[], None] = lambda: None
+) -> None:
     """Unpack the ``package/`` tree of an npm tarball into ``dest``.
 
     Regular files and directories only: links are skipped (the standalone
     server resolves modules by path), and a member that would land outside
-    ``dest`` fails the install.
+    ``dest`` fails the install. ``tick`` runs before each member.
     """
     dest = dest.resolve()
     with tarfile.open(archive, "r:gz") as tf:
         for member in tf:
+            tick()
             name = member.name.replace("\\", "/")
             if not name.startswith("package/"):
                 continue
@@ -511,7 +514,7 @@ def _set_aside(path: Path) -> bool:
 def _download_into_place(
     version: str,
     dist: Mapping[str, Any],
-    report: ProgressFn,
+    report: Heartbeat,
     node_exe: Path | None,
     *,
     cn_hint: bool = False,
@@ -548,7 +551,7 @@ def _download_into_place(
         report(0.75, "Unpacking")
         unpacked = tmp / "package"
         try:
-            extract_package(archive, unpacked)
+            extract_package(archive, unpacked, report.tick)
         except (tarfile.TarError, EOFError) as exc:
             raise StageError(
                 "download_failed", f"Could not unpack {name}: {exc}"
@@ -631,7 +634,7 @@ def ensure_webui(
     """
     from .node import configured_mirror
 
-    report = progress or (lambda _f, _m: None)
+    report = Heartbeat(progress or (lambda _f, _m: None))
     compat = compat_range()
     recorded = recorded_webui(compat)
     if recorded is not None and not refresh and _staged(_read_record()) is None:
@@ -641,12 +644,10 @@ def ensure_webui(
     if _failed_install is not None:
         raise _failed_install
 
-    from filelock import FileLock
-
     root = webui_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(_lock_path())):
+        with stage_lock(_lock_path(), "the WebUI", progress):
             remove_stale_temp_dirs(root, _TEMP_PREFIX)
             _promote_staged(compat, node_exe, report)
             recorded = recorded_webui(compat)
@@ -741,7 +742,9 @@ def stage_update(node_exe: Path, mirror: str | None = None) -> str | None:
             ):
                 return None
             dist = dist_of(metadata, version)
-            path = _download_into_place(version, dist, lambda _f, _m: None, None)
+            path = _download_into_place(
+                version, dist, Heartbeat(lambda _f, _m: None), None
+            )
             record = _read_record() or record
             if staged is not None and staged.path != path:
                 _set_aside(staged.path)

@@ -68,6 +68,10 @@ class FakeNet:
         return hashlib.sha256(self.data).hexdigest()
 
 
+# A probe result: a Windows policy refuses to start the program.
+BLOCKED = object()
+
+
 class ProbeTable(dict):
     """Fake ``node --version`` results keyed by executable path.
 
@@ -99,12 +103,15 @@ def env(tmp_path, monkeypatch):
     # Pin the fake archive, as NODE_SHA256 pins the real one.
     monkeypatch.setitem(node.NODE_SHA256, PLAT, hashlib.sha256(net.data).hexdigest())
     probes = ProbeTable()
-    # Anything under our tools dir probes as the pinned version by default.
-    monkeypatch.setattr(
-        node,
-        "_probe",
-        lambda exe: probes.get(exe, tuple(map(int, V.split(".")))),
-    )
+
+    def probe(exe):
+        # Anything under our tools dir probes as the pinned version by default.
+        result = probes.get(exe, tuple(map(int, V.split("."))))
+        if result is BLOCKED:
+            raise node.PolicyBlocked(exe)
+        return result
+
+    monkeypatch.setattr(node, "_probe", probe)
     return {"data": data, "net": net, "probes": probes, "tmp": tmp_path}
 
 
@@ -209,7 +216,7 @@ def test_lasting_access_denied_on_move_is_install_failed(env, monkeypatch):
 
 
 def test_disk_error_while_unpacking_is_install_failed(env, monkeypatch):
-    def disk_full(archive, dest):
+    def disk_full(archive, dest, tick=None):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(node, "_extract", disk_full)
@@ -758,3 +765,125 @@ def test_run_stage_returns_done_with_the_node_detail(monkeypatch):
     result = node.run_stage(lambda event: None, "default")
     assert result.status == "done"
     assert result.detail == info.detail()
+
+
+# --------------------------------------------------------------------------- #
+# Heartbeats, lock waits, Windows policy
+# --------------------------------------------------------------------------- #
+def test_unpacking_repeats_its_line_between_members(env, monkeypatch):
+    from EvoScientist.setup import protocol
+
+    monkeypatch.setattr(protocol, "HEARTBEAT_INTERVAL", 0)
+    lines: list[str] = []
+    node.ensure_node("default", lambda _f, message: lines.append(message))
+    assert lines.count("Unpacking") > 1
+
+
+def test_second_install_waits_for_the_first_and_says_so(env, monkeypatch):
+    import threading
+
+    from filelock import FileLock
+
+    from EvoScientist.setup import _install
+
+    monkeypatch.setattr(_install, "HEARTBEAT_INTERVAL", 0.05)
+    tools = env["data"] / "tools"
+    tools.mkdir(parents=True)
+    holder = FileLock(str(tools / "node.lock"))
+    holder.acquire()
+    lines: list[str] = []
+    result = {}
+    waiter = threading.Thread(
+        target=lambda: result.update(
+            info=node.ensure_node("default", lambda _f, m: lines.append(m))
+        )
+    )
+    waiter.start()
+    try:
+        deadline = 50
+        while not lines and deadline:
+            waiter.join(0.05)
+            deadline -= 1
+        # Meanwhile the first install finishes.
+        node._write_record(V, tools / f"node-v{V}")
+    finally:
+        holder.release()
+    waiter.join(10)
+    assert (
+        lines[0]
+        == "Waiting for another EvoScientist process to finish installing Node.js"
+    )
+    assert result["info"].source == "private"
+    assert env["net"].urls == []
+
+
+def test_policy_block_right_after_install_is_probe_failed_and_keeps_the_files(env):
+    final = env["data"] / "tools" / f"node-v{V}"
+    env["probes"][str(node._node_exe(final))] = BLOCKED
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "probe_failed"
+    assert "Windows policy" in ei.value.message
+    assert str(node._node_exe(final)) in ei.value.message
+    assert _record(env["data"]) is None
+    assert node._node_exe(final).exists()
+
+
+def test_blocked_install_is_reported_again_without_a_new_download(env, monkeypatch):
+    final = env["data"] / "tools" / f"node-v{V}"
+    env["probes"][str(node._node_exe(final))] = BLOCKED
+    with pytest.raises(StageError):
+        node.ensure_node("default")
+    monkeypatch.setattr(node, "_failed_install", None)  # a new process
+    env["net"].urls.clear()
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "probe_failed"
+    assert env["net"].urls == []
+
+
+def test_blocked_recorded_node_is_probe_failed_without_a_download(env):
+    info = node.ensure_node("default")
+    env["probes"][str(info.path)] = BLOCKED
+    env["net"].urls.clear()
+    with pytest.raises(StageError) as ei:
+        node.ensure_node("default")
+    assert ei.value.code == "probe_failed"
+    assert env["net"].urls == []
+
+
+def test_blocked_system_node_falls_back_to_the_private_node(env, monkeypatch):
+    exe = _system_node(env, monkeypatch, (22, 0, 0))
+    env["probes"][str(exe)] = BLOCKED
+    assert node.ensure_node("default").source == "private"
+
+
+def test_probe_turns_a_policy_error_into_policy_blocked(monkeypatch):
+    def blocked(*_a, **_k):
+        exc = OSError(13, "This program is blocked by group policy")
+        exc.winerror = 1260
+        raise exc
+
+    monkeypatch.setattr(node.subprocess, "run", blocked)
+    with pytest.raises(node.PolicyBlocked):
+        node._probe(Path("node.exe"))
+
+
+def test_probe_returns_none_for_other_start_errors(monkeypatch):
+    def missing(*_a, **_k):
+        raise FileNotFoundError(2, "not found")
+
+    monkeypatch.setattr(node.subprocess, "run", missing)
+    assert node._probe(Path("node.exe")) is None
+
+
+def test_record_is_written_atomically(env, monkeypatch):
+    written: list[Path] = []
+
+    def atomic_write_text(path, text):
+        written.append(path)
+        _install.atomic_write_text(path, text)
+
+    monkeypatch.setattr(node, "atomic_write_text", atomic_write_text)
+    node.ensure_node("default")
+    assert written == [env["data"] / "tools" / "node.json"]

@@ -1,4 +1,6 @@
-"""Install helpers shared by the stages that unpack a tool into ``<DATA_DIR>/tools``."""
+"""Helpers shared by the setup stages: the tools dir and moving an unpacked
+tool into ``<DATA_DIR>/tools``, PATH lookups, stage locks, watching and
+stopping a process tree, and Windows policy errors."""
 
 from __future__ import annotations
 
@@ -8,7 +10,10 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
+
+from .protocol import HEARTBEAT_INTERVAL, StageError
 
 logger = logging.getLogger(__name__)
 
@@ -182,3 +187,119 @@ def remove_stale_temp_dirs(root: Path, prefix: str) -> None:
     for stale in root.glob(f"{prefix}*"):
         if stale.is_dir():
             shutil.rmtree(stale, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def stage_lock(
+    path: Path, what: str, report: Callable[[float, str], None] | None
+) -> Iterator[None]:
+    """Hold the file lock ``path`` for a stage; wait as long as it takes.
+
+    While another process holds it (an ``EvoSci setup``, the WebUI launcher,
+    an MCP load), ``report`` gets a line every :data:`HEARTBEAT_INTERVAL`
+    seconds naming ``what`` is being installed, so a reader can tell a wait
+    from a hang. The holder may run pip for many minutes, so there is no limit.
+    """
+    from filelock import FileLock, Timeout
+
+    lock = FileLock(str(path))
+    while True:
+        try:
+            lock.acquire(timeout=HEARTBEAT_INTERVAL)
+            break
+        except Timeout:
+            if report is not None:
+                report(
+                    0.01,
+                    f"Waiting for another EvoScientist process to finish installing {what}",
+                )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def tree_signature(root: Path, *, exact: bool = False) -> tuple[int, int]:
+    """(file count, total bytes) under ``root``; changes while files are written.
+
+    Files that vanish or cannot be read mid-walk are skipped: the value only
+    has to differ while a step makes progress. ``exact`` asks each file for its
+    size, for files that grow while held open: a Windows listing shows a file's
+    new size only once its last handle is closed.
+    """
+    files = size = 0
+    stack = [root]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                else:
+                    files += 1
+                    if exact:
+                        size += os.stat(entry.path, follow_symlinks=False).st_size
+                    else:
+                        size += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return files, size
+
+
+def kill_tree(pid: int) -> None:
+    """Kill process ``pid`` and all its descendants; gone ones are skipped.
+
+    Waits up to 10 s for the descendants to exit (the caller reaps ``pid``
+    itself): a kill on Windows returns before the process is gone, and until
+    then it keeps its files open, so the caller could not delete them. A
+    Windows venv's ``python.exe`` is a launcher whose child is the real
+    interpreter.
+    """
+    import psutil
+
+    try:
+        proc = psutil.Process(pid)
+        children = proc.children(recursive=True)
+    except psutil.Error:
+        return
+    for target in [*children, proc]:
+        try:
+            target.kill()
+        except psutil.Error:
+            pass
+    psutil.wait_procs(children, timeout=10)
+
+
+# Windows errors for a program blocked by a code-integrity policy:
+# ERROR_ACCESS_DISABLED_BY_POLICY (AppLocker) and
+# ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION (WDAC, also Smart App Control).
+POLICY_WINERRORS = frozenset({1260, 4551})
+
+
+class PolicyBlocked(Exception):
+    """A Windows policy refused to start ``path``."""
+
+    def __init__(self, path: str | Path) -> None:
+        super().__init__(str(path))
+        self.path = str(path)
+
+
+def is_policy_block(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) in POLICY_WINERRORS
+
+
+def policy_error(path: str | Path, alternative: str) -> StageError:
+    """The readable error for a program of ours that a Windows policy blocked.
+
+    ``probe_failed``, and no new download: the same program would be blocked
+    again. ``alternative`` completes "or ..., and run `EvoSci setup` again".
+    """
+    return StageError(
+        "probe_failed",
+        f"A Windows policy (AppLocker, WDAC or Smart App Control) blocked {path}. "
+        f"Ask your administrator to allow programs under {tools_dir()}, or "
+        f"{alternative} and run `EvoSci setup` again.",
+    )

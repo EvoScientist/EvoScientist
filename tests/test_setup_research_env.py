@@ -46,6 +46,7 @@ class FakeRunner:
         self.pip_ok = True
         self.env_starts = True
         self.imports_ok = True
+        self.imports_crash = False
         # Results for the next import checks, used before ``imports_ok``.
         self.imports_script: list[bool] = []
         # Packages a failing import check reports (all of them when empty).
@@ -90,7 +91,7 @@ class FakeRunner:
             return "imports"
         return "starts"
 
-    def __call__(self, cmd, timeout):
+    def __call__(self, cmd, timeout, **_kw):
         self.raw.append(list(cmd))
         cmd = [part for part in cmd if part != "-I"]
         self.calls.append(cmd)
@@ -109,6 +110,9 @@ class FakeRunner:
         if kind == "config":
             return self._pip_config(cmd)
         if kind == "imports":
+            if self.imports_crash:
+                # Python failed before the check could name a package.
+                return subprocess.CompletedProcess(cmd, 1, "")
             scripted = self.imports_script.pop(0) if self.imports_script else None
             ok = self.env_starts and (self.imports_ok if scripted is None else scripted)
             if not self.env_starts:
@@ -722,7 +726,7 @@ def test_import_check_without_a_version_line_reinstalls_everything(env, monkeypa
     """Exit 0 but no version line: never an empty repair ``pip install``."""
     re_env.ensure_research_env("default")
 
-    def run(cmd, timeout):
+    def run(cmd, timeout, **_kw):
         if FakeRunner._kind(list(cmd)) == "imports":
             return subprocess.CompletedProcess(cmd, 0, "\n")
         return env["run"](cmd, timeout)
@@ -735,7 +739,7 @@ def test_import_check_that_crashes_midway_reinstalls_everything(env, monkeypatch
     """A crash ends the loop early, so its failed lines are only a part."""
     re_env.ensure_research_env("default")
 
-    def run(cmd, timeout):
+    def run(cmd, timeout, **_kw):
         if FakeRunner._kind(list(cmd)) == "imports":
             return subprocess.CompletedProcess(
                 cmd, -11, "version 3.12.9\nfailed numpy: ImportError()\n"
@@ -784,17 +788,19 @@ def test_failed_repair_keeps_the_environment(env):
 
 
 @pytest.mark.parametrize(("mirror", "hinted"), [("default", True), ("cn", False)])
-def test_pip_timeout_names_the_mirror_while_it_is_off(env, monkeypatch, mirror, hinted):
-    def run(cmd, timeout):
+def test_stalled_pip_names_the_mirror_while_it_is_off(env, monkeypatch, mirror, hinted):
+    def run(cmd, timeout, **_kw):
         if FakeRunner._kind(list(cmd)) == "pip":
-            raise subprocess.TimeoutExpired(cmd, timeout)
+            raise re_env._Stalled(
+                "pip printed and wrote nothing for 300 s and was stopped"
+            )
         return env["run"](cmd, timeout)
 
     monkeypatch.setattr(re_env, "_run", run)
     with pytest.raises(StageError) as exc:
         re_env.ensure_research_env(mirror)
     assert exc.value.code == "install_failed"
-    assert "did not finish" in exc.value.message
+    assert "was stopped" in exc.value.message
     assert (re_env.CN_MIRROR_HINT in exc.value.message) is hinted
 
 
@@ -806,7 +812,7 @@ def test_failed_pip_logs_its_whole_output_at_warning(env, monkeypatch, caplog):
         "ERROR: No matching distribution found for numpy\n"
     )
 
-    def run(cmd, timeout):
+    def run(cmd, timeout, **_kw):
         if FakeRunner._kind(list(cmd)) == "pip":
             return subprocess.CompletedProcess(cmd, 1, pip_output)
         return env["run"](cmd, timeout)
@@ -866,7 +872,7 @@ def test_failed_import_check_is_probe_failed(env):
 
 
 def test_failed_import_check_logs_its_output_at_warning(env, monkeypatch, caplog):
-    def run(cmd, timeout):
+    def run(cmd, timeout, **_kw):
         if FakeRunner._kind(list(cmd)) == "imports":
             return subprocess.CompletedProcess(cmd, 1, "ImportError: libgfortran\n")
         return env["run"](cmd, timeout)
@@ -983,7 +989,7 @@ def test_missing_package_is_reinstalled_in_place(env):
     env["run"].imports_script = [False]  # pandas gone, back after pip
     env["run"].failed_packages = ["pandas"]
     assert re_env.ensure_research_env("default").version == "3.12.9"
-    assert env["run"].kinds() == ["imports", "starts", "pip", "imports"]
+    assert env["run"].kinds() == ["imports", "starts", "pip", "pip", "imports"]
     assert extra.exists()
     assert re_env.is_ready(env["env"])
 
@@ -996,7 +1002,57 @@ def test_repair_reinstalls_only_the_failed_package_at_its_pin(env):
     env["run"].imports_script = [False]
     env["run"].failed_packages = ["pandas"]
     re_env.ensure_research_env("default")
-    assert env["run"].pip_requirements() == [[f"pandas=={re_env.PINS['pandas']}"]]
+    pandas = f"pandas=={re_env.PINS['pandas']}"
+    assert env["run"].pip_requirements() == [[pandas], [pandas]]
+
+
+def test_repair_reinstalls_the_broken_files_then_what_is_missing(env):
+    """pip counts a package with broken files as installed; the first call
+    reinstalls it alone, the second brings back a dependency that is gone."""
+    re_env.ensure_research_env("default")
+    env["run"].calls.clear()
+    env["run"].imports_script = [False]
+    env["run"].failed_packages = ["matplotlib"]
+    re_env.ensure_research_env("default")
+    flags = [
+        [part for part in cmd if part in ("--force-reinstall", "--no-deps")]
+        for cmd in env["run"].calls
+        if FakeRunner._kind(cmd) == "pip"
+    ]
+    assert flags == [["--force-reinstall", "--no-deps"], []]
+
+
+def test_repair_after_a_crashed_check_does_not_force_a_reinstall(env):
+    """With no package named, a forced reinstall would download all four
+    again for nothing."""
+    re_env.ensure_research_env("default")
+    env["run"].calls.clear()
+    env["run"].imports_crash = True
+    with pytest.raises(StageError):
+        re_env.ensure_research_env("default")
+    assert any(FakeRunner._kind(cmd) == "pip" for cmd in env["run"].calls)
+    assert not any("--force-reinstall" in cmd for cmd in env["run"].calls)
+
+
+def test_check_of_a_ready_env_repeats_its_line(env, monkeypatch):
+    """The heartbeat needs a line to repeat while the import check runs."""
+    re_env.ensure_research_env("default")
+    runner = env["run"]
+
+    def beating(cmd, timeout, **kw):
+        if FakeRunner._kind([p for p in cmd if p != "-I"]) == "imports":
+            kw["beat"]()
+        return runner(cmd, timeout, **kw)
+
+    monkeypatch.setattr(re_env, "_run", beating)
+    lines: list[str] = []
+    re_env.ensure_research_env("default", lambda _f, m: lines.append(m))
+    assert lines.count("Checking the packages") == 2
+
+
+def test_build_installs_without_force_reinstall(env):
+    re_env.ensure_research_env("default")
+    assert not any("--force-reinstall" in cmd for cmd in env["run"].calls)
 
 
 def test_still_broken_after_repair_is_rebuilt(env):
@@ -1010,6 +1066,7 @@ def test_still_broken_after_repair_is_rebuilt(env):
     assert env["run"].kinds() == [
         "imports",
         "starts",
+        "pip",
         "pip",
         "imports",
         "venv",
@@ -1166,3 +1223,235 @@ def test_python_used_is_logged_once(env, caplog):
     lines = [r for r in caplog.records if "Agent shell python" in r.getMessage()]
     assert len(lines) == 1
     assert str(env["env"]) in lines[0].getMessage()
+
+
+# --------------------------------------------------------------------------- #
+# Watched steps (real subprocesses)
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def fast_beats(monkeypatch):
+    monkeypatch.setattr(re_env, "_BEAT_INTERVAL", 0.05)
+
+
+def _python(code: str) -> list[str]:
+    return [sys.executable, "-c", code]
+
+
+# A silence limit longer than starting Python takes on a slow Windows CI
+# runner (the start itself is silent); the steps below stay active for longer.
+LIMIT = 2.0
+
+
+def test_watched_step_returns_its_output_and_exit_code(fast_beats):
+    result = re_env._run(
+        _python("print('hi'); raise SystemExit(3)"), 5, beat=lambda: None
+    )
+    assert (result.returncode, result.stdout.strip()) == (3, "hi")
+
+
+def test_watched_step_that_only_writes_files_is_not_stopped(fast_beats, tmp_path):
+    """pip prints nothing while it downloads a wheel; the growing folder keeps
+    it alive past the silence limit."""
+    beats: list[int] = []
+    code = (
+        "import pathlib, sys, time\n"
+        "p = pathlib.Path(sys.argv[1]) / 'wheel.part'\n"
+        "for _ in range(30):\n"
+        "    with p.open('ab') as f: f.write(b'x' * 100)\n"
+        "    time.sleep(0.1)\n"
+    )
+    result = re_env._run(
+        [*_python(code), str(tmp_path)],
+        LIMIT,
+        beat=lambda: beats.append(1),
+        watched=(tmp_path,),
+    )
+    assert result.returncode == 0
+    assert beats
+
+
+def test_watched_step_that_grows_an_open_file_is_not_stopped(
+    fast_beats, tmp_path, monkeypatch
+):
+    """Like pip's download: one file held open while it grows, which a Windows
+    listing shows at its size when opened."""
+    listed = re_env.tree_signature
+    monkeypatch.setattr(
+        re_env,
+        "tree_signature",
+        lambda p, exact=False: listed(p, exact=True) if exact else (listed(p)[0], 0),
+    )
+    beats: list[int] = []
+    code = (
+        "import pathlib, sys, time\n"
+        "p = pathlib.Path(sys.argv[1]) / 'wheel.part'\n"
+        "with p.open('ab') as f:\n"
+        "    for _ in range(30):\n"
+        "        f.write(b'x' * 100); f.flush(); time.sleep(0.1)\n"
+    )
+    result = re_env._run(
+        [*_python(code), str(tmp_path)],
+        LIMIT,
+        beat=lambda: beats.append(1),
+        held_open=(tmp_path,),
+    )
+    assert result.returncode == 0
+    assert beats
+
+
+def test_watched_step_that_prints_is_not_stopped(fast_beats):
+    code = "import time\nfor _ in range(30):\n    print('.', flush=True); time.sleep(0.1)\n"
+    assert re_env._run(_python(code), LIMIT, beat=lambda: None).returncode == 0
+
+
+def test_watched_step_that_prints_without_newlines_is_not_stopped(fast_beats):
+    """A progress dot with no line end is activity too."""
+    code = (
+        "import sys, time\n"
+        "for _ in range(30):\n"
+        "    sys.stdout.write('.'); sys.stdout.flush(); time.sleep(0.1)\n"
+    )
+    result = re_env._run(_python(code), LIMIT, beat=lambda: None)
+    assert (result.returncode, result.stdout) == (0, "." * 30)
+
+
+def test_watched_step_output_has_plain_line_ends(fast_beats):
+    code = "import sys\nsys.stdout.buffer.write(b'a\\r\\nb\\rc\\n')"
+    assert re_env._run(_python(code), LIMIT, beat=lambda: None).stdout == "a\nb\nc\n"
+
+
+def test_silent_watched_step_is_stopped(fast_beats, tmp_path):
+    import psutil
+
+    pid_file = tmp_path / "pid"
+    code = (
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.raises(re_env._Stalled) as exc:
+        re_env._run([*_python(code), str(pid_file)], LIMIT, beat=lambda: None)
+    assert "was stopped" in str(exc.value)
+    assert not psutil.pid_exists(int(pid_file.read_text()))
+
+
+def test_a_stopped_step_leaves_no_grandchild(fast_beats, tmp_path):
+    """The kill waits for the whole tree: a grandchild still exiting would
+    keep files open in the folder the caller deletes next (on Windows a
+    venv's python.exe is a launcher whose child is the interpreter)."""
+    import psutil
+
+    pid_file = tmp_path / "pid"
+    grandchild = (
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    # The child prints until the grandchild is up (starting Python is slow on
+    # Windows), then goes silent.
+    code = (
+        "import pathlib, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}, sys.argv[1]])\n"
+        "while not pathlib.Path(sys.argv[1]).exists():\n"
+        "    print('.', flush=True); time.sleep(0.1)\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.raises(re_env._Stalled):
+        re_env._run([*_python(code), str(pid_file)], LIMIT, beat=lambda: None)
+    assert not psutil.pid_exists(int(pid_file.read_text()))
+
+
+def test_pip_gets_a_temp_folder_of_its_own_and_it_is_removed(env, monkeypatch):
+    seen: dict = {}
+
+    def run(cmd, timeout, **kw):
+        if FakeRunner._kind(list(cmd)) == "pip":
+            seen.update(kw)
+        return env["run"](cmd, timeout)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    re_env.ensure_research_env("default")
+    tmp = Path(seen["env"]["TMPDIR"])
+    assert tmp.parent == env["env"].parent
+    assert tmp.name.startswith(re_env._PIP_TEMP_PREFIX)
+    assert seen["watched"] == (env["env"],)
+    assert seen["held_open"] == (tmp,)
+    assert not tmp.exists()
+
+
+def test_stage_waits_for_another_process_and_says_so(env, monkeypatch):
+    import threading
+
+    from filelock import FileLock
+
+    from EvoScientist.setup import _install
+
+    monkeypatch.setattr(_install, "HEARTBEAT_INTERVAL", 0.05)
+    env["env"].parent.mkdir(parents=True, exist_ok=True)
+    holder = FileLock(str(env["env"].parent / f"{env['env'].name}.lock"))
+    holder.acquire()
+    lines: list[str] = []
+    waiter = threading.Thread(
+        target=lambda: re_env.ensure_research_env(
+            "default", lambda _f, m: lines.append(m)
+        )
+    )
+    waiter.start()
+    try:
+        for _ in range(50):
+            if lines:
+                break
+            waiter.join(0.05)
+    finally:
+        holder.release()
+    waiter.join(10)
+    assert lines[0] == (
+        "Waiting for another EvoScientist process to finish installing the "
+        "research environment"
+    )
+    assert re_env.is_ready(env["env"])
+
+
+def test_pip_temp_folders_left_by_a_killed_run_are_removed(env):
+    leftover = env["env"].parent / f"{re_env._PIP_TEMP_PREFIX}killed"
+    leftover.mkdir(parents=True)
+    (leftover / "scipy.whl").write_bytes(b"x")
+    re_env.ensure_research_env("default")
+    assert not leftover.exists()
+
+
+def test_an_interrupted_watched_step_is_stopped(fast_beats, tmp_path):
+    """A heartbeat written to a closed pipe (the desktop app quit) stops the step."""
+    import psutil
+
+    pid_file = tmp_path / "pid"
+    code = (
+        "import os, pathlib, sys, time\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+
+    def beat():
+        if pid_file.exists() and pid_file.read_text():
+            raise BrokenPipeError
+
+    with pytest.raises(BrokenPipeError):
+        re_env._run([*_python(code), str(pid_file)], LIMIT, beat=beat)
+    assert not psutil.pid_exists(int(pid_file.read_text()))
+
+
+def test_stalled_check_of_a_ready_env_leads_to_a_repair(env, monkeypatch):
+    """Like a check that could not run: a repair, never probe_failed."""
+    re_env.ensure_research_env("default")
+    runner = env["run"]
+    runner.calls.clear()
+    stalls = [re_env._Stalled()]
+
+    def run(cmd, timeout, **kw):
+        if FakeRunner._kind(list(cmd)) == "imports" and stalls:
+            raise stalls.pop()
+        return runner(cmd, timeout, **kw)
+
+    monkeypatch.setattr(re_env, "_run", run)
+    assert re_env.ensure_research_env("default").version == "3.12.9"
+    assert runner.kinds() == ["starts", "pip", "imports"]

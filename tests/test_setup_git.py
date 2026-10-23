@@ -638,7 +638,10 @@ def test_blocked_fresh_portablegit_is_probe_failed_without_a_new_download(env):
     with pytest.raises(StageError) as ei:
         git.ensure_git()
     assert ei.value.code == "probe_failed"
-    assert "Windows policy (AppLocker or WDAC) blocked" in ei.value.message
+    assert (
+        "Windows policy (AppLocker, WDAC or Smart App Control) blocked"
+        in ei.value.message
+    )
     assert "bash.exe" in ei.value.message
     assert _record(env) is None
     assert final.is_dir()  # kept, so the next run does not download it again
@@ -881,3 +884,34 @@ def test_verified_download_rename_retries_a_scanner_lock(env, monkeypatch):
     assert info.source == "portablegit"
     assert denied
     assert len(env["net"].urls) == 1
+
+
+def test_install_waits_for_the_lock_and_says_so(env, monkeypatch):
+    import threading
+
+    from filelock import FileLock
+
+    monkeypatch.setattr(_install, "HEARTBEAT_INTERVAL", 0.05)
+    env["tools"].mkdir(parents=True, exist_ok=True)
+    holder = FileLock(str(env["tools"] / "git.lock"))
+    holder.acquire()
+    lines: list[str] = []
+    result = {}
+    waiter = threading.Thread(
+        target=lambda: result.update(
+            info=git.ensure_git("default", lambda _f, m: lines.append(m))
+        )
+    )
+    waiter.start()
+    try:
+        for _ in range(50):
+            if lines:
+                break
+            waiter.join(0.05)
+    finally:
+        holder.release()
+    waiter.join(10)
+    assert lines[0] == (
+        "Waiting for another EvoScientist process to finish installing Git for Windows"
+    )
+    assert result["info"].source == "portablegit"
