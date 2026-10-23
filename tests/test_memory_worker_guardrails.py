@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -695,29 +699,175 @@ def test_worker_stub_attempt_is_refused_and_counted(tmp_path, monkeypatch):
     assert _observation_files(tmp_path) == []
 
 
+def test_record_waits_for_another_process_holding_the_store(tmp_path, monkeypatch):
+    """The main agent and the workers write from different processes, so the
+    summary check and the write are one step across processes too."""
+    from EvoScientist.memory.observations import store
+
+    folder = tmp_path / "memories" / "observations"
+    folder.mkdir(parents=True)
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys, time\n"
+            "from filelock import FileLock\n"
+            "lock = FileLock(sys.argv[1])\n"
+            "lock.acquire()\n"
+            "print('held', flush=True)\n"
+            "time.sleep(60)\n",
+            str(folder / ".record.lock"),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "held"
+        monkeypatch.setattr(store, "_RECORD_LOCK_TIMEOUT", 0.2)
+        with pytest.raises(TimeoutError, match="nothing was written"):
+            _store_write(tmp_path, summary="lesson", body="one")
+        assert _observation_files(tmp_path) == []
+    finally:
+        holder.kill()
+        holder.wait()
+        if holder.stdout is not None:
+            holder.stdout.close()
+
+    assert _store_write(tmp_path, summary="lesson", body="one")["created"] is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_rewrite_keeps_the_file_permissions(tmp_path):
+    _store_write(tmp_path, summary="lesson", body="one")
+    [path] = _observation_files(tmp_path)
+    reference = tmp_path / "reference.txt"
+    reference.write_text("x", encoding="utf-8")
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+    path.chmod(0o640)
+    metadata, body = read_observation_document(path)
+    write_observation_document(path, metadata=metadata, body=body + "\nmore\n")
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert "more" in path.read_text(encoding="utf-8")
+
+
+def test_staged_writes_match_a_plain_text_write_byte_for_byte(tmp_path):
+    """The staging write must not change line endings: a text-mode descriptor
+    on Windows would add a second CR to every line."""
+    _store_write(tmp_path, summary="lesson", body="line one\nline two")
+    [path] = _observation_files(tmp_path)
+    metadata, body = read_observation_document(path)
+    write_observation_document(path, metadata=metadata, body=body)
+    reference = tmp_path / "reference.md"
+    reference.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    write_observation_document(path, metadata=metadata, body=body)
+
+    assert path.read_bytes() == reference.read_bytes()
+
+
+def test_record_gives_up_when_a_thread_holds_the_store_too_long(tmp_path, monkeypatch):
+    from EvoScientist.memory.observations import store
+
+    monkeypatch.setattr(store, "_RECORD_LOCK_TIMEOUT", 0.1)
+    assert store._record_lock.acquire(timeout=1)
+    try:
+        with pytest.raises(TimeoutError, match="nothing was written"):
+            _store_write(tmp_path, summary="lesson", body="one")
+    finally:
+        store._record_lock.release()
+    assert _observation_files(tmp_path) == []
+
+
+def test_failed_rewrite_of_a_read_only_file_leaves_no_staging_file(
+    tmp_path, monkeypatch
+):
+    """Windows refuses to delete a read-only file; the staging copy takes the
+    target's read-only mode, so cleanup clears it before deleting."""
+    from EvoScientist.memory.observations import store
+
+    _store_write(tmp_path, summary="lesson", body="one")
+    [path] = _observation_files(tmp_path)
+    metadata, body = read_observation_document(path)
+    path.chmod(stat.S_IREAD)
+    original_unlink = Path.unlink
+
+    def windows_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.exists() and not self.stat().st_mode & stat.S_IWRITE:
+            raise PermissionError(f"read-only: {self.name}")
+        original_unlink(self, missing_ok=missing_ok)
+
+    def refuse(source: Any, target: Any) -> None:
+        raise PermissionError("target is read-only")
+
+    monkeypatch.setattr(Path, "unlink", windows_unlink)
+    monkeypatch.setattr(store, "_os_replace", refuse)
+    monkeypatch.setattr(store, "_sleep", lambda _seconds: None)
+    try:
+        with pytest.raises(PermissionError, match="target is read-only"):
+            write_observation_document(path, metadata=metadata, body=body + "x")
+        assert [p.name for p in path.parent.iterdir()] == [path.name]
+    finally:
+        path.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_failed_cleanup_chmod_still_removes_the_staging_file(tmp_path, monkeypatch):
+    from EvoScientist.memory.observations import store
+
+    _store_write(tmp_path, summary="lesson", body="one")
+    [path] = _observation_files(tmp_path)
+    metadata, body = read_observation_document(path)
+    original_chmod = os.chmod
+
+    def chmod(target: Any, mode: int) -> None:
+        if mode == stat.S_IREAD | stat.S_IWRITE:
+            raise PermissionError("chmod refused")
+        original_chmod(target, mode)
+
+    def refuse(source: Any, target: Any) -> None:
+        raise PermissionError("target is busy")
+
+    monkeypatch.setattr(store.os, "chmod", chmod)
+    monkeypatch.setattr(store, "_os_replace", refuse)
+    monkeypatch.setattr(store, "_sleep", lambda _seconds: None)
+    with pytest.raises(PermissionError, match="target is busy"):
+        write_observation_document(path, metadata=metadata, body=body + "x")
+
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+
 def test_observation_files_are_replaced_in_one_step(tmp_path, monkeypatch):
     """A rewrite (the linker) or a new record never leaves a partial file
     where the summary scan, the index or a search could read it."""
+    from EvoScientist.memory.observations import store
+
     _store_write(tmp_path, summary="lesson", body="one")
     [path] = _observation_files(tmp_path)
     before = path.read_text(encoding="utf-8")
     metadata, body = read_observation_document(path)
 
-    writes: list[tuple[str, str | None]] = []
-    original = Path.write_text
+    # (staged file name, staged content, target content just before the move)
+    moves: list[tuple[str, str, str | None]] = []
+    original = store._os_replace
 
-    def spy(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
-        target = path.read_text(encoding="utf-8") if path.exists() else None
-        writes.append((self.name, target))
-        return original(self, data, *args, **kwargs)
+    def spy(source: Any, target: Any) -> None:
+        staged, final = Path(source), Path(target)
+        current = final.read_text(encoding="utf-8") if final.exists() else None
+        moves.append((staged.name, staged.read_text(encoding="utf-8"), current))
+        original(source, target)
 
-    monkeypatch.setattr(Path, "write_text", spy)
+    monkeypatch.setattr(store, "_os_replace", spy)
     write_observation_document(path, metadata=metadata, body=body.replace("one", "two"))
     _store_write(tmp_path, summary="another lesson", body="three")
 
-    assert [name.endswith(".tmp") for name, _ in writes] == [True, True]
-    assert writes[0][1] == before
-    assert "two" in path.read_text(encoding="utf-8")
+    assert [name.endswith(".tmp") for name, _, _ in moves] == [True, True]
+    assert moves[0][2] == before
+    assert moves[0][1] == path.read_text(encoding="utf-8")
+    assert "two" in moves[0][1]
+    assert moves[1][2] is None
+    assert "three" in moves[1][1]
     assert len(_observation_files(tmp_path)) == 2
     leftovers = [p for p in path.parent.iterdir() if p.suffix != ".md"]
     assert leftovers == []

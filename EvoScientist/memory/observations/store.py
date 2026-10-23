@@ -8,19 +8,24 @@ can grep and read with ordinary file tools today.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import os
 import re
+import stat
 import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import yaml
+from filelock import FileLock, Timeout
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ..search import (
@@ -243,10 +248,21 @@ def _write_file_atomically(path: Path, content: str) -> None:
     global _cache_generation
     staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        staging.write_text(content, encoding="utf-8")
+        # A rewrite keeps the file's own permissions; until it takes them
+        # over, the staging copy is readable by its owner only.
+        mode = _existing_mode(path)
+        opener = functools.partial(os.open, mode=0o666 if mode is None else 0o600)
+        with open(staging, "x", encoding="utf-8", opener=opener) as handle:
+            handle.write(content)
+        if mode is not None:
+            os.chmod(staging, mode)
         _replace_file(staging, path)
     finally:
-        # A failing cleanup must not hide the error of the write itself.
+        # A failing cleanup must not hide the error of the write itself; a
+        # read-only mode taken from the target blocks deletion on Windows.
+        with contextlib.suppress(OSError):
+            if staging.exists():
+                os.chmod(staging, stat.S_IREAD | stat.S_IWRITE)
         with contextlib.suppress(OSError):
             staging.unlink(missing_ok=True)
     # The writer's own process must not serve the old parse even where the
@@ -255,6 +271,13 @@ def _write_file_atomically(path: Path, content: str) -> None:
     with _cache_lock:
         _file_parse_cache.pop(str(path), None)
         _cache_generation += 1
+
+
+def _existing_mode(path: Path) -> int | None:
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        return None
 
 
 _REPLACE_ATTEMPTS = 5
@@ -780,6 +803,33 @@ _STUB_PHRASES = frozenset(
     )
 )
 _record_lock = threading.Lock()
+_RECORD_LOCK_TIMEOUT = 10.0
+
+
+@contextmanager
+def _record_guard(memory_dir: str | Path) -> Iterator[None]:
+    """One writer at a time across threads and processes: the main agent and
+    the memory workers run in different processes on one memory folder."""
+    folder = Path(memory_dir).expanduser() / "observations"
+    folder.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(folder / ".record.lock"), is_singleton=True)
+    busy = TimeoutError(
+        "Another writer holds the observation store; nothing was written."
+    )
+    deadline = time.monotonic() + _RECORD_LOCK_TIMEOUT
+    if not _record_lock.acquire(timeout=_RECORD_LOCK_TIMEOUT):
+        raise busy
+    try:
+        try:
+            lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        except Timeout:
+            raise busy from None
+        try:
+            yield
+        finally:
+            lock.release()
+    finally:
+        _record_lock.release()
 
 
 def _is_stub(text: str) -> bool:
@@ -875,7 +925,7 @@ def record_observation_file(
         result["project_id"] = project_id
 
     # One writer at a time, so two parallel calls cannot both pass the checks.
-    with _record_lock:
+    with _record_guard(memory_dir):
         if path.exists():
             result["note"] = _NOTE_IDENTICAL
             return result
