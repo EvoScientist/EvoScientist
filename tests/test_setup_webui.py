@@ -248,6 +248,49 @@ def test_fetch_metadata_network_error_is_download_failed(monkeypatch, error):
     assert exc.value.code == "download_failed"
 
 
+def test_fetch_metadata_retries_a_server_error(monkeypatch):
+    calls: list[int] = []
+
+    def urlopen(request, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
+        return _Resp(json.dumps({"versions": {"0.3.0": {}}}).encode())
+
+    monkeypatch.setattr(webui, "open_url", urlopen)
+    assert webui.fetch_metadata(REG)["versions"] == {"0.3.0": {}}
+    assert len(calls) == 2
+
+
+def test_fetch_metadata_that_cannot_connect_fails_at_once(monkeypatch):
+    from EvoScientist.setup.download import NotConnected
+
+    calls: list[int] = []
+
+    def urlopen(request, timeout):
+        calls.append(1)
+        raise NotConnected("registry.npmjs.org", ConnectionRefusedError("refused"))
+
+    monkeypatch.setattr(webui, "open_url", urlopen)
+    with pytest.raises(StageError) as exc:
+        webui.fetch_metadata(REG)
+    assert exc.value.code == "download_failed"
+    assert len(calls) == 1
+
+
+def test_fetch_metadata_names_no_mirror_when_the_proxy_is_down(monkeypatch):
+    from EvoScientist.setup.download import NotConnected
+
+    def urlopen(request, timeout):
+        raise NotConnected("registry.npmjs.org", ConnectionRefusedError(), proxy="p:1")
+
+    monkeypatch.setattr(webui, "open_url", urlopen)
+    with pytest.raises(StageError) as exc:
+        webui.fetch_metadata(REG, cn_hint=True)
+    assert "the proxy p:1" in exc.value.message
+    assert "--cn" not in exc.value.message
+
+
 # --------------------------------------------------------------------------- #
 # Integrity and extraction
 # --------------------------------------------------------------------------- #

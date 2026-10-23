@@ -396,6 +396,21 @@ def test_slow_but_steady_body_outlasts_the_connect_budget(serve, tmp_path, monke
     assert (tmp_path / "a").read_bytes() == BODY
 
 
+def test_name_lookup_is_outside_the_connect_budget(serve, tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "CONNECT_BUDGET", 0.2)
+    server = serve(ok)
+    real = socket.getaddrinfo
+
+    def slow_lookup(host, port, *args):
+        time.sleep(0.5)
+        return real("127.0.0.1", port, *args)
+
+    monkeypatch.setattr(dl.socket, "getaddrinfo", slow_lookup)
+    dl.download(server.url.replace("127.0.0.1", "nodejs.example"), tmp_path / "a")
+    assert server.requests == 1
+    assert (tmp_path / "a").read_bytes() == BODY
+
+
 def test_refused_connection_fails_at_once(tmp_path, monkeypatch):
     calls: list[tuple] = []
     real = dl._connect_within
@@ -450,6 +465,74 @@ def test_proxy_that_cannot_reach_the_host_fails_at_once(tmp_path, monkeypatch):
     assert "502" in ei.value.message
 
 
+def test_proxy_that_cannot_be_reached_is_named(tmp_path, monkeypatch):
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    monkeypatch.delenv("no_proxy")
+    monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{port}")
+    with pytest.raises(StageError) as ei:
+        dl.download("https://nodejs.example/node.tar.xz", tmp_path / "a", cn_hint=True)
+    assert ei.value.message.startswith(
+        f"Could not connect to the proxy 127.0.0.1:{port} (for nodejs.example): "
+    )
+    assert CN_MIRROR_HINT not in ei.value.message
+
+
+def test_a_resume_through_a_proxy_that_went_down_names_no_mirror(
+    serve, tmp_path, monkeypatch
+):
+    server = serve(truncated)
+    opened = dl.open_url
+
+    def open_url(request, timeout):
+        if server.requests:
+            raise dl.NotConnected(
+                "nodejs.example", ConnectionRefusedError(), proxy="p:1"
+            )
+        return opened(request, timeout)
+
+    monkeypatch.setattr(dl, "open_url", open_url)
+    with pytest.raises(StageError) as ei:
+        dl.download(server.url, tmp_path / "a", cn_hint=True)
+    assert "the proxy p:1" in ei.value.message
+    assert CN_MIRROR_HINT not in ei.value.message
+
+
+def test_tls_after_a_slow_tunnel_gets_only_what_is_left(tmp_path, monkeypatch):
+    """A proxy that answers CONNECT late and then stalls the TLS handshake
+    fails within the budget, not the budget again on top."""
+    monkeypatch.setattr(dl, "CONNECT_BUDGET", 2.0)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    held: list[socket.socket] = []
+
+    def proxy() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        held.append(conn)
+        conn.recv(4096)
+        time.sleep(1.5)
+        conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+
+    threading.Thread(target=proxy, daemon=True).start()
+    monkeypatch.delenv("no_proxy")
+    monkeypatch.setenv("https_proxy", f"http://127.0.0.1:{listener.getsockname()[1]}")
+    started = time.monotonic()
+    try:
+        with pytest.raises(StageError) as ei:
+            dl.download("https://nodejs.example/node.tar.xz", tmp_path / "a")
+    finally:
+        listener.close()
+        for conn in held:
+            conn.close()
+    assert time.monotonic() - started < 3.0
+    assert "no answer within 2 s" in ei.value.message
+
+
 def test_connect_budget_is_shared_by_all_addresses(monkeypatch):
     """socket.create_connection gives each address the full timeout; the
     budget here covers them all, in shares."""
@@ -482,7 +565,9 @@ def test_connect_budget_is_shared_by_all_addresses(monkeypatch):
     monkeypatch.setattr(dl.time, "monotonic", lambda: clock["now"])
     reachable: set[str] = set()
     with pytest.raises(TimeoutError):
-        dl._connect_within(("registry.example", 443), None, deadline=15.0)
+        dl._connect_within(
+            dl.socket.getaddrinfo("registry.example", 443), deadline=15.0
+        )
     # Each address gets an equal share, at least 3 s, until the budget is spent.
     assert timeouts == [3.0] * 5
     assert clock["now"] == 15.0
@@ -491,9 +576,52 @@ def test_connect_budget_is_shared_by_all_addresses(monkeypatch):
     timeouts.clear()
     clock["now"] = 0.0
     reachable.add("192.0.2.1")
-    sock = dl._connect_within(("registry.example", 443), None, deadline=15.0)
+    sock = dl._connect_within(
+        dl.socket.getaddrinfo("registry.example", 443), deadline=15.0
+    )
     assert isinstance(sock, DroppingSocket)
     assert timeouts[:2] == [3.0, 3.0]
+
+
+@pytest.mark.parametrize("ipv6", ["drops", "unsupported"])
+def test_ipv4_gets_a_turn_while_ipv6_fails(monkeypatch, ipv6):
+    """getaddrinfo lists every IPv6 address before the IPv4 ones."""
+    clock = {"now": 0.0}
+    tried: list[str] = []
+
+    class FakeSocket:
+        def __init__(self, family, *_args) -> None:
+            if family == socket.AF_INET6 and ipv6 == "unsupported":
+                raise OSError("Address family not supported by protocol")
+            self.family = family
+            self.timeout = None
+
+        def settimeout(self, value) -> None:
+            self.timeout = value
+
+        def connect(self, addr) -> None:
+            tried.append(addr[0])
+            if self.family == socket.AF_INET6:
+                clock["now"] += self.timeout
+                raise TimeoutError("timed out")
+
+        def close(self) -> None:
+            pass
+
+    v6 = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", (f"2001:db8::{i}", 443, 0, 0))
+        for i in range(12)
+    ]
+    v4 = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"192.0.2.{i}", 443))
+        for i in range(12)
+    ]
+    monkeypatch.setattr(dl.socket, "getaddrinfo", lambda *_a: v6 + v4)
+    monkeypatch.setattr(dl.socket, "socket", FakeSocket)
+    monkeypatch.setattr(dl.time, "monotonic", lambda: clock["now"])
+    dl._connect_within(dl.socket.getaddrinfo("registry.example", 443), deadline=15.0)
+    assert tried[-1] == "192.0.2.0"
+    assert clock["now"] <= 3.0
 
 
 def test_notconnected_names_the_budget_for_a_timeout():
