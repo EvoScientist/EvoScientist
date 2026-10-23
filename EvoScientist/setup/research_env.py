@@ -204,6 +204,7 @@ def _run(
     *,
     beat: Callable[[], None] | None = None,
     watched: Sequence[Path] = (),
+    held_open: Sequence[Path] = (),
     env: Mapping[str, str] | None = None,
     label: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -215,7 +216,9 @@ def _run(
     stay unchanged; past it the process tree is stopped and :class:`_Stalled`
     raised, naming the step as ``label`` (default: the program's name). pip
     prints nothing while it downloads a wheel when its output is piped, so the
-    files it writes are the better sign of work.
+    files it writes are the better sign of work. Folders in ``held_open``
+    count too, for files that grow while held open (pip's downloads): each
+    file there is asked for its size (see :func:`tree_signature`).
 
     No console window on Windows: the python probes also run when an agent is
     built, and a process without a console (the desktop app) would otherwise
@@ -262,7 +265,11 @@ def _run(
             return None
 
     def activity() -> tuple[object, ...]:
-        return (sum(map(len, output)), *(tree_signature(p) for p in watched))
+        return (
+            sum(map(len, output)),
+            *(tree_signature(p) for p in watched),
+            *(tree_signature(p, exact=True) for p in held_open),
+        )
 
     try:
         code = wait_with_heartbeat(
@@ -270,7 +277,9 @@ def _run(
         )
     except StepStalled as exc:
         _stop(proc)
-        silent = "printed and wrote nothing" if watched else "printed nothing"
+        silent = (
+            "printed and wrote nothing" if watched or held_open else "printed nothing"
+        )
         raise _Stalled(
             f"{label or Path(cmd[0]).name} {silent} for {timeout:g} s and was stopped"
         ) from exc
@@ -648,7 +657,8 @@ def _pip_install_in(
                 cmd,
                 _SILENCE_LIMIT,
                 beat=beat,
-                watched=(tmp, env),
+                watched=(env,),
+                held_open=(tmp,),
                 env=child_env,
                 label="pip",
             )

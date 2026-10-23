@@ -1270,6 +1270,35 @@ def test_watched_step_that_only_writes_files_is_not_stopped(fast_beats, tmp_path
     assert beats
 
 
+def test_watched_step_that_grows_an_open_file_is_not_stopped(
+    fast_beats, tmp_path, monkeypatch
+):
+    """Like pip's download: one file held open while it grows, which a Windows
+    listing shows at its size when opened."""
+    listed = re_env.tree_signature
+    monkeypatch.setattr(
+        re_env,
+        "tree_signature",
+        lambda p, exact=False: listed(p, exact=True) if exact else (listed(p)[0], 0),
+    )
+    beats: list[int] = []
+    code = (
+        "import pathlib, sys, time\n"
+        "p = pathlib.Path(sys.argv[1]) / 'wheel.part'\n"
+        "with p.open('ab') as f:\n"
+        "    for _ in range(30):\n"
+        "        f.write(b'x' * 100); f.flush(); time.sleep(0.1)\n"
+    )
+    result = re_env._run(
+        [*_python(code), str(tmp_path)],
+        LIMIT,
+        beat=lambda: beats.append(1),
+        held_open=(tmp_path,),
+    )
+    assert result.returncode == 0
+    assert beats
+
+
 def test_watched_step_that_prints_is_not_stopped(fast_beats):
     code = "import time\nfor _ in range(30):\n    print('.', flush=True); time.sleep(0.1)\n"
     assert re_env._run(_python(code), LIMIT, beat=lambda: None).returncode == 0
@@ -1345,7 +1374,8 @@ def test_pip_gets_a_temp_folder_of_its_own_and_it_is_removed(env, monkeypatch):
     tmp = Path(seen["env"]["TMPDIR"])
     assert tmp.parent == env["env"].parent
     assert tmp.name.startswith(re_env._PIP_TEMP_PREFIX)
-    assert seen["watched"] == (tmp, env["env"])
+    assert seen["watched"] == (env["env"],)
+    assert seen["held_open"] == (tmp,)
     assert not tmp.exists()
 
 

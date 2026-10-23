@@ -321,3 +321,21 @@ def test_is_policy_block_reads_winerror():
     assert not _install.is_policy_block(exc)
     exc.winerror = 4551
     assert _install.is_policy_block(exc)
+
+
+def test_exact_tree_signature_asks_each_file_for_its_size(tmp_path, monkeypatch):
+    """A Windows listing keeps the size a file had when it was opened."""
+    (tmp_path / "wheel.part").write_bytes(b"x" * 10)
+    scandir = os.scandir
+
+    class Listed:
+        def __init__(self, entry):
+            self.path = entry.path
+            self.is_dir = entry.is_dir
+
+        def stat(self, **_kw):
+            return os.stat_result((0,) * 10)
+
+    monkeypatch.setattr(_install.os, "scandir", lambda p: map(Listed, scandir(p)))
+    assert _install.tree_signature(tmp_path) == (1, 0)
+    assert _install.tree_signature(tmp_path, exact=True) == (1, 10)
