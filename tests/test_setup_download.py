@@ -228,6 +228,56 @@ def test_resume_without_a_content_length_accepts_the_size(serve, tmp_path, monke
     assert digest == hashlib.sha256(BODY).hexdigest()
 
 
+def ranged_then_cut(size: str, *, length: bool) -> Reply:
+    """A ``206`` for the asked range, of a file of ``size`` bytes (``*``:
+    unknown), that ends after 100 bytes; with or without a Content-Length."""
+
+    def reply(handler) -> None:
+        start = int(handler.headers["Range"].removeprefix("bytes=").rstrip("-"))
+        handler.send_response(206)
+        handler.send_header("Content-Range", f"bytes {start}-{len(BODY) - 1}/{size}")
+        if length:
+            handler.send_header("Content-Length", str(len(BODY) - start))
+        handler.end_headers()
+        handler.wfile.write(BODY[start : start + 100])
+        handler.close_connection = True
+
+    return reply
+
+
+@pytest.mark.parametrize("size", [str(len(BODY)), "*"])
+@pytest.mark.parametrize("length", [True, False])
+def test_cut_resume_without_a_content_length_is_retried(
+    serve, tmp_path, monkeypatch, size, length
+):
+    monkeypatch.setattr(dl, "_CHUNK", 100)
+    server = serve(chunked_then_cut, ranged_then_cut(size, length=length), ranged)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert server.requests == 3
+    assert server.headers[2]["Range"] == "bytes=200-"
+    assert (tmp_path / "a").read_bytes() == BODY
+    assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def ranged_part(handler) -> None:
+    """A ``206`` with only the next 100 bytes of the asked range."""
+    start = int(handler.headers["Range"].removeprefix("bytes=").rstrip("-"))
+    handler.send_response(206)
+    handler.send_header("Content-Range", f"bytes {start}-{start + 99}/{len(BODY)}")
+    handler.send_header("Content-Length", "100")
+    handler.end_headers()
+    handler.wfile.write(BODY[start : start + 100])
+
+
+def test_a_resume_with_part_of_the_rest_goes_on(serve, tmp_path, monkeypatch):
+    monkeypatch.setattr(dl, "_CHUNK", 100)
+    server = serve(chunked_then_cut, ranged_part, ranged)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert server.requests == 3
+    assert server.headers[2]["Range"] == "bytes=200-"
+    assert digest == hashlib.sha256(BODY).hexdigest()
+
+
 def test_a_resume_that_cannot_connect_is_retried(serve, tmp_path, monkeypatch):
     """After a cut, a failed reconnect is likely the same blip (a VPN
     reconnecting), not a blocked network."""
@@ -284,6 +334,45 @@ def test_resume_at_the_wrong_offset_restarts_the_download(serve, tmp_path):
     assert "Range" not in server.headers[2]
     assert (tmp_path / "a").read_bytes() == BODY
     assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def wrong_total(handler) -> None:
+    """A ``206`` at the asked offset, of a file with another size."""
+    start = int(handler.headers["Range"].removeprefix("bytes=").rstrip("-"))
+    handler.send_response(206)
+    handler.send_header(
+        "Content-Range", f"bytes {start}-{len(BODY) - 1}/{len(BODY) + 1}"
+    )
+    handler.send_header("Content-Length", str(len(BODY) - start))
+    handler.end_headers()
+    handler.wfile.write(BODY[start:])
+
+
+def test_resume_of_a_file_with_another_size_restarts_the_download(serve, tmp_path):
+    server = serve(truncated, wrong_total, ranged)
+    digest = dl.download(server.url, tmp_path / "a")
+    assert server.requests == 3
+    assert "Range" not in server.headers[2]
+    assert (tmp_path / "a").read_bytes() == BODY
+    assert digest == hashlib.sha256(BODY).hexdigest()
+
+
+def truncated_with_a_weak_etag(handler) -> None:
+    """Like :func:`truncated`, with a weak ETag and a Last-Modified date."""
+    handler.send_response(200)
+    handler.send_header("Content-Length", str(len(BODY)))
+    handler.send_header("ETag", 'W/"v1"')
+    handler.send_header("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+    handler.end_headers()
+    handler.wfile.write(BODY[:100])
+    handler.close_connection = True
+
+
+def test_resume_after_a_weak_etag_sends_the_date_in_if_range(serve, tmp_path):
+    server = serve(truncated_with_a_weak_etag, ranged)
+    dl.download(server.url, tmp_path / "a")
+    assert server.headers[1]["If-Range"] == "Wed, 21 Oct 2015 07:28:00 GMT"
+    assert (tmp_path / "a").read_bytes() == BODY
 
 
 def test_stall_past_the_no_data_timeout_is_retried(serve, tmp_path, monkeypatch):
