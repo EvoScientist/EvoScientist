@@ -223,11 +223,13 @@ def stage_lock(
         lock.release()
 
 
-def tree_signature(root: Path) -> tuple[int, int]:
+def tree_signature(root: Path, *, exact: bool = False) -> tuple[int, int]:
     """(file count, total bytes) under ``root``; changes while files are written.
 
     Files that vanish or cannot be read mid-walk are skipped: the value only
-    has to differ while a step makes progress.
+    has to differ while a step makes progress. ``exact`` asks each file for its
+    size, for files that grow while held open: a Windows listing shows a file's
+    new size only once its last handle is closed.
     """
     files = size = 0
     stack = [root]
@@ -242,7 +244,10 @@ def tree_signature(root: Path) -> tuple[int, int]:
                     stack.append(Path(entry.path))
                 else:
                     files += 1
-                    size += entry.stat(follow_symlinks=False).st_size
+                    if exact:
+                        size += os.stat(entry.path, follow_symlinks=False).st_size
+                    else:
+                        size += entry.stat(follow_symlinks=False).st_size
             except OSError:
                 continue
     return files, size
