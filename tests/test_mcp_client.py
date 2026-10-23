@@ -2305,6 +2305,64 @@ class TestLoadToolsProgressCallback:
             ("error", "srv", "boom"),
         ]
 
+    async def test_unresolved_node_server_is_reported_and_not_started(
+        self, monkeypatch, tmp_path
+    ):
+        """An ``npx`` not on PATH would be taken from the current directory."""
+        from EvoScientist.mcp import client as mcp_client
+
+        seen: dict[str, dict] = {}
+        self._patch_client(monkeypatch, {"srv": ["tool1"]})
+        import langchain_mcp_adapters.client as lc_client
+
+        fake = lc_client.MultiServerMCPClient
+
+        def client(connections):
+            seen.update(connections)
+            return fake(connections)
+
+        monkeypatch.setattr(lc_client, "MultiServerMCPClient", client)
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        cwd = _fake_npx(tmp_path / "project")
+        monkeypatch.chdir(cwd)
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(tmp_path / "empty")]))
+        config = {
+            "fs": {"transport": "stdio", "command": "npx", "args": []},
+            "srv": {"transport": "stdio", "command": "demo"},
+        }
+        events: list[tuple[str, str, str]] = []
+
+        result = await mcp_client._load_tools(
+            config, on_progress=lambda *e: events.append(e)
+        )
+
+        assert list(seen) == ["srv"]
+        assert result == {"fs": [], "srv": ["tool1"]}
+        assert events[:2] == [
+            ("start", "fs", ""),
+            (
+                "error",
+                "fs",
+                "npx was not found on PATH. Run 'EvoSci setup' to install Node.js",
+            ),
+        ]
+
+    async def test_unresolved_node_server_alone_returns_its_failure(
+        self, monkeypatch, tmp_path
+    ):
+        from EvoScientist.mcp import client as mcp_client
+
+        monkeypatch.setattr(mcp_client, "_ensure_node_for_stdio", lambda _c: None)
+        monkeypatch.setattr(
+            mcp_client.sys, "executable", str(tmp_path / "nowhere" / "python")
+        )
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        config = {"fs": {"transport": "stdio", "command": "npx"}}
+        assert await mcp_client._load_tools(config) == {"fs": []}
+
     async def test_mixed_fleet_reports_each_server_independently(self, monkeypatch):
         from EvoScientist.mcp.client import _load_tools
 
