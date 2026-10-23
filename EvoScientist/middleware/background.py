@@ -201,7 +201,37 @@ def check_process(process_id: str, runtime: ToolRuntime = None) -> "str | Comman
         process_id: The id returned by run_in_background.
     """
     text = background.status(process_id, thread_id=_origin_thread_id(runtime))
-    return _bg_command(text, [background.state_record(process_id)], runtime)
+    record = background.state_record(process_id)
+    if record is not None:
+        return _bg_command(text, [record], runtime)
+
+    from ..EvoScientist import _ensure_config
+    from ..langgraph_dev.manager import needs_langgraph_dev
+    from ..langgraph_dev.sdk import (
+        configured_langgraph_dev_url,
+        langgraph_dev_headers,
+    )
+
+    if not needs_langgraph_dev(_ensure_config(), backend="local"):
+        return text
+
+    import httpx
+
+    try:
+        response = httpx.get(
+            f"{configured_langgraph_dev_url()}/api/bg_process_check",
+            params={
+                "process_id": process_id,
+                "thread_id": _origin_thread_id(runtime) or "",
+            },
+            headers=langgraph_dev_headers(),
+            timeout=10.0,
+        )
+    except httpx.ConnectError:
+        return text
+    response.raise_for_status()
+    data = response.json()
+    return _bg_command(data["text"], [data["record"]], runtime)
 
 
 @tool(parse_docstring=True)

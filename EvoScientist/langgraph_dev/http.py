@@ -184,6 +184,25 @@ async def get_bg_processes_running(_request: Request) -> JSONResponse:
     return JSONResponse({"running": running})
 
 
+async def get_bg_process_check(request: Request) -> JSONResponse:
+    """Return the status text and state mirror for a process owned by this server.
+
+    The local graph's check_process tool uses the mirror to persist terminal
+    state, so resuming the thread does not repeatedly announce the same exit.
+    Registry access and log-tail reads run outside the async event loop.
+    """
+    from EvoScientist import background
+
+    process_id = request.query_params.get("process_id", "")
+    thread_id = request.query_params.get("thread_id") or None
+
+    def check():
+        text = background.status(process_id, thread_id=thread_id)
+        return {"text": text, "record": background.state_record(process_id)}
+
+    return JSONResponse(await asyncio.to_thread(check))
+
+
 async def post_policy(request: Request) -> JSONResponse:
     """Resolve HITL decisions for action requests, for non-Python clients.
 
@@ -321,6 +340,7 @@ def _build_app() -> Starlette:
             Route("/api/models", get_models, methods=["GET"]),
             Route("/api/teams", get_teams, methods=["GET"]),
             Route("/api/bg_process_status", get_bg_process_status, methods=["GET"]),
+            Route("/api/bg_process_check", get_bg_process_check, methods=["GET"]),
             Route(
                 "/api/bg_processes/running", get_bg_processes_running, methods=["GET"]
             ),
