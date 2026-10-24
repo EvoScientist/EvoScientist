@@ -128,6 +128,37 @@ def test_terminate_is_false_when_the_job_cannot_be_opened(monkeypatch):
     assert ("terminate", 88) not in api.calls
 
 
+def test_started_resumes_through_psutil_when_the_job_api_cannot_load(monkeypatch):
+    """The suspended server must be resumed even when the job API itself
+    cannot be loaded (e.g. the tests' os.name="nt" on Linux): ``started``
+    falls back to a psutil resume instead of leaving the server frozen or
+    raising — the never-raises contract."""
+
+    def _no_api():
+        raise AttributeError("kernel32 unavailable")
+
+    monkeypatch.setattr(agent_shell, "_job_api", _no_api)
+    resumed = []
+
+    class FakePsutilProcess:
+        def __init__(self, pid):
+            assert pid == 4242
+
+        def resume(self):
+            resumed.append(True)
+
+    fake_psutil = type(sys)("psutil")
+    fake_psutil.Process = FakePsutilProcess
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    sweep = agent_shell.ServerSweepJob(123)
+    assert sweep._handle is None
+    assert sweep.creationflags == 0
+    process = type("P", (), {"_handle": 9, "pid": 4242})()
+    sweep.started(process, resume=True)
+    assert resumed == [True]
+
+
 @windows_bash
 def test_sweep_job_ends_msys_orphans_the_tree_walk_misses(tmp_path):
     bash = _SYSTEM_GIT / "bin" / "bash.exe"

@@ -588,13 +588,25 @@ class ServerSweepJob:
 
         ``resume`` True means the caller started the process suspended for
         THIS job and no other job's ``started`` will resume it — the process
-        is resumed whatever happens, also when it could not be assigned.
-        False when a second job (``deploy --json``'s) owns the resume.
+        is resumed whatever happens, also when the job API itself cannot be
+        loaded. False when a second job (``deploy --json``'s) owns the
+        resume.
         """
-        api = _job_api()
-        if self._handle is None:
+        api: _JobApi | None = None
+        try:
+            api = _job_api()
+        except (OSError, AttributeError):
+            api = None
+        if api is None or self._handle is None:
+            # No usable job API (or the job was never created): nothing to
+            # assign, the caller's suspended start still needs its resume.
             if resume:
-                api.resume(int(process._handle))
+                if api is not None:
+                    api.resume(int(process._handle))
+                else:
+                    import psutil
+
+                    psutil.Process(process.pid).resume()
             return
         try:
             if not api.assign(self._handle, int(process._handle)):
