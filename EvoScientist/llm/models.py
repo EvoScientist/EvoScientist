@@ -30,7 +30,6 @@ from .patches import (
     _patch_anthropic_structured_output,
     _patch_openai_compat_content,
     _patch_openai_responses_whole_tool_args,
-    _patch_openrouter_strip_responses_reasoning,
     _patch_openrouter_structured_output,
 )
 from .registry import (
@@ -563,11 +562,8 @@ def get_chat_model(
         if api_key:
             kwargs["api_key"] = api_key
         # Reasoning via `effort` + `summary: "auto"` so a readable reasoning
-        # summary is returned for display. OpenAI-Responses also emits encrypted
-        # reasoning items (`rs_*` id) that can't be replayed on multi-turn
-        # passback (OpenRouter's `/responses` beta is stateless, store=false —
-        # "Item with id 'rs_...' not found"); the patch strips them on passback,
-        # so enabling `summary` is safe. See langchain-ai/langchain#37777.
+        # summary is returned for display; langchain-openrouter drops the
+        # ephemeral `rs_` ids before replaying encrypted reasoning items.
         # Note: mandatory-reasoning endpoints (kimi-k3, grok-4.5, …) reject
         # effort "none" with HTTP 400 — that error is surfaced to the user
         # as-is; pick a real effort (low+) for those models.
@@ -624,7 +620,6 @@ def get_chat_model(
             _app_categories = _app_categories[:_limit]
         if _app_categories:
             kwargs.setdefault("app_categories", _app_categories)
-        _patch_openrouter_strip_responses_reasoning()
         _patch_openrouter_structured_output()
 
     # Anthropic-routed providers → route through Anthropic provider with base_url
