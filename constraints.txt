@@ -25,7 +25,7 @@ cfgv==3.5.0
 charset-normalizer==3.5.2
 click==8.5.0
 cloudpickle==3.1.2
-colorama==0.4.6 ; (os_name == 'nt' and platform_machine != 'x86_64') or (os_name != 'nt' and sys_platform == 'win32') or (os_name == 'nt' and sys_platform != 'darwin')
+colorama==0.4.6 ; (os_name == 'nt' and platform_machine != 'x86_64') or (os_name == 'nt' and sys_platform != 'darwin' and sys_platform != 'win32') or sys_platform == 'win32'
 coverage==7.17.0
 croniter==6.2.4
 cryptography==48.0.1 ; platform_machine == 'x86_64' and sys_platform == 'darwin'
