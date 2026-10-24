@@ -14,6 +14,9 @@ Patches:
       (installed by the first sign-in model, then applies to every Responses stream)
     - _patch_langgraph_goto_none_crash: handle Command(goto=None)
       defensively in langgraph and langgraph-api (langgraph 1.2.9 workaround)
+    - _patch_deepagents_bound_reasoning_claude_only: after a summary, drop
+      kept ``anthropic``-tagged thinking for Claude only (installed by
+      ``create_per_run_summarization_middleware``)
 
 Utilities:
     - _flatten_message_content: convert content blocks to plain string
@@ -1175,6 +1178,43 @@ def _patch_langgraph_goto_none_crash() -> None:
 
 
 _patch_langgraph_goto_none_crash()
+
+
+# ---------------------------------------------------------------------------
+# Patch: deepagents (0.7.30+) drops the ``thinking`` blocks of messages kept
+# across a summary whenever they are tagged ``model_provider == "anthropic"``.
+# Only Claude binds them to the earlier history; every Anthropic-protocol reply
+# carries that tag, and Kimi backends reject a tool-call turn without thinking.
+# ---------------------------------------------------------------------------
+def _patch_deepagents_bound_reasoning_claude_only() -> None:
+    """Keep thinking of models named other than Claude (upstream's Bedrock rule).
+
+    A reply without a model name keeps upstream's drop.
+    """
+    try:
+        import deepagents.middleware.summarization as _summ_mod
+    except ImportError:
+        return
+
+    _orig = getattr(_summ_mod, "_bound_reasoning_types", None)
+    if _orig is None or hasattr(_orig, "_evosci_claude_only"):
+        return
+
+    @functools.wraps(_orig)
+    def _patched(message: AIMessage) -> frozenset[str]:
+        metadata = message.response_metadata
+        model = str(metadata.get("model_name") or "").lower()
+        if (
+            metadata.get("model_provider") == "anthropic"
+            and model
+            and "claude" not in model
+            and "anthropic" not in model
+        ):
+            return frozenset()
+        return _orig(message)
+
+    _patched._evosci_claude_only = True  # type: ignore[attr-defined]
+    _summ_mod._bound_reasoning_types = _patched
 
 
 # ---------------------------------------------------------------------------

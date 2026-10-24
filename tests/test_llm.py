@@ -3202,6 +3202,153 @@ class TestAnthropicStripForeignReasoning:
 
 
 # =============================================================================
+# Test _patch_deepagents_bound_reasoning_claude_only
+# =============================================================================
+
+
+class TestSummaryKeepsNonClaudeThinking:
+    """Only Claude binds thinking to the history a summary replaces; Kimi backends
+    reject a tool-call turn whose thinking is missing."""
+
+    @pytest.fixture(autouse=True)
+    def _agent_summarization(self, tmp_path):
+        from deepagents.backends import FilesystemBackend
+        from langchain_core.language_models import FakeListChatModel
+
+        from EvoScientist.middleware import create_per_run_summarization_middleware
+
+        # Building the agent's summarization middleware installs the patch.
+        create_per_run_summarization_middleware(
+            FakeListChatModel(responses=["unused"]),
+            FilesystemBackend(root_dir=tmp_path),
+        )
+
+    @staticmethod
+    def _events(model: str) -> list[dict]:
+        return [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "plan"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "ls",
+                    "input": {},
+                },
+            },
+            {"type": "content_block_stop", "index": 1},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": 2},
+            },
+            {"type": "message_stop"},
+        ]
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["invoke", "stream"])
+    @pytest.mark.parametrize(
+        ("provider", "model", "key_env", "kept"),
+        [
+            ("anthropic", "claude-sonnet-5-5", "ANTHROPIC_API_KEY", ["tool_use"]),
+            (
+                "kimi-coding",
+                "kimi-for-coding",
+                "KIMI_API_KEY",
+                ["thinking", "tool_use"],
+            ),
+        ],
+    )
+    def test_reply_kept_across_a_summary(
+        self, monkeypatch, provider, model, key_env, kept, stream
+    ):
+        import json
+
+        import anthropic
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import HumanMessage
+
+        httpx = _anthropic_httpx()
+        monkeypatch.setenv(key_env, "test-key")
+        chat_model = get_chat_model(model, provider=provider)
+        events = self._events(model)
+
+        def respond(request):
+            if json.loads(request.content).get("stream"):
+                body = "".join(
+                    f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events
+                )
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=body.encode(),
+                )
+            message = {
+                **events[0]["message"],
+                "content": [
+                    {"type": "thinking", "thinking": "plan", "signature": ""},
+                    events[4]["content_block"],
+                ],
+                "stop_reason": "tool_use",
+            }
+            return httpx.Response(200, json=message)
+
+        chat_model._client = anthropic.Anthropic(
+            api_key=chat_model.anthropic_api_key.get_secret_value(),
+            base_url=chat_model.anthropic_api_url,
+            timeout=None,
+            http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+        )
+        prompt = [HumanMessage("list files")]
+        if stream:
+            reply = None
+            for chunk in chat_model.stream(prompt):
+                reply = chunk if reply is None else reply + chunk
+        else:
+            reply = chat_model.invoke(prompt)
+
+        assert reply.response_metadata["model_name"] == model
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == kept
+
+    def test_unnamed_reply_keeps_upstreams_drop(self):
+        from deepagents.middleware.summarization import _drop_bound_reasoning
+        from langchain_core.messages import AIMessage
+
+        reply = AIMessage(
+            content=[
+                {"type": "thinking", "thinking": "plan", "signature": "sig"},
+                {"type": "text", "text": "done"},
+            ],
+            response_metadata={"model_provider": "anthropic"},
+        )
+
+        assert [b["type"] for b in _drop_bound_reasoning(reply).content] == ["text"]
+
+
+# =============================================================================
 # Test _patch_anthropic_structured_output
 # =============================================================================
 

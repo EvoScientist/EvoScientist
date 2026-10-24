@@ -398,4 +398,8 @@ def create_per_run_summarization_middleware(
             backend the stock instance would have used, since deepagents'
             name-based merge replaces the built-in with this instance.
     """
+    # Imported here: llm.patches loads the provider SDKs, too slow for CLI startup.
+    from ..llm.patches import _patch_deepagents_bound_reasoning_claude_only
+
+    _patch_deepagents_bound_reasoning_claude_only()
     return _PerRunLimitsSummarizationMiddleware(construction_model, backend)
