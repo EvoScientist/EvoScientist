@@ -400,6 +400,13 @@ _FILE_LOCK_TIMEOUT = 120.0  # 60s cold-start health-check + buffer
 # Stays None when we reused an existing process (managed by the user).
 _PROCESS: subprocess.Popen | None = None
 
+# The Windows server sweep job around the process in ``_PROCESS`` (#604): a
+# named job whose members are every descendant, however its parent links
+# look, so a stop can end MSYS programs whose parent bash already exited.
+# Kept open for this process's lifetime; the server holds its own handle, so
+# a keepalive server's job survives this CLI's exit either way.
+_SWEEP_JOB = None
+
 # Workspace directory the running subprocess was launched with. Used by
 # ``ensure_langgraph_dev`` to detect a workspace switch (e.g., on /resume of
 # a thread from a different workspace) and trigger a restart so the deployed
@@ -890,6 +897,13 @@ def _stop_recorded_server_locked() -> int | None:
                 pass
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
+    from EvoScientist.agent_shell import terminate_server_sweep_job
+
+    # Same as the tree walk above but by job membership: ends the MSYS
+    # programs whose parent bash already exited (#604). The server holds
+    # its own handle to the named job, so it is reachable from this
+    # process even though another session started it. POSIX: no-op.
+    terminate_server_sweep_job(owned_pid)
     stop_langgraph_dev()
     return owned_pid
 
@@ -1177,10 +1191,20 @@ def start_langgraph_dev(
         }
     else:
         _spawn_kwargs = {"start_new_session": True}
+    sweep_resumes = False
     if job is not None:
         _spawn_kwargs["creationflags"] = (
             _spawn_kwargs.get("creationflags", 0) | job.creationflags
         )
+    elif os.name == "nt":
+        # No ``deploy --json`` job owns the suspended start, but the server
+        # must still join the sweep job (#604) before its first worker runs.
+        from EvoScientist.agent_shell import _CREATE_SUSPENDED
+
+        _spawn_kwargs["creationflags"] = (
+            _spawn_kwargs.get("creationflags", 0) | _CREATE_SUSPENDED
+        )
+        sweep_resumes = True
 
     try:
         logger.info("Starting langgraph dev with CLI: %s", exe)
@@ -1215,10 +1239,18 @@ def start_langgraph_dev(
             pass
     # Recorded before anything else can fail or be interrupted, so every
     # later failure path, and a caller's stop_langgraph_dev(), reaches it.
-    global _PROCESS_WORKSPACE, _PROCESS_RUN_DIR
+    global _PROCESS_WORKSPACE, _PROCESS_RUN_DIR, _SWEEP_JOB
     _PROCESS = proc
     _PROCESS_WORKSPACE = workspace_dir
     _PROCESS_RUN_DIR = run_dir
+    if os.name == "nt":
+        from EvoScientist.agent_shell import ServerSweepJob
+
+        # The named sweep job lets both stop paths end MSYS orphans whose
+        # parent bash exited (#604); assignment must precede the resume, so
+        # a worker cannot spawn outside the job.
+        _SWEEP_JOB = ServerSweepJob(proc.pid)
+        _SWEEP_JOB.started(proc, resume=sweep_resumes)
     if job is not None:
         job.started(proc)
     RUNTIME.pid_file.write_text(str(proc.pid), encoding="utf-8")
@@ -1319,7 +1351,7 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
     ``_PROCESS_WORKSPACE`` so concurrent ``ensure_langgraph_dev`` callers
     (which also hold ``_LOCK``) don't observe partially-cleared state.
     """
-    global _PROCESS, _PROCESS_WORKSPACE, _PROCESS_RUN_DIR, SERVED_WORKSPACE
+    global _PROCESS, _PROCESS_WORKSPACE, _PROCESS_RUN_DIR, SERVED_WORKSPACE, _SWEEP_JOB
     with _LOCK:
         SERVED_WORKSPACE = None
         proc = proc if proc is not None else _PROCESS
@@ -1370,6 +1402,18 @@ def stop_langgraph_dev(proc: subprocess.Popen | None = None) -> None:
                 _PROCESS = None
                 _PROCESS_WORKSPACE = None
                 _PROCESS_RUN_DIR = None
+        if proc is not None:
+            from EvoScientist.agent_shell import terminate_server_sweep_job
+
+            # The tree walk above follows parent PIDs, so it misses MSYS
+            # programs whose parent bash exited (#604); the sweep job holds
+            # them by membership. Best effort — a server that never joined
+            # one keeps the old behaviour (and on POSIX the helper is a
+            # no-op).
+            terminate_server_sweep_job(proc.pid)
+        if _SWEEP_JOB is not None:
+            _SWEEP_JOB.close()
+            _SWEEP_JOB = None
     if RUNTIME.pid_file.exists():
         try:
             RUNTIME.pid_file.unlink()

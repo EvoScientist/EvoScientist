@@ -422,6 +422,8 @@ class _JobApi:
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.CreateJobObjectW.restype = wintypes.HANDLE
         k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        k32.OpenJobObjectW.restype = wintypes.HANDLE
+        k32.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
         k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
         k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
         k32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -437,6 +439,13 @@ class _JobApi:
 
     def create(self) -> int | None:
         return self._k32.CreateJobObjectW(None, None)
+
+    def create_named(self, name: str) -> int | None:
+        return self._k32.CreateJobObjectW(None, name)
+
+    def open(self, name: str) -> int | None:
+        """Open an existing named job, with the right to terminate it."""
+        return self._k32.OpenJobObjectW(0x0008, False, name)  # TERMINATE
 
     def assign(self, job: int, process: int) -> bool:
         return bool(self._k32.AssignProcessToJobObject(job, process))
@@ -519,6 +528,146 @@ def terminate_job(process: subprocess.Popen) -> bool:
         if job is None:
             return False
         return _job_api().terminate(job)
+
+
+# --------------------------------------------------------------------------- #
+# The server sweep job (issue #604)
+# --------------------------------------------------------------------------- #
+_SERVER_JOB_PREFIX = "evoscientist-server-"
+
+
+def server_sweep_job_name(pid: int) -> str:
+    """The name of the sweep job for the langgraph server with ``pid``."""
+    return f"{_SERVER_JOB_PREFIX}{pid}"
+
+
+class ServerSweepJob:
+    """A named job around a langgraph server, so stopping the server can end
+    MSYS programs whose parent bash already exited.
+
+    The per-command jobs are not kill-on-close (a ``&`` background job must
+    outlive its call) and their handles die with the server, and the stop
+    paths walk parent PIDs, so an MSYS program whose parent bash exited is
+    missed (issue #604). A job around the whole server instead collects every
+    descendant by inheritance — an MSYS ``fork()`` keeps job membership — and
+    :func:`terminate_server_sweep_job` ends them by name from any process.
+
+    Deliberately NOT kill-on-close: a ``langgraph_dev_keepalive`` server must
+    outlive the CLI that started it. The server process holds its own handle
+    (:func:`_hold_own_server_job`) so the job survives that CLI's exit and
+    ``EvoSci server stop`` from a fresh process can still reach it.
+
+    Same shape as ``deploy.backend_job.BackendJob``: :attr:`creationflags`
+    for ``Popen`` (start suspended, join before the first worker spawns),
+    then :meth:`started` once the process exists. Never raises.
+    """
+
+    def __init__(self, pid: int) -> None:
+        self._handle: int | None = None
+        try:
+            api = _job_api()
+            self._handle = api.create_named(server_sweep_job_name(pid))
+            if not self._handle:
+                logger.debug(
+                    "No server sweep job for pid %s (error %s); stopping the "
+                    "server falls back to the process-tree walk.",
+                    pid,
+                    api.last_error(),
+                )
+        except (OSError, AttributeError) as exc:
+            logger.debug(f"Job object API unavailable: {exc}")
+
+    @property
+    def creationflags(self) -> int:
+        """Start the server suspended, so it joins the job before it can
+        spawn a worker that would escape it."""
+        return _CREATE_SUSPENDED if self._handle is not None else 0
+
+    def started(self, process: subprocess.Popen, resume: bool = True) -> None:
+        """Put the suspended ``process`` in the job.
+
+        ``resume`` True means the caller started the process suspended for
+        THIS job and no other job's ``started`` will resume it — the process
+        is resumed whatever happens, also when the job API itself cannot be
+        loaded. False when a second job (``deploy --json``'s) owns the
+        resume.
+        """
+        api: _JobApi | None = None
+        try:
+            api = _job_api()
+        except (OSError, AttributeError):
+            api = None
+        if api is None or self._handle is None:
+            # No usable job API (or the job was never created): nothing to
+            # assign, the caller's suspended start still needs its resume.
+            if resume:
+                if api is not None:
+                    api.resume(int(process._handle))
+                else:
+                    import psutil
+
+                    psutil.Process(process.pid).resume()
+            return
+        try:
+            if not api.assign(self._handle, int(process._handle)):
+                logger.debug(
+                    "Server sweep job: could not assign pid %s (error %s)",
+                    process.pid,
+                    api.last_error(),
+                )
+        finally:
+            if resume:
+                api.resume(int(process._handle))
+
+    def close(self) -> None:
+        """Close this process's handle; the job lives on while the server
+        holds its own. Safe to call more than once."""
+        if self._handle is None:
+            return
+        handle, self._handle = self._handle, None
+        _job_api().close(handle)
+
+
+def terminate_server_sweep_job(pid: int) -> bool:
+    """End every process still in the sweep job named for ``pid`` — the
+    server and whatever the process-tree walk missed, MSYS programs whose
+    parent bash exited (#604). False when no such job can be opened.
+
+    Best effort: called after the graceful stop paths, so the job usually
+    holds only the leftovers the tree walk could not reach.
+    """
+    try:
+        api = _job_api()
+        job = api.open(server_sweep_job_name(pid))
+        if not job:
+            return False
+        try:
+            return api.terminate(job)
+        finally:
+            api.close(job)
+    except (OSError, AttributeError):
+        return False
+
+
+# The server's own handle to its sweep job, so the job outlives the CLI that
+# started a keepalive server. None (or a CLI process's failed lookup) leaves
+# the starter's handle in charge.
+_OWN_SERVER_JOB: int | None = None
+
+
+def _hold_own_server_job() -> None:
+    """On import, keep our sweep job's handle open when this process is a
+    langgraph server that was started into one (#604)."""
+    global _OWN_SERVER_JOB
+    try:
+        api = _job_api()
+        _OWN_SERVER_JOB = api.open(server_sweep_job_name(os.getpid()))
+    except (OSError, AttributeError):
+        pass
+
+
+if sys.platform == "win32":  # pragma: no cover - exercised via _FakeApi tests
+    _hold_own_server_job()
 
 
 class BashMissingError(RuntimeError):
