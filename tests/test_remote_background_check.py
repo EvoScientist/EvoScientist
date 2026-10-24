@@ -7,7 +7,7 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from EvoScientist import background
+from EvoScientist import background, local_secret
 from EvoScientist.langgraph_dev.http import app
 from EvoScientist.langgraph_dev.sdk import langgraph_dev_headers
 from EvoScientist.middleware.background import check_process
@@ -63,7 +63,10 @@ def test_check_process_mirrors_remote_terminal_record(remote):
         "thread_id": "thread-1",
     }
     assert request.call_args.kwargs["timeout"] == 10.0
-    assert request.call_args.kwargs["headers"] == langgraph_dev_headers()
+    assert request.call_args.kwargs["headers"] == {
+        **langgraph_dev_headers(),
+        local_secret.HEADER: local_secret.ensure_local_secret(),
+    }
 
 
 def test_known_local_process_does_not_query_server(remote, monkeypatch):
@@ -99,6 +102,17 @@ def test_remote_timeout_does_not_mark_process_observed(remote):
         check_process.func(process_id="server-process", runtime=RUNTIME)
 
 
+def test_remote_check_does_not_request_without_a_readable_secret(remote, monkeypatch):
+    """An unusable secret must not cause an unauthenticated process-output request."""
+    _, request = remote
+    monkeypatch.setattr(
+        local_secret, "ensure_local_secret", Mock(side_effect=OSError("unreadable"))
+    )
+    with pytest.raises(OSError, match="unreadable"):
+        check_process.func(process_id="server-process", runtime=RUNTIME)
+    request.assert_not_called()
+
+
 def test_remote_unknown_process_does_not_write_state(remote):
     _, request = remote
     request.return_value = httpx.Response(
@@ -122,6 +136,7 @@ def test_check_route_returns_status_tail_and_state_record(monkeypatch):
         response = client.get(
             "/api/bg_process_check",
             params={"process_id": "server-process", "thread_id": "thread-1"},
+            headers={local_secret.HEADER: local_secret.ensure_local_secret()},
         )
     assert response.status_code == 200
     assert response.json() == {"text": status.return_value, "record": RECORD}
@@ -131,11 +146,55 @@ def test_check_route_returns_status_tail_and_state_record(monkeypatch):
 def test_check_route_returns_null_record_for_missing_process():
     with TestClient(app, base_url="http://localhost") as client:
         response = client.get(
-            "/api/bg_process_check", params={"process_id": "missing-process"}
+            "/api/bg_process_check",
+            params={"process_id": "missing-process"},
+            headers={local_secret.HEADER: local_secret.ensure_local_secret()},
         )
     assert response.status_code == 200
     assert response.json()["record"] is None
     assert "No such background process" in response.json()["text"]
+
+
+@pytest.mark.parametrize(
+    "headers", [{}, {local_secret.HEADER: ""}, {local_secret.HEADER: "wrong"}]
+)
+def test_check_route_refuses_before_reading_process_output(monkeypatch, headers):
+    """Neither process output nor observation state is accessed without the secret."""
+    status = Mock(return_value="private process output")
+    state_record = Mock(return_value=RECORD)
+    monkeypatch.setattr(background, "status", status)
+    monkeypatch.setattr(background, "state_record", state_record)
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get(
+            "/api/bg_process_check",
+            params={"process_id": "server-process", "thread_id": "thread-1"},
+            headers=headers,
+        )
+    assert response.status_code == 403
+    assert response.json() == {"error": "local_secret_required"}
+    status.assert_not_called()
+    state_record.assert_not_called()
+
+
+def test_check_route_refuses_when_server_secret_is_unavailable(monkeypatch):
+    """A server that cannot load its secret fails closed before accessing a process."""
+    status = Mock(return_value="private process output")
+    state_record = Mock(return_value=RECORD)
+    monkeypatch.setattr(background, "status", status)
+    monkeypatch.setattr(background, "state_record", state_record)
+    monkeypatch.setattr(
+        local_secret, "ensure_local_secret", Mock(side_effect=OSError("unreadable"))
+    )
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.get(
+            "/api/bg_process_check",
+            params={"process_id": "server-process"},
+            headers={local_secret.HEADER: "anything"},
+        )
+    assert response.status_code == 403
+    assert response.json() == {"error": "local_secret_required"}
+    status.assert_not_called()
+    state_record.assert_not_called()
 
 
 def test_remote_check_mirrors_a_real_completed_process(tmp_path, monkeypatch):

@@ -189,8 +189,12 @@ async def get_bg_process_check(request: Request) -> JSONResponse:
 
     The local graph's check_process tool uses the mirror to persist terminal
     state, so resuming the thread does not repeatedly announce the same exit.
+    The local secret is required because the response includes commands and logs.
     Registry access and log-tail reads run outside the async event loop.
     """
+    if (denied := require_local_secret(request)) is not None:
+        return denied
+
     from EvoScientist import background
 
     process_id = request.query_params.get("process_id", "")

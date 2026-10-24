@@ -211,6 +211,7 @@ def check_process(process_id: str, runtime: ToolRuntime = None) -> "str | Comman
         configured_langgraph_dev_url,
         langgraph_dev_headers,
     )
+    from ..local_secret import HEADER, ensure_local_secret
 
     if not needs_langgraph_dev(_ensure_config(), backend="local"):
         return text
@@ -224,7 +225,7 @@ def check_process(process_id: str, runtime: ToolRuntime = None) -> "str | Comman
                 "process_id": process_id,
                 "thread_id": _origin_thread_id(runtime) or "",
             },
-            headers=langgraph_dev_headers(),
+            headers={**langgraph_dev_headers(), HEADER: ensure_local_secret()},
             timeout=10.0,
         )
     except httpx.ConnectError:
