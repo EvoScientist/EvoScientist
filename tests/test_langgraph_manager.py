@@ -1019,9 +1019,11 @@ class TestStartLanggraphDevSpawnFlags:
         except FileNotFoundError:
             pass  # _fake_popen stops before the real spawn
         kw = env.captured["kwargs"]
-        # Exactly the process-group flag: no CREATE_NO_WINDOW, which would
-        # detach the server from the console and let it outlive a closed one.
-        assert kw.get("creationflags") == 0x00000200
+        # The process-group flag plus the suspended start the server sweep
+        # job resumes (#604): the server joins the job before its first
+        # worker can escape it. Never CREATE_NO_WINDOW, which would detach
+        # the server from the console and let it outlive a closed one.
+        assert kw.get("creationflags") == 0x00000200 | 0x00000004
         assert "start_new_session" not in kw
 
     def test_posix_uses_new_session(self, start_langgraph_dev_capture, monkeypatch):
