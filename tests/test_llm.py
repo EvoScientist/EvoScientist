@@ -1662,14 +1662,16 @@ class TestThirdPartyRouting:
 
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_minimax_gets_thinking(self, mock_init, monkeypatch):
-        """MiniMax provider should get auto-thinking (thinking-capable via Anthropic)."""
+        """MiniMax gets the only thinking shape its API takes and its documented
+        output limit (no langchain profile, so the fallback would be 4096)."""
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
         get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert "thinking" in call_kwargs
+        assert call_kwargs["thinking"] == {"type": "adaptive"}
+        assert call_kwargs["max_tokens"] == 131072
         assert "reasoning" not in call_kwargs
 
     @patch("EvoScientist.llm.models._patch_openai_compat_content")
@@ -1706,6 +1708,7 @@ class TestThirdPartyRouting:
         model._client = anthropic.Anthropic(
             api_key="mm-key",
             base_url="https://api.minimaxi.com/anthropic",
+            timeout=None,
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
 
@@ -3993,6 +3996,51 @@ def test_xiaomi_token_plan_wire_request(monkeypatch, region_url, host):
     assert captured["body"]["model"] == "mimo-v2.6-pro"
     assert captured["body"]["max_tokens"] == 131072
     assert captured["body"]["thinking"]["type"] == "enabled"
+
+
+def test_minimax_wire_request(monkeypatch):
+    """Wire-level: MiniMax gets adaptive thinking and its documented output limit."""
+    import json
+
+    import anthropic
+    from langchain_core.messages import HumanMessage
+
+    httpx = _anthropic_httpx()
+    monkeypatch.setenv("MINIMAX_API_KEY", "mm-test")
+    monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
+    model = get_chat_model("minimax-m3.1-flash", provider="minimax")
+    captured = {}
+
+    def respond(request):
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "MiniMax-M3.1-Flash",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    # Rebuild the client from the model's own settings so routing is what's tested.
+    model._client = anthropic.Anthropic(
+        api_key=model.anthropic_api_key.get_secret_value(),
+        base_url=model.anthropic_api_url,
+        timeout=None,
+        http_client=httpx.Client(transport=httpx.MockTransport(respond)),
+    )
+    model.invoke([HumanMessage("hi")])
+
+    assert captured["url"] == "https://api.minimaxi.com/anthropic/v1/messages"
+    assert captured["body"]["model"] == "MiniMax-M3.1-Flash"
+    assert captured["body"]["max_tokens"] == 131072
+    assert captured["body"]["thinking"] == {"type": "adaptive"}
 
 
 # =============================================================================

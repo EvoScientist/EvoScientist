@@ -382,6 +382,9 @@ def _apply_auto_config(
         elif _is_current_claude(model_id):
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             kwargs.setdefault("effort", "max")
+        elif original_provider == "minimax":
+            # MiniMax takes only `adaptive` (M3.1 Flash rejects `disabled`), no budget.
+            kwargs["thinking"] = {"type": "adaptive"}
         else:
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": 10000}
 
@@ -655,9 +658,9 @@ def get_chat_model(
         # Kimi Coding Plan requires claude-code User-Agent header
         if provider == "kimi-coding":
             kwargs.setdefault("default_headers", {})["User-Agent"] = "claude-code/0.1.0"
-        # MiMo ids have no langchain profile, so ChatAnthropic would fall back to
-        # 4096; match the server's own default (131072) instead.
-        if provider in ("xiaomi", "xiaomi-token-plan"):
+        # MiMo and MiniMax ids have no langchain profile, so ChatAnthropic would
+        # fall back to 4096; use the 131072 both vendors document instead.
+        if provider in ("xiaomi", "xiaomi-token-plan", "minimax"):
             kwargs.setdefault("max_tokens", 131072)
         provider = "anthropic"
 
