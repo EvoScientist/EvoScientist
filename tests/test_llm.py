@@ -1197,6 +1197,20 @@ class TestThirdPartyRouting:
 
         mock_init.assert_not_called()
 
+    @pytest.mark.parametrize("provider", ["openrouter", "requesty"])
+    @patch("EvoScientist.llm.models.init_chat_model")
+    def test_router_does_not_borrow_another_providers_id(
+        self, mock_init, monkeypatch, provider
+    ):
+        # A vendor/model id from another provider's entry can be routable too
+        # and would silently run an older snapshot.
+        monkeypatch.setitem(MODELS, "listed-elsewhere", ("vendor/model-0731", "novita"))
+
+        with pytest.raises(ValueError, match="not in EvoScientist's"):
+            get_chat_model("listed-elsewhere", provider=provider)
+
+        mock_init.assert_not_called()
+
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_router_accepts_a_full_model_id(self, mock_init, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")

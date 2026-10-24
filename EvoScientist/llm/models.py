@@ -444,7 +444,13 @@ def get_chat_model(
             if name == model and p == provider:
                 model_id = mid
                 break
-    if model_id is None and model in MODELS:
+    # Routers keep to their own entries: another provider's id may name an
+    # older or different model there.
+    if (
+        model_id is None
+        and model in MODELS
+        and provider not in ("openrouter", "requesty")
+    ):
         model_id, default_provider = MODELS[model]
         provider = provider or default_provider
 
@@ -466,7 +472,7 @@ def get_chat_model(
                 provider = "anthropic"  # Default fallback
 
     # Routers address models as ``vendor/model``; a bare id here is a short
-    # name that is no longer in the registry (or another provider's id).
+    # name outside this router's list.
     if provider in ("openrouter", "requesty") and "/" not in model_id:
         raise UnknownModelError(
             f"Model {model!r} is not in EvoScientist's {provider} model list "
