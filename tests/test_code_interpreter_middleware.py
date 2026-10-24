@@ -28,9 +28,12 @@ def test_task_excluded_from_ptc_allowlist():
     assert "task" not in _DEFAULT_PTC_ALLOWLIST
 
 
-def test_async_dispatch_tools_remain_in_allowlist():
-    # Guard against over-deletion: async fan-out is the killer PTC use case.
-    for name in ("start_async_task", "check_async_task", "list_async_tasks"):
+def test_async_tools_that_track_tasks_stay_out_of_allowlist():
+    # The REPL drops a tool's Command state update (langchain-ai/deepagents#5652),
+    # so a task started there is never tracked; reading tracked tasks still works.
+    for name in ("start_async_task", "update_async_task", "cancel_async_task"):
+        assert name not in _DEFAULT_PTC_ALLOWLIST
+    for name in ("check_async_task", "list_async_tasks"):
         assert name in _DEFAULT_PTC_ALLOWLIST
 
 
