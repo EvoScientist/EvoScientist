@@ -834,7 +834,7 @@ async def test_deepseek_selector_uses_copy_settings(monkeypatch, provider):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider=provider,
             http_async_client=client,
         )

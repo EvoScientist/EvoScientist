@@ -37,12 +37,12 @@ from .registry import (
     _ANTHROPIC_ROUTED_PROVIDERS,
     _MODEL_ENTRIES,
     _OPENAI_ROUTED_PROVIDERS,
-    _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS,  # noqa: F401 — re-exported
     _THINKING_CAPABLE_PROVIDERS,
     DEFAULT_MODEL,
     MODELS,
     UnknownModelError,
     _is_mandatory_thinking_kimi,
+    _openrouter_needs_json_schema,  # noqa: F401 — re-exported
     get_model_info,  # noqa: F401 — re-exported for existing import sites
     get_models_for_provider,  # noqa: F401 — re-exported for existing import sites
     list_model_picker_entries,  # noqa: F401 — re-exported for existing import sites
@@ -538,11 +538,11 @@ def get_chat_model(
         # from history, causing error 20015 on multi-turn requests.
         if provider == "siliconflow":
             kwargs.setdefault("extra_body", {})["enable_thinking"] = False
-        # Moonshot: disable thinking for pre-K3 models to prevent LangChain from
-        # dropping reasoning_content, which causes multi-turn conversation errors
-        # (error 20015). Even native thinking models like kimi-k2-thinking operate
-        # in non-thinking mode. kimi-k3+ is exempt: always-thinking, and
-        # Moonshot's K3 guide forbids the K2.x `thinking` parameter for it.
+        # Moonshot: disable thinking for pre-K3 models (K2.x, still served to
+        # existing users until the end of 2026) so LangChain does not drop
+        # reasoning_content, which causes multi-turn errors (error 20015).
+        # kimi-k3+ is exempt: always-thinking, and Moonshot's K3 guide forbids
+        # the K2.x `thinking` parameter for it.
         if provider == "moonshot" and not model_id.startswith("kimi-k3"):
             kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
         provider = "openai"

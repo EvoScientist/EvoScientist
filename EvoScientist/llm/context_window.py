@@ -29,18 +29,9 @@ _KNOWN_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "grok-4.5": 500_000,
     # Claude Haiku 4.5 — exception to the ``claude-`` family (200K, not 1M).
     "claude-haiku-4-5": 200_000,
-    # MiniMax M3 — 1M context (M2.x variants stay at provider default ~204K).
-    # Covers OpenRouter ``minimax/minimax-m3`` (via split('/')[-1]) and direct
-    # ``MiniMax-M3`` (via lowercased exact match).
-    "minimax-m3": 1_000_000,
     # Volcengine Coding Plan's OpenAI-compatible alias for GLM-5.2 (1M); the
     # dashed id misses the ``glm-5.2`` family pattern below.
     "glm-5-2": 1_000_000,
-    # Tencent Hunyuan — HY4 preview 1M, HY3 262K (OpenRouter ``tencent/hy*``).
-    "hy4-preview": 1_048_576,
-    "hy3": 262_000,
-    # DeepSeek rolling Flash tier (native ``deepseek-flash``, V4.1-Flash today).
-    "deepseek-flash": 1_000_000,
 }
 
 # Family-level fallbacks: tried only after exact-name lookup misses.
@@ -51,19 +42,15 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("claude-", 1_000_000),
     # OpenAI GPT-6 family — astra, astra-pro, future variants
     ("gpt-6", 1_050_000),
-    # OpenAI GPT-5.6 family — sol, terra, luna variants
-    ("gpt-5.6", 1_050_000),
     # OpenAI GPT-5.5 family — base, pro, future variants
     ("gpt-5.5", 1_050_000),
     # Google Gemini 3.x family — flash, flash-lite, pro (1.05M). Excludes 2.5.
     ("gemini-3", 1_050_000),
     # Google Gemini 4 family — argon, future variants (1M).
     ("gemini-4", 1_048_576),
-    # Moonshot Kimi K3 — 1M context; covers bare ``kimi-k3`` (native Moonshot),
-    # OpenRouter ``moonshotai/kimi-k3``, and dated slugs like ``kimi-k3-20260715``.
+    # Moonshot Kimi K3 family — 1M context; covers ``kimi-k3`` / ``kimi-k3.1-pro``
+    # (native Moonshot), OpenRouter ``moonshotai/...`` and dated slugs.
     ("kimi-k3", 1_048_576),
-    # Moonshot Kimi K2 family — k2.5, k2.6, k2-thinking, k2-thinking-turbo
-    ("kimi-k2", 262_000),
     # Zhipu GLM-5.3 / 5.2 — 1M context; covers flash, flashx, future variants.
     ("glm-5.3", 1_000_000),
     ("glm-5.2", 1_000_000),
@@ -71,6 +58,8 @@ _KNOWN_MODEL_FAMILIES: list[tuple[str, int]] = [
     ("glm-5", 203_000),
     # DeepSeek V4 family — pro, flash, future variants
     ("deepseek-v4", 1_050_000),
+    # MiniMax M3 family — m3, m3.1-flash (1M).
+    ("minimax-m3", 1_000_000),
     # Xiaomi MiMo v2.6 family — pro, flash, future variants
     ("mimo-v2.6", 1_048_576),
     # Xiaomi MiMo v2.5 family — base, pro, future variants

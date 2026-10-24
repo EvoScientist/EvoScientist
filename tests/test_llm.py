@@ -676,7 +676,7 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
 
-        model = get_chat_model("deepseek-v4-flash", provider="deepseek")
+        model = get_chat_model("deepseek-flash", provider="deepseek")
 
         mock_init.assert_not_called()
         assert isinstance(model, EvoChatDeepSeek)
@@ -883,8 +883,12 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        # The dated canonical_slug is routable too and must be equally covered.
-        for model_name in ("moonshotai/kimi-k3", "moonshotai/kimi-k3-20260715"):
+        # The rule covers the K3 family: dated slugs and point releases too.
+        for model_name in (
+            "moonshotai/kimi-k3",
+            "moonshotai/kimi-k3-20260715",
+            "moonshotai/kimi-k3.1-pro",
+        ):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -902,8 +906,8 @@ class TestThirdPartyRouting:
         """Non-Moonshot models keep the function_calling default.
 
         Includes always-thinking models like grok-4.5 — the forced tool_choice
-        restriction is Moonshot-specific, so the json_schema rerouting must
-        stay limited to _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS.
+        restriction is Moonshot-specific — and Moonshot models outside the
+        always-thinking K3 family.
         """
         from pydantic import BaseModel
 
@@ -912,7 +916,7 @@ class TestThirdPartyRouting:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
 
-        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5"):
+        for model_name in ("x-ai/grok-4.3", "x-ai/grok-4.5", "moonshotai/kimi-k2.6"):
             model = get_chat_model(model_name, provider="openrouter")
             structured = model.with_structured_output(ToolSelection)
 
@@ -1385,7 +1389,7 @@ class TestThirdPartyRouting:
 
     @pytest.mark.parametrize(
         ("configured_model", "api_model"),
-        [("glm-5.2", "glm-5-2"), ("kimi-k2.5", "kimi-k2-5")],
+        [("glm-5.2", "glm-5-2")],
     )
     @patch("EvoScientist.llm.models.init_chat_model")
     def test_volcengine_code_routes_through_openai(
@@ -1526,7 +1530,7 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["model_provider"] == "anthropic"
@@ -1637,7 +1641,7 @@ class TestThirdPartyRouting:
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key-123")
         monkeypatch.setenv("MINIMAX_BASE_URL", "https://api.minimax.io/anthropic")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert call_kwargs["base_url"] == "https://api.minimax.io/anthropic"
@@ -1648,7 +1652,7 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("MiniMax-M2.5", provider="minimax")
+        get_chat_model("MiniMax-M3", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
         assert "thinking" in call_kwargs
@@ -1769,22 +1773,10 @@ class TestThirdPartyRouting:
         mock_init.return_value = "mock_model"
         monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
 
-        get_chat_model("minimax-m2.5", provider="minimax")
+        get_chat_model("minimax-m3.1-flash", provider="minimax")
 
         call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5"
-        assert call_kwargs["model_provider"] == "anthropic"
-
-    @patch("EvoScientist.llm.models.init_chat_model")
-    def test_minimax_highspeed_model(self, mock_init, monkeypatch):
-        """MiniMax M2.5-highspeed model should resolve correctly."""
-        mock_init.return_value = "mock_model"
-        monkeypatch.setenv("MINIMAX_API_KEY", "mm-key")
-
-        get_chat_model("minimax-m2.5-highspeed", provider="minimax")
-
-        call_kwargs = mock_init.call_args[1]
-        assert call_kwargs["model"] == "MiniMax-M2.5-highspeed"
+        assert call_kwargs["model"] == "MiniMax-M3.1-Flash"
         assert call_kwargs["model_provider"] == "anthropic"
         assert call_kwargs["base_url"] == "https://api.minimaxi.com/anthropic"
 
@@ -1827,28 +1819,20 @@ class TestMiniMaxProvider:
         assert "minimax" not in _OPENAI_ROUTED_PROVIDERS
 
     def test_minimax_models_registered(self):
-        """MiniMax should have 5 direct model entries in _MODEL_ENTRIES."""
-        minimax_models = get_models_for_provider("minimax")
-        assert len(minimax_models) == 5
-        model_names = {name for name, _ in minimax_models}
-        assert "minimax-m3" in model_names
-        assert "minimax-m2.7" in model_names
-        assert "minimax-m2.7-highspeed" in model_names
-        assert "minimax-m2.5" in model_names
-        assert "minimax-m2.5-highspeed" in model_names
+        """MiniMax lists the two models its API serves."""
+        model_names = {name for name, _ in get_models_for_provider("minimax")}
+        assert model_names == {"minimax-m3.1-flash", "minimax-m3"}
 
     def test_minimax_model_ids_correct(self):
         """MiniMax model IDs should match the official API model names."""
-        minimax_models = get_models_for_provider("minimax")
-        model_dict = dict(minimax_models)
-        assert model_dict["minimax-m2.7"] == "MiniMax-M2.7"
-        assert model_dict["minimax-m2.5"] == "MiniMax-M2.5"
-        assert model_dict["minimax-m2.5-highspeed"] == "MiniMax-M2.5-highspeed"
+        model_dict = dict(get_models_for_provider("minimax"))
+        assert model_dict["minimax-m3.1-flash"] == "MiniMax-M3.1-Flash"
+        assert model_dict["minimax-m3"] == "MiniMax-M3"
 
     def test_minimax_short_name_in_models_dict(self):
         """MiniMax short names should be accessible via the MODELS dict."""
         # Note: MODELS dict uses last-entry-wins, so direct minimax entries
-        # may be overridden by nvidia/siliconflow/openrouter entries.
+        # may be overridden by openrouter entries.
         # Use get_models_for_provider() for provider-specific lookups.
         minimax_models = get_models_for_provider("minimax")
         assert len(minimax_models) > 0
@@ -2876,7 +2860,7 @@ def test_deepseek_model_strips_unsupported_tool_media(monkeypatch):
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
-            "deepseek-v4-flash",
+            "deepseek-flash",
             provider="deepseek",
             http_client=client,
         )

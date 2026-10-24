@@ -769,7 +769,7 @@ def _patch_openrouter_strip_responses_reasoning() -> None:
 
 # ---------------------------------------------------------------------------
 # Patch (lazy, OpenRouter only): default structured output to json_schema for
-# Moonshot's always-thinking models (kimi-k3).
+# Moonshot's always-thinking models (the kimi-k3 family).
 #
 # Moonshot rejects a forced tool choice while thinking is enabled with HTTP 400:
 #   "tool_choice 'specified' is incompatible with thinking enabled"
@@ -801,9 +801,9 @@ def _patch_openrouter_structured_output() -> None:
             **kwargs: Any,
         ) -> Any:
             if method == "function_calling":
-                from .models import _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS
+                from .models import _openrouter_needs_json_schema
 
-                if self.model_name in _OPENROUTER_JSON_SCHEMA_STRUCTURED_OUTPUT_MODELS:
+                if _openrouter_needs_json_schema(self.model_name):
                     method = "json_schema"
             return _orig(self, schema, method=method, **kwargs)
 
