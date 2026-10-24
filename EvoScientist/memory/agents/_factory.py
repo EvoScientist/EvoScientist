@@ -5,13 +5,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from deepagents.backends.protocol import BackendProtocol
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
-from pydantic import BaseModel
 
 from ... import paths as _paths
 from ...paths import Workspace
@@ -78,7 +76,6 @@ def build_memory_agent_graph(
     tools: Sequence[BaseTool],
     middleware: Sequence[AgentMiddleware],
     recursion_limit: int = MEMORY_AGENT_RECURSION_LIMIT,
-    response_format: type[BaseModel] | None = None,
     skills: list[str] | None = None,
     backend: BackendProtocol | None = None,
 ) -> CompiledStateGraph:
@@ -87,12 +84,8 @@ def build_memory_agent_graph(
 
     from ...backends import build_memory_agent_backend
     from ...EvoScientist import _ensure_auxiliary_chat_model
-    from ...middleware.utils import structured_output_for
 
     model = _ensure_auxiliary_chat_model()
-    kwargs: dict[str, Any] = {}
-    if response_format is not None:
-        model, kwargs["response_format"] = structured_output_for(model, response_format)
 
     if backend is None:
         backend = build_memory_agent_backend(
@@ -109,6 +102,5 @@ def build_memory_agent_graph(
         middleware=list(middleware),
         subagents=[],
         skills=skills,
-        **kwargs,
     )
     return agent.with_config({"recursion_limit": recursion_limit})

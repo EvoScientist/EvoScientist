@@ -1909,7 +1909,7 @@ def test_lifecycle_skips_memory_worker_without_runtime_thread_id(tmp_path, monke
     )
 
 
-def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
+def test_execution_summary_tool_uses_worker_metadata(tmp_path, monkeypatch):
     summary = "Completed the analysis."
     monkeypatch.setattr(
         memory_worker,
@@ -1921,18 +1921,9 @@ def test_subagent_summary_writer_uses_worker_metadata(tmp_path, monkeypatch):
             "evomemory_trajectory_digest": "digest-1",
         },
     )
-    middleware = memory_worker._SubagentSummaryWriterMiddleware(
-        memory_dir=tmp_path / "memories"
-    )
+    tool = memory_worker._execution_summary_tool(tmp_path / "memories")
 
-    state: AgentState[object] = {
-        "messages": [],
-        "structured_response": memory_worker.SubagentMemoryDecision(summary=summary),
-    }
-    middleware.after_agent(
-        state,
-        fake_runtime(),
-    )
+    assert tool.invoke({"summary": summary}) == memory_worker._SUMMARY_SAVED
 
     paths = list((tmp_path / "memories" / "executions" / "thread-1").glob("*.md"))
     assert len(paths) == 1
@@ -2422,14 +2413,15 @@ def test_memory_worker_accepts_roots_at_build_time(tmp_path, monkeypatch, worksp
     assert calls[0]["workspace_dir"] == workspace.root
 
 
-def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
+def test_subagent_worker_keeps_deepseek_thinking_and_forces_no_tool_choice(
     tmp_path, monkeypatch
 ):
-    """DeepSeek rejects json_schema response_format and, in thinking mode, forced tool_choice."""
+    """DeepSeek's thinking mode rejects a forced tool choice; the summary tool
+    needs none, so the worker keeps thinking on."""
     import httpx
 
     from EvoScientist.llm import get_chat_model
-    from EvoScientist.memory.agents._factory import build_memory_agent_graph
+    from EvoScientist.paths import Workspace
     from tests.fakes.common import deepseek_tool_call_response
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
@@ -2437,12 +2429,17 @@ def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
 
     def respond(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json=deepseek_tool_call_response(
-                "SubagentMemoryDecision", {"summary": "baseline trained"}
-            ),
-        )
+        if len(bodies) == 1:
+            return httpx.Response(
+                200,
+                json=deepseek_tool_call_response(
+                    "record_execution_summary", {"summary": "baseline trained"}
+                ),
+            )
+        closing = deepseek_tool_call_response("unused", {})
+        closing["choices"][0]["finish_reason"] = "stop"
+        closing["choices"][0]["message"] = {"role": "assistant", "content": "Done."}
+        return httpx.Response(200, json=closing)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         model = get_chat_model(
@@ -2451,52 +2448,28 @@ def test_subagent_worker_uses_tool_calling_without_thinking_on_deepseek(
         monkeypatch.setattr(
             "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
         )
-        graph = build_memory_agent_graph(
-            name="evomemory-subagent-worker",
-            system_prompt="Summarize the run.",
+        graph = memory_worker.build_memory_worker_graph(
+            MemorySourceType.SUBAGENT,
+            workspace=Workspace(tmp_path / "workspace"),
             memory_dir=tmp_path / "memories",
-            workspace_dir=tmp_path / "workspace",
-            tools=[],
-            middleware=[],
-            response_format=memory_worker.SubagentMemoryDecision,
         )
-        result = graph.invoke({"messages": [HumanMessage("summarize")]})
+        graph.invoke(
+            {"messages": [HumanMessage("summarize")]},
+            config={
+                "configurable": {
+                    "evomemory_source_session_id": "thread-1",
+                    "evomemory_source_agent": "writing-agent",
+                    "evomemory_trajectory_digest": "digest-1",
+                }
+            },
+        )
 
-    assert "response_format" not in bodies[0]
-    assert bodies[0]["tool_choice"] == "required"
-    assert bodies[0]["thinking"] == {"type": "disabled"}
-    assert result["structured_response"] == memory_worker.SubagentMemoryDecision(
-        summary="baseline trained"
-    )
-
-
-def test_memory_agent_graph_leaves_other_models_to_langchain(tmp_path, monkeypatch):
-    from langchain_anthropic import ChatAnthropic
-
-    from EvoScientist.memory.agents._factory import build_memory_agent_graph
-
-    model = ChatAnthropic(model="claude-haiku-4-5", api_key="k")
-    create = MagicMock()
-    monkeypatch.setattr("deepagents.create_deep_agent", create)
-    monkeypatch.setattr(
-        "EvoScientist.EvoScientist._ensure_auxiliary_chat_model", lambda: model
-    )
-
-    build_memory_agent_graph(
-        name="evomemory-subagent-worker",
-        system_prompt="Summarize the run.",
-        memory_dir=tmp_path / "memories",
-        workspace_dir=tmp_path / "workspace",
-        tools=[],
-        middleware=[],
-        response_format=memory_worker.SubagentMemoryDecision,
-    )
-
-    assert create.call_args.kwargs["model"] is model
-    assert (
-        create.call_args.kwargs["response_format"]
-        is memory_worker.SubagentMemoryDecision
-    )
+    assert len(bodies) == 2
+    assert all("response_format" not in body for body in bodies)
+    assert all(body.get("tool_choice") in (None, "auto") for body in bodies)
+    assert bodies[0].get("thinking") != {"type": "disabled"}
+    [path] = (tmp_path / "memories" / "executions").rglob("*.md")
+    assert path.read_text(encoding="utf-8").endswith("baseline trained\n")
 
 
 def test_memory_agent_graph_keeps_deepseek_thinking_without_response_format(
